@@ -1,0 +1,10 @@
+.{
+    .name = "zlib",
+    .version = "1.3.0",
+    .dependencies = .{
+        .zlib = .{
+            .url = "https://github.com/madler/zlib/archive/refs/tags/v1.3.tar.gz",
+            .hash = "12207d353609d95cee9da7891919e6d9582e97b7aa2831bd50f33bf523a582a08547",
+        },
+    },
+}

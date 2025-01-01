@@ -1,0 +1,29 @@
+name: 'Tests'
+
+on: [ push ]
+
+jobs:
+  linux-tests:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ssh-key: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+
+      - name: Install Dependencies
+        run: |
+          zigup fetch $(cat zig_version.txt)
+          pushd assets > /dev/null
+          ./build.sh CI
+          popd > /dev/null
+
+      - name: Run Tests (debug)
+        run: |
+          zigup run $(cat zig_version.txt) build --summary all -freference-trace -Drace -Dci -Dllvm
+          ./zig-out/bin/panacea-tests
+
+      - name: Run Tests (release safe)
+        run: |
+          zigup run $(cat zig_version.txt) build --summary all -freference-trace -Doptimize=ReleaseSafe -Dci -Dllvm
+          ./zig-out/bin/panacea-tests

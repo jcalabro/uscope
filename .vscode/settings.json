@@ -1,0 +1,7 @@
+{
+	"lldb.displayFormat": "auto",
+	"lldb.dereferencePointers": true,
+	"lldb.consoleMode": "commands",
+	"lldb.showDisassembly": "auto",
+	"zig.initialSetupDone": true
+}

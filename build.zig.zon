@@ -1,0 +1,21 @@
+.{
+    .name = "panacea",
+    .version = "0.1.0",
+    .paths = .{""},
+    .dependencies = .{
+        //
+        // Remote dependencies
+        //
+
+        .time = .{
+            .url = "https://github.com/jcalabro/zig-time/archive/master.tar.gz",
+            .hash = "1220f43a23ab22f4a151477923e986cbfeb01a7970f57e85ea78fb17b3fcdb21d88d",
+        },
+        .cimgui = .{ .path = "libs/cimgui" },
+        .system_sdk = .{ .path = "libs/system-sdk" },
+        .zglfw = .{ .path = "libs/zglfw" },
+        .zopengl = .{ .path = "libs/zopengl" },
+        .zpool = .{ .path = "libs/zpool" },
+        .ztracy = .{ .path = "libs/ztracy" },
+    },
+}

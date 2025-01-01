@@ -1,0 +1,32 @@
+# local debugger configuration (you might usually want to check
+# this in on your projects, or not if it doesn't make sense to)
+.panacea/
+
+# zig binaries and build output
+.bin/
+zig-cache/
+.zig-cache/
+zig-out/
+
+# gdb
+.gdbinit
+
+# lldb
+.lldbinit
+
+# cargo build output
+assets/**/target/
+
+# jai build output
+assets/**/.build/
+
+# build binaries
+assets/**/out
+
+# file extensions
+*.o
+
+# profiles and traces
+*.spall
+vgcore.*
+massif.*

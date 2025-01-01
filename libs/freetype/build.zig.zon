@@ -1,0 +1,13 @@
+.{
+    .name = "freetype",
+    .version = "2.13.2",
+    .dependencies = .{
+        .freetype = .{
+            .url = "https://github.com/freetype/freetype/archive/refs/tags/VER-2-13-2.tar.gz",
+            .hash = "1220b81f6ecfb3fd222f76cf9106fecfa6554ab07ec7fdc4124b9bb063ae2adf969d",
+        },
+
+        .libpng = .{ .path = "../libpng" },
+        .zlib = .{ .path = "../zlib" },
+    },
+}
