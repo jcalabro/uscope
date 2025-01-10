@@ -265,11 +265,11 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 .perm_alloc = thread_safe_alloc.allocator(),
                 .data = try Data.init(thread_safe_alloc),
                 .requests = Queue(proto.Request).init(
-                    perm_alloc,
+                    thread_safe_alloc,
                     .{ .timeout_ns = q_timeout },
                 ),
                 .responses = Queue(proto.Response).init(
-                    perm_alloc,
+                    thread_safe_alloc,
                     .{ .timeout_ns = q_timeout },
                 ),
             };
@@ -302,7 +302,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             // free all responses in the queue that need it
             for (self.responses.queue.items) |resp| {
                 switch (resp) {
-                    .received_text_output => |r| self.responses.allocator.free(r.text),
+                    .received_text_output => |r| self.responses.alloc.free(r.text),
                     else => {}, // nothing to free
                 }
             }
@@ -764,7 +764,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 // the debugger is exiting
                 if (self.shuttingDown()) return;
 
-                const alloc = self.responses.allocator;
+                const alloc = self.responses.alloc;
 
                 // move from this thread's storage to an allocator accessible by the UI thread
                 const output = buf[0..n];
@@ -2074,7 +2074,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             defer z.end();
 
             // free the items in the request (they're allocated in the request queue's allocator)
-            defer req.deinit(self.requests.allocator);
+            defer req.deinit(self.requests.alloc);
 
             defer self.stateUpdated();
 

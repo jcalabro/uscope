@@ -77,7 +77,7 @@ pub fn init(thread_safe_alloc: *ThreadSafeAllocator, req_q: *Queue(proto.Request
         .perm_alloc = perm_alloc,
 
         .wait4_q = Queue(*Wait4Request).init(
-            perm_alloc,
+            thread_safe_alloc,
             .{ .timeout_ns = time.ns_per_s },
         ),
     };

@@ -310,13 +310,13 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
     const parse_scratch = parse_scratch_tsa.allocator();
 
     const req_queue = try opts.scratch.create(Queue(?CompileUnitRequest));
-    req_queue.* = Queue(?CompileUnitRequest).init(parse_scratch, .{
+    req_queue.* = Queue(?CompileUnitRequest).init(parse_scratch_tsa, .{
         .timeout_ns = 100 * std.time.ns_per_ms,
     });
     defer req_queue.deinit();
 
     const err_queue = try parse_scratch.create(Queue(ParseError));
-    err_queue.* = Queue(ParseError).init(parse_scratch, .{});
+    err_queue.* = Queue(ParseError).init(parse_scratch_tsa, .{});
     defer err_queue.deinit();
 
     // accumulate responses in this array (must lock the mutex)

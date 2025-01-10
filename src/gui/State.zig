@@ -197,7 +197,7 @@ fn handleDebuggerResponses(self: *Self) void {
             },
 
             .received_text_output => |r| {
-                defer self.dbg.responses.allocator.free(r.text);
+                defer self.dbg.responses.alloc.free(r.text);
 
                 self.subordinate_output_mu.lock();
                 defer self.subordinate_output_mu.unlock();

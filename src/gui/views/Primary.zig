@@ -828,7 +828,7 @@ pub fn addWatchValue(self: *Self, val: []const u8) Allocator.Error!void {
 
     try self.watch_vars.append(str);
 
-    const alloc = self.state.dbg.requests.allocator;
+    const alloc = self.state.dbg.requests.alloc;
     var num_allocated: usize = 0;
     const items = try alloc.alloc([]const u8, self.watch_vars.items.len);
     errdefer {
