@@ -46,6 +46,8 @@ This is a birds-eye overview of the features I'd like implemented before I'd per
 
 Other long-term features that should be implemented are:
 
+- Build as a library so other people can build other interesting things on top of this
+  - The GUI will be the first consumer of that library
 - Many more types of domain-specific data visualizations
   - For example, I work on chess engines for my day job, and it would be amazing to have a debugger that natively understands my position encoding and automatically renders interactive chess boards
 - Remote debugging over ssh
