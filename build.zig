@@ -194,12 +194,6 @@ fn defineStep(b: *Build, def: stepDef) void {
         });
         exe.root_module.addImport("zopengl", zopengl.module("root"));
 
-        const zpool = b.dependency("zpool", .{
-            .target = def.target,
-            .optimize = def.optimize,
-        });
-        exe.root_module.addImport("zpool", zpool.module("root"));
-
         const ztracy = b.dependency("ztracy", .{
             .enable_ztracy = def.flags.tracy,
             .target = def.target,

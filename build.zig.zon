@@ -15,7 +15,6 @@
         .system_sdk = .{ .path = "libs/system-sdk" },
         .zglfw = .{ .path = "libs/zglfw" },
         .zopengl = .{ .path = "libs/zopengl" },
-        .zpool = .{ .path = "libs/zpool" },
         .ztracy = .{ .path = "libs/ztracy" },
     },
 }
