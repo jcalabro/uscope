@@ -879,87 +879,6 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
     }
 
     {
-        const z1 = trace.zoneN(@src(), "assign function variables");
-        defer z1.end();
-
-        assert(functions.items.len == function_variables.items.len);
-        for (functions.items, 0..) |*f, ndx| {
-            f.variables = try function_variables.items[ndx].toOwnedSlice();
-        }
-    }
-
-    {
-        const z1 = trace.zoneN(@src(), "assign variable types");
-        defer z1.end();
-
-        for (variable_types.items) |vt| {
-            const data_type_ndx = dt: {
-                if (data_type_map.get(vt.type_offset)) |dt_ndx| {
-                    if (dt_ndx.int() < data_types.items.len) {
-                        break :dt dt_ndx;
-                    }
-                }
-
-                log.errf("unable to find data type for variable with offset 0x{x}", .{
-                    vt.type_offset,
-                });
-                return error.InvalidDWARFInfo;
-            };
-
-            const var_ptr = &variables.items[vt.variable_ndx.int()];
-            var_ptr.*.data_type = data_type_ndx;
-        }
-    }
-
-    {
-        const z1 = trace.zoneN(@src(), "assign array types");
-        defer z1.end();
-
-        for (array_types.items) |arr_type| {
-            const data_type_ndx = dt: {
-                if (data_type_map.get(arr_type.type_offset)) |dt_ndx| {
-                    if (dt_ndx.int() < data_types.items.len) {
-                        break :dt dt_ndx;
-                    }
-                }
-
-                log.errf("unable to find data type for array with offset 0x{x}", .{
-                    arr_type.type_offset,
-                });
-                return error.InvalidDWARFInfo;
-            };
-
-            const arr_ptr = &data_types.items[arr_type.variable_ndx.int()];
-            arr_ptr.*.form.array.element_type = data_type_ndx;
-        }
-    }
-
-    {
-        const z1 = trace.zoneN(@src(), "assign pointer types");
-        defer z1.end();
-
-        for (pointer_types.items) |ptr_type| {
-            if (ptr_type.type_offset == null) continue;
-
-            const data_type_ndx = dt: {
-                if (data_type_map.get(ptr_type.type_offset.?)) |dt_ndx| {
-                    if (dt_ndx.int() < data_types.items.len) {
-                        break :dt dt_ndx;
-                    }
-                }
-
-                log.errf("unable to find data type for pointer with offset 0x{x}", .{
-                    ptr_type.type_offset.?,
-                });
-                return error.InvalidDWARFInfo;
-            };
-
-            const ptr = &data_types.items[ptr_type.variable_ndx.int()];
-            ptr.*.form.pointer.data_type = data_type_ndx;
-        }
-    }
-
-    {
         const z1 = trace.zoneN(@src(), "assign const types");
         defer z1.end();
 
@@ -1036,6 +955,98 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                 .@"union" => |*u| u.members = try members.members.toOwnedSlice(),
                 else => unreachable,
             }
+        }
+    }
+
+    {
+        const z1 = trace.zoneN(@src(), "assign pointer types");
+        defer z1.end();
+
+        for (pointer_types.items) |ptr_type| {
+            if (ptr_type.type_offset == null) continue;
+
+            const data_type_ndx = dt: {
+                if (data_type_map.get(ptr_type.type_offset.?)) |dt_ndx| {
+                    if (dt_ndx.int() < data_types.items.len) {
+                        break :dt dt_ndx;
+                    }
+                }
+
+                log.errf("unable to find data type for pointer with offset 0x{x}", .{
+                    ptr_type.type_offset.?,
+                });
+                return error.InvalidDWARFInfo;
+            };
+
+            const data_type = data_types.items[data_type_ndx.int()];
+            const item_type_name = str_cache.get(data_type.name) orelse types.Unknown;
+            const type_name = try types.ArrayType.nameFromItemType(cu.opts.scratch, item_type_name);
+
+            const ptr = &data_types.items[ptr_type.variable_ndx.int()];
+            ptr.*.form.pointer.data_type = data_type_ndx;
+            ptr.*.name = try str_cache.add(type_name);
+        }
+    }
+
+    {
+        const z1 = trace.zoneN(@src(), "assign array types");
+        defer z1.end();
+
+        for (array_types.items) |arr_type| {
+            const data_type_ndx = dt: {
+                if (data_type_map.get(arr_type.type_offset)) |dt_ndx| {
+                    if (dt_ndx.int() < data_types.items.len) {
+                        break :dt dt_ndx;
+                    }
+                }
+
+                log.errf("unable to find data type for array with offset 0x{x}", .{
+                    arr_type.type_offset,
+                });
+                return error.InvalidDWARFInfo;
+            };
+
+            const data_type = data_types.items[data_type_ndx.int()];
+            const item_type_name = str_cache.get(data_type.name) orelse types.Unknown;
+            const type_name = try types.ArrayType.nameFromItemType(cu.opts.scratch, item_type_name);
+
+            const arr_ptr = &data_types.items[arr_type.variable_ndx.int()];
+            arr_ptr.*.form.array.element_type = data_type_ndx;
+            arr_ptr.*.size_bytes = data_type.size_bytes;
+            arr_ptr.*.name = try str_cache.add(type_name);
+        }
+    }
+
+    {
+        const z1 = trace.zoneN(@src(), "assign function variables");
+        defer z1.end();
+
+        assert(functions.items.len == function_variables.items.len);
+        for (functions.items, 0..) |*f, ndx| {
+            f.variables = try function_variables.items[ndx].toOwnedSlice();
+        }
+    }
+
+    {
+        const z1 = trace.zoneN(@src(), "assign variable types");
+        defer z1.end();
+
+        for (variable_types.items) |vt| {
+            const data_type_ndx = dt: {
+                if (data_type_map.get(vt.type_offset)) |dt_ndx| {
+                    if (dt_ndx.int() < data_types.items.len) {
+                        break :dt dt_ndx;
+                    }
+                }
+
+                log.errf("unable to find data type for variable with offset 0x{x}", .{
+                    vt.type_offset,
+                });
+                return error.InvalidDWARFInfo;
+            };
+
+            const var_ptr = &variables.items[vt.variable_ndx.int()];
+            var_ptr.*.data_type = data_type_ndx;
         }
     }
 

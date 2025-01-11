@@ -721,6 +721,12 @@ pub const PointerType = struct {
     /// we have a `*MyStruct`, the index would lead to `MyStruct`. This
     /// is null if the pointer type is opaque.
     data_type: ?TypeNdx,
+
+    /// Returns the name of a pointer given the name of the type it points to.
+    /// For instance, `u8` would return `*u8`.
+    pub fn nameFromItemType(alloc: mem.Allocator, item_type: String) mem.Allocator.Error!String {
+        return std.fmt.allocPrint(alloc, "*{s}", .{item_type});
+    }
 };
 
 /// Represents a constant value of some other type
@@ -777,6 +783,12 @@ pub const ArrayType = struct {
     /// Array length is sometimes unknown, and in that case, it's assumed that
     /// we are dealing with a null-terminated array
     len: ?u64,
+
+    /// Returns the name of an array given the name of the type of each element. For
+    /// instance, `u8` would return `[]u8`.
+    pub fn nameFromItemType(alloc: mem.Allocator, item_type: String) mem.Allocator.Error!String {
+        return std.fmt.allocPrint(alloc, "[]{s}", .{item_type});
+    }
 };
 
 /// Represents an alias to another type definition
