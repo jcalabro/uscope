@@ -862,16 +862,11 @@ fn renderExpressionResult(
             });
             defer zui.popStyleColor(.{});
 
-            // variable name
-            const name = if (field.name) |name| paused.getString(name) else "";
-            if (name.len > 0) {
-                zui.text("{s},", .{name});
-                zui.sameLine(.{});
-            }
-
-            // variable data type
+            const name = if (field.name) |name| paused.getString(name) else continue;
             const type_name = paused.getString(field.data_type_name);
-            if (mem.eql(u8, type_name, types.Unknown)) continue;
+
+            zui.text("{s},", .{name});
+            zui.sameLine(.{});
             zui.text("{s}", .{type_name});
 
             // if rendering an array/string, first render the length
