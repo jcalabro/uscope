@@ -980,7 +980,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
 
             const data_type = data_types.items[data_type_ndx.int()];
             const item_type_name = str_cache.get(data_type.name) orelse types.Unknown;
-            const type_name = try types.ArrayType.nameFromItemType(cu.opts.scratch, item_type_name);
+            const type_name = try types.PointerType.nameFromItemType(cu.opts.scratch, item_type_name);
 
             const ptr = &data_types.items[ptr_type.variable_ndx.int()];
             ptr.*.form.pointer.data_type = data_type_ndx;
