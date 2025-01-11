@@ -448,30 +448,35 @@ pub fn update(self: *Self) State.View {
                     var ndx: usize = 0;
                     while (ndx < hex.contents.len) : (ndx += 8) {
                         const addr = hex.address.int() + ndx;
+                        var buf = [_]u8{0} ** 8;
+                        @memcpy(&buf, hex.contents[ndx .. ndx + 8]);
 
                         // print the raw bytes
                         zui.text("0x{x:0>16}: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
                             addr,
-                            hex.contents[ndx + 0],
-                            hex.contents[ndx + 1],
-                            hex.contents[ndx + 2],
-                            hex.contents[ndx + 3],
-                            hex.contents[ndx + 4],
-                            hex.contents[ndx + 5],
-                            hex.contents[ndx + 6],
-                            hex.contents[ndx + 7],
+                            buf[0],
+                            buf[1],
+                            buf[2],
+                            buf[3],
+                            buf[4],
+                            buf[5],
+                            buf[6],
+                            buf[7],
                         });
 
-                        // print it as ascii
+                        // print it as ascii, turning null-terminators in to empty space first
+                        for (buf, 0..) |c, i| {
+                            if (c == 0) buf[i] = ' ';
+                        }
                         zui.text("                    {c:2} {c:2} {c:2} {c:2} {c:2} {c:2} {c:2} {c:2}", .{
-                            hex.contents[ndx + 0],
-                            hex.contents[ndx + 1],
-                            hex.contents[ndx + 2],
-                            hex.contents[ndx + 3],
-                            hex.contents[ndx + 4],
-                            hex.contents[ndx + 5],
-                            hex.contents[ndx + 6],
-                            hex.contents[ndx + 7],
+                            buf[0],
+                            buf[1],
+                            buf[2],
+                            buf[3],
+                            buf[4],
+                            buf[5],
+                            buf[6],
+                            buf[7],
                         });
                     }
                 }
