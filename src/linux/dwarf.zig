@@ -978,13 +978,17 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                 return error.InvalidDWARFInfo;
             };
 
-            const data_type = data_types.items[data_type_ndx.int()];
-            const item_type_name = str_cache.get(data_type.name) orelse types.Unknown;
-            const type_name = try types.PointerType.nameFromItemType(cu.opts.scratch, item_type_name);
-
             const ptr = &data_types.items[ptr_type.variable_ndx.int()];
             ptr.*.form.pointer.data_type = data_type_ndx;
-            ptr.*.name = try str_cache.add(type_name);
+
+            // pointer name may or may not already be set at this time
+            const ptr_name = str_cache.get(ptr.name);
+            if (ptr_name == null or ptr_name.?.len == 0) {
+                const data_type = data_types.items[data_type_ndx.int()];
+                const item_type_name = str_cache.get(data_type.name) orelse types.Unknown;
+                const type_name = try types.PointerType.nameFromItemType(cu.opts.scratch, item_type_name);
+                ptr.*.name = try str_cache.add(type_name);
+            }
         }
     }
 
