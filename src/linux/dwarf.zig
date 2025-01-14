@@ -713,7 +713,15 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                     });
                 },
 
-                .DW_TAG_pointer_type, .DW_TAG_reference_type, .DW_TAG_ptr_to_member_type => {
+                // @NOTE (jrc): I'm not sure it's correct to treat volatile types the same as
+                // pointers...but the data is shaped very similarly
+                .DW_TAG_pointer_type,
+                .DW_TAG_reference_type,
+                .DW_TAG_restrict_type,
+                .DW_TAG_ptr_to_member_type,
+                .DW_TAG_rvalue_reference_type,
+                .DW_TAG_volatile_type,
+                => {
                     // DW_TAG_pointer_type without a DW_AT_type just tells us how large
                     // a pointer size is on this target, which we don't care about
                     try pointer_types.append(.{
