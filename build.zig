@@ -60,17 +60,6 @@ pub fn build(b: *Build) !void {
     flags.llvm = b.option(bool, "llvm", llvm_help) orelse llvm_default;
     opts.addOption(bool, "llvm", flags.llvm);
 
-    const vector_len = b.option(
-        u8,
-        "vector-len",
-        "The default length of Vector types that Zig will use",
-    ) orelse 4;
-    if (!std.math.isPowerOfTwo(vector_len)) {
-        std.debug.print("-Dvector-len must be a power of two, got: {d}\n", .{vector_len});
-        return error.InvalidVectorLen;
-    }
-    opts.addOption(u64, "vector_len", vector_len);
-
     //
     // Define all the possible executables and objects we'd ever want to build
     //
