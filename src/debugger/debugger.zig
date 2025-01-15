@@ -2128,10 +2128,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
-            var fields = ArrayList(types.ExpressionRenderField).init(scratch);
+            var fields = ArrayListUnmanaged(types.ExpressionRenderField){};
 
             log.debugf("calculating expression: {s}", .{expression});
-            const warning = "unable to calculate value for expression \"{s}\"";
 
             const pid = self.data.subordinate.?.paused.?.pid;
             const regs = try self.adapter.getRegisters(pid);
@@ -2142,7 +2141,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const func = f: {
                 if (self.functionAtAddr(stopped_at_addr)) |func| break :f func;
 
-                log.warnf(warning ++ "subordinate is stopped in an unknown function", .{expression});
+                log.warnf(
+                    "unable to calculate value for expresion \"{s}\": subordinate is stopped in an unknown function",
+                    .{expression},
+                );
                 return error.ExpressionError;
             };
             const cu = self.data.target.?.compile_units[func.cu_ndx.int()];
@@ -2159,117 +2161,23 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             };
 
             for (func.func.variables) |var_ndx| {
-                const variable = cu.variables[var_ndx.int()];
-
-                const var_name = self.data.target.?.strings.get(variable.name);
-                if (var_name == null or !strings.eql(expression, var_name.?)) continue;
-
-                const var_platform_data = switch (builtin.target.os.tag) {
-                    .linux => if (variable.platform_data.location_expression) |loc|
-                        self.data.target.?.strings.get(loc) orelse ""
-                    else
-                        "",
-
-                    else => @compileError("build target not supported"),
-                };
-
-                const data_type = cu.data_types[variable.data_type.int()];
-                const data_type_name = self.data.target.?.strings.get(data_type.name) orelse types.Unknown;
-
-                // follow pointer values to their underlying base type
-                var base_data_type = data_type;
-                while (base_data_type.form == .pointer) {
-                    if (base_data_type.form.pointer.data_type) |ptr_type| {
-                        base_data_type = cu.data_types[ptr_type.int()];
-                        continue;
-                    }
-                    break;
-                }
-                const base_data_type_name = self.data.target.?.strings.get(base_data_type.name) orelse types.Unknown;
-
-                const buf = try self.adapter.getVariableValue(.{
+                try self.renderVariableValue(&fields, .{
                     .scratch = scratch,
+                    .encoder = encoder,
+                    .cu = &cu,
                     .pid = pid,
                     .registers = &regs,
                     .load_addr = load_addr,
-                    .variable_size = data_type.size_bytes,
                     .frame_base = self.data.subordinate.?.paused.?.frame_base_addr,
-                    .frame_base_platform_data = func_frame_base,
-                    .platform_data = var_platform_data,
+                    .func_frame_base = func_frame_base,
+                    .variable = cu.variables[var_ndx.int()],
+                    .expression = expression,
                 });
-                const buf_hash = try self.data.subordinate.?.paused.?.strings.add(buf);
-
-                const enc_params = &encoding.Params{
-                    .scratch = scratch,
-                    .adapter = self.adapter,
-                    .pid = pid,
-                    .load_addr = load_addr,
-                    .cu = &cu,
-                    .target_strings = self.data.target.?.strings,
-                    .data_type = &data_type,
-                    .data_type_name = data_type_name,
-                    .base_data_type = &base_data_type,
-                    .base_data_type_name = base_data_type_name,
-                    .val = buf,
-                };
-
-                // special-case: strings
-                if (encoder.isString(enc_params)) |len| {
-                    const res = try encoder.renderString(enc_params, len);
-                    try fields.append(.{
-                        .data = try self.data.subordinate.?.paused.?.strings.add(res.str),
-                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                        .address = res.address,
-                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                        .encoding = .{ .primitive = .{
-                            .encoding = .string,
-                        } },
-                    });
-                    continue;
-                }
-
-                // special-case: slices (known length plus an array)
-                if (encoder.isSlice(enc_params)) {
-                    const res = try encoder.renderSlice(enc_params);
-                    try fields.append(.{
-                        .data = try self.data.subordinate.?.paused.?.strings.add(res.str),
-                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                        .address = res.address,
-                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                        .encoding = .{ .primitive = .{
-                            .encoding = .string,
-                        } },
-                    });
-                    continue;
-                }
-
-                switch (data_type.form) {
-                    .unknown => {
-                        log.warnf(warning ++ "variable not found in current function", .{expression});
-                        return error.ExpressionError;
-                    },
-                    .primitive => |primitive| {
-                        try fields.append(.{
-                            .data = buf_hash,
-                            .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                            .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                            .encoding = .{ .primitive = .{
-                                .encoding = primitive.encoding,
-                            } },
-                        });
-                    },
-
-                    else => {
-                        // @DELETEME (jrc): remove the whole else clause
-                        log.warnf("unsupported data type: {s}", .{@tagName(data_type.form)});
-                        return error.ExpressionError;
-                    },
-                }
             }
 
             if (fields.items.len == 0) {
                 // we were not able to find the variable, so display "unknown"
-                try fields.append(.{
+                try fields.append(scratch, .{
                     .data = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                     .name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
@@ -2281,8 +2189,149 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             return types.ExpressionResult{
                 .expression = try self.data.subordinate.?.paused.?.strings.add(expression),
-                .fields = try fields.toOwnedSlice(),
+                .fields = try fields.toOwnedSlice(scratch),
             };
+        }
+
+        const RenderVariableParams = struct {
+            scratch: Allocator,
+            encoder: encoding.Encoding,
+            cu: *const types.CompileUnit,
+            pid: types.PID,
+            registers: *const arch.Registers,
+            load_addr: types.Address,
+            frame_base: types.Address,
+            func_frame_base: String,
+            variable: types.Variable,
+            expression: String,
+
+            /// This may be populated if we already know the bytes that represent this
+            /// variable (i.e. we're rendering an item in a slice). If it's not populated,
+            /// it follows the OS-specific mechanism to look up variable values.
+            variable_value_buf: ?[]const u8 = null,
+        };
+
+        fn renderVariableValue(
+            self: *Self,
+            fields: *ArrayListUnmanaged(types.ExpressionRenderField),
+            params: RenderVariableParams,
+        ) !void {
+            const z = trace.zone(@src());
+            defer z.end();
+
+            const var_name = self.data.target.?.strings.get(params.variable.name);
+            if (var_name == null or !strings.eql(params.expression, var_name.?)) return;
+
+            const var_platform_data = switch (builtin.target.os.tag) {
+                .linux => if (params.variable.platform_data.location_expression) |loc|
+                    self.data.target.?.strings.get(loc) orelse ""
+                else
+                    "",
+
+                else => @compileError("build target not supported"),
+            };
+
+            const data_type = params.cu.data_types[params.variable.data_type.int()];
+            const data_type_name = self.data.target.?.strings.get(data_type.name) orelse types.Unknown;
+
+            // follow pointer values to their underlying base type
+            var base_data_type = data_type;
+            while (base_data_type.form == .pointer) {
+                if (base_data_type.form.pointer.data_type) |ptr_type| {
+                    base_data_type = params.cu.data_types[ptr_type.int()];
+                    continue;
+                }
+                break;
+            }
+            const base_data_type_name = self.data.target.?.strings.get(base_data_type.name) orelse types.Unknown;
+
+            const buf = blk: {
+                if (params.variable_value_buf) |b| break :blk b;
+
+                break :blk try self.adapter.getVariableValue(.{
+                    .scratch = params.scratch,
+                    .pid = params.pid,
+                    .registers = params.registers,
+                    .load_addr = params.load_addr,
+                    .variable_size = data_type.size_bytes,
+                    .frame_base = self.data.subordinate.?.paused.?.frame_base_addr,
+                    .frame_base_platform_data = params.func_frame_base,
+                    .platform_data = var_platform_data,
+                });
+            };
+            const buf_hash = try self.data.subordinate.?.paused.?.strings.add(buf);
+
+            const enc_params = &encoding.Params{
+                .scratch = params.scratch,
+                .adapter = self.adapter,
+                .pid = params.pid,
+                .load_addr = params.load_addr,
+                .cu = params.cu,
+                .target_strings = self.data.target.?.strings,
+                .data_type = &data_type,
+                .data_type_name = data_type_name,
+                .base_data_type = &base_data_type,
+                .base_data_type_name = base_data_type_name,
+                .val = buf,
+            };
+
+            // special-case: strings
+            if (params.encoder.isString(enc_params)) |len| {
+                const res = try params.encoder.renderString(enc_params, len);
+                try fields.append(params.scratch, .{
+                    .data = try self.data.subordinate.?.paused.?.strings.add(res.str),
+                    .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                    .address = res.address,
+                    .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                    .encoding = .{ .primitive = .{
+                        .encoding = .string,
+                    } },
+                });
+
+                return;
+            }
+
+            // special-case: slices (known length plus an array)
+            if (params.encoder.isSlice(enc_params)) {
+                const res = try params.encoder.renderSlice(enc_params);
+                try fields.append(params.scratch, .{
+                    .data = try self.data.subordinate.?.paused.?.strings.add(res.str),
+                    .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                    .address = res.address,
+                    .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                    .encoding = .{ .primitive = .{
+                        .encoding = .string,
+                    } },
+                });
+
+                return;
+            }
+
+            switch (data_type.form) {
+                .unknown => {
+                    log.warnf(
+                        "unable to calculate value for expresion \"{s}\": variable not found in current function",
+                        .{params.expression},
+                    );
+                    return error.ExpressionError;
+                },
+                .primitive => |primitive| {
+                    try fields.append(params.scratch, .{
+                        .data = buf_hash,
+                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .encoding = .{ .primitive = .{
+                            .encoding = primitive.encoding,
+                        } },
+                    });
+                },
+
+                else => {
+                    // @DELETEME (jrc): remove the whole else clause
+                    log.warnf("unsupported data type: {s}", .{@tagName(data_type.form)});
+                    return error.ExpressionError;
+                },
+            }
         }
     };
 }
