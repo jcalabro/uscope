@@ -23,7 +23,7 @@ pub const Params = struct {
     base_data_type_name: String,
 
     /// The initial variable value as raw bytes as returned from the Adapter for the target platform
-    val: []const u8,
+    val: String,
 };
 
 pub const EncodeVariableError = error{ReadDataError} || Allocator.Error;
@@ -44,10 +44,24 @@ pub const Encoding = struct {
     renderString: *const fn (params: *const Params, len: u64) EncodeVariableError!RenderStringResult,
 
     isSlice: *const fn (params: *const Params) bool,
-    renderSlice: *const fn (params: *const Params) EncodeVariableError!RenderStringResult,
+    renderSlice: *const fn (params: *const Params) EncodeVariableError!RenderSliceResult,
 };
 
 pub const RenderStringResult = struct {
+    /// The address that points to the start of the string in the subordinate's memory
     address: types.Address,
+
+    /// A preview of the string (this may be shorter than the actual string)
     str: String,
+};
+
+pub const RenderSliceResult = struct {
+    /// The address that points to the start of the slice's buffer in the subordinate's memory
+    address: types.Address,
+
+    /// The total number of items in the slice
+    len: usize,
+
+    /// A preview of the slice items (this may be shorter than the actual slice)
+    item_bufs: []String,
 };

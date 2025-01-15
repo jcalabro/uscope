@@ -35,7 +35,7 @@ fn isSlice(_: *const encoding.Params) bool {
     return false;
 }
 
-fn renderSlice(_: *const encoding.Params) encoding.EncodeVariableError!encoding.RenderStringResult {
+fn renderSlice(_: *const encoding.Params) encoding.EncodeVariableError!encoding.RenderSliceResult {
     unreachable;
 }
 

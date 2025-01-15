@@ -2294,13 +2294,25 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             // special-case: slices (known length plus an array)
             if (params.encoder.isSlice(enc_params)) {
                 const res = try params.encoder.renderSlice(enc_params);
+
+                var item_ndxes = try params.scratch.alloc(types.ExpressionFieldNdx, res.item_bufs.len);
+                for (res.item_bufs, 0..) |item_buf, ndx| {
+                    // recursively render slice items using the known item buffer
+                    var recursive_params = params;
+                    recursive_params.variable_value_buf = item_buf;
+                    // @TODO (jrc): set the rest of these values to...what?
+
+                    try self.renderVariableValue(fields, params);
+                    item_ndxes[ndx] = types.ExpressionFieldNdx.from(fields.items.len - 1);
+                }
+
                 try fields.append(params.scratch, .{
-                    .data = try self.data.subordinate.?.paused.?.strings.add(res.str),
+                    .data = null,
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                     .address = res.address,
                     .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                    .encoding = .{ .primitive = .{
-                        .encoding = .string,
+                    .encoding = .{ .array = .{
+                        .items = item_ndxes,
                     } },
                 });
 

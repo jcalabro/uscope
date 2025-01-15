@@ -114,9 +114,7 @@ fn readUsizeStructMember(params: *const encoding.Params, comptime name: String) 
     return mem.readInt(usize, @ptrCast(params.val[start..end]), endian);
 }
 
-// @TODO (jrc): This should return an array of many types.ExpressionRenderFields that each contian one
-// of the elements in the slice. It's incorrect to just treat slices as strings as we currently are doing.
-fn renderSlice(params: *const encoding.Params) encoding.EncodeVariableError!encoding.RenderStringResult {
+fn renderSlice(params: *const encoding.Params) encoding.EncodeVariableError!encoding.RenderSliceResult {
     // read the address of the buffer and its length
     const addr = types.Address.from(try readUsizeStructMember(params, "ptr"));
     const len = try readUsizeStructMember(params, "len");
@@ -143,13 +141,25 @@ fn renderSlice(params: *const encoding.Params) encoding.EncodeVariableError!enco
         return error.ReadDataError;
     };
 
-    const buf = try params.scratch.alloc(u8, len * member_size_bytes);
-    params.adapter.peekData(params.pid, params.load_addr, addr, buf) catch {
+    // @TODO (jrc): allow the user to configure the max preview length in their settings, or accept this as a
+    // parameter on the render expression, i.e. `myslice | len=1000` or similar
+    const preview_len = @min(len, 100);
+
+    const full_buf = try params.scratch.alloc(u8, preview_len * member_size_bytes);
+    params.adapter.peekData(params.pid, params.load_addr, addr, full_buf) catch {
         return error.ReadDataError;
     };
 
-    return .{
+    var item_bufs = try params.scratch.alloc(String, preview_len);
+    for (0..preview_len) |ndx| {
+        const start = ndx * member_size_bytes;
+        const end = start + member_size_bytes;
+        item_bufs[ndx] = full_buf[start..end];
+    }
+
+    return encoding.RenderSliceResult{
         .address = addr,
-        .str = buf,
+        .len = len,
+        .item_bufs = item_bufs,
     };
 }

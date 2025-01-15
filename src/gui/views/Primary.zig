@@ -867,23 +867,24 @@ fn renderExpressionResult(
             });
             defer zui.popStyleColor(.{});
 
-            const name = if (field.name) |name| paused.getString(name) else continue;
             const type_name = paused.getString(field.data_type_name);
-
-            zui.text("{s},", .{name});
-            zui.sameLine(.{});
             zui.text("{s}", .{type_name});
 
             // if rendering an array/string, first render the length
             switch (field.encoding) {
-                // .array => |arr| {
-                //     zui.sameLine(.{});
-                //     zui.textWrapped("(len: {d})", .{arr.len});
-                // },
-                // .string => |str| {
-                //     zui.sameLine(.{});
-                //     zui.textWrapped("(len: {d})", .{str.len});
-                // },
+                .array => |arr| {
+                    zui.textWrapped("(len: {d})", .{arr.items.len});
+                },
+                .primitive => |p| {
+                    switch (p.encoding) {
+                        .string => {
+                            if (paused.strings.get(field.data.?)) |data| {
+                                zui.textWrapped("(len: {d})", .{data.len});
+                            }
+                        },
+                        else => {},
+                    }
+                },
                 else => {},
             }
         }
@@ -905,9 +906,13 @@ fn renderExpressionResult(
                 }
             }
 
-            const data = paused.strings.get(field.data) orelse {
-                log.err("unable to find raw symbol render data");
-                continue;
+            const data = blk: {
+                if (field.data == null) break :blk "";
+
+                break :blk paused.strings.get(field.data.?) orelse {
+                    log.err("unable to find raw symbol render data");
+                    continue;
+                };
             };
             const buf = switch (field.encoding) {
                 .primitive => |primitive| switch (primitive.encoding) {
@@ -940,7 +945,7 @@ fn renderExpressionResult(
                     },
                 },
 
-                else => types.Unknown, // @DELETEME (jrc)
+                else => types.Unknown, // @DELETEME (jrc): once all encodings are implemeted
             };
 
             zui.textWrapped("{s}", .{buf});
