@@ -32,7 +32,8 @@ fn isString(params: *const encoding.Params) ?u64 {
 
     // string slices
     if (params.data_type.form == .@"struct" and strings.eql(params.data_type_name, "[]u8")) {
-        return readUsizeStructMember(params, "len") catch null;
+        if (readUsizeStructMember(params, "len") catch null) |len| return len.data;
+        return null;
     }
 
     // string literals (i.e. *[13:0]u8)
@@ -98,10 +99,20 @@ fn isSlice(params: *const encoding.Params) bool {
     };
 }
 
-fn readUsizeStructMember(params: *const encoding.Params, comptime name: String) encoding.EncodeVariableError!usize {
+const UsizeStructMemberResult = struct {
+    data: usize,
+    data_type: types.TypeNdx,
+};
+
+fn readUsizeStructMember(
+    params: *const encoding.Params,
+    comptime name: String,
+) encoding.EncodeVariableError!UsizeStructMemberResult {
+    var data_type: ?types.TypeNdx = null;
     const member_offset_bytes = blk: {
         for (params.data_type.form.@"struct".members) |m| {
             const name_str = params.target_strings.get(m.name) orelse continue;
+            data_type = m.data_type;
             if (strings.eql(name, name_str)) break :blk m.offset_bytes;
         }
 
@@ -111,15 +122,19 @@ fn readUsizeStructMember(params: *const encoding.Params, comptime name: String) 
 
     const start = member_offset_bytes;
     const end = start + @sizeOf(usize);
-    return mem.readInt(usize, @ptrCast(params.val[start..end]), endian);
+    const data = mem.readInt(usize, @ptrCast(params.val[start..end]), endian);
+
+    return .{
+        .data = data,
+        .data_type = data_type.?,
+    };
 }
 
-// @TODO (jrc): This should return an array of many types.ExpressionRenderFields that each contian one
-// of the elements in the slice. It's incorrect to just treat slices as strings as we currently are doing.
-fn renderSlice(params: *const encoding.Params) encoding.EncodeVariableError!encoding.RenderStringResult {
+fn renderSlice(params: *const encoding.Params) encoding.EncodeVariableError!encoding.RenderSliceResult {
     // read the address of the buffer and its length
-    const addr = types.Address.from(try readUsizeStructMember(params, "ptr"));
-    const len = try readUsizeStructMember(params, "len");
+    const ptr = try readUsizeStructMember(params, "ptr");
+    const addr = types.Address.from(ptr.data);
+    const len = (try readUsizeStructMember(params, "len")).data;
 
     // find the number of bytes taken by one element in the buffer
     const member_size_bytes = blk: {
@@ -143,13 +158,33 @@ fn renderSlice(params: *const encoding.Params) encoding.EncodeVariableError!enco
         return error.ReadDataError;
     };
 
-    const buf = try params.scratch.alloc(u8, len * member_size_bytes);
-    params.adapter.peekData(params.pid, params.load_addr, addr, buf) catch {
+    // @TODO (jrc): allow the user to configure the max preview length in their settings, or accept this as a
+    // parameter on the render expression, i.e. `myslice | len=1000` or similar
+    const preview_len = @min(len, 100);
+
+    const full_buf = try params.scratch.alloc(u8, preview_len * member_size_bytes);
+    params.adapter.peekData(params.pid, params.load_addr, addr, full_buf) catch {
         return error.ReadDataError;
     };
 
-    return .{
+    var item_bufs = try params.scratch.alloc(String, preview_len);
+    for (0..preview_len) |ndx| {
+        const start = ndx * member_size_bytes;
+        const end = start + member_size_bytes;
+        item_bufs[ndx] = full_buf[start..end];
+    }
+
+    // dereference the pointer (i.e. []u32 -> *u32 -> u32)
+    const ptr_t = params.cu.data_types[ptr.data_type.int()];
+    const ptr_data_type = switch (ptr_t.form) {
+        .pointer => |p| p.data_type,
+        else => return error.InvalidDataType,
+    };
+
+    return encoding.RenderSliceResult{
         .address = addr,
-        .str = buf,
+        .len = len,
+        .item_data_type = ptr_data_type,
+        .item_bufs = item_bufs,
     };
 }

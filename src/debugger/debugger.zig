@@ -2294,16 +2294,35 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             // special-case: slices (known length plus an array)
             if (params.encoder.isSlice(enc_params)) {
                 const res = try params.encoder.renderSlice(enc_params);
+
                 try fields.append(params.scratch, .{
-                    .data = try self.data.subordinate.?.paused.?.strings.add(res.str),
+                    .data = null,
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                     .address = res.address,
                     .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                    .encoding = .{ .primitive = .{
-                        .encoding = .string,
+                    .encoding = .{ .array = .{
+                        .items = undefined,
                     } },
                 });
+                const slice_field_ndx = fields.items.len - 1;
 
+                var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
+
+                // only attempt to render the slice preview if the pointer type isn't opaque
+                if (res.item_data_type) |item_data_type| {
+                    for (res.item_bufs) |item_buf| {
+                        // recursively render slice items using the known item buffer
+                        var recursive_params = params;
+                        recursive_params.variable_value_buf = item_buf;
+                        recursive_params.variable.data_type = item_data_type;
+
+                        try self.renderVariableValue(fields, recursive_params);
+                        try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(fields.items.len - 1));
+                    }
+                }
+
+                // re-assign array items
+                fields.items[slice_field_ndx].encoding.array.items = try item_ndxes.toOwnedSlice(params.scratch);
                 return;
             }
 

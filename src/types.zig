@@ -819,7 +819,7 @@ pub const Variable = struct {
     name: strings.Hash,
 
     /// A pointer to the type of this Variable (there may be multiple types
-    /// to follow up the chain before arriving at the base type)
+    /// to follow in the chain before arriving at the base type)
     data_type: TypeNdx,
 
     /// Data for this Variable that is specific to one target OS
@@ -1115,8 +1115,9 @@ pub const ExpressionRenderField = struct {
     /// The format of the data
     encoding: ExpressionFieldEncoding,
 
-    /// Pointer to the buffer that contains the raw data to be rendered by the UI
-    data: strings.Hash,
+    /// Pointer to the buffer that contains the raw data to be rendered by the UI. Not all
+    /// variables are rendered from this raw buffer (i.e. a slice is rendered by other means).
+    data: ?strings.Hash,
 
     /// The name of the data type of this expression result field
     data_type_name: strings.Hash,

@@ -858,39 +858,41 @@ fn renderExpressionResult(
     const z = trace.zone(@src());
     defer z.end();
 
+    assert(expr_res.fields.len > 0);
+
     // display the name and data type of the field
     if (zui.tableNextColumn()) {
-        for (expr_res.fields) |field| {
-            zui.pushStyleColor4f(.{
-                .idx = .text,
-                .c = colors.EncodingMetaText,
-            });
-            defer zui.popStyleColor(.{});
+        // the field data type is always encapsulated in the first field in the list
+        const field = expr_res.fields[0];
 
-            const name = if (field.name) |name| paused.getString(name) else continue;
-            const type_name = paused.getString(field.data_type_name);
+        zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+        defer zui.popStyleColor(.{});
 
-            zui.text("{s},", .{name});
-            zui.sameLine(.{});
-            zui.text("{s}", .{type_name});
+        const type_name = paused.getString(field.data_type_name);
+        zui.text("{s}", .{type_name});
 
-            // if rendering an array/string, first render the length
-            switch (field.encoding) {
-                // .array => |arr| {
-                //     zui.sameLine(.{});
-                //     zui.textWrapped("(len: {d})", .{arr.len});
-                // },
-                // .string => |str| {
-                //     zui.sameLine(.{});
-                //     zui.textWrapped("(len: {d})", .{str.len});
-                // },
-                else => {},
-            }
+        // if rendering an array/string, first render the length
+        switch (field.encoding) {
+            .array => |arr| {
+                zui.textWrapped("(len: {d})", .{arr.items.len});
+            },
+            .primitive => |p| {
+                switch (p.encoding) {
+                    .string => {
+                        if (paused.strings.get(field.data.?)) |data| {
+                            zui.textWrapped("(len: {d})", .{data.len});
+                        }
+                    },
+                    else => {},
+                }
+            },
+            else => {},
         }
     }
 
     if (zui.tableNextColumn()) {
-        for (expr_res.fields) |field| {
+        const first_field = expr_res.fields[0];
+        for (expr_res.fields, 0..) |field, field_ndx| {
             // if we're rendering a pointer value, display the address as well
             if (field.address) |addr| {
                 // @TODO (jrc): clean up the display of this address, it looks terrible
@@ -905,11 +907,28 @@ fn renderExpressionResult(
                 }
             }
 
-            const data = paused.strings.get(field.data) orelse {
-                log.err("unable to find raw symbol render data");
-                continue;
+            // if rendering a list of array values, label each of their indicies
+            if (first_field.encoding == .array and field_ndx > 0) {
+                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+                defer zui.popStyleColor(.{});
+
+                zui.text("{d}: ", .{field_ndx - 1});
+                zui.sameLine(.{});
+            }
+
+            const data = blk: {
+                if (field.data == null) break :blk "";
+
+                break :blk paused.strings.get(field.data.?) orelse {
+                    log.err("unable to find raw symbol render data");
+                    continue;
+                };
             };
+
             const buf = switch (field.encoding) {
+                // noop, we are rendering the preview via other fields in the list
+                .array => continue,
+
                 .primitive => |primitive| switch (primitive.encoding) {
                     .boolean => renderWatchBoolean(scratch, data) catch |err| e: {
                         log.errf("unable to render boolean watch value: {!}", .{err});
@@ -940,7 +959,7 @@ fn renderExpressionResult(
                     },
                 },
 
-                else => types.Unknown, // @DELETEME (jrc)
+                else => types.Unknown, // @DELETEME (jrc): once all encodings are implemeted
             };
 
             zui.textWrapped("{s}", .{buf});
