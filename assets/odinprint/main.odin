@@ -45,7 +45,8 @@ main :: proc() {
 
 	// arrays
 	w := []int{14, 15, 16}
-	x := [dynamic]int{17}
+	x := [dynamic]int{}
+	append(&x, 17)
 	append(&x, 18)
 
 	// @TODO (jrc): maps
