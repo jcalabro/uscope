@@ -291,6 +291,8 @@ pub fn update(self: *Self) State.View {
                 defer zui.endTable();
 
                 for (self.watch_vars.items, 0..) |watch, ndx| {
+                    defer zui.tableNextRow(.{});
+
                     if (zui.tableNextColumn()) {
                         const label = fmt.allocPrint(self.state.scratch_alloc, "X###{d}\x00", .{ndx}) catch |err| e: {
                             log.errf("unable to create delete watch item label: {!}", .{err});
