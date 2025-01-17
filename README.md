@@ -1,12 +1,12 @@
-# Panacea Debugger
+# Inspect Debugger
 
-[![Tests](https://github.com/jcalabro/panacea/actions/workflows/ci.yaml/badge.svg)](https://github.com/jcalabro/panacea/actions/workflows/ci.yaml)
+[![Tests](https://github.com/jcalabro/inspect/actions/workflows/ci.yaml/badge.svg)](https://github.com/jcalabro/inspect/actions/workflows/ci.yaml)
 
-<img src="https://github.com/user-attachments/assets/c1369788-bc58-4323-a063-c74f403cc39c" />
+<img src="https://github.com/user-attachments/assets/17eb2df9-35af-4f3e-a589-de519c4a9e35" />
 
 ### Overview
 
-`panacea` is a native code debugger for Linux. It supports debugging C and Zig programs (with support for more languages to come).
+`inspect` is a native code debugger for Linux. It supports debugging C and Zig programs (with support for more languages to come).
 
 There is substantial room for innovation in the space of debug tooling, and though we're currently early-days, the vision for this project is a fast, robust debugger that answers the question of "what is my program doing" as quickly and painlessly as possible for a variety of workloads.
 
@@ -23,7 +23,7 @@ All of the debugger-related functionality is written from the ground-up, includi
 
 ### Project Status
 
-`panacea` is not far enough along to consider using as a daily-driver. It is a side project I'm working on for fun and because I want a good debugger for my own use. Consequently, the pace of updates may be slow and inconsistent, but I do intend to keep working on it when I have time.
+`inspect` is not far enough along to consider using as a daily-driver. It is a side project I'm working on for fun and because I want a good debugger for my own use. Consequently, the pace of updates may be slow and inconsistent, but I do intend to keep working on it when I have time.
 
 I'm always interested in talking debuggers and other areas of tech. Please feel free to reach out via email to jim at [my domain](https://calabro.io). Other forms of contact info can also be found on my site.
 
@@ -71,12 +71,12 @@ We do not provide pre-built binaries or package manager distributions (yet).
 To build from source, clone the repo and run `zig build`. [Zig version 0.13.0](https://ziglang.org/download/) is required.
 
 ```bash
-git clone git@github.com:jcalabro/panacea.git
-cd panacea
+git clone git@github.com:jcalabro/inspect.git
+cd inspect
 zig build -Doptimize=ReleaseSafe -Drelease
 ```
 
-You'll probably want to create a global config file at `$XDG_CONFIG_HOME/panacea/config.ini` like this (though we'll create an empty config for you if one does not already exist):
+You'll probably want to create a global config file at `$XDG_CONFIG_HOME/inspect/config.ini` like this (though we'll create an empty config for you if one does not already exist):
 
 ```ini
 [log]
@@ -84,7 +84,7 @@ level=debug
 regions=all
 ```
 
-And a you'll need to create a local, project-specific config file at `$(pwd)/.panacea/config.ini`, whose only required field is `target.path`:
+And a you'll need to create a local, project-specific config file at `$(pwd)/.inspect/config.ini`, whose only required field is `target.path`:
 
 ```ini
 [target]
@@ -138,7 +138,7 @@ Additionally, we've taken a bit of inspiration from the [Helix editor](https://h
 The program outputs a user-friendly log by default to:
 
 ```bash
-tail -d /tmp/panacea.log
+tail -d /tmp/inspect.log
 ```
 
 This repo comes pre-packaged with a bunch of small, simple source programs in various languages in the `assets/` directory. To build them all, ensure you have all the toolchains you could possibly neeed installed and:

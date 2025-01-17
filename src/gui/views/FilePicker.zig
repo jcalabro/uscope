@@ -54,7 +54,7 @@ const skipExtensions = &.{
     ".ttf",
     ".bin",
 
-    // @DELETEME (jrc): this is specific to panacea itself
+    // @DELETEME (jrc): this is specific to inspect itself
     "out",
 };
 

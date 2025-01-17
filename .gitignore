@@ -1,6 +1,6 @@
 # local debugger configuration (you might usually want to check
 # this in on your projects, or not if it doesn't make sense to)
-.panacea/
+.inspect/
 
 # zig binaries and build output
 .bin/

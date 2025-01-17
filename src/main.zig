@@ -54,8 +54,8 @@ pub fn main() !void {
     });
     defer logging.deinit();
 
-    log.info("panacea starting");
-    defer log.info("panacea done");
+    log.info("inspect starting");
+    defer log.info("inspect done");
 
     flags.logAll();
 
@@ -109,7 +109,7 @@ test {
 
     const log_fp = switch (flags.CI) {
         true => std.io.getStdOut(),
-        false => try openOrCreateLogFile("/tmp/panacea.log"),
+        false => try openOrCreateLogFile("/tmp/inspect.log"),
     };
 
     logging.init(.{
