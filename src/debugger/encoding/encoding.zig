@@ -26,7 +26,7 @@ pub const Params = struct {
     val: String,
 };
 
-pub const EncodeVariableError = error{ReadDataError} || Allocator.Error;
+pub const EncodeVariableError = error{InvalidDataType} || error{ReadDataError} || Allocator.Error;
 
 /// Encoding is a comptime-known interface type that allows us to select how to read data from memory based
 /// on the programming language of the compile unit we're inspecting. These Encoding objects are thin wrappers
@@ -61,6 +61,10 @@ pub const RenderSliceResult = struct {
 
     /// The total number of items in the slice
     len: usize,
+
+    /// The type of each element in the slice. If the pointer in the slice is pointing to an
+    /// opaque type, `item_data_type` will be null, and we can't render a preview.
+    item_data_type: ?types.TypeNdx,
 
     /// A preview of the slice items (this may be shorter than the actual slice)
     item_bufs: []String,

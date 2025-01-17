@@ -2295,15 +2295,19 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             if (params.encoder.isSlice(enc_params)) {
                 const res = try params.encoder.renderSlice(enc_params);
 
-                var item_ndxes = try params.scratch.alloc(types.ExpressionFieldNdx, res.item_bufs.len);
-                for (res.item_bufs, 0..) |item_buf, ndx| {
-                    // recursively render slice items using the known item buffer
-                    var recursive_params = params;
-                    recursive_params.variable_value_buf = item_buf;
-                    // @TODO (jrc): set the rest of these values to...what?
+                var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
 
-                    try self.renderVariableValue(fields, params);
-                    item_ndxes[ndx] = types.ExpressionFieldNdx.from(fields.items.len - 1);
+                // only attempt to render the slice preview if the pointer type isn't opaque
+                if (res.item_data_type) |item_data_type| {
+                    for (res.item_bufs) |item_buf| {
+                        // recursively render slice items using the known item buffer
+                        var recursive_params = params;
+                        recursive_params.variable_value_buf = item_buf;
+                        recursive_params.variable.data_type = item_data_type;
+
+                        try self.renderVariableValue(fields, recursive_params);
+                        try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(fields.items.len - 1));
+                    }
                 }
 
                 try fields.append(params.scratch, .{
@@ -2312,7 +2316,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     .address = res.address,
                     .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
                     .encoding = .{ .array = .{
-                        .items = item_ndxes,
+                        .items = try item_ndxes.toOwnedSlice(params.scratch),
                     } },
                 });
 
