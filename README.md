@@ -1,6 +1,6 @@
 # Inspect
 
-[![Tests](https://github.com/jcalabro/inspect/actions/workflows/ci.yaml/badge.svg)](https://github.com/jcalabro/inspect/actions/workflows/ci.yaml)
+[![status-badge](https://nuc01.tail0223.ts.net/api/badges/1/status.svg)](https://nuc01.tail0223.ts.net/repos/1)
 
 <img src="https://github.com/user-attachments/assets/17eb2df9-35af-4f3e-a589-de519c4a9e35" />
 

@@ -20,6 +20,7 @@ const arch = @import("../arch.zig").arch;
 const Child = @import("Child.zig");
 const encoding = @import("encoding/encoding.zig");
 const file = @import("../file.zig");
+const flags = @import("../flags.zig");
 const logging = @import("../logging.zig");
 const proto = @import("proto.zig");
 const Queue = @import("../queue.zig").Queue;
@@ -663,10 +664,11 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             );
 
             if (builtin.mode == .Debug) {
-                // If we are running the debugger in the debugger, we need to sleep to work around bugs in GDB
+                // If we are running the debugger in the debugger, we need to avoid race conditions, and this is a hack to help
                 // @REF: https://stackoverflow.com/questions/2359581/calling-ptrace-inside-a-ptraced-linux-process
                 //
                 // @TODO (jrc): use /proc/self/status to detect if we are being traced by a debugger
+                // @TODO (jrc): handle this properly with signals rather than a sleep
                 std.time.sleep(20 * std.time.ns_per_ms);
             }
 
@@ -697,7 +699,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             }
 
             // wait for the child to start, at which point it will send us a SIGTRAP
-            try self.adapter.waitForSignalSync(pid, 5 * time.ns_per_s);
+            const timeout_secs = if (flags.CI) 20 else 2; // Github Actions default runners are insanely slow
+            try self.adapter.waitForSignalSync(pid, timeout_secs * time.ns_per_s);
 
             // apply all breakpoints that the user has already requested
             for (self.data.state.breakpoints.items) |*bp| {

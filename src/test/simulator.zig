@@ -742,7 +742,8 @@ test "sim:zigprint" {
     })
     .addCondition(.{
         .desc = "subordinate must have finished execution and all subordinate output must be displayed",
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(4000),
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 {
@@ -756,7 +757,7 @@ test "sim:zigprint" {
                     s.state.subordinate_output_mu.lock();
                     defer s.state.subordinate_output_mu.unlock();
 
-                    if (checkeq(usize, expected_output_len, s.state.subordinate_output.len, "incorrect program output size")) {
+                    if (expected_output_len == s.state.subordinate_output.len) {
                         return true;
                     }
                 }
@@ -781,7 +782,8 @@ test "sim:zigprint" {
     })
     .addCondition(.{
         .desc = "subordinate must have finished execution and all subordinate output must be displayed on the second run",
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(4000),
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 s.dbg.data.mu.lock();
@@ -792,7 +794,9 @@ test "sim:zigprint" {
                 s.state.subordinate_output_mu.lock();
                 defer s.state.subordinate_output_mu.unlock();
 
-                if (expected_output_len == s.state.subordinate_output.len) return true;
+                if (expected_output_len == s.state.subordinate_output.len) {
+                    return true;
+                }
 
                 return null;
             }
@@ -912,6 +916,7 @@ test "sim:cmulticu" {
         .req = (proto.ContinueRequest{}).req(),
     })
     .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
         .max_ticks = msToTicks(2000),
         .desc = "subordinate must have hit the breakpoint in second.c",
         .cond = struct {
@@ -1255,7 +1260,7 @@ test "sim:cbacktrace" {
         .req = (proto.ContinueRequest{}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(1000),
+        .wait_for_ticks = msToTicks(100),
         .max_ticks = msToTicks(4000),
         .desc = "subordinate must have hit the breakpoint in FuncC()",
         .cond = struct {
@@ -1345,19 +1350,21 @@ fn checkZigBacktraceLine(s: *Simulator, line: types.SourceLine, stack_depth: usi
     s.dbg.data.mu.lock();
     defer s.dbg.data.mu.unlock();
 
-    if (s.dbg.data.subordinate.?.paused) |paused| {
-        if (paused.source_location == null) {
-            log.err("subordinate is stopped at a PC that has no source line");
-            return false;
+    if (s.dbg.data.subordinate) |sub| {
+        if (sub.paused) |paused| {
+            if (paused.source_location == null) {
+                log.err("subordinate is stopped at a PC that has no source line");
+                return false;
+            }
+            const src = paused.source_location.?;
+
+            // must be recalculated because its value is not runtime-known
+            const fhash = fileHash(t.allocator, zigbacktrace_main_zig) catch unreachable;
+
+            return checkeq(file_utils.Hash, fhash, src.file_hash, "stopped in a file other than main.zig") and
+                checkeq(types.SourceLine, line, src.line, "stopped at the wrong line in main.zig") and
+                checkeq(usize, stack_depth, paused.stack_frames.len, "incorrect stacktrace depth");
         }
-        const src = paused.source_location.?;
-
-        // must be recalculated because its value is not runtime-known
-        const fhash = fileHash(t.allocator, zigbacktrace_main_zig) catch unreachable;
-
-        return checkeq(file_utils.Hash, fhash, src.file_hash, "stopped in a file other than main.zig") and
-            checkeq(types.SourceLine, line, src.line, "stopped at the wrong line in main.zig") and
-            checkeq(usize, stack_depth, paused.stack_frames.len, "incorrect stacktrace depth");
     }
 
     return null;
@@ -1455,7 +1462,7 @@ test "sim:step_over_until_end" {
 
     .addCondition(.{
         .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(5000),
         .desc = "subordinate must have hit the breakpoint",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {

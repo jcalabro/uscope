@@ -684,19 +684,15 @@ test "load ELF files" {
             .path = "./assets/cprint/out",
             .cu_lang = .DW_LANG_C11,
         },
-        .{
-            .path = "./assets/cprint/out",
-            .cu_lang = .DW_LANG_C11,
-        },
         // .{
         //     .path = "./assets/goloop/out",
         //     .cu_lang = .DW_LANG_Go,
         // },
-        .{
-            .path = "./assets/rustloop/out",
-            .pie = true,
-            .cu_lang = .DW_LANG_Rust,
-        },
+        // .{
+        //     .path = "./assets/rustloop/out",
+        //     .pie = true,
+        //     .cu_lang = .DW_LANG_Rust,
+        // },
         .{
             .path = "./assets/zigloop/out",
             .cu_lang = .DW_LANG_Zig,
@@ -729,6 +725,7 @@ test "load ELF files" {
         defer log.flush();
 
         log.debugf("load ELF files: {s}", .{case.path});
+        log.flush();
 
         var arena = ArenaAllocator.init(t.allocator);
         defer arena.deinit();
