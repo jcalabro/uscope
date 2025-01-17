@@ -1,4 +1,4 @@
-# Inspect Debugger
+# Inspect
 
 [![Tests](https://github.com/jcalabro/inspect/actions/workflows/ci.yaml/badge.svg)](https://github.com/jcalabro/inspect/actions/workflows/ci.yaml)
 
