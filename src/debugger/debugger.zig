@@ -2295,6 +2295,17 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             if (params.encoder.isSlice(enc_params)) {
                 const res = try params.encoder.renderSlice(enc_params);
 
+                try fields.append(params.scratch, .{
+                    .data = null,
+                    .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                    .address = res.address,
+                    .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                    .encoding = .{ .array = .{
+                        .items = undefined,
+                    } },
+                });
+                const slice_field_ndx = fields.items.len - 1;
+
                 var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
 
                 // only attempt to render the slice preview if the pointer type isn't opaque
@@ -2310,16 +2321,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     }
                 }
 
-                try fields.append(params.scratch, .{
-                    .data = null,
-                    .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                    .address = res.address,
-                    .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                    .encoding = .{ .array = .{
-                        .items = try item_ndxes.toOwnedSlice(params.scratch),
-                    } },
-                });
-
+                // re-assign array items
+                fields.items[slice_field_ndx].encoding.array.items = try item_ndxes.toOwnedSlice(params.scratch);
                 return;
             }
 

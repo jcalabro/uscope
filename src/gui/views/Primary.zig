@@ -858,40 +858,41 @@ fn renderExpressionResult(
     const z = trace.zone(@src());
     defer z.end();
 
+    assert(expr_res.fields.len > 0);
+
     // display the name and data type of the field
     if (zui.tableNextColumn()) {
-        for (expr_res.fields) |field| {
-            zui.pushStyleColor4f(.{
-                .idx = .text,
-                .c = colors.EncodingMetaText,
-            });
-            defer zui.popStyleColor(.{});
+        // the field data type is always encapsulated in the first field in the list
+        const field = expr_res.fields[0];
 
-            const type_name = paused.getString(field.data_type_name);
-            zui.text("{s}", .{type_name});
+        zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+        defer zui.popStyleColor(.{});
 
-            // if rendering an array/string, first render the length
-            switch (field.encoding) {
-                .array => |arr| {
-                    zui.textWrapped("(len: {d})", .{arr.items.len});
-                },
-                .primitive => |p| {
-                    switch (p.encoding) {
-                        .string => {
-                            if (paused.strings.get(field.data.?)) |data| {
-                                zui.textWrapped("(len: {d})", .{data.len});
-                            }
-                        },
-                        else => {},
-                    }
-                },
-                else => {},
-            }
+        const type_name = paused.getString(field.data_type_name);
+        zui.text("{s}", .{type_name});
+
+        // if rendering an array/string, first render the length
+        switch (field.encoding) {
+            .array => |arr| {
+                zui.textWrapped("(len: {d})", .{arr.items.len});
+            },
+            .primitive => |p| {
+                switch (p.encoding) {
+                    .string => {
+                        if (paused.strings.get(field.data.?)) |data| {
+                            zui.textWrapped("(len: {d})", .{data.len});
+                        }
+                    },
+                    else => {},
+                }
+            },
+            else => {},
         }
     }
 
     if (zui.tableNextColumn()) {
-        for (expr_res.fields) |field| {
+        const first_field = expr_res.fields[0];
+        for (expr_res.fields, 0..) |field, field_ndx| {
             // if we're rendering a pointer value, display the address as well
             if (field.address) |addr| {
                 // @TODO (jrc): clean up the display of this address, it looks terrible
@@ -906,6 +907,15 @@ fn renderExpressionResult(
                 }
             }
 
+            // if rendering a list of array values, label each of their indicies
+            if (first_field.encoding == .array and field_ndx > 0) {
+                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+                defer zui.popStyleColor(.{});
+
+                zui.text("{d}: ", .{field_ndx - 1});
+                zui.sameLine(.{});
+            }
+
             const data = blk: {
                 if (field.data == null) break :blk "";
 
@@ -914,7 +924,11 @@ fn renderExpressionResult(
                     continue;
                 };
             };
+
             const buf = switch (field.encoding) {
+                // noop, we are rendering the preview via other fields in the list
+                .array => continue,
+
                 .primitive => |primitive| switch (primitive.encoding) {
                     .boolean => renderWatchBoolean(scratch, data) catch |err| e: {
                         log.errf("unable to render boolean watch value: {!}", .{err});
