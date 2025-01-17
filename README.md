@@ -6,55 +6,51 @@
 
 ### Overview
 
-`panacea` is a native code debugger for Linux. It supports debugging C and Zig programs (with support for more languages to come in the future).
+`panacea` is a native code debugger for Linux. It supports debugging C and Zig programs (with support for more languages to come).
 
-There is substantial room for innovation in the space of debug tooling, and though we're currently early-days, I envision a future with a fast, robust debugger that answers the question of "what is my program doing" as quickly and painlessly as possible.
+There is substantial room for innovation in the space of debug tooling, and though we're currently early-days, the vision for this project is a fast, robust debugger that answers the question of "what is my program doing" as quickly and painlessly as possible for a variety of workloads.
 
-100% of the debugger-related functionality is written from the ground-up, including:
+All of the debugger-related functionality is written from the ground-up, including:
 
-- Parsing ELF/DWARF files to get debug info
-- Running a subordiante process and handling control flow (stepping, continue execution, etc.)
+- Parsing ELF/DWARF files to obtain debug info
+- Running a subordiante process and handling control flow (pausing, stepping, continue execution, etc.)
 - Setting and handling breakpoints
-- Viewing variable values in a human-friendly format
+- Viewing variable values in a user-friendly format
 - Call stack unwinding
 - etc.
 
-It's critical to build these key areas of the system from scratch so we can own our long-term success, innovate based on solid footing, and remain unencumbered by large dependencies or licenses that enforce obligations.
-
-[See here](https://www.calabro.io/dwarf#why-are-you-writing-this) for some more thoughts on the motivation behind this project.
+[See here](https://www.calabro.io/dwarf#why-are-you-writing-this) for some further thoughts on the motivation behind this project.
 
 ### Project Status
 
-`panacea` is not far enough along to consider using as a daily-driver. That being said, you may find it useful at present if you're writing simple, single-threaded C or Zig programs.
-
-It is a side project I'm working on for fun and because I want a good debugger for my own use. Consequently, the pace of updates may be slow and inconsistent, but I do intend to keep working on it when I have the time.
+`panacea` is not far enough along to consider using as a daily-driver. It is a side project I'm working on for fun and because I want a good debugger for my own use. Consequently, the pace of updates may be slow and inconsistent, but I do intend to keep working on it when I have time.
 
 I'm always interested in talking debuggers and other areas of tech. Please feel free to reach out via email to jim at [my domain](https://calabro.io). Other forms of contact info can also be found on my site.
 
 ### High-level Roadmap
 
-This is a birds-eye overview of the features I'd like implemented before I'd personally be able to completely ditch all other "traditional" debuggers. In no particular order:
+This is a birds-eye overview of the features I'd like implemented before I'd personally be able to completely ditch other "traditional" debuggers. In no particular order:
 
 - Support for visualization of common data types in more languages
   - At least C++, Go, Rust, Odin, and Jai (C and Zig are already supported)
   - I personally use C++ and Go a lot at my day job, so those ones will probably come first even though they're very complicated languages
-  - In general, I think we just need a plugin system similar to natvis or LLDB pretty-printers, but better
+  - In general, we just need a plugin system that understands natvis, LLDB pretty-printers, or something else of our own design
 - Support for multi-threaded programs
 - User-friendly source code navigation (i.e. go to definition, find all references, etc.)
 - Run to cursor
 - Debug tests by clicking on them
 
-Other long-term features that should be implemented are:
+Other long-term features that will be implemented are:
 
 - Build as a library so other people can build other interesting things on top of this
-  - The GUI will be the first consumer of that library
+  - The GUI will be the first consumer of that library, sort of in the same way [Ghostty](https://github.com/mitchellh/ghostty) is the first consumer of libghostty
 - Many more types of domain-specific data visualizations
   - For example, I work on chess engines for my day job, and it would be amazing to have a debugger that natively understands my position encoding and automatically renders interactive chess boards
-- Remote debugging over ssh
+- Remote debugging
 - Conditional breakpoints
 - Data breakpoints (i.e. break when an address is accessed or a variable mutated)
 - Trace points (observe variable values over time without actually pausing the subordinate program)
-- Load core dumps
+- Load and view core dumps
 - Assembly viewer
 - Ability to track and visualize system calls (similar to [strace](https://man7.org/linux/man-pages/man1/strace.1.html))
 - Various `/proc` views (there's lots of interesting information in there)
@@ -64,9 +60,9 @@ Other long-term features that should be implemented are:
 
 Similarly, the following features are non-goals of the project:
 
-- Supporting non-native languages (i.e. Java), JIT'ed languages (i.e. JavaScript), or interpreted langauges (i.e. Python)
-- Terminal UI
-- Record/rewind (reverse debugging)
+- Supporting non-native languages (i.e. Java, Python, etc.)
+- Record/replay like [rr](https://rr-project.org/)
+  - `rr` is awesome, it's just a very different model
 
 ### Building and Running
 
@@ -105,7 +101,7 @@ open_files=assets/zigprint/main.zig:33:96
 # open_files=first.c:1:2, second.c:3:4
 ```
 
-Note that the plan in the future is to allow 100% of configuration options to be accssible from within the debugger itself rather than requiring the user to edit text files. The debugger will manage these files automatically.
+Note that the plan in the future is to allow all configuration options to be configurable from within the debugger itself rather than requiring the user to edit text files. The debugger will manage these files automatically.
 
 Then, to create a development build, you can do any of:
 
@@ -177,3 +173,11 @@ Probably a long time (a year or more at least). I have a day job, and this is a 
 ##### 3. Will you provide pre-built binaries?
 
 Once the debugger is further along, yes, but not now. It's not generally useful to people yet, so there's no point in providing binaries at the moment.
+
+##### 4. Why are you intending to build a library for debugging, not just a new debugger? Why not just use DAP?
+
+There are a wide variety of use-cases for an introspection library outside of traditional debuggers (i.e. reverse engineering tools, novel forms of debuggers, etc.). For instance, perhaps a user could create a version of `dwarfdump` that's much more visual where you can click around the DIE tree and explore.
+
+Additionally, I do not think [DAP](https://microsoft.github.io/debug-adapter-protocol//) is very good, but lots of editors out there already speak it. By creating a library, we easily create a separate DAP-mode static executable as opposed to having to also lug around a giant GUI that never gets used.
+
+In short, it allows us all to build simple, focused, and novel introspection tools.
