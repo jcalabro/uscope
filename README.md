@@ -1,4 +1,4 @@
-# Inspect
+# Inspect 🔬
 
 [![status-badge](https://nuc01.tail0223.ts.net/api/badges/1/status.svg)](https://nuc01.tail0223.ts.net/repos/1)
 
@@ -148,15 +148,16 @@ cd assets
 ./build.sh
 ```
 
-Here's what versions I run on my development and CI machines for reference, though getting a healthy variety of compilers and versions is good because it reveals subtle, real-world issues:
+The compiler versions used to build all the asset programs in CI are in the [Dockerfile](https://github.com/jcalabro/inspect/blob/main/Dockerfile). You run the tests without docker as demonstrated above, or with docker using:
 
-- gcc: 14.2.1 20240910
-- clang: 18.1.8
-- zig: 0.13.0
-- rust: 1.83.0
-- go: 1.23.4
-- odin: dev-2024-12-nightly
-- jai: 0.2.002
+```bash
+docker build -t inspect .
+docker run --rm -it -v $(pwd):/inspect inspect
+cd /inspect/assets
+./build.sh
+cd ..
+zig build test -Drace
+```
 
 ### FAQ
 
