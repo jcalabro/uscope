@@ -702,6 +702,7 @@ test "sim:zigprint" {
                             checkeq(String, "b", paused.strings.get(paused.locals[1].expression) orelse "", "second local expression was incorrect")) {
 
                             {
+                                // test rendering a basic string
                                 const ao = paused.getLocalByName("ao") orelse return falseWithErr("unable to get local \"ao\"", .{});
                                 const data_hash = ao.fields[0].data orelse return falseWithErr("data not set on variable \"ao\"", .{});
                                 if (!checkstr(paused.strings, "abcd", data_hash, "unexpected render value for field \"ao\"")) {
@@ -710,12 +711,14 @@ test "sim:zigprint" {
                             }
 
                             {
+                                // test rendering an array of u32's
                                 const at = paused.getLocalByName("at") orelse return falseWithErr("unable to get local \"at\"", .{});
                                 const field = at.fields[0];
                                 if (field.encoding != .array) {
-                                    log.errf("at encoding was not an array, got {s}", .{@tagName(field.encoding)});
+                                    log.errf("variable \"at\" encoding was not an array, got {s}", .{@tagName(field.encoding)});
                                     return false;
                                 }
+
                                 if (!checkeq(usize, 5, field.encoding.array.items.len, "unexpected number of array items for \"at\"")) {
                                     return false;
                                 }
@@ -744,6 +747,66 @@ test "sim:zigprint" {
                                     const i_u8: u8 = @intCast(i);
                                     const expected_char: u8 = '1' + i_u8;
                                     if (!checkstr(paused.strings, &.{expected_char, 0, 0, 0}, data_hash, "unexpected data for variable \"at\"")) return false;
+                                }
+                            }
+
+                            {
+                                // test rendering a simple struct
+                                const ap = paused.getLocalByName("ap") orelse return falseWithErr("unable to get local \"ap\"", .{});
+                                const field = ap.fields[0];
+                                if (field.encoding != .@"struct") {
+                                    log.errf("variable \"ap\" encoding was not a struct, got {s}", .{@tagName(field.encoding)});
+                                    return false;
+                                }
+
+                                if (!checkeq(usize, 2, field.encoding.@"struct".members.len, "unexpected number of struct members for \"at\"")) {
+                                    return false;
+                                }
+
+                                {
+                                    // check `field_a`
+                                    const member = mem: {
+                                        for (ap.fields) |f| {
+                                            const name = paused.strings.get(f.name orelse 0).?;
+                                            if (strings.eql(name, "field_a")) break :mem f;
+                                        }
+                                        log.err("\"field_a\" not found in struct \"ap\"");
+                                        return false;
+                                    };
+
+                                    if (member.encoding != .primitive) {
+                                        log.errf("\"ap.field_a\" was not a primitive, got {s}", .{@tagName(member.encoding)});
+                                        return false;
+                                    }
+                                    if (member.encoding.primitive.encoding != .signed) {
+                                        log.errf("\"ap.field_a\" was not a signed integer, got {s}", .{@tagName(member.encoding.primitive.encoding)});
+                                        return false;
+                                    }
+
+                                    if (!checkstr(paused.strings, &.{123, 0, 0, 0}, member.data.?, "incorrect value for \"ap.field_a\"")) return false;
+                                }
+
+                                {
+                                    // check `field_b`
+                                    const member = mem: {
+                                        for (ap.fields) |f| {
+                                            const name = paused.strings.get(f.name orelse 0).?;
+                                            if (strings.eql(name, "field_b")) break :mem f;
+                                        }
+                                        log.err("\"field_b\" not found in struct \"ap\"");
+                                        return false;
+                                    };
+
+                                    if (member.encoding != .primitive) {
+                                        log.errf("\"ap.field_b\" was not a primitive, got {s}", .{@tagName(member.encoding)});
+                                        return false;
+                                    }
+                                    if (member.encoding.primitive.encoding != .string) {
+                                        log.errf("\"ap.field_b\" was not a string, got {s}", .{@tagName(member.encoding.primitive.encoding)});
+                                        return false;
+                                    }
+
+                                    if (!checkstr(paused.strings, "this is field_b", member.data.?, "incorrect value for \"ap.field_b\"")) return false;
                                 }
                             }
 
