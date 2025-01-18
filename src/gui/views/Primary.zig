@@ -291,7 +291,7 @@ pub fn update(self: *Self) State.View {
                 defer zui.endTable();
 
                 for (self.watch_vars.items, 0..) |watch, ndx| {
-                    defer zui.tableNextRow(.{});
+                    zui.tableNextRow(.{});
 
                     if (zui.tableNextColumn()) {
                         const label = fmt.allocPrint(self.state.scratch_alloc, "X###{d}\x00", .{ndx}) catch |err| e: {
@@ -874,21 +874,23 @@ fn renderExpressionResult(
         zui.text("{s}", .{type_name});
 
         // if rendering an array/string, first render the length
-        switch (field.encoding) {
-            .array => |arr| {
-                zui.textWrapped("(len: {d})", .{arr.items.len});
-            },
-            .primitive => |p| {
-                switch (p.encoding) {
-                    .string => {
-                        if (paused.strings.get(field.data.?)) |data| {
-                            zui.textWrapped("(len: {d})", .{data.len});
-                        }
-                    },
-                    else => {},
-                }
-            },
-            else => {},
+        if (!strings.eql(type_name, types.Unknown)) {
+            switch (field.encoding) {
+                .array => |arr| {
+                    zui.textWrapped("(len: {d})", .{arr.items.len});
+                },
+                .primitive => |p| {
+                    switch (p.encoding) {
+                        .string => {
+                            if (paused.strings.get(field.data.?)) |data| {
+                                zui.textWrapped("(len: {d})", .{data.len});
+                            }
+                        },
+                        else => {},
+                    }
+                },
+                else => {},
+            }
         }
     }
 
@@ -1119,42 +1121,3 @@ fn renderWatchFloat(scratch: Allocator, buf: []const u8) ![]const u8 {
         },
     }
 }
-
-// /// @NEEDSTEST
-// fn renderWatchArray(scratch: Allocator, buf: []const u8, array: types.ArrayRenderer) ![]const u8 {
-//     var str = ArrayList(u8).init(scratch);
-
-//     var r: Reader = undefined;
-//     r.init(buf);
-//     while (!r.atEOF()) {
-//         try str.appendSlice(switch (array.item_encoding) {
-//             .boolean => blk: {
-//                 const val = try r.read(u8);
-//                 break :blk switch (val) {
-//                     0 => try fmt.allocPrint(scratch, "false", .{}),
-//                     else => try fmt.allocPrint(scratch, "true", .{}),
-//                 };
-//             },
-
-//             .signed, .unsigned => |int| blk: {
-//                 const start = r.offset();
-//                 const end = start + array.item_size;
-//                 break :blk try renderWatchInteger(scratch, r.buf[start..end], int);
-//             },
-
-//             .float => blk: {
-//                 const start = r.offset();
-//                 const end = start + array.item_size;
-//                 break :blk try renderWatchFloat(scratch, r.buf[start..end]);
-//             },
-
-//             // @TODO (jrc): implement the rest of the encodings we support
-//             else => return error.ArrayVisualizationNotSupported,
-//         });
-
-//         r.advanceBy(array.item_size);
-//         if (!r.atEOF()) try str.appendSlice(", ");
-//     }
-
-//     return try str.toOwnedSlice();
-// }

@@ -54,7 +54,6 @@ const State = struct {
     max_breakpoint_id: atomic.Value(u64) = atomic.Value(u64).init(1),
 
     watch_expressions: ArrayListUnmanaged(String) = .{},
-    watch_expressions_updated: bool = false,
 
     /// The address the user would like to display in the memory viewer window
     hex_window_address: ?types.Address = null,
@@ -350,11 +349,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             var done = false;
             while (!done) {
-                // @TODO (jrc)
-                // self.updateWatchResultsIfNeeded(scratch) catch |err| {
-                //     log.errf("unable to recalculate watch expressions: {!}", .{err});
-                // };
-
                 const request = self.requests.get() catch continue;
                 logRequest("async", request);
 
@@ -2348,10 +2342,19 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     });
                 },
 
+                // @DELETEME (jrc): remove the whole else clause
                 else => {
-                    // @DELETEME (jrc): remove the whole else clause
+                    // append an empty field so the UI knows to render "unknown"
+                    try fields.append(params.scratch, .{
+                        .data = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
+                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .encoding = .{ .primitive = .{
+                            .encoding = .string,
+                        } },
+                    });
+
                     log.warnf("unsupported data type: {s}", .{@tagName(data_type.form)});
-                    return error.ExpressionError;
                 },
             }
         }
