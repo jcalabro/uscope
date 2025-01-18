@@ -324,6 +324,11 @@ test "msToTicks" {
     try t.expectEqual(@as(i32, 2), msToTicks(20));
 }
 
+fn falseWithErr(comptime fmt: String, args: anytype) bool {
+    log.errf(fmt, args);
+    return false;
+}
+
 fn check(cond: bool, desc: String) bool {
     if (!cond) log.errf("condition failed: {s}", .{desc});
     return cond;
@@ -673,9 +678,8 @@ test "sim:zigprint" {
                     break :blk s.dbg.data.state.breakpoints.items[0];
                 };
 
-                // @VARIABLES (jrc)
-                // s.state.primary.addWatchValue("a") catch unreachable;
-                // defer s.state.primary.watch_vars.clearAndFree();
+                s.state.primary.addWatchValue("a") catch unreachable;
+                defer s.state.primary.watch_vars.clearAndFree();
 
                 if (s.state.getStateSnapshot(s.arena.allocator())) |ss| {
                     if (ss.state.paused) |paused| {
@@ -688,37 +692,63 @@ test "sim:zigprint" {
                         // wait for output to arrive
                         if (s.state.subordinate_output.len == 0) return null;
 
-                        // @VARIABLES (jrc)
-                        if (checkeq(usize, 4, s.state.subordinate_output.len, "unexpected program output len")) {
+                        // spot check a few fields
+                        const num_locals = 46;
+                        if (checkeq(usize, 4, s.state.subordinate_output.len, "unexpected program output len") and
+                            checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") and
+                            checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") and
+                            checkeq(usize, 1, paused.watches.len, "unexpected number of watch expressions") and
+                            checkeq(String, "a", paused.strings.get(paused.watches[0].expression) orelse "", "first watch expression was incorrect") and
+                            checkeq(String, "b", paused.strings.get(paused.locals[1].expression) orelse "", "second local expression was incorrect")) {
+
+                            {
+                                const ao = paused.getLocalByName("ao") orelse return falseWithErr("unable to get local \"ao\"", .{});
+                                const data_hash = ao.fields[0].data orelse return falseWithErr("data not set on variable \"ao\"", .{});
+                                if (!checkstr(paused.strings, "abcd", data_hash, "unexpected render value for field \"ao\"")) {
+                                    return false;
+                                }
+                            }
+
+                            {
+                                const at = paused.getLocalByName("at") orelse return falseWithErr("unable to get local \"at\"", .{});
+                                const field = at.fields[0];
+                                if (field.encoding != .array) {
+                                    log.errf("at encoding was not an array, got {s}", .{@tagName(field.encoding)});
+                                    return false;
+                                }
+                                if (!checkeq(usize, 5, field.encoding.array.items.len, "unexpected number of array items for \"at\"")) {
+                                    return false;
+                                }
+
+                                for (field.encoding.array.items, 0..) |field_ndx, i| {
+                                    const item = at.fields[field_ndx.int()];
+                                    if (item.encoding != .primitive) {
+                                        log.errf("expected element at ndx {d} of \"at\" to be a primitive, got {s}", .{
+                                            field_ndx,
+                                            @tagName(item.encoding),
+                                        });
+                                        return false;
+                                    }
+                                    if (!checkeq(
+                                        types.PrimitiveTypeEncoding,
+                                        .unsigned,
+                                        item.encoding.primitive.encoding,
+                                        "item element encoding should be an unsigned primitive for \"at\"",
+                                    )) return false;
+
+                                    const data_hash = at.fields[field_ndx.int()].data orelse return falseWithErr(
+                                        "unable to get data for \"at\" at field ndx {d}",
+                                        .{field_ndx},
+                                    );
+
+                                    const i_u8: u8 = @intCast(i);
+                                    const expected_char: u8 = '1' + i_u8;
+                                    if (!checkstr(paused.strings, &.{expected_char, 0, 0, 0}, data_hash, "unexpected data for variable \"at\"")) return false;
+                                }
+                            }
+
                             return true;
                         }
-
-                        // const num_locals = 46;
-                        // if (checkeq(usize, 4, s.state.subordinate_output.len, "unexpected program output len") and
-                        //     checkeq(usize, num_locals, paused.local_variables.len, "unexpected number of local variables") and
-                        //     checkeq(usize, num_locals, paused.local_variable_results.len, "unexpected number of local variable expression results") and
-                        //     checkeq(usize, 1, paused.watch_expressions.len, "unexpected number of watch expressions") and
-                        //     checkeq(String, "a", paused.watch_expressions[0], "first watch variable expression was incorrect") and
-                        //     checkeq(usize, 1, paused.watch_expression_results.len, "there must be two watch expression results") and
-                        //     checkeq(usize, 4, paused.local_variable_results[45].fields[0].encoding.array.len, "unexpected array length for variable `ao`")) {
-
-                        //     const a = paused.watch_expression_results[0];
-                        //     if (a.fields.len == 0) return null;
-
-                        //     if (!checkeq(usize, a.fields.len, 1, "watch expression a.fields should have one item")) return false;
-                        //     const res = a.fields[0];
-
-                        //     if (!checkeq(String, &[_]u8{1}, res.buf, "'a' expression result was incorrect")) return false;
-                        //     switch (res.encoding) {
-                        //         .integer => |int| {
-                        //             return checkeq(types.TypeEncoding, .signed, int.encoding, "unexpected integer encoding");
-                        //         },
-                        //         else => {
-                        //             log.errf("unexpected 'a' encoding: {s}", .{@tagName(res.encoding)});
-                        //             return false;
-                        //         },
-                        //     }
-                        // }
 
                         // we return null here because it might be the case that the capture stdout thread
                         // has not yet received its data and passed it to the GUI

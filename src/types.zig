@@ -1033,6 +1033,17 @@ pub const PauseData = struct {
     pub fn getString(self: Self, hash: strings.Hash) String {
         return self.strings.get(hash) orelse Unknown;
     }
+
+    /// Looks up a local variable by name
+    pub fn getLocalByName(self: Self, name: String) ?ExpressionResult {
+        for (self.locals) |local| {
+            if (self.strings.get(local.expression)) |local_name| {
+                if (strings.eql(name, local_name)) return local;
+            }
+        }
+
+        return null;
+    }
 };
 
 /// An entry in the call stack
