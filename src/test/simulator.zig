@@ -613,7 +613,7 @@ test "sim:zigprint" {
     const exe_path = "assets/zigprint/out";
     const zigprint_main_zig_hash = try fileHash(t.allocator, "assets/zigprint/main.zig");
 
-    const expected_output_len = 487;
+    const expected_output_len = 442;
 
     // zig fmt: off
     sim.lock()
@@ -645,7 +645,7 @@ test "sim:zigprint" {
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = zigprint_main_zig_hash,
-            .line = types.SourceLine.from(96),
+            .line = types.SourceLine.from(91),
         }}}).req(),
     })
 

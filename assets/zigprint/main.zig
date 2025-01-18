@@ -4,13 +4,8 @@ const print = std.debug.print;
 const MyStruct = struct {
     field_a: i32 = 123,
     field_b: []const u8 = "this is field_b",
-    field_c: StructTwo = .{},
 
     fn dontOptimizeMe(_: *@This()) void {}
-};
-
-const StructTwo = struct {
-    example: i32 = 456,
 };
 
 const PackedStruct = packed struct {

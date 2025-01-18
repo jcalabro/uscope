@@ -905,18 +905,34 @@ fn renderExpressionResult(
                     return;
                 };
 
-                // send to the memory hex window
+                // send to the memory hex window on click
                 if (zui.selectable(@ptrCast(line), .{})) {
                     self.state.dbg.enqueue(proto.SetHexWindowAddressRequest{ .address = addr });
                 }
             }
 
-            // if rendering a list of array values, label each of their indicies
+            // if rendering a list of array values, label each of its indicies
             if (first_field.encoding == .array and field_ndx > 0) {
                 zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
                 defer zui.popStyleColor(.{});
 
                 zui.text("{d}: ", .{field_ndx - 1});
+                zui.sameLine(.{});
+            }
+
+            // if rendering a struct, label each of its members
+            if (first_field.encoding == .@"struct" and field_ndx > 0) {
+                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+                defer zui.popStyleColor(.{});
+
+                const name = name: {
+                    if (field.name) |n| {
+                        break :name paused.strings.get(n) orelse types.Unknown;
+                    }
+                    break :name types.Unknown;
+                };
+
+                zui.text("{s}: ", .{name});
                 zui.sameLine(.{});
             }
 
@@ -930,8 +946,9 @@ fn renderExpressionResult(
             };
 
             const buf = switch (field.encoding) {
-                // noop, we are rendering the preview via other fields in the list
+                // noop for these since we are rendering the preview via other fields in the list
                 .array => continue,
+                .@"struct" => continue,
 
                 .primitive => |primitive| switch (primitive.encoding) {
                     .boolean => renderWatchBoolean(scratch, data) catch |err| e: {

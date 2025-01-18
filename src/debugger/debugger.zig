@@ -2206,6 +2206,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             /// variable (i.e. we're rendering an item in a slice). If it's not populated,
             /// it follows the OS-specific mechanism to look up variable values.
             variable_value_buf: ?[]const u8 = null,
+
+            /// Only valid if `variable_value_buf` is not null. Specifies how far this field
+            /// is from the start of the known byte buffer.
+            buf_offset: ?usize = null,
         };
 
         fn renderVariableValue(
@@ -2215,6 +2219,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
         ) !void {
             const z = trace.zone(@src());
             defer z.end();
+
+            if (builtin.mode == .Debug) {
+                if (params.buf_offset != null) assert(params.variable_value_buf != null);
+            }
 
             const var_name = self.data.target.?.strings.get(params.variable.name);
             if (var_name == null or !strings.eql(params.expression, var_name.?)) return;
@@ -2243,7 +2251,13 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const base_data_type_name = self.data.target.?.strings.get(base_data_type.name) orelse types.Unknown;
 
             const buf = blk: {
-                if (params.variable_value_buf) |b| break :blk b;
+                if (params.variable_value_buf) |b| {
+                    if (params.buf_offset) |offset| {
+                        const end = offset + data_type.size_bytes;
+                        break :blk b[offset..end];
+                    }
+                    break :blk b;
+                }
 
                 break :blk try self.adapter.getVariableValue(.{
                     .scratch = params.scratch,
@@ -2325,12 +2339,12 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             switch (data_type.form) {
                 .unknown => {
-                    log.warnf(
-                        "unable to calculate value for expresion \"{s}\": variable not found in current function",
-                        .{params.expression},
-                    );
+                    log.warnf("unable to calculate value for expresion \"{s}\": variable not found in current function", .{
+                        params.expression,
+                    });
                     return error.ExpressionError;
                 },
+
                 .primitive => |primitive| {
                     try fields.append(params.scratch, .{
                         .data = buf_hash,
@@ -2340,6 +2354,41 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                             .encoding = primitive.encoding,
                         } },
                     });
+                },
+
+                .@"struct" => |st| {
+                    try fields.append(params.scratch, .{
+                        .data = null,
+                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .encoding = .{ .@"struct" = .{
+                            .members = undefined,
+                        } },
+                    });
+                    const struct_field_ndx = fields.items.len - 1;
+
+                    var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
+                    for (st.members) |member| {
+                        // recursively render struct members using the known item buffer
+                        var recursive_params = params;
+                        recursive_params.variable_value_buf = buf;
+                        recursive_params.variable.data_type = member.data_type;
+                        recursive_params.buf_offset = member.offset_bytes;
+
+                        try self.renderVariableValue(fields, recursive_params);
+                        const member_ndx = fields.items.len - 1;
+
+                        // cache and assign the struct member's variable name
+                        const name = self.data.target.?.strings.get(member.name) orelse types.Unknown;
+                        const name_hash = try self.data.subordinate.?.paused.?.strings.add(name);
+                        fields.items[member_ndx].name = name_hash;
+
+                        try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(member_ndx));
+                    }
+
+                    // re-assign slice members
+                    fields.items[struct_field_ndx].encoding.@"struct".members = try item_ndxes.toOwnedSlice(params.scratch);
+                    return;
                 },
 
                 // @DELETEME (jrc): remove the whole else clause
