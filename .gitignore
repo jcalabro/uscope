@@ -22,6 +22,8 @@ assets/**/.build/
 
 # build binaries
 assets/**/out
+assets/**/*.a
+assets/**/*.so
 
 # file extensions
 *.o
