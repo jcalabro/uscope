@@ -66,7 +66,7 @@ pub fn build(b: *Build) !void {
 
     // build and run the application
     const run_exe = b.addExecutable(.{
-        .name = "ms",
+        .name = "micro",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
@@ -74,7 +74,7 @@ pub fn build(b: *Build) !void {
 
     // build and run the tests
     const test_exe = b.addTest(.{
-        .name = "ms-tests",
+        .name = "micro-tests",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
