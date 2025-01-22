@@ -54,8 +54,8 @@ pub fn main() !void {
     });
     defer logging.deinit();
 
-    log.info("microscope starting");
-    defer log.info("microscope done");
+    log.info("uscope starting");
+    defer log.info("uscope done");
 
     flags.logAll();
 
@@ -109,7 +109,7 @@ test {
 
     const log_fp = switch (flags.CI) {
         true => std.io.getStdOut(),
-        false => try openOrCreateLogFile("/tmp/microscope.log"),
+        false => try openOrCreateLogFile("/tmp/uscope.log"),
     };
 
     logging.init(.{
