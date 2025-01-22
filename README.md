@@ -2,22 +2,13 @@
 
 [![status-badge](https://nuc01.tail0223.ts.net/api/badges/1/status.svg)](https://nuc01.tail0223.ts.net/repos/1)
 
-<img src="https://github.com/user-attachments/assets/17eb2df9-35af-4f3e-a589-de519c4a9e35" />
+<img src="https://github.com/user-attachments/assets/8ad10ca9-42d1-4afe-8397-74b8a92a69f5" />
 
 ### Overview
 
-Microscope is a native code debugger for Linux. It supports debugging C and Zig programs (with support for more languages to come).
+Microscope is a native code introspection toolchain and graphical debugger for Linux.
 
-There is substantial room for innovation in the space of debug tooling, and though we're currently early-days, the vision for this project is a fast, robust, and flexible debugger that answers the question of "what is my program doing" as quickly and painlessly as possible for a wide variety of workloads.
-
-All of the debugger-related functionality is written from the ground-up, including:
-
-- Parsing ELF/DWARF files to obtain debug info
-- Running a subordiante process and handling control flow (pausing, stepping, continue execution, etc.)
-- Setting and handling breakpoints
-- Viewing variable values in a user-friendly format
-- Call stack unwinding
-- etc.
+[See here](https://calabro.io/microscope) for background and motivation on the project.
 
 ### Project Status and Roadmap
 
@@ -25,10 +16,10 @@ Microscope is not far enough along to consider using as a daily-driver. It is a 
 
 This is a birds-eye overview of the features I'd like implemented before I'd personally be able to completely ditch other "traditional" debuggers. In no particular order:
 
-- Support for visualization of common data types in more languages
+- Support for visualization of common data types in several languages
   - At least C++, Go, Rust, Odin, and Jai (C and Zig are already supported)
   - I personally use C++ and Go a lot at my day job, so those ones will probably come first even though they're very complicated languages
-  - In general, we just need a plugin system that understands natvis, LLDB pretty-printers, or something else of our own design
+  - In general, we will design a system that handles transforming data in to user-friendly visualization that is flexible, extensible, and not tied to any one language
 - Support for multi-threaded programs
 - User-friendly source code navigation (i.e. go to definition, find all references, etc.)
 - Run to cursor
@@ -36,27 +27,24 @@ This is a birds-eye overview of the features I'd like implemented before I'd per
 
 Other long-term features that will be implemented are:
 
-- Build as a library so other people can build other interesting things on top of this
-  - The GUI will be the first consumer of that library, sort of in the same way [Ghostty](https://github.com/mitchellh/ghostty) is the first consumer of libghostty
+- Build as a library so other people can build other interesting things as well
+  - The GUI debugger will be the first consumer of that library (in the same way [Ghostty](https://github.com/mitchellh/ghostty) is the first consumer of libghostty)
 - Many more types of domain-specific data visualizations
-  - For example, I work on chess engines for my day job, and it would be amazing to have a debugger that natively understands my position encoding and automatically renders interactive chess boards
+  - For example, I work on chess engines for my day job, and it would be amazing to have a debugger that natively understands my position encoding and automatically visually renders interactive chess boards
 - Remote debugging
 - Conditional breakpoints
-- Data breakpoints (i.e. break when an address is accessed or a variable mutated)
+- Data/address breakpoints (i.e. break when an address is accessed or a variable mutated)
 - Trace points (observe variable values over time without actually pausing the subordinate program)
 - Load and view core dumps
 - Assembly viewer
 - Ability to track and visualize system calls (similar to [strace](https://man7.org/linux/man-pages/man1/strace.1.html))
 - Various `/proc` views (there's lots of interesting information in there)
-- Complete UI/UX revamp (Dear ImGUI has been decent, but it has its limitations)
+- Complete UI/UX revamp (Dear ImGUI has been decent, but it has its limitations - we'll probably just write our own)
 - macOS and Windows support
-- i18n
 
 Similarly, the following features are non-goals of the project:
 
 - Supporting non-native languages (i.e. Java, Python, etc.)
-- Record/replay like [rr](https://rr-project.org/)
-  - `rr` is awesome, it's just a very different model
 
 ### Building and Running
 
