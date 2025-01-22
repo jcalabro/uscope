@@ -41,6 +41,7 @@ Other long-term features that will be implemented are:
 - Various `/proc` views (there's lots of interesting information in there)
 - Complete UI/UX revamp (Dear ImGUI has been decent, but it has its limitations - we'll probably just write our own)
 - macOS and Windows support
+- What is important to _you_? Let me know!
 
 Similarly, the following features are non-goals of the project:
 
