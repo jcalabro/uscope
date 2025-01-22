@@ -16,12 +16,18 @@ Microscope is not far enough along to consider using as a daily-driver. It's a s
 
 This is a birds-eye overview of the features I'd like implemented before I'd personally be able to completely ditch other "traditional" debuggers. In no particular order:
 
+- Ensure that all table-stakes debugger operations are rock-solid and fast
+  - Debug symbol parsing
+  - Subordinate process control flow (i.e. stepping)
+  - Basic variable value rendering
+  - Stack unwinding
+  - etc.
 - Support for visualization of common data types in several languages (C and Zig are already supported)
   - Adding at least C++ and Go even though they're very complicated languages since that's what I use for work
-  - Also planning on supporting Rust, Odin, and Jai
+  - Also planning on supporting at least Rust, Odin, and Jai
   - In general, we will design a system that handles transforming data in to user-friendly visualization that is flexible, extensible, and not tied to any one language
 - Support for multi-threaded programs
-- Debug tests by clicking on them
+- Debug tests by clicking on them, at least for programs with built-in testing solutions like Zig, Go, etc.
 - Run to cursor
 - User-friendly source code navigation (i.e. go to definition, find all references, etc.)
 
