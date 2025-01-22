@@ -12,18 +12,18 @@ Microscope is a native code introspection toolchain and graphical debugger for L
 
 ### Project Status and Roadmap
 
-Microscope is not far enough along to consider using as a daily-driver. It is a side project I'm working on for fun and because I want a great debugger for my own use.
+Microscope is not far enough along to consider using as a daily-driver. It's a side project I'm working on for fun and because I need a better debugger for my own use.
 
 This is a birds-eye overview of the features I'd like implemented before I'd personally be able to completely ditch other "traditional" debuggers. In no particular order:
 
-- Support for visualization of common data types in several languages
-  - At least C++, Go, Rust, Odin, and Jai (C and Zig are already supported)
-  - I personally use C++ and Go a lot at my day job, so those ones will probably come first even though they're very complicated languages
+- Support for visualization of common data types in several languages (C and Zig are already supported)
+  - Adding at least C++ and Go even though they're very complicated languages since that's what I use for work
+  - Also planning on supporting Rust, Odin, and Jai
   - In general, we will design a system that handles transforming data in to user-friendly visualization that is flexible, extensible, and not tied to any one language
 - Support for multi-threaded programs
-- User-friendly source code navigation (i.e. go to definition, find all references, etc.)
-- Run to cursor
 - Debug tests by clicking on them
+- Run to cursor
+- User-friendly source code navigation (i.e. go to definition, find all references, etc.)
 
 Other long-term features that will be implemented are:
 
@@ -39,7 +39,9 @@ Other long-term features that will be implemented are:
 - Assembly viewer
 - Ability to track and visualize system calls (similar to [strace](https://man7.org/linux/man-pages/man1/strace.1.html))
 - Various `/proc` views (there's lots of interesting information in there)
-- Complete UI/UX revamp (Dear ImGUI has been decent, but it has its limitations - we'll probably just write our own)
+- Complete UI/UX revamp
+  - Dear ImGUI has been decent, but it has its limitations; we'll probably just end up writing our own if I had to guess
+  - I'm really looking for a fast UI system that allows my users to write interesting visualization plugins for their own needs with minimal effort
 - macOS and Windows support
 - What is important to _you_? Let me know!
 
@@ -49,7 +51,7 @@ Similarly, the following features are non-goals of the project:
 
 ### Building and Running
 
-We do not provide pre-built binaries or package manager distributions (yet).
+We do not provide pre-built binaries or package manager distributions yet.
 
 To build from source, clone the repo and run `zig build`. [Zig version 0.13.0](https://ziglang.org/download/) is required.
 
@@ -144,24 +146,26 @@ zig build test -Drace
 
 ### FAQ
 
-##### 1. How can I help out?
+##### 1. When will this project be mature enough to use for my day to day work?
 
-The absolute best thing you can do is reach out and talk debuggers with me so I know that there is interest in the the project (I love hearing from you).
+Probably a long time (could easily be a year or more). I have a day job, and this is a passion project I work on in my spare time. Check back often for updates!
 
-Additionally, adding features, fixing bugs, and creating tests that move us further along the path towards being able to use this for day-to-day work is also apprecaited! Feel free to reach out to me if you're thinking about doing some large amount of work and I can give you an overview of the project structure so you don't waste your time.
+##### 2. How can I help out?
 
-##### 2. When will this project be mature enough to use for my day to day work?
+The absolute best thing you can do is reach out and talk debuggers with me so I know that there is interest in the the project. My email is jim@calabro.io, and I'm `jcalabro` on Discord. I love hearing from you!
 
-Probably a long time (a year or more at least). I have a day job, and this is a passion project I work on in my spare time. Check back often for updates!
+Additionally, adding features, fixing bugs, and creating tests that move us further along the path towards being able to use this for day-to-day work is also apprecaited! If you're thinking about tackling a major new feature, I'd recommend reaching out first to make sure we're on the same page and effort isn't wasted going in the wrong direciton.
+
+You could also consider [sponsoring my work](https://github.com/sponsors/jcalabro). This is a very strong signal to me that I'm focused in the right direction.
 
 ##### 3. Will you provide pre-built binaries?
 
-Once the project is further along, yes, but not now. It's not generally useful to people yet, so there's no point in providing binaries at the moment.
+Once the project is further along, yes, but not now.
 
-##### 4. Why are you intending to build a library for debugging, not just a new debugger? Why not just use DAP?
+##### 4. Why are you building a library for debugging, not just a new debugger? And why not just use DAP?
 
-There are a wide variety of use-cases for an introspection library outside of traditional debuggers (i.e. reverse engineering tools, novel forms of debuggers, etc.). This toolchain intends to be lower-level and broader in scope than something like DAP would enable.
+There are a wide variety of use-cases for an introspection library outside of traditional debuggers (i.e. reverse engineering tools, novel forms of debuggers, etc.). By making this system reusable and nicely packaged, it encourages the entire ecosystem of debugging tools to improve, not just this one project.
 
-I do not think [DAP](https://microsoft.github.io/debug-adapter-protocol//) is very good, but lots of editors out there already speak it. By creating an introspection toolchain, we easily create a separate DAP-mode executable in addition to the native GUI we're building so that way neither is bloated by the other.
+Regarding [DAP](https://microsoft.github.io/debug-adapter-protocol), This toolchain intends to be lower-level and broader in scope than something like DAP would enable. I do not think DAP is very good, but lots of editors out there already speak it, so we're partially stuck with it. However, by creating an introspection toolchain, we easily create a separate DAP-compatible executable in separate from the native GUI we're building so that way neither is bloated by the other.
 
-In short, it allows us all to build simple, focused, and novel introspection tools better than DAP would allow.
+In short, building as a library allows us all to build many novel, simple, and focused introspection tools.
