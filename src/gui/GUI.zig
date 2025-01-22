@@ -88,7 +88,7 @@ fn init(alloc: Allocator, dbg: *Debugger) !*Self {
     glfw.windowHintTyped(.client_api, .opengl_api);
     glfw.windowHintTyped(.doublebuffer, true);
 
-    const window = try glfw.Window.create(width, height, "Inspect", null);
+    const window = try glfw.Window.create(width, height, "Microscope", null);
     glfw.Window.setPos(window, x_pos, y_pos);
     glfw.makeContextCurrent(window);
 
@@ -415,7 +415,7 @@ fn drawMenuBar(self: *Self) ?State.View {
                 self.state.closeSourceFile(null);
             }
 
-            if (zui.menuItem("inspect", .{ .shortcut = "q" })) {
+            if (zui.menuItem("microscope", .{ .shortcut = "q" })) {
                 self.state.quit();
             }
         }
@@ -473,7 +473,7 @@ fn drawMenuBar(self: *Self) ?State.View {
             var year = ztime.DateTime.now().years;
             if (year < 2024) year = 2024;
 
-            zui.text("Thank you for using inspect! This software is in early alpha, so there will be bugs.", .{});
+            zui.text("Thank you for using microscope! This software is in early alpha, so there will be bugs.", .{});
             zui.text("", .{});
             zui.text("Please reach out on Discord or submit a GitHub issue if you have encountered a bug or have a feature request.", .{});
             zui.text("", .{});

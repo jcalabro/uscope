@@ -62,7 +62,7 @@ const Log = struct {
     regions: []const u8 = "none",
 
     /// The absolute path to the file where logs will be written
-    file: []const u8 = "/tmp/inspect.log",
+    file: []const u8 = "/tmp/microscope.log",
 
     fn mapEntry(self: *@This(), allocator: Allocator, entry: *const IniEntry) !void {
         if (mem.eql(u8, entry.key, "color")) {
@@ -260,7 +260,7 @@ pub fn parseFiles(allocator: Allocator) !void {
     // and perhaps create the file on the user's behalf
     //
 
-    const project_path = ".inspect/config.ini";
+    const project_path = ".microscope/config.ini";
     var project_fp = file.open(project_path, .{ .mode = .read_only }) catch |err| {
         std.debug.print("unable to open project settings file: {!}\n", .{err});
         return err;
@@ -274,7 +274,7 @@ pub fn parseFiles(allocator: Allocator) !void {
     defer global_path.deinit();
 
     // create the global config file if it doesn't already exist
-    const global_cfg_name = "inspect";
+    const global_cfg_name = "microscope";
     const global_dir = try std.fs.openDirAbsolute(global_path.items, .{});
     global_dir.access(global_cfg_name, .{}) catch |err| switch (err) {
         error.FileNotFound => try global_dir.makeDir(global_cfg_name),
@@ -456,7 +456,7 @@ test "settings ini correctly parses" {
         try testing.expect(g.log.color);
         try testing.expectEqual(logging.Level.err, g.log.level);
         try testing.expectEqualStrings("none", g.log.regions);
-        try testing.expectEqualStrings("/tmp/inspect.log", g.log.file);
+        try testing.expectEqualStrings("/tmp/microscope.log", g.log.file);
     }
 
     {

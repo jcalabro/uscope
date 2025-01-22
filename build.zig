@@ -66,7 +66,7 @@ pub fn build(b: *Build) !void {
 
     // build and run the application
     const run_exe = b.addExecutable(.{
-        .name = "inspect",
+        .name = "ms",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
@@ -74,7 +74,7 @@ pub fn build(b: *Build) !void {
 
     // build and run the tests
     const test_exe = b.addTest(.{
-        .name = "inspect-tests",
+        .name = "ms-tests",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
@@ -88,7 +88,7 @@ pub fn build(b: *Build) !void {
 
     defineStep(b, stepDef{
         .name = "run",
-        .description = "Build and run the inspect Debugger",
+        .description = "Build and run the microscope Debugger",
         .exes = &.{run_exe},
         .opts = opts,
         .flags = flags,

@@ -1,4 +1,4 @@
-# Inspect 🔬
+# Microscope 🔬
 
 [![status-badge](https://nuc01.tail0223.ts.net/api/badges/1/status.svg)](https://nuc01.tail0223.ts.net/repos/1)
 
@@ -6,9 +6,9 @@
 
 ### Overview
 
-`inspect` is a native code debugger for Linux. It supports debugging C and Zig programs (with support for more languages to come).
+Microscope is a native code debugger for Linux. It supports debugging C and Zig programs (with support for more languages to come).
 
-There is substantial room for innovation in the space of debug tooling, and though we're currently early-days, the vision for this project is a fast, robust debugger that answers the question of "what is my program doing" as quickly and painlessly as possible for a variety of workloads.
+There is substantial room for innovation in the space of debug tooling, and though we're currently early-days, the vision for this project is a fast, robust, and flexible debugger that answers the question of "what is my program doing" as quickly and painlessly as possible for a wide variety of workloads.
 
 All of the debugger-related functionality is written from the ground-up, including:
 
@@ -19,15 +19,9 @@ All of the debugger-related functionality is written from the ground-up, includi
 - Call stack unwinding
 - etc.
 
-[See here](https://www.calabro.io/dwarf#why-are-you-writing-this) for some further thoughts on the motivation behind this project.
+### Project Status and Roadmap
 
-### Project Status
-
-`inspect` is not far enough along to consider using as a daily-driver. It is a side project I'm working on for fun and because I want a good debugger for my own use. Consequently, the pace of updates may be slow and inconsistent, but I do intend to keep working on it when I have time.
-
-I'm always interested in talking debuggers and other areas of tech. Please feel free to reach out via email to jim at [my domain](https://calabro.io). Other forms of contact info can also be found on my site.
-
-### High-level Roadmap
+Microscope is not far enough along to consider using as a daily-driver. It is a side project I'm working on for fun and because I want a great debugger for my own use.
 
 This is a birds-eye overview of the features I'd like implemented before I'd personally be able to completely ditch other "traditional" debuggers. In no particular order:
 
@@ -71,12 +65,12 @@ We do not provide pre-built binaries or package manager distributions (yet).
 To build from source, clone the repo and run `zig build`. [Zig version 0.13.0](https://ziglang.org/download/) is required.
 
 ```bash
-git clone git@github.com:jcalabro/inspect.git
-cd inspect
+git clone git@github.com:jcalabro/microscope.git
+cd microscope
 zig build -Doptimize=ReleaseSafe -Drelease
 ```
 
-You'll probably want to create a global config file at `$XDG_CONFIG_HOME/inspect/config.ini` like this (though we'll create an empty config for you if one does not already exist):
+You'll probably want to create a global config file at `$XDG_CONFIG_HOME/microscope/config.ini` like this (though we'll create an empty config for you if one does not already exist):
 
 ```ini
 [log]
@@ -84,7 +78,7 @@ level=debug
 regions=all
 ```
 
-And a you'll need to create a local, project-specific config file at `$(pwd)/.inspect/config.ini`, whose only required field is `target.path`:
+And a you'll need to create a local, project-specific config file at `$(pwd)/.microscope/config.ini`, whose only required field is `target.path`:
 
 ```ini
 [target]
@@ -138,7 +132,7 @@ Additionally, we've taken a bit of inspiration from the [Helix editor](https://h
 The program outputs a user-friendly log by default to:
 
 ```bash
-tail -d /tmp/inspect.log
+tail -d /tmp/microscope.log
 ```
 
 This repo comes pre-packaged with a bunch of small, simple source programs in various languages in the `assets/` directory. To build them all, ensure you have all the toolchains you could possibly neeed installed and:
@@ -148,12 +142,12 @@ cd assets
 ./build.sh
 ```
 
-The compiler versions used to build all the asset programs in CI are in the [Dockerfile](https://github.com/jcalabro/inspect/blob/main/Dockerfile). You run the tests without docker as demonstrated above, or with docker using:
+The compiler versions used to build all the asset programs in CI are in the [Dockerfile](https://github.com/jcalabro/microscope/blob/main/Dockerfile). You run the tests without docker as demonstrated above, or with docker using:
 
 ```bash
-docker build -t inspect .
-docker run --rm -it -v $(pwd):/inspect inspect
-cd /inspect/assets
+docker build -t microscope .
+docker run --rm -it -v $(pwd):/microscope microscope
+cd /microscope/assets
 ./build.sh
 cd ..
 zig build test -Drace
@@ -173,12 +167,12 @@ Probably a long time (a year or more at least). I have a day job, and this is a 
 
 ##### 3. Will you provide pre-built binaries?
 
-Once the debugger is further along, yes, but not now. It's not generally useful to people yet, so there's no point in providing binaries at the moment.
+Once the project is further along, yes, but not now. It's not generally useful to people yet, so there's no point in providing binaries at the moment.
 
 ##### 4. Why are you intending to build a library for debugging, not just a new debugger? Why not just use DAP?
 
-There are a wide variety of use-cases for an introspection library outside of traditional debuggers (i.e. reverse engineering tools, novel forms of debuggers, etc.). For instance, perhaps a user could create a version of `dwarfdump` that's much more visual where you can click around the DIE tree and explore.
+There are a wide variety of use-cases for an introspection library outside of traditional debuggers (i.e. reverse engineering tools, novel forms of debuggers, etc.). This toolchain intends to be lower-level and broader in scope than something like DAP would enable.
 
-Additionally, I do not think [DAP](https://microsoft.github.io/debug-adapter-protocol//) is very good, but lots of editors out there already speak it. By creating a library, we easily create a separate DAP-mode static executable as opposed to having to also lug around a giant GUI that never gets used.
+I do not think [DAP](https://microsoft.github.io/debug-adapter-protocol//) is very good, but lots of editors out there already speak it. By creating an introspection toolchain, we easily create a separate DAP-mode executable in addition to the native GUI we're building so that way neither is bloated by the other.
 
-In short, it allows us all to build simple, focused, and novel introspection tools.
+In short, it allows us all to build simple, focused, and novel introspection tools better than DAP would allow.

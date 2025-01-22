@@ -797,11 +797,11 @@ fn parseLoadAddressFromLine(line: []const u8) !types.Address {
 
 test "linux: parse load address" {
     const maps =
-        \\5630231d2000-5630231d8000 r--p 00000000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/inspect/assets/rustloop/out
-        \\5630231d8000-563023218000 r-xp 00006000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/inspect/assets/rustloop/out
-        \\563023218000-563023227000 r--p 00046000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/inspect/assets/rustloop/out
-        \\563023227000-56302322a000 r--p 00054000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/inspect/assets/rustloop/out
-        \\56302322a000-56302322b000 rw-p 00057000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/inspect/assets/rustloop/out
+        \\5630231d2000-5630231d8000 r--p 00000000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/microscope/assets/rustloop/out
+        \\5630231d8000-563023218000 r-xp 00006000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/microscope/assets/rustloop/out
+        \\563023218000-563023227000 r--p 00046000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/microscope/assets/rustloop/out
+        \\563023227000-56302322a000 r--p 00054000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/microscope/assets/rustloop/out
+        \\56302322a000-56302322b000 rw-p 00057000 00:23 9310890                    /home/jcalabro/go/src/github.com/jcalabro/microscope/assets/rustloop/out
         \\563024188000-5630241a9000 rw-p 00000000 00:00 0                          [heap]
         \\7f133493b000-7f133493e000 rw-p 00000000 00:00 0
         \\7f133493e000-7f1334964000 r--p 00000000 00:23 3821002                    /usr/lib64/libc.so.6

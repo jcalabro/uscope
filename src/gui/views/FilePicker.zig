@@ -54,7 +54,7 @@ const skipExtensions = &.{
     ".ttf",
     ".bin",
 
-    // @DELETEME (jrc): this is specific to inspect itself
+    // @DELETEME (jrc): this is specific to microscope itself
     "out",
 };
 

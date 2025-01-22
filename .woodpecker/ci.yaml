@@ -4,20 +4,20 @@ when:
 
 steps:
   - name: Build Assets
-    image: jcalabro/inspect-dev:2025-01-17
+    image: jcalabro/microscope-dev:2025-01-17
     commands: |
       pushd assets > /dev/null
       ./build.sh CI
       popd > /dev/null
 
   - name: Build and Test (debug)
-    image: jcalabro/inspect-dev:2025-01-17
+    image: jcalabro/microscope-dev:2025-01-17
     commands: |
       zigup run $(cat zig_version.txt) build --summary all -freference-trace -Drace -Dci -Dllvm
-      ./zig-out/bin/inspect-tests
+      ./zig-out/bin/microscope-tests
 
   - name: Build and Test (release safe)
-    image: jcalabro/inspect-dev:2025-01-17
+    image: jcalabro/microscope-dev:2025-01-17
     commands: |
       zigup run $(cat zig_version.txt) build --summary all -freference-trace -Doptimize=ReleaseSafe -Dci -Dllvm
-      ./zig-out/bin/inspect-tests
+      ./zig-out/bin/microscope-tests
