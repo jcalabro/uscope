@@ -14,10 +14,10 @@ steps:
     image: jcalabro/microscope-dev:2025-01-17
     commands: |
       zigup run $(cat zig_version.txt) build --summary all -freference-trace -Drace -Dci -Dllvm
-      ./zig-out/bin/microscope-tests
+      ./zig-out/bin/ms-tests
 
   - name: Build and Test (release safe)
     image: jcalabro/microscope-dev:2025-01-17
     commands: |
       zigup run $(cat zig_version.txt) build --summary all -freference-trace -Doptimize=ReleaseSafe -Dci -Dllvm
-      ./zig-out/bin/microscope-tests
+      ./zig-out/bin/ms-tests
