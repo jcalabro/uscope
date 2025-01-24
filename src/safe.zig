@@ -17,7 +17,7 @@ pub fn setThreadName(thread: Thread, comptime name: []const u8) void {
 }
 
 pub fn enumFromInt(comptime enumT: anytype, val: anytype) error{UnexpectedValue}!enumT {
-    return inline for (@typeInfo(enumT).Enum.fields) |f| {
+    return inline for (@typeInfo(enumT).@"enum".fields) |f| {
         if (val == f.value) break @enumFromInt(f.value);
     } else {
         log.errf("invalid " ++ @typeName(enumT) ++ " enum value: 0x{x}", .{val});
@@ -26,7 +26,7 @@ pub fn enumFromInt(comptime enumT: anytype, val: anytype) error{UnexpectedValue}
 }
 
 pub fn enumFromIntSilent(comptime enumT: anytype, val: anytype) error{UnexpectedValue}!enumT {
-    return inline for (@typeInfo(enumT).Enum.fields) |f| {
+    return inline for (@typeInfo(enumT).@"enum".fields) |f| {
         if (val == f.value) break @enumFromInt(f.value);
     } else {
         return error.UnexpectedValue;

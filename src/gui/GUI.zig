@@ -81,12 +81,12 @@ fn init(alloc: Allocator, dbg: *Debugger) !*Self {
 
     const gl_major = 4;
     const gl_minor = 0;
-    glfw.windowHintTyped(.context_version_major, gl_major);
-    glfw.windowHintTyped(.context_version_minor, gl_minor);
-    glfw.windowHintTyped(.opengl_profile, .opengl_core_profile);
-    glfw.windowHintTyped(.opengl_forward_compat, true);
-    glfw.windowHintTyped(.client_api, .opengl_api);
-    glfw.windowHintTyped(.doublebuffer, true);
+    glfw.windowHint(.context_version_major, gl_major);
+    glfw.windowHint(.context_version_minor, gl_minor);
+    glfw.windowHint(.opengl_profile, .opengl_core_profile);
+    glfw.windowHint(.opengl_forward_compat, true);
+    glfw.windowHint(.client_api, .opengl_api);
+    glfw.windowHint(.doublebuffer, true);
 
     const window = try glfw.Window.create(width, height, "Microscope", null);
     glfw.Window.setPos(window, x_pos, y_pos);
@@ -108,7 +108,7 @@ fn init(alloc: Allocator, dbg: *Debugger) !*Self {
             .height = h,
             .pixels = icon_pixels,
         };
-        window.setIcons(icons);
+        window.setIcon(icons);
     }
 
     try gl.loadCoreProfile(glfw.getProcAddress, gl_major, gl_minor);
@@ -444,7 +444,7 @@ fn drawMenuBar(self: *Self) ?State.View {
 
             // @TODO (jrc): serialize the user's open window preferences to their global settings file
 
-            inline for (@typeInfo(PrimaryView.OpenWindows).Struct.fields) |field| {
+            inline for (@typeInfo(PrimaryView.OpenWindows).@"struct".fields) |field| {
                 var name = self.state.scratch_alloc.alloc(u8, field.name.len + 1) catch |err| {
                     log.errf("unable to alloc temp storage for view name: {!}", .{err});
                     break :blk;

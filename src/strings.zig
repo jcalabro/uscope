@@ -5,6 +5,7 @@ const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
 const mem = std.mem;
 const Mutex = std.Thread.Mutex;
 
+const flags = @import("flags.zig");
 const logging = @import("logging.zig");
 const safe = @import("safe.zig");
 const trace = @import("trace.zig");
@@ -31,7 +32,9 @@ pub fn hash(str: String) Hash {
     const z = trace.zone(@src());
     defer z.end();
 
-    return std.hash.XxHash3.hash(0, str);
+    // @TODO (jrc): just use XxHash3 rather than FNV once the self-hosted backend supports it
+    if (flags.LLVM) return std.hash.XxHash3.hash(0, str);
+    return std.hash.Fnv1a_32.hash(str);
 }
 
 /// A simple data structure used to do string interning

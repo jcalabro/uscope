@@ -383,7 +383,7 @@ pub fn update(self: *Self) State.View {
         defer zui.end();
         if (zui.begin(windows.Primary_Registers, .{})) {
             if (self.state.dbg_state.paused) |paused| {
-                inline for (@typeInfo(@TypeOf(paused.registers)).Struct.fields) |field| {
+                inline for (@typeInfo(@TypeOf(paused.registers)).@"struct".fields) |field| {
                     const addr = @field(paused.registers, field.name);
                     const line = fmt.allocPrint(self.state.scratch_alloc, "{s}: 0x{x}\x00", .{
                         field.name,

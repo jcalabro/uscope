@@ -185,6 +185,7 @@ fn calculateFrameAddress(adapter: *Adapter, unwind: *UnwindData) !void {
             // calculate the CFA of the current frame at the PC the subordinate is stopped at
             const rule = try safe.enumFromInt(consts.UnwindRegisterRule, row.rules[ColCFARegister]);
             break :blk switch (rule) {
+                .undef => 0,
                 .reg => r: {
                     // CFA is stored in a register + offset
                     const register = unwind.virtual_regs[ColCFARegister];
@@ -226,6 +227,7 @@ fn calculateFrameAddress(adapter: *Adapter, unwind: *UnwindData) !void {
     // set the CFA for the next frame up the stack
     const cfa_rule = try safe.enumFromInt(consts.UnwindRegisterRule, last_row.rules[ColCFARegister]);
     unwind.virtual_regs[ColCFARegister] = switch (cfa_rule) {
+        .undef => 0,
         .reg => blk: {
             // CFA is stored in a register + offset
             const register = last_row.values[ColCFARegister];

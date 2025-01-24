@@ -1156,12 +1156,12 @@ pub fn optionalAttribute(
         }
 
         switch (@typeInfo(T)) {
-            .Enum => |e| {
+            .@"enum" => |e| {
                 const val = try spec.parseNumeric(e.tag_type, opts.cu);
                 return safe.enumFromInt(T, val) catch return error.InvalidDWARFInfo;
             },
 
-            .Int => return try spec.parseNumeric(T, opts.cu),
+            .int => return try spec.parseNumeric(T, opts.cu),
 
             // see above note about form types
             else => return null,

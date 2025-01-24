@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) !void {
     }
 
     cimgui_mod.addIncludePath(b.path("vendor"));
+    lib.addIncludePath(b.path("vendor"));
     lib.addIncludePath(imgui.path(""));
     if (webgpu) {
         lib.addIncludePath(b.path("../zgpu/libs/dawn/include"));

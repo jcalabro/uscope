@@ -55,7 +55,7 @@ pub fn build(b: *Build) !void {
     flags.race = b.option(bool, "race", "Enable TSan (default: true)") orelse false;
     opts.addOption(bool, "race", flags.race);
 
-    const llvm_default = true; // @NOTE (jrc): set this to false when we're ready to use the x86 native backend
+    const llvm_default = flags.release or flags.race or optimize != .Debug;
     const llvm_help = try std.fmt.allocPrint(b.allocator, "Enable LLVM (default: {any})", .{llvm_default});
     flags.llvm = b.option(bool, "llvm", llvm_help) orelse llvm_default;
     opts.addOption(bool, "llvm", flags.llvm);
@@ -168,7 +168,9 @@ fn defineStep(b: *Build, def: stepDef) void {
         exe.root_module.addImport("cimgui", cimgui_dep.module("cimgui"));
         exe.linkLibrary(cimgui_dep.artifact("cimgui"));
 
-        @import("system_sdk").addLibraryPathsTo(exe);
+        if (b.lazyDependency("system_sdk", .{})) |system_sdk| {
+            exe.addLibraryPath(system_sdk.path("linux/lib/x86_64-linux-gnu"));
+        }
 
         const zglfw = b.dependency("zglfw", .{
             .target = def.target,
@@ -177,10 +179,7 @@ fn defineStep(b: *Build, def: stepDef) void {
         exe.root_module.addImport("zglfw", zglfw.module("root"));
         exe.linkLibrary(zglfw.artifact("glfw"));
 
-        const zopengl = b.dependency("zopengl", .{
-            .target = def.target,
-            .optimize = def.optimize,
-        });
+        const zopengl = b.dependency("zopengl", .{});
         exe.root_module.addImport("zopengl", zopengl.module("root"));
 
         const ztracy = b.dependency("ztracy", .{

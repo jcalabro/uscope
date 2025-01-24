@@ -22,11 +22,11 @@ pub fn NumericType(comptime T: type) type {
 
         _,
 
-        pub fn from(i: @typeInfo(Self).Enum.tag_type) Self {
+        pub fn from(i: @typeInfo(Self).@"enum".tag_type) Self {
             return @enumFromInt(i);
         }
 
-        pub fn int(self: Self) @typeInfo(Self).Enum.tag_type {
+        pub fn int(self: Self) @typeInfo(Self).@"enum".tag_type {
             return @intFromEnum(self);
         }
 

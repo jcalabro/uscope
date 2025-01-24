@@ -334,7 +334,7 @@ pub const Attr = struct {
             },
         }
 
-        assert(@intFromEnum(val.class) <= @typeInfo(FormClass).Enum.fields.len);
+        assert(@intFromEnum(val.class) <= @typeInfo(FormClass).@"enum".fields.len);
     }
 
     /// Looks up a string in the .debug_str table via an offset in
