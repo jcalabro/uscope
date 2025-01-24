@@ -158,11 +158,11 @@ Probably a long time (could easily be a year or more). I have a day job, and thi
 
 ##### 2. How can I help out?
 
-The absolute best thing you can do is reach out and talk debuggers with me so I know that there is interest in the the project. My email is jim@calabro.io, and I'm `jcalabro` on Discord. I love hearing from you!
+The absolute best thing you can do is reach out and talk debuggers so I know that there is interest in the the project. We have a [Discord](https://github.com/sponsors/jcalabro), and you can find my email on my personal site. I love hearing from you!
 
 Additionally, adding features, fixing bugs, and creating tests that move us further along the path towards being able to use this for day-to-day work is also apprecaited! If you're thinking about tackling a major new feature, I'd recommend reaching out first to make sure we're on the same page and effort isn't wasted going in the wrong direciton.
 
-You could also consider [sponsoring my work](https://github.com/sponsors/jcalabro). This is a very strong signal to me that I'm focused in the right direction.
+You could also consider [sponsoring my work](https://github.com/sponsors/jcalabro). This is a very strong signal to me that I'm focused on things that matter.
 
 ##### 3. Will you provide pre-built binaries?
 
