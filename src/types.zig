@@ -1,5 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Allocator = mem.Allocator;
+const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const assert = std.debug.assert;
 const mem = std.mem;
 const t = std.testing;
@@ -367,27 +369,24 @@ pub const CompileUnit = struct {
     }
 
     /// Copies to `dst` from `src`. Caller owns returned memory.
-    pub fn copyFrom(dst: *Self, alloc: mem.Allocator, src: Self) mem.Allocator.Error!void {
+    pub fn copyFrom(dst: *Self, alloc: Allocator, src: Self) Allocator.Error!void {
         const z = trace.zoneN(@src(), "copy compile unit");
         defer z.end();
-
-        // @TODO (jrc) ArrayList -> ArrayListUnmanaged
-        const ArrayList = std.ArrayList;
 
         const ranges = try safe.copySlice(AddressRange, alloc, src.ranges);
         errdefer alloc.free(ranges);
 
-        var sources = try ArrayList(SourceFile).initCapacity(alloc, src.sources.len);
+        var sources = try ArrayListUnmanaged(SourceFile).initCapacity(alloc, src.sources.len);
         errdefer {
             for (sources.items) |s| alloc.free(s.statements);
-            sources.deinit();
+            sources.deinit(alloc);
         }
         for (src.sources) |s| sources.appendAssumeCapacity(.{
             .file_hash = s.file_hash,
             .statements = try safe.copySlice(SourceStatement, alloc, s.statements),
         });
 
-        var data_types = ArrayList(DataType).init(alloc);
+        var data_types = ArrayListUnmanaged(DataType){};
         errdefer {
             for (data_types.items) |dt| {
                 switch (dt.form) {
@@ -397,7 +396,7 @@ pub const CompileUnit = struct {
                     else => {},
                 }
             }
-            data_types.deinit();
+            data_types.deinit(alloc);
         }
         for (src.data_types) |src_dt| {
             var copy_dt = src_dt;
@@ -407,17 +406,17 @@ pub const CompileUnit = struct {
                 .@"enum" => |e| copy_dt.form.@"enum".values = try safe.copySlice(EnumValue, alloc, e.values),
                 else => {},
             }
-            try data_types.append(copy_dt);
+            try data_types.append(alloc, copy_dt);
         }
         // const data_types = try safe.copySlice(DataType, alloc, src.data_types);
 
         const variables = try safe.copySlice(Variable, alloc, src.variables);
         errdefer alloc.free(variables);
 
-        var functions = try ArrayList(Function).initCapacity(alloc, src.functions.functions.len);
+        var functions = try ArrayListUnmanaged(Function).initCapacity(alloc, src.functions.functions.len);
         errdefer {
             for (functions.items) |f| f.deinit(alloc);
-            functions.deinit();
+            functions.deinit(alloc);
         }
         for (src.functions.functions) |f| {
             const stmts = try safe.copySlice(SourceStatement, alloc, f.statements);
@@ -450,11 +449,11 @@ pub const CompileUnit = struct {
             .language = src.language,
             .address_size = src.address_size,
             .ranges = ranges,
-            .sources = try sources.toOwnedSlice(),
-            .data_types = try data_types.toOwnedSlice(),
+            .sources = try sources.toOwnedSlice(alloc),
+            .data_types = try data_types.toOwnedSlice(alloc),
             .variables = variables,
             .functions = .{
-                .functions = try functions.toOwnedSlice(),
+                .functions = try functions.toOwnedSlice(alloc),
                 .ranges = function_ranges,
             },
         };
@@ -664,7 +663,7 @@ pub const Function = struct {
     platform_data: PlatformData,
 
     /// Free's all data for the given Function
-    pub fn deinit(self: Self, alloc: mem.Allocator) void {
+    pub fn deinit(self: Self, alloc: Allocator) void {
         alloc.free(self.statements);
         alloc.free(self.addr_ranges);
         alloc.free(self.inlined_function_indices);
@@ -724,7 +723,7 @@ pub const PointerType = struct {
 
     /// Returns the name of a pointer given the name of the type it points to.
     /// For instance, `u8` would return `*u8`.
-    pub fn nameFromItemType(alloc: mem.Allocator, item_type: String) mem.Allocator.Error!String {
+    pub fn nameFromItemType(alloc: Allocator, item_type: String) Allocator.Error!String {
         return std.fmt.allocPrint(alloc, "*{s}", .{item_type});
     }
 };
@@ -786,7 +785,7 @@ pub const ArrayType = struct {
 
     /// Returns the name of an array given the name of the type of each element. For
     /// instance, `u8` would return `[]u8`.
-    pub fn nameFromItemType(alloc: mem.Allocator, item_type: String) mem.Allocator.Error!String {
+    pub fn nameFromItemType(alloc: Allocator, item_type: String) Allocator.Error!String {
         return std.fmt.allocPrint(alloc, "[]{s}", .{item_type});
     }
 };
@@ -899,8 +898,6 @@ pub const Breakpoint = struct {
 
 /// Contains the data that is set for each breakpoint on a per-thread basis
 pub const ThreadBreakpoint = struct {
-    // @TODO (jrc): we might have a lot of ThreadBreakpoints, so we should
-    // remove bools-in-structs and just keep multiple collections
     pub const Flags = packed struct {
         /// Whether or not this breakpoint has been applied to the subordiante's text
         /// segment in the given thread
@@ -967,7 +964,7 @@ pub const PauseData = struct {
     /// The string intern pool. Must be free'd each time PauseData is free'd.
     strings: *strings.Cache,
 
-    pub fn deinit(self: Self, alloc: mem.Allocator) void {
+    pub fn deinit(self: Self, alloc: Allocator) void {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -980,7 +977,7 @@ pub const PauseData = struct {
     }
 
     /// Does a full, deep copy of all data. Caller owns returned memory.
-    pub fn copy(self: Self, alloc: mem.Allocator) mem.Allocator.Error!Self {
+    pub fn copy(self: Self, alloc: Allocator) Allocator.Error!Self {
         const z = trace.zoneN(@src(), "copy PauseData");
         defer z.end();
 
@@ -990,7 +987,7 @@ pub const PauseData = struct {
         const hex_displays = try safe.copySlice(HexDisplay, alloc, self.hex_displays);
         errdefer alloc.free(hex_displays);
 
-        var locals_arr = std.ArrayListUnmanaged(ExpressionResult){};
+        var locals_arr = ArrayListUnmanaged(ExpressionResult){};
         errdefer {
             for (locals_arr.items) |l| l.deinit(alloc);
             locals_arr.deinit(alloc);
@@ -1000,7 +997,7 @@ pub const PauseData = struct {
         }
         const locals = try locals_arr.toOwnedSlice(alloc);
 
-        var watches_arr = std.ArrayListUnmanaged(ExpressionResult){};
+        var watches_arr = ArrayListUnmanaged(ExpressionResult){};
         errdefer {
             for (watches_arr.items) |l| l.deinit(alloc);
             watches_arr.deinit(alloc);
@@ -1089,12 +1086,12 @@ pub const ExpressionResult = struct {
     /// the array container, and every subsequent item is each int instance.
     fields: []const ExpressionRenderField,
 
-    fn deinit(self: Self, alloc: mem.Allocator) void {
+    fn deinit(self: Self, alloc: Allocator) void {
         for (self.fields) |f| f.deinit(alloc);
     }
 
-    fn copy(src: Self, alloc: mem.Allocator) mem.Allocator.Error!Self {
-        var fields = std.ArrayListUnmanaged(ExpressionRenderField){};
+    fn copy(src: Self, alloc: Allocator) Allocator.Error!Self {
+        var fields = ArrayListUnmanaged(ExpressionRenderField){};
         errdefer {
             for (fields.items) |f| f.deinit(alloc);
             fields.deinit(alloc);
@@ -1139,7 +1136,7 @@ pub const ExpressionRenderField = struct {
     /// The name of the variable or member to be displayed (if we are rendering a local variable)
     name: ?strings.Hash,
 
-    fn deinit(self: @This(), alloc: mem.Allocator) void {
+    fn deinit(self: @This(), alloc: Allocator) void {
         switch (self.encoding) {
             .array => |arr| alloc.free(arr.items),
             .@"struct" => |s| alloc.free(s.members),

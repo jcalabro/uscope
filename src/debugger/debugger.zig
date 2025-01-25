@@ -1213,7 +1213,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         assert(regs.pc().eql(load_addr.add(bp.addr)));
                     }
 
-                    var buf = [_]u8{0} ** 1;
+                    var buf = [_]u8{0};
                     try self.adapter.peekData(pid, load_addr, bp.addr, &buf);
 
                     var instruction = [_]u8{bp.instruction_byte};
@@ -1389,7 +1389,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             // Note that in the case of recursive functions, this is not sufficient because we may
             // be at depth 2, but may be recursing until depth 10, which means that the first time
             // we hit the breakpoint at the base frame address, we will be at max depth. So, when
-            // we hit those breakpoints, we repeatedly ignore them until we're at the correct depth.
+            // we hit those breakpoints, we repeatedly ignore them until we're at the correct depth,
+            // or we hit some other breakpoint along the way.
             //
 
             const frames = self.data.subordinate.?.paused.?.stack_frames;
@@ -1418,8 +1419,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             //
             // Step over (also called "step next") is implemented as follows:
             // 1. Set an internal breakpoint on every line of the function on this thread.
-            //    Don't set breakpoints on lines that already have active breakpoints or
-            //    statements that come from inlined function calls.
+            //    Don't internal set breakpoints on lines that already have user-specified
+            //    breakpoints or statements that come from inlined function calls.
             // 2. Set an internal breakpoint on the return address on this thread if one
             //    is not already set in case the function returns to the caller
             // 3. Set an internal breakpoint on this thread on the last defer function if
@@ -1536,7 +1537,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 }
             }
 
-            // (3) @TODO (jrc): implement this
+            // (3) @TODO (jrc): implement this (?)
 
             // (4)
             if (bpp.bp) |bp| {

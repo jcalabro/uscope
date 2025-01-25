@@ -6,7 +6,7 @@
 
 ### Overview
 
-Microscope is a native code introspection toolchain and graphical debugger for Linux.
+Microscope is a native code graphical debugger and introspection toolchain for Linux.
 
 [See here](https://calabro.io/microscope) for background and motivation on the project.
 
@@ -172,6 +172,6 @@ Once the project is further along, yes, but not now.
 
 There are a wide variety of use-cases for an introspection library outside of traditional debuggers (i.e. reverse engineering tools, novel forms of debuggers, etc.). By making this system reusable and nicely packaged, it encourages the entire ecosystem of debugging tools to improve, not just this one project.
 
-Regarding [DAP](https://microsoft.github.io/debug-adapter-protocol), This toolchain intends to be lower-level and broader in scope than something like DAP would enable. I do not think DAP is very good, but lots of editors out there already speak it, so we're partially stuck with it. However, by creating an introspection toolchain, we easily create a separate DAP-compatible executable in separate from the native GUI we're building so that way neither is bloated by the other.
+Regarding [DAP](https://microsoft.github.io/debug-adapter-protocol), This toolchain intends to be lower-level and broader in scope than something like DAP would enable. I do not think DAP is very good, but lots of editors out there already speak it, so we're partially stuck with it. However, by creating an introspection library, we easily create a separate DAP-compatible executable in separate from the native GUI we're building so that way neither is bloated by the other.
 
 In short, building as a library allows us all to build many novel, simple, and focused introspection tools.

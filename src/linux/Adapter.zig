@@ -140,7 +140,9 @@ pub fn loadDebugSymbols(
 }
 
 fn assertCorrectThreadIsCallingPtrace(self: *Self) void {
-    assert(self.controller_thread_id.load(.seq_cst) == Thread.getCurrentId());
+    if (builtin.mode == .Debug) {
+        assert(self.controller_thread_id.load(.seq_cst) == Thread.getCurrentId());
+    }
 }
 
 pub fn spawnSubordinate(self: *Self, subordinate: *Child) !void {
