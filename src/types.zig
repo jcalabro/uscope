@@ -981,45 +981,26 @@ pub const PauseData = struct {
         const z = trace.zoneN(@src(), "copy PauseData");
         defer z.end();
 
-        const stack_frames = try safe.copySlice(StackFrame, alloc, self.stack_frames);
-        errdefer alloc.free(stack_frames);
+        var arena = std.heap.ArenaAllocator.init(alloc);
+        errdefer arena.deinit();
+        const arena_alloc = arena.allocator();
 
-        var hex_displays_arr = try ArrayListUnmanaged(HexDisplay).initCapacity(alloc, self.hex_displays.len);
-        errdefer {
-            for (hex_displays_arr.items) |hex| alloc.free(hex.contents);
-            hex_displays_arr.deinit(alloc);
-        }
+        const stack_frames = try safe.copySlice(StackFrame, arena_alloc, self.stack_frames);
+
+        var hex_displays = try ArrayListUnmanaged(HexDisplay).initCapacity(arena_alloc, self.hex_displays.len);
         for (self.hex_displays) |hex| {
             var hex_copy = hex;
-            hex_copy.contents = try strings.clone(alloc, hex.contents);
-            hex_displays_arr.appendAssumeCapacity(hex_copy);
+            hex_copy.contents = try strings.clone(arena_alloc, hex.contents);
+            hex_displays.appendAssumeCapacity(hex_copy);
         }
-        const hex_displays = try hex_displays_arr.toOwnedSlice(alloc);
 
-        var locals_arr = ArrayListUnmanaged(ExpressionResult){};
-        errdefer {
-            for (locals_arr.items) |l| l.deinit(alloc);
-            locals_arr.deinit(alloc);
-        }
-        for (self.locals) |l| {
-            try locals_arr.append(alloc, try l.copy(alloc));
-        }
-        const locals = try locals_arr.toOwnedSlice(alloc);
+        var locals = ArrayListUnmanaged(ExpressionResult){};
+        for (self.locals) |l| try locals.append(arena_alloc, try l.copy(arena_alloc));
 
-        var watches_arr = ArrayListUnmanaged(ExpressionResult){};
-        errdefer {
-            for (watches_arr.items) |l| l.deinit(alloc);
-            watches_arr.deinit(alloc);
-        }
-        for (self.watches) |l| {
-            try watches_arr.append(alloc, try l.copy(alloc));
-        }
-        const watches = try watches_arr.toOwnedSlice(alloc);
+        var watches = ArrayListUnmanaged(ExpressionResult){};
+        for (self.watches) |l| try watches.append(arena_alloc, try l.copy(arena_alloc));
 
-        const strs = try self.strings.copy(alloc);
-        errdefer strs.deinit(alloc);
-
-        errdefer comptime unreachable;
+        const strs = try self.strings.copy(arena_alloc);
 
         return Self{
             .pid = self.pid,
@@ -1028,9 +1009,9 @@ pub const PauseData = struct {
             .breakpoint = self.breakpoint,
             .frame_base_addr = self.frame_base_addr,
             .stack_frames = stack_frames,
-            .hex_displays = hex_displays,
-            .locals = locals,
-            .watches = watches,
+            .hex_displays = try hex_displays.toOwnedSlice(arena_alloc),
+            .locals = try locals.toOwnedSlice(arena_alloc),
+            .watches = try watches.toOwnedSlice(arena_alloc),
             .strings = strs,
         };
     }
