@@ -432,9 +432,12 @@ fn drawMenuBar(self: *Self) ?State.View {
                     }
                 },
                 false => {
-                    if (zui.menuItem("Kill", .{ .shortcut = "k" })) {
-                        self.state.killSubordinate();
-                    }
+                    if (zui.menuItem("Kill", .{ .shortcut = "k" })) self.state.killSubordinate();
+                    if (zui.menuItem("Continue", .{ .shortcut = "c" })) self.state.continueExecution();
+                    if (zui.menuItem("Step Out", .{ .shortcut = "w" })) self.state.sendStepRequest(.out_of);
+                    if (zui.menuItem("Single Step", .{ .shortcut = "a" })) self.state.sendStepRequest(.single);
+                    if (zui.menuItem("Step Into", .{ .shortcut = "s" })) self.state.sendStepRequest(.into);
+                    if (zui.menuItem("Step Over", .{ .shortcut = "d" })) self.state.sendStepRequest(.over);
                 },
             }
         }
@@ -473,9 +476,9 @@ fn drawMenuBar(self: *Self) ?State.View {
             var year = ztime.DateTime.now().years;
             if (year < 2024) year = 2024;
 
-            zui.text("Thank you for using microscope! This software is in early alpha, so there will be bugs.", .{});
+            zui.text("Thank you for using uscope! This software is in early alpha, so there will be bugs.", .{});
             zui.text("", .{});
-            zui.text("Please reach out on Discord or submit a GitHub issue if you have encountered a bug or have a feature request.", .{});
+            zui.text("Please reach out on Discord or submit a GitHub issue if you have encountered a bug.", .{});
             zui.text("", .{});
             zui.text("© {d}", .{year});
         }
