@@ -610,9 +610,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 return;
             }
 
-            if (builtin.mode == .Debug) {
-                // @TODO (jrc): wait until the symbols are loaded rather than an assert
-                assert(self.data.target != null);
+            if (self.data.target == null) {
+                log.err("not launching the subordinate because debug symbols have not yet been loaded");
+                return;
             }
 
             self.resetSubordinateState();
@@ -844,8 +844,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 try self.addBreakpoint(scratch, req);
             }
 
-            // update the hex window since we might be looking at program text that was changed
-            // try self.findHexWindowContents(); // @TODO (jrc)
+            try self.findHexWindowContents();
         }
 
         fn addBreakpoint(
@@ -1306,20 +1305,28 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             //
             // @SEARCH: STEPINTO
             //
-            // @TODO (jrc): I know this code makes no sense. What happens if we try
-            // to step in to a library whose source we don't have? We could potentially
-            // spend a long time executing, or just never actually finish. What do
-            // other debuggers do for this operation? This needs a total rewrite.
+            // Single step zero or many times, up to a limit. Each time, check whether
+            // we've hit a known line of source code. If yes, we're done. If we don't
+            // ever hit a known line of source code, perform a step next operation as
+            // if we were still stopped in the function in which we started.
             //
-            // Single step until we reach the next statement. It might be the case
-            // that we step down in to a new function call, or we stay in the same
-            // function (in the case that the line we're stepping in to is not
-            // itself a function call).
-            //
-            // If we land on a line that already has a breakpoint set, we toggle its
-            // instruction back to the real instruction, which is what is expected
-            // to happen whenever we hit a breakpoint.
-            //
+
+            const start_regs = try self.adapter.getRegisters(bpp.pid);
+            const start_pc = start_regs.pc();
+            const load_addr = self.data.subordinate.?.load_addr;
+
+            var found_line_of_code = false;
+            defer {
+                if (!found_line_of_code) {
+                    // We did not find a known line of code, so pretend as though we just did a step
+                    // next in the function in which we started. We have to do this in the defer because
+                    // we have to reset the breakpoint back to its original value before calling
+                    // step next, since step next continues execution.
+                    self.stepOverForPC(scratch, bpp, start_pc) catch |err| {
+                        log.errf("unable to perform subordinate step: {!}", .{err});
+                    };
+                }
+            }
 
             // unset a breakpoint if we're stopped at one
             if (bpp.bp) |bp| {
@@ -1346,36 +1353,40 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 }
             }
 
-            const start_regs = try self.adapter.getRegisters(bpp.pid);
+            // we're not at a call instruction, so we should repeatedly single-step until
+            // we hit a known line of code, or we hit the limit on the number of times we're
+            // willing to single step
             const start_src = self.sourceForAddress(start_regs.pc());
-
-            for (0..math.pow(usize, 2, 16)) |_| {
+            for (0..256) |_| {
                 try self.adapter.singleStepAndWait(bpp.pid);
 
                 const regs = try self.adapter.getRegisters(bpp.pid);
                 if (self.sourceForAddress(regs.pc())) |current_src| {
                     if (start_src == null or !start_src.?.loc.eql(current_src.loc)) {
                         // we've hit the next line of code
+                        found_line_of_code = true;
                         break;
                     }
                 }
             }
 
-            // if we stopped on a line that has a breakpoint, toggle its instruction back to its
-            // original value so we're prepared for future operations (i.e. a continue request)
-            const regs = try self.adapter.getRegisters(bpp.pid);
-            const load_addr = self.data.subordinate.?.load_addr;
-            for (self.data.state.breakpoints.items) |*bp| {
-                if (!bp.flags.active or bp.flags.internal or (bp.addr.add(load_addr).neq(regs.pc()))) {
-                    continue;
+            if (found_line_of_code) {
+                // if we stopped on a line that has a breakpoint, toggle its instruction back to its
+                // original value so we're prepared for future operations (i.e. a continue request)
+                const regs = try self.adapter.getRegisters(bpp.pid);
+                for (self.data.state.breakpoints.items) |*bp| {
+                    if (!bp.flags.active or bp.flags.internal or (bp.addr.add(load_addr).neq(regs.pc()))) {
+                        continue;
+                    }
+
+                    var instruction = [_]u8{bp.instruction_byte};
+                    try self.adapter.pokeData(bpp.pid, load_addr, bp.addr, &instruction);
                 }
 
-                var instruction = [_]u8{bp.instruction_byte};
-                try self.adapter.pokeData(bpp.pid, load_addr, bp.addr, &instruction);
+                const req = proto.SubordinateStoppedRequest{ .pid = bpp.pid, .exited = false };
+                try self.handleSubordinateStoppedAlreadyLocked(scratch, req);
+                return;
             }
-
-            const req = proto.SubordinateStoppedRequest{ .pid = bpp.pid, .exited = false };
-            try self.handleSubordinateStoppedAlreadyLocked(scratch, req);
         }
 
         fn stepOutOf(self: *Self, scratch: Allocator, bpp: BreakpointAndPID) !void {
@@ -1410,6 +1421,11 @@ fn DebuggerType(comptime AdapterType: anytype) type {
         }
 
         fn stepOver(self: *Self, scratch: Allocator, bpp: BreakpointAndPID) !void {
+            const regs = try self.adapter.getRegisters(bpp.pid);
+            try self.stepOverForPC(scratch, bpp, regs.pc());
+        }
+
+        fn stepOverForPC(self: *Self, scratch: Allocator, bpp: BreakpointAndPID, pc: types.Address) !void {
             const z = trace.zone(@src());
             defer z.end();
 
@@ -1437,9 +1453,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             //
 
             // (1)
-            const registers = try self.adapter.getRegisters(bpp.pid);
-            const pc = registers.pc();
-
             const current_func = self.functionAtAddr(pc) orelse {
                 log.warn("cannot step to next line of code because current function is unknown");
                 return;
@@ -1987,7 +2000,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             errdefer stack.deinit();
             try stack.append(return_addr);
 
-            const max = std.math.pow(usize, 2, 12);
+            const max = math.pow(usize, 2, 12);
             for (0..max) |ndx| {
                 const buf = try scratch.alloc(u8, data_size);
 
@@ -2042,7 +2055,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             // @TODO (jrc): hard-coding the length to 256 is just a placeholder. We should
             // detect how many bytes to read based on the size of the viewer window, and
             // accept the number of bytes as a request param.
-            const max = @min(std.math.maxInt(usize) - addr.int(), 256); // avoid integer overflows
+            const max = @min(math.maxInt(usize) - addr.int(), 256); // avoid integer overflows
 
             const alloc = self.data.subordinate.?.paused_arena.allocator();
             const buf = try alloc.alloc(u8, max);
