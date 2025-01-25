@@ -984,8 +984,17 @@ pub const PauseData = struct {
         const stack_frames = try safe.copySlice(StackFrame, alloc, self.stack_frames);
         errdefer alloc.free(stack_frames);
 
-        const hex_displays = try safe.copySlice(HexDisplay, alloc, self.hex_displays);
-        errdefer alloc.free(hex_displays);
+        var hex_displays_arr = try ArrayListUnmanaged(HexDisplay).initCapacity(alloc, self.hex_displays.len);
+        errdefer {
+            for (hex_displays_arr.items) |hex| alloc.free(hex.contents);
+            hex_displays_arr.deinit(alloc);
+        }
+        for (self.hex_displays) |hex| {
+            var hex_copy = hex;
+            hex_copy.contents = try strings.clone(alloc, hex.contents);
+            hex_displays_arr.appendAssumeCapacity(hex_copy);
+        }
+        const hex_displays = try hex_displays_arr.toOwnedSlice(alloc);
 
         var locals_arr = ArrayListUnmanaged(ExpressionResult){};
         errdefer {
