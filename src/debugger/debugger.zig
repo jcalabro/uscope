@@ -1357,7 +1357,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             // we hit a known line of code, or we hit the limit on the number of times we're
             // willing to single step
             const start_src = self.sourceForAddress(start_regs.pc());
-            for (0..256) |_| {
+            for (0..64) |_| {
                 try self.adapter.singleStepAndWait(bpp.pid);
 
                 const regs = try self.adapter.getRegisters(bpp.pid);
