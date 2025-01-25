@@ -30,6 +30,8 @@ This is a birds-eye overview of the features I'd like implemented before I'd per
 - Debug tests by clicking on them, at least for programs with built-in testing solutions like Zig, Go, etc.
 - Run to cursor
 - User-friendly source code navigation (i.e. go to definition, find all references, etc.)
+- Better config file management
+  - I don't want to have to manually edit config files; I want to have the debugger configure them for me via the GUI
 
 Other long-term features that will be implemented are:
 
@@ -91,8 +93,6 @@ open_files=assets/zigprint/main.zig:33:96
 # to open multiple files on launch, you could do something like:
 # open_files=first.c:1:2, second.c:3:4
 ```
-
-Note that the plan in the future is to allow all configuration options to be configurable from within the debugger itself rather than requiring the user to edit text files. The debugger will manage these files automatically.
 
 Then, to create a development build, you can do any of:
 
