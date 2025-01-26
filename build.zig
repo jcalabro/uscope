@@ -88,7 +88,7 @@ pub fn build(b: *Build) !void {
 
     defineStep(b, stepDef{
         .name = "run",
-        .description = "Build and run the Microscope Debugger",
+        .description = "Build and run uscope",
         .exes = &.{run_exe},
         .opts = opts,
         .flags = flags,
@@ -98,7 +98,7 @@ pub fn build(b: *Build) !void {
 
     defineStep(b, stepDef{
         .name = "test",
-        .description = "Build and run the tests",
+        .description = "Build and run tests",
         .exes = &.{test_exe},
         .opts = opts,
         .flags = flags,

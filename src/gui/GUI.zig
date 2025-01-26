@@ -88,7 +88,7 @@ fn init(alloc: Allocator, dbg: *Debugger) !*Self {
     glfw.windowHint(.client_api, .opengl_api);
     glfw.windowHint(.doublebuffer, true);
 
-    const window = try glfw.Window.create(width, height, "Microscope", null);
+    const window = try glfw.Window.create(width, height, "uscope", null);
     glfw.Window.setPos(window, x_pos, y_pos);
     glfw.makeContextCurrent(window);
 
@@ -415,7 +415,7 @@ fn drawMenuBar(self: *Self) ?State.View {
                 self.state.closeSourceFile(null);
             }
 
-            if (zui.menuItem("microscope", .{ .shortcut = "q" })) {
+            if (zui.menuItem("uscope", .{ .shortcut = "q" })) {
                 self.state.quit();
             }
         }

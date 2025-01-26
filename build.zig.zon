@@ -1,5 +1,5 @@
 .{
-    .name = "microscope",
+    .name = "uscope",
     .version = "0.1.0",
     .paths = .{""},
     .dependencies = .{

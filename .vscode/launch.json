@@ -4,7 +4,7 @@
 		{
 			"type": "lldb",
 			"request": "launch",
-			"name": "Debug Microscope",
+			"name": "Debug uscope",
 			"program": "${workspaceFolder}/zig-out/bin/uscope",
 			"cwd": "${workspaceFolder}",
 			"preLaunchTask": "build",

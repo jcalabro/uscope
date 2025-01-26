@@ -1,4 +1,4 @@
-# Microscope 🔬
+# uscope 🔬
 
 [![status-badge](https://ci.uscope.dev/api/badges/1/status.svg)](https://ci.uscope.dev/repos/1)
 
@@ -6,13 +6,13 @@
 
 ### Overview
 
-Microscope is a native code graphical debugger and introspection toolchain for Linux.
+uscope (pronounced "microscope") is a native code graphical debugger and introspection toolchain for Linux.
 
-[See here](https://calabro.io/microscope) for background and motivation on the project.
+[See here](https://calabro.io/uscope) for background and motivation on the project.
 
 ### Project Status and Roadmap
 
-Microscope is not far enough along to consider using as a daily-driver. It's a side project I'm working on for fun and because I need a better debugger for my own use.
+uscope is not far enough along to consider using as a daily-driver. It's a side project I'm working on for fun and because I need a better debugger for my own use.
 
 This is a birds-eye overview of the features I'd like implemented before I'd personally be able to completely ditch other "traditional" debuggers. In no particular order:
 
@@ -64,12 +64,12 @@ We do not provide pre-built binaries or package manager distributions yet.
 To build from source, clone the repo and run `zig build`. [Zig version 0.13.0](https://ziglang.org/download/) is required.
 
 ```bash
-git clone git@github.com:jcalabro/microscope.git
-cd microscope
+git clone git@github.com:jcalabro/uscope.git
+cd uscope
 zig build -Doptimize=ReleaseSafe -Drelease
 ```
 
-You'll probably want to create a global config file at `$XDG_CONFIG_HOME/microscope/config.ini` like this (though we'll create an empty config for you if one does not already exist):
+You'll probably want to create a global config file at `$XDG_CONFIG_HOME/uscope/config.ini` like this (though we'll create an empty config for you if one does not already exist):
 
 ```ini
 [log]
@@ -77,7 +77,7 @@ level=debug
 regions=all
 ```
 
-And a you'll need to create a local, project-specific config file at `$(pwd)/.microscope/config.ini`, whose only required field is `target.path`:
+And a you'll need to create a local, project-specific config file at `$(pwd)/.uscope/config.ini`, whose only required field is `target.path`:
 
 ```ini
 [target]
@@ -129,7 +129,7 @@ Additionally, we've taken a bit of inspiration from the [Helix editor](https://h
 The program outputs a user-friendly log by default to:
 
 ```bash
-tail -d /tmp/microscope.log
+tail -d /tmp/uscope.log
 ```
 
 This repo comes pre-packaged with a bunch of small, simple source programs in various languages in the `assets/` directory. To build them all, ensure you have all the toolchains you could possibly neeed installed and:
@@ -139,12 +139,12 @@ cd assets
 ./build.sh
 ```
 
-The compiler versions used to build all the asset programs in CI are in the [Dockerfile](https://github.com/jcalabro/microscope/blob/main/Dockerfile). You run the tests without docker as demonstrated above, or with docker using:
+The compiler versions used to build all the asset programs in CI are in the [Dockerfile](https://github.com/jcalabro/uscope/blob/main/Dockerfile). You run the tests without docker as demonstrated above, or with docker using:
 
 ```bash
-docker build -t microscope .
-docker run --rm -it -v $(pwd):/microscope microscope
-cd /microscope/assets
+docker build -t uscope .
+docker run --rm -it -v $(pwd):/uscope uscope
+cd /uscope/assets
 ./build.sh
 cd ..
 zig build test -Drace
