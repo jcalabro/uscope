@@ -871,7 +871,7 @@ fn renderExpressionResult(
         defer zui.popStyleColor(.{});
 
         const type_name = paused.getString(field.data_type_name);
-        zui.text("{s}", .{type_name});
+        zui.textWrapped("{s}", .{type_name});
 
         // if rendering an array/string, first render the length
         if (!strings.eql(type_name, types.Unknown)) {
