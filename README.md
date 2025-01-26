@@ -1,6 +1,6 @@
 # Microscope 🔬
 
-[![status-badge](https://nuc01.tail0223.ts.net/api/badges/1/status.svg)](https://nuc01.tail0223.ts.net/repos/1)
+[![status-badge](https://ci.uscope.dev/api/badges/1/status.svg)](https://ci.uscope.dev/repos/1)
 
 <img src="https://github.com/user-attachments/assets/8ad10ca9-42d1-4afe-8397-74b8a92a69f5" />
 
