@@ -61,7 +61,7 @@ Similarly, the following features are non-goals of the project:
 
 We do not provide pre-built binaries or package manager distributions yet.
 
-To build from source, clone the repo and run `zig build`. [Zig version 0.13.0](https://ziglang.org/download/) is required.
+To build from source, clone the repo and run `zig build`. Ensure you're using the exact version of zig specified in [zig_version.txt](https://github.com/jcalabro/uscope/blob/main/zig_version.txt).
 
 ```bash
 git clone git@github.com:jcalabro/uscope.git
