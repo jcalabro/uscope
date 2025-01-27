@@ -771,7 +771,7 @@ pub const EnumValue = struct {
     name: strings.Hash,
 
     /// The value of this entry in the enum
-    value: i128,
+    value: EnumInstanceValue,
 };
 
 /// Represents an array or a slice
@@ -1182,9 +1182,11 @@ pub const StructRenderer = struct {
 
 /// Renders enum values, possibly a tagged union
 pub const EnumRenderer = struct {
-    /// A pointer to the type of data contained in this enum instance
-    val: ExpressionFieldNdx,
+    /// The integer value of instance of the enum
+    value: EnumInstanceValue,
 
-    /// The name of the member of the enum to display for convenience (if known)
+    /// The user-friendly name of the enum value to display (if known)
     name: ?strings.Hash,
 };
+
+pub const EnumInstanceValue = NumericType(i128);

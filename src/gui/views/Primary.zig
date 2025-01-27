@@ -945,6 +945,7 @@ fn renderExpressionResult(
                 };
             };
 
+            var post_text: ?String = null;
             const buf = switch (field.encoding) {
                 // noop for these since we are rendering the preview via other fields in the list
                 .array => continue,
@@ -980,10 +981,30 @@ fn renderExpressionResult(
                     },
                 },
 
-                else => types.Unknown, // @DELETEME (jrc): once all encodings are implemeted
+                .@"enum" => |enm| e: {
+                    post_text = fmt.allocPrint(scratch, "({d})", .{enm.value.int()}) catch |err| txt: {
+                        log.errf("unable to render enum integer value: {!}", .{err});
+                        break :txt types.Unknown;
+                    };
+
+                    if (enm.name) |name| {
+                        break :e paused.strings.get(name) orelse types.Unknown;
+                    } else {
+                        break :e types.Unknown;
+                    }
+                },
             };
 
             zui.textWrapped("{s}", .{buf});
+
+            if (post_text) |txt| {
+                // render some postfix information (i.e. enum integer values)
+                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+                defer zui.popStyleColor(.{});
+
+                zui.sameLine(.{});
+                zui.text("{s}", .{txt});
+            }
         }
     }
 }

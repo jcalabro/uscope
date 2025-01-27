@@ -2370,7 +2370,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     });
                 },
 
-                .@"struct" => |st| {
+                .@"struct" => |strct| {
                     try fields.append(params.scratch, .{
                         .data = null,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
@@ -2382,7 +2382,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     const struct_field_ndx = fields.items.len - 1;
 
                     var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
-                    for (st.members) |member| {
+                    for (strct.members) |member| {
                         // recursively render struct members using the known item buffer
                         var recursive_params = params;
                         recursive_params.variable_value_buf = buf;
@@ -2403,6 +2403,31 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     // re-assign slice members
                     fields.items[struct_field_ndx].encoding.@"struct".members = try item_ndxes.toOwnedSlice(params.scratch);
                     return;
+                },
+
+                .@"enum" => |enm| {
+                    const enum_val = types.EnumInstanceValue.from(mem.readVarInt(i128, buf, .little));
+
+                    var enum_field = types.ExpressionRenderField{
+                        .data = buf_hash,
+                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .encoding = .{ .@"enum" = .{
+                            .value = enum_val,
+                            .name = null,
+                        } },
+                    };
+
+                    for (enm.values) |val| {
+                        if (val.value == enum_val) {
+                            if (self.data.target.?.strings.get(val.name)) |enum_name| {
+                                enum_field.encoding.@"enum".name = try self.data.subordinate.?.paused.?.strings.add(enum_name);
+                            }
+                            break;
+                        }
+                    }
+
+                    try fields.append(params.scratch, enum_field);
                 },
 
                 // @DELETEME (jrc): remove the whole else clause

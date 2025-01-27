@@ -863,7 +863,9 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
 
                         try values.append(.{
                             .name = try parseAndCacheString(&value_opts, .DW_AT_name, str_cache),
-                            .value = try requiredAttribute(&value_opts, i128, .DW_AT_const_value),
+                            .value = types.EnumInstanceValue.from(
+                                try requiredAttribute(&value_opts, i128, .DW_AT_const_value),
+                            ),
                         });
 
                         assert(value_ndx <= max_values - 1);

@@ -24,6 +24,14 @@ const ExternStruct = extern struct {
     fn dontOptimizeMe(_: *@This()) void {}
 };
 
+const MyEnum = enum(u8) {
+    first,
+    second,
+    final = 100,
+
+    fn dontOptimizeMe(_: *@This()) void {}
+};
+
 pub fn main() !void {
     const a: i2 = 1;
     const b: u2 = 2;
@@ -86,6 +94,10 @@ pub fn main() !void {
     const at = try std.heap.page_allocator.alloc(u32, as.len);
     @memcpy(at, &as);
 
+    const au = MyEnum.first;
+    const av = MyEnum.second;
+    const aw = MyEnum.final;
+
     print("{}\n", .{a});
     print("{}\n", .{b});
     print("{}\n", .{c}); // sim:zigprint stops here
@@ -139,4 +151,8 @@ pub fn main() !void {
 
     print("{d}\n", .{as});
     print("{d}\n", .{at});
+
+    print("{s}\n", .{@tagName(au)});
+    print("{s}\n", .{@tagName(av)});
+    print("{s}\n", .{@tagName(aw)});
 }
