@@ -618,7 +618,7 @@ test "sim:zigprint" {
     const exe_path = "assets/zigprint/out";
     const zigprint_main_zig_hash = try fileHash(t.allocator, "assets/zigprint/main.zig");
 
-    const expected_output_len = 442;
+    const expected_output_len = 461;
 
     // zig fmt: off
     sim.lock()
@@ -650,7 +650,7 @@ test "sim:zigprint" {
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = zigprint_main_zig_hash,
-            .line = types.SourceLine.from(91),
+            .line = types.SourceLine.from(103),
         }}}).req(),
     })
 
@@ -693,7 +693,7 @@ test "sim:zigprint" {
                         if (s.state.subordinate_output.len == 0) return null;
 
                         // spot check a few fields
-                        const num_locals = 46;
+                        const num_locals = 49;
                         if (checkeq(usize, 4, s.state.subordinate_output.len, "unexpected program output len") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") and
