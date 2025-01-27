@@ -48,9 +48,9 @@ int main() {
     heap_str[2] = 's';
     heap_str[3] = '\0';
 
-    enum TestEnum enum_one = ONE;
-    enum TestEnum enum_two = TWO;
-    enum TestEnum enum_three = THREE;
+    TestEnum enum_one = ONE;
+    TestEnum enum_two = TWO;
+    TestEnum enum_three = THREE;
 
     printf("A: %d\n", a);
     printf("B: %d\n", b);
