@@ -24,7 +24,9 @@ const ExternStruct = extern struct {
     fn dontOptimizeMe(_: *@This()) void {}
 };
 
-const MyEnum = enum(u8) {
+const MyEnum = enum(i8) {
+    negative = -1,
+    zero,
     first,
     second,
     final = 100,
@@ -94,7 +96,7 @@ pub fn main() !void {
     const at = try std.heap.page_allocator.alloc(u32, as.len);
     @memcpy(at, &as);
 
-    const au = MyEnum.first;
+    const au = MyEnum.negative;
     const av = MyEnum.second;
     const aw = MyEnum.final;
 

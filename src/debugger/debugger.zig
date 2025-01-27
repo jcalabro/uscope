@@ -2408,26 +2408,43 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 .@"enum" => |enm| {
                     const enum_val = types.EnumInstanceValue.from(mem.readVarInt(i128, buf, .little));
 
-                    var enum_field = types.ExpressionRenderField{
-                        .data = buf_hash,
-                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                        .encoding = .{ .@"enum" = .{
-                            .value = enum_val,
-                            .name = null,
-                        } },
-                    };
+                    //
+                    // The zero'th field describes the type of the enum, and the enum value's name
+                    //
+                    //
 
+                    var enum_name_hash: ?strings.Hash = null;
                     for (enm.values) |val| {
                         if (val.value == enum_val) {
-                            if (self.data.target.?.strings.get(val.name)) |enum_name| {
-                                enum_field.encoding.@"enum".name = try self.data.subordinate.?.paused.?.strings.add(enum_name);
-                            }
+                            enum_name_hash = try self.data.subordinate.?.paused.?.strings.add(self.data.target.?.strings.get(val.name).?);
                             break;
                         }
                     }
 
-                    try fields.append(params.scratch, enum_field);
+                    try fields.append(params.scratch, .{
+                        .data = null,
+                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .encoding = .{ .@"enum" = .{
+                            .value = types.ExpressionFieldNdx.from(fields.items.len),
+                            .name = enum_name_hash,
+                        } },
+                    });
+
+                    //
+                    // The rest of the fields are the runtime value of the enum (this can be any type in the
+                    // case of i.e. zig's tagged unions)
+                    // @TODO (jrc): actually support non-numeric types
+                    //
+
+                    try fields.append(params.scratch, .{
+                        .data = buf_hash,
+                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                        .name = enum_name_hash,
+                        .encoding = .{ .primitive = .{
+                            .encoding = .signed,
+                        } },
+                    });
                 },
 
                 // @DELETEME (jrc): remove the whole else clause

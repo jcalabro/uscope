@@ -926,9 +926,20 @@ fn renderExpressionResult(
                 defer zui.popStyleColor(.{});
 
                 const name = name: {
-                    if (field.name) |n| {
-                        break :name paused.strings.get(n) orelse types.Unknown;
-                    }
+                    if (field.name) |n| break :name paused.strings.get(n) orelse types.Unknown;
+                    break :name types.Unknown;
+                };
+
+                zui.text("{s}: ", .{name});
+                zui.sameLine(.{});
+            }
+
+            // if rendering an enum, display the label, then the integer
+            // value as metadata, since the name is more user-friendly
+            const rendering_enum = first_field.encoding == .@"enum" and field_ndx > 0;
+            if (rendering_enum) {
+                const name = name: {
+                    if (field.name) |n| break :name paused.strings.get(n) orelse types.Unknown;
                     break :name types.Unknown;
                 };
 
@@ -945,11 +956,9 @@ fn renderExpressionResult(
                 };
             };
 
-            var post_text: ?String = null;
             const buf = switch (field.encoding) {
                 // noop for these since we are rendering the preview via other fields in the list
-                .array => continue,
-                .@"struct" => continue,
+                .array, .@"struct", .@"enum" => continue,
 
                 .primitive => |primitive| switch (primitive.encoding) {
                     .boolean => renderWatchBoolean(scratch, data) catch |err| e: {
@@ -980,30 +989,15 @@ fn renderExpressionResult(
                         break :e types.Unknown;
                     },
                 },
-
-                .@"enum" => |enm| e: {
-                    post_text = fmt.allocPrint(scratch, "({d})", .{enm.value.int()}) catch |err| txt: {
-                        log.errf("unable to render enum integer value: {!}", .{err});
-                        break :txt types.Unknown;
-                    };
-
-                    if (enm.name) |name| {
-                        break :e paused.strings.get(name) orelse types.Unknown;
-                    } else {
-                        break :e types.Unknown;
-                    }
-                },
             };
 
-            zui.textWrapped("{s}", .{buf});
-
-            if (post_text) |txt| {
-                // render some postfix information (i.e. enum integer values)
+            if (rendering_enum) {
                 zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
                 defer zui.popStyleColor(.{});
 
-                zui.sameLine(.{});
-                zui.text("{s}", .{txt});
+                zui.textWrapped("({s})", .{buf});
+            } else {
+                zui.textWrapped("{s}", .{buf});
             }
         }
     }

@@ -774,6 +774,8 @@ pub const EnumValue = struct {
     value: EnumInstanceValue,
 };
 
+pub const EnumInstanceValue = NumericType(i128);
+
 /// Represents an array or a slice
 pub const ArrayType = struct {
     /// An index that indicates the type of each element contained in this array
@@ -1182,11 +1184,11 @@ pub const StructRenderer = struct {
 
 /// Renders enum values, possibly a tagged union
 pub const EnumRenderer = struct {
-    /// The integer value of instance of the enum
-    value: EnumInstanceValue,
+    /// A pointer to the type of data contained in this enum instance. We need to use an
+    /// `ExpressionFieldNdx` because this enum may point at any arbitrary data (i.e. in
+    /// the case of a tagged union in zig).
+    value: ExpressionFieldNdx,
 
     /// The user-friendly name of the enum value to display (if known)
     name: ?strings.Hash,
 };
-
-pub const EnumInstanceValue = NumericType(i128);

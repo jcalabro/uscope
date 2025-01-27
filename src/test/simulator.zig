@@ -618,7 +618,7 @@ test "sim:zigprint" {
     const exe_path = "assets/zigprint/out";
     const zigprint_main_zig_hash = try fileHash(t.allocator, "assets/zigprint/main.zig");
 
-    const expected_output_len = 461;
+    const expected_output_len = 464;
 
     // zig fmt: off
     sim.lock()
@@ -650,7 +650,7 @@ test "sim:zigprint" {
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = zigprint_main_zig_hash,
-            .line = types.SourceLine.from(103),
+            .line = types.SourceLine.from(104),
         }}}).req(),
     })
 
@@ -813,19 +813,24 @@ test "sim:zigprint" {
                             {
                                 // check rendering an enum value
                                 const aw = paused.getLocalByName("aw") orelse return falseWithErr("unable to get local \"aw\"", .{});
-                                const field = aw.fields[0];
-                                if (field.encoding != .@"enum") {
-                                    log.errf("variable \"aw\" encoding was not an enum, got {s}", .{@tagName(field.encoding)});
+                                const first = aw.fields[0];
+                                const second = aw.fields[1];
+                                if (first.encoding != .@"enum") {
+                                    log.errf("variable \"aw\" encoding was not an enum, got {s}", .{@tagName(first.encoding)});
+                                    return false;
+                                }
+                                if (second.encoding != .primitive) {
+                                    log.errf("variable \"aw\" value encoding was not primitive, got {s}", .{@tagName(second.encoding)});
                                     return false;
                                 }
 
-                                const enm = field.encoding.@"enum";
-                                if (!checkeq(i128, 100, enm.value.int(), "unexpected enum value \"aw\"")) {
+                                if (!check(second.data != null, "enum data must not be null") or
+                                    !checkeq(i128, 100, second.data.?, "unexpected enum value \"aw\"")) {
                                     return false;
                                 }
 
-                                if (!check(enm.name != null, "enum name must not be null") or
-                                    !checkstr(paused.strings, "final", enm.name.?, "unexpected name for enum \"av\"")) {
+                                if (!check(second.name != null, "enum name must not be null") or
+                                    !checkstr(paused.strings, "final", second.name.?, "unexpected name for enum \"av\"")) {
                                     return false;
                                 }
                             }
