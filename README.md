@@ -10,7 +10,7 @@ uscope (pronounced "microscope") is a native code graphical debugger and introsp
 
 [See here](https://calabro.io/uscope) for background and motivation on the project.
 
-Join the [Discord](https://discord.gg/bPWC6PZPhR) if you're interested in talking/learning more about debuggers!
+Join the [Discord](https://discord.gg/bPWC6PZPhR) if you're interested in talking debuggers.
 
 ### Project Status and Roadmap
 
