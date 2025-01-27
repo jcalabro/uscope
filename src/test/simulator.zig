@@ -2115,6 +2115,178 @@ test "sim:step_in_then_over_then_out" {
     try sim.run(@src().fn_name);
 }
 
+test "sim:cprint" {
+    //
+    // Tests the ability to render various variable values in a C program that prints out
+    // instances various data types
+    //
+
+    const sim = try Simulator.init(t.allocator);
+    defer sim.deinit(t.allocator);
+
+    const exe_path = "assets/cprint/out";
+    const cprint_main_c_hash = try fileHash(t.allocator, "assets/cprint/main.c");
+
+    const expected_output_len = 245;
+
+    // zig fmt: off
+    sim.lock()
+
+    // load symbols
+    .addCommand(.{ .req = (proto.LoadSymbolsRequest{
+        .path = exe_path,
+    }).req() })
+    .addCondition(.{
+        .max_ticks = msToTicks(20000),
+        .desc = "debug symbols must be loaded",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
+
+                if (s.dbg.data.target) |target| {
+                    return checkeq(usize, 1, target.compile_units.len, "must have one compile unit") and
+                        check(s.dbg.data.subordinate == null, "subordinate must not be launched");
+                }
+
+                return null;
+            }
+        }.cond,
+    })
+
+    // set a breakpoint
+    .addCommand(.{
+        .send_after_ticks = 1,
+        .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
+            .file_hash = cprint_main_c_hash,
+            .line = types.SourceLine.from(57),
+        }}}).req(),
+    })
+
+    // launch subordinate and ensure it hits the breakpoint
+    .addCommand(.{
+        .send_after_ticks = msToTicks(100),
+        .req = (proto.LaunchSubordinateRequest{
+            .path = exe_path,
+            .args = "",
+            .stop_on_entry = false,
+        }).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have hit the breakpoint",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                const bp = blk: {
+                    s.dbg.data.mu.lock();
+                    defer s.dbg.data.mu.unlock();
+
+                    if (s.dbg.data.subordinate == null) return null;
+
+                    if (s.dbg.data.state.breakpoints.items.len == 0) return null;
+                    break :blk s.dbg.data.state.breakpoints.items[0];
+                };
+
+                if (s.state.getStateSnapshot(s.arena.allocator())) |ss| {
+                    if (ss.state.paused == null) return null;
+                    const paused = ss.state.paused.?;
+
+                    if (!checkeq(types.Address, bp.addr, paused.registers.pc(), "breakpoint addr must equal PC"))
+                        return false;
+
+                    // spot check a few fields
+                    const num_locals = 21;
+                    if (!checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") or
+                        !checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") or
+                        !checkeq(String, "a", paused.strings.get(paused.locals[0].expression) orelse "", "first local expression was incorrect") or
+                        !checkeq(String, "b", paused.strings.get(paused.locals[1].expression) orelse "", "second local expression was incorrect")) {
+                        return false;
+                    }
+
+                    {
+                        // test rendering a basic int
+                        const c = paused.getLocalByName("c") orelse return falseWithErr("unable to get local \"c\"", .{});
+                        const data_hash = c.fields[0].data orelse return falseWithErr("data not set on variable \"c\"", .{});
+                        if (paused.strings.get(data_hash)) |buf| {
+                            const val = mem.readVarInt(c_int, buf, .little);
+                            if (!checkeq(c_int, 3, val, "unexpected value for local \"c\"")) return false;
+                        } else {
+                            log.err("local variable \"c\" data not found in string cache");
+                            return false;
+                        }
+                    }
+
+                    {
+                        // test rendering a char*
+                        const str = paused.getLocalByName("basic_str") orelse return falseWithErr("unable to get local \"basic_str\"", .{});
+                        const data_hash = str.fields[0].data orelse return falseWithErr("data not set on variable \"basic_str\"", .{});
+                        if (!checkstr(paused.strings, "Hello, world!", data_hash, "unexpected render value for field \"basic_str\"")) {
+                            return false;
+                        }
+                    }
+
+                    {
+                        // test rendering an enum that's behind a typedef
+                        const enum_three = paused.getLocalByName("enum_three") orelse return falseWithErr("unable to get local \"enum_three\"", .{});
+                        const data_hash = enum_three.fields[1].data orelse return falseWithErr("data not set on variable \"enum_three\"", .{});
+                        if (paused.strings.get(data_hash)) |buf| {
+                            const val = mem.readVarInt(c_int, buf, .little);
+                            if (!checkeq(c_int, 2, val, "unexpected value for local \"enum_three\"")) return false;
+                        } else {
+                            log.err("local variable \"enum_three\" data not found in string cache");
+                            return false;
+                        }
+                    }
+
+                    return true;
+                } else |err| {
+                    log.errf("unable to get state snapshot: {!}", .{err});
+                    return false;
+                }
+
+                return null;
+            }
+        }.cond,
+    })
+
+    // continue execution and let it run to the end
+    .addCommand(.{
+        .send_after_ticks = 1,
+        .req = (proto.ContinueRequest{}).req(),
+    })
+    .addCondition(.{
+        .desc = "subordinate must have finished execution and all subordinate output must be displayed",
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(4000),
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                {
+                    s.dbg.data.mu.lock();
+                    defer s.dbg.data.mu.unlock();
+
+                    if (s.dbg.data.subordinate != null) return null;
+                }
+
+                {
+                    s.state.subordinate_output_mu.lock();
+                    defer s.state.subordinate_output_mu.unlock();
+
+                    if (expected_output_len == s.state.subordinate_output.len) {
+                        return true;
+                    }
+                }
+
+                return null;
+            }
+        }.cond,
+    })
+
+    .quit().unlock();
+    // zig fmt: on
+
+    try sim.run(@src().fn_name);
+}
+
 // // tracking this as a global so it's accessible from condition checks, and we need
 // // to track it because different C compiler version may give different stack depths
 // var crecursion_initial_stack_depth: usize = 0;
