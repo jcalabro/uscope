@@ -810,6 +810,26 @@ test "sim:zigprint" {
                                 }
                             }
 
+                            {
+                                // check rendering an enum value
+                                const aw = paused.getLocalByName("aw") orelse return falseWithErr("unable to get local \"aw\"", .{});
+                                const field = aw.fields[0];
+                                if (field.encoding != .@"enum") {
+                                    log.errf("variable \"aw\" encoding was not an enum, got {s}", .{@tagName(field.encoding)});
+                                    return false;
+                                }
+
+                                const enm = field.encoding.@"enum";
+                                if (!checkeq(i128, 100, enm.value.int(), "unexpected enum value \"aw\"")) {
+                                    return false;
+                                }
+
+                                if (!check(enm.name != null, "enum name must not be null") or
+                                    !checkstr(paused.strings, "final", enm.name.?, "unexpected name for enum \"av\"")) {
+                                    return false;
+                                }
+                            }
+
                             return true;
                         }
 
