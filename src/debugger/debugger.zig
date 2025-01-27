@@ -2406,7 +2406,19 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 },
 
                 .@"enum" => |enm| {
-                    const enum_val = types.EnumInstanceValue.from(mem.readVarInt(i128, buf, .little));
+                    // @TODO (jrc): support non-numeric enum types
+                    const enum_val = types.EnumInstanceValue.from(switch (buf.len) {
+                        1 => mem.readVarInt(i8, buf, .little),
+                        2 => mem.readVarInt(i16, buf, .little),
+                        4 => mem.readVarInt(i32, buf, .little),
+                        8 => mem.readVarInt(i64, buf, .little),
+                        16 => mem.readVarInt(i128, buf, .little),
+
+                        else => {
+                            log.errf("invalid enum buffer length: {d}", .{buf.len});
+                            return;
+                        },
+                    });
 
                     //
                     // The zero'th field describes the type of the enum, and the enum value's name
@@ -2434,7 +2446,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     //
                     // The rest of the fields are the runtime value of the enum (this can be any type in the
                     // case of i.e. zig's tagged unions)
-                    // @TODO (jrc): actually support non-numeric types
                     //
 
                     try fields.append(params.scratch, .{

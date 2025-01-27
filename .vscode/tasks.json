@@ -3,7 +3,7 @@
     "tasks": [{
         "label": "build",
         "command": "zig",
-        "args": ["build"],
+        "args": ["build", "-Dllvm"],
         "type": "shell"
     }]
 }
