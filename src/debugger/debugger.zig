@@ -2370,6 +2370,21 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     });
                 },
 
+                .typedef => |typedef| {
+                    if (typedef.data_type == null) {
+                        log.warnf("unable to calculate value for expresion \"{s}\": typedef type is opaque", .{
+                            params.expression,
+                        });
+                        return;
+                    }
+
+                    // recurse using the base data type
+                    var recursive_params = params;
+                    recursive_params.variable.data_type = typedef.data_type.?;
+
+                    try self.renderVariableValue(fields, recursive_params);
+                },
+
                 .@"struct" => |strct| {
                     try fields.append(params.scratch, .{
                         .data = null,

@@ -40,7 +40,7 @@ int main() {
     arr[1] = 4.56;
     arr[13] = 7.89;
 
-    char *basic_str = "Hello, world!\n";
+    char *basic_str = "Hello, world!";
 
     char *heap_str = (char*)malloc(4 * sizeof(char));
     heap_str[0] = 'y';
@@ -48,12 +48,13 @@ int main() {
     heap_str[2] = 's';
     heap_str[3] = '\0';
 
-    enum TestEnum enum_one = ONE;
+    // test with and without the `enum` prefix
+    TestEnum enum_one = ONE;
     enum TestEnum enum_two = TWO;
-    enum TestEnum enum_three = THREE;
+    TestEnum enum_three = THREE;
 
     printf("A: %d\n", a);
-    printf("B: %d\n", b);
+    printf("B: %d\n", b); // sim:cprint stops here
     printf("C: %d\n", c);
     printf("D: %ld\n", d);
     printf("E: %lld\n", e);
