@@ -926,9 +926,20 @@ fn renderExpressionResult(
                 defer zui.popStyleColor(.{});
 
                 const name = name: {
-                    if (field.name) |n| {
-                        break :name paused.strings.get(n) orelse types.Unknown;
-                    }
+                    if (field.name) |n| break :name paused.strings.get(n) orelse types.Unknown;
+                    break :name types.Unknown;
+                };
+
+                zui.text("{s}: ", .{name});
+                zui.sameLine(.{});
+            }
+
+            // if rendering an enum, display the label, then the integer
+            // value as metadata, since the name is more user-friendly
+            const rendering_enum = first_field.encoding == .@"enum" and field_ndx > 0;
+            if (rendering_enum) {
+                const name = name: {
+                    if (field.name) |n| break :name paused.strings.get(n) orelse types.Unknown;
                     break :name types.Unknown;
                 };
 
@@ -947,8 +958,7 @@ fn renderExpressionResult(
 
             const buf = switch (field.encoding) {
                 // noop for these since we are rendering the preview via other fields in the list
-                .array => continue,
-                .@"struct" => continue,
+                .array, .@"struct", .@"enum" => continue,
 
                 .primitive => |primitive| switch (primitive.encoding) {
                     .boolean => renderWatchBoolean(scratch, data) catch |err| e: {
@@ -979,11 +989,16 @@ fn renderExpressionResult(
                         break :e types.Unknown;
                     },
                 },
-
-                else => types.Unknown, // @DELETEME (jrc): once all encodings are implemeted
             };
 
-            zui.textWrapped("{s}", .{buf});
+            if (rendering_enum) {
+                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+                defer zui.popStyleColor(.{});
+
+                zui.textWrapped("({s})", .{buf});
+            } else {
+                zui.textWrapped("{s}", .{buf});
+            }
         }
     }
 }

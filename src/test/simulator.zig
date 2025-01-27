@@ -618,7 +618,7 @@ test "sim:zigprint" {
     const exe_path = "assets/zigprint/out";
     const zigprint_main_zig_hash = try fileHash(t.allocator, "assets/zigprint/main.zig");
 
-    const expected_output_len = 442;
+    const expected_output_len = 464;
 
     // zig fmt: off
     sim.lock()
@@ -650,7 +650,7 @@ test "sim:zigprint" {
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = zigprint_main_zig_hash,
-            .line = types.SourceLine.from(91),
+            .line = types.SourceLine.from(105),
         }}}).req(),
     })
 
@@ -693,7 +693,7 @@ test "sim:zigprint" {
                         if (s.state.subordinate_output.len == 0) return null;
 
                         // spot check a few fields
-                        const num_locals = 46;
+                        const num_locals = 49;
                         if (checkeq(usize, 4, s.state.subordinate_output.len, "unexpected program output len") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") and
@@ -807,6 +807,58 @@ test "sim:zigprint" {
                                     }
 
                                     if (!checkstr(paused.strings, "this is field_b", member.data.?, "incorrect value for \"ap.field_b\"")) return false;
+                                }
+                            }
+
+                            {
+                                // check rendering an enum value
+                                const aw = paused.getLocalByName("aw") orelse return falseWithErr("unable to get local \"aw\"", .{});
+                                const first = aw.fields[0];
+                                const second = aw.fields[1];
+                                if (first.encoding != .@"enum") {
+                                    log.errf("variable \"aw\" encoding was not an enum, got {s}", .{@tagName(first.encoding)});
+                                    return false;
+                                }
+                                if (second.encoding != .primitive) {
+                                    log.errf("variable \"aw\" value encoding was not primitive, got {s}", .{@tagName(second.encoding)});
+                                    return false;
+                                }
+
+                                if (!check(second.data != null, "enum data must not be null")) return false;
+                                if (paused.strings.get(second.data.?)) |enum_data| {
+                                    const enum_val = mem.readVarInt(i128, enum_data, .little);
+                                    if (!checkeq(i128, 100, enum_val, "unexpected enum value \"aw\"")) return false;
+                                }
+
+                                if (!check(second.name != null, "enum name must not be null") or
+                                    !checkstr(paused.strings, "final", second.name.?, "unexpected name for enum \"aw\"")) {
+                                    return false;
+                                }
+                            }
+
+                            {
+                                // check rendering a negative enum value
+                                const au = paused.getLocalByName("au") orelse return falseWithErr("unable to get local \"au\"", .{});
+                                const first = au.fields[0];
+                                const second = au.fields[1];
+                                if (first.encoding != .@"enum") {
+                                    log.errf("variable \"au\" encoding was not an enum, got {s}", .{@tagName(first.encoding)});
+                                    return false;
+                                }
+                                if (second.encoding != .primitive) {
+                                    log.errf("variable \"au\" value encoding was not primitive, got {s}", .{@tagName(second.encoding)});
+                                    return false;
+                                }
+
+                                if (!check(second.data != null, "enum data must not be null")) return false;
+                                if (paused.strings.get(second.data.?)) |enum_data| {
+                                    const enum_val = mem.readVarInt(i8, enum_data, .little);
+                                    if (!checkeq(i128, -1, enum_val, "unexpected enum value \"au\"")) return false;
+                                }
+
+                                if (!check(second.name != null, "enum name must not be null") or
+                                    !checkstr(paused.strings, "negative", second.name.?, "unexpected name for enum \"av\"")) {
+                                    return false;
                                 }
                             }
 

@@ -6,6 +6,12 @@ typedef struct TestStruct {
     int B;
 } TestStruct;
 
+typedef enum TestEnum {
+    ONE,
+    TWO,
+    THREE,
+} TestEnum ;
+
 int main() {
     char      a = 1;
     short     b = 2;
@@ -42,6 +48,10 @@ int main() {
     heap_str[2] = 's';
     heap_str[3] = '\0';
 
+    enum TestEnum enum_one = ONE;
+    enum TestEnum enum_two = TWO;
+    enum TestEnum enum_three = THREE;
+
     printf("A: %d\n", a);
     printf("B: %d\n", b);
     printf("C: %d\n", c);
@@ -67,4 +77,8 @@ int main() {
     printf("ARR: %p\n", arr);
     printf("STR: %s\n", basic_str);
     printf("HEAP STR: %s\n", heap_str);
+
+    printf("ENUM ONE: %d\n", enum_one);
+    printf("ENUM TWO: %d\n", enum_two);
+    printf("ENUM THREE: %d\n", enum_three);
 }

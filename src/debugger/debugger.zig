@@ -2370,7 +2370,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     });
                 },
 
-                .@"struct" => |st| {
+                .@"struct" => |strct| {
                     try fields.append(params.scratch, .{
                         .data = null,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
@@ -2382,7 +2382,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     const struct_field_ndx = fields.items.len - 1;
 
                     var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
-                    for (st.members) |member| {
+                    for (strct.members) |member| {
                         // recursively render struct members using the known item buffer
                         var recursive_params = params;
                         recursive_params.variable_value_buf = buf;
@@ -2403,6 +2403,59 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     // re-assign slice members
                     fields.items[struct_field_ndx].encoding.@"struct".members = try item_ndxes.toOwnedSlice(params.scratch);
                     return;
+                },
+
+                .@"enum" => |enm| {
+                    // @TODO (jrc): support non-numeric enum types
+                    const enum_val = types.EnumInstanceValue.from(switch (buf.len) {
+                        1 => mem.readVarInt(i8, buf, .little),
+                        2 => mem.readVarInt(i16, buf, .little),
+                        4 => mem.readVarInt(i32, buf, .little),
+                        8 => mem.readVarInt(i64, buf, .little),
+                        16 => mem.readVarInt(i128, buf, .little),
+
+                        else => {
+                            log.errf("invalid enum buffer length: {d}", .{buf.len});
+                            return;
+                        },
+                    });
+
+                    //
+                    // The zero'th field describes the type of the enum, and the enum value's name
+                    //
+                    //
+
+                    var enum_name_hash: ?strings.Hash = null;
+                    for (enm.values) |val| {
+                        if (val.value == enum_val) {
+                            enum_name_hash = try self.data.subordinate.?.paused.?.strings.add(self.data.target.?.strings.get(val.name).?);
+                            break;
+                        }
+                    }
+
+                    try fields.append(params.scratch, .{
+                        .data = null,
+                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .encoding = .{ .@"enum" = .{
+                            .value = types.ExpressionFieldNdx.from(fields.items.len),
+                            .name = enum_name_hash,
+                        } },
+                    });
+
+                    //
+                    // The rest of the fields are the runtime value of the enum (this can be any type in the
+                    // case of i.e. zig's tagged unions)
+                    //
+
+                    try fields.append(params.scratch, .{
+                        .data = buf_hash,
+                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                        .name = enum_name_hash,
+                        .encoding = .{ .primitive = .{
+                            .encoding = .signed,
+                        } },
+                    });
                 },
 
                 // @DELETEME (jrc): remove the whole else clause
