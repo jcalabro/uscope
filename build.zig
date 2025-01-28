@@ -55,7 +55,8 @@ pub fn build(b: *Build) !void {
     flags.race = b.option(bool, "race", "Enable TSan (default: true)") orelse false;
     opts.addOption(bool, "race", flags.race);
 
-    const llvm_default = flags.release or flags.race or flags.spall or flags.tracy or optimize != .Debug;
+    // @NOTE (jrc): swap to the self-hosted backend when it's more reliable
+    const llvm_default = true or flags.release or flags.race or flags.spall or flags.tracy or optimize != .Debug;
     const llvm_help = try std.fmt.allocPrint(b.allocator, "Enable LLVM (default: {any})", .{llvm_default});
     flags.llvm = b.option(bool, "llvm", llvm_help) orelse llvm_default;
     opts.addOption(bool, "llvm", flags.llvm);
