@@ -415,7 +415,13 @@ fn drawMenuBar(self: *Self) ?State.View {
                 self.state.closeSourceFile(null);
             }
 
-            if (zui.menuItem("uscope", .{ .shortcut = "q" })) {
+            if (zui.menuItem("View Breakpoints", .{
+                .shortcut = "space+b",
+            })) {
+                return self.state.breakpoint.view();
+            }
+
+            if (zui.menuItem("Quit", .{ .shortcut = "ctrl+q" })) {
                 self.state.quit();
             }
         }
