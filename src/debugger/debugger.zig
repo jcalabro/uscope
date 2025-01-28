@@ -2192,9 +2192,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     .data = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                     .name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
-                    .encoding = .{ .primitive = .{
-                        .encoding = .string,
-                    } },
+                    .encoding = .{ .primitive = .{ .encoding = .string } },
                 });
             }
 
@@ -2255,9 +2253,11 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             // follow pointer values to their underlying base type
             var base_data_type = data_type;
+            var base_data_type_ndx: ?types.TypeNdx = null;
             while (base_data_type.form == .pointer) {
                 if (base_data_type.form.pointer.data_type) |ptr_type| {
                     base_data_type = params.cu.data_types[ptr_type.int()];
+                    base_data_type_ndx = ptr_type;
                     continue;
                 }
                 break;
@@ -2308,9 +2308,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                     .address = res.address,
                     .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                    .encoding = .{ .primitive = .{
-                        .encoding = .string,
-                    } },
+                    .encoding = .{ .primitive = .{ .encoding = .string } },
                 });
 
                 return;
@@ -2325,9 +2323,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                     .address = res.address,
                     .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                    .encoding = .{ .array = .{
-                        .items = undefined,
-                    } },
+                    .encoding = .{ .array = .{ .items = undefined } },
                 });
                 const slice_field_ndx = fields.items.len - 1;
 
@@ -2364,9 +2360,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         .data = buf_hash,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                         .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                        .encoding = .{ .primitive = .{
-                            .encoding = primitive.encoding,
-                        } },
+                        .encoding = .{ .primitive = .{ .encoding = primitive.encoding } },
                     });
                 },
 
@@ -2385,14 +2379,65 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try self.renderVariableValue(fields, recursive_params);
                 },
 
+                .pointer => {
+                    const address = switch (buf.len) {
+                        4 => types.Address.from(mem.readVarInt(u32, buf, .little)),
+                        8 => types.Address.from(mem.readVarInt(u64, buf, .little)),
+                        else => {
+                            log.errf("invalid pointer buffer size: {d}", .{buf.len});
+                            return error.InvalidPointerBufferLength;
+                        },
+                    };
+
+                    // the pointer is opaque, so we can't do anything other than render
+                    // its address, which may still be useful to the user
+                    if (base_data_type_ndx == null) {
+                        try fields.append(params.scratch, .{
+                            .address = address,
+                            .data = null,
+                            .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                            .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                            .encoding = .{ .primitive = .{ .encoding = .string } },
+                        });
+                        return;
+                    }
+
+                    // follow typedefs to their base
+                    var ptr_data_type = params.cu.data_types[base_data_type_ndx.?.int()];
+                    var ptr_data_type_ndx = base_data_type_ndx.?;
+                    while (ptr_data_type.form == .typedef) {
+                        if (ptr_data_type.form.typedef.data_type) |typedef_type| {
+                            ptr_data_type = params.cu.data_types[typedef_type.int()];
+                            ptr_data_type_ndx = typedef_type;
+                            continue;
+                        }
+                        break;
+                    }
+
+                    // look up the bytes for this pointer's value in the subordinate
+                    const ptr_buf = try params.scratch.alloc(u8, ptr_data_type.size_bytes);
+                    try self.adapter.peekData(params.pid, params.load_addr, address, ptr_buf);
+
+                    // recurse using the base data type
+                    var recursive_params = params;
+                    recursive_params.variable_value_buf = ptr_buf;
+                    recursive_params.variable.data_type = ptr_data_type_ndx;
+
+                    const original_len = fields.items.len;
+                    try self.renderVariableValue(fields, recursive_params);
+
+                    // set the pointer value on the new field
+                    assert(fields.items.len > original_len);
+                    fields.items[original_len].address = address;
+                    fields.items[original_len].data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name);
+                },
+
                 .@"struct" => |strct| {
                     try fields.append(params.scratch, .{
                         .data = null,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                         .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                        .encoding = .{ .@"struct" = .{
-                            .members = undefined,
-                        } },
+                        .encoding = .{ .@"struct" = .{ .members = undefined } },
                     });
                     const struct_field_ndx = fields.items.len - 1;
 
@@ -2467,9 +2512,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         .data = buf_hash,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                         .name = enum_name_hash,
-                        .encoding = .{ .primitive = .{
-                            .encoding = .signed,
-                        } },
+                        .encoding = .{ .primitive = .{ .encoding = .signed } },
                     });
                 },
 
@@ -2480,9 +2523,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         .data = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                         .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
-                        .encoding = .{ .primitive = .{
-                            .encoding = .string,
-                        } },
+                        .encoding = .{ .primitive = .{ .encoding = .string } },
                     });
 
                     log.warnf("unsupported data type: {s}", .{@tagName(data_type.form)});
