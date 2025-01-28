@@ -2238,6 +2238,40 @@ test "sim:cprint" {
                         }
                     }
 
+                    {
+                        // test rendering a pointer to a primitive
+                        const j_ptr = paused.getLocalByName("j_ptr") orelse return falseWithErr("unable to get local \"j_ptr\"", .{});
+                        const data_hash = j_ptr.fields[0].data orelse return falseWithErr("data not set on variable \"j_ptr\"", .{});
+                        const val = mem.readVarInt(u64, paused.getString(data_hash), .little);
+                        if (!checkeq(u64, 10, val, "unexpected render value for field \"j_ptr\"")) {
+                            return false;
+                        }
+                    }
+
+                    {
+                        // test rendering a pointer to a struct
+                        const ts2 = paused.getLocalByName("ts2") orelse return falseWithErr("unable to get local \"ts2\"", .{});
+                        if (!checkeq(usize, 3, ts2.fields.len, "unexpected number of fields on struct \"ts2\"")) return false;
+
+                        {
+                            // check the first struct member
+                            const data_hash = ts2.fields[1].data orelse return falseWithErr("first member not set on variable \"ts2\"", .{});
+                            const val = mem.readVarInt(u64, paused.getString(data_hash), .little);
+                            if (!checkeq(u64, 15, val, "unexpected render value for first field on \"ts2\"")) {
+                                return false;
+                            }
+                        }
+
+                        {
+                            // check the second struct member
+                            const data_hash = ts2.fields[2].data orelse return falseWithErr("second member not set on variable \"ts2\"", .{});
+                            const val = mem.readVarInt(u64, paused.getString(data_hash), .little);
+                            if (!checkeq(u64, 16, val, "unexpected render value for second field on \"ts2\"")) {
+                                return false;
+                            }
+                        }
+                    }
+
                     return true;
                 } else |err| {
                     log.errf("unable to get state snapshot: {!}", .{err});
