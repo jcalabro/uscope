@@ -161,6 +161,7 @@ const FunctionAddrRanges = struct {
     }
 
     fn valid(self: Self) bool {
+        if (flags.Release) return true;
         return self.ranges.items.len == self.map.count() and types.addressRangesAreSorted(self.ranges.items);
     }
 
