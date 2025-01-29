@@ -1822,8 +1822,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             var local_variables = ArrayList(String).init(paused_alloc);
 
             for (unwind_res.call_stack_addrs, 0..) |addr, ndx| {
-                const func = self.functionAtAddr(addr);
                 const name: String = blk: {
+                    if (addr.eqlInt(0)) break :blk types.Unknown;
+
+                    const func = self.functionAtAddr(addr);
                     if (func) |fun| {
                         if (ndx == 0) {
                             // store the variable identifiers that are local to this function
@@ -1868,14 +1870,15 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             // @CLEANUP (jrc): the logging here is a bit tedious
             const source_loc = self.sourceForAddress(registers.pc());
+            const pc_minus_load_addr = registers.pc().sub(self.data.subordinate.?.load_addr);
             if (source_loc) |src| {
                 if (file.getCachedFile(src.loc.file_hash)) |f| {
-                    log.debugf("stopped at pc: 0x{x}, source location: {s}:{d}", .{ registers.pc(), f.name, src.loc.line });
+                    log.debugf("stopped at pc: 0x{x} (0x{x}), source location: {s}:{d}", .{ registers.pc(), pc_minus_load_addr, f.name, src.loc.line });
                 } else {
-                    log.debugf("stopped at pc: 0x{x}, source location: {any}", .{ registers.pc(), src });
+                    log.debugf("stopped at pc: 0x{x} (0x{x}), source location: {any}", .{ registers.pc(), pc_minus_load_addr, src });
                 }
             } else {
-                log.debugf("stopped at pc: 0x{x}, source location: (unknown)", .{registers.pc()});
+                log.debugf("stopped at pc: 0x{x} (0x{x}), source location: (unknown)", .{ registers.pc(), pc_minus_load_addr });
             }
 
             //
