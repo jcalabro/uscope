@@ -744,24 +744,6 @@ test "load ELF files" {
         const first = target.compile_units[0];
         try t.expectEqual(case.cu_lang.toGeneric() catch unreachable, first.language);
 
-        for (target.compile_units) |cu| {
-            // ensure all CU address ranges are sorted
-            try t.expect(std.sort.isSorted(
-                types.AddressRange,
-                cu.ranges,
-                {},
-                types.AddressRange.sortByLowAddress,
-            ));
-
-            // ensure each functions' address ranges are sorted
-            try t.expect(std.sort.isSorted(
-                types.CompileUnit.Functions.Range,
-                cu.functions.ranges,
-                {},
-                types.CompileUnit.Functions.Range.sortByLowAddress,
-            ));
-        }
-
         if (ndx == 0) {
             // Since we have a fully-populated, real types.CompileUnit from disk, this is
             // a reasonable spot to test out memory leak checking in CompileUnit.copyFrom.

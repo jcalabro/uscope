@@ -1068,26 +1068,6 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
         }
     }
 
-    {
-        const z1 = trace.zoneN(@src(), "sort compile unit address ranges");
-        defer z1.end();
-
-        mem.sort(types.AddressRange, ranges, {}, types.AddressRange.sortByLowAddress);
-        assert(types.addressRangesAreSorted(ranges));
-    }
-
-    {
-        const z1 = trace.zoneN(@src(), "sort function address ranges");
-        defer z1.end();
-
-        mem.sort(
-            types.CompileUnit.Functions.Range,
-            function_ranges.items,
-            {},
-            types.CompileUnit.Functions.Range.sortByLowAddress,
-        );
-    }
-
     return .{
         .strings = str_cache,
         .cu = types.CompileUnit{

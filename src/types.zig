@@ -101,78 +101,38 @@ pub const AddressRange = struct {
     pub fn contains(self: Self, addr: Address) bool {
         return addr.int() >= self.low.int() and addr.int() < self.high.int();
     }
-
-    /// For use with std.mem.sort
-    pub fn sortByLowAddress(_: void, a: Self, b: Self) bool {
-        return a.low.int() < b.low.int();
-    }
 };
 
 /// An index in to a list of AddressRange's
 pub const AddressRangeNdx = NumericType(usize);
 
 /// Returns the containing index if addr falls in the any of the ranges of [low, high). If the
-/// address is not contained in any of the ranges, returns null. The list of address ranges must
-/// be sorted by low address.
-pub fn sortedAddressRangesContain(ranges: []const AddressRange, addr: Address) ?AddressRangeNdx {
+/// address is not contained in any of the ranges, returns null. The list of addresses need not
+/// be sorted. If there are multiple matches, it returns the first match.
+pub fn addressRangesContain(ranges: []const AddressRange, addr: Address) ?AddressRangeNdx {
     const S = struct {
-        fn accessor(range: AddressRange) Address {
-            return range.low;
+        inline fn accessor(range: AddressRange) AddressRange {
+            return range;
         }
     };
 
-    return sortedAddressRangesContainByField(AddressRange, S.accessor, ranges, addr);
+    return addressRangesContainByField(AddressRange, S.accessor, ranges, addr);
 }
 
-/// A sanity check intended to be used in `assert()` calls that ensures that
-/// address ranges are sorted by low address
-pub fn addressRangesAreSorted(ranges: []const AddressRange) bool {
-    if (ranges.len == 0) return true;
-
-    var last_low = ranges[0].low;
-    var ndx: usize = 1;
-    while (ndx < ranges.len) : (ndx += 1) {
-        const current_low = ranges[ndx].low;
-        if (last_low.int() > current_low.int()) return false;
-        last_low = current_low;
-    }
-
-    return true;
-}
-
-fn sortedAddressRangesContainByField(
+fn addressRangesContainByField(
     comptime T: type,
-    comptime accessor: fn (T) Address,
+    comptime accessor: fn (T) callconv(.@"inline") AddressRange,
     ranges: []const T,
     addr: Address,
 ) ?AddressRangeNdx {
     const z = trace.zone(@src());
     defer z.end();
 
-    // sanity check
-    if (comptime builtin.mode == .Debug) {
-        var last: ?Address = null;
-        for (ranges) |r| {
-            if (last) |l| assert(l.int() < accessor(r).int());
-            last = accessor(r);
-        }
-    }
-
-    var low_ndx: usize = 0;
-    var high_ndx = ranges.len;
-
-    // binary search
-    while (low_ndx < high_ndx) {
-        const mid_ndx = low_ndx + (high_ndx - low_ndx) / 2;
-        const mid = ranges[mid_ndx];
-        if (mid.contains(addr)) {
-            return AddressRangeNdx.from(mid_ndx);
-        }
-
-        if (addr.int() < accessor(mid).int()) {
-            high_ndx = mid_ndx;
-        } else {
-            low_ndx = mid_ndx + 1;
+    // @PERFORMANCE (jrc): Vectorize
+    for (ranges, 0..) |item, ndx| {
+        const range = accessor(item);
+        if (range.contains(addr)) {
+            return AddressRangeNdx.from(ndx);
         }
     }
 
@@ -201,18 +161,18 @@ test "addr range contains" {
             .{ .low = Address.from(9), .high = Address.from(10) },
         };
 
-        try t.expectEqual(AddressRangeNdx.from(0), sortedAddressRangesContain(ranges, Address.from(1)));
-        try t.expectEqual(AddressRangeNdx.from(1), sortedAddressRangesContain(ranges, Address.from(3)));
-        try t.expectEqual(AddressRangeNdx.from(2), sortedAddressRangesContain(ranges, Address.from(5)));
-        try t.expectEqual(AddressRangeNdx.from(3), sortedAddressRangesContain(ranges, Address.from(7)));
-        try t.expectEqual(AddressRangeNdx.from(4), sortedAddressRangesContain(ranges, Address.from(9)));
+        try t.expectEqual(AddressRangeNdx.from(0), addressRangesContain(ranges, Address.from(1)));
+        try t.expectEqual(AddressRangeNdx.from(1), addressRangesContain(ranges, Address.from(3)));
+        try t.expectEqual(AddressRangeNdx.from(2), addressRangesContain(ranges, Address.from(5)));
+        try t.expectEqual(AddressRangeNdx.from(3), addressRangesContain(ranges, Address.from(7)));
+        try t.expectEqual(AddressRangeNdx.from(4), addressRangesContain(ranges, Address.from(9)));
 
-        try t.expectEqual(null, sortedAddressRangesContain(ranges, Address.from(0)));
-        try t.expectEqual(null, sortedAddressRangesContain(ranges, Address.from(2)));
-        try t.expectEqual(null, sortedAddressRangesContain(ranges, Address.from(4)));
-        try t.expectEqual(null, sortedAddressRangesContain(ranges, Address.from(6)));
-        try t.expectEqual(null, sortedAddressRangesContain(ranges, Address.from(8)));
-        try t.expectEqual(null, sortedAddressRangesContain(ranges, Address.from(10)));
+        try t.expectEqual(null, addressRangesContain(ranges, Address.from(0)));
+        try t.expectEqual(null, addressRangesContain(ranges, Address.from(2)));
+        try t.expectEqual(null, addressRangesContain(ranges, Address.from(4)));
+        try t.expectEqual(null, addressRangesContain(ranges, Address.from(6)));
+        try t.expectEqual(null, addressRangesContain(ranges, Address.from(8)));
+        try t.expectEqual(null, addressRangesContain(ranges, Address.from(10)));
     }
 }
 
@@ -253,7 +213,7 @@ pub const Target = struct {
         defer z.end();
 
         for (self.compile_units) |cu| {
-            if (sortedAddressRangesContain(cu.ranges, addr) != null) return cu;
+            if (addressRangesContain(cu.ranges, addr) != null) return cu;
         }
 
         return null;
@@ -280,10 +240,6 @@ pub const CompileUnit = struct {
             /// The index of the Function in the CompileUnit.Functions.functions array
             func_ndx: FunctionNdx,
 
-            pub fn sortByLowAddress(ctx: void, a: @This(), b: @This()) bool {
-                return AddressRange.sortByLowAddress(ctx, a.range, b.range);
-            }
-
             fn contains(self: @This(), addr: Address) bool {
                 return self.range.contains(addr);
             }
@@ -295,7 +251,7 @@ pub const CompileUnit = struct {
 
         /// The list of all address ranges that correspond to various parts of all the functions
         /// in this compile unit. Each address range is mapped to an index in to the `functions`
-        /// array. These ranges are sorted by low address and their lengths must be equal.
+        /// array. These ranges are not sorted.
         ranges: []const Range,
 
         pub fn assertValid(self: @This()) void {
@@ -311,9 +267,6 @@ pub const CompileUnit = struct {
                 for (self.ranges) |range| {
                     assert(range.func_ndx.int() < self.functions.len);
                 }
-
-                // ensure the address range list is sorted by low address
-                assert(std.sort.isSorted(Range, self.ranges, {}, Range.sortByLowAddress));
             }
         }
 
@@ -327,12 +280,12 @@ pub const CompileUnit = struct {
             self.assertValid();
 
             const S = struct {
-                fn accessor(range: Range) Address {
-                    return range.range.low;
+                inline fn accessor(range: Range) AddressRange {
+                    return range.range;
                 }
             };
 
-            if (sortedAddressRangesContainByField(Range, S.accessor, self.ranges, addr)) |range_ndx| {
+            if (addressRangesContainByField(Range, S.accessor, self.ranges, addr)) |range_ndx| {
                 const func_ndx = self.ranges[range_ndx.int()].func_ndx;
                 return self.functions[func_ndx.int()];
             }
@@ -348,7 +301,7 @@ pub const CompileUnit = struct {
     address_size: AddressSize,
 
     /// The full list of all address ranges contained within this compile unit. These ranges
-    /// are sorted by low address.
+    /// are not sorted.
     ranges: []const AddressRange,
 
     /// The list of the source files that were used in this compile unit
@@ -365,7 +318,7 @@ pub const CompileUnit = struct {
 
     /// Returns true if there is an address range in this compile unit that contains `addr`
     pub fn containsAddress(self: Self, addr: Address) bool {
-        return sortedAddressRangesContain(self.ranges, addr) != null;
+        return addressRangesContain(self.ranges, addr) != null;
     }
 
     /// Copies to `dst` from `src`. Caller owns returned memory.
@@ -649,7 +602,6 @@ pub const Function = struct {
 
     /// The list of address ranges for this function (note that this data is
     /// duplicated from CompileUnit.Ranges...is there a better way to store this?).
-    /// This list may be unsorted.
     addr_ranges: []const AddressRange,
 
     /// The list of functions that have been inlined within this function. These
