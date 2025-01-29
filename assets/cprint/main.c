@@ -48,6 +48,12 @@ int main() {
     heap_str[2] = 's';
     heap_str[3] = '\0';
 
+    char* strings[4];
+    strings[0] = "this";
+    strings[1] = "is";
+    strings[2] = "a";
+    strings[3] = "test";
+
     // test with and without the `enum` prefix
     TestEnum enum_one = ONE;
     enum TestEnum enum_two = TWO;
@@ -78,6 +84,10 @@ int main() {
     printf("ARR: %p\n", arr);
     printf("STR: %s\n", basic_str);
     printf("HEAP STR: %s\n", heap_str);
+    printf("STRINGS[0]: %s\n", strings[0]);
+    printf("STRINGS[1]: %s\n", strings[1]);
+    printf("STRINGS[2]: %s\n", strings[2]);
+    printf("STRINGS[3]: %s\n", strings[3]);
 
     printf("ENUM ONE: %d\n", enum_one);
     printf("ENUM TWO: %d\n", enum_two);
