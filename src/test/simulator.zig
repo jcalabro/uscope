@@ -2272,6 +2272,42 @@ test "sim:cprint" {
                         }
                     }
 
+                    {
+                        // test rendering a stack-allocated array
+                        const arr = paused.getLocalByName("arr") orelse return falseWithErr("unable to get local \"arr\"", .{});
+                        if (!checkeq(usize, 15, arr.fields.len, "unexpected number of fields on struct \"arr\"")) return false;
+
+                        {
+                            // check the zero'th array element
+                            const data_hash = arr.fields[1].data orelse return falseWithErr("first member not set on variable \"arr\"", .{});
+                            const val = mem.readVarInt(u32, paused.getString(data_hash), .little);
+                            const val_float: f32 = @bitCast(val);
+                            if (!checkeq(f32, 1.23, val_float, "unexpected render value for zero'th element in \"arr\"")) {
+                                return false;
+                            }
+                        }
+
+                        {
+                            // check the third array element
+                            const data_hash = arr.fields[3].data orelse return falseWithErr("third member not set on variable \"arr\"", .{});
+                            const val = mem.readVarInt(u32, paused.getString(data_hash), .little);
+                            const val_float: f32 = @bitCast(val);
+                            if (!checkeq(f32, 0, val_float, "unexpected render value for third element in \"arr\"")) {
+                                return false;
+                            }
+                        }
+
+                        {
+                            // check the final array element
+                            const data_hash = arr.fields[14].data orelse return falseWithErr("final member not set on variable \"arr\"", .{});
+                            const val = mem.readVarInt(u32, paused.getString(data_hash), .little);
+                            const val_float: f32 = @bitCast(val);
+                            if (!checkeq(f32, 7.89, val_float, "unexpected render value for final element in \"arr\"")) {
+                                return false;
+                            }
+                        }
+                    }
+
                     return true;
                 } else |err| {
                     log.errf("unable to get state snapshot: {!}", .{err});
