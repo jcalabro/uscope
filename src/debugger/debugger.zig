@@ -2432,6 +2432,55 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     fields.items[original_len].data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name);
                 },
 
+                .array => |arr| {
+                    const element_data_type = params.cu.data_types[arr.element_type.int()];
+
+                    // find the array buffer and length of the array (if not already known)
+                    var arr_buf: []const u8 = &.{};
+                    var arr_len: usize = 0;
+                    if (arr.len) |len| {
+                        arr_len = len;
+                        arr_buf = buf;
+                    } else {
+                        // @TOOD (jrc): search until a null terminator or N entries
+                        // @QUESTION (jrc): when is array length not known? I can't remember at this point.
+                        log.warn("unable to render array because length is not known");
+                        try fields.append(params.scratch, .{
+                            .data = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
+                            .data_type_name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
+                            .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                            .encoding = .{ .primitive = .{ .encoding = .string } },
+                        });
+                        return;
+                    }
+
+                    // @TODO (jrc): It would be great to also supply the `address` param on this field. We'll
+                    // need to pass it back from the adapter, and we'll only be able to know it in some cases,
+                    // but it's common enough that it would be nice to have.
+                    try fields.append(params.scratch, .{
+                        .data = null,
+                        .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .encoding = .{ .array = .{ .items = undefined } },
+                    });
+                    const arr_field_ndx = fields.items.len - 1;
+
+                    var item_ndxes = try ArrayListUnmanaged(types.ExpressionFieldNdx).initCapacity(params.scratch, arr_len);
+                    for (0..arr_len) |ndx| {
+                        // recursively render array elements using the known item buffer
+                        var recursive_params = params;
+                        recursive_params.variable_value_buf = arr_buf;
+                        recursive_params.variable.data_type = arr.element_type;
+                        recursive_params.buf_offset = ndx * element_data_type.size_bytes;
+
+                        try self.renderVariableValue(fields, recursive_params);
+                        const member_ndx = fields.items.len - 1;
+                        try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(member_ndx));
+                    }
+
+                    fields.items[arr_field_ndx].encoding.array.items = try item_ndxes.toOwnedSlice(params.scratch);
+                },
+
                 .@"struct" => |strct| {
                     try fields.append(params.scratch, .{
                         .data = null,

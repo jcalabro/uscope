@@ -1026,8 +1026,12 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
 
             const arr_ptr = &data_types.items[arr_type.variable_ndx.int()];
             arr_ptr.*.form.array.element_type = data_type_ndx;
-            arr_ptr.*.size_bytes = data_type.size_bytes;
             arr_ptr.*.name = try str_cache.add(type_name);
+
+            arr_ptr.*.size_bytes = 0;
+            if (arr_ptr.form.array.len) |len| {
+                arr_ptr.*.size_bytes = data_type.size_bytes * len;
+            }
         }
     }
 

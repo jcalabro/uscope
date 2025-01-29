@@ -876,7 +876,7 @@ pub const GetVariableValueArgs = struct {
     pid: types.PID,
     registers: *const arch.Registers,
     load_addr: types.Address,
-    variable_size: u32,
+    variable_size: u64,
     frame_base: types.Address,
     frame_base_platform_data: []const u8,
     platform_data: []const u8,

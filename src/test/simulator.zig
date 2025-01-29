@@ -2127,7 +2127,7 @@ test "sim:cprint" {
     const exe_path = "assets/cprint/out";
     const cprint_main_c_hash = try fileHash(t.allocator, "assets/cprint/main.c");
 
-    const expected_output_len = 245;
+    const expected_output_len = 308;
 
     // zig fmt: off
     sim.lock()
@@ -2159,7 +2159,7 @@ test "sim:cprint" {
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = cprint_main_c_hash,
-            .line = types.SourceLine.from(57),
+            .line = types.SourceLine.from(63),
         }}}).req(),
     })
 
@@ -2195,7 +2195,7 @@ test "sim:cprint" {
                         return false;
 
                     // spot check a few fields
-                    const num_locals = 21;
+                    const num_locals = 22;
                     if (!checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") or
                         !checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") or
                         !checkeq(String, "a", paused.strings.get(paused.locals[0].expression) orelse "", "first local expression was incorrect") or
@@ -2267,6 +2267,42 @@ test "sim:cprint" {
                             const data_hash = ts2.fields[2].data orelse return falseWithErr("second member not set on variable \"ts2\"", .{});
                             const val = mem.readVarInt(u64, paused.getString(data_hash), .little);
                             if (!checkeq(u64, 16, val, "unexpected render value for second field on \"ts2\"")) {
+                                return false;
+                            }
+                        }
+                    }
+
+                    {
+                        // test rendering a stack-allocated array
+                        const arr = paused.getLocalByName("arr") orelse return falseWithErr("unable to get local \"arr\"", .{});
+                        if (!checkeq(usize, 15, arr.fields.len, "unexpected number of fields on struct \"arr\"")) return false;
+
+                        {
+                            // check the zero'th array element
+                            const data_hash = arr.fields[1].data orelse return falseWithErr("first member not set on variable \"arr\"", .{});
+                            const val = mem.readVarInt(u32, paused.getString(data_hash), .little);
+                            const val_float: f32 = @bitCast(val);
+                            if (!checkeq(f32, 1.23, val_float, "unexpected render value for zero'th element in \"arr\"")) {
+                                return false;
+                            }
+                        }
+
+                        {
+                            // check the third array element
+                            const data_hash = arr.fields[3].data orelse return falseWithErr("third member not set on variable \"arr\"", .{});
+                            const val = mem.readVarInt(u32, paused.getString(data_hash), .little);
+                            const val_float: f32 = @bitCast(val);
+                            if (!checkeq(f32, 0, val_float, "unexpected render value for third element in \"arr\"")) {
+                                return false;
+                            }
+                        }
+
+                        {
+                            // check the final array element
+                            const data_hash = arr.fields[14].data orelse return falseWithErr("final member not set on variable \"arr\"", .{});
+                            const val = mem.readVarInt(u32, paused.getString(data_hash), .little);
+                            const val_float: f32 = @bitCast(val);
+                            if (!checkeq(f32, 7.89, val_float, "unexpected render value for final element in \"arr\"")) {
                                 return false;
                             }
                         }
