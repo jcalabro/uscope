@@ -320,7 +320,7 @@ pub const CompileUnit = struct {
         /// Attempts to find a function whose body contains `addr` in any of the function
         /// contained within this compile unit. Returns null if the address is not found
         /// in any address ranges.
-        pub fn forAddress(self: @This(), addr: Address) ?Function {
+        pub fn findForAddress(self: @This(), addr: Address) ?Function {
             const z = trace.zone(@src());
             defer z.end();
 
@@ -496,7 +496,7 @@ test "CompileUnit.Functions.forAddress" {
 
     const S = struct {
         fn check(self: CompileUnit.Functions, comptime name: strings.Hash, addr: Address) !void {
-            const func = self.forAddress(addr);
+            const func = self.findForAddress(addr);
             try t.expect(func != null);
             try t.expectEqual(name, func.?.name);
         }
@@ -508,12 +508,12 @@ test "CompileUnit.Functions.forAddress" {
     try S.check(funcs, 2, Address.from(7));
     try S.check(funcs, 1, Address.from(9));
 
-    try t.expectEqual(null, funcs.forAddress(Address.from(0)));
-    try t.expectEqual(null, funcs.forAddress(Address.from(2)));
-    try t.expectEqual(null, funcs.forAddress(Address.from(4)));
-    try t.expectEqual(null, funcs.forAddress(Address.from(6)));
-    try t.expectEqual(null, funcs.forAddress(Address.from(8)));
-    try t.expectEqual(null, funcs.forAddress(Address.from(10)));
+    try t.expectEqual(null, funcs.findForAddress(Address.from(0)));
+    try t.expectEqual(null, funcs.findForAddress(Address.from(2)));
+    try t.expectEqual(null, funcs.findForAddress(Address.from(4)));
+    try t.expectEqual(null, funcs.findForAddress(Address.from(6)));
+    try t.expectEqual(null, funcs.findForAddress(Address.from(8)));
+    try t.expectEqual(null, funcs.findForAddress(Address.from(10)));
 }
 
 /// Represents an index to a line of code within a source file. Note that

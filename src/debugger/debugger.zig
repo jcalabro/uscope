@@ -117,10 +117,6 @@ const Subordinate = struct {
     threads: ArrayListUnmanaged(types.PID) = .{},
     thread_breakpoints: ArrayListUnmanaged(types.ThreadBreakpoint) = .{},
 
-    /// Stores only the data for `func_ranges`
-    func_ranges_arena: ArenaAllocator,
-    func_ranges: ?FunctionAddrRanges = null,
-
     /// Stores only the data for `paused`
     paused_arena: ArenaAllocator,
     /// Describes the state of the subordinate when it has stopped after a trap
@@ -129,69 +125,16 @@ const Subordinate = struct {
     can_use_frame_pointer_stack_unwinding: bool = false,
     has_checked_for_frame_pointer_stack_unwinding: bool = false,
 
-    inline fn init(alloc: Allocator, child: Child) Self {
-        var self = Self{
+    fn init(alloc: Allocator, child: Child) Self {
+        return .{
             .child = child,
             .paused_arena = ArenaAllocator.init(alloc),
-            .func_ranges_arena = ArenaAllocator.init(alloc),
         };
-
-        self.func_ranges = .{};
-        return self;
     }
 
     fn clearAndFreePauseData(self: *Self) void {
         _ = self.paused_arena.reset(.free_all);
         self.paused = null;
-    }
-};
-
-/// A cache of function address low/high PCs mapped to function decl index in the symbol table
-/// for fast lookup. This is populated once when the subordinate starts, and is deinit'ed when
-/// the subordinate exits. The items in this list already have the load address applied.
-const FunctionAddrRanges = struct {
-    const Self = @This();
-
-    ranges: ArrayListUnmanaged(types.AddressRange) = .{},
-    map: AutoHashMapUnmanaged(usize, FunctionDeclIndex) = .{},
-
-    fn reset(self: *Self, alloc: Allocator) void {
-        self.ranges.clearAndFree(alloc);
-        self.map.clearAndFree(alloc);
-    }
-
-    fn assertValid(self: Self) void {
-        if (comptime builtin.mode == .Debug) {
-            assert(self.ranges.items.len == self.map.count());
-            assert(types.addressRangesAreSorted(self.ranges.items));
-        }
-    }
-
-    fn add(
-        self: *Self,
-        alloc: Allocator,
-        range: types.AddressRange,
-        decl: FunctionDeclIndex,
-    ) Allocator.Error!void {
-        // ensure we're in a valid state before and after
-        self.assertValid();
-        defer self.assertValid();
-
-        try self.ranges.append(alloc, range);
-        errdefer _ = self.ranges.popOrNull();
-
-        const ndx = self.ranges.items.len - 1;
-        try self.map.put(alloc, ndx, decl);
-    }
-
-    fn find(self: Self, addr: types.Address) ?FunctionDeclIndex {
-        self.assertValid();
-
-        if (types.sortedAddressRangesContain(self.ranges.items, addr)) |ndx| {
-            if (self.map.get(ndx.int())) |res| return res;
-        }
-
-        return null;
     }
 };
 
@@ -488,9 +431,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             sub.child.extremeKill() catch {};
 
-            _ = sub.func_ranges_arena.reset(.free_all);
-            sub.func_ranges = null;
-
             sub.clearAndFreePauseData();
 
             _ = self.data.subordinate_arena.reset(.free_all);
@@ -705,29 +645,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 try self.applyBreakpointToAllThreads(scratch, bp, true);
             }
 
-            // store the list of function address ranges with the load address
-            // already applied for fast lookups during subordinate execution
-            const load_addr = self.data.subordinate.?.load_addr;
-            for (self.data.target.?.compile_units, 0..) |cu, cu_ndx| {
-                cu.functions.assertValid();
-
-                for (cu.functions.ranges) |range| {
-                    const addr_range = types.AddressRange{
-                        .low = range.range.low.add(load_addr),
-                        .high = range.range.high.add(load_addr),
-                    };
-
-                    try self.data.subordinate.?.func_ranges.?.add(
-                        self.data.subordinate.?.func_ranges_arena.allocator(),
-                        addr_range,
-                        FunctionDeclIndex{
-                            .compile_unit_ndx = types.CompileUnitNdx.from(cu_ndx),
-                            .function_ndx = range.func_ndx,
-                        },
-                    );
-                }
-            }
-
             if (req.stop_on_entry) {
                 try self.handleSubordinateStoppedAlreadyLocked(scratch, .{
                     .pid = pid,
@@ -739,7 +656,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 try self.adapter.waitForSignalAsync(pid);
             }
 
-            log.debugf("started child process with pid: {d}, load address: 0x{x}", .{ pid, self.data.subordinate.?.load_addr });
+            log.debugf("started child process with pid: {d}, load address: 0x{x}", .{
+                pid,
+                self.data.subordinate.?.load_addr,
+            });
         }
 
         fn captureOutput(self: *Self, reader: anytype) void {
@@ -1648,6 +1568,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             return null;
         }
 
+        /// Returns the function declaration and the index of its CompileUnit for the given.
+        /// address. `addr` should NOT have the load adderss applied; it will be applied
+        /// automatically by this function.
         fn functionAtAddr(self: *Self, addr: types.Address) ?struct {
             cu_ndx: types.CompileUnitNdx,
             func: types.Function,
@@ -1656,19 +1579,23 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             defer z.end();
 
             if (self.data.subordinate) |sub| {
-                if (sub.func_ranges.?.find(addr)) |loc| {
-                    const cu = self.data.target.?.compile_units[loc.compile_unit_ndx.int()];
-                    return .{
-                        .cu_ndx = loc.compile_unit_ndx,
-                        .func = cu.functions.functions[loc.function_ndx.int()],
-                    };
+                const target_addr = addr.sub(sub.load_addr);
+                for (self.data.target.?.compile_units, 0..) |cu, cu_ndx| {
+                    if (cu.functions.findForAddress(target_addr)) |func| {
+                        return .{
+                            .cu_ndx = types.CompileUnitNdx.from(cu_ndx),
+                            .func = func,
+                        };
+                    }
                 }
             }
 
             return null;
         }
 
-        /// `addr` should not have the load address applied; it will be applied automatically by this function
+        /// Returns the source statement, source location, and the index of its CompileUnit
+        /// for the given address. `addr` should NOT have the load adderss applied;
+        /// it will be applied automatically by this function.
         fn sourceForAddress(self: *Self, addr: types.Address) ?struct {
             cu_ndx: types.CompileUnitNdx,
             stmt: types.SourceStatement,
@@ -2150,10 +2077,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const regs = try self.adapter.getRegisters(pid);
             const pc = regs.pc();
             const load_addr = self.data.subordinate.?.load_addr;
-            const stopped_at_addr = pc.sub(load_addr);
 
             const func = f: {
-                if (self.functionAtAddr(stopped_at_addr)) |func| break :f func;
+                if (self.functionAtAddr(pc)) |func| break :f func;
 
                 log.warnf(
                     "unable to calculate value for expresion \"{s}\": subordinate is stopped in an unknown function",
