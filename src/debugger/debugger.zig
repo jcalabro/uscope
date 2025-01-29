@@ -160,9 +160,20 @@ const FunctionAddrRanges = struct {
         self.map.clearAndFree(alloc);
     }
 
-    fn valid(self: Self) bool {
-        if (flags.Release) return true;
-        return self.ranges.items.len == self.map.count() and types.addressRangesAreSorted(self.ranges.items);
+    fn assertValid(self: Self) void {
+        if (comptime builtin.mode == .Debug) {
+            if (flags.Release) return true;
+
+            if (!types.addressRangesAreSorted(self.ranges.items)) {
+                for (self.ranges.items) |range| {
+                    log.debugf("addr: 0x{x} - 0x{x}", .{ range.low, range.high });
+                }
+            }
+            log.flush();
+
+            assert(self.ranges.items.len == self.map.count());
+            assert(types.addressRangesAreSorted(self.ranges.items));
+        }
     }
 
     fn add(
@@ -172,8 +183,8 @@ const FunctionAddrRanges = struct {
         decl: FunctionDeclIndex,
     ) Allocator.Error!void {
         // ensure we're in a valid state before and after
-        assert(self.valid());
-        defer assert(self.valid());
+        self.assertValid();
+        defer self.assertValid();
 
         try self.ranges.append(alloc, range);
         errdefer _ = self.ranges.popOrNull();
@@ -183,7 +194,7 @@ const FunctionAddrRanges = struct {
     }
 
     fn find(self: Self, addr: types.Address) ?FunctionDeclIndex {
-        assert(self.valid());
+        self.assertValid();
 
         if (types.sortedAddressRangesContain(self.ranges.items, addr)) |ndx| {
             if (self.map.get(ndx.int())) |res| return res;
