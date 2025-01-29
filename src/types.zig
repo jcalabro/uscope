@@ -674,7 +674,7 @@ pub const Function = struct {
 /// A type declaration within a CompileUnit
 pub const DataType = struct {
     /// The number of bytes required to store a variable of this type
-    size_bytes: u32,
+    size_bytes: u64,
 
     /// The hash of the name of the data type
     name: strings.Hash,

@@ -49,7 +49,7 @@ pub const EvaluationError = error{
 alloc: Allocator,
 pid: types.PID,
 location_expression: String,
-variable_size: u32,
+variable_size: u64,
 frame_base: types.Address,
 frame_base_location_expr: String,
 load_addr: types.Address,
