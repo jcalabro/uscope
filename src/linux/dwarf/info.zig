@@ -124,6 +124,9 @@ pub const CompileUnit = struct {
 
         const max = std.math.pow(usize, 2, 24);
         for (0..max) |die_ndx| {
+            // sometimes, compilers don't specify exit abbrev codes
+            if (self.info_r.atEOF()) break;
+
             const die_offset = self.info_r.offset();
 
             const abbrev_code = try dwarf.readULEB128(self.info_r);

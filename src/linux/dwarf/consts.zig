@@ -254,6 +254,24 @@ pub const AttributeName = enum(u32) {
     DW_AT_lo_user = 0x2000,
     DW_AT_hi_user = 0x3fff,
 
+    // SGI/MIPS extensions
+    DW_AT_MIPS_fde = 0x2001,
+    DW_AT_MIPS_loop_begin = 0x2002,
+    DW_AT_MIPS_tail_loop_begin = 0x2003,
+    DW_AT_MIPS_epilog_begin = 0x2004,
+    DW_AT_MIPS_loop_unroll_factor = 0x2005,
+    DW_AT_MIPS_software_pipeline_depth = 0x2006,
+    DW_AT_MIPS_linkage_name = 0x2007,
+    DW_AT_MIPS_stride = 0x2008,
+    DW_AT_MIPS_abstract_name = 0x2009,
+    DW_AT_MIPS_clone_origin = 0x200a,
+    DW_AT_MIPS_has_inlines = 0x200b,
+    DW_AT_MIPS_stride_byte = 0x200c,
+    DW_AT_MIPS_stride_elem = 0x200d,
+    DW_AT_MIPS_ptr_dopetype = 0x200e,
+    DW_AT_MIPS_allocatable_dopetype = 0x200f,
+    DW_AT_MIPS_assumed_shape_dopetype = 0x2010,
+
     // GNU extensions
     DW_AT_sf_names = 0x2101,
     DW_AT_src_info = 0x2102,
