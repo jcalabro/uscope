@@ -162,15 +162,6 @@ const FunctionAddrRanges = struct {
 
     fn assertValid(self: Self) void {
         if (comptime builtin.mode == .Debug) {
-            if (flags.Release) return true;
-
-            if (!types.addressRangesAreSorted(self.ranges.items)) {
-                for (self.ranges.items) |range| {
-                    log.debugf("addr: 0x{x} - 0x{x}", .{ range.low, range.high });
-                }
-            }
-            log.flush();
-
             assert(self.ranges.items.len == self.map.count());
             assert(types.addressRangesAreSorted(self.ranges.items));
         }
