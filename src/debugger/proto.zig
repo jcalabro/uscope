@@ -159,8 +159,15 @@ pub const ReceivedTextOutputResponse = struct {
 
 /// Indicates that the subordinate has paused execution
 pub const SubordinateStoppedRequest = struct {
+    /// The PID of the subordinate process/thread that was stopped
     pid: types.PID,
+
+    /// Whether or not the subordinate process exited
     exited: bool,
+
+    /// Sometimes, the subordinate received signals that stop the process but
+    /// should not stop the debugger (i.e. on Linux, window resize signals)
+    should_stop_debugger: bool = true,
 
     pub fn req(self: @This()) Request {
         return Request{ .stopped = self };

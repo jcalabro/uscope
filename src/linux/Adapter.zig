@@ -561,8 +561,18 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
             continue;
         };
 
-        // @TODO (jrc): handle status.cloned() case
         const status = WaitStatus{ .status = res.status };
+
+        var should_stop_debugger = true;
+        if (status.stopped()) {
+            const SIG = linux.SIG;
+            switch (status.stopSignal()) {
+                SIG.WINCH => should_stop_debugger = false,
+                else => {},
+            }
+        }
+
+        // @TODO (jrc): handle status.cloned() case
 
         if (status.exitStatus() == posix.SIG.USR2) {
             // a temporary pause happened, don't call back the debugger layer,
@@ -584,7 +594,8 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
                 // inform the main debugger thread that the subordinate was stopped
                 const stopped_req = proto.SubordinateStoppedRequest{
                     .pid = req.pid,
-                    .exited = status.exited() or status.killed(),
+                    .exited = status.exited() or (status.signaled() and status.terminationSignal() == 9),
+                    .should_stop_debugger = should_stop_debugger,
                 };
 
                 trace.message(@tagName(stopped_req.req()));
@@ -623,47 +634,42 @@ fn wait4(pid: types.PID, flags: u32, ru: ?*posix.rusage) !posix.WaitPidResult {
     }
 }
 
-const WaitStatus = struct {
-    const _mask = 0x7F;
-    const _core = 0x80;
-    const _exited = 0x00;
-    const _stopped = 0x7F;
-
+/// @REF (jrc): https://github.com/lattera/glibc/blob/master/bits/waitstatus.h
+///             https://github.com/lattera/glibc/blob/master/posix/sys/wait.h#L54-L63
+pub const WaitStatus = struct {
+    /// The result of the waitpid/wait4 call
     status: u32,
 
+    /// Returns true if the subordinate process exited normally
     pub fn exited(self: @This()) bool {
-        return (self.status & _mask) == _exited;
+        return (self.status & 0x7f) == 0;
     }
 
-    pub fn killed(self: @This()) bool {
-        // used in the kill -9 case
-        return (self.status & _mask) == 9;
+    /// Returns the exit code of the subordinate process if `exited()`
+    pub fn exitStatus(self: @This()) u8 {
+        return @intCast((self.status >> 8) & 0xff);
     }
 
+    /// Returns true if the subordinate process was terminated by a signal (not to be
+    /// confused with `stopped()`)
     pub fn signaled(self: @This()) bool {
-        return (self.status & _mask) != _stopped and
-            (self.status & _mask) != _exited;
+        return (self.status & 0x7f) != 0 and (self.status & 0x7f) != 0x7f;
     }
 
+    /// Returns the terminating signal of the subordinate process if `signaled()`
+    pub fn terminationSignal(self: @This()) u8 {
+        return @intCast(self.status & 0x7f);
+    }
+
+    /// Returns true if the subordinate process was stopped by a signal (not to be confused
+    /// with `signaled()`)
     pub fn stopped(self: @This()) bool {
-        return (self.status & 0xff) == _stopped;
+        return (self.status & 0xff) == 0x7f;
     }
 
-    pub fn continued(self: @This()) bool {
-        return self.status == 0xffff;
-    }
-
-    pub fn core_dumped(self: @This()) bool {
-        return (self.status & _core) != 0 and self.signaled();
-    }
-
-    pub fn cloned(self: @This()) bool {
-        const ptraceEventClone = 3;
-        return (self.status >> 8) == (posix.SIG.TRAP | ptraceEventClone);
-    }
-
-    pub fn exitStatus(self: @This()) u32 {
-        return (self.status >> 8) & 0xff;
+    /// Returns the stopping signal of the subordinate process if `stopped()`
+    pub fn stopSignal(self: @This()) u8 {
+        return @intCast((self.status >> 8) & 0xff);
     }
 };
 

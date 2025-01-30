@@ -1702,6 +1702,12 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 return;
             }
 
+            // we received a signal that we don't care about, so don't actually pause the debugger
+            if (!req.should_stop_debugger) {
+                try self.continueExecution(.{});
+                return;
+            }
+
             // we're no longer stopped (edge case)
             var registers = try self.adapter.getRegisters(req.pid);
             if (registers.pc().int() == 0) return;
