@@ -235,14 +235,18 @@ const IniEntry = struct {
 pub fn globalConfigDir(allocator: Allocator) !ArrayList(u8) {
     var dir = ArrayList(u8).init(allocator);
 
-    const home = posix.getenv("XDG_CONFIG_HOME");
-    if (home == null) {
+    // XDG_CONFIG_HOME specification: https://specifications.freedesktop.org/basedir-spec/latest/
+    if (posix.getenv("XDG_CONFIG_HOME")) |xdg_config_home| {
+        try dir.appendSlice(xdg_config_home);
+    } else if (posix.getenv("HOME")) |home| {
+        try dir.appendSlice(home);
+        try dir.appendSlice("/.config");
+    } else {
         const w = io.getStdErr().writer();
         try w.print("unable to get XDG_CONFIG_HOME environment variable\n", .{});
         return error.InvalidGlobalConfigPath;
     }
 
-    try dir.appendSlice(home.?);
     if (!mem.endsWith(u8, dir.items, "/")) try dir.append('/');
 
     return dir;
@@ -260,13 +264,13 @@ pub fn parseFiles(allocator: Allocator) !void {
 
     const project_path = ".uscope/config.ini";
     var project_fp = file.open(project_path, .{ .mode = .read_only }) catch |err| {
-        std.debug.print("unable to open project settings file \"{}\": {!}\n", .{std.zig.fmtEscapes(project_path), err});
+        std.debug.print("unable to open project settings file \"{}\": {!}\n", .{ std.zig.fmtEscapes(project_path), err });
         return err;
     };
     defer project_fp.close();
 
     const projectContents = file.mapWholeFile(project_fp) catch |err| {
-        std.debug.print("unable to open project settings file \"{}\": {!}\n", .{std.zig.fmtEscapes(project_path), err});
+        std.debug.print("unable to open project settings file \"{}\": {!}\n", .{ std.zig.fmtEscapes(project_path), err });
         return err;
     };
     defer file.munmap(projectContents);
