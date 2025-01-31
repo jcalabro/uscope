@@ -330,7 +330,7 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
 
     // start worker threads
     var threads = try ArrayList(Thread).initCapacity(opts.scratch, num_threads);
-    for (num_threads) |_| {
+    for (0..num_threads) |_| {
         const thread = try Thread.spawn(.{}, parseAndMapCompileUnits, .{
             perm_alloc,
             req_queue,
@@ -353,7 +353,7 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
     for (0..max) |cu_ndx| {
         if (offset >= opts.sections.info.contents.len) {
             // send poison pills to tell all workers to shutdown
-            for (num_threads) |_| try req_queue.put(null);
+            for (0..num_threads) |_| try req_queue.put(null);
             break;
         }
 
