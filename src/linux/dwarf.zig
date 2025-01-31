@@ -597,8 +597,15 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                         });
                     }
 
+                    const name = name: {
+                        if (try optionalAttribute(&opts, String, .DW_AT_linkage_name)) |linkage_name| {
+                            break :name try str_cache.add(linkage_name);
+                        }
+                        break :name try parseAndCacheString(&opts, .DW_AT_name, str_cache);
+                    };
+
                     try functions.append(.{
-                        .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
+                        .name = name,
                         .source_loc = try parseSourceLoc(&opts),
                         .statements = try func_statements.toOwnedSlice(),
                         .addr_ranges = func_ranges,
