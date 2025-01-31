@@ -162,9 +162,11 @@ Probably a long time (could easily be a year or more). I have a day job, and thi
 
 The absolute best thing you can do is reach out and talk debuggers so I know that there is interest in the the project. We have a [Discord](https://discord.gg/bPWC6PZPhR), and you can find my email on my personal site. I love hearing from you!
 
-Additionally, adding features, fixing bugs, and creating tests that move us further along the path towards being able to use this for day-to-day work is also apprecaited! If you're thinking about tackling a major new feature, I'd recommend reaching out first to make sure we're on the same page and effort isn't wasted going in the wrong direciton.
+Adding features, fixing bugs, and creating tests that move us further along the path towards being able to use this for day-to-day work is also apprecaited! If you're thinking about tackling a major new feature, I'd recommend reaching out first to make sure we're on the same page and effort isn't wasted going in the wrong direciton.
 
 You could also consider [sponsoring my work](https://github.com/sponsors/jcalabro). This is a very strong signal to me that I'm focused on things that matter.
+
+Additionally, please consider donating to the [Zig Software Foundation](https://ziglang.org/zsf/)!
 
 ##### 3. Will you provide pre-built binaries?
 
