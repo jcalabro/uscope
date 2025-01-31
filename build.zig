@@ -153,10 +153,10 @@ fn defineStep(b: *Build, def: stepDef) void {
         // Set up module dependencies
         //
 
-        exe.root_module.addIncludePath(.{ .cwd_relative = "libs/stb_image" });
-        exe.addCSourceFile(.{ .file = .{ .cwd_relative = "libs/stb_image/stb_image.c" } });
+        exe.root_module.addIncludePath(b.path("libs/stb_image"));
+        exe.addCSourceFile(.{ .file = b.path("libs/stb_image/stb_image.c") });
 
-        exe.root_module.addIncludePath(.{ .cwd_relative = "libs/spall" });
+        exe.root_module.addIncludePath(b.path("libs/spall"));
 
         const time_dep = b.dependency("time", .{});
         const time_mod = time_dep.module("time");
