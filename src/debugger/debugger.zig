@@ -2378,6 +2378,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try pointers.put(params.scratch, address, types.ExpressionFieldNdx.from(original_len));
 
                     try self.renderVariableValue(fields, pointers, recursive_params);
+                    assert(fields.items.len > original_len);
 
                     // set the pointer value on the new field
                     assert(fields.items.len > original_len);
