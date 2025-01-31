@@ -12,6 +12,12 @@ typedef enum TestEnum {
     THREE,
 } TestEnum ;
 
+typedef struct CircularPointer CircularPointer;
+struct CircularPointer {
+    int value;
+    CircularPointer* ptr;
+};
+
 int main() {
     char      a = 1;
     short     b = 2;
@@ -59,6 +65,14 @@ int main() {
     enum TestEnum enum_two = TWO;
     TestEnum enum_three = THREE;
 
+    // Create a circular pointer chain
+    CircularPointer* circular_a = (CircularPointer*)malloc(sizeof(CircularPointer));
+    circular_a->value = 17;
+    CircularPointer* circular_b = (CircularPointer*)malloc(sizeof(CircularPointer));
+    circular_b->value = 18;
+    circular_b->ptr = circular_a;
+    circular_a->ptr = circular_b;
+
     printf("A: %d\n", a);
     printf("B: %d\n", b); // sim:cprint stops here
     printf("C: %d\n", c);
@@ -92,4 +106,7 @@ int main() {
     printf("ENUM ONE: %d\n", enum_one);
     printf("ENUM TWO: %d\n", enum_two);
     printf("ENUM THREE: %d\n", enum_three);
+
+    printf("CIRCULAR_A: %d, %p\n", circular_a->value, circular_a->ptr);
+    printf("CIRCULAR_B: %d, %p\n", circular_b->value, circular_b->ptr);
 }

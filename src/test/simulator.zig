@@ -2127,7 +2127,7 @@ test "sim:cprint" {
     const exe_path = "assets/cprint/out";
     const cprint_main_c_hash = try fileHash(t.allocator, "assets/cprint/main.c");
 
-    const expected_output_len = 308;
+    const expected_output_len = 362;
 
     // zig fmt: off
     sim.lock()
@@ -2159,7 +2159,7 @@ test "sim:cprint" {
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = cprint_main_c_hash,
-            .line = types.SourceLine.from(63),
+            .line = types.SourceLine.from(77),
         }}}).req(),
     })
 
@@ -2195,7 +2195,7 @@ test "sim:cprint" {
                         return false;
 
                     // spot check a few fields
-                    const num_locals = 22;
+                    const num_locals = 24;
                     if (!checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") or
                         !checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") or
                         !checkeq(String, "a", paused.strings.get(paused.locals[0].expression) orelse "", "first local expression was incorrect") or
