@@ -265,7 +265,10 @@ pub fn parseFiles(allocator: Allocator) !void {
     };
     defer project_fp.close();
 
-    const projectContents = try file.mapWholeFile(project_fp);
+    const projectContents = file.mapWholeFile(project_fp) catch |err| {
+        std.debug.print("unable to open project settings file \"{}\": {!}\n", .{std.zig.fmtEscapes(project_path), err});
+        return err;
+    };
     defer file.munmap(projectContents);
 
     var global_path = try globalConfigDir(allocator);
