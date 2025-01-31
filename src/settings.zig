@@ -264,13 +264,19 @@ pub fn parseFiles(allocator: Allocator) !void {
 
     const project_path = ".uscope/config.ini";
     var project_fp = file.open(project_path, .{ .mode = .read_only }) catch |err| {
-        std.debug.print("unable to open project settings file \"{}\": {!}\n", .{ std.zig.fmtEscapes(project_path), err });
+        std.debug.print("unable to open project settings file \"{}\": {!}\n", .{
+            std.zig.fmtEscapes(project_path),
+            err,
+        });
         return err;
     };
     defer project_fp.close();
 
     const projectContents = file.mapWholeFile(project_fp) catch |err| {
-        std.debug.print("unable to open project settings file \"{}\": {!}\n", .{ std.zig.fmtEscapes(project_path), err });
+        std.debug.print("unable to open project settings file \"{}\": {!}\n", .{
+            std.zig.fmtEscapes(project_path),
+            err,
+        });
         return err;
     };
     defer file.munmap(projectContents);

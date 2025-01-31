@@ -104,7 +104,10 @@ pub fn init(alloc: Allocator, dbg: *Debugger, gui: *GUIType) !*Self {
             self,
             executableFileChanged,
         ) catch |err| {
-            std.log.warn("Unable to watch target path \"{}\": {!}", .{ std.zig.fmtEscapes(settings.settings.project.target.path), err });
+            log.warnf("unable to watch target path \"{}\": {!}", .{
+                std.zig.fmtEscapes(settings.settings.project.target.path),
+                err,
+            });
             return err;
         },
     };
