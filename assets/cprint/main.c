@@ -107,6 +107,6 @@ int main() {
     printf("ENUM TWO: %d\n", enum_two);
     printf("ENUM THREE: %d\n", enum_three);
 
-    printf("CIRCULAR_A: %d, %p\n", circular_a->value, circular_a->ptr);
-    printf("CIRCULAR_B: %d, %p\n", circular_b->value, circular_b->ptr);
+    printf("CIRCULAR_A: %d\n", circular_a->value);
+    printf("CIRCULAR_B: %d\n", circular_b->value);
 }

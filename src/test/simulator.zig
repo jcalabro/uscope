@@ -2127,7 +2127,7 @@ test "sim:cprint" {
     const exe_path = "assets/cprint/out";
     const cprint_main_c_hash = try fileHash(t.allocator, "assets/cprint/main.c");
 
-    const expected_output_len = 362;
+    const expected_output_len = 338;
 
     // zig fmt: off
     sim.lock()
@@ -2174,7 +2174,7 @@ test "sim:cprint" {
     })
     .addCondition(.{
         .max_ticks = msToTicks(2000),
-        .desc = "subordinate must have hit the breakpoint",
+        .desc = "subordinate must have hit the breakpoint and rendered its variables correctly",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 const bp = blk: {
@@ -2341,9 +2341,8 @@ test "sim:cprint" {
                     s.state.subordinate_output_mu.lock();
                     defer s.state.subordinate_output_mu.unlock();
 
-                    if (expected_output_len == s.state.subordinate_output.len) {
+                    if (checkeq(usize, expected_output_len, s.state.subordinate_output.len, "unexpected program output length"))
                         return true;
-                    }
                 }
 
                 return null;
