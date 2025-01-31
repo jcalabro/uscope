@@ -2110,7 +2110,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             };
 
             for (func.func.variables) |var_ndx| {
-                try self.renderVariableValue(&fields, .{
+                var pointers = AutoHashMapUnmanaged(types.Address, types.ExpressionFieldNdx){};
+                try self.renderVariableValue(&fields, &pointers, .{
                     .scratch = scratch,
                     .encoder = encoder,
                     .cu = &cu,
@@ -2165,6 +2166,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
         fn renderVariableValue(
             self: *Self,
             fields: *ArrayListUnmanaged(types.ExpressionRenderField),
+            pointers: *AutoHashMapUnmanaged(types.Address, types.ExpressionFieldNdx),
             params: RenderVariableParams,
         ) !void {
             const z = trace.zone(@src());
@@ -2275,7 +2277,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         recursive_params.variable_value_buf = item_buf;
                         recursive_params.variable.data_type = item_data_type;
 
-                        try self.renderVariableValue(fields, recursive_params);
+                        try self.renderVariableValue(fields, pointers, recursive_params);
                         try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(fields.items.len - 1));
                     }
                 }
@@ -2314,7 +2316,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     var recursive_params = params;
                     recursive_params.variable.data_type = typedef.data_type.?;
 
-                    try self.renderVariableValue(fields, recursive_params);
+                    try self.renderVariableValue(fields, pointers, recursive_params);
                 },
 
                 .pointer => {
@@ -2326,6 +2328,13 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                             return error.InvalidPointerBufferLength;
                         },
                     };
+
+                    // check if we've seen this pointer before for this variable
+                    if (pointers.get(address)) |field_ndx| {
+                        const original_pointer_field = fields.items[field_ndx.int()];
+                        try fields.append(params.scratch, original_pointer_field);
+                        return;
+                    }
 
                     // the pointer is opaque, so we can't do anything other than render
                     // its address, which may still be useful to the user
@@ -2359,10 +2368,16 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     // recurse using the base data type
                     var recursive_params = params;
                     recursive_params.variable_value_buf = ptr_buf;
+                    recursive_params.buf_offset = 0;
                     recursive_params.variable.data_type = ptr_data_type_ndx;
 
                     const original_len = fields.items.len;
-                    try self.renderVariableValue(fields, recursive_params);
+
+                    // store the pointer value in case we see it again later, thus avoiding
+                    // potential stack overflows with circular pointer chains
+                    try pointers.put(params.scratch, address, types.ExpressionFieldNdx.from(original_len));
+
+                    try self.renderVariableValue(fields, pointers, recursive_params);
 
                     // set the pointer value on the new field
                     assert(fields.items.len > original_len);
@@ -2411,7 +2426,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         recursive_params.variable.data_type = arr.element_type;
                         recursive_params.buf_offset = ndx * element_data_type.size_bytes;
 
-                        try self.renderVariableValue(fields, recursive_params);
+                        try self.renderVariableValue(fields, pointers, recursive_params);
                         const member_ndx = fields.items.len - 1;
                         try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(member_ndx));
                     }
@@ -2436,7 +2451,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         recursive_params.variable.data_type = member.data_type;
                         recursive_params.buf_offset = member.offset_bytes;
 
-                        try self.renderVariableValue(fields, recursive_params);
+                        try self.renderVariableValue(fields, pointers, recursive_params);
                         const member_ndx = fields.items.len - 1;
 
                         // cache and assign the struct member's variable name
