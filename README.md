@@ -172,7 +172,7 @@ Once the project is further along, yes, but not now.
 
 ##### 4. Why are you building a library for debugging, not just a new debugger? And why not just use DAP?
 
-There are a wide variety of use-cases for an introspection library outside of traditional debuggers (i.e. reverse engineering tools, novel forms of debuggers, etc.). By making this system reusable and nicely packaged, it encourages the entire ecosystem of debugging tools to improve, not just this one project.
+There are a wide variety of use-cases for an introspection library outside of traditional debuggers (i.e. reverse engineering tools, novel forms of debuggers, etc.). By making this system reusable and nicely packaged, it encourages the entire ecosystem of debugging tools to improve, not just this one project. That being said, we are focusing intently on the traditional debugger first, and then once the core of the system is solid, we will make it more intentionally accessible to other consumers.
 
 Regarding [DAP](https://microsoft.github.io/debug-adapter-protocol), This toolchain intends to be lower-level and broader in scope than something like DAP would enable. I do not think DAP is very good, but lots of editors out there already speak it, so we're partially stuck with it. However, by creating an introspection library, we easily create a separate DAP-compatible executable in separate from the native GUI we're building so that way neither is bloated by the other.
 
