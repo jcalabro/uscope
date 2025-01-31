@@ -98,12 +98,15 @@ pub fn init(alloc: Allocator, dbg: *Debugger, gui: *GUIType) !*Self {
             self.perm_alloc,
             settings.settings.global.display.output_bytes,
         ),
-        .watcher = try Watcher.init(
+        .watcher = Watcher.init(
             alloc,
             settings.settings.project.target.path,
             self,
             executableFileChanged,
-        ),
+        ) catch |err| {
+            std.log.warn("Unable to watch target path \"{}\": {!}", .{ std.zig.fmtEscapes(settings.settings.project.target.path), err });
+            return err;
+        },
     };
 
     self.scratch_alloc = self.scratch_arena.allocator();
