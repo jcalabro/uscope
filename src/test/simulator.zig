@@ -2115,6 +2115,9 @@ test "sim:step_in_then_over_then_out" {
     try sim.run(@src().fn_name);
 }
 
+const cprint_my_func_breakpoint_line = types.SourceLine.from(24);
+const cprint_main_breakpoint_line = types.SourceLine.from(85);
+
 test "sim:cprint" {
     //
     // Tests the ability to render various variable values in a C program that prints out
@@ -2127,7 +2130,7 @@ test "sim:cprint" {
     const exe_path = "assets/cprint/out";
     const cprint_main_c_hash = try fileHash(t.allocator, "assets/cprint/main.c");
 
-    const expected_output_len = 338;
+    const expected_output_len = 365;
 
     // zig fmt: off
     sim.lock()
@@ -2154,16 +2157,24 @@ test "sim:cprint" {
         }.cond,
     })
 
-    // set a breakpoint
+    // set a breakpoint in my_func()
     .addCommand(.{
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = cprint_main_c_hash,
-            .line = types.SourceLine.from(77),
+            .line = cprint_my_func_breakpoint_line,
         }}}).req(),
     })
 
-    // launch subordinate and ensure it hits the breakpoint
+    // set a breakpoint in main()
+    .addCommand(.{
+        .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
+            .file_hash = cprint_main_c_hash,
+            .line = cprint_main_breakpoint_line,
+        }}}).req(),
+    })
+
+    // launch subordinate and ensure it hits the breakpoint in my_func()
     .addCommand(.{
         .send_after_ticks = msToTicks(100),
         .req = (proto.LaunchSubordinateRequest{
@@ -2174,7 +2185,7 @@ test "sim:cprint" {
     })
     .addCondition(.{
         .max_ticks = msToTicks(2000),
-        .desc = "subordinate must have hit the breakpoint and rendered its variables correctly",
+        .desc = "subordinate must have hit the breakpoint in my_func and rendered its variables correctly",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 const bp = blk: {
@@ -2183,8 +2194,73 @@ test "sim:cprint" {
 
                     if (s.dbg.data.subordinate == null) return null;
 
-                    if (s.dbg.data.state.breakpoints.items.len == 0) return null;
-                    break :blk s.dbg.data.state.breakpoints.items[0];
+                    for (s.dbg.data.state.breakpoints.items) |bp| {
+                        if (bp.source_location.?.line.eql(cprint_my_func_breakpoint_line)) {
+                            break :blk bp;
+                        }
+                    }
+                    return null;
+                };
+
+                if (s.state.getStateSnapshot(s.arena.allocator())) |ss| {
+                    if (ss.state.paused == null) return null;
+                    const paused = ss.state.paused.?;
+
+                    if (!checkeq(types.Address, bp.addr, paused.registers.pc(), "breakpoint addr must equal PC"))
+                        return false;
+
+                    const num_locals = 3;
+                    if (!checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") or
+                        !checkeq(String, "param", paused.strings.get(paused.locals[0].expression) orelse "", "first local expression was incorrect") or
+                        !checkeq(String, "ts2", paused.strings.get(paused.locals[1].expression) orelse "", "second local expression was incorrect") or
+                        !checkeq(String, "res", paused.strings.get(paused.locals[2].expression) orelse "", "third local expression was incorrect")) {
+                        return false;
+                    }
+
+                    {
+                        // spot check a field
+                        const param = paused.getLocalByName("param") orelse return falseWithErr("unable to get local \"param\"", .{});
+                        const data_hash = param.fields[0].data orelse return falseWithErr("data not set on variable \"param\"", .{});
+                        const val = mem.readVarInt(u64, paused.getString(data_hash), .little);
+                        if (!checkeq(u64, 19, val, "unexpected render value for field \"param\"")) {
+                            return false;
+                        }
+                    }
+
+                    return true;
+                } else |err| {
+                    log.errf("unable to get state snapshot: {!}", .{err});
+                    return false;
+                }
+
+                return null;
+            }
+        }.cond,
+    })
+
+    // continue execution and make sure it hits the breakpoint in main()
+    .addCommand(.{
+        .send_after_ticks = 1,
+        .req = (proto.ContinueRequest{}).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100),
+        .desc = "subordinate must have hit the breakpoint in main and rendered its variables correctly",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                const bp = blk: {
+                    s.dbg.data.mu.lock();
+                    defer s.dbg.data.mu.unlock();
+
+                    if (s.dbg.data.subordinate == null) return null;
+
+                    for (s.dbg.data.state.breakpoints.items) |bp| {
+                        if (bp.source_location.?.line.eql(cprint_main_breakpoint_line)) {
+                            break :blk bp;
+                        }
+                    }
+                    return null;
                 };
 
                 if (s.state.getStateSnapshot(s.arena.allocator())) |ss| {
@@ -2195,9 +2271,8 @@ test "sim:cprint" {
                         return false;
 
                     // spot check a few fields
-                    const num_locals = 24;
+                    const num_locals = 25;
                     if (!checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") or
-                        !checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") or
                         !checkeq(String, "a", paused.strings.get(paused.locals[0].expression) orelse "", "first local expression was incorrect") or
                         !checkeq(String, "b", paused.strings.get(paused.locals[1].expression) orelse "", "second local expression was incorrect")) {
                         return false;

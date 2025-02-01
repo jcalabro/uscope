@@ -3,5 +3,5 @@
 ITERATIONS=${1:-100}
 echo "running tests on the existing binary $ITERATIONS times"
 for I in $( seq 0 $ITERATIONS); do
-  ./zig-out/bin/ms-tests || exit 1
+  ./zig-out/bin/uscope-tests || exit 1
 done

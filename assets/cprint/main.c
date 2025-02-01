@@ -20,7 +20,8 @@ struct CircularPointer {
 
 int my_func(int param, TestStruct* ts2) {
     printf("IN my_func\n");
-    return param + ts2->B;
+    int res = param + ts2->B;
+    return res; // sim:cprint stops here
 }
 
 int main() {
