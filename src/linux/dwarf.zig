@@ -632,7 +632,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                     });
                 },
 
-                .DW_TAG_variable => {
+                .DW_TAG_variable, .DW_TAG_formal_parameter => {
                     if (try optionalAttribute(&opts, Offset, .DW_AT_type)) |type_offset| {
                         try variable_types.append(.{
                             .type_offset = type_offset,

@@ -18,6 +18,11 @@ struct CircularPointer {
     CircularPointer* ptr;
 };
 
+int my_func(int param, TestStruct* ts2) {
+    printf("IN my_func\n");
+    return param + ts2->B;
+}
+
 int main() {
     char      a = 1;
     short     b = 2;
@@ -73,6 +78,8 @@ int main() {
     circular_b->ptr = circular_a;
     circular_a->ptr = circular_b;
 
+    int func_result = my_func(19, ts2);
+
     printf("A: %d\n", a);
     printf("B: %d\n", b); // sim:cprint stops here
     printf("C: %d\n", c);
@@ -109,4 +116,6 @@ int main() {
 
     printf("CIRCULAR_A: %d\n", circular_a->value);
     printf("CIRCULAR_B: %d\n", circular_b->value);
+
+    printf("FUNC_RESULT: %d\n", func_result);
 }
