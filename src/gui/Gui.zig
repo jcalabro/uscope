@@ -42,7 +42,7 @@ const icon_png = @embedFile("images/icon.png");
 pub const MaxFPS: u64 = 60;
 const FrameMicros: u64 = @divFloor(time.us_per_s, MaxFPS);
 
-const Self = @This();
+const Gui = @This();
 
 perm_alloc: Allocator,
 
@@ -58,7 +58,7 @@ main_dockspace_id: zui.ID = undefined,
 
 state: *State = undefined,
 
-fn init(alloc: Allocator, dbg: *Debugger) !*Self {
+fn init(alloc: Allocator, dbg: *Debugger) !*Gui {
     const z = trace.zoneN(@src(), "GUI.init");
     defer z.end();
 
@@ -203,10 +203,10 @@ fn init(alloc: Allocator, dbg: *Debugger) !*Self {
 
     _ = window.setKeyCallback(Input.keyCallback);
 
-    const self = try alloc.create(Self);
+    const self = try alloc.create(Gui);
     errdefer alloc.destroy(self);
 
-    self.* = Self{
+    self.* = Gui{
         .perm_alloc = alloc,
         .window = window,
     };
@@ -223,7 +223,7 @@ fn init(alloc: Allocator, dbg: *Debugger) !*Self {
     return self;
 }
 
-fn deinit(self: *Self) void {
+fn deinit(self: *Gui) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -308,7 +308,7 @@ pub fn frameRateLimit(last_frame_render_micros: u64) u64 {
     return @intCast(time.microTimestamp());
 }
 
-fn render(self: *Self) void {
+fn render(self: *Gui) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -316,7 +316,7 @@ fn render(self: *Self) void {
     self.window.swapBuffers();
 }
 
-fn setWindowSize(self: *Self, window: *glfw.Window) void {
+fn setWindowSize(self: *Gui, window: *glfw.Window) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -347,7 +347,7 @@ fn windowResizedCallback(
     const z = trace.zone(@src());
     defer z.end();
 
-    const gui_null = window.getUserPointer(Self);
+    const gui_null = window.getUserPointer(Gui);
     assert(gui_null != null);
     gui_null.?.setWindowSize(window);
 }
@@ -360,13 +360,13 @@ pub const WindowSize = struct {
     h: f32,
 };
 
-pub fn getSingleFocusWindowSize(self: Self) WindowSize {
+pub fn getSingleFocusWindowSize(self: Gui) WindowSize {
     return self.getSingleFocusWindowSizeWithScale(0.95);
 }
 
 /// returns the width and height of a window that is almost full-screen,
 /// but has a bit of border padding around the edges
-pub fn getSingleFocusWindowSizeWithScale(self: Self, scale: f32) WindowSize {
+pub fn getSingleFocusWindowSizeWithScale(self: Gui, scale: f32) WindowSize {
     assert(scale >= 0);
     assert(scale <= 1);
 
@@ -388,11 +388,11 @@ pub fn getSingleFocusWindowSizeWithScale(self: Self, scale: f32) WindowSize {
     };
 }
 
-pub fn getMainDockspaceID(self: Self) zui.ID {
+pub fn getMainDockspaceID(self: Gui) zui.ID {
     return self.main_dockspace_id;
 }
 
-fn drawMenuBar(self: *Self) ?State.View {
+fn drawMenuBar(self: *Gui) ?State.View {
     const z = trace.zone(@src());
     defer z.end();
 

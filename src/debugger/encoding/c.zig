@@ -8,12 +8,10 @@ const encoding = @import("encoding.zig");
 const strings = @import("../../strings.zig");
 const types = @import("../../types.zig");
 
-const Self = @This();
-
 const endian = builtin.cpu.arch.endian();
 
 pub fn encoder() encoding.Encoding {
-    return encoding.Encoding{
+    return .{
         .isString = isString,
         .renderString = renderString,
         .isSlice = isSlice,

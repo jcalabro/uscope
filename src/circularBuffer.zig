@@ -14,7 +14,7 @@ pub fn CircularBuffer(comptime T: type) type {
         len: usize = 0,
 
         pub fn init(alloc: Allocator, size: usize) !Self {
-            return Self{ .items = try alloc.alloc(T, size) };
+            return .{ .items = try alloc.alloc(T, size) };
         }
 
         pub fn deinit(self: *Self, alloc: Allocator) void {

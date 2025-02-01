@@ -585,7 +585,7 @@ pub const StyleCol = enum(u32) {
     nav_windowing_dim_bg,
     modal_window_dim_bg,
 
-    pub fn int(self: @This()) usize {
+    pub fn int(self: StyleCol) usize {
         return @intFromEnum(self);
     }
 };

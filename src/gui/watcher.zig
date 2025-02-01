@@ -18,8 +18,6 @@ pub const Watcher = switch (builtin.os.tag) {
 };
 
 const LinuxWatcher = struct {
-    const Self = @This();
-
     const IN = std.os.linux.IN;
     const posix = std.posix;
 
@@ -36,9 +34,9 @@ const LinuxWatcher = struct {
         fpath: []const u8,
         state: *State,
         callback: *const fn (*State) void,
-    ) !*Self {
-        const self = try alloc.create(Self);
-        self.* = Self{
+    ) !*LinuxWatcher {
+        const self = try alloc.create(LinuxWatcher);
+        self.* = LinuxWatcher{
             .fpath = try safe.copySlice(u8, alloc, fpath),
             .state = state,
             .callback = callback,
@@ -55,18 +53,18 @@ const LinuxWatcher = struct {
         return self;
     }
 
-    pub fn deinit(self: *Self, alloc: Allocator) void {
+    pub fn deinit(self: *LinuxWatcher, alloc: Allocator) void {
         // @TODO (jrc): stop background thread
         alloc.free(self.fpath);
         alloc.destroy(self);
     }
 
-    fn setupWatch(self: *Self) !void {
+    fn setupWatch(self: *LinuxWatcher) !void {
         self.ifd = try posix.inotify_init1(IN.NONBLOCK);
         self.wd = try posix.inotify_add_watch(self.ifd, self.fpath, IN.CLOSE_WRITE);
     }
 
-    fn pollEvents(self: *Self) void {
+    fn pollEvents(self: *LinuxWatcher) void {
         trace.initThread();
         defer trace.deinitThread();
 

@@ -5,7 +5,7 @@ const MyStruct = struct {
     field_a: i32 = 123,
     field_b: []const u8 = "this is field_b",
 
-    fn print(self: @This(), msg: []const u8) void {
+    fn print(self: MyStruct, msg: []const u8) void {
         std.debug.print(
             "{s}: .{{ .field_a = {}, .field_b = \"{s}\"}}\n",
             .{ msg, self.field_a, self.field_b },

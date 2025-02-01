@@ -256,9 +256,7 @@ pub const HeaderData = struct {
     // the list of section headers and the data of each section
     sections: ArrayList(Section) = undefined,
 
-    const Self = *@This();
-
-    fn sectionHeaderByName(self: Self, name: String) ?Section {
+    fn sectionHeaderByName(self: *HeaderData, name: String) ?Section {
         for (self.sections.items) |section| {
             if (strings.eql(section.name, name)) {
                 return section;

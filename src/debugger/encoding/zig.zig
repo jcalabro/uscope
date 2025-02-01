@@ -14,8 +14,6 @@ const types = @import("../../types.zig");
 
 const log = logging.Logger.init(logging.Region.Debugger);
 
-const Self = @This();
-
 const endian = builtin.cpu.arch.endian();
 
 pub fn encoder() encoding.Encoding {

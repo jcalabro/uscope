@@ -45,15 +45,15 @@ pub const Version = enum(u4) {
     four = 4,
     five = 5,
 
-    pub fn int(self: @This()) u8 {
+    pub fn int(self: Version) u8 {
         return @intFromEnum(self);
     }
 
-    pub fn isLessThan(self: @This(), version: @This()) bool {
+    pub fn isLessThan(self: Version, version: Version) bool {
         return @intFromEnum(self) < @intFromEnum(version);
     }
 
-    pub fn isAtLeast(self: @This(), version: @This()) bool {
+    pub fn isAtLeast(self: Version, version: Version) bool {
         return @intFromEnum(self) >= @intFromEnum(version);
     }
 };

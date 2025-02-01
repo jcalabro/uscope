@@ -24,11 +24,11 @@ pub fn NumericType(comptime T: type) type {
 
         _,
 
-        pub fn from(i: @typeInfo(Self).@"enum".tag_type) Self {
+        pub fn from(i: T) Self {
             return @enumFromInt(i);
         }
 
-        pub fn int(self: Self) @typeInfo(Self).@"enum".tag_type {
+        pub fn int(self: Self) T {
             return @intFromEnum(self);
         }
 
@@ -80,11 +80,11 @@ pub const AddressSize = enum(u4) {
     four = 4,
     eight = 8,
 
-    pub fn bytes(self: @This()) u8 {
+    pub fn bytes(self: AddressSize) u8 {
         return @intFromEnum(self);
     }
 
-    pub fn bits(self: @This()) u8 {
+    pub fn bits(self: AddressSize) u8 {
         return self.bytes() * 8;
     }
 };
@@ -92,13 +92,11 @@ pub const AddressSize = enum(u4) {
 /// Represents a segment of virtual memory contained between the low and
 /// high addresses. A range is contained in [low,high).
 pub const AddressRange = struct {
-    const Self = @This();
-
     low: Address,
     high: Address,
 
     /// Returns true if addr falls in the range of [low, high)
-    pub fn contains(self: Self, addr: Address) bool {
+    pub fn contains(self: AddressRange, addr: Address) bool {
         return addr.int() >= self.low.int() and addr.int() < self.high.int();
     }
 };
@@ -179,8 +177,6 @@ test "addr range contains" {
 /// Target contains various data related to the debug symbols of a subordinate process. All data
 /// is loaded at once, then never again modified until the next time we do a full load.
 pub const Target = struct {
-    const Self = @This();
-
     const Flags = packed struct {
         /// Indicates whether or not the target is a position independent executable
         pie: bool,
@@ -198,7 +194,7 @@ pub const Target = struct {
 
     /// A platform-specific implementation of a stack unwinder
     unwinder: switch (builtin.os.tag) {
-        .linux => @import("linux/dwarf/frame.zig").CIEList,
+        .linux => @import("linux/dwarf/frame.zig").CieList,
         else => @compileError("build target not supported"),
     },
 
@@ -208,7 +204,7 @@ pub const Target = struct {
 
     /// Finds and returns a pointer to the CompileUnit that contains the given address. This function
     /// does not have knowledge of the subordinate's load address for PIE binaries.
-    pub fn compileUnitForAddr(self: Self, addr: Address) ?CompileUnit {
+    pub fn compileUnitForAddr(self: Target, addr: Address) ?CompileUnit {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -231,8 +227,6 @@ pub const TypeNdx = NumericType(usize);
 
 /// The result of loading debug information for a single CompileUnit from the binary on disk
 pub const CompileUnit = struct {
-    const Self = @This();
-
     pub const Functions = struct {
         pub const Range = struct {
             /// A range contained within this function's body
@@ -240,7 +234,7 @@ pub const CompileUnit = struct {
             /// The index of the Function in the CompileUnit.Functions.functions array
             func_ndx: FunctionNdx,
 
-            fn contains(self: @This(), addr: Address) bool {
+            fn contains(self: Range, addr: Address) bool {
                 return self.range.contains(addr);
             }
         };
@@ -254,7 +248,7 @@ pub const CompileUnit = struct {
         /// array. These ranges are not sorted.
         ranges: []const Range,
 
-        pub fn assertValid(self: @This()) void {
+        pub fn assertValid(self: Functions) void {
             if (comptime builtin.mode == .Debug) {
                 // ensure all inline function indices are in range
                 for (self.functions) |func| {
@@ -273,7 +267,7 @@ pub const CompileUnit = struct {
         /// Attempts to find a function whose body contains `addr` in any of the function
         /// contained within this compile unit. Returns null if the address is not found
         /// in any address ranges.
-        pub fn findForAddress(self: @This(), addr: Address) ?Function {
+        pub fn findForAddress(self: Functions, addr: Address) ?Function {
             const z = trace.zone(@src());
             defer z.end();
 
@@ -317,12 +311,12 @@ pub const CompileUnit = struct {
     variables: []const Variable,
 
     /// Returns true if there is an address range in this compile unit that contains `addr`
-    pub fn containsAddress(self: Self, addr: Address) bool {
+    pub fn containsAddress(self: CompileUnit, addr: Address) bool {
         return addressRangesContain(self.ranges, addr) != null;
     }
 
     /// Copies to `dst` from `src`. Caller owns returned memory.
-    pub fn copyFrom(dst: *Self, alloc: Allocator, src: Self) Allocator.Error!void {
+    pub fn copyFrom(dst: *CompileUnit, alloc: Allocator, src: CompileUnit) Allocator.Error!void {
         const z = trace.zoneN(@src(), "copy compile unit");
         defer z.end();
 
@@ -476,8 +470,6 @@ pub const SourceLine = NumericType(u64);
 
 /// Contains information pertaining to a single file of source code
 pub const SourceFile = struct {
-    const Self = @This();
-
     /// Uniquely identifies the aboslute path of this file
     file_hash: file.Hash,
 
@@ -496,8 +488,6 @@ pub const SourceStatement = struct {
 
 /// Identifies a location in a file of source code
 pub const SourceLocation = struct {
-    const Self = @This();
-
     /// The hash of the absolute path of this source file
     file_hash: file.Hash,
 
@@ -509,7 +499,7 @@ pub const SourceLocation = struct {
     column: ?usize = null,
 
     /// Checks whether two SourceLocations are referring to the same line of code
-    pub fn eql(a: Self, b: Self) bool {
+    pub fn eql(a: SourceLocation, b: SourceLocation) bool {
         if (a.file_hash != b.file_hash or a.line != b.line) return false;
         if (a.column == null or b.column == null) return true;
         return a.column.? == b.column.?;
@@ -528,7 +518,7 @@ pub const Language = enum(u8) {
     Jai,
     Assembly,
 
-    pub fn fromPath(fpath: String) @This() {
+    pub fn fromPath(fpath: String) Language {
         const ext = std.fs.path.extension(fpath);
 
         if (strings.eql(ext, ".c")) return .C;
@@ -580,8 +570,6 @@ pub const Language = enum(u8) {
 
 /// Contains data for a function declaration and its body in the program text
 pub const Function = struct {
-    const Self = @This();
-
     const PlatformData = switch (builtin.os.tag) {
         .linux => struct {
             /// @DWARF: The instructions to run before executing
@@ -615,7 +603,7 @@ pub const Function = struct {
     platform_data: PlatformData,
 
     /// Free's all data for the given Function
-    pub fn deinit(self: Self, alloc: Allocator) void {
+    pub fn deinit(self: Function, alloc: Allocator) void {
         alloc.free(self.statements);
         alloc.free(self.addr_ranges);
         alloc.free(self.inlined_function_indices);
@@ -637,8 +625,6 @@ pub const DataType = struct {
 
 /// One of the many forms a variable could take
 pub const DataTypeForm = union(enum) {
-    const Self = @This();
-
     unknown: UnknownType,
     primitive: PrimitiveType,
     pointer: PointerType,
@@ -797,8 +783,6 @@ pub const BID = NumericType(u64);
 /// subordinate, we set all the breakpoints in that thread's PID and record each as
 /// a new ThreadBreakpoint.
 pub const Breakpoint = struct {
-    const Self = @This();
-
     pub const Flags = packed struct {
         /// Whether or not this breakpoint has been enabled/disabled by the user
         active: bool = true,
@@ -845,7 +829,7 @@ pub const Breakpoint = struct {
     max_stack_frames: ?usize = null,
 
     /// For use with std.sort
-    pub fn sort(_: void, a: Self, b: Self) bool {
+    pub fn sort(_: void, a: Breakpoint, b: Breakpoint) bool {
         return a.bid.int() < b.bid.int();
     }
 };
@@ -885,8 +869,6 @@ pub const StateSnapshot = struct {
 /// is sent from the debugger thread to the UI thread whenever the subordinate stops, even
 /// if it's not stopped at a breakpoint or a line of source code we know about.
 pub const PauseData = struct {
-    const Self = @This();
-
     /// the PID of the thread on which we're stopped
     pid: PID,
 
@@ -918,7 +900,7 @@ pub const PauseData = struct {
     /// The string intern pool. Must be free'd each time PauseData is free'd.
     strings: *strings.Cache,
 
-    pub fn deinit(self: Self, alloc: Allocator) void {
+    pub fn deinit(self: PauseData, alloc: Allocator) void {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -931,7 +913,7 @@ pub const PauseData = struct {
     }
 
     /// Does a full, deep copy of all data. Caller owns returned memory.
-    pub fn copy(self: Self, alloc: Allocator) Allocator.Error!Self {
+    pub fn copy(self: PauseData, alloc: Allocator) Allocator.Error!PauseData {
         const z = trace.zoneN(@src(), "copy PauseData");
         defer z.end();
 
@@ -956,7 +938,7 @@ pub const PauseData = struct {
 
         const strs = try self.strings.copy(arena_alloc);
 
-        return Self{
+        return .{
             .pid = self.pid,
             .registers = self.registers,
             .source_location = self.source_location,
@@ -971,12 +953,12 @@ pub const PauseData = struct {
     }
 
     /// Looks up a string in the string intern table
-    pub fn getString(self: Self, hash: strings.Hash) String {
+    pub fn getString(self: PauseData, hash: strings.Hash) String {
         return self.strings.get(hash) orelse Unknown;
     }
 
     /// Looks up a local variable by name
-    pub fn getLocalByName(self: Self, name: String) ?ExpressionResult {
+    pub fn getLocalByName(self: PauseData, name: String) ?ExpressionResult {
         for (self.locals) |local| {
             if (self.strings.get(local.expression)) |local_name| {
                 if (strings.eql(name, local_name)) return local;
@@ -1020,8 +1002,6 @@ pub const ExpressionFieldNdx = NumericType(usize);
 
 /// A view of a single expression that should be rendered
 pub const ExpressionResult = struct {
-    const Self = @This();
-
     /// The user-provided expresson, or an auto-discovered local variable name
     expression: strings.Hash,
 
@@ -1030,11 +1010,11 @@ pub const ExpressionResult = struct {
     /// the array container, and every subsequent item is each int instance.
     fields: []const ExpressionRenderField,
 
-    fn deinit(self: Self, alloc: Allocator) void {
+    fn deinit(self: ExpressionResult, alloc: Allocator) void {
         for (self.fields) |f| f.deinit(alloc);
     }
 
-    fn copy(src: Self, alloc: Allocator) Allocator.Error!Self {
+    fn copy(src: ExpressionResult, alloc: Allocator) Allocator.Error!ExpressionResult {
         var fields = ArrayListUnmanaged(ExpressionRenderField){};
         errdefer {
             for (fields.items) |f| f.deinit(alloc);
@@ -1080,7 +1060,7 @@ pub const ExpressionRenderField = struct {
     /// The name of the variable or member to be displayed (if we are rendering a local variable)
     name: ?strings.Hash,
 
-    fn deinit(self: @This(), alloc: Allocator) void {
+    fn deinit(self: ExpressionRenderField, alloc: Allocator) void {
         switch (self.encoding) {
             .array => |arr| alloc.free(arr.items),
             .@"struct" => |s| alloc.free(s.members),

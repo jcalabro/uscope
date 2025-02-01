@@ -43,8 +43,6 @@ pub const Debugger = DebuggerType(Adapter);
 /// instance, a user may set breakpoints even if the subordinate is not running, so store them
 /// in this struct.
 const State = struct {
-    const Self = @This();
-
     shutdown_wg: WaitGroup = .{},
     shutting_down: atomic.Value(bool) = atomic.Value(bool).init(false),
 
@@ -58,25 +56,25 @@ const State = struct {
     /// The address the user would like to display in the memory viewer window
     hex_window_address: ?types.Address = null,
 
-    fn init(alloc: Allocator) !Self {
-        return Self{
+    fn init(alloc: Allocator) !State {
+        return .{
             .strings = try strings.Cache.init(alloc),
         };
     }
 
-    fn deinit(self: *Self, alloc: Allocator) void {
+    fn deinit(self: *State, alloc: Allocator) void {
         self.breakpoints.deinit(alloc);
 
         self.clearAndFreeWatchExpressions(alloc);
         self.watch_expressions.deinit(alloc);
     }
 
-    fn nextBreakpointID(self: *Self) types.BID {
+    fn nextBreakpointID(self: *State) types.BID {
         return types.BID.from(self.max_breakpoint_id.fetchAdd(1, .seq_cst));
     }
 
     /// Takes a copy of `expression` in to `alloc`-owned memory
-    fn addWatchExpression(self: *Self, alloc: Allocator, expression: String) Allocator.Error!void {
+    fn addWatchExpression(self: *State, alloc: Allocator, expression: String) Allocator.Error!void {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -88,7 +86,7 @@ const State = struct {
 
     /// Frees and resets all watch expressions. After this operation, self.watch_expressions
     /// will have zero items and will be ready to use.
-    fn clearAndFreeWatchExpressions(self: *Self, alloc: Allocator) void {
+    fn clearAndFreeWatchExpressions(self: *State, alloc: Allocator) void {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -101,8 +99,6 @@ const State = struct {
 /// may have more than one thread, and thus more than one PID). This data lives for the lifetime
 /// of the subordinate.
 const Subordinate = struct {
-    const Self = @This();
-
     /// The subordinate process. This is essentially a full fork of the zig stdlib for subprocess
     /// management, but modified to support calling PTRACE_TRACEME before we exec().
     child: Child,
@@ -125,14 +121,14 @@ const Subordinate = struct {
     can_use_frame_pointer_stack_unwinding: bool = false,
     has_checked_for_frame_pointer_stack_unwinding: bool = false,
 
-    fn init(alloc: Allocator, child: Child) Self {
+    fn init(alloc: Allocator, child: Child) Subordinate {
         return .{
             .child = child,
             .paused_arena = ArenaAllocator.init(alloc),
         };
     }
 
-    fn clearAndFreePauseData(self: *Self) void {
+    fn clearAndFreePauseData(self: *Subordinate) void {
         _ = self.paused_arena.reset(.free_all);
         self.paused = null;
     }
@@ -149,8 +145,6 @@ const FunctionDeclIndex = struct {
 /// their data is highly coupled, and we require that operations on that data to
 /// be atomic, or we quickly run in to bugs.
 const Data = struct {
-    const Self = @This();
-
     /// This lock is required to be acquired to access any of the fields in this struct
     mu: Mutex = .{},
 
@@ -167,15 +161,15 @@ const Data = struct {
     /// Stores data on the currently active child process, if any
     subordinate: ?Subordinate = null,
 
-    fn init(tsa: *ThreadSafeAllocator) !Self {
-        return Self{
+    fn init(tsa: *ThreadSafeAllocator) !Data {
+        return .{
             .state = try State.init(tsa.allocator()),
             .target_arena = ArenaAllocator.init(tsa.allocator()),
             .subordinate_arena = ArenaAllocator.init(tsa.allocator()),
         };
     }
 
-    fn deinit(self: *Self, alloc: Allocator) void {
+    fn deinit(self: *Data, alloc: Allocator) void {
         if (self.subordinate) |*sub| {
             sub.clearAndFreePauseData();
         }
@@ -2099,8 +2093,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const cu = self.data.target.?.compile_units[func.cu_ndx.int()];
 
             const encoder = switch (cu.language) {
-                .C => @import("encoding/C.zig").encoder(),
-                .Zig => @import("encoding/Zig.zig").encoder(),
+                .C => @import("encoding/c.zig").encoder(),
+                .Zig => @import("encoding/zig.zig").encoder(),
                 else => return error.LanguageUnsupported,
             };
 

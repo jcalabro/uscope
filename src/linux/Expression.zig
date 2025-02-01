@@ -36,9 +36,9 @@ const PeekFunc = fn (
 ) EvaluationError!void;
 
 const CalcFunc = fn (a: i64, b: i64) i64;
-const CondFunc = fn (self: *Self) EvaluationError!bool;
+const CondFunc = fn (self: *Expression) EvaluationError!bool;
 
-const Self = @This();
+const Expression = @This();
 
 pub const EvaluationError = error{
     InvalidLocationExpression,
@@ -59,7 +59,7 @@ stack: ArrayList(String) = undefined,
 reader: Reader = undefined,
 
 /// Passed allocator must be a scratch arena, and caller owns returned memory.
-pub fn evaluate(state: *Self, peek_data: PeekFunc) EvaluationError!String {
+pub fn evaluate(state: *Expression, peek_data: PeekFunc) EvaluationError!String {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -80,7 +80,7 @@ pub fn evaluate(state: *Self, peek_data: PeekFunc) EvaluationError!String {
     return try state.runEvalProgram(peek_data);
 }
 
-fn runEvalProgram(state: *Self, peek_data: PeekFunc) EvaluationError!String {
+fn runEvalProgram(state: *Expression, peek_data: PeekFunc) EvaluationError!String {
     state.reader.init(state.location_expression);
 
     const max = math.pow(usize, 2, 20);
@@ -357,7 +357,7 @@ test "DW_OP_rot" {
 
 /// Pops a single operand off the stack, transforms it to an int, then
 /// runs it through the given CalcFunc, and pushes the result on the stack
-fn evalInt1(state: *Self, comptime calc: CalcFunc) !void {
+fn evalInt1(state: *Expression, comptime calc: CalcFunc) !void {
     if (state.stack.items.len == 0) {
         log.err("cannot run int operation: stack is empty");
         return error.InvalidLocationExpression;
@@ -369,7 +369,7 @@ fn evalInt1(state: *Self, comptime calc: CalcFunc) !void {
 
 /// Pops two operands off the stack, transforms them to ints, then runs
 /// them through the given CalcFunc, and pushes the result on the stack
-fn evalInt2(state: *Self, comptime calc: CalcFunc) !void {
+fn evalInt2(state: *Expression, comptime calc: CalcFunc) !void {
     if (state.stack.items.len < 2) {
         log.err("cannot run int operation: stack has fewer than two items");
         return error.InvalidLocationExpression;
@@ -389,7 +389,7 @@ fn evalInt2(state: *Self, comptime calc: CalcFunc) !void {
 }
 
 fn evalInt(
-    state: *Self,
+    state: *Expression,
     comptime calc: CalcFunc,
     buf_a: String,
     buf_b: String,
@@ -433,7 +433,7 @@ fn evalInt(
     try state.stack.append(res);
 }
 
-fn evalUConst(state: *Self) !void {
+fn evalUConst(state: *Expression) !void {
     if (state.stack.items.len == 0) {
         log.err("cannot run uconst operation: stack is empty");
         return error.InvalidLocationExpression;
@@ -733,7 +733,7 @@ test "DW_OP_shl" {
 /// than using intOperation2 since we don't know the size of the data ahead
 /// of time, and we need to preserve the high bits, rather than simply
 /// allowing the transform function to operate on int64's.
-fn evalShr(state: *Self) !void {
+fn evalShr(state: *Expression) !void {
     if (state.stack.items.len == 0) {
         log.err("cannot run right shift operation: stack has fewer than two items");
         return error.InvalidLocationExpression;
@@ -864,7 +864,7 @@ test "DW_OP_xor" {
     try t.expectEqual(15, res);
 }
 
-fn evalPick(state: *Self, depth: u8) !void {
+fn evalPick(state: *Expression, depth: u8) !void {
     if (depth >= state.stack.items.len) {
         log.errf("cannot eval pick: stack size of {d} is less than depth {d}", .{
             state.stack.items.len,
@@ -917,7 +917,7 @@ test "evalPick" {
 }
 
 /// Reads an address from the input reader, then peeks at that address in memory
-fn evalAddr(state: *Self, peek_data: PeekFunc) !void {
+fn evalAddr(state: *Expression, peek_data: PeekFunc) !void {
     const buf = try state.alloc.alloc(u8, @sizeOf(u64));
     _ = try state.reader.readBuf(buf);
 
@@ -955,7 +955,7 @@ test "evalAddr" {
 }
 
 /// Pops an address from the stack, then peeks at that address in memory
-fn evalDeref(state: *Self, peek_data: PeekFunc) !void {
+fn evalDeref(state: *Expression, peek_data: PeekFunc) !void {
     const buf = state.stack.popOrNull();
     if (buf == null) {
         log.err("unable to execute DW_OP_deref: stack is empty");
@@ -965,7 +965,7 @@ fn evalDeref(state: *Self, peek_data: PeekFunc) !void {
     try state.readAtAddrBuf(peek_data, @constCast(buf.?));
 }
 
-fn readAtAddrBuf(state: *Self, peek_data: PeekFunc, buf: []u8) !void {
+fn readAtAddrBuf(state: *Expression, peek_data: PeekFunc, buf: []u8) !void {
     const addr = types.Address.from(mem.readInt(u64, @ptrCast(buf), endianness));
 
     const data = try state.alloc.alloc(u8, state.variable_size);
@@ -990,7 +990,7 @@ test "evalDeref" {
     try t.expectEqualSlices(u8, &expected, res);
 }
 
-fn evalFBReg(state: *Self, peek_data: PeekFunc) !void {
+fn evalFBReg(state: *Expression, peek_data: PeekFunc) !void {
     if (state.frame_base_location_expr.len == 0) {
         log.err("unable to calculate DW_OP_fbreg: frame base is empty");
         return error.InvalidLocationExpression;
@@ -1027,14 +1027,14 @@ test "evalFBReg" {
     try t.expectEqualSlices(u8, &expected, res);
 }
 
-fn evalCallFrameCFA(state: *Self) !void {
+fn evalCallFrameCFA(state: *Expression) !void {
     const cfa_buf = try state.alloc.alloc(u8, @sizeOf(u64));
     mem.writeInt(@TypeOf(state.frame_base.int()), @ptrCast(cfa_buf), state.frame_base.int(), endianness);
     try state.stack.append(cfa_buf);
 }
 
 /// @NEEDSTEST
-fn evalBReg(state: *Self, register: u64) !void {
+fn evalBReg(state: *Expression, register: u64) !void {
     const val = try state.registers.fromID(register);
     const offset = try state.reader.readSLEB128();
 
@@ -1043,12 +1043,12 @@ fn evalBReg(state: *Self, register: u64) !void {
     try state.stack.append(data);
 }
 
-fn evalBRegX(state: *Self) !void {
+fn evalBRegX(state: *Expression) !void {
     const register = try state.reader.readSLEB128();
     try state.evalBReg(register);
 }
 
-fn branch(state: *Self, cond_func: CondFunc) !void {
+fn branch(state: *Expression, cond_func: CondFunc) !void {
     // 2-byte distance operand
     const distance = try state.reader.read(i16);
 
@@ -1057,7 +1057,7 @@ fn branch(state: *Self, cond_func: CondFunc) !void {
     }
 }
 
-fn branchFollow(state: *Self) EvaluationError!bool {
+fn branchFollow(state: *Expression) EvaluationError!bool {
     const len = state.stack.items.len;
     if (len == 0) {
         log.err("cannot run DW_OP_bra: stack is empty");
@@ -1254,7 +1254,7 @@ test "DW_OP_lt" {
     }
 }
 
-fn evalConst(state: *Self, comptime size: u8) !void {
+fn evalConst(state: *Expression, comptime size: u8) !void {
     const buf = try state.alloc.alloc(u8, size);
     _ = try state.reader.readBuf(buf);
     try state.stack.append(buf);
@@ -1295,7 +1295,7 @@ test "evalConst" {
     }
 }
 
-fn evalULEB128(state: *Self) !void {
+fn evalULEB128(state: *Expression) !void {
     const n = try state.reader.readULEB128();
 
     const buf = try state.alloc.alloc(u8, @sizeOf(u64));
@@ -1312,7 +1312,7 @@ test "evalULEB128" {
     try t.expectEqualSlices(u8, &[_]u8{ 0x2a, 0, 0, 0, 0, 0, 0, 0 }, val);
 }
 
-fn evalSLEB128(state: *Self) !void {
+fn evalSLEB128(state: *Expression) !void {
     const n = try state.reader.readSLEB128();
 
     const buf = try state.alloc.alloc(u8, @sizeOf(u64));
@@ -1329,7 +1329,7 @@ test "evalSLEB128" {
     try t.expectEqualSlices(u8, &[_]u8{ 0x2a, 0, 0, 0, 0, 0, 0, 0 }, val);
 }
 
-fn evalRegister(state: *Self, register: u64) !void {
+fn evalRegister(state: *Expression, register: u64) !void {
     const val = try state.registers.fromID(register);
 
     const buf = try state.alloc.alloc(u8, @sizeOf(@TypeOf(val)));
@@ -1352,7 +1352,7 @@ test "evalRegister" {
     }
 }
 
-fn evalLiteral(state: *Self, val: u8) !void {
+fn evalLiteral(state: *Expression, val: u8) !void {
     const buf = try state.alloc.alloc(u8, 1);
     buf[0] = val;
     try state.stack.append(buf);
@@ -1392,9 +1392,9 @@ const TestExpression = switch (builtin.is_test) {
         arena: *ArenaAllocator,
         alloc: Allocator,
 
-        expr: Self,
+        expr: Expression,
 
-        fn init(location_expression: String) !*@This() {
+        fn init(location_expression: String) !*TestExpression {
             peek_values = .{};
 
             var arena = try t.allocator.create(ArenaAllocator);
@@ -1405,7 +1405,7 @@ const TestExpression = switch (builtin.is_test) {
             }
             const alloc = arena.allocator();
 
-            const self = try arena.allocator().create(@This());
+            const self = try arena.allocator().create(TestExpression);
             self.* = .{
                 .arena = arena,
                 .alloc = alloc,
@@ -1445,7 +1445,7 @@ const TestExpression = switch (builtin.is_test) {
             return self;
         }
 
-        fn deinit(self: @This()) void {
+        fn deinit(self: TestExpression) void {
             peek_values.clearAndFree(self.alloc);
 
             const arena = self.arena;
@@ -1453,7 +1453,7 @@ const TestExpression = switch (builtin.is_test) {
             t.allocator.destroy(arena);
         }
 
-        fn setFrameBaseLocationExpr(self: *@This(), op: Opcode) !void {
+        fn setFrameBaseLocationExpr(self: *TestExpression, op: Opcode) !void {
             const frame_base_loc = try self.alloc.alloc(u8, 1);
             frame_base_loc[0] = op.int();
             self.expr.frame_base_location_expr = frame_base_loc;
@@ -1461,7 +1461,7 @@ const TestExpression = switch (builtin.is_test) {
 
         /// Creates an entry at the given address in the peek data map for later lookup. Buf must
         /// be 8 bytes because ptrace peeks data in 8 byte chunks.
-        fn setPeekData(self: *@This(), addr: types.Address, buf: String) !void {
+        fn setPeekData(self: *TestExpression, addr: types.Address, buf: String) !void {
             assert(buf.len == 8);
 
             try peek_values.put(self.alloc, addr, buf);

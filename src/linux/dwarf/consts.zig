@@ -466,7 +466,7 @@ pub const Language = enum(u16) {
     DW_LANG_Jai = 0xb103,
     DW_LANG_Odin = 0xb104,
 
-    pub fn fromProducer(producer: []const u8) ?@This() {
+    pub fn fromProducer(producer: []const u8) ?Language {
         if (mem.startsWith(u8, producer, "zig")) return .DW_LANG_Zig;
         if (mem.startsWith(u8, producer, "odin")) return .DW_LANG_Odin;
         if (mem.containsAtLeast(u8, producer, 1, "Jai")) return .DW_LANG_Jai;
@@ -474,7 +474,7 @@ pub const Language = enum(u16) {
         return null;
     }
 
-    pub fn toGeneric(self: @This()) error{LanguageUnsupported}!types.Language {
+    pub fn toGeneric(self: Language) error{LanguageUnsupported}!types.Language {
         return switch (self) {
             .DW_LANG_C,
             .DW_LANG_C89,
@@ -503,7 +503,7 @@ pub const Language = enum(u16) {
         };
     }
 
-    pub fn str(self: @This()) []const u8 {
+    pub fn str(self: Language) []const u8 {
         return switch (self) {
             .DW_LANG_C,
             .DW_LANG_C89,
@@ -627,7 +627,7 @@ pub const LineNumberOpcodes = enum(u8) {
     set_epilogue_begin = 11,
     set_isa = 12,
 
-    pub fn knownLen(self: @This()) ?u8 {
+    pub fn knownLen(self: LineNumberOpcodes) ?u8 {
         return switch (self) {
             .copy => 0,
             .advance_pc => 1,
@@ -779,7 +779,7 @@ pub const UnwindRegisterRule = enum(u8) {
     /// Register is computed value
     val_expr,
 
-    pub fn int(self: @This()) u8 {
+    pub fn int(self: UnwindRegisterRule) u8 {
         return @intFromEnum(self);
     }
 };
@@ -803,7 +803,7 @@ pub const Registers = enum(u8) {
     r15,
     rip,
 
-    pub fn int(self: @This()) u8 {
+    pub fn int(self: Registers) u8 {
         return @intFromEnum(self);
     }
 };
@@ -1023,7 +1023,7 @@ pub const ExpressionOpcode = enum(u8) {
     pub const lo_user = 0xe0; // Implementation-defined range start.
     pub const hi_user = 0xff; // Implementation-defined range end.
 
-    pub fn int(self: @This()) u8 {
+    pub fn int(self: ExpressionOpcode) u8 {
         return @intFromEnum(self);
     }
 };

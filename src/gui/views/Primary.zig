@@ -10,7 +10,7 @@ const t = std.testing;
 
 const colors = @import("../colors.zig");
 const debugger = @import("../../debugger.zig");
-const GUI = @import("../GUI.zig");
+const GUI = @import("../Gui.zig");
 const Input = @import("../Input.zig");
 const file_util = @import("../../file.zig");
 const logging = @import("../../logging.zig");
@@ -30,9 +30,9 @@ const time = @import("time");
 
 const log = logging.Logger.init(logging.Region.GUI);
 
-const Self = @This();
+const Primary = @This();
 
-gui: *State.GUIType,
+gui: *State.GuiType,
 state: *State,
 
 typing_in_textbox: bool = false,
@@ -47,11 +47,11 @@ focus_watch_var_input_on_next_frame: bool = false,
 
 open_windows: OpenWindows = .{},
 
-pub fn init(state: *State, gui: *State.GUIType) !*Self {
+pub fn init(state: *State, gui: *State.GuiType) !*Primary {
     const z = trace.zone(@src());
     defer z.end();
 
-    const self = try state.perm_alloc.create(Self);
+    const self = try state.perm_alloc.create(Primary);
     errdefer state.perm_alloc.destroy(self);
 
     self.* = .{
@@ -77,11 +77,11 @@ pub fn init(state: *State, gui: *State.GUIType) !*Self {
     return self;
 }
 
-pub fn toggleDiagnosticsView(self: *Self) void {
+pub fn toggleDiagnosticsView(self: *Primary) void {
     self.show_diagnostics = !self.show_diagnostics;
 }
 
-pub fn view(self: *Self) State.View {
+pub fn view(self: *Primary) State.View {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -99,7 +99,7 @@ pub const OpenWindows = packed struct {
     diagnostics: bool = true,
 };
 
-fn handleInput(self: *Self) ?State.View {
+fn handleInput(self: *Primary) ?State.View {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -190,7 +190,7 @@ fn handleInput(self: *Self) ?State.View {
     return null;
 }
 
-pub fn update(self: *Self) State.View {
+pub fn update(self: *Primary) State.View {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -492,7 +492,7 @@ pub fn update(self: *Self) State.View {
     return self.view();
 }
 
-fn drawSpaceMenuHelp(self: *Self) void {
+fn drawSpaceMenuHelp(self: *Primary) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -530,7 +530,7 @@ fn drawSpaceMenuHelp(self: *Self) void {
     }
 }
 
-fn displaySourceFiles(self: *Self) void {
+fn displaySourceFiles(self: *Primary) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -724,7 +724,7 @@ test "countNumberOfDigits" {
 }
 
 // @TODO (jrc): this is all temporary and we will re-think the entire UX
-fn drawMainDockspace(self: *Self) void {
+fn drawMainDockspace(self: *Primary) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -818,7 +818,7 @@ fn drawMainDockspace(self: *Self) void {
     zui.dockBuilderFinish(self.gui.getMainDockspaceID());
 }
 
-pub fn addWatchValue(self: *Self, val: []const u8) Allocator.Error!void {
+pub fn addWatchValue(self: *Primary, val: []const u8) Allocator.Error!void {
     if (val.len == 0) return;
 
     // copy to the heap
@@ -852,7 +852,7 @@ pub fn addWatchValue(self: *Self, val: []const u8) Allocator.Error!void {
 }
 
 fn renderExpressionResult(
-    self: *Self,
+    self: *Primary,
     scratch: Allocator,
     paused: *const types.PauseData,
     expr_res: types.ExpressionResult,

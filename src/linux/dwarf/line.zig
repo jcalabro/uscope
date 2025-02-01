@@ -203,8 +203,6 @@ const EntryFormat = struct {
 };
 
 const Header = struct {
-    const Self = @This();
-
     is_32_bit: bool = true,
     unit_len: u64 = 0,
 
@@ -247,11 +245,11 @@ const Header = struct {
         opts: *const dwarf.AttributeParseOpts,
         r: *Reader,
         comp_dir: []const u8,
-    ) dwarf.ParseError!*Self {
+    ) dwarf.ParseError!*Header {
         const z = trace.zoneN(@src(), "parse line table header");
         defer z.end();
 
-        var self = try opts.cu.opts.scratch.create(Self);
+        var self = try opts.cu.opts.scratch.create(Header);
         self.* = .{};
 
         self.unit_len = try dwarf.readInitialLength(r);
@@ -399,7 +397,7 @@ const Header = struct {
     }
 
     fn v5ReadLineFormat(
-        self: *Self,
+        self: *Header,
         opts: *const dwarf.AttributeParseOpts,
         r: *Reader,
         forms: []EntryFormat,
@@ -493,7 +491,7 @@ const Header = struct {
         return file;
     }
 
-    fn readFileEntry(self: *const Self, r: *Reader, opts: *const dwarf.AttributeParseOpts) dwarf.ParseError!?[]const u8 {
+    fn readFileEntry(self: *const Header, r: *Reader, opts: *const dwarf.AttributeParseOpts) dwarf.ParseError!?[]const u8 {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -519,7 +517,7 @@ const Header = struct {
         return file;
     }
 
-    fn readAddr(self: *Self, r: *Reader) !u64 {
+    fn readAddr(self: *Header, r: *Reader) !u64 {
         if (self.is_32_bit) return @intCast(try dwarf.read(r, u32));
         return try dwarf.read(r, u64);
     }
@@ -579,8 +577,6 @@ const Header = struct {
 };
 
 const Entry = struct {
-    const Self = @This();
-
     address: u64 = 0,
     op_index: u64 = 0,
     file: u64 = 1,
@@ -597,7 +593,7 @@ const Entry = struct {
     /// internal field; not part of the dwarf standard
     prologue_len: u64 = 0,
 
-    fn reset(self: *Self) void {
+    fn reset(self: *Entry) void {
         self.basic_block = false;
         self.prologue_end = false;
         self.epilogue_begin = false;
@@ -605,14 +601,14 @@ const Entry = struct {
     }
 
     /// Advances "operation pointer" (the combination of `address` and `op_index`) by N steps
-    fn advancePC(self: *Self, header: *const Header, advance_by: u64) void {
+    fn advancePC(self: *Entry, header: *const Header, advance_by: u64) void {
         const op_index = @as(u64, self.op_index) + advance_by;
         self.address += header.min_instruction_len * (op_index / header.max_ops_per_instruction);
         self.op_index = op_index % @as(u64, header.max_ops_per_instruction);
     }
 
     fn emit(
-        self: *Self,
+        self: *Entry,
         opts: *const dwarf.AttributeParseOpts,
         header: *const Header,
         sources: *ArrayList(SourceFile),

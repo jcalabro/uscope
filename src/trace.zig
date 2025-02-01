@@ -39,7 +39,7 @@ pub fn zoneN(comptime src: Src, comptime name: [:0]const u8) ZoneCtx {
 pub const ZoneCtx = struct {
     tracy_ctx: tracy.ZoneCtx,
 
-    pub fn end(self: @This()) void {
+    pub fn end(self: ZoneCtx) void {
         spall.end();
         self.tracy_ctx.End();
     }

@@ -21,9 +21,7 @@ const types = @import("../../types.zig");
 const log = logging.Logger.init(logging.Region.Symbols);
 
 /// A Common Information Entry holds information shared among many FDEs
-pub const CIE = struct {
-    const Self = @This();
-
+pub const Cie = struct {
     /// Whether or not this CIE is being parsed from the .eh_frame ELF section, or the .debug_frame DWARF section
     is_eh_frame: bool = true,
 
@@ -72,9 +70,9 @@ pub const CIE = struct {
     initial_instructions: []const u8 = "",
 
     /// The list of FDEs that share this CIE
-    fdes: []const FDE = &.{},
+    fdes: []const Fde = &.{},
 
-    fn free(self: *Self, alloc: Allocator) void {
+    fn free(self: *Cie, alloc: Allocator) void {
         for (self.fdes) |fde| alloc.free(fde.instructions);
         alloc.free(self.fdes);
 
@@ -82,7 +80,7 @@ pub const CIE = struct {
         alloc.free(self.initial_instructions);
     }
 
-    fn copyFrom(dest: *Self, alloc: Allocator, src: *const Self) Allocator.Error!void {
+    fn copyFrom(dest: *Cie, alloc: Allocator, src: *const Cie) Allocator.Error!void {
         dest.* = src.*;
 
         dest.augmentation_data = try safe.copySlice(u8, alloc, src.augmentation_data);
@@ -91,7 +89,7 @@ pub const CIE = struct {
         dest.initial_instructions = try safe.copySlice(u8, alloc, src.initial_instructions);
         errdefer alloc.free(dest.initial_instructions);
 
-        const fdes = try alloc.alloc(FDE, src.fdes.len);
+        const fdes = try alloc.alloc(Fde, src.fdes.len);
         errdefer {
             for (fdes) |fde| alloc.free(fde.instructions);
             alloc.free(fdes);
@@ -105,14 +103,12 @@ pub const CIE = struct {
 
 /// A Frame Description Entry instructions a running appliation on how to unwind the callstack when the
 /// program is stopped at a particular address
-pub const FDE = struct {
-    const Self = @This();
-
+pub const Fde = struct {
     cie_offset: u64 = undefined,
     addr_range: types.AddressRange = undefined,
     instructions: []const u8 = undefined,
 
-    fn copyFrom(dest: *Self, alloc: Allocator, src: *const Self) Allocator.Error!void {
+    fn copyFrom(dest: *Fde, alloc: Allocator, src: *const Fde) Allocator.Error!void {
         dest.* = src.*;
 
         dest.instructions = try safe.copySlice(u8, alloc, src.instructions);
@@ -120,11 +116,11 @@ pub const FDE = struct {
     }
 };
 
-pub const CIEList = struct {
-    cies: []CIE,
+pub const CieList = struct {
+    cies: []Cie,
 
     /// @PERFORMANCE (jrc)
-    pub fn findForAddr(self: @This(), addr: types.Address) ?*const CIE {
+    pub fn findForAddr(self: CieList, addr: types.Address) ?*const Cie {
         for (self.cies) |*cie| {
             for (cie.fdes) |fde| {
                 if (fde.addr_range.contains(addr)) return cie;
@@ -138,11 +134,11 @@ pub const CIEList = struct {
 /// Loads the frame table from either the .eh_frame section or the .debug_frame section so we can
 /// later unwind call stacks while the subordinate is running. The returned CIE is allocated in
 /// the scratch arena.
-pub fn loadTable(perm_alloc: Allocator, opts: *const dwarf.ParseOpts) dwarf.ParseError![]CIE {
+pub fn loadTable(perm_alloc: Allocator, opts: *const dwarf.ParseOpts) dwarf.ParseError![]Cie {
     const z = trace.zoneN(@src(), "load frame table");
     defer z.end();
 
-    var cies = ArrayList(CIE).init(opts.scratch);
+    var cies = ArrayList(Cie).init(opts.scratch);
 
     if (opts.sections.eh_frame.contents.len > 0) {
         try loadCIE(opts, true, &cies);
@@ -154,13 +150,13 @@ pub fn loadTable(perm_alloc: Allocator, opts: *const dwarf.ParseOpts) dwarf.Pars
     }
 
     // copy to permanent storage and return
-    var res = ArrayList(CIE).init(perm_alloc);
+    var res = ArrayList(Cie).init(perm_alloc);
     errdefer {
         for (res.items) |*cie| cie.free(perm_alloc);
         res.deinit();
     }
     for (cies.items) |cie| {
-        var copy = CIE{};
+        var copy = Cie{};
         try copy.copyFrom(perm_alloc, &cie);
         try res.append(copy);
     }
@@ -168,7 +164,7 @@ pub fn loadTable(perm_alloc: Allocator, opts: *const dwarf.ParseOpts) dwarf.Pars
     return try res.toOwnedSlice();
 }
 
-fn loadCIE(opts: *const dwarf.ParseOpts, eh_frame: bool, cies: *ArrayList(CIE)) dwarf.ParseError!void {
+fn loadCIE(opts: *const dwarf.ParseOpts, eh_frame: bool, cies: *ArrayList(Cie)) dwarf.ParseError!void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -186,8 +182,8 @@ fn loadCIE(opts: *const dwarf.ParseOpts, eh_frame: bool, cies: *ArrayList(CIE)) 
     }
 }
 
-fn readOneCIE(opts: *const dwarf.ParseOpts, eh_frame: bool, contents: []const u8, frames_r: *Reader) dwarf.ParseError!*CIE {
-    const cie = try opts.scratch.create(CIE);
+fn readOneCIE(opts: *const dwarf.ParseOpts, eh_frame: bool, contents: []const u8, frames_r: *Reader) dwarf.ParseError!*Cie {
+    const cie = try opts.scratch.create(Cie);
     cie.* = .{ .is_eh_frame = eh_frame };
 
     // read the length of the CIE and create a local reader for easier bookkeeping
@@ -271,15 +267,15 @@ fn readOneCIE(opts: *const dwarf.ParseOpts, eh_frame: bool, contents: []const u8
     }
 
     {
-        var fdes = ArrayList(FDE).init(opts.scratch);
+        var fdes = ArrayList(Fde).init(opts.scratch);
 
         const max = pow(usize, 2, 20);
         for (0..max) |fde_ndx| {
             defer assert(fde_ndx < max - 1);
 
             var done = false;
-            var fde = FDE{};
-            loadFDE(opts, frames_r, contents, cie, &fde) catch |err| switch (err) {
+            var fde = Fde{};
+            loadFde(opts, frames_r, contents, cie, &fde) catch |err| switch (err) {
                 error.EndOfFile => done = true,
                 else => |e| return e,
             };
@@ -294,15 +290,15 @@ fn readOneCIE(opts: *const dwarf.ParseOpts, eh_frame: bool, contents: []const u8
     return cie;
 }
 
-const ParseFDEError = dwarf.ParseError || error{EndOfFile};
+const ParseFdeError = dwarf.ParseError || error{EndOfFile};
 
-fn loadFDE(
+fn loadFde(
     opts: *const dwarf.ParseOpts,
     frames_r: *Reader,
     contents: []const u8,
-    cie: *const CIE,
-    fde: *FDE,
-) ParseFDEError!void {
+    cie: *const Cie,
+    fde: *Fde,
+) ParseFdeError!void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -324,9 +320,9 @@ fn loadFDE(
     };
 
     if (cie.is_eh_frame) {
-        try parseEHFrameFDE(opts, cie, &fde_r, fde);
+        try parseEhFrameFde(opts, cie, &fde_r, fde);
     } else {
-        try parseDebugFrameFDE(opts, cie, &fde_r, fde);
+        try parseDebugFrameFde(opts, cie, &fde_r, fde);
     }
 
     {
@@ -338,29 +334,29 @@ fn loadFDE(
 }
 
 /// Parses fields specific to the .eh_frame section
-fn parseEHFrameFDE(
+fn parseEhFrameFde(
     opts: *const dwarf.ParseOpts,
-    cie: *const CIE,
+    cie: *const Cie,
     fde_r: *Reader,
-    fde: *FDE,
-) ParseFDEError!void {
+    fde: *Fde,
+) ParseFdeError!void {
     const addr_size: u8 = if (cie.is_32_bit) 4 else 8;
 
-    const start_addr = try readEHFrameAddr(cie, fde_r);
+    const start_addr = try readEhFrameAddr(cie, fde_r);
     const low_base = dwarf.applyOffset(opts.sections.eh_frame.addr, start_addr);
     fde.addr_range.low = types.Address.from(dwarf.applyOffset(low_base, fde.cie_offset + addr_size));
 
-    const num_bytes = try readEHFrameAddr(cie, fde_r);
+    const num_bytes = try readEhFrameAddr(cie, fde_r);
     fde.addr_range.high = types.Address.from(dwarf.applyOffset(fde.addr_range.low.int(), num_bytes));
 }
 
 /// Parses fields specific to the .debug_frame section
-fn parseDebugFrameFDE(
+fn parseDebugFrameFde(
     opts: *const dwarf.ParseOpts,
-    cie: *const CIE,
+    cie: *const Cie,
     fde_r: *Reader,
-    fde: *FDE,
-) ParseFDEError!void {
+    fde: *Fde,
+) ParseFdeError!void {
     // @NOTE (jrc): segment selector is not currently in use, so we just discard it for now
     if (cie.segment_selector_size > 0) {
         const segment_selector_buf = try opts.scratch.alloc(u8, cie.segment_selector_size);
@@ -381,7 +377,7 @@ fn parseDebugFrameFDE(
     fde.addr_range.high = types.Address.from(dwarf.applyOffset(fde.addr_range.low.int(), high_offset));
 }
 
-fn readEHFrameAddr(cie: *const CIE, fde_r: *Reader) ParseFDEError!i128 {
+fn readEhFrameAddr(cie: *const Cie, fde_r: *Reader) ParseFdeError!i128 {
     return switch (cie.fde_addr_encoding) {
         .DW_EH_PE_omit => 0, // noop
 
@@ -398,7 +394,7 @@ fn readEHFrameAddr(cie: *const CIE, fde_r: *Reader) ParseFDEError!i128 {
 }
 
 /// Same as dwarf.readInitialLength, but the error set adds EOF and does not log in case of EOF
-fn readInitialLength(r: *Reader) ParseFDEError!u64 {
+fn readInitialLength(r: *Reader) ParseFdeError!u64 {
     const val = r.read(u32) catch |err| switch (err) {
         error.EndOfFile => |e| return e,
         else => {

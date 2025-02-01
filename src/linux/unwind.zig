@@ -49,7 +49,7 @@ pub fn stack(
     regs: *const arch.Registers,
     load_addr: types.Address,
     addr_size: types.AddressSize,
-    cie: *const frame.CIE,
+    cie: *const frame.Cie,
     depth: ?u32, // null indicates that we should unwind the entire stack
 ) !types.UnwindResult {
     const z = trace.zone(@src());
@@ -130,8 +130,8 @@ const UnwindData = struct {
 
     first_iteration: bool = true,
 
-    cie: *const frame.CIE,
-    fde: *const frame.FDE = undefined,
+    cie: *const frame.Cie,
+    fde: *const frame.Fde = undefined,
 };
 
 fn calculateFrameAddress(adapter: *Adapter, unwind: *UnwindData) !void {
@@ -343,7 +343,7 @@ fn getCFA(table: *FrameTable) i128 {
 
 fn parseUnwindProgram(
     scratch: Allocator,
-    cie: *const frame.CIE,
+    cie: *const frame.Cie,
     base_addr: types.Address,
     instructions_r: *Reader,
     table: *FrameTable,

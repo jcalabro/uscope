@@ -5,7 +5,7 @@ const MyStruct = struct {
     field_a: i32 = 123,
     field_b: []const u8 = "this is field_b",
 
-    fn dontOptimizeMe(_: *@This()) void {}
+    fn dontOptimizeMe(_: *MyStruct) void {}
 };
 
 const PackedStruct = packed struct {
@@ -13,7 +13,7 @@ const PackedStruct = packed struct {
     second: bool = true,
     third: u6 = 6,
 
-    fn dontOptimizeMe(_: *@This()) void {}
+    fn dontOptimizeMe(_: *PackedStruct) void {}
 };
 
 const ExternStruct = extern struct {
@@ -21,7 +21,7 @@ const ExternStruct = extern struct {
     second: bool = true,
     third: u8 = 6,
 
-    fn dontOptimizeMe(_: *@This()) void {}
+    fn dontOptimizeMe(_: *ExternStruct) void {}
 };
 
 const MyEnum = enum(i8) {
@@ -31,7 +31,7 @@ const MyEnum = enum(i8) {
     second,
     final = 100,
 
-    fn dontOptimizeMe(_: *@This()) void {}
+    fn dontOptimizeMe(_: *MyEnum) void {}
 };
 
 pub fn main() !void {

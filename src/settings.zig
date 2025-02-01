@@ -35,7 +35,7 @@ const Global = struct {
     display: Display = Display{},
     rust: Rust = Rust{},
 
-    fn mapEntry(global: *@This(), allocator: Allocator, entry: *const IniEntry) !void {
+    fn mapEntry(global: *Global, allocator: Allocator, entry: *const IniEntry) !void {
         if (mem.eql(u8, entry.section, "log")) {
             try global.log.mapEntry(allocator, entry);
             return;
@@ -62,7 +62,7 @@ const Log = struct {
     /// The absolute path to the file where logs will be written
     file: []const u8 = "/tmp/uscope.log",
 
-    fn mapEntry(self: *@This(), allocator: Allocator, entry: *const IniEntry) !void {
+    fn mapEntry(self: *Log, allocator: Allocator, entry: *const IniEntry) !void {
         if (mem.eql(u8, entry.key, "color")) {
             self.color = try parseBool(entry.val);
             return;
@@ -108,7 +108,7 @@ const Rust = struct {
     /// (i.e. /home/user/.cargo/registry/src/)
     cargo: []const u8 = "",
 
-    fn mapEntry(self: *@This(), allocator: Allocator, entry: *const IniEntry) !void {
+    fn mapEntry(self: *Rust, allocator: Allocator, entry: *const IniEntry) !void {
         if (mem.eql(u8, entry.key, "stdlib")) {
             self.stdlib = try allocString(allocator, mem.trimRight(u8, entry.val, "/"));
             return;
@@ -125,7 +125,7 @@ const Project = struct {
 
     target: Target = Target{},
 
-    fn mapEntry(project: *@This(), allocator: Allocator, entry: *const IniEntry) !void {
+    fn mapEntry(project: *Project, allocator: Allocator, entry: *const IniEntry) !void {
         if (mem.eql(u8, entry.section, "sources")) {
             try project.sources.mapEntry(allocator, entry);
             return;
@@ -150,7 +150,7 @@ const Sources = struct {
     /// matching entry in `open_files`.
     breakpoint_lines: [][]usize = &.{},
 
-    fn mapEntry(self: *@This(), allocator: Allocator, entry: *const IniEntry) !void {
+    fn mapEntry(self: *Sources, allocator: Allocator, entry: *const IniEntry) !void {
         if (mem.eql(u8, entry.key, "open_files")) {
             const entries = try allocStringSlice(allocator, entry.val);
             errdefer allocator.free(entries);
@@ -205,7 +205,7 @@ const Target = struct {
     /// The default set of expressions to use in the watch window
     watch_expressions: [][]const u8 = &.{},
 
-    fn mapEntry(self: *@This(), allocator: Allocator, entry: *const IniEntry) !void {
+    fn mapEntry(self: *Target, allocator: Allocator, entry: *const IniEntry) !void {
         if (mem.eql(u8, entry.key, "path")) {
             self.path = try allocString(allocator, entry.val);
             return;

@@ -28,8 +28,6 @@ const types = @import("../../types.zig");
 const log = logging.Logger.init(logging.Region.Symbols);
 
 pub const CompileUnit = struct {
-    const Self = @This();
-
     opts: *const dwarf.ParseOpts,
     abbrev_table: *const abbrev.Table = undefined,
 
@@ -46,8 +44,8 @@ pub const CompileUnit = struct {
     pub fn create(
         opts: *const dwarf.ParseOpts,
         offset: usize,
-    ) dwarf.ParseError!*Self {
-        const self = try opts.scratch.create(Self);
+    ) dwarf.ParseError!*CompileUnit {
+        const self = try opts.scratch.create(CompileUnit);
 
         // peek at the first field in this CU to see how
         // long the reader's backing buffer should be
@@ -73,7 +71,7 @@ pub const CompileUnit = struct {
 
     /// readOffset reads 4 bytes in the .debug_info section if the CU is a 32 bit
     /// CU, and 64 if it's a 64 bit CU, then always returns that data as a u64
-    pub fn readOffset(self: *const Self, r: *Reader) error{InvalidDWARFInfo}!Offset {
+    pub fn readOffset(self: *const CompileUnit, r: *Reader) error{InvalidDWARFInfo}!Offset {
         if (!self.header.is_32_bit) return read(r, Offset);
 
         const val = try read(r, u32);
@@ -81,13 +79,13 @@ pub const CompileUnit = struct {
     }
 
     /// Reads an Offset form the .debug_info section (convenience wrapper)
-    pub fn readInfoOffset(self: *Self) error{InvalidDWARFInfo}!Offset {
+    pub fn readInfoOffset(self: *CompileUnit) error{InvalidDWARFInfo}!Offset {
         return self.readOffset(self.info_r);
     }
 
     /// Finds and sets the appropriate .debug_abbrev table for this compile unit based
     /// on the compile unit header value
-    fn setAbbrevTable(self: *Self, tables: []abbrev.Table) error{InvalidDWARFInfo}!void {
+    fn setAbbrevTable(self: *CompileUnit, tables: []abbrev.Table) error{InvalidDWARFInfo}!void {
         for (tables) |*table| {
             if (table.offset == self.header.debug_abbrev_offset) {
                 self.abbrev_table = table;
@@ -100,7 +98,7 @@ pub const CompileUnit = struct {
 
     /// Parses all header information for a given compile unit. Returned memory is allocated in the scratch arena.
     pub fn parseHeader(
-        self: *Self,
+        self: *CompileUnit,
         abbrev_tables: []abbrev.Table,
         offsets: *dwarf.TableOffsets,
     ) dwarf.ParseError!void {
@@ -115,7 +113,7 @@ pub const CompileUnit = struct {
     }
 
     /// Parses all DIEs for a given compile unit. Returned memory is allocated in the scratch arena.
-    pub fn parseDIEs(self: *Self) dwarf.ParseError![]DIE {
+    pub fn parseDIEs(self: *CompileUnit) dwarf.ParseError![]DIE {
         const z = trace.zone(@src());
         defer z.end();
 

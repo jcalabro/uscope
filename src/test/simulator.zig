@@ -16,7 +16,7 @@ const debugger = @import("../debugger.zig");
 const Debugger = debugger.Debugger;
 const file_utils = @import("../file.zig");
 const flags = @import("../flags.zig");
-const GUI = @import("../gui/GUI.zig");
+const GUI = @import("../gui/Gui.zig");
 const logging = @import("../logging.zig");
 const proto = debugger.proto;
 const State = @import("../gui/State.zig");
@@ -30,17 +30,15 @@ const log = logging.Logger.init(logging.Region.Test);
 /// A Mock GUI implementation for the few cross-cutting concerns that
 /// haven't (yet) been eliminated
 pub const TestGUI = struct {
-    const Self = @This();
-
-    pub fn getMainDockspaceID(_: Self) zui.ID {
+    pub fn getMainDockspaceID(_: TestGUI) zui.ID {
         return 0;
     }
 
-    pub fn getSingleFocusWindowSize(self: Self) GUI.WindowSize {
+    pub fn getSingleFocusWindowSize(self: TestGUI) GUI.WindowSize {
         return self.getSingleFocusWindowSizeWithScale(0);
     }
 
-    pub fn getSingleFocusWindowSizeWithScale(_: Self, _: f32) GUI.WindowSize {
+    pub fn getSingleFocusWindowSizeWithScale(_: TestGUI, _: f32) GUI.WindowSize {
         return .{ .x = 0, .y = 0, .w = 800, .h = 600 };
     }
 };
@@ -54,8 +52,6 @@ fn fileHash(alloc: Allocator, path: String) !file_utils.Hash {
 }
 
 const Simulator = struct {
-    const Self = @This();
-
     arena: *ArenaAllocator,
     thread_safe_alloc: *ThreadSafeAllocator,
     alloc: Allocator,
@@ -77,7 +73,7 @@ const Simulator = struct {
     commands: ArrayList(Command),
     conditions: ArrayList(Condition),
 
-    fn init(root_alloc: Allocator) !*Self {
+    fn init(root_alloc: Allocator) !*Simulator {
         const thread_safe_alloc = try root_alloc.create(ThreadSafeAllocator);
         errdefer root_alloc.destroy(thread_safe_alloc);
         thread_safe_alloc.* = .{ .child_allocator = root_alloc };
@@ -86,7 +82,7 @@ const Simulator = struct {
         var dbg = try Debugger.init(thread_safe_alloc);
         errdefer dbg.deinit();
 
-        const self = try alloc.create(Self);
+        const self = try alloc.create(Simulator);
         errdefer alloc.destroy(self);
 
         var arena = try alloc.create(ArenaAllocator);
@@ -115,7 +111,7 @@ const Simulator = struct {
         return self;
     }
 
-    fn deinit(self: *Self, root_alloc: Allocator) void {
+    fn deinit(self: *Simulator, root_alloc: Allocator) void {
         self.dbg.deinit();
 
         self.commands.deinit();
@@ -133,16 +129,16 @@ const Simulator = struct {
         log.flush();
     }
 
-    fn lock(self: *Self) *Self {
+    fn lock(self: *Simulator) *Simulator {
         self.mu.lock();
         return self;
     }
 
-    fn unlock(self: *Self) void {
+    fn unlock(self: *Simulator) void {
         self.mu.unlock();
     }
 
-    fn addCommand(self: *Self, cmd: Command) *Self {
+    fn addCommand(self: *Simulator, cmd: Command) *Simulator {
         var copy = cmd;
         copy.order = self.event_count;
         self.event_count += 1;
@@ -151,13 +147,13 @@ const Simulator = struct {
         return self;
     }
 
-    fn quit(self: *Self) *Self {
+    fn quit(self: *Simulator) *Simulator {
         return self.addCommand(.{
             .req = (proto.QuitRequest{}).req(),
         });
     }
 
-    fn addCondition(self: *Self, cond: Condition) *Self {
+    fn addCondition(self: *Simulator, cond: Condition) *Simulator {
         var copy = cond;
         copy.order = self.event_count;
         self.event_count += 1;
@@ -170,7 +166,7 @@ const Simulator = struct {
         return mem.trimLeft(u8, s, sub);
     }
 
-    fn run(self: *Self, sim_name: String) !void {
+    fn run(self: *Simulator, sim_name: String) !void {
         const name = trim(trim(sim_name, "test"), ".");
 
         log.infof("{s}[TEST]{s} {s}", .{
@@ -212,7 +208,7 @@ const Simulator = struct {
         });
     }
 
-    fn tick(self: *Self) !bool {
+    fn tick(self: *Simulator) !bool {
         defer self.tick_count += 1;
 
         // send the Commands that are ready, if any

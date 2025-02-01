@@ -5,14 +5,14 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const heap = std.heap;
 
-const Self = @This();
+const MainAllocator = @This();
 
 gpa: heap.GeneralPurposeAllocator(.{}),
 alloc: Allocator,
 
-pub inline fn init() Self {
+pub inline fn init() MainAllocator {
     var gpa = heap.GeneralPurposeAllocator(.{}){};
-    return Self{
+    return .{
         .gpa = gpa,
         .alloc = switch (builtin.mode) {
             .Debug => gpa.allocator(),
@@ -21,10 +21,10 @@ pub inline fn init() Self {
     };
 }
 
-pub fn allocator(self: Self) Allocator {
+pub fn allocator(self: MainAllocator) Allocator {
     return self.alloc;
 }
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *MainAllocator) void {
     defer assert(self.gpa.deinit() == .ok);
 }

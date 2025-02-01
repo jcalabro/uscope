@@ -4,7 +4,7 @@ const mem = std.mem;
 
 const debugger = @import("../../debugger.zig");
 const file = @import("../../file.zig");
-const GUI = @import("../GUI.zig");
+const GUI = @import("../Gui.zig");
 const Input = @import("../Input.zig");
 const logging = @import("../../logging.zig");
 const proto = debugger.proto;
@@ -15,31 +15,31 @@ const zui = @import("../zui.zig");
 
 const log = logging.Logger.init(logging.Region.GUI);
 
-const Self = @This();
+const Breakpoint = @This();
 
-gui: *State.GUIType,
+gui: *State.GuiType,
 state: *State,
 
-pub fn init(state: *State, gui: *State.GUIType) !*Self {
-    const self = try state.perm_alloc.create(Self);
+pub fn init(state: *State, gui: *State.GuiType) !*Breakpoint {
+    const self = try state.perm_alloc.create(Breakpoint);
     errdefer state.perm_alloc.free(self);
 
     self.* = .{ .state = state, .gui = gui };
     return self;
 }
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *Breakpoint) void {
     self.alloc.destroy(self);
 }
 
-pub fn view(self: *Self) State.View {
+pub fn view(self: *Breakpoint) State.View {
     const z = trace.zone(@src());
     defer z.end();
 
     return State.View{ .breakpoint = self };
 }
 
-fn handleInput(self: *Self) ?State.View {
+fn handleInput(self: *Breakpoint) ?State.View {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -50,7 +50,7 @@ fn handleInput(self: *Self) ?State.View {
     return null;
 }
 
-pub fn update(self: *Self) State.View {
+pub fn update(self: *Breakpoint) State.View {
     const z = trace.zoneN(@src(), "Breakpoint.update");
     defer z.end();
 

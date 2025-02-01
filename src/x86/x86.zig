@@ -6,8 +6,6 @@ const types = @import("../types.zig");
 pub const InterruptInstruction = 0xcc;
 
 pub const Registers = extern struct {
-    const Self = @This();
-
     R15: u64 = 0,
     R14: u64 = 0,
     R13: u64 = 0,
@@ -36,25 +34,25 @@ pub const Registers = extern struct {
     Fs: u64 = 0,
     Gs: u64 = 0,
 
-    pub fn pc(self: Self) types.Address {
+    pub fn pc(self: Registers) types.Address {
         return types.Address.from(self.Rip);
     }
 
-    pub fn setPC(self: *Self, val: types.Address) void {
+    pub fn setPC(self: *Registers, val: types.Address) void {
         self.Rip = val.int();
     }
 
-    pub fn bp(self: Self) types.Address {
+    pub fn bp(self: Registers) types.Address {
         return types.Address.from(self.Rbp);
     }
 
-    pub fn sp(self: Self) types.Address {
+    pub fn sp(self: Registers) types.Address {
         return types.Address.from(self.Rsp);
     }
 
     /// Implements platform-specific logic to retrieve the value of a registeer
     /// given an ID that is meaningful for a given target
-    pub fn fromID(self: *const Self, id: u64) error{UnexpectedValue}!u64 {
+    pub fn fromID(self: *const Registers, id: u64) error{UnexpectedValue}!u64 {
         switch (builtin.os.tag) {
             .linux => {
                 const DWARFRegs = @import("../linux/dwarf/consts.zig").Registers;

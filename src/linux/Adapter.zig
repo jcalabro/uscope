@@ -42,7 +42,7 @@ const WaitGroup = std.Thread.WaitGroup;
 
 const log = logging.Logger.init(logging.Region.Linux);
 
-const Self = @This();
+const Adapter = @This();
 
 const PtraceSetOptions = enum(usize) {
     tracesysgood = 0x00000001,
@@ -68,12 +68,12 @@ wait4_mu: Mutex = .{},
 
 temp_pause_done: atomic.Value(u32) = atomic.Value(u32).init(DoneVal),
 
-pub fn init(thread_safe_alloc: *ThreadSafeAllocator, req_q: *Queue(proto.Request)) !*Self {
+pub fn init(thread_safe_alloc: *ThreadSafeAllocator, req_q: *Queue(proto.Request)) !*Adapter {
     const perm_alloc = thread_safe_alloc.allocator();
-    const self = try perm_alloc.create(Self);
+    const self = try perm_alloc.create(Adapter);
     errdefer perm_alloc.destroy(self);
 
-    self.* = Self{
+    self.* = Adapter{
         .perm_alloc = perm_alloc,
 
         .wait4_q = Queue(*Wait4Request).init(
@@ -90,7 +90,7 @@ pub fn init(thread_safe_alloc: *ThreadSafeAllocator, req_q: *Queue(proto.Request
     return self;
 }
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *Adapter) void {
     {
         // stop the wait4 loop with a "poison pill"
         const req = self.perm_alloc.create(Wait4Request) catch unreachable;
@@ -116,14 +116,14 @@ pub fn deinit(self: *Self) void {
     self.wait4_q.deinit();
 }
 
-pub fn reset(self: *Self) void {
+pub fn reset(self: *Adapter) void {
     self.wait4_q.reset();
 }
 
 /// Loads the given ELF/DWARF data from disk and maps it to a generic Target. Caller owns returned memory,
 /// and the allocator must be an arena capable of freeing everything on error or when finished with the data.
 pub fn loadDebugSymbols(
-    self: *Self,
+    self: *Adapter,
     alloc: Allocator,
     req: proto.LoadSymbolsRequest,
 ) !*types.Target {
@@ -139,13 +139,13 @@ pub fn loadDebugSymbols(
     });
 }
 
-fn assertCorrectThreadIsCallingPtrace(self: *Self) void {
+fn assertCorrectThreadIsCallingPtrace(self: *Adapter) void {
     if (builtin.mode == .Debug) {
         assert(self.controller_thread_id.load(.seq_cst) == Thread.getCurrentId());
     }
 }
 
-pub fn spawnSubordinate(self: *Self, subordinate: *Child) !void {
+pub fn spawnSubordinate(self: *Adapter, subordinate: *Child) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -164,7 +164,7 @@ pub fn spawnSubordinate(self: *Self, subordinate: *Child) !void {
     );
 }
 
-pub fn pauseSubordinate(self: *Self, pid: types.PID) !void {
+pub fn pauseSubordinate(self: *Adapter, pid: types.PID) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -177,7 +177,7 @@ pub fn pauseSubordinate(self: *Self, pid: types.PID) !void {
 /// to the debugger layer via a SubordinateStopRequest. This is useful for when the
 /// debugger needs to pause the subordinate for a moment, then continue it (i.e. if
 /// we want to set a brekapoint in a process that is currently executing).
-pub fn temporarilyPauseSubordinate(self: *Self, pid: types.PID) !void {
+pub fn temporarilyPauseSubordinate(self: *Adapter, pid: types.PID) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -187,7 +187,7 @@ pub fn temporarilyPauseSubordinate(self: *Self, pid: types.PID) !void {
     Futex.wait(&self.temp_pause_done, DoneVal);
 }
 
-pub fn singleStep(self: *Self, pid: types.PID) !void {
+pub fn singleStep(self: *Adapter, pid: types.PID) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -197,7 +197,7 @@ pub fn singleStep(self: *Self, pid: types.PID) !void {
     try self.waitForSignalAsync(pid);
 }
 
-pub fn singleStepAndWait(self: *Self, pid: types.PID) !void {
+pub fn singleStepAndWait(self: *Adapter, pid: types.PID) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -212,7 +212,7 @@ pub fn singleStepAndWait(self: *Self, pid: types.PID) !void {
     };
 }
 
-pub fn continueExecution(self: *Self, pid: types.PID) !void {
+pub fn continueExecution(self: *Adapter, pid: types.PID) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -221,7 +221,7 @@ pub fn continueExecution(self: *Self, pid: types.PID) !void {
     try posix.ptrace(linux.PTRACE.CONT, pid.int(), 0, 0);
 }
 
-pub fn getRegisters(self: *Self, pid: types.PID) !arch.Registers {
+pub fn getRegisters(self: *Adapter, pid: types.PID) !arch.Registers {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -248,7 +248,7 @@ pub fn getRegisters(self: *Self, pid: types.PID) !arch.Registers {
     return regs;
 }
 
-pub fn setRegisters(self: *Self, pid: types.PID, regs: *const arch.Registers) !void {
+pub fn setRegisters(self: *Adapter, pid: types.PID, regs: *const arch.Registers) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -269,7 +269,7 @@ pub fn setRegisters(self: *Self, pid: types.PID, regs: *const arch.Registers) !v
 }
 
 pub fn peekData(
-    self: *Self,
+    self: *Adapter,
     pid: types.PID,
     load_addr: types.Address,
     read_at_addr: types.Address,
@@ -356,7 +356,7 @@ fn globalPeekData(
 }
 
 pub fn pokeData(
-    self: *Self,
+    self: *Adapter,
     pid: types.PID,
     load_addr: types.Address,
     set_at_addr: types.Address,
@@ -485,7 +485,7 @@ pub fn pokeData(
 }
 
 pub fn setBreakpoint(
-    self: *Self,
+    self: *Adapter,
     load_addr: types.Address,
     bp: *types.Breakpoint,
     pid: types.PID,
@@ -508,7 +508,7 @@ pub fn setBreakpoint(
 }
 
 pub fn unsetBreakpoint(
-    self: *Self,
+    self: *Adapter,
     load_addr: types.Address,
     bp: types.Breakpoint,
     pid: types.PID,
@@ -522,7 +522,7 @@ pub fn unsetBreakpoint(
 
 /// wait4Loop spawns a loop that runs on a background thread forever, waiting for results
 /// to come in from the subordinate process
-fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
+fn wait4Loop(self: *Adapter, request_q: *Queue(proto.Request)) void {
     trace.initThread();
     defer trace.deinitThread();
 
@@ -641,34 +641,34 @@ pub const WaitStatus = struct {
     status: u32,
 
     /// Returns true if the subordinate process exited normally
-    pub fn exited(self: @This()) bool {
+    pub fn exited(self: WaitStatus) bool {
         return (self.status & 0x7f) == 0;
     }
 
     /// Returns the exit code of the subordinate process if `exited()`
-    pub fn exitStatus(self: @This()) u8 {
+    pub fn exitStatus(self: WaitStatus) u8 {
         return @intCast((self.status >> 8) & 0xff);
     }
 
     /// Returns true if the subordinate process was terminated by a signal (not to be
     /// confused with `stopped()`)
-    pub fn signaled(self: @This()) bool {
+    pub fn signaled(self: WaitStatus) bool {
         return (self.status & 0x7f) != 0 and (self.status & 0x7f) != 0x7f;
     }
 
     /// Returns the terminating signal of the subordinate process if `signaled()`
-    pub fn terminationSignal(self: @This()) u8 {
+    pub fn terminationSignal(self: WaitStatus) u8 {
         return @intCast(self.status & 0x7f);
     }
 
     /// Returns true if the subordinate process was stopped by a signal (not to be confused
     /// with `signaled()`)
-    pub fn stopped(self: @This()) bool {
+    pub fn stopped(self: WaitStatus) bool {
         return (self.status & 0xff) == 0x7f;
     }
 
     /// Returns the stopping signal of the subordinate process if `stopped()`
-    pub fn stopSignal(self: @This()) u8 {
+    pub fn stopSignal(self: WaitStatus) u8 {
         return @intCast((self.status >> 8) & 0xff);
     }
 };
@@ -691,7 +691,7 @@ const Wait4Request = struct {
 
 const DoneVal = 1;
 
-pub fn waitForSignalSync(self: *Self, pid: types.PID, timeout_ns: u64) !void {
+pub fn waitForSignalSync(self: *Adapter, pid: types.PID, timeout_ns: u64) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -718,7 +718,7 @@ pub fn waitForSignalSync(self: *Self, pid: types.PID, timeout_ns: u64) !void {
     try Futex.timedWait(&req.done, DoneVal, timeout_ns);
 }
 
-pub fn waitForSignalAsync(self: *Self, pid: types.PID) !void {
+pub fn waitForSignalAsync(self: *Adapter, pid: types.PID) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -856,13 +856,13 @@ test "linux: parse load address of PIE" {
 }
 
 pub fn unwindStack(
-    self: *Self,
+    self: *Adapter,
     scratch: Allocator,
     pid: types.PID,
     load_addr: types.Address,
     regs: *const arch.Registers,
     addr_size: types.AddressSize,
-    cie: *const frame.CIE,
+    cie: *const frame.Cie,
     depth: ?u32, // null indicates that we should unwind the entire stack
 ) !types.UnwindResult {
     return try unwind.stack(
@@ -889,7 +889,7 @@ pub const GetVariableValueArgs = struct {
 };
 
 /// Passed allocator must be a scratch arena, and the caller owns returned memory.
-pub fn getVariableValue(self: *Self, args: GetVariableValueArgs) ![]const u8 {
+pub fn getVariableValue(self: *Adapter, args: GetVariableValueArgs) ![]const u8 {
     const z = trace.zone(@src());
     defer z.end();
 

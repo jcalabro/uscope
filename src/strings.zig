@@ -39,15 +39,13 @@ pub fn hash(str: String) Hash {
 
 /// A simple data structure used to do string interning
 pub const Cache = struct {
-    const Self = @This();
-
     alloc: Allocator,
     arena: *ArenaAllocator,
 
     mu: Mutex = .{},
     map: AutoHashMapUnmanaged(Hash, String) = .{},
 
-    pub fn init(alloc: Allocator) Allocator.Error!*Self {
+    pub fn init(alloc: Allocator) Allocator.Error!*Cache {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -58,7 +56,7 @@ pub const Cache = struct {
             alloc.destroy(arena);
         }
 
-        const self = try alloc.create(Self);
+        const self = try alloc.create(Cache);
         errdefer alloc.destroy(self);
         self.* = .{
             .arena = arena,
@@ -67,7 +65,7 @@ pub const Cache = struct {
         return self;
     }
 
-    pub fn deinit(self: *Self, alloc: Allocator) void {
+    pub fn deinit(self: *Cache, alloc: Allocator) void {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -84,7 +82,7 @@ pub const Cache = struct {
 
     /// Allocates and does a full copy of every string in the given Cache. Caller
     /// owns returned memory, and the existing cache is still valid after copy.
-    pub fn copy(self: *Self, alloc: Allocator) Allocator.Error!*Self {
+    pub fn copy(self: *Cache, alloc: Allocator) Allocator.Error!*Cache {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -105,7 +103,7 @@ pub const Cache = struct {
     /// Inserts an item in to the cache, returning its cache key. It allocates
     /// and stores a local copy of the string, so the caller is free to do what
     /// it wants with the passed `str`.
-    pub fn add(self: *Self, str: String) Allocator.Error!Hash {
+    pub fn add(self: *Cache, str: String) Allocator.Error!Hash {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -126,7 +124,7 @@ pub const Cache = struct {
     /// quick-and-dirty lookups of Strings in the table. If the caller wishes to hold
     /// on to the String, use `getOwned`, which will take a copy of the String in the
     /// passed allocator (if any String is found).
-    pub fn get(self: *Self, hsh: Hash) ?String {
+    pub fn get(self: *Cache, hsh: Hash) ?String {
         const z = trace.zone(@src());
         defer z.end();
 
@@ -137,7 +135,7 @@ pub const Cache = struct {
     }
 
     /// Caller owns returned memory, if the String is found
-    pub fn getOwned(self: *Self, alloc: Allocator, hsh: Hash) Allocator.Error!?String {
+    pub fn getOwned(self: *Cache, alloc: Allocator, hsh: Hash) Allocator.Error!?String {
         const z = trace.zone(@src());
         defer z.end();
 

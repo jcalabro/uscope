@@ -35,7 +35,7 @@ pub const Response = union(enum) {
 pub const GetStateRequest = struct {
     alloc: Allocator,
 
-    pub fn req(self: @This()) Request {
+    pub fn req(self: GetStateRequest) Request {
         return .{ .get_state = self };
     }
 };
@@ -45,8 +45,8 @@ pub const GetStateResponse = struct {
     /// All allocated memory lives in the corresponding GetStateRequest's allocator
     state: types.StateSnapshot,
 
-    pub fn resp(self: @This()) Response {
-        return Response{ .get_state = self };
+    pub fn resp(self: GetStateResponse) Response {
+        return .{ .get_state = self };
     }
 };
 
@@ -57,7 +57,7 @@ pub const GetStateResponse = struct {
 /// arena allocator totally separate from the Debugger allocator. This is probably not the best way
 /// of doing things, esp. once we support remote debugging.
 pub const StateUpdatedResponse = struct {
-    pub fn resp(self: @This()) Response {
+    pub fn resp(self: StateUpdatedResponse) Response {
         return .{ .state_updated = self };
     }
 };
@@ -67,7 +67,7 @@ pub const StateUpdatedResponse = struct {
 pub const LoadSymbolsRequest = struct {
     path: String,
 
-    pub fn req(self: @This()) Request {
+    pub fn req(self: LoadSymbolsRequest) Request {
         return .{ .load_symbols = self };
     }
 };
@@ -78,22 +78,22 @@ pub const LaunchSubordinateRequest = struct {
     args: String,
     stop_on_entry: bool,
 
-    pub fn req(self: @This()) Request {
-        return Request{ .launch = self };
+    pub fn req(self: LaunchSubordinateRequest) Request {
+        return .{ .launch = self };
     }
 };
 
 /// Force-kills the subordinate if it is running
 pub const KillSubordinateRequest = struct {
-    pub fn req(self: @This()) Request {
-        return Request{ .kill = self };
+    pub fn req(self: KillSubordinateRequest) Request {
+        return .{ .kill = self };
     }
 };
 
 /// Instructs the subordinate to continue execution if it was paused
 pub const ContinueRequest = struct {
-    pub fn req(self: @This()) Request {
-        return Request{ .cont = self };
+    pub fn req(self: ContinueRequest) Request {
+        return .{ .cont = self };
     }
 };
 
@@ -101,8 +101,8 @@ pub const ContinueRequest = struct {
 pub const StepRequest = struct {
     step_type: StepType,
 
-    pub fn req(self: @This()) Request {
-        return Request{ .step = self };
+    pub fn req(self: StepRequest) Request {
+        return .{ .step = self };
     }
 };
 
@@ -116,7 +116,7 @@ pub const StepType = enum(u8) {
 
 /// Quit shuts down the application
 pub const QuitRequest = struct {
-    pub fn req(self: @This()) Request {
+    pub fn req(self: QuitRequest) Request {
         return .{ .quit = self };
     }
 };
@@ -132,8 +132,8 @@ pub const UpdateBreakpointLocation = union(enum) {
 pub const ToggleBreakpointRequest = struct {
     id: types.BID,
 
-    pub fn req(self: @This()) Request {
-        return Request{ .toggle_breakpoint = self };
+    pub fn req(self: ToggleBreakpointRequest) Request {
+        return .{ .toggle_breakpoint = self };
     }
 };
 
@@ -141,8 +141,8 @@ pub const ToggleBreakpointRequest = struct {
 pub const UpdateBreakpointRequest = struct {
     loc: UpdateBreakpointLocation,
 
-    pub fn req(self: @This()) Request {
-        return Request{ .update_breakpoint = self };
+    pub fn req(self: UpdateBreakpointRequest) Request {
+        return .{ .update_breakpoint = self };
     }
 };
 
@@ -152,8 +152,8 @@ pub const ReceivedTextOutputResponse = struct {
     /// Memory is owned by the response queue's allocator.
     text: String,
 
-    pub fn resp(self: @This()) Response {
-        return Response{ .received_text_output = self };
+    pub fn resp(self: ReceivedTextOutputResponse) Response {
+        return .{ .received_text_output = self };
     }
 };
 
@@ -169,21 +169,21 @@ pub const SubordinateStoppedRequest = struct {
     /// should not stop the debugger (i.e. on Linux, window resize signals)
     should_stop_debugger: bool = true,
 
-    pub fn req(self: @This()) Request {
-        return Request{ .stopped = self };
+    pub fn req(self: SubordinateStoppedRequest) Request {
+        return .{ .stopped = self };
     }
 };
 
 /// Reset informs the GUI that the subordinate has been reset
 pub const ResetResponse = struct {
-    pub fn resp(self: @This()) Response {
+    pub fn resp(self: ResetResponse) Response {
         return .{ .reset = self };
     }
 };
 
 /// Informs the GUI that the symbols from the subordinate have been loaded and parsed
 pub const LoadSymbolsResponse = struct {
-    pub fn resp(self: @This()) Response {
+    pub fn resp(self: LoadSymbolsResponse) Response {
         return .{ .load_symbols = self };
     }
 
@@ -195,7 +195,7 @@ pub const LoadSymbolsResponse = struct {
 pub const SetHexWindowAddressRequest = struct {
     address: types.Address,
 
-    pub fn req(self: @This()) Request {
+    pub fn req(self: SetHexWindowAddressRequest) Request {
         return .{ .set_hex_window_address = self };
     }
 };
@@ -205,11 +205,11 @@ pub const SetWatchExpressionsRequest = struct {
     /// Memory is owned by the debugger thread
     expressions: []String,
 
-    pub fn req(self: @This()) Request {
+    pub fn req(self: SetWatchExpressionsRequest) Request {
         return .{ .set_watch_expressions = self };
     }
 
-    pub fn deinit(self: @This(), alloc: Allocator) void {
+    pub fn deinit(self: SetWatchExpressionsRequest, alloc: Allocator) void {
         for (self.expressions) |e| alloc.free(e);
         alloc.free(self.expressions);
     }

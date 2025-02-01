@@ -33,7 +33,7 @@ pub fn Queue(comptime T: anytype) type {
         cond: Condition = .{},
 
         pub fn init(tsa: *heap.ThreadSafeAllocator, opts: Options) Self {
-            return Self{
+            return .{
                 .alloc = tsa.allocator(),
                 .opts = opts,
             };

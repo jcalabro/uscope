@@ -1,1 +1,1 @@
-pub const run = @import("gui/GUI.zig").run;
+pub const run = @import("gui/Gui.zig").run;

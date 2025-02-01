@@ -33,8 +33,6 @@ pub const EncodeVariableError = error{InvalidDataType} || error{ReadDataError} |
 /// that are not designed to have long lifetimes. All allocators passed to these functions must be scratch
 /// arenas, and the caller owns returned memory.
 pub const Encoding = struct {
-    const Self = @This();
-
     /// Returns null in the case that the symbol is not a string. Returns 0 if the length is unknown. Else,
     /// returns the length of the string as noted in the debug symbols.
     ///

@@ -7,7 +7,7 @@ const fs = std.fs;
 const mem = std.mem;
 
 const file = @import("../../file.zig");
-const GUI = @import("../GUI.zig");
+const GUI = @import("../Gui.zig");
 const Input = @import("../Input.zig");
 const logging = @import("../../logging.zig");
 const State = @import("../State.zig");
@@ -20,9 +20,9 @@ const imgui = cimgui.c;
 
 const log = logging.Logger.init(logging.Region.GUI);
 
-const Self = @This();
+const FilePicker = @This();
 
-gui: *State.GUIType,
+gui: *State.GuiType,
 state: *State,
 
 hide_mouse: bool = true,
@@ -65,7 +65,7 @@ const FilePreview = struct {
     /// accessed directly; instead, we lazy load using getPreview().
     preview: ?[]const u8 = null,
 
-    fn getPreview(self: *@This(), state: *State, filePath: []const u8) ![]const u8 {
+    fn getPreview(self: *FilePreview, state: *State, filePath: []const u8) ![]const u8 {
         if (self.preview) |p| return p;
 
         assert(filePath.len > 0);
@@ -85,11 +85,11 @@ const FilePreview = struct {
     }
 };
 
-pub fn init(state: *State, gui: *State.GUIType) !*Self {
+pub fn init(state: *State, gui: *State.GuiType) !*FilePicker {
     const z = trace.zone(@src());
     defer z.end();
 
-    const self = try state.perm_alloc.create(Self);
+    const self = try state.perm_alloc.create(FilePicker);
     errdefer state.perm_alloc.destroy(self);
 
     self.* = .{
@@ -104,7 +104,7 @@ pub fn init(state: *State, gui: *State.GUIType) !*Self {
     return self;
 }
 
-fn clearFiles(self: *Self) void {
+fn clearFiles(self: *FilePicker) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -121,7 +121,7 @@ fn clearFiles(self: *Self) void {
     self.selected_files.clearAndFree();
 }
 
-fn reset(self: *Self) !void {
+fn reset(self: *FilePicker) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -185,7 +185,7 @@ fn reset(self: *Self) !void {
     try self.filter("");
 }
 
-fn getFilteredPaths(self: Self) ![][]const u8 {
+fn getFilteredPaths(self: FilePicker) ![][]const u8 {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -199,7 +199,7 @@ fn getFilteredPaths(self: Self) ![][]const u8 {
     return try files.toOwnedSlice();
 }
 
-fn filter(self: *Self, input: []const u8) !void {
+fn filter(self: *FilePicker, input: []const u8) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -266,7 +266,7 @@ fn filter(self: *Self, input: []const u8) !void {
     mem.sort(usize, self.selected_files.items, self, compareSortOrder);
 }
 
-fn compareSortOrder(self: *Self, i: usize, j: usize) bool {
+fn compareSortOrder(self: *FilePicker, i: usize, j: usize) bool {
     const a = self.file_paths.items[i];
     const b = self.file_paths.items[j];
     return a.len < b.len;
@@ -274,7 +274,7 @@ fn compareSortOrder(self: *Self, i: usize, j: usize) bool {
 
 /// caller does not own returned memory; it will be free'd by the
 /// FilePicker itself
-fn getPreview(self: *Self, selectedNdx: usize) ![]const u8 {
+fn getPreview(self: *FilePicker, selectedNdx: usize) ![]const u8 {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -285,14 +285,14 @@ fn getPreview(self: *Self, selectedNdx: usize) ![]const u8 {
     return self.file_previews.items[fileNdx].getPreview(self.state, filePath);
 }
 
-pub fn view(self: *Self) State.View {
+pub fn view(self: *FilePicker) State.View {
     const z = trace.zone(@src());
     defer z.end();
 
     return State.View{ .file_picker = self };
 }
 
-fn handleInput(self: *Self) ?State.View {
+fn handleInput(self: *FilePicker) ?State.View {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -323,7 +323,7 @@ fn handleInput(self: *Self) ?State.View {
     return null;
 }
 
-pub fn update(self: *Self) State.View {
+pub fn update(self: *FilePicker) State.View {
     const z = trace.zoneN(@src(), "FilePicker.update");
     defer z.end();
 
@@ -491,7 +491,7 @@ pub fn update(self: *Self) State.View {
     return next;
 }
 
-fn hide(self: *Self) void {
+fn hide(self: *FilePicker) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -508,7 +508,7 @@ fn textChanged(args: [*c]zui.InputTextCallbackData) callconv(.C) i32 {
     defer z.end();
 
     assert(args.*.user_data != null);
-    const self: *Self = @ptrCast(@alignCast(args.*.user_data));
+    const self: *FilePicker = @ptrCast(@alignCast(args.*.user_data));
 
     const buf = args.*.buf[0..@intCast(args.*.buf_text_len)];
     self.filter(buf) catch |err| {
@@ -524,7 +524,7 @@ const CursorDirection = enum(u8) {
     down,
 };
 
-fn moveCursor(self: *Self, dir: CursorDirection) void {
+fn moveCursor(self: *FilePicker, dir: CursorDirection) void {
     switch (dir) {
         .up => {
             if (self.cursor_ndx > 0) {

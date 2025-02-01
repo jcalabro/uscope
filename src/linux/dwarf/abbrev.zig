@@ -25,7 +25,7 @@ pub const Table = struct {
     offset: Offset,
     decls: AutoHashMapUnmanaged(Code, *Decl) = .{},
 
-    pub fn getDecl(self: @This(), code: Code) error{InvalidDWARFInfo}!*Decl {
+    pub fn getDecl(self: Table, code: Code) error{InvalidDWARFInfo}!*Decl {
         const decl = self.decls.get(code);
         if (decl) |d| return d;
 
@@ -48,7 +48,7 @@ pub const Attr = struct {
     /// Determines which FormType to use for the given Attr, and advances the
     /// reader by the appropriate number of bytes
     pub fn chooseFormAndAdvanceBySize(
-        self: @This(),
+        self: Attr,
         val: *FormValue,
         cu: *info.CompileUnit,
     ) dwarf.ParseError!void {
@@ -708,7 +708,7 @@ pub const FormValue = struct {
     form: FormType,
     class: FormClass,
 
-    pub fn parseNumeric(self: @This(), comptime T: type, cu: *const info.CompileUnit) error{InvalidDWARFInfo}!T {
+    pub fn parseNumeric(self: FormValue, comptime T: type, cu: *const info.CompileUnit) error{InvalidDWARFInfo}!T {
         return switch (self.form) {
             .string => {
                 log.errf("cannot parse form type {s} to numeric", .{@tagName(self.name)});
@@ -741,7 +741,7 @@ pub const FormClass = enum(u8) {
     string,
     stroffsetptr,
 
-    pub fn contents(self: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}![]const u8 {
+    pub fn contents(self: FormClass, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}![]const u8 {
         const buf = switch (self) {
             .address, .reference => cu.opts.sections.info.contents,
             .addrptr => cu.opts.sections.addr.contents,
@@ -798,10 +798,10 @@ pub const FormType = union(enum) {
 
 pub const FormU8 = struct {
     pub fn formType() FormType {
-        return FormType{ .u8 = @This(){} };
+        return .{ .u8 = .{} };
     }
 
-    pub fn parse(_: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!u8 {
+    pub fn parse(_: FormU8, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!u8 {
         try numericFormBoundsCheck(u8, cu.opts.sections.info.contents, offset);
         return mem.bytesToValue(u8, cu.opts.sections.info.contents[offset..]);
     }
@@ -809,10 +809,10 @@ pub const FormU8 = struct {
 
 pub const FormU16 = struct {
     pub fn formType() FormType {
-        return FormType{ .u16 = @This(){} };
+        return .{ .u16 = .{} };
     }
 
-    pub fn parse(_: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!u16 {
+    pub fn parse(_: FormU16, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!u16 {
         try numericFormBoundsCheck(u16, cu.opts.sections.info.contents, offset);
         return mem.bytesToValue(u16, cu.opts.sections.info.contents[offset..]);
     }
@@ -820,10 +820,10 @@ pub const FormU16 = struct {
 
 pub const FormU32 = struct {
     pub fn formType() FormType {
-        return FormType{ .u32 = @This(){} };
+        return .{ .u32 = .{} };
     }
 
-    pub fn parse(_: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!u32 {
+    pub fn parse(_: FormU32, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!u32 {
         try numericFormBoundsCheck(u32, cu.opts.sections.info.contents, offset);
         return mem.bytesToValue(u32, cu.opts.sections.info.contents[offset..]);
     }
@@ -831,10 +831,10 @@ pub const FormU32 = struct {
 
 pub const FormU64 = struct {
     pub fn formType() FormType {
-        return FormType{ .u64 = @This(){} };
+        return .{ .u64 = .{} };
     }
 
-    pub fn parse(_: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!u64 {
+    pub fn parse(_: FormU64, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!u64 {
         try numericFormBoundsCheck(u64, cu.opts.sections.info.contents, offset);
         return mem.bytesToValue(u64, cu.opts.sections.info.contents[offset..]);
     }
@@ -842,10 +842,10 @@ pub const FormU64 = struct {
 
 pub const FormI8 = struct {
     pub fn formType() FormType {
-        return FormType{ .i8 = @This(){} };
+        return .{ .i8 = .{} };
     }
 
-    pub fn parse(_: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!i8 {
+    pub fn parse(_: FormI8, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!i8 {
         try numericFormBoundsCheck(i8, cu.opts.sections.info.contents, offset);
         return mem.bytesToValue(i8, cu.opts.sections.info.contents[offset..]);
     }
@@ -853,10 +853,10 @@ pub const FormI8 = struct {
 
 pub const FormI16 = struct {
     pub fn formType() FormType {
-        return FormType{ .i16 = @This(){} };
+        return .{ .i16 = .{} };
     }
 
-    pub fn parse(_: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!i16 {
+    pub fn parse(_: FormI16, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!i16 {
         try numericFormBoundsCheck(i16, cu.opts.sections.info.contents, offset);
         return mem.bytesToValue(i16, cu.opts.sections.info.contents[offset..]);
     }
@@ -864,10 +864,10 @@ pub const FormI16 = struct {
 
 pub const FormI32 = struct {
     pub fn formType() FormType {
-        return FormType{ .i32 = @This(){} };
+        return .{ .i32 = .{} };
     }
 
-    pub fn parse(_: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!i32 {
+    pub fn parse(_: FormI32, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!i32 {
         try numericFormBoundsCheck(i32, cu.opts.sections.info.contents, offset);
         return mem.bytesToValue(i32, cu.opts.sections.info.contents[offset..]);
     }
@@ -875,10 +875,10 @@ pub const FormI32 = struct {
 
 pub const FormI64 = struct {
     pub fn formType() FormType {
-        return FormType{ .i64 = @This(){} };
+        return .{ .i64 = .{} };
     }
 
-    pub fn parse(_: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!i64 {
+    pub fn parse(_: FormI64, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!i64 {
         try numericFormBoundsCheck(i64, cu.opts.sections.info.contents, offset);
         return mem.bytesToValue(i64, cu.opts.sections.info.contents[offset..]);
     }
@@ -886,10 +886,10 @@ pub const FormI64 = struct {
 
 pub const FormOffset = struct {
     pub fn formType() FormType {
-        return FormType{ .offset = @This(){} };
+        return .{ .offset = .{} };
     }
 
-    pub fn parse(_: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!Offset {
+    pub fn parse(_: FormOffset, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}!Offset {
         if (cu.header.is_32_bit) {
             try numericFormBoundsCheck(u32, cu.opts.sections.info.contents, offset);
             return mem.bytesToValue(u32, cu.opts.sections.info.contents[offset..]);
@@ -901,18 +901,15 @@ pub const FormOffset = struct {
 };
 
 pub const FormString = struct {
-    len: usize,
     section: FormStringSection,
+    len: usize,
 
     pub fn formType(section: FormStringSection, len: usize) FormType {
-        return FormType{ .string = @This(){
-            .len = len,
-            .section = section,
-        } };
+        return .{ .string = .{ .len = len, .section = section } };
     }
 
     /// Returns a slice in to the existing debug_info_contents array, so no allocations are performed
-    pub fn parse(self: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}![]const u8 {
+    pub fn parse(self: FormString, cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}![]const u8 {
         const section_data = self.section.contents(cu.opts.sections);
 
         const end = offset + self.len;
@@ -934,10 +931,10 @@ pub const FormStored = struct {
     val: i128,
 
     pub fn formType(val: i128) FormType {
-        return FormType{ .stored = @This(){ .val = val } };
+        return .{ .stored = .{ .val = val } };
     }
 
-    pub fn parse(self: @This(), _: *const info.CompileUnit, _: Offset) error{InvalidDWARFInfo}!i128 {
+    pub fn parse(self: FormStored, _: *const info.CompileUnit, _: Offset) error{InvalidDWARFInfo}!i128 {
         return self.val;
     }
 };
@@ -966,7 +963,7 @@ pub const FormStringSection = enum(u8) {
     str_offsets,
     types,
 
-    pub fn contents(self: @This(), sections: *const dwarf.Sections) []const u8 {
+    pub fn contents(self: FormStringSection, sections: *const dwarf.Sections) []const u8 {
         return switch (self) {
             .abbrev => return sections.abbrev.contents,
             .line => return sections.line.contents,

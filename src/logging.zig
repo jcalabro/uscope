@@ -30,7 +30,7 @@ pub const Level = enum(u8) {
     err,
     ftl,
 
-    pub fn fromStr(lvl: []const u8) error{InvalidLogLevel}!@This() {
+    pub fn fromStr(lvl: []const u8) error{InvalidLogLevel}!Level {
         if (eql(u8, lvl, "ftl") or eql(u8, lvl, "fatal")) {
             return .ftl;
         }
@@ -50,7 +50,7 @@ pub const Level = enum(u8) {
         return error.InvalidLogLevel;
     }
 
-    fn enabled(global_lvl: @This(), local_lvl: @This()) bool {
+    fn enabled(global_lvl: Level, local_lvl: Level) bool {
         return @intFromEnum(global_lvl) <= @intFromEnum(local_lvl);
     }
 };
@@ -82,7 +82,7 @@ pub const Options = struct {
     // only one thread is allowed to write to the output file at a time
     mu: Mutex = Mutex{},
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *Options) void {
         // attempt a best-effort flush before shutting down
         self.buf.flush() catch {};
 
@@ -139,17 +139,15 @@ pub const Color = enum {
 };
 
 pub const Logger = struct {
-    const Self = @This();
-
     region: []const u8,
 
-    pub fn init(comptime region: []const u8) Self {
-        return Self{
+    pub fn init(comptime region: []const u8) Logger {
+        return .{
             .region = region,
         };
     }
 
-    fn write(self: Self, comptime fmt: []const u8, args: anytype, lvl: Level, color: Color) void {
+    fn write(self: Logger, comptime fmt: []const u8, args: anytype, lvl: Level, color: Color) void {
         if (!Level.enabled(opts.level, lvl)) {
             return;
         }
@@ -198,49 +196,49 @@ pub const Logger = struct {
         opts.buf.writer().writeAll(output) catch return;
     }
 
-    pub fn debug(self: Self, comptime fmt: []const u8) void {
+    pub fn debug(self: Logger, comptime fmt: []const u8) void {
         debugf(self, fmt, .{});
     }
 
-    pub fn debugf(self: Self, comptime fmt: []const u8, args: anytype) void {
+    pub fn debugf(self: Logger, comptime fmt: []const u8, args: anytype) void {
         write(self, fmt, args, Level.dbg, Color.Green);
     }
 
-    pub fn info(self: Self, comptime fmt: []const u8) void {
+    pub fn info(self: Logger, comptime fmt: []const u8) void {
         infof(self, fmt, .{});
     }
 
-    pub fn infof(self: Self, comptime fmt: []const u8, args: anytype) void {
+    pub fn infof(self: Logger, comptime fmt: []const u8, args: anytype) void {
         write(self, fmt, args, Level.inf, Color.Blue);
     }
 
-    pub fn warn(self: Self, comptime fmt: []const u8) void {
+    pub fn warn(self: Logger, comptime fmt: []const u8) void {
         warnf(self, fmt, .{});
     }
 
-    pub fn warnf(self: Self, comptime fmt: []const u8, args: anytype) void {
+    pub fn warnf(self: Logger, comptime fmt: []const u8, args: anytype) void {
         write(self, fmt, args, Level.wrn, Color.Yellow);
     }
 
-    pub fn err(self: Self, comptime fmt: []const u8) void {
+    pub fn err(self: Logger, comptime fmt: []const u8) void {
         errf(self, fmt, .{});
     }
 
-    pub fn errf(self: Self, comptime fmt: []const u8, args: anytype) void {
+    pub fn errf(self: Logger, comptime fmt: []const u8, args: anytype) void {
         write(self, fmt, args, Level.err, Color.Red);
     }
 
-    pub fn fatal(self: Self, comptime fmt: []const u8) noreturn {
+    pub fn fatal(self: Logger, comptime fmt: []const u8) noreturn {
         fatalf(self, fmt, .{});
     }
 
-    pub fn fatalf(self: Self, comptime fmt: []const u8, args: anytype) noreturn {
+    pub fn fatalf(self: Logger, comptime fmt: []const u8, args: anytype) noreturn {
         write(self, fmt, args, Level.ftl, Color.Red);
         self.flush();
         std.process.exit(1);
     }
 
-    pub fn flush(_: Self) void {
+    pub fn flush(_: Logger) void {
         opts.mu.lock();
         defer opts.mu.unlock();
 

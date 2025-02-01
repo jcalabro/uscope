@@ -27,11 +27,11 @@ const trace = @import("../trace.zig");
 const types = @import("../types.zig");
 const Watcher = @import("watcher.zig").Watcher;
 
-const Self = @This();
+const State = @This();
 
-pub const GUIType = switch (builtin.is_test) {
+pub const GuiType = switch (builtin.is_test) {
     true => @import("../test/simulator.zig").TestGUI,
-    false => @import("GUI.zig"),
+    false => @import("Gui.zig"),
 };
 
 const log = logging.Logger.init(logging.Region.GUI);
@@ -80,13 +80,13 @@ pub const View = union(enum) {
     breakpoint: *BreakpointView,
 };
 
-pub fn init(alloc: Allocator, dbg: *Debugger, gui: *GUIType) !*Self {
+pub fn init(alloc: Allocator, dbg: *Debugger, gui: *GuiType) !*State {
     const z = trace.zoneN(@src(), "State.init");
     defer z.end();
 
     Input.init(alloc);
 
-    const self = try alloc.create(Self);
+    const self = try alloc.create(State);
     errdefer alloc.destroy(self);
 
     self.* = .{
@@ -123,7 +123,7 @@ pub fn init(alloc: Allocator, dbg: *Debugger, gui: *GUIType) !*Self {
     return self;
 }
 
-pub fn deinit(self: *Self) void {
+pub fn deinit(self: *State) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -136,7 +136,7 @@ pub fn deinit(self: *Self) void {
     self.perm_alloc.destroy(self);
 }
 
-pub fn quit(self: *Self) void {
+pub fn quit(self: *State) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -144,7 +144,7 @@ pub fn quit(self: *Self) void {
     self.dbg.enqueue(proto.QuitRequest{});
 }
 
-pub fn update(self: *Self) void {
+pub fn update(self: *State) void {
     const z = trace.zoneN(@src(), "State.update");
     defer z.end();
 
@@ -175,14 +175,14 @@ pub fn update(self: *Self) void {
     if (builtin.mode == .Debug) log.flush();
 }
 
-pub fn getStateSnapshot(self: *Self, alloc: Allocator) !proto.GetStateResponse {
+pub fn getStateSnapshot(self: *State, alloc: Allocator) !proto.GetStateResponse {
     return self.dbg.handleRequest(
         proto.GetStateResponse,
         proto.GetStateRequest{ .alloc = alloc },
     );
 }
 
-fn handleDebuggerResponses(self: *Self) void {
+fn handleDebuggerResponses(self: *State) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -234,7 +234,7 @@ fn handleDebuggerResponses(self: *Self) void {
     }
 }
 
-pub fn loadDebugSymbols(self: *Self) void {
+pub fn loadDebugSymbols(self: *State) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -244,13 +244,13 @@ pub fn loadDebugSymbols(self: *Self) void {
 }
 
 /// This function is called back whenever the file on disk is modified
-fn executableFileChanged(self: *Self) void {
+fn executableFileChanged(self: *State) void {
     self.loadDebugSymbols();
 
     // @TODO (jrc): adjust breakpoint line numbers
 }
 
-pub fn launchSubordinate(self: *Self) void {
+pub fn launchSubordinate(self: *State) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -261,21 +261,21 @@ pub fn launchSubordinate(self: *Self) void {
     });
 }
 
-pub fn killSubordinate(self: *Self) void {
+pub fn killSubordinate(self: *State) void {
     const z = trace.zone(@src());
     defer z.end();
 
     self.dbg.enqueue(proto.KillSubordinateRequest{});
 }
 
-pub fn continueExecution(self: *Self) void {
+pub fn continueExecution(self: *State) void {
     const z = trace.zone(@src());
     defer z.end();
 
     self.dbg.enqueue(proto.ContinueRequest{});
 }
 
-pub fn updateBreakpoint(self: *Self, abs_file_path: String, line: types.SourceLine) void {
+pub fn updateBreakpoint(self: *State, abs_file_path: String, line: types.SourceLine) void {
     assert(fs.path.isAbsolute(abs_file_path));
     self.dbg.enqueue(proto.UpdateBreakpointRequest{ .loc = .{
         .source = .{
@@ -296,7 +296,7 @@ pub const OpenFile = struct {
 
     language: types.Language,
 
-    pub fn deinit(self: @This(), alloc: Allocator) void {
+    pub fn deinit(self: OpenFile, alloc: Allocator) void {
         alloc.free(self.rel_path);
         alloc.free(self.name);
 
@@ -306,7 +306,7 @@ pub const OpenFile = struct {
 };
 
 /// Loads a source file from disk for display in the primary source viewer
-pub fn openSourceFile(self: *Self, relative_path: String) !void {
+pub fn openSourceFile(self: *State, relative_path: String) !void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -371,7 +371,7 @@ pub fn openSourceFile(self: *Self, relative_path: String) !void {
 
 /// closes the file at the given ndx. If the ndx is null, it defaults to closing
 /// the file that is currently open in the viewer
-pub fn closeSourceFile(self: *Self, file_ndx: ?usize) void {
+pub fn closeSourceFile(self: *State, file_ndx: ?usize) void {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -389,7 +389,7 @@ test "load source files for display" {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const self = try alloc.create(Self);
+    const self = try alloc.create(State);
     self.* = .{
         .perm_alloc = alloc,
         .scratch_arena = ArenaAllocator.init(alloc),
@@ -410,14 +410,14 @@ test "load source files for display" {
     try t.expectEqual(types.Language.C, f.language);
 }
 
-pub fn sendStepRequest(self: *Self, step_type: proto.StepType) void {
+pub fn sendStepRequest(self: *State, step_type: proto.StepType) void {
     const z = trace.zone(@src());
     defer z.end();
 
     self.dbg.enqueue(proto.StepRequest{ .step_type = step_type });
 }
 
-fn updateSourceLocationInFocus(self: *Self, new_state: types.StateSnapshot) void {
+fn updateSourceLocationInFocus(self: *State, new_state: types.StateSnapshot) void {
     const z = trace.zone(@src());
     defer z.end();
 

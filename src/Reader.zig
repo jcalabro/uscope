@@ -10,34 +10,34 @@ const leb = std.leb;
 const mem = std.mem;
 const t = std.testing;
 
-const Self = @This();
+const Reader = @This();
 
 pub const ReadError = error{ EndOfFile, EndOfStream, Overflow };
 
-const IOReader = io.Reader(*Self, ReadError, readBuf);
+const IOReader = io.Reader(*Reader, ReadError, readBuf);
 
 off: usize,
 buf: []const u8,
 io_reader: IOReader,
 
-pub fn init(self: *Self, buf: []const u8) void {
-    self.* = Self{ .off = 0, .buf = buf, .io_reader = undefined };
+pub fn init(self: *Reader, buf: []const u8) void {
+    self.* = Reader{ .off = 0, .buf = buf, .io_reader = undefined };
     self.io_reader = self.reader();
 }
 
-pub fn create(alloc: Allocator, buf: []const u8) error{OutOfMemory}!*Self {
-    const self = try alloc.create(Self);
+pub fn create(alloc: Allocator, buf: []const u8) error{OutOfMemory}!*Reader {
+    const self = try alloc.create(Reader);
     errdefer alloc.destroy(self);
 
     init(self, buf);
     return self;
 }
 
-pub fn reader(self: *Self) IOReader {
+pub fn reader(self: *Reader) IOReader {
     return .{ .context = self };
 }
 
-pub fn readBuf(self: *Self, dst: []u8) ReadError!usize {
+pub fn readBuf(self: *Reader, dst: []u8) ReadError!usize {
     if (self.buf.len < (self.off + dst.len)) {
         // advance the pointer to the end
         self.off += dst.len;
@@ -51,14 +51,14 @@ pub fn readBuf(self: *Self, dst: []u8) ReadError!usize {
     return dst.len;
 }
 
-pub fn read(self: *Self, comptime T: type) ReadError!T {
+pub fn read(self: *Reader, comptime T: type) ReadError!T {
     var subBuf: [@sizeOf(T)]u8 = undefined;
     _ = try self.readBuf(&subBuf);
 
     return mem.bytesToValue(T, &subBuf);
 }
 
-pub fn readUntil(self: *Self, val: u8) ReadError![]const u8 {
+pub fn readUntil(self: *Reader, val: u8) ReadError![]const u8 {
     const start = self.offset();
 
     const max = std.math.pow(usize, 2, 20);
@@ -78,36 +78,36 @@ pub fn readUntil(self: *Self, val: u8) ReadError![]const u8 {
 }
 
 /// seek adjusts our pointer directly to the given offset (absolute, not relative)
-pub fn seek(self: *Self, off: usize) void {
+pub fn seek(self: *Reader, off: usize) void {
     self.off = off;
 }
 
 /// advanceBy skips N bytes
-pub fn advanceBy(self: *Self, off: usize) void {
+pub fn advanceBy(self: *Reader, off: usize) void {
     self.off = self.off + off;
 }
 
-pub fn reset(self: *Self) void {
+pub fn reset(self: *Reader) void {
     self.seek(0);
 }
 
-pub fn offset(self: *Self) usize {
+pub fn offset(self: *Reader) usize {
     return self.off;
 }
 
-pub fn atEOF(self: *Self) bool {
+pub fn atEOF(self: *Reader) bool {
     return self.off >= self.buf.len;
 }
 
 /// readSLEB128 can read at most 10 bytes of data, else it
 /// will return error.Overflow
-pub fn readSLEB128(self: *Self) ReadError!i64 {
+pub fn readSLEB128(self: *Reader) ReadError!i64 {
     return try leb.readILEB128(i64, self.io_reader);
 }
 
 /// readULEB128 can read at most 10 bytes of data, else it
 /// will return error.Overflow
-pub fn readULEB128(self: *Self) ReadError!u64 {
+pub fn readULEB128(self: *Reader) ReadError!u64 {
     return try leb.readULEB128(u64, self.io_reader);
 }
 
@@ -118,14 +118,14 @@ test "expect various reads to return the correct value" {
 
     {
         // if there are insufficient remaining bytes in the buffer, it will return EOF
-        var r: Self = undefined;
+        var r: Reader = undefined;
         r.init(&[_]u8{});
         const res = r.read(u32);
         try t.expectError(error.EndOfFile, res);
     }
 
     {
-        var r = try Self.create(alloc, &[_]u8{ 0xab, 0, 0, 0xcd });
+        var r = try Reader.create(alloc, &[_]u8{ 0xab, 0, 0, 0xcd });
         const res = try r.read(u32);
         try t.expect(res == 0xcd0000ab);
 
@@ -135,7 +135,7 @@ test "expect various reads to return the correct value" {
 
     {
         // multiple successful reads
-        var r = try Self.create(alloc, &[_]u8{ 0x12, 0, 0, 0x34, 0x56, 0, 0, 0x78 });
+        var r = try Reader.create(alloc, &[_]u8{ 0x12, 0, 0, 0x34, 0x56, 0, 0, 0x78 });
 
         var res = try r.read(u32);
         try t.expect(res == 0x34000012);
@@ -152,7 +152,7 @@ test "expect various reads to return the correct value" {
     {
         // unsigned LEB128
         const buf = &[_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01 };
-        var r = try Self.create(alloc, buf);
+        var r = try Reader.create(alloc, buf);
 
         const n = try r.readULEB128();
         try t.expectEqual(@as(u64, std.math.maxInt(u64)), n);
@@ -165,7 +165,7 @@ test "expect various reads to return the correct value" {
             0x80, 0x2, // 256
             0x80, 0x1, // 128
         };
-        var r = try Self.create(alloc, buf);
+        var r = try Reader.create(alloc, buf);
 
         try t.expectEqual(@as(u64, 384), try r.readULEB128());
         try t.expectEqual(@as(u64, 256), try r.readULEB128());
@@ -176,7 +176,7 @@ test "expect various reads to return the correct value" {
     {
         // signed LEB128
         const buf = &[_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0 };
-        var r = try Self.create(alloc, buf);
+        var r = try Reader.create(alloc, buf);
 
         const n = try r.readSLEB128();
         try t.expectEqual(@as(i64, std.math.maxInt(i64)), n);
@@ -185,7 +185,7 @@ test "expect various reads to return the correct value" {
     {
         // reads of zero-terminated strings
         const buf = &[_]u8{ 'a', 'b', 0, 'c', 'x', 0 };
-        var r = try Self.create(alloc, buf);
+        var r = try Reader.create(alloc, buf);
 
         {
             const str = try r.readUntil(0);
