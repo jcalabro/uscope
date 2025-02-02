@@ -2176,8 +2176,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 if (params.buf_offset != null) assert(params.variable_value_buf != null);
             }
 
-            const var_name = self.data.target.?.strings.get(params.variable.name);
-            if (var_name == null or !strings.eql(params.expression, var_name.?)) return;
+            const var_name = blk: {
+                if (self.data.target.?.strings.get(params.variable.name)) |n| break :blk n;
+                return;
+            };
 
             const var_platform_data = switch (builtin.target.os.tag) {
                 .linux => if (params.variable.platform_data.location_expression) |loc|
@@ -2247,7 +2249,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     .data = try self.data.subordinate.?.paused.?.strings.add(res.str),
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                     .address = res.address,
-                    .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                    .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                     .encoding = .{ .primitive = .{ .encoding = .string } },
                 });
 
@@ -2262,7 +2264,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     .data = null,
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                     .address = res.address,
-                    .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                    .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                     .encoding = .{ .array = .{ .items = undefined } },
                 });
                 const slice_field_ndx = fields.items.len - 1;
@@ -2299,7 +2301,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try fields.append(params.scratch, .{
                         .data = buf_hash,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                         .encoding = .{ .primitive = .{ .encoding = primitive.encoding } },
                     });
                 },
@@ -2343,7 +2345,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                             .address = address,
                             .data = null,
                             .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                            .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                            .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                             .encoding = .{ .primitive = .{ .encoding = .string } },
                         });
                         return;
@@ -2402,7 +2404,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         try fields.append(params.scratch, .{
                             .data = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                             .data_type_name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
-                            .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                            .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                             .encoding = .{ .primitive = .{ .encoding = .string } },
                         });
                         return;
@@ -2414,7 +2416,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try fields.append(params.scratch, .{
                         .data = null,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                         .encoding = .{ .array = .{ .items = undefined } },
                     });
                     const arr_field_ndx = fields.items.len - 1;
@@ -2439,7 +2441,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try fields.append(params.scratch, .{
                         .data = null,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                         .encoding = .{ .@"struct" = .{ .members = undefined } },
                     });
                     const struct_field_ndx = fields.items.len - 1;
@@ -2499,7 +2501,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try fields.append(params.scratch, .{
                         .data = null,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
-                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                         .encoding = .{ .@"enum" = .{
                             .value = types.ExpressionFieldNdx.from(fields.items.len),
                             .name = enum_name_hash,
@@ -2525,7 +2527,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try fields.append(params.scratch, .{
                         .data = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
-                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name.?),
+                        .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                         .encoding = .{ .primitive = .{ .encoding = .string } },
                     });
 
