@@ -106,39 +106,38 @@ fn runEvalProgram(state: *Self, peek_data: PeekFunc) EvaluationError!String {
             .DW_OP_fbreg => try state.evalFBReg(peek_data),
             .DW_OP_call_frame_cfa => try state.evalCallFrameCFA(),
 
-            // @TODO (jrc): fill in the rest of these 0-32
-            .DW_OP_breg0 => try state.evalBReg(0),
-            .DW_OP_breg1 => try state.evalBReg(1),
-            .DW_OP_breg2 => try state.evalBReg(2),
-            .DW_OP_breg3 => try state.evalBReg(3),
-            .DW_OP_breg4 => try state.evalBReg(4),
-            .DW_OP_breg5 => try state.evalBReg(5),
-            .DW_OP_breg6 => try state.evalBReg(6),
-            .DW_OP_breg7 => try state.evalBReg(7),
-            .DW_OP_breg8 => try state.evalBReg(8),
-            .DW_OP_breg9 => try state.evalBReg(9),
-            .DW_OP_breg10 => try state.evalBReg(10),
-            .DW_OP_breg11 => try state.evalBReg(11),
-            .DW_OP_breg12 => try state.evalBReg(12),
-            .DW_OP_breg13 => try state.evalBReg(13),
-            .DW_OP_breg14 => try state.evalBReg(14),
-            .DW_OP_breg15 => try state.evalBReg(15),
-            .DW_OP_breg16 => try state.evalBReg(16),
-            .DW_OP_breg17 => try state.evalBReg(17),
-            .DW_OP_breg18 => try state.evalBReg(18),
-            .DW_OP_breg19 => try state.evalBReg(19),
-            .DW_OP_breg20 => try state.evalBReg(20),
-            .DW_OP_breg21 => try state.evalBReg(21),
-            .DW_OP_breg22 => try state.evalBReg(22),
-            .DW_OP_breg23 => try state.evalBReg(23),
-            .DW_OP_breg24 => try state.evalBReg(24),
-            .DW_OP_breg25 => try state.evalBReg(25),
-            .DW_OP_breg26 => try state.evalBReg(26),
-            .DW_OP_breg27 => try state.evalBReg(27),
-            .DW_OP_breg28 => try state.evalBReg(28),
-            .DW_OP_breg29 => try state.evalBReg(29),
-            .DW_OP_breg30 => try state.evalBReg(30),
-            .DW_OP_breg31 => try state.evalBReg(31),
+            .DW_OP_breg0 => try state.evalBReg(peek_data, 0),
+            .DW_OP_breg1 => try state.evalBReg(peek_data, 1),
+            .DW_OP_breg2 => try state.evalBReg(peek_data, 2),
+            .DW_OP_breg3 => try state.evalBReg(peek_data, 3),
+            .DW_OP_breg4 => try state.evalBReg(peek_data, 4),
+            .DW_OP_breg5 => try state.evalBReg(peek_data, 5),
+            .DW_OP_breg6 => try state.evalBReg(peek_data, 6),
+            .DW_OP_breg7 => try state.evalBReg(peek_data, 7),
+            .DW_OP_breg8 => try state.evalBReg(peek_data, 8),
+            .DW_OP_breg9 => try state.evalBReg(peek_data, 9),
+            .DW_OP_breg10 => try state.evalBReg(peek_data, 10),
+            .DW_OP_breg11 => try state.evalBReg(peek_data, 11),
+            .DW_OP_breg12 => try state.evalBReg(peek_data, 12),
+            .DW_OP_breg13 => try state.evalBReg(peek_data, 13),
+            .DW_OP_breg14 => try state.evalBReg(peek_data, 14),
+            .DW_OP_breg15 => try state.evalBReg(peek_data, 15),
+            .DW_OP_breg16 => try state.evalBReg(peek_data, 16),
+            .DW_OP_breg17 => try state.evalBReg(peek_data, 17),
+            .DW_OP_breg18 => try state.evalBReg(peek_data, 18),
+            .DW_OP_breg19 => try state.evalBReg(peek_data, 19),
+            .DW_OP_breg20 => try state.evalBReg(peek_data, 20),
+            .DW_OP_breg21 => try state.evalBReg(peek_data, 21),
+            .DW_OP_breg22 => try state.evalBReg(peek_data, 22),
+            .DW_OP_breg23 => try state.evalBReg(peek_data, 23),
+            .DW_OP_breg24 => try state.evalBReg(peek_data, 24),
+            .DW_OP_breg25 => try state.evalBReg(peek_data, 25),
+            .DW_OP_breg26 => try state.evalBReg(peek_data, 26),
+            .DW_OP_breg27 => try state.evalBReg(peek_data, 27),
+            .DW_OP_breg28 => try state.evalBReg(peek_data, 28),
+            .DW_OP_breg29 => try state.evalBReg(peek_data, 29),
+            .DW_OP_breg30 => try state.evalBReg(peek_data, 30),
+            .DW_OP_breg31 => try state.evalBReg(peek_data, 31),
 
             .DW_OP_dup => {
                 const len = state.stack.items.len;
@@ -1034,12 +1033,13 @@ fn evalCallFrameCFA(state: *Self) !void {
 }
 
 /// @NEEDSTEST
-fn evalBReg(state: *Self, register: u64) !void {
+fn evalBReg(state: *Self, peek_data: PeekFunc, register: u64) !void {
     const val = try state.registers.fromID(register);
     const offset = try state.reader.readSLEB128();
+    const loc = dwarf.applyOffset(val, offset);
 
-    const data = try state.alloc.alloc(u8, @sizeOf(u64));
-    mem.writeInt(u64, @ptrCast(data), dwarf.applyOffset(val, offset), endianness);
+    const data = try state.alloc.alloc(u8, state.variable_size);
+    try peek_data(state.pid, state.load_addr, types.Address.from(loc), data);
     try state.stack.append(data);
 }
 
