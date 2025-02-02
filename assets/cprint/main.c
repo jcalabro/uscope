@@ -60,6 +60,8 @@ int main() {
     heap_str[2] = 's';
     heap_str[3] = '\0';
 
+    void* opaque_ptr = (void*)heap_str;
+
     char* strings[4];
     strings[0] = "this";
     strings[1] = "is";
@@ -106,6 +108,7 @@ int main() {
     printf("ARR: %p\n", arr);
     printf("STR: %s\n", basic_str);
     printf("HEAP STR: %s\n", heap_str);
+    printf("OPAQUE_PTR: 0x%016lx\n", (unsigned long)opaque_ptr);
     printf("STRINGS[0]: %s\n", strings[0]);
     printf("STRINGS[1]: %s\n", strings[1]);
     printf("STRINGS[2]: %s\n", strings[2]);
