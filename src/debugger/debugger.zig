@@ -2180,6 +2180,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 if (self.data.target.?.strings.get(params.variable.name)) |n| break :blk n;
                 return;
             };
+            if (!strings.eql(params.expression, var_name)) return;
 
             const var_platform_data = switch (builtin.target.os.tag) {
                 .linux => if (params.variable.platform_data.location_expression) |loc|
