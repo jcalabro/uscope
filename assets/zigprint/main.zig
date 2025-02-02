@@ -100,6 +100,8 @@ pub fn main() !void {
     const av = MyEnum.second;
     const aw = MyEnum.final;
 
+    const opaque_ptr: *anyopaque = @ptrFromInt(0x123);
+
     print("{}\n", .{a});
     print("{}\n", .{b});
     print("{}\n", .{c}); // sim:zigprint stops here
@@ -157,4 +159,6 @@ pub fn main() !void {
     print("{s}\n", .{@tagName(au)});
     print("{s}\n", .{@tagName(av)});
     print("{s}\n", .{@tagName(aw)});
+
+    print("{any}\n", .{opaque_ptr});
 }

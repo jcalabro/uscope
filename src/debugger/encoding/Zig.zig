@@ -20,11 +20,16 @@ const endian = builtin.cpu.arch.endian();
 
 pub fn encoder() encoding.Encoding {
     return encoding.Encoding{
+        .isOpaquePointer = isOpaquePointer,
         .isString = isString,
         .renderString = renderString,
         .isSlice = isSlice,
         .renderSlice = renderSlice,
     };
+}
+
+fn isOpaquePointer(params: *const encoding.Params) bool {
+    return strings.eql(params.data_type_name, "*anyopaque");
 }
 
 fn isString(params: *const encoding.Params) ?u64 {

@@ -882,8 +882,10 @@ fn renderExpressionResult(
                 .primitive => |p| {
                     switch (p.encoding) {
                         .string => {
-                            if (paused.strings.get(field.data.?)) |data| {
-                                zui.textWrapped("(len: {d})", .{data.len});
+                            if (field.data) |str_hash| {
+                                if (paused.strings.get(str_hash)) |data| {
+                                    zui.textWrapped("(len: {d})", .{data.len});
+                                }
                             }
                         },
                         else => {},
@@ -1033,9 +1035,7 @@ fn renderWatchInteger(scratch: Allocator, buf: []const u8, signedness: types.Sig
         4 => if (signedness == .signed) try r.read(i32) else try r.read(u32),
         8 => if (signedness == .signed) try r.read(i64) else try r.read(u64),
         16 => try r.read(i128),
-        else => {
-            return error.InvalidIntegerSize;
-        },
+        else => return error.InvalidIntegerSize,
     };
 
     return try fmt.allocPrint(scratch, "{d}", .{n});
