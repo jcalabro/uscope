@@ -2279,6 +2279,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         var recursive_params = params;
                         recursive_params.variable_value_buf = item_buf;
                         recursive_params.variable.data_type = item_data_type;
+                        recursive_params.buf_offset = null;
 
                         try self.renderVariableValue(fields, pointers, recursive_params);
                         try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(fields.items.len - 1));
