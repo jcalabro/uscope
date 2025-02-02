@@ -316,6 +316,7 @@ pub fn update(self: *Self) State.View {
 
                         self.renderExpressionResult(
                             self.state.scratch_alloc,
+                            ndx,
                             &paused,
                             paused.watches[ndx],
                         );
@@ -345,13 +346,18 @@ pub fn update(self: *Self) State.View {
                 defer zui.endTable();
 
                 if (self.state.dbg_state.paused) |paused| {
-                    for (paused.locals) |local| {
+                    for (paused.locals, 0..) |local, ndx| {
                         if (zui.tableNextColumn()) {
                             const expr = paused.getString(local.expression);
                             zui.textWrapped("{s}", .{expr});
                         }
 
-                        self.renderExpressionResult(self.state.scratch_alloc, &paused, local);
+                        self.renderExpressionResult(
+                            self.state.scratch_alloc,
+                            ndx,
+                            &paused,
+                            local,
+                        );
                     }
                 }
             }
@@ -854,6 +860,7 @@ pub fn addWatchValue(self: *Self, val: []const u8) Allocator.Error!void {
 fn renderExpressionResult(
     self: *Self,
     scratch: Allocator,
+    expression_ndx: usize,
     paused: *const types.PauseData,
     expr_res: types.ExpressionResult,
 ) void {
@@ -902,7 +909,7 @@ fn renderExpressionResult(
             // if we're rendering a pointer value, display the address as well
             if (field.address) |addr| {
                 // @TODO (jrc): clean up the display of this address, it looks terrible
-                const line = fmt.allocPrint(scratch, "0x{x}\x00", .{addr}) catch |err| {
+                const line = fmt.allocPrint(scratch, "0x{x}###{x}\x00", .{ addr, expression_ndx }) catch |err| {
                     log.errf("unable to render variable address 0x{x}: {!}", .{ addr, err });
                     return;
                 };
