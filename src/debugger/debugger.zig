@@ -2341,7 +2341,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
                     // the pointer is opaque, so we can't do anything other than render
                     // its address, which may still be useful to the user
-                    if (base_data_type_ndx == null) {
+                    if (base_data_type_ndx == null or params.encoder.isOpaquePointer(enc_params)) {
                         try fields.append(params.scratch, .{
                             .address = address,
                             .data = null,

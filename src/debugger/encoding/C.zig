@@ -14,11 +14,16 @@ const endian = builtin.cpu.arch.endian();
 
 pub fn encoder() encoding.Encoding {
     return encoding.Encoding{
+        .isOpaquePointer = isOpaquePointer,
         .isString = isString,
         .renderString = renderString,
         .isSlice = isSlice,
         .renderSlice = renderSlice,
     };
+}
+
+fn isOpaquePointer(_: *const encoding.Params) bool {
+    return false;
 }
 
 fn isString(params: *const encoding.Params) ?usize {

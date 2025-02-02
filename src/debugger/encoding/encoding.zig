@@ -35,6 +35,8 @@ pub const EncodeVariableError = error{InvalidDataType} || error{ReadDataError} |
 pub const Encoding = struct {
     const Self = @This();
 
+    isOpaquePointer: *const fn (params: *const Params) bool,
+
     /// Returns null in the case that the symbol is not a string. Returns 0 if the length is unknown. Else,
     /// returns the length of the string as noted in the debug symbols.
     ///
