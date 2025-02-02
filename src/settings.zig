@@ -208,6 +208,14 @@ const Target = struct {
     fn mapEntry(self: *@This(), allocator: Allocator, entry: *const IniEntry) !void {
         if (mem.eql(u8, entry.key, "path")) {
             self.path = try allocString(allocator, entry.val);
+
+            // if we are of the form `path=program`, prepend `./` so it's `./program`
+            // because it's much more common to want to debug a local file rather than
+            // a program in your path
+            if (mem.count(u8, self.path, "/") == 0) {
+                self.path = try fmt.allocPrint(allocator, "./{s}", .{self.path});
+            }
+
             return;
         }
         if (mem.eql(u8, entry.key, "args")) {
