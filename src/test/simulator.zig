@@ -618,7 +618,7 @@ test "sim:zigprint" {
     const exe_path = "assets/zigprint/out";
     const zigprint_main_zig_hash = try fileHash(t.allocator, "assets/zigprint/main.zig");
 
-    const expected_output_len = 464;
+    const expected_output_len = 478;
 
     // zig fmt: off
     sim.lock()
@@ -650,7 +650,7 @@ test "sim:zigprint" {
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = zigprint_main_zig_hash,
-            .line = types.SourceLine.from(105),
+            .line = types.SourceLine.from(107),
         }}}).req(),
     })
 
@@ -693,7 +693,7 @@ test "sim:zigprint" {
                         if (s.state.subordinate_output.len == 0) return null;
 
                         // spot check a few fields
-                        const num_locals = 49;
+                        const num_locals = 50;
                         if (checkeq(usize, 4, s.state.subordinate_output.len, "unexpected program output len") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") and
@@ -708,6 +708,13 @@ test "sim:zigprint" {
                                 if (!checkstr(paused.strings, "abcd", data_hash, "unexpected render value for field \"ao\"")) {
                                     return false;
                                 }
+                            }
+
+                            {
+                                // test rendering an opaque pointer
+                                const opaque_ptr = paused.getLocalByName("opaque_ptr") orelse return falseWithErr("unable to get local \"opaque_ptr\"", .{});
+                                if (opaque_ptr.fields[0].data != null) return falseWithErr("data should not set on variable \"opaque_ptr\"", .{});
+                                if (opaque_ptr.fields[0].address == null) return falseWithErr("address should be set on variable \"opaque_ptr\"", .{});
                             }
 
                             {
