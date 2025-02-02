@@ -13,6 +13,7 @@ const ThreadSafeAllocator = std.heap.ThreadSafeAllocator;
 const flags = @import("flags.zig");
 const logging = @import("logging.zig");
 const safe = @import("safe.zig");
+const String = @import("strings.zig").String;
 const trace = @import("trace.zig");
 
 const log = logging.Logger.init(logging.Region.Misc);
@@ -22,7 +23,7 @@ pub const Hash = u64;
 
 /// returns a unique, non-cryptographic hash of the absolute file path for use
 /// as an index in to various data structures
-pub fn hashAbsPath(abs_path: []const u8) Hash {
+pub fn hashAbsPath(abs_path: String) Hash {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -33,12 +34,12 @@ pub fn hashAbsPath(abs_path: []const u8) Hash {
 
 pub const SourceFile = struct {
     /// the absolute path of the file
-    abs_path: []const u8,
+    abs_path: String,
 
     /// name is the final part of the path (it is a subslice on
     /// the same memory allocation as abs_path, so it should not
     /// be individually free'd on cleanup)
-    name: []const u8,
+    name: String,
 };
 
 const FileMap = AutoHashMap(Hash, SourceFile);
@@ -72,7 +73,7 @@ pub fn getCachedFile(fhash: Hash) ?SourceFile {
 
 /// Caller does NOT own returned memory, and the strings within the SourceFile are allocated
 /// once on first use, then never mutated again, so they are safe to read from multiple threads
-pub fn getCachedFileFromAbsPath(abs_path: []const u8) ?SourceFile {
+pub fn getCachedFileFromAbsPath(abs_path: String) ?SourceFile {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -83,7 +84,7 @@ pub fn getCachedFileFromAbsPath(abs_path: []const u8) ?SourceFile {
 /// Inserts a path in to the cache, returning the hash of the absolute
 /// path. It allocates in he case that the hash does not already exist.
 /// If the entry already exists, this function never returns an error.
-pub fn addAbsPathToCache(abs_path: []const u8) error{ OutOfMemory, InvalidPath }!Hash {
+pub fn addAbsPathToCache(abs_path: String) error{ OutOfMemory, InvalidPath }!Hash {
     const z = trace.zone(@src());
     defer z.end();
 
@@ -140,19 +141,15 @@ test "file hashing and caching" {
 pub const LineDelimiter = "\n";
 
 /// Opens the file at the given path, which can be either relative or absolute
-pub fn open(path: []const u8, open_flags: fs.File.OpenFlags) fs.File.OpenError!fs.File {
+pub fn open(path: String, open_flags: fs.File.OpenFlags) fs.File.OpenError!fs.File {
     if (path.len == 0) return error.FileNotFound;
 
-    var fp: ?fs.File = null;
     if (fs.path.isAbsolute(path)) {
-        fp = try std.fs.openFileAbsolute(path, open_flags);
-    } else {
-        var dir = fs.cwd();
-        fp = try dir.openFile(path, open_flags);
+        return try std.fs.openFileAbsolute(path, open_flags);
     }
 
-    assert(fp != null);
-    return fp.?;
+    var dir = fs.cwd();
+    return try dir.openFile(path, open_flags);
 }
 
 pub const MMapError = posix.MMapError || fs.File.OpenError ||
@@ -182,7 +179,7 @@ pub fn mapWholeFile(fp: fs.File) MMapError![]align(mem.page_size) const u8 {
 pub const munmap = posix.munmap;
 
 /// caller owns returned memory
-pub fn readWholeFile(alloc: Allocator, fp: fs.File) ![]const u8 {
+pub fn readWholeFile(alloc: Allocator, fp: fs.File) !String {
     const fileLen = math.cast(usize, try fp.getEndPos()) orelse math.maxInt(usize);
     return fp.readToEndAlloc(alloc, fileLen);
 }
