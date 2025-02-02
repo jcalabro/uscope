@@ -2157,10 +2157,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             /// variable (i.e. we're rendering an item in a slice). If it's not populated,
             /// it follows the OS-specific mechanism to look up variable values.
             variable_value_buf: ?[]const u8 = null,
-
-            /// Only valid if `variable_value_buf` is not null. Specifies how far this field
-            /// is from the start of the known byte buffer.
-            buf_offset: ?usize = null,
         };
 
         fn renderVariableValue(
@@ -2172,14 +2168,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
-            if (builtin.mode == .Debug) {
-                if (params.buf_offset != null) assert(params.variable_value_buf != null);
-            }
-
-            const var_name = blk: {
-                if (self.data.target.?.strings.get(params.variable.name)) |n| break :blk n;
-                return;
-            };
+            const var_name = if (self.data.target.?.strings.get(params.variable.name)) |n| n else return;
             if (!strings.eql(params.expression, var_name) or var_name.len == 0) return;
 
             const var_platform_data = switch (builtin.target.os.tag) {
@@ -2208,14 +2197,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const base_data_type_name = self.data.target.?.strings.get(base_data_type.name) orelse types.Unknown;
 
             const buf = blk: {
-                if (params.variable_value_buf) |b| {
-                    if (params.buf_offset) |offset| {
-                        const end = offset + data_type.size_bytes;
-                        break :blk b[offset..end];
-                    }
-                    break :blk b;
-                }
+                // use a pre-determined buffer
+                if (params.variable_value_buf) |b| break :blk b;
 
+                // look up the buffer to use in the subordinate registers+memory
                 break :blk try self.adapter.getVariableValue(.{
                     .scratch = params.scratch,
                     .pid = params.pid,
@@ -2279,7 +2264,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         var recursive_params = params;
                         recursive_params.variable_value_buf = item_buf;
                         recursive_params.variable.data_type = item_data_type;
-                        recursive_params.buf_offset = null;
 
                         try self.renderVariableValue(fields, pointers, recursive_params);
                         try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(fields.items.len - 1));
@@ -2372,7 +2356,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     // recurse using the base data type
                     var recursive_params = params;
                     recursive_params.variable_value_buf = ptr_buf;
-                    recursive_params.buf_offset = 0;
                     recursive_params.variable.data_type = ptr_data_type_ndx;
 
                     const original_len = fields.items.len;
@@ -2426,10 +2409,12 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     var item_ndxes = try ArrayListUnmanaged(types.ExpressionFieldNdx).initCapacity(params.scratch, arr_len);
                     for (0..arr_len) |ndx| {
                         // recursively render array elements using the known item buffer
+                        const buf_start = ndx * element_data_type.size_bytes;
+                        const buf_end = buf_start + element_data_type.size_bytes;
+
                         var recursive_params = params;
-                        recursive_params.variable_value_buf = arr_buf;
+                        recursive_params.variable_value_buf = arr_buf[buf_start..buf_end];
                         recursive_params.variable.data_type = arr.element_type;
-                        recursive_params.buf_offset = ndx * element_data_type.size_bytes;
 
                         try self.renderVariableValue(fields, pointers, recursive_params);
                         const member_ndx = fields.items.len - 1;
@@ -2452,9 +2437,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     for (strct.members) |member| {
                         // recursively render struct members using the known item buffer
                         var recursive_params = params;
-                        recursive_params.variable_value_buf = buf;
+                        recursive_params.variable_value_buf = buf[member.offset_bytes..];
                         recursive_params.variable.data_type = member.data_type;
-                        recursive_params.buf_offset = member.offset_bytes;
 
                         try self.renderVariableValue(fields, pointers, recursive_params);
                         const member_ndx = fields.items.len - 1;
