@@ -44,6 +44,10 @@ pub fn NumericType(comptime T: type) type {
             return a.int() != b.int();
         }
 
+        pub fn neqInt(a: Self, b: T) bool {
+            return a.int() != b;
+        }
+
         pub fn add(a: Self, b: Self) Self {
             return Self.from(a.int() + b.int());
         }
@@ -52,12 +56,44 @@ pub fn NumericType(comptime T: type) type {
             return Self.from(a.int() + b);
         }
 
+        pub fn addSafe(a: Self, b: Self) ?Self {
+            const res = @addWithOverflow(a.int(), b.int());
+            if (res[1] == 1) return null;
+            return Self.from(res[0]);
+        }
+
+        pub fn addIntSafe(a: Self, b: T) ?Self {
+            const res = @addWithOverflow(a.int(), b);
+            if (res[1] == 1) return null;
+            return Self.from(res[0]);
+        }
+
         pub fn sub(a: Self, b: Self) Self {
             return Self.from(a.int() - b.int());
         }
 
         pub fn subInt(a: Self, b: T) Self {
             return Self.from(a.int() - b);
+        }
+
+        pub fn subSafe(a: Self, b: Self) ?Self {
+            const res = @subWithOverflow(a.int(), b.int());
+            if (res[1] == 1) return null;
+            return Self.from(res[0]);
+        }
+
+        pub fn subIntSafe(a: Self, b: T) ?Self {
+            const res = @subWithOverflow(a.int(), b);
+            if (res[1] == 1) return null;
+            return Self.from(res[0]);
+        }
+
+        pub fn mod(a: Self, b: Self) Self {
+            return Self.from(a.int() % b.int());
+        }
+
+        pub fn modInt(a: Self, b: T) Self {
+            return Self.from(a.int() % b);
         }
 
         pub fn jsonStringify(self: *const Self, jw: anytype) !void {

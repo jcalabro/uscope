@@ -302,27 +302,27 @@ fn globalPeekData(
     // @REF: https://cs.opensource.google/go/go/+/refs/tags/go1.21.5:src/syscall/syscall_linux.go;l=832
     //
 
-    const addr_size = @sizeOf(usize);
-    var addr = load_addr.add(read_at_addr).int();
+    const addr_size = @sizeOf(usize); // @TODO (jrc): support 32-bit
+    var addr = load_addr.add(read_at_addr);
 
     var num_read: usize = 0;
     var buf align(@alignOf(usize)) = [_]u8{0} ** addr_size;
 
-    const addr_remainder = addr % addr_size;
+    const addr_remainder = addr.int() % addr_size;
     if (addr_remainder != 0) {
         // leading edge
-        addr = addr - addr_remainder;
-        assert(addr % addr_size == 0);
+        addr = addr.subInt(addr_remainder);
+        assert(addr.modInt(addr_size).eqlInt(0));
 
         try posix.ptrace(
             linux.PTRACE.PEEKDATA,
             pid.int(),
-            addr,
+            addr.int(),
             @intFromPtr(&buf),
         );
 
         num_read += addr_size - addr_remainder;
-        addr += addr_size;
+        if (addr.addIntSafe(addr_size)) |a| addr = a else return;
 
         const offset = addr_remainder;
         for (0..num_read) |ndx| {
@@ -334,11 +334,11 @@ fn globalPeekData(
 
     while (num_read < data.len) {
         // remainder
-        assert(addr % addr_size == 0);
+        assert(addr.int() % addr_size == 0);
         try posix.ptrace(
             linux.PTRACE.PEEKDATA,
             pid.int(),
-            addr,
+            addr.int(),
             @intFromPtr(&buf),
         );
 
@@ -351,7 +351,7 @@ fn globalPeekData(
         }
 
         num_read += addr_size;
-        addr += addr_size;
+        if (addr.addIntSafe(addr_size)) |a| addr = a else return;
     }
 }
 
@@ -372,7 +372,7 @@ pub fn pokeData(
     self.assertCorrectThreadIsCallingPtrace();
 
     const addr_size = @sizeOf(usize);
-    var addr = load_addr.add(set_at_addr).int();
+    var addr = load_addr.add(set_at_addr);
 
     var num_written: usize = 0;
     var buf align(@alignOf(usize)) = [_]u8{0} ** addr_size;
@@ -382,15 +382,15 @@ pub fn pokeData(
         // Leading edge
         //
 
-        const addr_remainder = addr % addr_size;
+        const addr_remainder = addr.int() % addr_size;
         if (addr_remainder != 0) {
-            addr = addr - addr_remainder;
-            assert(addr % addr_size == 0);
+            if (addr.subIntSafe(addr_remainder)) |a| addr = a else return;
+            assert(addr.modInt(addr_size).eqlInt(0));
 
             try posix.ptrace(
                 linux.PTRACE.PEEKDATA,
                 pid.int(),
-                addr,
+                addr.int(),
                 @intFromPtr(&buf),
             );
 
@@ -400,7 +400,7 @@ pub fn pokeData(
             const offset = addr_remainder;
             for (0..num_replacements) |ndx| {
                 if (ndx < data.len) {
-                    buf[ndx + offset] = data[ndx];
+                    buf[offset + ndx] = data[ndx];
                 }
             }
 
@@ -411,12 +411,12 @@ pub fn pokeData(
             try posix.ptrace(
                 linux.PTRACE.POKEDATA,
                 pid.int(),
-                addr,
+                addr.int(),
                 word,
             );
 
             num_written += num_replacements;
-            addr += addr_size;
+            if (addr.addIntSafe(addr_size)) |a| addr = a else return;
         }
     }
 
@@ -435,16 +435,16 @@ pub fn pokeData(
 
             const word = mem.readInt(usize, &buf, .little);
 
-            assert(addr % addr_size == 0);
+            assert(addr.modInt(addr_size).eqlInt(0));
             try posix.ptrace(
                 linux.PTRACE.POKEDATA,
                 pid.int(),
-                addr,
+                addr.int(),
                 word,
             );
 
             num_written += addr_size;
-            addr += addr_size;
+            if (addr.addIntSafe(addr_size)) |a| addr = a else return;
         }
     }
 
@@ -458,11 +458,11 @@ pub fn pokeData(
 
         const remaining = data.len - num_written;
         if (remaining > 0) {
-            assert(addr % addr_size == 0);
+            assert(addr.modInt(addr_size).eqlInt(0));
             try posix.ptrace(
                 linux.PTRACE.PEEKDATA,
                 pid.int(),
-                addr,
+                addr.int(),
                 @intFromPtr(&buf),
             );
 
@@ -477,7 +477,7 @@ pub fn pokeData(
             try posix.ptrace(
                 linux.PTRACE.POKEDATA,
                 pid.int(),
-                addr,
+                addr.int(),
                 word,
             );
         }
