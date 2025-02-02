@@ -2435,9 +2435,13 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
                     var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
                     for (strct.members) |member| {
+                        const member_data_type = params.cu.data_types[member.data_type.int()];
+                        const buf_start = member.offset_bytes;
+                        const buf_end = buf_start + member_data_type.size_bytes;
+
                         // recursively render struct members using the known item buffer
                         var recursive_params = params;
-                        recursive_params.variable_value_buf = buf[member.offset_bytes..];
+                        recursive_params.variable_value_buf = buf[buf_start..buf_end];
                         recursive_params.variable.data_type = member.data_type;
 
                         try self.renderVariableValue(fields, pointers, recursive_params);
