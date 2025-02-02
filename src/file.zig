@@ -142,12 +142,6 @@ pub const LineDelimiter = "\n";
 
 /// Opens the file at the given path, which can be either relative or absolute
 pub fn open(path: String, open_flags: fs.File.OpenFlags) fs.File.OpenError!fs.File {
-    if (path.len == 0) return error.FileNotFound;
-
-    if (fs.path.isAbsolute(path)) {
-        return try std.fs.openFileAbsolute(path, open_flags);
-    }
-
     var dir = fs.cwd();
     return try dir.openFile(path, open_flags);
 }
