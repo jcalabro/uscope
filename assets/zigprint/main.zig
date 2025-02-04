@@ -34,6 +34,14 @@ const MyEnum = enum(i8) {
     fn dontOptimizeMe(_: *@This()) void {}
 };
 
+const TaggedUnion = union(enum) {
+    first: i32,
+    second: MyEnum,
+    third: *MyStruct,
+
+    fn dontOptimizeMe(_: *@This()) void {}
+};
+
 pub fn main() !void {
     const a: i2 = 1;
     const b: u2 = 2;
@@ -102,6 +110,13 @@ pub fn main() !void {
 
     const ax: *anyopaque = @ptrFromInt(0x123);
 
+    var ay = TaggedUnion{ .first = 38 };
+    ay.dontOptimizeMe();
+    var az = TaggedUnion{ .second = .second };
+    az.dontOptimizeMe();
+    var ba = TaggedUnion{ .third = &ap };
+    ba.dontOptimizeMe();
+
     print("{}\n", .{a});
     print("{}\n", .{b});
     print("{}\n", .{c}); // sim:zigprint stops here
@@ -161,4 +176,8 @@ pub fn main() !void {
     print("{s}\n", .{@tagName(aw)});
 
     print("{any}\n", .{ax});
+
+    print("{any}\n", .{ay});
+    print("{any}\n", .{az});
+    print("{any}\n", .{ba});
 }
