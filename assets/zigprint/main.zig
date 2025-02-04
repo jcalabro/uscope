@@ -8,6 +8,13 @@ const MyStruct = struct {
     fn dontOptimizeMe(_: *@This()) void {}
 };
 
+const NestedStruct = struct {
+    first: i32 = 456,
+    second: MyStruct,
+
+    fn dontOptimizeMe(_: *@This()) void {}
+};
+
 const PackedStruct = packed struct {
     first: bool = false,
     second: bool = true,
@@ -117,6 +124,9 @@ pub fn main() !void {
     var ba = TaggedUnion{ .third = &ap };
     ba.dontOptimizeMe();
 
+    var bb = NestedStruct{ .second = ap };
+    bb.dontOptimizeMe();
+
     print("{}\n", .{a});
     print("{}\n", .{b});
     print("{}\n", .{c}); // sim:zigprint stops here
@@ -180,4 +190,6 @@ pub fn main() !void {
     print("{any}\n", .{ay});
     print("{any}\n", .{az});
     print("{any}\n", .{ba});
+
+    print("{any}\n", .{bb});
 }

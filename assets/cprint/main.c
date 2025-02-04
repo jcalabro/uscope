@@ -6,18 +6,22 @@ typedef struct TestStruct {
     int B;
 } TestStruct;
 
+typedef struct NestedStruct {
+    int first;
+    TestStruct ts;
+} NestedStruct;
+
 typedef enum TestEnum {
     ONE,
     TWO,
     THREE,
 } TestEnum ;
 
-typedef union TestUnion TestUnion;
-union TestUnion {
+typedef union TestUnion {
     int first;
     float second;
     TestStruct third;
-};
+} TestUnion;
 
 typedef struct CircularPointer CircularPointer;
 struct CircularPointer {
@@ -49,6 +53,7 @@ int main() {
     double l = 12.75;
 
     TestStruct ts = {13, 14};
+    NestedStruct ns = {99, ts};
 
     TestStruct *ts2 = (TestStruct*)malloc(sizeof(TestStruct));
     ts2->A = 15;
@@ -112,6 +117,9 @@ int main() {
 
     printf("TestStruct.A: %d\n", ts.A);
     printf("TestStruct.B: %d\n", ts.B);
+    printf("NestedStruct.first: %d\n", ns.first);
+    printf("NestedStruct.second.A: %d\n", ns.ts.A);
+    printf("NestedStruct.second.B: %d\n", ns.ts.B);
 
     printf("TestStruct2->A: %d\n", ts2->A);
     printf("TestStruct2->B: %d\n", ts2->B);

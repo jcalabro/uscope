@@ -2338,25 +2338,16 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     }
 
                     // follow typedefs to their base
-                    var ptr_data_type = params.cu.data_types[base_data_type_ndx.?.int()];
-                    var ptr_data_type_ndx = base_data_type_ndx.?;
-                    while (ptr_data_type.form == .typedef) {
-                        if (ptr_data_type.form.typedef.data_type) |typedef_type| {
-                            ptr_data_type = params.cu.data_types[typedef_type.int()];
-                            ptr_data_type_ndx = typedef_type;
-                            continue;
-                        }
-                        break;
-                    }
+                    const ptr_type = typedefBaseType(params, base_data_type_ndx.?);
 
                     // look up the bytes for this pointer's value in the subordinate
-                    const ptr_buf = try params.scratch.alloc(u8, ptr_data_type.size_bytes);
+                    const ptr_buf = try params.scratch.alloc(u8, ptr_type.data_type.size_bytes);
                     try self.adapter.peekData(params.pid, params.load_addr, address, ptr_buf);
 
                     // recurse using the base data type
                     var recursive_params = params;
                     recursive_params.variable_value_buf = ptr_buf;
-                    recursive_params.variable.data_type = ptr_data_type_ndx;
+                    recursive_params.variable.data_type = ptr_type.data_type_ndx;
 
                     const original_len = fields.items.len;
 
@@ -2435,9 +2426,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
                     var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
                     for (strct.members) |member| {
-                        const member_data_type = params.cu.data_types[member.data_type.int()];
+                        const member_data_type = typedefBaseType(params, member.data_type);
                         const buf_start = member.offset_bytes;
-                        const buf_end = buf_start + member_data_type.size_bytes;
+                        const buf_end = buf_start + member_data_type.data_type.size_bytes;
 
                         // recursively render struct members using the known item buffer
                         var recursive_params = params;
@@ -2524,6 +2515,28 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     log.warnf("unsupported data type: {s}", .{@tagName(data_type.form)});
                 },
             }
+        }
+
+        /// Follows a given data type that may be a typedef to the first non-typedef type in the chain
+        fn typedefBaseType(params: RenderVariableParams, type_ndx: types.TypeNdx) struct {
+            data_type: types.DataType,
+            data_type_ndx: types.TypeNdx,
+        } {
+            var data_type = params.cu.data_types[type_ndx.int()];
+            var data_type_ndx = type_ndx;
+            while (data_type.form == .typedef) {
+                if (data_type.form.typedef.data_type) |typedef_type| {
+                    data_type = params.cu.data_types[typedef_type.int()];
+                    data_type_ndx = typedef_type;
+                    continue;
+                }
+                break;
+            }
+
+            return .{
+                .data_type = data_type,
+                .data_type_ndx = data_type_ndx,
+            };
         }
     };
 }

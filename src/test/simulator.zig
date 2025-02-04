@@ -618,7 +618,7 @@ test "sim:zigprint" {
     const exe_path = "assets/zigprint/out";
     const zigprint_main_zig_hash = try fileHash(t.allocator, "assets/zigprint/main.zig");
 
-    const expected_output_len = 706;
+    const expected_output_len = 869;
 
     // zig fmt: off
     sim.lock()
@@ -650,7 +650,7 @@ test "sim:zigprint" {
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = zigprint_main_zig_hash,
-            .line = types.SourceLine.from(122),
+            .line = types.SourceLine.from(132),
         }}}).req(),
     })
 
@@ -693,7 +693,7 @@ test "sim:zigprint" {
                         if (s.state.subordinate_output.len == 0) return null;
 
                         // spot check a few fields
-                        const num_locals = 53;
+                        const num_locals = 54;
                         if (checkeq(usize, 4, s.state.subordinate_output.len, "unexpected program output len") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") and
@@ -2123,8 +2123,8 @@ test "sim:step_in_then_over_then_out" {
     try sim.run(@src().fn_name);
 }
 
-const cprint_my_func_breakpoint_line = types.SourceLine.from(31);
-const cprint_main_breakpoint_line = types.SourceLine.from(98);
+const cprint_my_func_breakpoint_line = types.SourceLine.from(35);
+const cprint_main_breakpoint_line = types.SourceLine.from(103);
 
 test "sim:cprint" {
     //
@@ -2138,7 +2138,7 @@ test "sim:cprint" {
     const exe_path = "assets/cprint/out";
     const cprint_main_c_hash = try fileHash(t.allocator, "assets/cprint/main.c");
 
-    const expected_output_len = 447;
+    const expected_output_len = 522;
 
     // zig fmt: off
     sim.lock()
@@ -2279,7 +2279,7 @@ test "sim:cprint" {
                         return false;
 
                     // spot check a few fields
-                    const num_locals = 29;
+                    const num_locals = 30;
                     if (!checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") or
                         !checkeq(String, "a", paused.strings.get(paused.locals[0].expression) orelse "", "first local expression was incorrect") or
                         !checkeq(String, "b", paused.strings.get(paused.locals[1].expression) orelse "", "second local expression was incorrect")) {
