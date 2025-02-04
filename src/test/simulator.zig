@@ -2123,8 +2123,8 @@ test "sim:step_in_then_over_then_out" {
     try sim.run(@src().fn_name);
 }
 
-const cprint_my_func_breakpoint_line = types.SourceLine.from(24);
-const cprint_main_breakpoint_line = types.SourceLine.from(87);
+const cprint_my_func_breakpoint_line = types.SourceLine.from(31);
+const cprint_main_breakpoint_line = types.SourceLine.from(98);
 
 test "sim:cprint" {
     //
@@ -2138,7 +2138,7 @@ test "sim:cprint" {
     const exe_path = "assets/cprint/out";
     const cprint_main_c_hash = try fileHash(t.allocator, "assets/cprint/main.c");
 
-    const expected_output_len = 396;
+    const expected_output_len = 447;
 
     // zig fmt: off
     sim.lock()
@@ -2279,7 +2279,7 @@ test "sim:cprint" {
                         return false;
 
                     // spot check a few fields
-                    const num_locals = 26;
+                    const num_locals = 29;
                     if (!checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") or
                         !checkeq(String, "a", paused.strings.get(paused.locals[0].expression) orelse "", "first local expression was incorrect") or
                         !checkeq(String, "b", paused.strings.get(paused.locals[1].expression) orelse "", "second local expression was incorrect")) {

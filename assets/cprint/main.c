@@ -12,6 +12,13 @@ typedef enum TestEnum {
     THREE,
 } TestEnum ;
 
+typedef union TestUnion TestUnion;
+union TestUnion {
+    int first;
+    float second;
+    TestStruct third;
+};
+
 typedef struct CircularPointer CircularPointer;
 struct CircularPointer {
     int value;
@@ -73,6 +80,10 @@ int main() {
     enum TestEnum enum_two = TWO;
     TestEnum enum_three = THREE;
 
+    TestUnion union_one   = { .first  = 123  };
+    TestUnion union_two   = { .second = 4.56 };
+    TestUnion union_three = { .third  = ts   };
+
     // Create a circular pointer chain
     CircularPointer* circular_a = (CircularPointer*)malloc(sizeof(CircularPointer));
     circular_a->value = 17;
@@ -117,6 +128,10 @@ int main() {
     printf("ENUM ONE: %d\n", enum_one);
     printf("ENUM TWO: %d\n", enum_two);
     printf("ENUM THREE: %d\n", enum_three);
+
+    printf("UNION ONE: %d\n", union_one.first);
+    printf("UNION TWO: %f\n", union_two.second);
+    printf("UNION THREE: %d\n", union_three.third.B);
 
     printf("CIRCULAR_A: %d\n", circular_a->value);
     printf("CIRCULAR_B: %d\n", circular_b->value);
