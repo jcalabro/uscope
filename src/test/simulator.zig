@@ -712,9 +712,10 @@ test "sim:zigprint" {
 
                             {
                                 // test rendering an opaque pointer
-                                const opaque_ptr = paused.getLocalByName("opaque_ptr") orelse return falseWithErr("unable to get local \"opaque_ptr\"", .{});
-                                if (opaque_ptr.fields[0].data != null) return falseWithErr("data should not set on variable \"opaque_ptr\"", .{});
-                                if (opaque_ptr.fields[0].address == null) return falseWithErr("address should be set on variable \"opaque_ptr\"", .{});
+                                const ax = paused.getLocalByName("ax") orelse return falseWithErr("unable to get local \"ax\"", .{});
+                                if (ax.fields[0].data != null) return falseWithErr("data should not set on variable \"ax\"", .{});
+                                if (ax.fields[0].address == null) return falseWithErr("address should be set on variable \"ax\"", .{});
+                                if (!checkeq(types.Address, types.Address.from(0x123), ax.fields[0].address.?, "unexpected address of \"ax\"")) return false;
                             }
 
                             {

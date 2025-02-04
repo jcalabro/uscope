@@ -100,7 +100,7 @@ pub fn main() !void {
     const av = MyEnum.second;
     const aw = MyEnum.final;
 
-    const opaque_ptr: *anyopaque = @ptrFromInt(0x123);
+    const ax: *anyopaque = @ptrFromInt(0x123);
 
     print("{}\n", .{a});
     print("{}\n", .{b});
@@ -160,5 +160,5 @@ pub fn main() !void {
     print("{s}\n", .{@tagName(av)});
     print("{s}\n", .{@tagName(aw)});
 
-    print("{any}\n", .{opaque_ptr});
+    print("{any}\n", .{ax});
 }
