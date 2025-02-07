@@ -99,9 +99,13 @@ pub fn selectable(_: [:0]const u8, _: zui.Selectable) bool { return false; }
 
 pub fn isItemHovered(_: zui.HoveredFlags) bool { return true; }
 
-pub fn button(_: [:0]const u8, _: zui.Button) bool { return true; }
+pub fn button(_: [:0]const u8, _: zui.Button) bool { return false; }
 
-pub fn isMouseClicked(_: zui.MouseButton) bool { return true; }
+pub fn isMouseClicked(_: zui.MouseButton) bool { return false; }
+
+pub fn getCursorPosX() f32 { return 0; }
+
+pub fn getCursorPosY() f32 { return 0; }
 
 pub fn setCursorPosX(_: f32) void {  }
 
@@ -120,6 +124,8 @@ pub fn text(comptime _: []const u8, _: anytype) void {  }
 pub fn textWrapped(comptime _: []const u8, _: anytype) void {  }
 
 pub fn centerText(_: [:0]const u8) void {  }
+
+pub fn dummy(_: zui.ImVec2) void {  }
 
 pub fn calcTextSize(_: []const u8, _: zui.CalcTextSize) zui.ImVec2 { return .{}; }
 
@@ -142,4 +148,8 @@ pub fn dockNodeIsSplitNode(_: ?*imgui.ImGuiDockNode) bool { return true; }
 pub fn dockBuilderDockWindow(_: [*c]const u8, _: imgui.ImGuiID) void {  }
 
 pub fn dockBuilderFinish(_: imgui.ImGuiID) void {  }
+
+pub fn treeNode(_: [:0]const u8) bool { return true; }
+
+pub fn treePop() void {  }
 

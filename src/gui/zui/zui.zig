@@ -293,6 +293,14 @@ pub fn isMouseClicked(btn: zui.MouseButton) bool {
     );
 }
 
+pub fn getCursorPosX() f32 {
+    return imgui.igGetCursorPosX();
+}
+
+pub fn getCursorPosY() f32 {
+    return imgui.igGetCursorPosY();
+}
+
 pub fn setCursorPosX(pos: f32) void {
     imgui.igSetCursorPosX(pos);
 }
@@ -345,6 +353,10 @@ pub fn centerText(txt: [:0]const u8) void {
 
     setCursorPosX((win_size.x - txt_size.x) * 0.5);
     setCursorPosY((win_size.y - txt_size.y) * 0.5);
+}
+
+pub fn dummy(size: zui.ImVec2) void {
+    imgui.igDummy(size);
 }
 
 ////////////////////////////////////////////////////////////////
@@ -416,6 +428,16 @@ pub fn dockBuilderDockWindow(window_name: [*c]const u8, node_id: imgui.ImGuiID) 
 
 pub fn dockBuilderFinish(node_id: imgui.ImGuiID) void {
     imgui.igDockBuilderFinish(node_id);
+}
+
+////////////////////////////////////////////////////////////////
+
+pub fn treeNode(label: [:0]const u8) bool {
+    return imgui.igTreeNode_Str(label);
+}
+
+pub fn treePop() void {
+    return imgui.igTreePop();
 }
 
 ////////////////////////////////////////////////////////////////

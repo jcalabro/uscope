@@ -1,7 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
+const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const assert = std.debug.assert;
 const fmt = std.fmt;
 const mem = std.mem;
@@ -282,51 +284,57 @@ pub fn update(self: *Self) State.View {
             //
 
             var to_delete = ArrayList(usize).init(self.state.scratch_alloc);
-            defer to_delete.deinit();
 
             if (zui.beginTable("Watch Values", .{
                 .flags = .{ .scroll_y = true, .row_bg = true },
-                .column = 4,
+                .column = 3,
             })) {
                 defer zui.endTable();
 
-                for (self.watch_vars.items, 0..) |watch, ndx| {
-                    zui.tableNextRow(.{});
+                renderExpressionTableColumnHeaders();
 
-                    if (zui.tableNextColumn()) {
-                        const label = fmt.allocPrint(self.state.scratch_alloc, "X###{d}\x00", .{ndx}) catch |err| e: {
-                            log.errf("unable to create delete watch item label: {!}", .{err});
-                            break :e "";
-                        };
-                        if (zui.button(@ptrCast(label), .{})) {
-                            to_delete.append(ndx) catch |err| {
+                if (self.state.dbg_state.paused) |paused| {
+                    self.renderExpressionResultTable(
+                        self.state.scratch_alloc,
+                        paused,
+                        paused.watches,
+                        .{
+                            .label = "watch",
+                            .to_delete = &to_delete,
+                        },
+                    ) catch |err| {
+                        log.errf("unable to render watch window: {!}", .{err});
+                    };
+                } else {
+                    // render a stripped-down version of the table so the user can
+                    // still delete watch expressions they've already set
+                    for (self.watch_vars.items, 0..) |watch, ndx| {
+                        zui.tableNextRow(.{});
+
+                        if (zui.tableNextColumn()) {
+                            const label = self.deleteWatchExpressionLabel(ndx, 0) catch |err| e: {
+                                log.errf("unable to create delete watch item label: {!}", .{err});
+                                break :e "";
+                            };
+
+                            if (zui.button(@ptrCast(label), .{})) to_delete.append(ndx) catch |err| {
                                 log.errf("unable to mark watch value for deletion: {!}", .{err});
                             };
+                            zui.sameLine(.{});
+                            zui.textWrapped("{s}", .{watch});
                         }
-                    }
-                    if (zui.tableNextColumn()) {
-                        zui.textWrapped("{s}", .{watch});
-                    }
-                    if (self.state.dbg_state.paused) |paused| {
-                        if (ndx >= paused.watches.len) {
-                            // it might be the case that the debugger thread hasn't finished calculating watch values yet,
-                            // so we skip here and attempt to display again next frame
-                            continue;
-                        }
-
-                        self.renderExpressionResult(
-                            self.state.scratch_alloc,
-                            ndx,
-                            &paused,
-                            paused.watches[ndx],
-                        );
                     }
                 }
 
-                var ndx: i64 = @as(i64, @intCast(to_delete.items.len)) - 1;
-                while (ndx >= 0) : (ndx -= 1) {
-                    const str = self.watch_vars.orderedRemove(to_delete.items[@intCast(ndx)]);
-                    self.state.perm_alloc.free(str);
+                if (to_delete.items.len > 0) {
+                    var ndx: i64 = @as(i64, @intCast(to_delete.items.len)) - 1;
+                    while (ndx >= 0) : (ndx -= 1) {
+                        const str = self.watch_vars.orderedRemove(to_delete.items[@intCast(ndx)]);
+                        self.state.perm_alloc.free(str);
+                    }
+                    self.sendSetWatchExpressionsRequest() catch |err| {
+                        log.errf("unable to send set watch expressions request: {!}", .{err});
+                    };
                 }
             }
         }
@@ -345,20 +353,17 @@ pub fn update(self: *Self) State.View {
             })) {
                 defer zui.endTable();
 
-                if (self.state.dbg_state.paused) |paused| {
-                    for (paused.locals, 0..) |local, ndx| {
-                        if (zui.tableNextColumn()) {
-                            const expr = paused.getString(local.expression);
-                            zui.textWrapped("{s}", .{expr});
-                        }
+                renderExpressionTableColumnHeaders();
 
-                        self.renderExpressionResult(
-                            self.state.scratch_alloc,
-                            ndx,
-                            &paused,
-                            local,
-                        );
-                    }
+                if (self.state.dbg_state.paused) |paused| {
+                    self.renderExpressionResultTable(
+                        self.state.scratch_alloc,
+                        paused,
+                        paused.locals,
+                        .{ .label = "locals" },
+                    ) catch |err| {
+                        log.errf("unable to render locals window: {!}", .{err});
+                    };
                 }
             }
         }
@@ -825,6 +830,9 @@ fn drawMainDockspace(self: *Self) void {
 }
 
 pub fn addWatchValue(self: *Self, val: []const u8) Allocator.Error!void {
+    const z = trace.zone(@src());
+    defer z.end();
+
     if (val.len == 0) return;
 
     // copy to the heap
@@ -840,186 +848,445 @@ pub fn addWatchValue(self: *Self, val: []const u8) Allocator.Error!void {
     }
 
     try self.watch_vars.append(str);
-
-    const alloc = self.state.dbg.requests.alloc;
-    var num_allocated: usize = 0;
-    const items = try alloc.alloc([]const u8, self.watch_vars.items.len);
-    errdefer {
-        for (0..num_allocated) |ndx| alloc.free(items[ndx]);
-        alloc.free(items);
-    }
-
-    for (self.watch_vars.items, 0..) |it, ndx| {
-        items[ndx] = try safe.copySlice(u8, alloc, it);
-        num_allocated += 1;
-    }
-
-    self.state.dbg.enqueue(proto.SetWatchExpressionsRequest{ .expressions = items });
+    try self.sendSetWatchExpressionsRequest();
 }
 
-fn renderExpressionResult(
-    self: *Self,
-    scratch: Allocator,
-    expression_ndx: usize,
-    paused: *const types.PauseData,
-    expr_res: types.ExpressionResult,
-) void {
+pub fn sendSetWatchExpressionsRequest(self: *Self) Allocator.Error!void {
     const z = trace.zone(@src());
     defer z.end();
 
-    assert(expr_res.fields.len > 0);
-
-    // display the name and data type of the field
-    if (zui.tableNextColumn()) {
-        // the field data type is always encapsulated in the first field in the list
-        const field = expr_res.fields[0];
-
-        zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
-        defer zui.popStyleColor(.{});
-
-        const type_name = paused.getString(field.data_type_name);
-        zui.textWrapped("{s}", .{type_name});
-
-        // if rendering an array/string, first render the length
-        if (!strings.eql(type_name, types.Unknown)) {
-            switch (field.encoding) {
-                .array => |arr| {
-                    zui.textWrapped("(len: {d})", .{arr.items.len});
-                },
-                .primitive => |p| {
-                    switch (p.encoding) {
-                        .string => {
-                            if (field.data) |str_hash| {
-                                if (paused.strings.get(str_hash)) |data| {
-                                    zui.textWrapped("(len: {d})", .{data.len});
-                                }
-                            }
-                        },
-                        else => {},
-                    }
-                },
-                else => {},
-            }
-        }
+    const alloc = self.state.dbg.requests.alloc;
+    var num_allocated: usize = 0;
+    const expressions = try alloc.alloc([]const u8, self.watch_vars.items.len);
+    errdefer {
+        for (0..num_allocated) |ndx| alloc.free(expressions[ndx]);
+        alloc.free(expressions);
     }
 
+    for (self.watch_vars.items, 0..) |it, ndx| {
+        expressions[ndx] = try safe.copySlice(u8, alloc, it);
+        num_allocated += 1;
+    }
+
+    self.state.dbg.enqueue(proto.SetWatchExpressionsRequest{
+        .expressions = expressions,
+    });
+}
+
+fn renderExpressionTableColumnHeaders() void {
+    zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+    defer zui.popStyleColor(.{});
+
+    zui.tableSetupColumn("Expression", .{});
+    zui.tableSetupColumn("Value", .{});
+    zui.tableSetupColumn("Type", .{});
+    zui.tableHeadersRow();
+}
+
+const RenderResultTableError = Allocator.Error;
+
+const RenderExpressionResultOptions = struct {
+    label: String,
+    to_delete: ?*ArrayList(usize) = null,
+    depth: usize = 0,
+};
+
+fn renderExpressionResultTable(
+    self: *Self,
+    scratch: Allocator,
+    paused: types.PauseData,
+    expressions: []const types.ExpressionResult,
+    opts: RenderExpressionResultOptions,
+) !void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    assert(opts.label.len > 0);
+
+    for (expressions, 0..) |expr, expr_ndx| {
+        if (expr.fields.len == 0) continue;
+
+        const field_ndx = 0;
+        const field = expr.fields[field_ndx];
+        try self.renderSingleExpression(
+            scratch,
+            paused,
+            expressions,
+            expr,
+            expr_ndx,
+            field,
+            field_ndx,
+            opts,
+        );
+    }
+}
+
+fn deleteWatchExpressionLabel(
+    self: *Self,
+    expr_ndx: usize,
+    field_ndx: usize,
+) RenderResultTableError!String {
+    return try fmt.allocPrint(self.state.scratch_alloc, "x###{d}_{d}\x00", .{
+        expr_ndx,
+        field_ndx,
+    });
+}
+
+/// Renders a single expression, and can be recursively called upon the tree
+/// being expanded by the user
+fn renderSingleExpression(
+    self: *Self,
+    scratch: Allocator,
+    paused: types.PauseData,
+    expressions: []const types.ExpressionResult,
+    expr: types.ExpressionResult,
+    expr_ndx: usize,
+    field: types.ExpressionRenderField,
+    field_ndx: usize,
+    opts: RenderExpressionResultOptions,
+) RenderResultTableError!void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    zui.tableNextRow(.{});
+
+    const expr_name = paused.strings.get(expr.expression) orelse types.Unknown;
+
+    // render the expressions identifier
+    var tree_expanded = false;
     if (zui.tableNextColumn()) {
-        const first_field = expr_res.fields[0];
-        for (expr_res.fields, 0..) |field, field_ndx| {
-            // if we're rendering a pointer value, display the address as well
-            if (field.address) |addr| {
-                // @TODO (jrc): clean up the display of this address, it looks terrible
-                const line = fmt.allocPrint(scratch, "0x{x}###{x}\x00", .{ addr, expression_ndx }) catch |err| {
-                    log.errf("unable to render variable address 0x{x}: {!}", .{ addr, err });
-                    return;
-                };
-
-                // send to the memory hex window on click
-                if (zui.selectable(@ptrCast(line), .{})) {
-                    self.state.dbg.enqueue(proto.SetHexWindowAddressRequest{ .address = addr });
-                }
+        if (opts.to_delete != null and field_ndx == 0) {
+            const delete_label = try self.deleteWatchExpressionLabel(expr_ndx, field_ndx);
+            if (zui.button(@ptrCast(delete_label), .{})) {
+                try opts.to_delete.?.append(expr_ndx);
+                return;
             }
+            zui.sameLine(.{});
+        }
 
-            // if rendering a list of array values, label each of its indicies
-            if (first_field.encoding == .array and field_ndx > 0) {
-                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
-                defer zui.popStyleColor(.{});
+        // add some padding if recursive
+        const padding: f32 = @floatFromInt(opts.depth * 30);
+        const cursor = zui.getCursorPosX();
+        zui.setCursorPosX(cursor + padding);
 
-                zui.text("{d}: ", .{field_ndx - 1});
-                zui.sameLine(.{});
-            }
+        const tree_label = try fmt.allocPrint(scratch, "{s}\x00", .{expr_name});
+        if (field_ndx == 0 and expr.fields.len > 1 and field.encoding != .@"enum") {
+            if (zui.treeNode(@ptrCast(tree_label))) tree_expanded = true;
+        } else if (expr.fields[0].encoding == .array and field_ndx > 0) {
+            zui.textWrapped("{s}[{d}]", .{ expr_name, field_ndx - 1 });
+        } else {
+            zui.textWrapped("{s}", .{expr_name});
+        }
+    }
+    defer if (tree_expanded) zui.treePop();
 
-            // if rendering a struct, label each of its members
-            if (first_field.encoding == .@"struct" and field_ndx > 0) {
-                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
-                defer zui.popStyleColor(.{});
-
-                const name = name: {
-                    if (field.name) |n| break :name paused.strings.get(n) orelse types.Unknown;
-                    break :name types.Unknown;
-                };
-
-                zui.text("{s}: ", .{name});
-                zui.sameLine(.{});
-            }
-
-            // if rendering an enum, display the label, then the integer
-            // value as metadata, since the name is more user-friendly
-            const rendering_enum = first_field.encoding == .@"enum" and field_ndx > 0;
-            if (rendering_enum) {
-                const name = name: {
-                    if (field.name) |n| break :name paused.strings.get(n) orelse types.Unknown;
-                    break :name types.Unknown;
-                };
-
-                zui.text("{s}: ", .{name});
-                zui.sameLine(.{});
-            }
-
-            const data = blk: {
-                if (field.data == null) break :blk "";
-
-                break :blk paused.strings.get(field.data.?) orelse {
-                    log.err("unable to find raw symbol render data");
-                    continue;
-                };
-            };
-
-            const buf = switch (field.encoding) {
-                // noop for these since we are rendering the preview via other fields in the list
-                .array, .@"struct", .@"enum" => continue,
-
-                .primitive => |primitive| switch (primitive.encoding) {
-                    .boolean => renderWatchBoolean(scratch, data) catch |err| e: {
-                        log.errf("unable to render boolean watch value: {!}", .{err});
-                        break :e types.Unknown;
-                    },
-                    .signed => renderWatchInteger(scratch, data, .signed) catch |err| e: {
-                        log.errf("unable to render signed integer watch value: {!}", .{err});
-                        break :e types.Unknown;
-                    },
-                    .unsigned => renderWatchInteger(scratch, data, .unsigned) catch |err| e: {
-                        log.errf("unable to render unsigned integer watch value: {!}", .{err});
-                        break :e types.Unknown;
-                    },
-                    .float => renderWatchFloat(scratch, data) catch |err| e: {
-                        log.errf("unable to render float watch value: {!}", .{err});
-                        break :e types.Unknown;
-                    },
-                    .string => e: {
-                        break :e data;
-                    },
-
-                    else => e: {
-                        log.warnf(
-                            "unsupported primitive encoding: {s}",
-                            .{@tagName(primitive.encoding)},
-                        );
-                        break :e types.Unknown;
-                    },
-                },
-            };
-
-            if (rendering_enum) {
-                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
-                defer zui.popStyleColor(.{});
-
-                zui.textWrapped("({s})", .{buf});
-            } else {
-                zui.textWrapped("{s}", .{buf});
-            }
+    // render the data value
+    if (zui.tableNextColumn()) {
+        if (!tree_expanded) {
+            try self.renderClickableAddressIfExists(scratch, field, expr_ndx);
+            try renderPrimitiveOrCollapsedTreePreview(scratch, paused, expr, field);
+            renderDataTypeColumn(paused, field);
+        } else {
+            try self.renderClickableAddressIfExists(scratch, field, expr_ndx);
+            try self.renderExpandedTree(
+                scratch,
+                paused,
+                expressions,
+                expr,
+                expr_ndx,
+                field,
+                opts,
+            );
         }
     }
 }
 
-fn renderWatchBoolean(scratch: Allocator, buf: []const u8) ![]const u8 {
+fn renderDataTypeColumn(paused: types.PauseData, field: types.ExpressionRenderField) void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    if (zui.tableNextColumn()) {
+        zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+        defer zui.popStyleColor(.{});
+
+        const dt_name = paused.strings.get(field.data_type_name) orelse types.Unknown;
+        zui.text("{s}", .{dt_name});
+    }
+}
+
+/// Render the fully evaluated expression value if it's a primitive, or a preview
+/// with the tree collapsed if it's a complex type
+fn renderPrimitiveOrCollapsedTreePreview(
+    scratch: Allocator,
+    paused: types.PauseData,
+    expr: types.ExpressionResult,
+    field: types.ExpressionRenderField,
+) !void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    const val = switch (field.encoding) {
+        .primitive => try renderWatchValue(scratch, paused, field, .{ .render_length = true }),
+
+        .@"enum" => blk: {
+            // render the enum name and its underlying value
+            const name = name: {
+                if (field.name) |n| break :name paused.strings.get(n) orelse types.Unknown;
+                break :name types.Unknown;
+            };
+            zui.text("{s} ", .{name});
+            zui.sameLine(.{});
+
+            if (expr.fields.len > 1) {
+                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+                defer zui.popStyleColor(.{});
+
+                const val = try renderWatchValue(scratch, paused, expr.fields[1], .{});
+                zui.textWrapped("({s})", .{val});
+            }
+
+            break :blk undefined;
+        },
+
+        .array => |arr| blk: {
+            renderLength(arr.items.len);
+
+            var preview = ArrayListUnmanaged(u8){};
+            try preview.appendSlice(scratch, "{ ");
+
+            var elem_ndx: usize = 1;
+            while (elem_ndx < expr.fields.len) : (elem_ndx += 1) {
+                const elem = expr.fields[elem_ndx];
+                const val = switch (elem.encoding) {
+                    .primitive => try renderWatchValue(scratch, paused, elem, .{}),
+
+                    // @TODO (jrc): improve the previews for non-primitives
+                    else => "{...}",
+                };
+
+                try preview.appendSlice(scratch, val);
+
+                // final element in the list, we're done
+                if (elem_ndx == expr.fields.len - 1) break;
+
+                // there are more items, but we lack the space to render them
+                if (preview.items.len >= 20) { // @TODO (jrc): calculate the available space for the preview
+                    try preview.appendSlice(scratch, " ...");
+                    break;
+                }
+
+                try preview.appendSlice(scratch, ", ");
+            }
+
+            try preview.appendSlice(scratch, " }");
+            break :blk try preview.toOwnedSlice(scratch);
+        },
+
+        .@"struct" => blk: {
+            var preview = ArrayListUnmanaged(u8){};
+            try preview.appendSlice(scratch, "{ ");
+
+            var member_ndx: usize = 1;
+            while (member_ndx < expr.fields.len) : (member_ndx += 1) {
+                const member = expr.fields[member_ndx];
+
+                if (member.name) |name_hash| {
+                    const name = paused.strings.get(name_hash) orelse types.Unknown;
+                    try preview.appendSlice(scratch, name);
+                    try preview.appendSlice(scratch, ": ");
+                }
+
+                const val = switch (member.encoding) {
+                    .primitive => try renderWatchValue(scratch, paused, member, .{}),
+
+                    // @TODO (jrc): improve the previews for non-primitives
+                    else => "{...}",
+                };
+
+                try preview.appendSlice(scratch, val);
+
+                // final element in the list, we're done
+                if (member_ndx == expr.fields.len - 1) break;
+
+                // there are more items, but we lack the space to render them
+                if (preview.items.len >= 20) { // @TODO (jrc): calculate the available space for the preview
+                    try preview.appendSlice(scratch, " ...");
+                    break;
+                }
+
+                try preview.appendSlice(scratch, ", ");
+            }
+
+            try preview.appendSlice(scratch, " }");
+            break :blk try preview.toOwnedSlice(scratch);
+        },
+    };
+
+    if (field.encoding != .@"enum") {
+        zui.text("{s}", .{val});
+    }
+}
+
+fn renderExpandedTree(
+    self: *Self,
+    scratch: Allocator,
+    paused: types.PauseData,
+    expressions: []const types.ExpressionResult,
+    expr: types.ExpressionResult,
+    expr_ndx: usize,
+    field: types.ExpressionRenderField,
+    opts: RenderExpressionResultOptions,
+) RenderResultTableError!void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    var recursive_opts = opts;
+    recursive_opts.depth += 1;
+
+    switch (field.encoding) {
+        .primitive => unreachable,
+        .@"enum" => unreachable,
+
+        .array => |arr| {
+            renderLength(arr.items.len);
+            renderDataTypeColumn(paused, field);
+
+            for (arr.items) |item_ndx| {
+                const item = expr.fields[item_ndx.int()];
+                try self.renderSingleExpression(
+                    scratch,
+                    paused,
+                    expressions,
+                    expr,
+                    expr_ndx,
+                    item,
+                    item_ndx.int(),
+                    recursive_opts,
+                );
+            }
+        },
+
+        .@"struct" => |strct| {
+            renderDataTypeColumn(paused, field);
+            for (strct.members) |field_ndx| {
+                const member = expr.fields[field_ndx.int()];
+
+                var recursive_expr = expr;
+                recursive_expr.expression = if (member.name) |n| n else strings.hash(types.Unknown);
+
+                try self.renderSingleExpression(
+                    scratch,
+                    paused,
+                    expressions,
+                    recursive_expr,
+                    expr_ndx,
+                    member,
+                    field_ndx.int(),
+                    recursive_opts,
+                );
+            }
+        },
+    }
+}
+
+/// Renders a clickable hex address if provided
+fn renderClickableAddressIfExists(
+    self: *Self,
+    scratch: Allocator,
+    field: types.ExpressionRenderField,
+    id: usize,
+) RenderResultTableError!void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    if (field.address) |addr| {
+        zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+        defer zui.popStyleColor(.{});
+
+        const addr_str = try fmt.allocPrint(scratch, "0x{x}###{x}\x00", .{
+            addr,
+            id,
+        });
+
+        // send to the memory hex window on click
+        if (zui.selectable(@ptrCast(addr_str), .{})) {
+            self.state.dbg.enqueue(proto.SetHexWindowAddressRequest{
+                .address = addr,
+            });
+        }
+    }
+}
+
+const RenderWatchValueOptions = struct {
+    render_length: bool = false,
+};
+
+fn renderWatchValue(
+    scratch: Allocator,
+    paused: types.PauseData,
+    field: types.ExpressionRenderField,
+    opts: RenderWatchValueOptions,
+) !String {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    const data = blk: {
+        if (field.data == null) break :blk "";
+
+        break :blk paused.strings.get(field.data.?) orelse {
+            log.err("unable to find raw symbol render data");
+            return types.Unknown;
+        };
+    };
+
+    return switch (field.encoding) {
+        // noop for these since we are rendering the preview via other fields in the list
+        .array, .@"struct", .@"enum" => "",
+
+        .primitive => |primitive| switch (primitive.encoding) {
+            .boolean => renderWatchBoolean(scratch, data) catch |err| e: {
+                log.errf("unable to render boolean watch value: {!}", .{err});
+                break :e types.Unknown;
+            },
+            .signed => renderWatchInteger(scratch, data, .signed) catch |err| e: {
+                log.errf("unable to render signed integer watch value: {!}", .{err});
+                break :e types.Unknown;
+            },
+            .unsigned => renderWatchInteger(scratch, data, .unsigned) catch |err| e: {
+                log.errf("unable to render unsigned integer watch value: {!}", .{err});
+                break :e types.Unknown;
+            },
+            .float => renderWatchFloat(scratch, data) catch |err| e: {
+                log.errf("unable to render float watch value: {!}", .{err});
+                break :e types.Unknown;
+            },
+            .string => e: {
+                if (opts.render_length) renderLength(data.len);
+                break :e data;
+            },
+
+            else => e: {
+                log.warnf(
+                    "unsupported primitive encoding: {s}",
+                    .{@tagName(primitive.encoding)},
+                );
+                break :e types.Unknown;
+            },
+        },
+    };
+}
+
+fn renderLength(len: usize) void {
+    zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
+    zui.textWrapped("len: {d}", .{len});
+    zui.popStyleColor(.{});
+}
+
+fn renderWatchBoolean(scratch: Allocator, buf: []const u8) Allocator.Error![]const u8 {
     assert(buf.len == 1);
 
-    if (buf.len > 0 and buf[0] != 0) {
-        return safe.copySlice(u8, scratch, "true");
-    }
-
-    return safe.copySlice(u8, scratch, "false");
+    const res = if (buf.len > 0 and buf[0] != 0) "true" else "false";
+    return try strings.clone(scratch, res);
 }
 
 test "renderWatchBoolean" {
@@ -1133,7 +1400,6 @@ test "renderWatchInteger" {
     }
 }
 
-/// @NEEDSTEST
 fn renderWatchFloat(scratch: Allocator, buf: []const u8) ![]const u8 {
     var r: Reader = undefined;
     r.init(buf);
@@ -1156,7 +1422,24 @@ fn renderWatchFloat(scratch: Allocator, buf: []const u8) ![]const u8 {
             return try fmt.allocPrint(scratch, "{d}", .{f});
         },
         else => {
-            return error.InvalidIntegerSize;
+            return error.InvalidFloatSize;
         },
     }
+}
+
+test "renderWatchFloat" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    try t.expectError(error.InvalidFloatSize, renderWatchFloat(alloc, &[_]u8{0}));
+
+    try t.expectEqualStrings("0", try renderWatchFloat(alloc, &[_]u8{ 0, 0 }));
+    try t.expectEqualStrings("1", try renderWatchFloat(alloc, &[_]u8{ 0, 0x3c }));
+
+    try t.expectEqualStrings("1", try renderWatchFloat(alloc, &[_]u8{ 0, 0, 128, 63 }));
+    try t.expectEqualStrings("1.23", try renderWatchFloat(alloc, &[_]u8{ 164, 112, 157, 63 }));
+    try t.expectEqualStrings("-1.23", try renderWatchFloat(alloc, &[_]u8{ 164, 112, 157, 191 }));
+
+    try t.expectEqualStrings("1.1273817238719823", try renderWatchFloat(alloc, &[_]u8{ 87, 54, 34, 107, 193, 9, 242, 63 }));
 }

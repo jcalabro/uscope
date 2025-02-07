@@ -49,7 +49,7 @@ const imgui = cimgui.c;
 		case "void":
 		case "bool":
 			val = "return true;"
-		case "u8", "u32", "zui.ID":
+		case "u8", "u32", "f32", "zui.ID":
 			val = "return 0;"
 		case "zui.ImVec2":
 			val = "return .{};"
@@ -63,9 +63,17 @@ const imgui = cimgui.c;
 			panic("unimplemented zui return type: " + returnType)
 		}
 
-		// special-case: selectable should return false
-		if strings.HasPrefix(line, "pub fn selectable(") {
-			val = "return false;"
+		// special-cases: things that should always return false in headless mode
+		falses := []string{
+			"selectable",
+			"button",
+			"isMouseClicked",
+		}
+		for _, item := range falses {
+			prefix := fmt.Sprintf("pub fn %s(", item)
+			if strings.HasPrefix(line, prefix) {
+				val = "return false;"
+			}
 		}
 
 		output += fmt.Sprintf("%s %s }\n\n", line, val)
