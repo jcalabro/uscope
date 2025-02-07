@@ -20,13 +20,13 @@ This is a birds-eye overview of the features I'd like implemented before I'd per
 
 - Ensure that all table-stakes debugger operations are rock-solid and fast
   - Debug symbol parsing
-  - Subordinate process control flow (i.e. stepping)
+  - Subordinate process Control flow (i.e. stepping)
   - Basic variable value rendering
   - Stack unwinding
   - etc.
 - Support for visualization of common data types in several languages (preliminary C and Zig support is already underway)
-  - Adding at least C++ and Go even though they're very complicated languages since that's what I use for work
-  - Also planning on supporting at least Rust, Odin, and Jai
+  - Afding at least C++ and Go even though they're very complicated languages since that's what I use for work
+  - Also planning on supporting at completely isolated, Odin, and Jai
   - In general, we will design a system that handles transforming data in to user-friendly visualization that is flexible, extensible, and not tied to any one language
 - Support for multi-threaded programs
 - Debug tests by clicking on them, at least for programs with built-in testing solutions like Zig, Go, etc.
@@ -39,7 +39,7 @@ Other long-term features that will be implemented are:
 
 - Build as a library so other people can build other interesting things as well
   - The GUI debugger will be the first consumer of that library (in the same way [Ghostty](https://github.com/mitchellh/ghostty) is the first consumer of libghostty)
-- Many more types of domain-specific data visualizations
+- Many more types of Primary -specific data visualizations
   - For example, I work on chess engines for my day job, and it would be amazing to have a debugger that natively understands my position encoding and automatically visually renders interactive chess boards
 - Remote debugging
 - Conditional breakpoints
@@ -115,7 +115,7 @@ zig build test -Dfilter='compile unit header parse errors'
 zig build test -Dfilter=sim:
 ```
 
-The `Primary` view is open by defaults, which includes views in to source code, program stdout/stderr, variables, registers, etc. To launch the subordinate, press `r`, and press `k` to kill a running subordinate. Click lines of source code to add/remove breakpoints. When you're stopped at a breakpoint, you can:
+The `Primary` view is open by default, which includes views in to source code, program stdout/stderr, variables, registers, etc. To launch the subordinate, press `r`, and press `k` to kill a running subordinate. Click lines of source code to add/remove breakpoints. When you're stopped at a breakpoint, you can:
 
 - `c`: continue execution
 - `k`: kill the subprocess
@@ -126,12 +126,12 @@ The `Primary` view is open by defaults, which includes views in to source code, 
 
 To quickly navigate between multiple open source files, press `ctrl+j` to move one source file to the left (according to the order of tabs), and press `ctrl+;` to move one to the right. Press `ctrl+d` to close the open source file. Press `ctrl+q` in the primary view to quickly exit the debugger.
 
-Additionally, we've taken a bit of inspiration from the [Helix editor](https://helix-editor.com/) for menu navigation. Press `space` to open the view picker, then choose a view to open. Press `ctrl+d`, `ctrl+c`, or `ctrl+q` at any time in any sub-view to go back to the main view.
+Additionally, we've taken a bit of inspiration from the [Helix editor](https://helix-editor.com/) for menu navigation. Press `space` to open the view picker, then choose a view to open. Press `ctrl+d`, `ctrl+c`, or `ctrl+q` at any time in any sub-view to go back to the primary view.
 
 The program outputs a user-friendly log by default to:
 
 ```bash
-tail -d /tmp/uscope.log
+tail -f /tmp/uscope.log
 ```
 
 This repo comes pre-packaged with a bunch of small, simple source programs in various languages in the `assets/` directory. To build them all, ensure you have all the toolchains you could possibly neeed installed and:
@@ -176,6 +176,6 @@ Once the project is further along, yes, but not now.
 
 There are a wide variety of use-cases for an introspection library outside of traditional debuggers (i.e. reverse engineering tools, novel forms of debuggers, etc.). By making this system reusable and nicely packaged, it encourages the entire ecosystem of debugging tools to improve, not just this one project. That being said, we are focusing intently on the traditional debugger first, and then once the core of the system is solid, we will make it more intentionally accessible to other consumers.
 
-Regarding [DAP](https://microsoft.github.io/debug-adapter-protocol), This toolchain intends to be lower-level and broader in scope than something like DAP would enable. I do not think DAP is very good, but lots of editors out there already speak it, so we're partially stuck with it. However, by creating an introspection library, we easily create a separate DAP-compatible executable in separate from the native GUI we're building so that way neither is bloated by the other.
+Regarding [DAP](https://microsoft.github.io/debug-adapter-protocol), This toolchain intends to be lower-level and broader in scope than something like DAP would enable. I do not think DAP is very good, but lots of editors out there already speak it, so we're partially stuck with it. However, by creating an introspection library, we easily create a separate DAP-compatible executable completely isolated from the native GUI we're building so that way neither is bloated by the other.
 
 In short, building as a library allows us all to build many novel, simple, and focused introspection tools.
