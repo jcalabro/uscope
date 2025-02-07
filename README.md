@@ -2,7 +2,7 @@
 
 [![status-badge](https://ci.uscope.dev/api/badges/1/status.svg)](https://ci.uscope.dev/repos/1)
 
-<img src="https://github.com/user-attachments/assets/8ad10ca9-42d1-4afe-8397-74b8a92a69f5" />
+<img src="https://github.com/user-attachments/assets/bc4b539f-77c1-4dbd-95f2-24102c41ab5c" />
 
 ### Overview
 
