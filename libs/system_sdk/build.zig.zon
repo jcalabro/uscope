@@ -1,0 +1,13 @@
+.{
+    .name = "system_sdk",
+    .version = "0.3.0-dev",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "README.md",
+        "linux",
+        "macos12",
+        "windows",
+    },
+}

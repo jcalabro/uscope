@@ -1,0 +1,6 @@
+# Ignore some special directories
+*zig-cache
+*zig-out
+
+# Ignore some special system files
+*.DS_Store

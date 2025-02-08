@@ -1,0 +1,15 @@
+.{
+    .name = "zglfw",
+    .version = "0.10.0-dev",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "libs",
+        "src",
+        "README.md",
+        "LICENSE",
+    },
+    .dependencies = .{
+        .system_sdk = .{ .path = "../system_sdk" },
+    },
+}
