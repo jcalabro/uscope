@@ -1,7 +1,14 @@
 .{
     .name = "uscope",
     .version = "0.1.0",
-    .paths = .{""},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "README.md",
+        "src",
+        "libs",
+    },
     .dependencies = .{
         .cimgui = .{ .path = "libs/cimgui" },
 
