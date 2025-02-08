@@ -26,7 +26,7 @@ This is a birds-eye overview of the features I'd like implemented before I'd per
   - etc.
 - Support for visualization of common data types in several languages (preliminary C and Zig support is already underway)
   - Afding at least C++ and Go even though they're very complicated languages since that's what I use for work
-  - Also planning on supporting at completely isolated, Odin, and Jai
+  - Also planning on supporting at Rust, Odin, Crystal, and Jai
   - In general, we will design a system that handles transforming data in to user-friendly visualization that is flexible, extensible, and not tied to any one language
 - Support for multi-threaded programs
 - Debug tests by clicking on them, at least for programs with built-in testing solutions like Zig, Go, etc.
