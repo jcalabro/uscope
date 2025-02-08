@@ -2110,6 +2110,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             };
 
             for (func.func.variables) |var_ndx| {
+                const variable = cu.variables[var_ndx.int()];
+                const var_name = if (self.data.target.?.strings.get(variable.name)) |n| n else continue;
+                if (!strings.eql(var_name, expression)) continue;
+
                 var pointers = AutoHashMapUnmanaged(types.Address, types.ExpressionFieldNdx){};
                 try self.renderVariableValue(&fields, &pointers, .{
                     .scratch = scratch,
@@ -2169,7 +2173,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             defer z.end();
 
             const var_name = if (self.data.target.?.strings.get(params.variable.name)) |n| n else return;
-            if (!strings.eql(params.expression, var_name) or var_name.len == 0) return;
+            if (var_name.len == 0) return;
 
             const var_platform_data = switch (builtin.target.os.tag) {
                 .linux => if (params.variable.platform_data.location_expression) |loc|
@@ -2439,8 +2443,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         const member_ndx = fields.items.len - 1;
 
                         // cache and assign the struct member's variable name
-                        const name = self.data.target.?.strings.get(member.name) orelse types.Unknown;
-                        const name_hash = try self.data.subordinate.?.paused.?.strings.add(name);
+                        const member_name = self.data.target.?.strings.get(member.name) orelse types.Unknown;
+                        const name_hash = try self.data.subordinate.?.paused.?.strings.add(member_name);
                         fields.items[member_ndx].name = name_hash;
 
                         try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(member_ndx));
