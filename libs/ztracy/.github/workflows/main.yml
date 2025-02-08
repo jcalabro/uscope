@@ -1,0 +1,36 @@
+name: ci
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+concurrency:
+  # Cancels pending runs when a PR gets updated.
+  group: ${{ github.head_ref || github.run_id }}-${{ github.actor }}
+  cancel-in-progress: true
+jobs:
+  lint-and-build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{matrix.os}}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Read .zig-version
+        id: zigversion
+        uses: juliangruber/read-file-action@v1
+        with:
+          path: ./.zigversion
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ steps.zigversion.outputs.content }}
+      - name: Check format
+        continue-on-error: true
+        run: zig fmt --check .
+      - name: Build and run tests
+        run: zig build test
