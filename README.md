@@ -79,7 +79,7 @@ level=debug
 regions=all
 ```
 
-And a you'll need to create a local, project-specific config file at `$(pwd)/.uscope/config.ini`, whose only required field is `target.path`:
+And a you'll need to create a local, project-specific config file at `$(pwd)/.uscope/config.ini` whose only required field is `target.path`. This local file is not automatically generated; only the global one is.
 
 ```ini
 [target]
