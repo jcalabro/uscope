@@ -1082,19 +1082,16 @@ fn renderPrimitiveOrCollapsedTreePreview(
             break :blk try preview.toOwnedSlice(scratch);
         },
 
-        .@"struct" => blk: {
+        .@"struct" => |strct| blk: {
             var preview = ArrayListUnmanaged(u8){};
             try preview.appendSlice(scratch, "{ ");
 
-            var member_ndx: usize = 1;
-            while (member_ndx < expr.fields.len) : (member_ndx += 1) {
-                const member = expr.fields[member_ndx];
+            for (strct.members) |member_ndx| {
+                const member = expr.fields[member_ndx.int()];
 
-                if (member.name) |name_hash| {
-                    const name = paused.strings.get(name_hash) orelse types.Unknown;
-                    try preview.appendSlice(scratch, name);
-                    try preview.appendSlice(scratch, ": ");
-                }
+                const name = if (member.name) |n| paused.getString(n) else types.Unknown;
+                try preview.appendSlice(scratch, name);
+                try preview.appendSlice(scratch, ": ");
 
                 const val = switch (member.encoding) {
                     .primitive => try renderWatchValue(scratch, paused, member, .{}),
@@ -1106,7 +1103,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
                 try preview.appendSlice(scratch, val);
 
                 // final element in the list, we're done
-                if (member_ndx == expr.fields.len - 1) break;
+                if (member_ndx.eqlInt(expr.fields.len - 1)) break;
 
                 // there are more items, but we lack the space to render them
                 if (preview.items.len >= 20) { // @TODO (jrc): calculate the available space for the preview
