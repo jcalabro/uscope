@@ -982,12 +982,11 @@ fn renderSingleExpression(
 
     // render the data value
     if (zui.tableNextColumn()) {
+        try self.renderClickableAddressIfExists(scratch, field, expr_ndx, field_ndx);
         if (!tree_expanded) {
-            try self.renderClickableAddressIfExists(scratch, field, expr_ndx);
             try renderPrimitiveOrCollapsedTreePreview(scratch, paused, expr, field);
             renderDataTypeColumn(paused, field);
         } else {
-            try self.renderClickableAddressIfExists(scratch, field, expr_ndx);
             try self.renderExpandedTree(
                 scratch,
                 paused,
@@ -1191,7 +1190,8 @@ fn renderClickableAddressIfExists(
     self: *Self,
     scratch: Allocator,
     field: types.ExpressionRenderField,
-    id: usize,
+    expr_ndx: usize,
+    field_ndx: usize,
 ) RenderResultTableError!void {
     const z = trace.zone(@src());
     defer z.end();
@@ -1200,9 +1200,10 @@ fn renderClickableAddressIfExists(
         zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
         defer zui.popStyleColor(.{});
 
-        const addr_str = try fmt.allocPrint(scratch, "0x{x}###{x}\x00", .{
+        const addr_str = try fmt.allocPrint(scratch, "0x{x}###{x}_{x}\x00", .{
             addr,
-            id,
+            expr_ndx,
+            field_ndx,
         });
 
         // send to the memory hex window on click
