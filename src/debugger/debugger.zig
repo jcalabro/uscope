@@ -2321,6 +2321,18 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         },
                     };
 
+                    if (address.eqlInt(0)) {
+                        // not sure what to do, just bail out
+                        try fields.append(params.scratch, .{
+                            .address = address,
+                            .data = null,
+                            .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
+                            .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
+                            .encoding = .{ .primitive = .{ .encoding = .string } },
+                        });
+                        return;
+                    }
+
                     // check if we've seen this pointer before for this variable
                     if (pointers.get(address)) |field_ndx| {
                         const original_pointer_field = fields.items[field_ndx.int()];
