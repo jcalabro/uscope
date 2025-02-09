@@ -11,14 +11,26 @@
     },
     .dependencies = .{
         .cimgui = .{ .path = "libs/cimgui" },
-        .system_sdk = .{ .path = "libs/system_sdk" },
-        .zglfw = .{ .path = "libs/zglfw" },
-        .zopengl = .{ .path = "libs/zopengl" },
-        .ztracy = .{ .path = "libs/ztracy" },
 
         .time = .{
             .url = "https://github.com/jcalabro/zig-time/archive/master.tar.gz",
             .hash = "1220f43a23ab22f4a151477923e986cbfeb01a7970f57e85ea78fb17b3fcdb21d88d",
+        },
+        .system_sdk = .{
+            .url = "git+https://github.com/zig-gamedev/system_sdk/?ref=HEAD#d1e724748d15cfcbf50c45ec7c7019688d45b16a",
+            .hash = "122047a9298c4c9dd43389d418d6826d469b192246ba0944102964cdc57f94c562df",
+        },
+        .zglfw = .{
+            .url = "git+https://github.com/zig-gamedev/zglfw/?ref=HEAD#e9bd486903b5904b6d4e27b8b3771b138a667ef1",
+            .hash = "12209fb981e7aab58c2f9062ab526bd43df3d7953aa41e131a173c37ad35d10b1132",
+        },
+        .zopengl = .{
+            .url = "git+https://github.com/zig-gamedev/zopengl/?ref=HEAD#8686d6f2881322ec3b985ca68c7caee1cabe273b",
+            .hash = "1220214a9591f6f2a15ac3e53810c3a593e868fa3ee17f0809c3420444e462c9b40f",
+        },
+        .ztracy = .{
+            .url = "git+https://github.com/zig-gamedev/ztracy/?ref=HEAD#b14c70625294de7c98fc08f7b6bd327dca01c79c",
+            .hash = "1220db44aa021874e7d813a816e79c1a60ac8b67ea7e31846c242f0736277353196d",
         },
     },
 }
