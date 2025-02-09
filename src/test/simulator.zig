@@ -618,7 +618,7 @@ test "sim:zigprint" {
     const exe_path = "assets/zigprint/out";
     const zigprint_main_zig_hash = try fileHash(t.allocator, "assets/zigprint/main.zig");
 
-    const expected_output_len = 869;
+    const expected_output_len = 871;
 
     // zig fmt: off
     sim.lock()

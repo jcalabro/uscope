@@ -9,8 +9,8 @@ const MyStruct = struct {
 };
 
 const NestedStruct = struct {
-    first: i32 = 456,
-    second: MyStruct,
+    numeric: i32 = 456,
+    nested: MyStruct,
 
     fn dontOptimizeMe(_: *@This()) void {}
 };
@@ -124,7 +124,7 @@ pub fn main() !void {
     var ba = TaggedUnion{ .third = &ap };
     ba.dontOptimizeMe();
 
-    var bb = NestedStruct{ .second = ap };
+    var bb = NestedStruct{ .nested = ap };
     bb.dontOptimizeMe();
 
     print("{}\n", .{a});

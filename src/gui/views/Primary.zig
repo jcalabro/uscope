@@ -956,7 +956,7 @@ fn renderSingleExpression(
     // render the expressions identifier
     var tree_expanded = false;
     if (zui.tableNextColumn()) {
-        if (opts.to_delete != null and field_ndx == 0) {
+        if (opts.to_delete != null and opts.depth == 0) {
             const delete_label = try self.deleteWatchExpressionLabel(expr_ndx, field_ndx);
             if (zui.button(@ptrCast(delete_label), .{})) {
                 try opts.to_delete.?.append(expr_ndx);
@@ -971,7 +971,7 @@ fn renderSingleExpression(
         zui.setCursorPosX(cursor + padding);
 
         const tree_label = try fmt.allocPrint(scratch, "{s}\x00", .{expr_name});
-        if (field_ndx == 0 and expr.fields.len > 1 and field.encoding != .@"enum") {
+        if (expr.fields.len > 1 and (field.encoding == .@"struct" or field.encoding == .array)) {
             if (zui.treeNode(@ptrCast(tree_label))) tree_expanded = true;
         } else if (expr.fields[0].encoding == .array and field_ndx > 0) {
             zui.textWrapped("{s}[{d}]", .{ expr_name, field_ndx - 1 });
@@ -1055,7 +1055,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
             try preview.appendSlice(scratch, "{ ");
 
             var elem_ndx: usize = 1;
-            while (elem_ndx < expr.fields.len) : (elem_ndx += 1) {
+            while (elem_ndx < arr.items.len) : (elem_ndx += 1) {
                 const elem = expr.fields[elem_ndx];
                 const val = switch (elem.encoding) {
                     .primitive => try renderWatchValue(scratch, paused, elem, .{}),

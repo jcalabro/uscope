@@ -2437,10 +2437,11 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         // recursively render struct members using the known item buffer
                         var recursive_params = params;
                         recursive_params.variable_value_buf = buf[buf_start..buf_end];
-                        recursive_params.variable.data_type = member.data_type;
+                        recursive_params.variable.data_type = member_data_type.data_type_ndx;
 
+                        const member_ndx = fields.items.len;
                         try self.renderVariableValue(fields, pointers, recursive_params);
-                        const member_ndx = fields.items.len - 1;
+                        assert(fields.items.len > member_ndx);
 
                         // cache and assign the struct member's variable name
                         const member_name = self.data.target.?.strings.get(member.name) orelse types.Unknown;
