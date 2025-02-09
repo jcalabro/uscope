@@ -767,9 +767,12 @@ test "sim:zigprint" {
                                     return false;
                                 }
 
-                                if (!checkeq(usize, 2, field.encoding.@"struct".members.len, "unexpected number of struct members for \"at\"")) {
+                                if (!checkeq(usize, 2, field.encoding.@"struct".members.len, "unexpected number of struct members for \"ap\"")) {
                                     return false;
                                 }
+
+                                // check the struct members
+                                if (!checkNestedZigStructMembers(paused, ap)) return false;
 
                                 {
                                     // check `field_a`
@@ -794,28 +797,46 @@ test "sim:zigprint" {
                                     if (!checkstr(paused.strings, &.{123, 0, 0, 0}, member.data.?, "incorrect value for \"ap.field_a\"")) return false;
                                 }
 
+                            }
+
+                            {
+                                // test rendering a nested struct
+                                const bb = paused.getLocalByName("bb") orelse return falseWithErr("unable to get local \"bb\"", .{});
+                                const field = bb.fields[0];
+                                if (field.encoding != .@"struct") {
+                                    log.errf("variable \"bb\" encoding was not a struct, got {s}", .{@tagName(field.encoding)});
+                                    return false;
+                                }
+
+                                if (!checkeq(usize, 2, field.encoding.@"struct".members.len, "unexpected number of struct members for \"bb\"")) {
+                                    return false;
+                                }
+
                                 {
-                                    // check `field_b`
+                                    // check the simple integer field (not nested)
                                     const member = mem: {
-                                        for (ap.fields) |f| {
+                                        for (bb.fields) |f| {
                                             const name = paused.strings.get(f.name orelse 0).?;
-                                            if (strings.eql(name, "field_b")) break :mem f;
+                                            if (strings.eql(name, "numeric")) break :mem f;
                                         }
-                                        log.err("\"field_b\" not found in struct \"ap\"");
+                                        log.err("\"numeric\" not found in struct \"bb\"");
                                         return false;
                                     };
 
                                     if (member.encoding != .primitive) {
-                                        log.errf("\"ap.field_b\" was not a primitive, got {s}", .{@tagName(member.encoding)});
+                                        log.errf("\"bb.numeric\" was not a primitive, got {s}", .{@tagName(member.encoding)});
                                         return false;
                                     }
-                                    if (member.encoding.primitive.encoding != .string) {
-                                        log.errf("\"ap.field_b\" was not a string, got {s}", .{@tagName(member.encoding.primitive.encoding)});
+                                    if (member.encoding.primitive.encoding != .signed) {
+                                        log.errf("\"bb.numeric\" was not a signed integer, got {s}", .{@tagName(member.encoding.primitive.encoding)});
                                         return false;
                                     }
 
-                                    if (!checkstr(paused.strings, "this is field_b", member.data.?, "incorrect value for \"ap.field_b\"")) return false;
+                                    if (!checkstr(paused.strings, &.{200, 1, 0, 0}, member.data.?, "incorrect value for \"bb.numeric\"")) return false;
                                 }
+
+                                // check `nested`, which is a struct within a struct
+                                if (!checkNestedZigStructMembers(paused, bb)) return false;
                             }
 
                             {
@@ -960,6 +981,56 @@ test "sim:zigprint" {
     // zig fmt: on
 
     try sim.run(@src().fn_name);
+}
+
+fn checkNestedZigStructMembers(paused: types.PauseData, res: types.ExpressionResult) bool {
+    {
+        // check `field_a`
+        const field_a = mem: {
+            for (res.fields) |f| {
+                const name = paused.strings.get(f.name orelse 0).?;
+                if (strings.eql(name, "field_a")) break :mem f;
+            }
+            log.err("\"field_a\" not found in struct \"bb.nested\"");
+            return false;
+        };
+
+        if (field_a.encoding != .primitive) {
+            log.errf("\"bb.nested.field_a\" was not a primitive, got {s}", .{@tagName(field_a.encoding)});
+            return false;
+        }
+        if (field_a.encoding.primitive.encoding != .signed) {
+            log.errf("\"bb.nested.field_a\" was not a signed integer, got {s}", .{@tagName(field_a.encoding.primitive.encoding)});
+            return false;
+        }
+
+        if (!checkstr(paused.strings, &.{ 123, 0, 0, 0 }, field_a.data.?, "incorrect value for \"bb.nested.field_a\"")) return false;
+    }
+
+    {
+        // check `field_b`
+        const member = mem: {
+            for (res.fields) |f| {
+                const name = paused.strings.get(f.name orelse 0).?;
+                if (strings.eql(name, "field_b")) break :mem f;
+            }
+            log.err("\"field_b\" not found in struct \"ap\"");
+            return false;
+        };
+
+        if (member.encoding != .primitive) {
+            log.errf("\"ap.field_b\" was not a primitive, got {s}", .{@tagName(member.encoding)});
+            return false;
+        }
+        if (member.encoding.primitive.encoding != .string) {
+            log.errf("\"ap.field_b\" was not a string, got {s}", .{@tagName(member.encoding.primitive.encoding)});
+            return false;
+        }
+
+        if (!checkstr(paused.strings, "this is field_b", member.data.?, "incorrect value for \"ap.field_b\"")) return false;
+    }
+
+    return true;
 }
 
 test "sim:cmulticu" {
