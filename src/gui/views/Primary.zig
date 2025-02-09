@@ -948,9 +948,10 @@ fn renderSingleExpression(
     const z = trace.zone(@src());
     defer z.end();
 
-    zui.tableNextRow(.{});
+    const expr_name = paused.strings.get(expr.expression) orelse "";
+    if (expr_name.len == 0) return;
 
-    const expr_name = paused.strings.get(expr.expression) orelse types.Unknown;
+    zui.tableNextRow(.{});
 
     // render the expressions identifier
     var tree_expanded = false;
