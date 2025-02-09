@@ -1,4 +1,5 @@
 const std = @import("std");
+const ArrayList = std.ArrayList;
 const print = std.debug.print;
 
 const MyStruct = struct {
@@ -9,8 +10,8 @@ const MyStruct = struct {
 };
 
 const NestedStruct = struct {
-    first: i32 = 456,
-    second: MyStruct,
+    numeric: i32 = 456,
+    nested: MyStruct,
 
     fn dontOptimizeMe(_: *@This()) void {}
 };
@@ -124,8 +125,20 @@ pub fn main() !void {
     var ba = TaggedUnion{ .third = &ap };
     ba.dontOptimizeMe();
 
-    var bb = NestedStruct{ .second = ap };
+    var bb = NestedStruct{ .nested = ap };
     bb.dontOptimizeMe();
+
+    var bd = NestedStruct{ .nested = .{
+        .field_a = 99,
+        .field_b = "another string",
+    } };
+    bd.dontOptimizeMe();
+
+    var be = ArrayList(NestedStruct).init(std.heap.page_allocator);
+    defer be.deinit();
+    try be.append(bb);
+    try be.append(bd);
+    try be.append(bb);
 
     print("{}\n", .{a});
     print("{}\n", .{b});
@@ -192,4 +205,6 @@ pub fn main() !void {
     print("{any}\n", .{ba});
 
     print("{any}\n", .{bb});
+
+    print("{any}\n", .{be.items.len});
 }

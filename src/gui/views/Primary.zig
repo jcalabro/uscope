@@ -889,6 +889,7 @@ const RenderExpressionResultOptions = struct {
     label: String,
     to_delete: ?*ArrayList(usize) = null,
     depth: usize = 0,
+    field_index_subscript: ?usize = null,
 };
 
 fn renderExpressionResultTable(
@@ -956,7 +957,7 @@ fn renderSingleExpression(
     // render the expressions identifier
     var tree_expanded = false;
     if (zui.tableNextColumn()) {
-        if (opts.to_delete != null and field_ndx == 0) {
+        if (opts.to_delete != null and opts.depth == 0) {
             const delete_label = try self.deleteWatchExpressionLabel(expr_ndx, field_ndx);
             if (zui.button(@ptrCast(delete_label), .{})) {
                 try opts.to_delete.?.append(expr_ndx);
@@ -971,10 +972,10 @@ fn renderSingleExpression(
         zui.setCursorPosX(cursor + padding);
 
         const tree_label = try fmt.allocPrint(scratch, "{s}\x00", .{expr_name});
-        if (field_ndx == 0 and expr.fields.len > 1 and field.encoding != .@"enum") {
+        if (expr.fields.len > 1 and (field.encoding == .@"struct" or field.encoding == .array)) {
             if (zui.treeNode(@ptrCast(tree_label))) tree_expanded = true;
-        } else if (expr.fields[0].encoding == .array and field_ndx > 0) {
-            zui.textWrapped("{s}[{d}]", .{ expr_name, field_ndx - 1 });
+        } else if (opts.field_index_subscript != null) {
+            zui.textWrapped("{s}[{d}]", .{ expr_name, opts.field_index_subscript.? });
         } else {
             zui.textWrapped("{s}", .{expr_name});
         }
@@ -1028,10 +1029,10 @@ fn renderPrimitiveOrCollapsedTreePreview(
     const val = switch (field.encoding) {
         .primitive => try renderWatchValue(scratch, paused, field, .{ .render_length = true }),
 
-        .@"enum" => blk: {
+        .@"enum" => |enm| blk: {
             // render the enum name and its underlying value
             const name = name: {
-                if (field.name) |n| break :name paused.strings.get(n) orelse types.Unknown;
+                if (enm.name) |n| break :name paused.strings.get(n) orelse types.Unknown;
                 break :name types.Unknown;
             };
             zui.text("{s} ", .{name});
@@ -1055,7 +1056,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
             try preview.appendSlice(scratch, "{ ");
 
             var elem_ndx: usize = 1;
-            while (elem_ndx < expr.fields.len) : (elem_ndx += 1) {
+            while (elem_ndx < arr.items.len + 1) : (elem_ndx += 1) {
                 const elem = expr.fields[elem_ndx];
                 const val = switch (elem.encoding) {
                     .primitive => try renderWatchValue(scratch, paused, elem, .{}),
@@ -1069,13 +1070,13 @@ fn renderPrimitiveOrCollapsedTreePreview(
                 // final element in the list, we're done
                 if (elem_ndx == expr.fields.len - 1) break;
 
+                try preview.appendSlice(scratch, ", ");
+
                 // there are more items, but we lack the space to render them
-                if (preview.items.len >= 20) { // @TODO (jrc): calculate the available space for the preview
-                    try preview.appendSlice(scratch, " ...");
+                if (preview.items.len >= 12) { // @TODO (jrc): calculate the available space for the preview
+                    try preview.appendSlice(scratch, "...");
                     break;
                 }
-
-                try preview.appendSlice(scratch, ", ");
             }
 
             try preview.appendSlice(scratch, " }");
@@ -1148,7 +1149,8 @@ fn renderExpandedTree(
             renderLength(arr.items.len);
             renderDataTypeColumn(paused, field);
 
-            for (arr.items) |item_ndx| {
+            for (arr.items, 0..) |item_ndx, ndx| {
+                recursive_opts.field_index_subscript = ndx;
                 const item = expr.fields[item_ndx.int()];
                 try self.renderSingleExpression(
                     scratch,
