@@ -2,7 +2,6 @@ const std = @import("std");
 const print = std.debug.print;
 const Thread = std.Thread;
 const WaitGroup = Thread.WaitGroup;
-const time = std.time;
 
 pub fn main() !void {
     print("starting zigmultithread\n", .{});
@@ -32,6 +31,6 @@ fn sleepThread(wg: *WaitGroup, sleep_ms: u64) void {
     defer wg.finish();
 
     print("sleeping for {d}ms\n", .{sleep_ms});
-    time.sleep(sleep_ms * time.ns_per_ms);
+    Thread.sleep(sleep_ms * std.time.ns_per_ms);
     print("sleep for {d}ms complete\n", .{sleep_ms});
 }

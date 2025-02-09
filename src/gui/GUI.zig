@@ -302,7 +302,7 @@ pub fn frameRateLimit(last_frame_render_micros: u64) u64 {
     const frame_duration = now - last_frame_render_micros;
     if (frame_duration < FrameMicros) {
         const wait_for = FrameMicros - frame_duration;
-        time.sleep(wait_for * time.ns_per_us);
+        std.Thread.sleep(wait_for * time.ns_per_us);
     }
 
     return @intCast(time.microTimestamp());

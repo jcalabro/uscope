@@ -85,7 +85,7 @@ const LinuxWatcher = struct {
             if (poll <= 0) continue;
 
             // @NOTE (jrc): a sleep is required for the file to flush to disk (this is pretty janky...)
-            time.sleep(50 * time.ns_per_ms);
+            std.Thread.sleep(50 * time.ns_per_ms);
 
             const max = std.math.pow(usize, 2, 10);
             for (0..max) |ndx| {

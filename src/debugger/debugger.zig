@@ -606,7 +606,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 //
                 // @TODO (jrc): use /proc/self/status to detect if we are being traced by a debugger
                 // @TODO (jrc): handle this properly with signals rather than a sleep
-                std.time.sleep(20 * std.time.ns_per_ms);
+                Thread.sleep(20 * std.time.ns_per_ms);
             }
 
             {
