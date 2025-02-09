@@ -66,6 +66,9 @@ uid: if (native_os == .windows or native_os == .wasi) void else ?posix.uid_t,
 /// Set to change the group id when spawning the child process.
 gid: if (native_os == .windows or native_os == .wasi) void else ?posix.gid_t,
 
+/// Set to change the process group id when spawning the child process.
+pgid: if (native_os == .windows or native_os == .wasi) void else ?posix.pid_t,
+
 /// Set to change the current working directory when spawning the child process.
 cwd: ?[]const u8,
 /// Set to change the current working directory when spawning the child process.
@@ -73,7 +76,7 @@ cwd: ?[]const u8,
 /// Once that is done, `cwd` will be deprecated in favor of this field.
 cwd_dir: ?fs.Dir = null,
 
-err_pipe: ?if (native_os == .windows) void else [2]posix.fd_t,
+err_pipe: if (native_os == .windows) void else ?posix.fd_t,
 
 expand_arg0: Arg0Expand,
 
@@ -104,7 +107,7 @@ resource_usage_statistics: ResourceUsageStatistics = .{},
 ///
 /// The child's progress tree will be grafted into the parent's progress tree,
 /// by substituting this node with the child's root node.
-progress_node: std.Progress.Node = .{ .index = .none },
+progress_node: std.Progress.Node = std.Progress.Node.none,
 
 pub const ResourceUsageStatistics = struct {
     rusage: @TypeOf(rusage_init) = rusage_init,
@@ -168,15 +171,12 @@ pub const SpawnError = error{
     /// - CR is stripped by `cmd.exe`, so any CR codepoints
     ///   would be lost after execution.
     InvalidBatchScriptArg,
-
-    // @NOTE (jrc): I added the following
-    DeviceBusy,
-    InputOutput,
-    ProcessNotFound,
 } ||
     posix.ExecveError ||
     posix.SetIdError ||
+    posix.SetPgidError ||
     posix.ChangeCurDirError ||
+    posix.PtraceError ||
     windows.CreateProcessError ||
     windows.GetProcessMemoryInfoError ||
     windows.WaitForSingleObjectError;
@@ -215,12 +215,13 @@ pub fn init(argv: []const []const u8, allocator: mem.Allocator) ChildProcess {
         .argv = argv,
         .id = undefined,
         .thread_handle = undefined,
-        .err_pipe = null,
+        .err_pipe = if (native_os == .windows) {} else null,
         .term = null,
         .env_map = null,
         .cwd = null,
         .uid = if (native_os == .windows or native_os == .wasi) {} else null,
         .gid = if (native_os == .windows or native_os == .wasi) {} else null,
+        .pgid = if (native_os == .windows or native_os == .wasi) {} else null,
         .stdin = null,
         .stdout = null,
         .stderr = null,
@@ -296,12 +297,12 @@ pub fn killPosix(self: *ChildProcess) !Term {
         error.ProcessNotFound => return error.AlreadyTerminated,
         else => return err,
     };
-    try self.waitUnwrapped();
+    self.waitUnwrappedPosix();
     return self.term.?;
 }
 
 // @NOTE (jrc): I added this
-pub fn extremeKill(self: *ChildProcess) !void {
+pub fn extremeKillPosix(self: *ChildProcess) !void {
     if (self.term != null) {
         self.cleanupStreams();
         return;
@@ -313,16 +314,45 @@ pub fn extremeKill(self: *ChildProcess) !void {
     };
 }
 
+pub const WaitError = SpawnError || std.os.windows.GetProcessMemoryInfoError;
+
+/// On some targets, `spawn` may not report all spawn errors, such as `error.InvalidExe`.
+/// This function will block until any spawn errors can be reported, and return them.
+pub fn waitForSpawn(self: *ChildProcess) SpawnError!void {
+    if (native_os == .windows) return; // `spawn` reports everything
+    if (self.term) |term| {
+        _ = term catch |spawn_err| return spawn_err;
+        return;
+    }
+
+    const err_pipe = self.err_pipe orelse return;
+    self.err_pipe = null;
+
+    // Wait for the child to report any errors in or before `execvpe`.
+    if (readIntFd(err_pipe)) |child_err_int| {
+        posix.close(err_pipe);
+        const child_err: SpawnError = @errorCast(@errorFromInt(child_err_int));
+        self.term = child_err;
+        return child_err;
+    } else |_| {
+        // Write end closed by CLOEXEC at the time of the `execvpe` call, indicating success!
+        posix.close(err_pipe);
+    }
+}
+
 /// Blocks until child process terminates and then cleans up all resources.
-pub fn wait(self: *ChildProcess) !Term {
-    const term = if (native_os == .windows)
-        try self.waitWindows()
-    else
-        try self.waitPosix();
-
+pub fn wait(self: *ChildProcess) WaitError!Term {
+    try self.waitForSpawn(); // report spawn errors
+    if (self.term) |term| {
+        self.cleanupStreams();
+        return term;
+    }
+    switch (native_os) {
+        .windows => try self.waitUnwrappedWindows(),
+        else => self.waitUnwrappedPosix(),
+    }
     self.id = undefined;
-
-    return term;
+    return self.term.?;
 }
 
 pub const RunResult = struct {
@@ -331,17 +361,17 @@ pub const RunResult = struct {
     stderr: []u8,
 };
 
-fn fifoToOwnedArrayList(fifo: *std.io.PollFifo) std.ArrayList(u8) {
-    if (fifo.head > 0) {
-        @memcpy(fifo.buf[0..fifo.count], fifo.buf[fifo.head..][0..fifo.count]);
+fn writeFifoDataToArrayList(allocator: Allocator, list: *std.ArrayListUnmanaged(u8), fifo: *std.io.PollFifo) !void {
+    if (fifo.head != 0) fifo.realign();
+    if (list.capacity == 0) {
+        list.* = .{
+            .items = fifo.buf[0..fifo.count],
+            .capacity = fifo.buf.len,
+        };
+        fifo.* = std.io.PollFifo.init(fifo.allocator);
+    } else {
+        try list.appendSlice(allocator, fifo.buf[0..fifo.count]);
     }
-    const result = std.ArrayList(u8){
-        .items = fifo.buf[0..fifo.count],
-        .capacity = fifo.buf.len,
-        .allocator = fifo.allocator,
-    };
-    fifo.* = std.io.PollFifo.init(fifo.allocator);
-    return result;
 }
 
 /// Collect the output from the process's stdout and stderr. Will return once all output
@@ -351,21 +381,16 @@ fn fifoToOwnedArrayList(fifo: *std.io.PollFifo) std.ArrayList(u8) {
 /// The process must be started with stdout_behavior and stderr_behavior == .Pipe
 pub fn collectOutput(
     child: ChildProcess,
-    stdout: *std.ArrayList(u8),
-    stderr: *std.ArrayList(u8),
+    /// Used for `stdout` and `stderr`.
+    allocator: Allocator,
+    stdout: *std.ArrayListUnmanaged(u8),
+    stderr: *std.ArrayListUnmanaged(u8),
     max_output_bytes: usize,
 ) !void {
     assert(child.stdout_behavior == .Pipe);
     assert(child.stderr_behavior == .Pipe);
 
-    // we could make this work with multiple allocators but YAGNI
-    if (stdout.allocator.ptr != stderr.allocator.ptr or
-        stdout.allocator.vtable != stderr.allocator.vtable)
-    {
-        unreachable; // ChildProcess.collectOutput only supports 1 allocator
-    }
-
-    var poller = std.io.poll(stdout.allocator, enum { stdout, stderr }, .{
+    var poller = std.io.poll(allocator, enum { stdout, stderr }, .{
         .stdout = child.stdout.?,
         .stderr = child.stderr.?,
     });
@@ -378,8 +403,8 @@ pub fn collectOutput(
             return error.StderrStreamTooLong;
     }
 
-    stdout.* = fifoToOwnedArrayList(poller.fifo(.stdout));
-    stderr.* = fifoToOwnedArrayList(poller.fifo(.stderr));
+    try writeFifoDataToArrayList(allocator, stdout, poller.fifo(.stdout));
+    try writeFifoDataToArrayList(allocator, stderr, poller.fifo(.stderr));
 }
 
 pub const RunError = posix.GetCwdError || posix.ReadError || SpawnError || posix.PollError || error{
@@ -397,6 +422,7 @@ pub fn run(args: struct {
     env_map: ?*const EnvMap = null,
     max_output_bytes: usize = 50 * 1024,
     expand_arg0: Arg0Expand = .no_expand,
+    progress_node: std.Progress.Node = std.Progress.Node.none,
 }) RunError!RunResult {
     var child = ChildProcess.init(args.argv, args.allocator);
     child.stdin_behavior = .Ignore;
@@ -406,45 +432,27 @@ pub fn run(args: struct {
     child.cwd_dir = args.cwd_dir;
     child.env_map = args.env_map;
     child.expand_arg0 = args.expand_arg0;
+    child.progress_node = args.progress_node;
 
-    var stdout = std.ArrayList(u8).init(args.allocator);
-    var stderr = std.ArrayList(u8).init(args.allocator);
-    errdefer {
-        stdout.deinit();
-        stderr.deinit();
-    }
+    var stdout: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer stdout.deinit(args.allocator);
+    var stderr: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer stderr.deinit(args.allocator);
 
     try child.spawn();
-    try child.collectOutput(&stdout, &stderr, args.max_output_bytes);
+    errdefer {
+        _ = child.kill() catch {};
+    }
+    try child.collectOutput(args.allocator, &stdout, &stderr, args.max_output_bytes);
 
     return RunResult{
+        .stdout = try stdout.toOwnedSlice(args.allocator),
+        .stderr = try stderr.toOwnedSlice(args.allocator),
         .term = try child.wait(),
-        .stdout = try stdout.toOwnedSlice(),
-        .stderr = try stderr.toOwnedSlice(),
     };
 }
 
-fn waitWindows(self: *ChildProcess) !Term {
-    if (self.term) |term| {
-        self.cleanupStreams();
-        return term;
-    }
-
-    try self.waitUnwrappedWindows();
-    return self.term.?;
-}
-
-fn waitPosix(self: *ChildProcess) !Term {
-    if (self.term) |term| {
-        self.cleanupStreams();
-        return term;
-    }
-
-    try self.waitUnwrapped();
-    return self.term.?;
-}
-
-fn waitUnwrappedWindows(self: *ChildProcess) !void {
+fn waitUnwrappedWindows(self: *ChildProcess) WaitError!void {
     const result = windows.WaitForSingleObjectEx(self.id, windows.INFINITE, false);
 
     self.term = @as(SpawnError!Term, x: {
@@ -466,7 +474,7 @@ fn waitUnwrappedWindows(self: *ChildProcess) !void {
     return result;
 }
 
-fn waitUnwrapped(self: *ChildProcess) !void {
+fn waitUnwrappedPosix(self: *ChildProcess) void {
     const res: posix.WaitPidResult = res: {
         if (self.request_resource_usage_statistics) {
             switch (native_os) {
@@ -488,7 +496,7 @@ fn waitUnwrapped(self: *ChildProcess) !void {
 }
 
 fn handleWaitResult(self: *ChildProcess, status: u32) void {
-    self.term = self.cleanupAfterWait(status);
+    self.term = statusToTerm(status);
 }
 
 fn cleanupStreams(self: *ChildProcess) void {
@@ -504,46 +512,6 @@ fn cleanupStreams(self: *ChildProcess) void {
         stderr.close();
         self.stderr = null;
     }
-}
-
-fn cleanupAfterWait(self: *ChildProcess, status: u32) !Term {
-    if (self.err_pipe) |err_pipe| {
-        defer destroyPipe(err_pipe);
-
-        if (native_os == .linux) {
-            var fd = [1]posix.pollfd{posix.pollfd{
-                .fd = err_pipe[0],
-                .events = posix.POLL.IN,
-                .revents = undefined,
-            }};
-
-            // Check if the eventfd buffer stores a non-zero value by polling
-            // it, that's the error code returned by the child process.
-            _ = posix.poll(&fd, 0) catch unreachable;
-
-            // According to eventfd(2) the descriptor is readable if the counter
-            // has a value greater than 0
-            if ((fd[0].revents & posix.POLL.IN) != 0) {
-                const err_int = try readIntFd(err_pipe[0]);
-                return @as(SpawnError, @errorCast(@errorFromInt(err_int)));
-            }
-        } else {
-            // Write maxInt(ErrInt) to the write end of the err_pipe. This is after
-            // waitpid, so this write is guaranteed to be after the child
-            // pid potentially wrote an error. This way we can do a blocking
-            // read on the error pipe and either get maxInt(ErrInt) (no error) or
-            // an error code.
-            try writeIntFd(err_pipe[1], maxInt(ErrInt));
-            const err_int = try readIntFd(err_pipe[0]);
-            // Here we potentially return the fork child's error from the parent
-            // pid.
-            if (err_int != maxInt(ErrInt)) {
-                return @as(SpawnError, @errorCast(@errorFromInt(err_int)));
-            }
-        }
-    }
-
-    return statusToTerm(status);
 }
 
 fn statusToTerm(status: u32) Term {
@@ -655,18 +623,9 @@ fn spawnPosix(self: *ChildProcess) SpawnError!void {
         }
     };
 
-    // This pipe is used to communicate errors between the time of fork
-    // and execve from the child process to the parent process.
-    const err_pipe = blk: {
-        if (native_os == .linux) {
-            const fd = try posix.eventfd(0, linux.EFD.CLOEXEC);
-            // There's no distinction between the readable and the writeable
-            // end with eventfd
-            break :blk [2]posix.fd_t{ fd, fd };
-        } else {
-            break :blk try posix.pipe2(.{ .CLOEXEC = true });
-        }
-    };
+    // This pipe communicates to the parent errors in the child between `fork` and `execvpe`.
+    // It is closed by the child (via CLOEXEC) without writing if `execvpe` succeeds.
+    const err_pipe: [2]posix.fd_t = try posix.pipe2(.{ .CLOEXEC = true });
     errdefer destroyPipe(err_pipe);
 
     const pid_result = try posix.fork();
@@ -694,6 +653,10 @@ fn spawnPosix(self: *ChildProcess) SpawnError!void {
             posix.setreuid(uid, uid) catch |err| forkChildErrReport(err_pipe[1], err);
         }
 
+        if (self.pgid) |pid| {
+            posix.setpgid(0, pid) catch |err| forkChildErrReport(err_pipe[1], err);
+        }
+
         if (self.ptrace_traceme) {
             posix.ptrace(linux.PTRACE.TRACEME, 0, 0, 0) catch |err| {
                 forkChildErrReport(err_pipe[1], err);
@@ -708,6 +671,11 @@ fn spawnPosix(self: *ChildProcess) SpawnError!void {
     }
 
     // we are the parent
+    errdefer comptime unreachable; // The child is forked; we must not error from now on
+
+    posix.close(err_pipe[1]); // make sure only the child holds the write end open
+    self.err_pipe = err_pipe[0];
+
     const pid: i32 = @intCast(pid_result);
     if (self.stdin_behavior == .Pipe) {
         self.stdin = .{ .handle = stdin_pipe[1] };
@@ -726,7 +694,6 @@ fn spawnPosix(self: *ChildProcess) SpawnError!void {
     }
 
     self.id = pid;
-    self.err_pipe = err_pipe;
     self.term = null;
 
     if (self.stdin_behavior == .Pipe) {
@@ -764,6 +731,7 @@ fn spawnWindows(self: *ChildProcess) SpawnError!void {
         }) catch |err| switch (err) {
             error.PathAlreadyExists => return error.Unexpected, // not possible for "NUL"
             error.PipeBusy => return error.Unexpected, // not possible for "NUL"
+            error.NoDevice => return error.Unexpected, // not possible for "NUL"
             error.FileNotFound => return error.Unexpected, // not possible for "NUL"
             error.AccessDenied => return error.Unexpected, // not possible for "NUL"
             error.NameTooLong => return error.Unexpected, // not possible for "NUL"
@@ -923,12 +891,12 @@ fn spawnWindows(self: *ChildProcess) SpawnError!void {
         var cmd_line_cache = WindowsCommandLineCache.init(self.allocator, self.argv);
         defer cmd_line_cache.deinit();
 
-        var app_buf = std.ArrayListUnmanaged(u16){};
+        var app_buf: std.ArrayListUnmanaged(u16) = .empty;
         defer app_buf.deinit(self.allocator);
 
         try app_buf.appendSlice(self.allocator, app_name_w);
 
-        var dir_buf = std.ArrayListUnmanaged(u16){};
+        var dir_buf: std.ArrayListUnmanaged(u16) = .empty;
         defer dir_buf.deinit(self.allocator);
 
         if (cwd_path_w.len > 0) {
@@ -1128,7 +1096,7 @@ fn windowsCreateProcessPathExt(
     }
     var io_status: windows.IO_STATUS_BLOCK = undefined;
 
-    const num_supported_pathext = @typeInfo(CreateProcessSupportedExtension).Enum.fields.len;
+    const num_supported_pathext = @typeInfo(WindowsExtension).@"enum".fields.len;
     var pathext_seen = [_]bool{false} ** num_supported_pathext;
     var any_pathext_seen = false;
     var unappended_exists = false;
@@ -1383,7 +1351,7 @@ fn windowsMakeAsyncPipe(rd: *?windows.HANDLE, wr: *?windows.HANDLE, sattr: *cons
         sattr,
     );
     if (read_handle == windows.INVALID_HANDLE_VALUE) {
-        switch (windows.kernel32.GetLastError()) {
+        switch (windows.GetLastError()) {
             else => |err| return windows.unexpectedError(err),
         }
     }
@@ -1400,7 +1368,7 @@ fn windowsMakeAsyncPipe(rd: *?windows.HANDLE, wr: *?windows.HANDLE, sattr: *cons
         null,
     );
     if (write_handle == windows.INVALID_HANDLE_VALUE) {
-        switch (windows.kernel32.GetLastError()) {
+        switch (windows.GetLastError()) {
             else => |err| return windows.unexpectedError(err),
         }
     }
@@ -1414,8 +1382,9 @@ fn windowsMakeAsyncPipe(rd: *?windows.HANDLE, wr: *?windows.HANDLE, sattr: *cons
 
 var pipe_name_counter = std.atomic.Value(u32).init(1);
 
-// Should be kept in sync with `windowsCreateProcessSupportsExtension`
-const CreateProcessSupportedExtension = enum {
+/// File name extensions supported natively by `CreateProcess()` on Windows.
+// Should be kept in sync with `windowsCreateProcessSupportsExtension`.
+pub const WindowsExtension = enum {
     bat,
     cmd,
     com,
@@ -1423,7 +1392,7 @@ const CreateProcessSupportedExtension = enum {
 };
 
 /// Case-insensitive WTF-16 lookup
-fn windowsCreateProcessSupportsExtension(ext: []const u16) ?CreateProcessSupportedExtension {
+fn windowsCreateProcessSupportsExtension(ext: []const u16) ?WindowsExtension {
     if (ext.len != 4) return null;
     const State = enum {
         start,
@@ -1482,7 +1451,7 @@ fn windowsCreateProcessSupportsExtension(ext: []const u16) ?CreateProcessSupport
 }
 
 test windowsCreateProcessSupportsExtension {
-    try std.testing.expectEqual(CreateProcessSupportedExtension.exe, windowsCreateProcessSupportsExtension(&[_]u16{ '.', 'e', 'X', 'e' }).?);
+    try std.testing.expectEqual(WindowsExtension.exe, windowsCreateProcessSupportsExtension(&[_]u16{ '.', 'e', 'X', 'e' }).?);
     try std.testing.expect(windowsCreateProcessSupportsExtension(&[_]u16{ '.', 'e', 'X', 'e', 'c' }) == null);
 }
 
@@ -1553,7 +1522,7 @@ fn windowsCmdExePath(allocator: mem.Allocator) error{ OutOfMemory, Unexpected }!
         // TODO: Get the system directory from PEB.ReadOnlyStaticServerData
         const len = windows.kernel32.GetSystemDirectoryW(@ptrCast(unused_slice), @intCast(unused_slice.len));
         if (len == 0) {
-            switch (windows.kernel32.GetLastError()) {
+            switch (windows.GetLastError()) {
                 else => |err| return windows.unexpectedError(err),
             }
         }

@@ -429,7 +429,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             if (self.data.subordinate == null) return;
             var sub = self.data.subordinate.?;
 
-            sub.child.extremeKill() catch {};
+            sub.child.extremeKillPosix() catch {};
 
             sub.clearAndFreePauseData();
 
