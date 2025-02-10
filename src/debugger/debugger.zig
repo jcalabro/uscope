@@ -2132,7 +2132,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             if (fields.items.len == 0) {
                 // we were not able to find the variable, so display "unknown"
                 try fields.append(scratch, .{
-                    .data = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
+                    .data = null,
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                     .name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                     .encoding = .{ .primitive = .{ .encoding = .string } },
@@ -2521,9 +2521,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
                 // @DELETEME (jrc): remove the whole else clause
                 else => {
-                    // append an empty field so the UI knows to render "unknown"
+                    // append an empty field so the UI renders "unknown"
                     try fields.append(params.scratch, .{
-                        .data = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
+                        .data = null,
                         .data_type_name = try self.data.subordinate.?.paused.?.strings.add(types.Unknown),
                         .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
                         .encoding = .{ .primitive = .{ .encoding = .string } },
