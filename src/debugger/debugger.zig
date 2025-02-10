@@ -2269,8 +2269,11 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         recursive_params.variable_value_buf = item_buf;
                         recursive_params.variable.data_type = item_data_type;
 
+                        const elem_ndx = fields.items.len;
                         try self.renderVariableValue(fields, pointers, recursive_params);
-                        try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(fields.items.len - 1));
+                        if (elem_ndx < fields.items.len) {
+                            try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(elem_ndx));
+                        }
                     }
                 }
 
@@ -2372,7 +2375,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try pointers.put(params.scratch, address, types.ExpressionFieldNdx.from(original_len));
 
                     try self.renderVariableValue(fields, pointers, recursive_params);
-                    assert(fields.items.len > original_len);
 
                     // set the pointer value on the new field
                     assert(fields.items.len > original_len);
@@ -2453,14 +2455,14 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
                         const member_ndx = fields.items.len;
                         try self.renderVariableValue(fields, pointers, recursive_params);
-                        assert(fields.items.len > member_ndx);
+                        if (member_ndx < fields.items.len) {
+                            // cache and assign the struct member's variable name
+                            const member_name = self.data.target.?.strings.get(member.name) orelse types.Unknown;
+                            const name_hash = try self.data.subordinate.?.paused.?.strings.add(member_name);
+                            fields.items[member_ndx].name = name_hash;
 
-                        // cache and assign the struct member's variable name
-                        const member_name = self.data.target.?.strings.get(member.name) orelse types.Unknown;
-                        const name_hash = try self.data.subordinate.?.paused.?.strings.add(member_name);
-                        fields.items[member_ndx].name = name_hash;
-
-                        try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(member_ndx));
+                            try item_ndxes.append(params.scratch, types.ExpressionFieldNdx.from(member_ndx));
+                        }
                     }
 
                     // re-assign slice members
