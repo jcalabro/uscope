@@ -1042,7 +1042,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
                 zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
                 defer zui.popStyleColor(.{});
 
-                const val = try renderWatchValue(scratch, paused, expr.fields[1], .{});
+                const val = try renderWatchValue(scratch, paused, expr.fields[1], .{}) orelse types.Unknown;
                 zui.textWrapped("({s})", .{val});
             }
 
@@ -1063,7 +1063,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
 
                     // @TODO (jrc): improve the previews for non-primitives
                     else => "{...}",
-                };
+                } orelse types.Unknown;
 
                 try preview.appendSlice(scratch, val);
 
@@ -1099,7 +1099,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
 
                     // @TODO (jrc): improve the previews for non-primitives
                     else => "{...}",
-                };
+                } orelse types.Unknown;
 
                 try preview.appendSlice(scratch, val);
 
@@ -1121,7 +1121,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
     };
 
     if (field.encoding != .@"enum") {
-        zui.text("{s}", .{val});
+        if (val) |v| zui.text("{s}", .{v});
     }
 }
 
@@ -1227,17 +1227,15 @@ fn renderWatchValue(
     paused: types.PauseData,
     field: types.ExpressionRenderField,
     opts: RenderWatchValueOptions,
-) !String {
+) !?String {
     const z = trace.zone(@src());
     defer z.end();
 
-    const data = blk: {
-        if (field.data == null) break :blk "";
+    if (field.data == null) return null;
 
-        break :blk paused.strings.get(field.data.?) orelse {
-            log.err("unable to find raw symbol render data");
-            return types.Unknown;
-        };
+    const data = paused.strings.get(field.data.?) orelse {
+        log.err("unable to find raw symbol render data");
+        return types.Unknown;
     };
 
     return switch (field.encoding) {
