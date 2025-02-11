@@ -1286,15 +1286,13 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 const regs = try self.adapter.getRegisters(bpp.pid);
                 if (self.sourceForAddress(regs.pc())) |current_src| {
                     if (start_src == null or !start_src.?.loc.eql(current_src.loc)) {
-                        //
                         // @NOTE (jrc): some compilers (i.e. certain gcc versions) emit line info
                         // that leaves us on the very first line of the new function we're stepping
-                        // in to. When we have base pointers enabled, it's commonly the case that
-                        // the instruction we're stopped at is the instruction that pushes the base
-                        // pointer. We want to single step one more time over this line if that's
-                        // the case.
-                        //
-
+                        // in to when we have base pointers enabled. In this case, the instruction
+                        // we're stopped at is the instruction that pushes the base pointer. We want
+                        // to step past this line if that's the case (i.e. step past the line that
+                        // is just the function signature, and wind up on the first line in the body
+                        // of the function).
                         if (self.data.subordinate) |sub| {
                             if (sub.can_use_frame_pointer_stack_unwinding) {
                                 var instr_buf = [_]u8{0};
