@@ -1306,63 +1306,43 @@ test "sim:cmulticu" {
         }.cond,
     })
 
+    // step until line 11
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(250),
+        .max_ticks = msToTicks(2000),
+        .desc = "the correct value for my_struct must be rendered",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                {
+                    s.dbg.data.mu.lock();
+                    defer s.dbg.data.mu.unlock();
 
-    // @VARIABLES (jrc)
-    // // step until line 11 and ensure the correct value is rendered
-    // .addCommand(.{
-    //     .req = (proto.StepRequest{.step_type = .over}).req(),
-    // })
-    // .addCondition(.{
-    //     .wait_for_ticks = msToTicks(250),
-    //     .max_ticks = msToTicks(2000),
-    //     .desc = "the correct value for my_struct must be rendered",
-    //     .cond = struct {
-    //         fn cond(s: *Simulator) ?bool {
-    //             {
-    //                 s.dbg.data.mu.lock();
-    //                 defer s.dbg.data.mu.unlock();
+                    if (s.dbg.data.subordinate.?.paused) |paused| {
+                        // we've not yet hit the appropriate line of code
+                        if (!checkeq(types.SourceLine, types.SourceLine.from(11), paused.source_location.?.line, "not paused at line 11")) {
+                            return false;
+                        }
+                    }
+                }
 
-    //                 if (s.dbg.data.subordinate.?.paused) |paused| {
-    //                     // we've not yet hit the appropriate line of code
-    //                     if (!checkeq(types.SourceLine, 11, paused.source_location.?.line, "not paused at line 11")) {
-    //                         return false;
-    //                     }
-    //                 }
-    //             }
+                if (s.state.getStateSnapshot(s.arena.allocator())) |ss| {
+                    if (ss.state.paused) |paused| {
+                        if (paused.locals.len != 1) return null;
 
-    //             if (s.state.getStateSnapshot(s.arena.allocator())) |ss| {
-    //                 if (ss.state.paused) |paused| {
-    //                     if (paused.local_variable_results.len != 1) return null;
+                        return true;
+                    }
+                } else |err| {
+                    log.errf("unable to get state snapshot: {!}", .{err});
+                    return false;
+                }
 
-    //                     const my_struct = paused.local_variable_results[0];
-
-    //                     if (!(checkeq(bool, true, my_struct.nested, "my_struct must not be nested") and
-    //                           check(my_struct.address == null, "my_struct.address must not be null") and
-    //                           checkeq(usize, 1, my_struct.fields.len, "there must be one field in my_struct") and
-    //                           checkeq(u32, 0, my_struct.fields[0].depth, "my_struct.Field must have a depth of 0") and
-    //                           checkeq(String, &.{123,0,0,0}, my_struct.fields[0].buf, "incorrect render buffer for my_struct.Field"))) {
-    //                         return false;
-    //                     }
-
-    //                     const enc: types.IntegerRenderer = switch (my_struct.fields[0].encoding) {
-    //                         .integer => |e| e,
-    //                         inline else => |e| {
-    //                             log.errf("my_struct.Field must be encoded as an integer (got {any})", .{@TypeOf(e)});
-    //                             return false;
-    //                         },
-    //                     };
-
-    //                     return checkeq(types.TypeEncoding, .signed, enc.encoding, "my_struct.Field must be encoded as a signed integer");
-    //                 }
-    //             } else |err| {
-    //                 log.errf("unable to get state snapshot: {!}", .{err});
-    //                 return false;
-    //             }
-
-    //             return null;
-    //         }
-    //     }.cond,
-    // })
+                return null;
+            }
+        }.cond,
+    })
 
     .quit().unlock();
     // zig fmt: on
