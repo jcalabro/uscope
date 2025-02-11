@@ -2517,437 +2517,442 @@ test "sim:cprint" {
     try sim.run(@src().fn_name);
 }
 
-// // tracking this as a global so it's accessible from condition checks, and we need
-// // to track it because different C compiler version may give different stack depths
-// var crecursion_initial_stack_depth: usize = 0;
+// tracking this as a global so it's accessible from condition checks, and we need
+// to track it because different C compiler version may give different stack depths
+var crecursion_initial_stack_depth: usize = 0;
 
-// test "sim:crecursion" {
-//     //
-//     // Tests stepping through a recursive function
-//     //
+test "sim:crecursion" {
+    //
+    // Tests stepping through a recursive function
+    //
 
-//     const sim = try Simulator.init(t.allocator);
-//     defer sim.deinit(t.allocator);
+    const sim = try Simulator.init(t.allocator);
+    defer sim.deinit(t.allocator);
 
-//     const crecursion_path = "assets/crecursion/main.c";
-//     const crecursion_main_c_hash = try fileHash(t.allocator, crecursion_path);
-//     const crecursion_exe = "assets/crecursion/out";
-//     const breakpoint_line = 20;
+    const crecursion_path = "assets/crecursion/main.c";
+    const crecursion_main_c_hash = try fileHash(t.allocator, crecursion_path);
+    const crecursion_exe = "assets/crecursion/out";
+    const breakpoint_line = 20;
 
-//     // zig fmt: off
-//     sim.lock()
+    // zig fmt: off
+    sim.lock()
 
-//     // load symbols
-//     .addCommand(.{
-//         .req = (proto.LoadSymbolsRequest{ .path = crecursion_exe }).req(),
-//     })
-//     .addCondition(.{
-//         .max_ticks = msToTicks(4000),
-//         .desc = "debug symbols must be loaded",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // load symbols
+    .addCommand(.{
+        .req = (proto.LoadSymbolsRequest{ .path = crecursion_exe }).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(4000),
+        .desc = "debug symbols must be loaded",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.target) |target| {
-//                     return checkeq(usize, 1, target.compile_units.len, "must have one compilation unit") and
-//                         check(s.dbg.data.subordinate == null, "subordinate must not be launched");
-//                 }
+                if (s.dbg.data.target) |target| {
+                    return checkeq(usize, 1, target.compile_units.len, "must have one compilation unit") and
+                        check(s.dbg.data.subordinate == null, "subordinate must not be launched");
+                }
 
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                return null;
+            }
+        }.cond,
+    })
 
-//     // set a breakpoint and launch the subordinate
-//     .addCommand(.{
-//         .send_after_ticks = 1,
-//         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
-//             .file_hash = crecursion_main_c_hash,
-//             .line = types.SourceLine.from(breakpoint_line),
-//         }}}).req(),
-//     })
-//     .addCommand(.{
-//         .send_after_ticks = msToTicks(100),
-//         .req = (proto.LaunchSubordinateRequest{
-//             .path = crecursion_exe,
-//             .args = "",
-//             .stop_on_entry = false,
-//         }).req(),
-//     })
-//     .addCondition(.{
-//         .max_ticks = msToTicks(2000),
-//         .desc = "subordinate must have hit the breakpoint",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // set a breakpoint and launch the subordinate
+    .addCommand(.{
+        .send_after_ticks = 1,
+        .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
+            .file_hash = crecursion_main_c_hash,
+            .line = types.SourceLine.from(breakpoint_line),
+        }}}).req(),
+    })
+    .addCommand(.{
+        .send_after_ticks = msToTicks(100),
+        .req = (proto.LaunchSubordinateRequest{
+            .path = crecursion_exe,
+            .args = "",
+            .stop_on_entry = false,
+        }).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have hit the breakpoint",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate) |sub| {
-//                     if (sub.paused) |paused| {
-//                         if (paused.source_location == null) {
-//                             log.err("subordinate is stopped at a PC that has no source location");
-//                             return false;
-//                         }
-//                         const src = paused.source_location.?;
+                if (s.dbg.data.subordinate) |sub| {
+                    if (sub.paused) |paused| {
+                        if (paused.source_location == null) {
+                            log.err("subordinate is stopped at a PC that has no source location");
+                            return false;
+                        }
+                        const src = paused.source_location.?;
 
-//                         const fhash = fileHash(t.allocator, crecursion_path) catch unreachable;
-//                         crecursion_initial_stack_depth = paused.stack_frames.len;
+                        const fhash = fileHash(t.allocator, crecursion_path) catch unreachable;
+                        crecursion_initial_stack_depth = paused.stack_frames.len;
 
-//                         return checkeq(file_utils.Hash, fhash, src.file_hash, "stopped in a file other than main.c") and
-//                             checkeq(types.SourceLine, types.SourceLine.from(breakpoint_line), src.line, "stopped at the wrong line in main.c");
-//                     }
-//                 }
+                        return checkeq(file_utils.Hash, fhash, src.file_hash, "stopped in a file other than main.c") and
+                            checkeq(types.SourceLine, types.SourceLine.from(breakpoint_line), src.line, "stopped at the wrong line in main.c");
+                    }
+                }
 
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                return null;
+            }
+        }.cond,
+    })
 
-//     // step into function `Recursion`
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .into}).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(100),
-//         .max_ticks = msToTicks(2000),
-//         .desc = "subordinate must have stepped in to the recursive function",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // step into function `Recursion`
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .into}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have stepped in to the recursive function",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate) |sub| {
-//                     if (sub.paused) |paused| {
-//                         return checkeq(usize, crecursion_initial_stack_depth + 1, paused.stack_frames.len, "stack depth is incorrect");
-//                     }
-//                 }
+                if (s.dbg.data.subordinate) |sub| {
+                    if (sub.paused) |paused| {
+                        return checkeq(usize, crecursion_initial_stack_depth + 1, paused.stack_frames.len, "stack depth is incorrect");
+                    }
+                }
 
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                return null;
+            }
+        }.cond,
+    })
 
-//     // step four times until the depth pointer has been updated from zero to one
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(100),
-//         .max_ticks = msToTicks(2000),
-//         .desc = "subordinate must have done the first step",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // step four times until the depth pointer has been updated from zero to one
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have done the first step",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 0, 1);
-//                 return null;
-//             }
-//         }.cond,
-//     })
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(100),
-//         .max_ticks = msToTicks(2000),
-//         .desc = "subordinate must have done the second step",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+                if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 0, 1);
+                return null;
+            }
+        }.cond,
+    })
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have done the second step",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 0, 1);
-//                 return null;
-//             }
-//         }.cond,
-//     })
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(100),
-//         .max_ticks = msToTicks(2000),
-//         .desc = "subordinate must have done the third step",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+                if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 0, 1);
+                return null;
+            }
+        }.cond,
+    })
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have done the third step",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 0, 1);
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 0, 1);
+                return null;
+            }
+        }.cond,
+    })
 
-//     // after this step, depth should be set to one and the cursor should be on `Recursion`
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(100),
-//         .max_ticks = msToTicks(2000),
-//         .desc = "subordinate must have done the fourth step and *depth should be 1",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // after this step, depth should be set to one and the cursor should be on `Recursion`
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have done the fourth step and *depth should be 1",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 1, 1);
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 1, 1);
+                return null;
+            }
+        }.cond,
+    })
 
-//     // step in to `Recursion` for the second time
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .into}).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(100),
-//         .max_ticks = msToTicks(2000),
-//         .desc = "subordinate must have stepped in to Recursion for the second time",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // step in to `Recursion` for the second time
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .into}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have stepped in to Recursion for the second time",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 1, 2);
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 1, 2);
+                return null;
+            }
+        }.cond,
+    })
 
-//     // step out of this call to `Recursion` and *depth should be MAX_DEPTH, which is 5
-//     //
-//     // @REF: RECURSIVE_STEP_BUG
-//     // @NOTE (jrc): there is a known bug where we stop at one instruction too early when we step out of a
-//     // recursive function where we are multiple calls deep, which means the user lands at a spot that is
-//     // typically not associated with a line of code. Why is this happening? Once we fix it, add a test
-//     // case here.
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .out_of}).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(100),
-//         .max_ticks = msToTicks(2000),
-//         .desc = "subordinate must have stepped out of the second call to Recursion",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // step out of this call to `Recursion` and *depth should be MAX_DEPTH, which is 5
+    //
+    // @REF: RECURSIVE_STEP_BUG
+    // @NOTE (jrc): there is a known bug where we stop at one instruction too early when we step out of a
+    // recursive function where we are multiple calls deep, which means the user lands at a spot that is
+    // typically not associated with a line of code. Why is this happening? Once we fix it, add a test
+    // case here.
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .out_of}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have stepped out of the second call to Recursion",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 // *depth == 1, and we're one function call deep
-//                 if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 5, 1);
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                // *depth == 1, and we're one function call deep
+                if (s.dbg.data.subordinate.?.paused) |paused| return checkCRecursionDepth(paused, 5, 1);
+                return null;
+            }
+        }.cond,
+    })
 
-//     // kill the subordinate and re-launch for a second check
-//     .addCommand(.{
-//         .req = (proto.KillSubordinateRequest{}).req(),
-//     })
-//     .addCondition(.{
-//         .max_ticks = msToTicks(1000),
-//         .desc = "subordinate must have been killed",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // kill the subordinate and re-launch for a second check
+    .addCommand(.{
+        .req = (proto.KillSubordinateRequest{}).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(1000),
+        .desc = "subordinate must have been killed",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate == null) return true;
-//                 return null;
-//             }
-//         }.cond,
-//     })
-//     .addCommand(.{
-//         .req = (proto.LaunchSubordinateRequest{
-//             .path = crecursion_exe,
-//             .args = "",
-//             .stop_on_entry = false,
-//         }).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(100),
-//         .max_ticks = msToTicks(1000),
-//         .desc = "subordinate must have been launched again and stopped at the ",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+                if (s.dbg.data.subordinate == null) return true;
+                return null;
+            }
+        }.cond,
+    })
+    .addCommand(.{
+        .req = (proto.LaunchSubordinateRequest{
+            .path = crecursion_exe,
+            .args = "",
+            .stop_on_entry = false,
+        }).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(1000),
+        .desc = "subordinate must have been launched again and stopped at the ",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate) |sub| {
-//                     if (sub.paused) |paused| {
-//                         return paused.stack_frames.len == crecursion_initial_stack_depth;
-//                     }
-//                 }
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                if (s.dbg.data.subordinate) |sub| {
+                    if (sub.paused) |paused| {
+                        return paused.stack_frames.len == crecursion_initial_stack_depth;
+                    }
+                }
+                return null;
+            }
+        }.cond,
+    })
 
-//     // step into `Recursive`
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .into}).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(250),
-//         .max_ticks = msToTicks(2000),
-//         .desc = "subordinate must have stepped in to Recursion",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // step into `Recursive`
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .into}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(250),
+        .max_ticks = msToTicks(2000),
+        .desc = "subordinate must have stepped in to Recursion",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| {
-//                     return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
-//                 }
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                if (s.dbg.data.subordinate.?.paused) |paused| {
+                    return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
+                }
+                return null;
+            }
+        }.cond,
+    })
 
-//     // step over five times
-//     //
-//     // @SEE: RECURSIVE_STEP_BUG
-//     // in an ideal world, we would fix the bug that requires the final step
-//     // and this would only be four steps
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .max_ticks = msToTicks(1000),
-//         .desc = "subordinate must have stepped once in Recursion",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // step over five times
+    //
+    // @SEE: RECURSIVE_STEP_BUG
+    // in an ideal world, we would fix the bug that requires the final step
+    // and this would only be four steps
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(1000),
+        .desc = "subordinate must have stepped once in Recursion",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| {
-//                     return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
-//                 }
-//                 return null;
-//             }
-//         }.cond,
-//     })
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .max_ticks = msToTicks(1000),
-//         .desc = "subordinate must have stepped twice in Recursion",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+                if (s.dbg.data.subordinate.?.paused) |paused| {
+                    return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
+                }
+                return null;
+            }
+        }.cond,
+    })
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(1000),
+        .desc = "subordinate must have stepped twice in Recursion",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| {
-//                     return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
-//                 }
-//                 return null;
-//             }
-//         }.cond,
-//     })
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .max_ticks = msToTicks(1000),
-//         .desc = "subordinate must have stepped three times in Recursion",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+                if (s.dbg.data.subordinate.?.paused) |paused| {
+                    return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
+                }
+                return null;
+            }
+        }.cond,
+    })
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(1000),
+        .desc = "subordinate must have stepped three times in Recursion",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| {
-//                     return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
-//                 }
-//                 return null;
-//             }
-//         }.cond,
-//     })
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .max_ticks = msToTicks(1000),
-//         .desc = "subordinate must have stepped four times in Recursion",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+                if (s.dbg.data.subordinate.?.paused) |paused| {
+                    return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
+                }
+                return null;
+            }
+        }.cond,
+    })
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(1000),
+        .desc = "subordinate must have stepped four times in Recursion",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| {
-//                     return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
-//                 }
-//                 return null;
-//             }
-//         }.cond,
-//     })
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .max_ticks = msToTicks(1000),
-//         .desc = "subordinate must have stepped five times in Recursion",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+                if (s.dbg.data.subordinate.?.paused) |paused| {
+                    return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
+                }
+                return null;
+            }
+        }.cond,
+    })
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(1000),
+        .desc = "subordinate must have stepped five times in Recursion",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| {
-//                     return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
-//                 }
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                if (s.dbg.data.subordinate.?.paused) |paused| {
+                    return paused.stack_frames.len == crecursion_initial_stack_depth + 1;
+                }
+                return null;
+            }
+        }.cond,
+    })
 
-//     // the next step gets us back to main()
-//     .addCommand(.{
-//         .req = (proto.StepRequest{.step_type = .over}).req(),
-//     })
-//     .addCondition(.{
-//         .wait_for_ticks = msToTicks(100),
-//         .max_ticks = msToTicks(1000),
-//         .desc = "subordinate must have stepped out of Recursion",
-//         .cond = struct {
-//             fn cond(s: *Simulator) ?bool {
-//                 s.dbg.data.mu.lock();
-//                 defer s.dbg.data.mu.unlock();
+    // the next step gets us back to main()
+    .addCommand(.{
+        .req = (proto.StepRequest{.step_type = .over}).req(),
+    })
+    .addCondition(.{
+        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(1000),
+        .desc = "subordinate must have stepped out of Recursion",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
 
-//                 if (s.dbg.data.subordinate.?.paused) |paused| {
-//                     return paused.stack_frames.len == crecursion_initial_stack_depth;
-//                 }
-//                 return null;
-//             }
-//         }.cond,
-//     })
+                if (s.dbg.data.subordinate.?.paused) |paused| {
+                    return paused.stack_frames.len == crecursion_initial_stack_depth;
+                }
+                return null;
+            }
+        }.cond,
+    })
 
-//     .quit().unlock();
-//     // zig fmt: on
+    .quit().unlock();
+    // zig fmt: on
 
-//     try sim.run(@src().fn_name);
-// }
+    try sim.run(@src().fn_name);
+}
 
-// fn checkCRecursionDepth(paused: types.PauseData, expected_depth_var: u8, expected_stack_depth: usize) bool {
-//     // @VARIABLES (jrc)
-//     // const name = "depth";
-//     // const ndx = blk: {
-//     //     for (paused.local_variables, 0..) |v, i| {
-//     //         if (mem.eql(u8, name, v)) break :blk i;
-//     //     }
+fn checkCRecursionDepth(paused: types.PauseData, expected_depth_var: u8, expected_stack_depth: usize) bool {
+    const name = "depth";
+    const ndx = blk: {
+        for (paused.locals, 0..) |v, i| {
+            const expr = paused.getString(v.expression);
+            if (strings.eql(name, expr)) break :blk i;
+        }
 
-//     //     log.errf("variable \"{s}\" not found in local scope", .{name});
-//     //     return false;
-//     // };
+        log.errf("variable \"{s}\" not found in local scope", .{name});
+        return false;
+    };
 
-//     // const expected_depth_buf = [_]u8{ expected_depth_var, 0, 0, 0 };
+    const expected_depth_buf = [_]u8{ expected_depth_var, 0, 0, 0 };
 
-//     // const local = paused.local_variable_results[ndx];
-//     // return check(local.address != null, "depth variable must have a pointer value set") and
-//     //     checkeq(String, &expected_depth_buf, local.fields[0].buf, "incorrect depth variable value") and
-//     //     checkeq(usize, crecursion_initial_stack_depth + expected_stack_depth, paused.stack_frames.len, "incorrect stack depth");
-// }
+    const local = paused.locals[ndx];
+    if (!checkeq(usize, 1, local.fields.len, "incorrect number of local expressions for variable \"depth\""))
+        return false;
+
+    const field = local.fields[0];
+    return check(field.address != null, "depth variable must have a pointer value set") and
+        check(field.data != null, "depth variable must have a pointer value set") and
+        checkeq(String, &expected_depth_buf, paused.getString(field.data.?), "incorrect depth variable value") and
+        checkeq(usize, crecursion_initial_stack_depth + expected_stack_depth, paused.stack_frames.len, "incorrect stack depth");
+}

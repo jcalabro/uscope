@@ -3,7 +3,11 @@ const builtin = @import("builtin");
 const safe = @import("../safe.zig");
 const types = @import("../types.zig");
 
+/// In x86_64, this is `int 3`, aka the interrupt instruction (sets a breakpoint)
 pub const InterruptInstruction = 0xcc;
+
+/// In x86_64, this is `push %rbp`
+pub const PushFramePointerInstruction = 0x55;
 
 pub const Registers = extern struct {
     const Self = @This();
