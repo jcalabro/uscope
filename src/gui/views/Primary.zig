@@ -105,6 +105,13 @@ fn handleInput(self: *Self) ?State.View {
     const z = trace.zone(@src());
     defer z.end();
 
+    if (self.state.modal_message != null) {
+        if (Input.cancelPressed() or Input.keyPressed(.enter)) {
+            self.state.clearMessage();
+        }
+        return null;
+    }
+
     if (self.show_space_menu) {
         if (Input.keyPressed(.f)) {
             self.show_space_menu = false;
@@ -499,6 +506,41 @@ pub fn update(self: *Self) State.View {
 
     self.displaySourceFiles();
     self.drawMainDockspace();
+
+    if (self.state.modal_message) |msg| {
+        const center = zui.getViewportCenter(zui.getMainViewport());
+        zui.setNextWindowPos(center.x, center.y, 0.5, 0.5);
+
+        const id = "Message\x00";
+        zui.openPopup(id, .{});
+        if (zui.beginPopupModal(id, .{
+            .flags = .{
+                .no_move = true,
+                .no_resize = true,
+                .no_collapse = true,
+                .always_auto_resize = true,
+                .always_use_window_padding = true,
+            },
+        })) {
+            defer zui.endPopup();
+
+            {
+                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.forLevel(msg.level) });
+                defer zui.popStyleColor(.{});
+
+                var level = @tagName(msg.level);
+                zui.text("{c}{s}: ", .{
+                    std.ascii.toUpper(level[0]),
+                    level[1..],
+                });
+            }
+
+            zui.sameLine(.{});
+            zui.text("{s}", .{msg.message});
+
+            if (zui.button("Close\x00", .{})) self.state.clearMessage();
+        }
+    }
 
     return self.view();
 }

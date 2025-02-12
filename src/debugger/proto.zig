@@ -24,6 +24,7 @@ pub const Request = union(enum) {
 /// Response can be any one of the various debugger command sent from the
 /// server to the client. A Response may or may not have a corresponding Request.
 pub const Response = union(enum) {
+    message: MessageResponse,
     get_state: GetStateResponse,
     state_updated: StateUpdatedResponse,
     reset: ResetResponse,
@@ -37,6 +38,27 @@ pub const GetStateRequest = struct {
 
     pub fn req(self: @This()) Request {
         return .{ .get_state = self };
+    }
+};
+
+/// Indicates the severity of a message to be sent from the debugger to the UI
+pub const MessageLevel = enum(u8) {
+    debug,
+    info,
+    warning,
+    @"error",
+};
+
+/// A status message sent from the debugger layer to the UI
+pub const MessageResponse = struct {
+    /// The log level of the message
+    level: MessageLevel,
+
+    /// All allocated memory lives in the response queue's allocator
+    message: String,
+
+    pub fn resp(self: @This()) Response {
+        return Response{ .message = self };
     }
 };
 

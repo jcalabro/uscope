@@ -7,6 +7,7 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const assert = std.debug.assert;
 const atomic = std.atomic;
 const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
+const fmt = std.fmt;
 const heap = std.heap;
 const math = std.math;
 const mem = std.mem;
@@ -408,6 +409,30 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     return error.InvalidRequest;
                 },
             }
+        }
+
+        fn sendMessage(
+            self: *Self,
+            comptime level: proto.MessageLevel,
+            comptime format: String,
+            args: anytype,
+        ) void {
+            const z = trace.zone(@src());
+            defer z.end();
+
+            const msg = fmt.allocPrint(self.responses.alloc, format, args) catch |err| {
+                log.errf("unable to allocate string for MessageResponse: {!}", .{err});
+                return;
+            };
+
+            const resp = proto.MessageResponse{
+                .level = level,
+                .message = msg,
+            };
+            self.responses.put(resp.resp()) catch |err| {
+                log.errf("unable to enqueue MessageResponse: {!}", .{err});
+                return;
+            };
         }
 
         fn forceKillSubordinate(self: *Self) void {

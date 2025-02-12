@@ -75,6 +75,9 @@ newly_opened_file: ?usize = null,
 /// a file that was not already open. :headdesk:
 has_waited_one_frame_to_scroll_to_line_of_text: bool = true,
 
+/// This message is displayed to the user when an
+modal_message: ?proto.MessageResponse = null,
+
 pub const View = union(enum) {
     primary: *PrimaryView,
     file_picker: *FilePickerView,
@@ -138,6 +141,9 @@ pub fn deinit(self: *Self) void {
 
     self.open_files.deinit();
     self.subordinate_output.deinit(self.perm_alloc);
+
+    if (self.modal_message) |msg| self.perm_alloc.free(msg.message);
+
     self.perm_alloc.destroy(self);
 }
 
@@ -232,6 +238,11 @@ fn handleDebuggerResponses(self: *Self) void {
 
             .state_updated => self.state_updated = true,
 
+            .message => |msg| {
+                if (self.modal_message) |m| self.dbg.responses.alloc.free(m.message);
+                self.modal_message = msg;
+            },
+
             inline else => |cmd| {
                 log.warnf("unhandled response: {any}", .{cmd});
             },
@@ -246,6 +257,11 @@ pub fn loadDebugSymbols(self: *Self) void {
     self.dbg.enqueue(proto.LoadSymbolsRequest{
         .path = settings.settings.project.target.path,
     });
+}
+
+pub fn clearMessage(self: *Self) void {
+    if (self.modal_message) |m| self.dbg.responses.alloc.free(m.message);
+    self.modal_message = null;
 }
 
 /// This function is called back whenever the file on disk is modified
