@@ -305,19 +305,19 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         done = true;
                     },
                     .load_symbols => |req| self.loadDebugSymbolsAsync(req) catch |err| {
-                        log.errf("unable to load debug symbols: {!}", .{err});
+                        self.sendErr("unable to load debug symbols: {!}", .{err});
                     },
                     .launch => |req| self.launchSubordinate(scratch, req) catch |err| {
-                        log.errf("unable to launch subordinate: {!}", .{err});
+                        self.sendErr("unable to launch subordinate: {!}", .{err});
                     },
                     .kill => |req| self.killSubordinate(req) catch |err| {
-                        log.errf("unable to kill subordinate: {!}", .{err});
+                        self.sendErr("unable to kill subordinate: {!}", .{err});
                     },
                     .update_breakpoint => |cmd| self.updateBreakpoint(scratch, cmd) catch |err| {
                         log.errf("unable to update breakpoint: {!}", .{err});
                     },
                     .toggle_breakpoint => |cmd| self.toggleBreakpoint(scratch, cmd) catch |err| {
-                        log.errf("unable to toggle breakpoint: {!}", .{err});
+                        self.sendErr("unable to toggle breakpoint: {!}", .{err});
                     },
                     .cont => {
                         self.data.mu.lock();
@@ -328,10 +328,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         };
                     },
                     .step => |cmd| self.step(scratch, cmd) catch |err| {
-                        log.errf("unable to perform subordinate step: {!}", .{err});
+                        self.sendErr("unable to perform subordinate step: {!}", .{err});
                     },
                     .stopped => |cmd| self.handleSubordinateStopped(scratch, cmd) catch |err| {
-                        log.errf("error during subordinate stopped event: {!}", .{err});
+                        self.sendErr("error handling subordinate stopped event: {!}", .{err});
                     },
                     .set_hex_window_address => |cmd| {
                         self.data.mu.lock();
@@ -339,12 +339,12 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
                         self.data.state.hex_window_address = cmd.address;
                         self.findHexWindowContents() catch |err| {
-                            log.errf("unable to find hex window contents: {!}", .{err});
+                            self.sendErr("unable to find hex window contents: {!}", .{err});
                         };
                     },
                     .set_watch_expressions => |cmd| {
                         self.setWatchExpressions(scratch, cmd) catch |err| {
-                            log.errf("unable to find hex window contents: {!}", .{err});
+                            self.sendErr("unable to find hex window contents: {!}", .{err});
                         };
                     },
                     else => {
@@ -411,14 +411,17 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             }
         }
 
-        fn sendMessage(
-            self: *Self,
-            comptime level: proto.MessageLevel,
-            comptime format: String,
-            args: anytype,
-        ) void {
+        /// Formats, logs, and sends the given message to the UI to be displayed
+        fn sendMessage(self: *Self, comptime level: proto.MessageLevel, comptime format: String, args: anytype) void {
             const z = trace.zone(@src());
             defer z.end();
+
+            switch (level) {
+                .debug => log.debugf(format, args),
+                .info => log.infof(format, args),
+                .warning => log.warnf(format, args),
+                .@"error" => log.errf(format, args),
+            }
 
             const msg = fmt.allocPrint(self.responses.alloc, format, args) catch |err| {
                 log.errf("unable to allocate string for MessageResponse: {!}", .{err});
@@ -433,6 +436,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 log.errf("unable to enqueue MessageResponse: {!}", .{err});
                 return;
             };
+        }
+
+        fn sendErr(self: *Self, comptime format: String, args: anytype) void {
+            self.sendMessage(.@"error", format, args);
         }
 
         fn forceKillSubordinate(self: *Self) void {
@@ -508,7 +515,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             var resp = proto.LoadSymbolsResponse{};
             self.loadDebugSymbols(req) catch |err| {
-                log.errf("unable to load debug symbols: {}", .{err});
+                self.sendErr("unable to load debug symbols: {}", .{err});
                 resp.err = err;
             };
 
@@ -574,12 +581,12 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             defer self.data.mu.unlock();
 
             if (self.data.subordinate != null) {
-                log.warn("not launching subordinate because it is already running");
+                self.sendMessage(.warning, "not launching subordinate because it is already running", .{});
                 return;
             }
 
             if (self.data.target == null) {
-                log.err("not launching the subordinate because debug symbols have not yet been loaded");
+                self.sendMessage(.warning, "not launching subordinate because debug symbols have not yet been loaded", .{});
                 return;
             }
 
