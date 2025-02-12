@@ -4,6 +4,7 @@ const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
 const assert = std.debug.assert;
+const fmt = std.fmt;
 const fs = std.fs;
 const mem = std.mem;
 const Mutex = std.Thread.Mutex;
@@ -104,10 +105,14 @@ pub fn init(alloc: Allocator, dbg: *Debugger, gui: *GUIType) !*Self {
             self,
             executableFileChanged,
         ) catch |err| {
-            log.warnf("unable to watch target path \"{}\": {!}", .{
+            const msg = try fmt.allocPrint(alloc, "unable to open target executable \"{}\": {!}", .{
                 std.zig.fmtEscapes(settings.settings.project.target.path),
                 err,
             });
+            defer alloc.free(msg);
+
+            log.errf("{s}", .{msg});
+            std.debug.print("{s}\n", .{msg});
             return err;
         },
     };
