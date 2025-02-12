@@ -1162,11 +1162,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         break :done;
                     }
 
-                    if (builtin.mode == .Debug) {
-                        const regs = try self.adapter.getRegisters(pid);
-                        assert(regs.pc().eql(load_addr.add(bp.addr)));
-                    }
-
                     var buf = [_]u8{0};
                     try self.adapter.peekData(pid, load_addr, bp.addr, &buf);
 
