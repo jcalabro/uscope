@@ -33,6 +33,8 @@ pub fn pushItemWidth(_: f32) void {  }
 
 pub fn popItemWidth() void {  }
 
+pub fn setClipboardText(_: [*c]const u8) void {  }
+
 pub fn beginPopupModal(_: [:0]const u8, _: zui.BeginPopupModal) bool { return true; }
 
 pub fn endPopup() void {  }

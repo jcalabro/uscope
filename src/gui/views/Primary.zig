@@ -4,6 +4,7 @@ const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ascii = std.ascii;
 const assert = std.debug.assert;
 const fmt = std.fmt;
 const mem = std.mem;
@@ -511,9 +512,22 @@ pub fn update(self: *Self) State.View {
         const center = zui.getViewportCenter(zui.getMainViewport());
         zui.setNextWindowPos(center.x, center.y, 0.5, 0.5);
 
-        const id = "Message\x00";
-        zui.openPopup(id, .{});
-        if (zui.beginPopupModal(id, .{
+        var tag = @tagName(msg.level);
+        const level = fmt.allocPrint(
+            self.state.scratch_alloc,
+            "{c}{s}",
+            .{ ascii.toUpper(tag[0]), tag[1..] },
+        ) catch |err| blk: {
+            log.errf("unable to format level string: {!}", .{err});
+            break :blk "Message";
+        };
+
+        var color_popped = false;
+        zui.pushStyleColor4f(.{ .idx = .text, .c = colors.forLevel(msg.level) });
+        defer if (!color_popped) zui.popStyleColor(.{});
+
+        zui.openPopup(@ptrCast(level), .{});
+        if (zui.beginPopupModal(@ptrCast(level), .{
             .flags = .{
                 .no_move = true,
                 .no_resize = true,
@@ -524,19 +538,23 @@ pub fn update(self: *Self) State.View {
         })) {
             defer zui.endPopup();
 
-            {
-                zui.pushStyleColor4f(.{ .idx = .text, .c = colors.forLevel(msg.level) });
-                defer zui.popStyleColor(.{});
+            zui.popStyleColor(.{});
+            color_popped = true;
 
-                var level = @tagName(msg.level);
-                zui.text("{c}{s}: ", .{
-                    std.ascii.toUpper(level[0]),
-                    level[1..],
-                });
+            const message = fmt.allocPrint(self.state.scratch_alloc, "{c}{s}", .{
+                ascii.toUpper(msg.message[0]),
+                msg.message[1..],
+            }) catch |err| blk: {
+                log.errf("unable to format status message: {!}", .{err});
+                break :blk types.Unknown;
+            };
+
+            zui.text("{s}", .{message});
+            zui.dummy(.{ .x = 0, .y = 10 });
+
+            if (zui.button("Copy to Clipboard\x00", .{})) {
+                zui.setClipboardText(@ptrCast(message));
             }
-
-            zui.sameLine(.{});
-            zui.text("{s}", .{msg.message});
 
             if (zui.button("Close\x00", .{})) self.state.clearMessage();
         }

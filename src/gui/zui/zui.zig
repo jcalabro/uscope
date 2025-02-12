@@ -77,6 +77,12 @@ pub fn popItemWidth() void {
 
 ////////////////////////////////////////////////////////////////
 
+pub fn setClipboardText(str: [*c]const u8) void {
+    imgui.igSetClipboardText(str);
+}
+
+////////////////////////////////////////////////////////////////
+
 pub fn beginPopupModal(label: [:0]const u8, args: zui.BeginPopupModal) bool {
     return imgui.igBeginPopupModal(
         label,
