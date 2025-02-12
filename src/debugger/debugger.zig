@@ -1876,7 +1876,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             );
 
             var local_variables = ArrayList(String).init(paused_alloc);
-
             for (unwind_res.call_stack_addrs, 0..) |addr, ndx| {
                 const name: String = blk: {
                     if (addr.eqlInt(0)) break :blk types.Unknown;
@@ -2151,7 +2150,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const encoder = switch (cu.language) {
                 .C => @import("encoding/C.zig").encoder(),
                 .Zig => @import("encoding/Zig.zig").encoder(),
-                else => return error.LanguageUnsupported,
+                else => @import("encoding/Unknown.zig").encoder(),
             };
 
             const func_frame_base = switch (builtin.target.os.tag) {
