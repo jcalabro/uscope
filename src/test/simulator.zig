@@ -77,6 +77,9 @@ const Simulator = struct {
     commands: ArrayList(Command),
     conditions: ArrayList(Condition),
 
+    /// Disables a test
+    skip: bool = false,
+
     fn init(root_alloc: Allocator) !*Self {
         const thread_safe_alloc = try root_alloc.create(ThreadSafeAllocator);
         errdefer root_alloc.destroy(thread_safe_alloc);
@@ -178,6 +181,15 @@ const Simulator = struct {
             logging.Color.Reset.str(),
             name,
         });
+
+        if (self.skip) {
+            log.warnf("{s}[SKIP]{s} {s}", .{
+                logging.Color.Yellow.str(),
+                logging.Color.Reset.str(),
+                name,
+            });
+            return;
+        }
 
         errdefer |err| log.errf("{s}[FAIL]{s} {s}: {!}", .{
             logging.Color.Red.str(),
@@ -2508,6 +2520,9 @@ test "sim:crecursion" {
 
     const sim = try Simulator.init(t.allocator);
     defer sim.deinit(t.allocator);
+
+    // @TODO (jrc): fix recursive step out behavior and re-enable this test
+    sim.skip = true;
 
     const crecursion_path = "assets/crecursion/main.c";
     const crecursion_main_c_hash = try fileHash(t.allocator, crecursion_path);

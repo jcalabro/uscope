@@ -1364,17 +1364,29 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             //
             // @SEARCH: STEPOUT
             //
-            // Set a breakpoint at the caller's base frame address, then continue until it is hit.
-            // Note that in the case of recursive functions, this is not sufficient because we may
-            // be at depth 2, but may be recursing until depth 10, which means that the first time
-            // we hit the breakpoint at the base frame address, we will be at max depth. So, when
-            // we hit those breakpoints, we repeatedly ignore them until we're at the correct depth,
-            // or we hit some other breakpoint along the way.
+            // Find the next source instruction past the caller's frame base address, then continue
+            // until it is hit. This is equivalent to "pop up the stack one, and step once". Note
+            // that in the case of recursive functions, this is not sufficient because we may be at
+            // depth 2, but may be recursing until depth 10, which means that the first time we hit
+            // the breakpoint at the base frame address, we will be at max depth. So, when we hit
+            // those breakpoints, we repeatedly ignore them until we're at the correct depth, or we
+            // hit some other breakpoint along the way.
             //
 
             const frames = self.data.subordinate.?.paused.?.stack_frames;
             if (frames.len > 1) {
-                var addrs = [_]types.Address{frames[1].address};
+                // attempt to find the next line of code
+                var addr = frames[1].address;
+                if (self.functionAtAddr(addr)) |func| {
+                    for (func.func.statements) |stmt| {
+                        if (stmt.breakpoint_addr.int() >= addr.int()) {
+                            addr = stmt.breakpoint_addr;
+                            break;
+                        }
+                    }
+                }
+
+                var addrs = [_]types.Address{addr};
                 const max_stack_frames = frames.len - 1;
                 try self.applyInternalBreakpoints(
                     scratch,
