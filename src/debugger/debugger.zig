@@ -38,6 +38,10 @@ pub const Adapter = switch (builtin.os.tag) {
     else => @compileError("unsupported platform: " ++ @tagName(builtin.os.tag)),
 };
 
+pub const SubordinateEvent = union(enum) {
+    new_thread_spawned: types.PID,
+};
+
 pub const Debugger = DebuggerType(Adapter);
 
 /// Stores all data that lives outside the scope of a single run of a subordinate process. For
@@ -1139,16 +1143,15 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             //
 
             if (self.data.subordinate == null) {
-                log.warn("cannot continue execution: subordinate is not running");
+                self.sendMessage(.warning, "cannot continue execution: subordinate is not running", .{});
                 return;
             }
 
             defer self.stateUpdated();
 
-            const pid = types.PID.from(self.data.subordinate.?.child.id);
-            const load_addr = self.data.subordinate.?.load_addr;
-
             if (self.data.subordinate.?.paused) |paused| done: {
+                const load_addr = self.data.subordinate.?.load_addr;
+
                 if (paused.breakpoint) |bp| {
                     const exists = e: {
                         for (self.data.state.breakpoints.items) |b| {
@@ -1166,20 +1169,20 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     }
 
                     var buf = [_]u8{0};
-                    try self.adapter.peekData(pid, load_addr, bp.addr, &buf);
+                    try self.adapter.peekData(paused.pid, load_addr, bp.addr, &buf);
 
                     var instruction = [_]u8{bp.instruction_byte};
                     if (buf[0] == arch.InterruptInstruction) {
-                        try self.adapter.pokeData(pid, load_addr, bp.addr, &instruction);
+                        try self.adapter.pokeData(paused.pid, load_addr, bp.addr, &instruction);
                     }
 
-                    try self.adapter.singleStepAndWait(pid);
+                    try self.adapter.singleStepAndWait(paused.pid);
 
                     // we still want to reset to the interrupt instruction in the case that
                     // we're stepping out of a recursive function
                     if (!bp.flags.internal or bp.max_stack_frames != null) {
                         instruction[0] = arch.InterruptInstruction;
-                        try self.adapter.pokeData(pid, load_addr, bp.addr, &instruction);
+                        try self.adapter.pokeData(paused.pid, load_addr, bp.addr, &instruction);
                     }
                 }
             } else if (!opts.force) {
@@ -1191,8 +1194,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             self.data.subordinate.?.clearAndFreePauseData();
 
-            try self.adapter.continueExecution(pid);
-            try self.adapter.waitForSignalAsync(pid);
+            for (self.data.subordinate.?.threads.items) |thread_pid| {
+                try self.adapter.continueExecution(thread_pid);
+                try self.adapter.waitForSignalAsync(thread_pid);
+            }
         }
 
         const BreakpointAndPID = struct {
@@ -1768,6 +1773,15 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 return;
             }
 
+            if (try self.adapter.handleEvent(req.pid)) |event| {
+                switch (event) {
+                    .new_thread_spawned => |new_pid| {
+                        try self.handleThreadSpawned(scratch, new_pid);
+                        return;
+                    },
+                }
+            }
+
             // we're no longer stopped (edge case)
             var registers = try self.adapter.getRegisters(req.pid);
             if (registers.pc().int() == 0) return;
@@ -1974,6 +1988,37 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 try self.calculateLocalVariables(scratch, try local_variables.toOwnedSlice());
                 try self.findHexWindowContents();
             }
+        }
+
+        fn handleThreadSpawned(self: *Self, scratch: Allocator, new_pid: types.PID) !void {
+            const z = trace.zone(@src());
+            defer z.end();
+
+            try self.adapter.spawnWait4Loop(&self.requests, new_pid);
+
+            try self.data.subordinate.?.threads.append(
+                self.data.subordinate_arena.allocator(),
+                new_pid,
+            );
+
+            // apply all active breakpoints to the new subordinate thread
+            const load_addr = self.data.subordinate.?.load_addr;
+            var thread_bps = ArrayList(types.ThreadBreakpoint).init(scratch);
+            for (self.data.state.breakpoints.items) |bp| {
+                if (!bp.flags.active) continue;
+
+                // make a copy to avoid modifying the source slice
+                var bp_copy = bp;
+                const tbp = try self.adapter.setBreakpoint(load_addr, &bp_copy, new_pid);
+                try thread_bps.append(tbp);
+            }
+
+            try self.data.subordinate.?.thread_breakpoints.appendSlice(
+                self.data.subordinate_arena.allocator(),
+                thread_bps.items,
+            );
+
+            try self.continueExecution(new_pid);
         }
 
         /// Caller owns returned memory
