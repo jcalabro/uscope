@@ -167,7 +167,7 @@ pub fn update(self: *Self) State.View {
                     if (zui.tableNextColumn()) {
                         var rendered = false;
                         if (bp.source_location) |loc| {
-                            if (file.getCachedFile(loc.file_hash)) |src| {
+                            if (self.state.dbg.file_cache.get(loc.file_hash)) |src| {
                                 zui.textWrapped("{s}:{d}", .{ src.name, loc.line });
                                 rendered = true;
                             }

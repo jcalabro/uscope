@@ -7,6 +7,7 @@ const assert = std.debug.assert;
 const t = std.testing;
 
 const dwarf = @import("../dwarf.zig");
+const file = @import("../../file.zig");
 const info = @import("info.zig");
 const logging = @import("../../logging.zig");
 const Reader = @import("../../Reader.zig");
@@ -99,6 +100,7 @@ test "parse cmulticu .debug_addr tables" {
     const opts = dwarf.ParseOpts{
         .scratch = scratch,
         .sections = sections,
+        .file_cache = try file.Cache.init(scratch),
     };
 
     // stich up the CU header manually for this unit test based on real-world values from clang

@@ -59,11 +59,12 @@ pub fn main() !void {
 
     flags.logAll();
 
-    var file_arena = ArenaAllocator.init(main_allocator.allocator());
-    defer file_arena.deinit();
-    file.initHashCache(file_arena.allocator());
+    var file_cache_arena = ArenaAllocator.init(main_allocator.allocator());
+    defer file_cache_arena.deinit();
+    const file_cache = try file.Cache.init(file_cache_arena.allocator());
+    defer file_cache.deinit();
 
-    var dbg = try Debugger.init(&thread_safe_allocator);
+    var dbg = try Debugger.init(&thread_safe_allocator, file_cache);
     defer dbg.deinit();
 
     var threads = ArrayList(Thread).init(main_allocator.allocator());
@@ -118,8 +119,6 @@ test {
         .regions = "all",
         .fp = log_fp,
     }) catch unreachable;
-
-    file.initHashCache(tsa.allocator());
 
     comptime {
         std.testing.refAllDeclsRecursive(@This());

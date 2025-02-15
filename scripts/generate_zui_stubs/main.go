@@ -54,6 +54,7 @@ const imgui = cimgui.c;
 		case "zui.ImVec2":
 			val = "return .{};"
 		case "*zui.Style":
+			line = strings.Replace(line, "pub fn", "pub inline fn", -1)
 			val = "var val = std.mem.zeroes(zui.Style); return &val;"
 		case "*imgui.ImGuiViewport":
 			val = "var val = std.mem.zeroes(imgui.ImGuiViewport); return &val;"

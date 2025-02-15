@@ -18,6 +18,7 @@ const TypeMap = AutoHashMap(Offset, usize);
 const abbrev = @import("dwarf/abbrev.zig");
 const aranges = @import("dwarf/aranges.zig");
 const consts = @import("dwarf/consts.zig");
+const file_utils = @import("../file.zig");
 const flags = @import("../flags.zig");
 const frame = @import("dwarf/frame.zig");
 const info = @import("dwarf/info.zig");
@@ -156,6 +157,9 @@ pub const ParseError = error{
 pub const ParseOpts = struct {
     /// Must be an arena allocator and must be deinit'ed by the caller after us
     scratch: Allocator,
+
+    /// Global cache of absolute file paths
+    file_cache: *file_utils.Cache,
 
     /// The full contents of each DWARF section. Each must be set by the caller
     /// if the section exists in the binary.
@@ -333,6 +337,7 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
     for (0..num_threads) |_| {
         const thread = try Thread.spawn(.{}, parseAndMapCompileUnits, .{
             perm_alloc,
+            opts.file_cache,
             req_queue,
             err_queue,
             cus,
@@ -397,6 +402,7 @@ const CompileUnitRequest = struct {
 
 fn parseAndMapCompileUnits(
     main_thread_perm_alloc: Allocator, // the allocator in use by the main debugger.zig thread
+    file_cache: *file_utils.Cache,
     cu_req_queue: *Queue(?CompileUnitRequest),
     err_queue: *Queue(ParseError),
     compile_units: *ArrayList(types.CompileUnit),
@@ -417,6 +423,7 @@ fn parseAndMapCompileUnits(
         if (cu_req_queue.get() catch continue) |*req| {
             const opts = ParseOpts{
                 .scratch = scratch.allocator(),
+                .file_cache = file_cache,
                 .sections = req.dwarf_cu.opts.sections,
             };
             req.dwarf_cu.opts = &opts;

@@ -11,6 +11,7 @@ const t = std.testing;
 
 const consts = @import("consts.zig");
 const dwarf = @import("../dwarf.zig");
+const file = @import("../../file.zig");
 const info = @import("info.zig");
 const logging = @import("../../logging.zig");
 const Reader = @import("../../Reader.zig");
@@ -431,6 +432,7 @@ test "parse cloop frame table" {
     const cies = try loadTable(arena.allocator(), &.{
         .scratch = arena.allocator(),
         .sections = &sections,
+        .file_cache = try file.Cache.init(arena.allocator()),
     });
 
     try t.expectEqual(1, cies.len);

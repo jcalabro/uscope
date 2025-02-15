@@ -54,7 +54,7 @@ pub fn parse(
 
         // save each hashed file path on the compile unit in the
         // correct order for later use during parsing
-        const hash = file_util.addAbsPathToCache(abs_path) catch |err| switch (err) {
+        const hash = opts.cu.opts.file_cache.add(abs_path) catch |err| switch (err) {
             error.InvalidPath => return error.InvalidDWARFInfo,
             else => |e| return e,
         };
@@ -528,6 +528,9 @@ const Header = struct {
         const zigloop = @embedFile("../test_files/linux_x86-64_zigloop_out_line");
         assert(zigloop.len > 0);
 
+        const fc = try file_util.Cache.init(t.allocator);
+        defer fc.deinit();
+
         var r: Reader = undefined;
         r.init(zigloop);
 
@@ -539,6 +542,7 @@ const Header = struct {
         cu.opts = &.{
             .scratch = alloc,
             .sections = undefined,
+            .file_cache = fc,
         };
         const opts = &dwarf.AttributeParseOpts{ .cu = cu, .die = undefined };
 
@@ -643,7 +647,7 @@ const Entry = struct {
                 }
             }
 
-            const add_fhash = file_util.addAbsPathToCache(abs_path) catch |err| switch (err) {
+            const add_fhash = opts.cu.opts.file_cache.add(abs_path) catch |err| switch (err) {
                 error.InvalidPath => return error.InvalidDWARFInfo,
                 else => |e| return e,
             };

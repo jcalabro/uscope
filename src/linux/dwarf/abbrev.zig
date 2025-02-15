@@ -11,6 +11,7 @@ const t = std.testing;
 
 const consts = @import("consts.zig");
 const dwarf = @import("../dwarf.zig");
+const file = @import("../../file.zig");
 const info = @import("info.zig");
 const logging = @import("../../logging.zig");
 const Offset = dwarf.Offset;
@@ -470,9 +471,13 @@ test "parse errors" {
     sections.abbrev.contents = abbrev;
     try t.expectEqual(@as(usize, 0x13a), sections.abbrev.contents.len);
 
+    const fc = try file.Cache.init(t.allocator);
+    defer fc.deinit();
+
     const opts = dwarf.ParseOpts{
         .scratch = alloc,
         .sections = &sections,
+        .file_cache = fc,
     };
 
     {
@@ -508,12 +513,16 @@ test "parse cloop abbrev table" {
     sections.abbrev.contents = cloop;
     try t.expectEqual(@as(usize, 0x13a), sections.abbrev.contents.len);
 
+    const fc = try file.Cache.init(t.allocator);
+    defer fc.deinit();
+
     var arena = ArenaAllocator.init(t.allocator);
     defer arena.deinit();
 
     const tables = try parse(&.{
         .scratch = arena.allocator(),
         .sections = &sections,
+        .file_cache = fc,
     });
 
     try t.expectEqual(@as(usize, 1), tables.len);
@@ -605,9 +614,13 @@ test "parse zigloop abbrev table" {
     var arena = ArenaAllocator.init(t.allocator);
     defer arena.deinit();
 
+    const fc = try file.Cache.init(t.allocator);
+    defer fc.deinit();
+
     const tables = try parse(&.{
         .scratch = arena.allocator(),
         .sections = &sections,
+        .file_cache = fc,
     });
 
     try t.expectEqual(@as(usize, 2), tables.len);

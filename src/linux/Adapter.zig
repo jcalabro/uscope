@@ -27,6 +27,7 @@ const debugger = @import("../debugger.zig");
 const Debugger = debugger.Debugger;
 const elf = @import("elf.zig");
 const Expression = @import("Expression.zig");
+const file = @import("../file.zig");
 const frame = @import("dwarf/frame.zig");
 const logging = @import("../logging.zig");
 const PID = types.PID;
@@ -94,12 +95,6 @@ pub fn deinit(self: *Self) void {
     {
         // stop the wait4 loop with a "poison pill"
         const req = self.perm_alloc.create(Wait4Request) catch unreachable;
-        defer {
-            self.wait4_mu.lock();
-            defer self.wait4_mu.unlock();
-            self.perm_alloc.destroy(req);
-        }
-
         req.* = .{
             .pid = undefined,
             .dest = .local_call_site,
@@ -125,6 +120,7 @@ pub fn reset(self: *Self) void {
 pub fn loadDebugSymbols(
     self: *Self,
     alloc: Allocator,
+    file_cache: *file.Cache,
     req: proto.LoadSymbolsRequest,
 ) !*types.Target {
     if (req.path.len == 0) return error.InvalidBinaryPath;
@@ -135,6 +131,7 @@ pub fn loadDebugSymbols(
     return try elf.load(&.{
         .perm = alloc,
         .scratch = scratch.allocator(),
+        .file_cache = file_cache,
         .path = req.path,
     });
 }
@@ -534,17 +531,13 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
     while (true) {
         // wait for a signal that tells us to start the wait4 call
         var req = self.wait4_q.get() catch continue;
+        defer self.perm_alloc.destroy(req);
         defer {
             self.wait4_mu.lock();
             defer self.wait4_mu.unlock();
 
-            switch (req.dest) {
-                .local_call_site => {
-                    Futex.wake(&req.done, 1);
-                },
-                .debugger_thread => {
-                    self.perm_alloc.destroy(req);
-                },
+            if (req.dest == .local_call_site) {
+                Futex.wake(&req.done, 1);
             }
         }
 
@@ -707,13 +700,6 @@ pub fn waitForSignalSync(self: *Self, pid: types.PID, timeout_ns: u64) !void {
         break :blk r;
     };
 
-    defer {
-        self.wait4_mu.lock();
-        defer self.wait4_mu.unlock();
-
-        self.perm_alloc.destroy(req);
-    }
-
     try self.wait4_q.put(req);
     try Futex.timedWait(&req.done, DoneVal, timeout_ns);
 }
@@ -738,12 +724,6 @@ pub fn waitForSignalAsync(self: *Self, pid: types.PID) !void {
         };
         break :blk r;
     };
-
-    errdefer {
-        self.wait4_mu.lock();
-        defer self.wait4_mu.unlock();
-        self.perm_alloc.destroy(req);
-    }
 
     try self.wait4_q.put(req);
 }

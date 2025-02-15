@@ -284,6 +284,9 @@ pub const LoadOpts = struct {
     /// Must be an arena's allocator and must always be free'd by the caller
     scratch: Allocator = undefined,
 
+    /// The cache to which all file paths will be written
+    file_cache: *file.Cache,
+
     /// the relative or absolute path to the file to parse
     path: String,
 };
@@ -321,6 +324,7 @@ pub fn load(opts: *const LoadOpts) LoadError!*types.Target {
     const dwarf_opts = try opts.scratch.create(dwarf.ParseOpts);
     dwarf_opts.* = .{
         .scratch = opts.scratch,
+        .file_cache = opts.file_cache,
         .sections = dwarf_sections,
     };
 
@@ -618,7 +622,13 @@ fn getOptionalSection(
 const cloop = @embedFile("test_files/linux_x86-64_cloop_out");
 
 test "load OS file errors" {
-    var opts = LoadOpts{ .path = "/invalid/path/to/file" };
+    const fc = try file.Cache.init(t.allocator);
+    defer fc.deinit();
+
+    var opts = LoadOpts{
+        .path = "/invalid/path/to/file",
+        .file_cache = fc,
+    };
 
     // shouldn't allocate
     opts.perm = t.failing_allocator;
@@ -730,10 +740,14 @@ test "load ELF files" {
         var arena = ArenaAllocator.init(t.allocator);
         defer arena.deinit();
 
+        var file_arena = ArenaAllocator.init(t.allocator);
+        defer file_arena.deinit();
+
         const target = load(&.{
             .perm = arena.allocator(),
             .scratch = arena.allocator(),
             .path = case.path,
+            .file_cache = try file.Cache.init(file_arena.allocator()),
         }) catch |err| {
             log.errf("failed to parse {s}: {!}", .{ case.path, err });
             return err;
@@ -790,6 +804,7 @@ test "parse cloop" {
         .perm = t.failing_allocator, // perm should never allocate
         .scratch = arena.allocator(),
         .path = undefined,
+        .file_cache = try file.Cache.init(arena.allocator()),
     };
 
     //
@@ -952,6 +967,7 @@ test "parse zigloop" {
         .perm = t.failing_allocator, // perm should never allocate
         .scratch = arena.allocator(),
         .path = undefined,
+        .file_cache = try file.Cache.init(arena.allocator()),
     };
 
     //

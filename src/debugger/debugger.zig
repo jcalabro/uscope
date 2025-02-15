@@ -197,11 +197,12 @@ fn DebuggerType(comptime AdapterType: anytype) type {
         adapter: *AdapterType = undefined,
 
         data: Data,
+        file_cache: *file.Cache,
 
         requests: Queue(proto.Request),
         responses: Queue(proto.Response),
 
-        pub fn init(thread_safe_alloc: *ThreadSafeAllocator) !*Self {
+        pub fn init(thread_safe_alloc: *ThreadSafeAllocator, file_cache: *file.Cache) !*Self {
             const q_timeout = time.ns_per_ms * 10;
 
             const perm_alloc = thread_safe_alloc.allocator();
@@ -211,6 +212,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             self.* = .{
                 .perm_alloc = thread_safe_alloc.allocator(),
                 .data = try Data.init(thread_safe_alloc),
+                .file_cache = file_cache,
                 .requests = Queue(proto.Request).init(
                     thread_safe_alloc,
                     .{ .timeout_ns = q_timeout },
@@ -556,6 +558,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             const target = try self.adapter.loadDebugSymbols(
                 self.data.target_arena.allocator(),
+                self.file_cache,
                 req,
             );
             log.debug("loading debug symbols complete");
@@ -842,7 +845,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             }
 
             if (breakpoint.source_location) |src_loc| {
-                const f = file.getCachedFile(src_loc.file_hash);
+                const f = self.file_cache.get(src_loc.file_hash);
                 log.debugf("breakpoint set at address 0x{x} ({s}:{d})", .{ base_addr, f.?.name, src_loc.line });
             } else {
                 log.debugf("breakpoint set at address 0x{x}", .{base_addr});
@@ -1934,7 +1937,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const source_loc = self.sourceForAddress(registers.pc());
             const pc_minus_load_addr = registers.pc().sub(self.data.subordinate.?.load_addr);
             if (source_loc) |src| {
-                if (file.getCachedFile(src.loc.file_hash)) |f| {
+                if (self.file_cache.get(src.loc.file_hash)) |f| {
                     log.debugf("stopped at pc: 0x{x} (0x{x}), source location: {s}:{d}", .{ registers.pc(), pc_minus_load_addr, f.name, src.loc.line });
                 } else {
                     log.debugf("stopped at pc: 0x{x} (0x{x}), source location: {any}", .{ registers.pc(), pc_minus_load_addr, src });

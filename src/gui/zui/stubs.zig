@@ -89,7 +89,7 @@ pub fn beginTabItem(_: [:0]const u8, _: zui.BeginTabItem) bool { return true; }
 
 pub fn endTabItem() void {  }
 
-pub fn getStyle() *zui.Style { var val = std.mem.zeroes(zui.Style); return &val; }
+pub inline fn getStyle() *zui.Style { var val = std.mem.zeroes(zui.Style); return &val; }
 
 pub fn pushStyleColor4f(_: zui.PushStyleColor4f) void {  }
 

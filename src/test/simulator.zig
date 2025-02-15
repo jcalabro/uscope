@@ -81,12 +81,15 @@ const Simulator = struct {
     skip: bool = false,
 
     fn init(root_alloc: Allocator) !*Self {
+        const file_cache = try file_utils.Cache.init(root_alloc);
+        errdefer file_cache.deinit();
+
         const thread_safe_alloc = try root_alloc.create(ThreadSafeAllocator);
         errdefer root_alloc.destroy(thread_safe_alloc);
         thread_safe_alloc.* = .{ .child_allocator = root_alloc };
         const alloc = thread_safe_alloc.allocator();
 
-        var dbg = try Debugger.init(thread_safe_alloc);
+        var dbg = try Debugger.init(thread_safe_alloc, file_cache);
         errdefer dbg.deinit();
 
         const self = try alloc.create(Self);
@@ -119,6 +122,7 @@ const Simulator = struct {
     }
 
     fn deinit(self: *Self, root_alloc: Allocator) void {
+        self.dbg.file_cache.deinit();
         self.dbg.deinit();
 
         self.commands.deinit();

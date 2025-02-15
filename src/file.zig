@@ -1,19 +1,19 @@
 const std = @import("std");
 const Allocator = mem.Allocator;
 const assert = std.debug.assert;
-const AutoHashMap = std.AutoHashMap;
+const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
 const fs = std.fs;
 const math = std.math;
 const mem = std.mem;
 const Mutex = std.Thread.Mutex;
 const posix = std.posix;
-const testing = std.testing;
-const ThreadSafeAllocator = std.heap.ThreadSafeAllocator;
+const t = std.testing;
 
 const flags = @import("flags.zig");
 const logging = @import("logging.zig");
 const safe = @import("safe.zig");
-const String = @import("strings.zig").String;
+const strings = @import("strings.zig");
+const String = strings.String;
 const trace = @import("trace.zig");
 
 const log = logging.Logger.init(logging.Region.Misc);
@@ -42,80 +42,103 @@ pub const SourceFile = struct {
     name: String,
 };
 
-const FileMap = AutoHashMap(Hash, SourceFile);
+const FileMap = AutoHashMapUnmanaged(Hash, SourceFile);
 
-/// file_cache translates file hashes back in to their full names.
-/// It keeps its own arena throughout the lifetime of the program.
-var file_cache: FileMap = undefined;
-var file_cache_mu: Mutex = Mutex{};
-var file_thread_safe_allocator: ThreadSafeAllocator = undefined;
-var file_allocator: Allocator = undefined;
+/// Stores and maps file hashes back in to their full names
+pub const Cache = struct {
+    const Self = @This();
 
-pub fn initHashCache(alloc: Allocator) void {
-    file_cache_mu.lock();
-    defer file_cache_mu.unlock();
+    alloc: Allocator,
+    map: FileMap = .{},
+    mu: Mutex = .{},
 
-    file_thread_safe_allocator = .{ .child_allocator = alloc };
-    file_allocator = file_thread_safe_allocator.allocator();
-    file_cache = FileMap.init(file_allocator);
-}
-
-/// Looks up a cached file in the global cache. Returns null if it does not exist.
-pub fn getCachedFile(fhash: Hash) ?SourceFile {
-    const z = trace.zone(@src());
-    defer z.end();
-
-    file_cache_mu.lock();
-    defer file_cache_mu.unlock();
-
-    return file_cache.get(fhash);
-}
-
-/// Caller does NOT own returned memory, and the strings within the SourceFile are allocated
-/// once on first use, then never mutated again, so they are safe to read from multiple threads
-pub fn getCachedFileFromAbsPath(abs_path: String) ?SourceFile {
-    const z = trace.zone(@src());
-    defer z.end();
-
-    const fhash = hashAbsPath(abs_path);
-    return getCachedFile(fhash);
-}
-
-/// Inserts a path in to the cache, returning the hash of the absolute
-/// path. It allocates in he case that the hash does not already exist.
-/// If the entry already exists, this function never returns an error.
-pub fn addAbsPathToCache(abs_path: String) error{ OutOfMemory, InvalidPath }!Hash {
-    const z = trace.zone(@src());
-    defer z.end();
-
-    if (!fs.path.isAbsolute(abs_path)) {
-        log.errf("expected an absolute path, got: {s}", .{abs_path});
-        return error.InvalidPath;
+    pub fn init(alloc: Allocator) Allocator.Error!*Self {
+        const self = try alloc.create(Self);
+        errdefer alloc.destroy(self);
+        self.* = .{ .alloc = alloc };
+        return self;
     }
 
-    const file_hash = hashAbsPath(abs_path);
-    if (getCachedFile(file_hash) != null) {
-        // entry already exists
+    pub fn deinit(self: *Self) void {
+        {
+            self.mu.lock();
+            defer self.mu.unlock();
+
+            var it = self.map.iterator();
+            while (it.next()) |item| self.alloc.free(item.value_ptr.*.abs_path);
+        }
+
+        self.map.deinit(self.alloc);
+        self.alloc.destroy(self);
+    }
+
+    pub fn count(self: *Self) usize {
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        return self.map.count();
+    }
+
+    /// Looks up a cached file in the global cache. Returns null if it does not exist.
+    pub fn get(self: *Self, fhash: Hash) ?SourceFile {
+        const z = trace.zone(@src());
+        defer z.end();
+
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        return self.map.get(fhash);
+    }
+
+    /// Caller does NOT own returned memory, and the strings within the SourceFile are allocated
+    /// once on first use, then never mutated again, so they are safe to read from multiple threads
+    pub fn getFromPath(self: *Self, abs_path: String) ?SourceFile {
+        const z = trace.zone(@src());
+        defer z.end();
+
+        const fhash = hashAbsPath(abs_path);
+        return self.get(fhash);
+    }
+
+    /// Inserts a path in to the cache, returning the hash of the absolute
+    /// path. It allocates in he case that the hash does not already exist.
+    /// If the entry already exists, this function never returns an error.
+    pub fn add(self: *Self, abs_path: String) error{ OutOfMemory, InvalidPath }!Hash {
+        const z = trace.zone(@src());
+        defer z.end();
+
+        if (!fs.path.isAbsolute(abs_path)) {
+            log.errf("expected an absolute path, got: {s}", .{abs_path});
+            return error.InvalidPath;
+        }
+
+        const file_hash = hashAbsPath(abs_path);
+        if (self.get(file_hash) != null) {
+            // entry already exists
+            return file_hash;
+        }
+
+        self.mu.lock();
+        defer self.mu.unlock();
+
+        // copy to the local allocator so this cache owns the memory
+        const abs = try strings.clone(self.alloc, abs_path);
+        errdefer self.alloc.free(abs);
+
+        try self.map.put(self.alloc, file_hash, .{
+            .abs_path = abs,
+            .name = std.fs.path.basename(abs),
+        });
+
         return file_hash;
     }
-
-    // copy to the local arena so this cache owns the memory
-    const abs = try safe.copySlice(u8, std.heap.c_allocator, abs_path);
-    errdefer file_allocator.free(abs);
-
-    file_cache_mu.lock();
-    defer file_cache_mu.unlock();
-
-    try file_cache.put(file_hash, .{
-        .abs_path = abs,
-        .name = std.fs.path.basename(abs),
-    });
-
-    return file_hash;
-}
+};
 
 test "file hashing and caching" {
-    const start_count = file_cache.count();
+    const cache = try Cache.init(t.allocator);
+    defer cache.deinit();
+
+    const start_count = cache.count();
 
     const str = "/home/jcalabro/test/file.txt";
 
@@ -124,17 +147,17 @@ test "file hashing and caching" {
     const hash_val = if (flags.LLVM) 0xc75d51990100f90b else 0xebcfc00e;
 
     for (0..100) |_| {
-        const h = try addAbsPathToCache(str);
-        try testing.expectEqual(@as(usize, start_count + 1), file_cache.count());
-        try testing.expectEqual(hash_val, h);
+        const h = try cache.add(str);
+        try t.expectEqual(@as(usize, start_count + 1), cache.count());
+        try t.expectEqual(hash_val, h);
     }
 
     {
         // value generated using a 3rd-party hasher
-        const val = getCachedFile(hash_val);
-        try testing.expect(val != null);
-        try testing.expectEqualSlices(u8, str, val.?.abs_path);
-        try testing.expectEqualSlices(u8, "file.txt", val.?.name);
+        const val = cache.get(hash_val);
+        try t.expect(val != null);
+        try t.expectEqualSlices(u8, str, val.?.abs_path);
+        try t.expectEqualSlices(u8, "file.txt", val.?.name);
     }
 }
 

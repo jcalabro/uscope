@@ -264,11 +264,15 @@ pub const CompileUnit = struct {
             defer arena.deinit();
             const scratch = arena.allocator();
 
+            const fc = try file_util.Cache.init(t.allocator);
+            defer fc.deinit();
+
             const sections = try scratch.create(dwarf.Sections);
             var cu = try scratch.create(CompileUnit);
             cu.opts = &.{
                 .scratch = scratch,
                 .sections = sections,
+                .file_cache = fc,
             };
 
             {
@@ -336,9 +340,13 @@ pub const CompileUnit = struct {
         var sections = try scratch.create(dwarf.Sections);
         sections.info.contents = cloop_info;
 
+        const fc = try file_util.Cache.init(t.allocator);
+        defer fc.deinit();
+
         const opts = dwarf.ParseOpts{
             .scratch = scratch,
             .sections = sections,
+            .file_cache = fc,
         };
 
         const cu = try CompileUnit.create(&opts, 0);
@@ -361,9 +369,13 @@ pub const CompileUnit = struct {
         const sections = try scratch.create(dwarf.Sections);
         sections.info.contents = getEmbeddedFile(zigloop_name);
 
+        const fc = try file_util.Cache.init(t.allocator);
+        defer fc.deinit();
+
         const opts = dwarf.ParseOpts{
             .scratch = scratch,
             .sections = sections,
+            .file_cache = fc,
         };
 
         var offset: usize = 0;

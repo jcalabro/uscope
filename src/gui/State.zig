@@ -464,7 +464,7 @@ fn updateSourceLocationInFocus(self: *Self, new_state: types.StateSnapshot) void
         self.open_source_file_ndx = ndx;
         self.newly_opened_file = ndx;
     } else {
-        if (file_util.getCachedFile(new_loc.file_hash)) |f| {
+        if (self.dbg.file_cache.get(new_loc.file_hash)) |f| {
             self.openSourceFile(f.abs_path) catch |err| {
                 log.errf("unable to open source file {s}: {!}", .{ f.abs_path, err });
                 return;
