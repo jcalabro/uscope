@@ -19,6 +19,7 @@ pub const Request = union(enum) {
     quit: QuitRequest,
     set_hex_window_address: SetHexWindowAddressRequest,
     set_watch_expressions: SetWatchExpressionsRequest,
+    thread_spawned: ThreadSpawnedRequest,
 };
 
 /// Response can be any one of the various debugger command sent from the
@@ -234,5 +235,14 @@ pub const SetWatchExpressionsRequest = struct {
     pub fn deinit(self: @This(), alloc: Allocator) void {
         for (self.expressions) |e| alloc.free(e);
         alloc.free(self.expressions);
+    }
+};
+
+/// Informs the debugger that the subordinate process has spawned a new thread
+pub const ThreadSpawnedRequest = struct {
+    pid: types.PID,
+
+    pub fn req(self: @This()) Request {
+        return .{ .thread_spawned = self };
     }
 };
