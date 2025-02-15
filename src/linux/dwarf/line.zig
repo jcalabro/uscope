@@ -666,7 +666,8 @@ const Entry = struct {
             while (ndx < self.prologue_len) : (ndx += 1) {
                 const stmt_ndx = num_statements - ndx - 1;
                 if (stmt_ndx < 0) break;
-                _ = src.statements.popOrNull();
+                assert(src.statements.items.len > 0);
+                _ = src.statements.pop().?;
             }
         }
 

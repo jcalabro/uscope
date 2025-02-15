@@ -154,7 +154,8 @@ fn runEvalProgram(state: *Self, peek_data: PeekFunc) EvaluationError!String {
                 try state.stack.append(dupe);
             },
             .DW_OP_drop => {
-                _ = state.stack.popOrNull();
+                assert(state.stack.items.len > 0);
+                _ = state.stack.pop().?;
             },
             .DW_OP_over => try state.evalPick(1),
             .DW_OP_pick => try state.evalPick(try state.reader.read(u8)),
@@ -178,9 +179,10 @@ fn runEvalProgram(state: *Self, peek_data: PeekFunc) EvaluationError!String {
                 }
 
                 // (top, second, third -> second, third, top)
-                const top = state.stack.pop();
-                const second = state.stack.pop();
-                const third = state.stack.pop();
+                assert(state.stack.items.len > 2);
+                const top = state.stack.pop().?;
+                const second = state.stack.pop().?;
+                const third = state.stack.pop().?;
 
                 try state.stack.append(top);
                 try state.stack.append(third);
@@ -362,7 +364,8 @@ fn evalInt1(state: *Self, comptime calc: CalcFunc) !void {
         return error.InvalidLocationExpression;
     }
 
-    const buf = state.stack.pop();
+    assert(state.stack.items.len > 0);
+    const buf = state.stack.pop().?;
     return try state.evalInt(calc, buf, buf);
 }
 
@@ -374,8 +377,9 @@ fn evalInt2(state: *Self, comptime calc: CalcFunc) !void {
         return error.InvalidLocationExpression;
     }
 
-    const buf_a = state.stack.pop();
-    const buf_b = state.stack.pop();
+    assert(state.stack.items.len > 1);
+    const buf_a = state.stack.pop().?;
+    const buf_b = state.stack.pop().?;
     if (buf_a.len != buf_b.len) {
         log.errf("int operand length mismatch (first: {d}, second: {d})", .{
             buf_a.len,
@@ -439,7 +443,8 @@ fn evalUConst(state: *Self) !void {
     }
 
     const a_u64 = try state.reader.readULEB128();
-    const buf_b = state.stack.pop();
+    assert(state.stack.items.len > 0);
+    const buf_b = state.stack.pop().?;
     const res = try state.alloc.alloc(u8, buf_b.len);
 
     @setRuntimeSafety(false);
@@ -738,8 +743,9 @@ fn evalShr(state: *Self) !void {
         return error.InvalidLocationExpression;
     }
 
-    const buf_a = state.stack.pop();
-    const buf_b = state.stack.pop();
+    assert(state.stack.items.len > 1);
+    const buf_a = state.stack.pop().?;
+    const buf_b = state.stack.pop().?;
     const res = try state.alloc.alloc(u8, buf_b.len);
 
     @setRuntimeSafety(false);
@@ -955,7 +961,7 @@ test "evalAddr" {
 
 /// Pops an address from the stack, then peeks at that address in memory
 fn evalDeref(state: *Self, peek_data: PeekFunc) !void {
-    const buf = state.stack.popOrNull();
+    const buf = state.stack.pop();
     if (buf == null) {
         log.err("unable to execute DW_OP_deref: stack is empty");
         return error.InvalidLocationExpression;

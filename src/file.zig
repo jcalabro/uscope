@@ -3,12 +3,13 @@ const Allocator = mem.Allocator;
 const assert = std.debug.assert;
 const AutoHashMap = std.AutoHashMap;
 const fs = std.fs;
+const heap = std.heap;
 const math = std.math;
 const mem = std.mem;
 const Mutex = std.Thread.Mutex;
 const posix = std.posix;
 const testing = std.testing;
-const ThreadSafeAllocator = std.heap.ThreadSafeAllocator;
+const ThreadSafeAllocator = heap.ThreadSafeAllocator;
 
 const flags = @import("flags.zig");
 const logging = @import("logging.zig");
@@ -100,7 +101,7 @@ pub fn addAbsPathToCache(abs_path: String) error{ OutOfMemory, InvalidPath }!Has
     }
 
     // copy to the local arena so this cache owns the memory
-    const abs = try safe.copySlice(u8, std.heap.c_allocator, abs_path);
+    const abs = try safe.copySlice(u8, heap.c_allocator, abs_path);
     errdefer file_allocator.free(abs);
 
     file_cache_mu.lock();
@@ -151,7 +152,7 @@ pub const MMapError = posix.MMapError || fs.File.OpenError ||
     FileEmpty,
 };
 
-pub fn mapWholeFile(fp: fs.File) MMapError![]align(mem.page_size) const u8 {
+pub fn mapWholeFile(fp: fs.File) MMapError![]align(heap.pageSize()) const u8 {
     const file_len = math.cast(usize, try fp.getEndPos()) orelse math.maxInt(usize);
 
     // cannot map a zero-byte file

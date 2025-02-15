@@ -552,7 +552,8 @@ fn parseUnwindProgram(
             .DW_CFA_restore_state => {
                 if (implicit_stack.items.len == 0) return error.NoImplicitStackRows;
 
-                const row = implicit_stack.pop();
+                assert(implicit_stack.items.len > 0);
+                const row = implicit_stack.pop().?;
                 table.items[table.items.len - 1] = row;
             },
 

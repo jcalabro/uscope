@@ -82,7 +82,8 @@ pub fn Queue(comptime T: anytype) type {
             }
 
             // dequeue from the back
-            return self.queue.pop();
+            assert(self.queue.items.len > 0);
+            return self.queue.pop().?;
         }
 
         /// Dequeues an item, returning `null` immediately if no items are on the queue
@@ -90,7 +91,6 @@ pub fn Queue(comptime T: anytype) type {
             self.mu.lock();
             defer self.mu.unlock();
 
-            if (self.queue.items.len == 0) return null;
             return self.queue.pop();
         }
     };
