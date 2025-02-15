@@ -14,23 +14,29 @@ pub fn main() !void {
 
     {
         wg.start();
-        const thread = try Thread.spawn(.{}, sleepThread, .{ wg, 100 });
-        try thread.setName("thread100");
+        const thread = try Thread.spawn(.{}, sleepThread, .{ wg, 1 });
+        try thread.setName("thread1");
     }
 
     {
         wg.start();
-        const thread = try Thread.spawn(.{}, sleepThread, .{ wg, 200 });
-        try thread.setName("thread200");
+        const thread = try Thread.spawn(.{}, sleepThread, .{ wg, 2 });
+        try thread.setName("thread2");
+    }
+
+    {
+        wg.start();
+        const thread = try Thread.spawn(.{}, sleepThread, .{ wg, 3 });
+        try thread.setName("thread3");
     }
 
     wg.wait();
 }
 
-fn sleepThread(wg: *WaitGroup, sleep_ms: u64) void {
+fn sleepThread(wg: *WaitGroup, sleep_secs: u64) void {
     defer wg.finish();
 
-    print("sleeping for {d}ms\n", .{sleep_ms});
-    Thread.sleep(sleep_ms * std.time.ns_per_ms);
-    print("sleep for {d}ms complete\n", .{sleep_ms});
+    print("sleeping for {d}s\n", .{sleep_secs});
+    Thread.sleep(sleep_secs * std.time.ns_per_s);
+    print("sleep for {d}s complete\n", .{sleep_secs});
 }

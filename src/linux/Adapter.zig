@@ -14,6 +14,7 @@ const Mutex = Thread.Mutex;
 const posix = std.posix;
 const pow = std.math.pow;
 const rand = std.rand;
+const SIG = posix.SIG;
 const t = std.testing;
 const time = std.time;
 const Thread = std.Thread;
@@ -46,14 +47,41 @@ const log = logging.Logger.init(logging.Region.Linux);
 const Self = @This();
 
 const PtraceSetOptions = enum(usize) {
-    tracesysgood = 0x00000001,
-    tracefork = 0x00000002,
-    tracevfork = 0x00000004,
-    traceclone = 0x00000008,
-    traceexec = 0x00000010,
-    tracevforkdone = 0x00000020,
-    traceexit = 0x00000040,
-    mask = 0x0000007f,
+    mask = 0x7f,
+
+    clone = 0x08,
+    exec = 0x10,
+    exit = 0x40,
+    fork = 0x02,
+    sysgood = 0x01,
+    vfork = 0x04,
+    vforkdone = 0x20,
+
+    fn int(self: @This()) usize {
+        return @intFromEnum(self);
+    }
+};
+
+/// Wait extended result codes for trace options
+const PtraceEvent = struct {
+    const FORK = 1;
+    const VFORK = 2;
+    const CLONE = 3;
+    const EXEC = 4;
+    const VFORK_DONE = 5;
+    const EXIT = 6;
+    const SECCOMP = 7;
+
+    /// Extended result codes which enabled by means other than options
+    const STOP = 128;
+};
+
+const TrapEvent = struct {
+    const BRKPT = 1;
+    const TRACE = 2;
+    const BRANCH = 3;
+    const HWBKPT = 4;
+    const UNK = 5;
 };
 
 perm_alloc: Allocator = undefined,
@@ -150,15 +178,35 @@ pub fn spawnSubordinate(self: *Self, subordinate: *Child) !void {
 
     // @NOTE (jrc): the child must have been started with PTRACE_TRACEME
     // after fork() but before exec(), which is why we use our own Child.zig
+    subordinate.ptrace_traceme = true;
     try subordinate.spawn();
+}
 
-    // trace clone's to be notified of all child threads that should also be traced
-    try posix.ptrace(
-        linux.PTRACE.SETOPTIONS,
-        subordinate.id,
-        0,
-        @intFromEnum(PtraceSetOptions.traceclone),
-    );
+/// Should only be called after the subordinate has spawned and set us its initial SIGTRAP
+pub fn setSubordinateTracingOptions(self: *Self, pid: types.PID) !void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    self.assertCorrectThreadIsCallingPtrace();
+
+    var opts: usize = 0;
+
+    // notify when the child spawns a new thread with `clone`
+    opts |= PtraceSetOptions.clone.int();
+
+    // notify when the child spawns a new thread with `clone`
+    opts |= PtraceSetOptions.clone.int();
+
+    // notify when the child spawns a process with `fork`
+    opts |= PtraceSetOptions.fork.int();
+
+    // notify when the child spawns a process with `vfork`
+    opts |= PtraceSetOptions.vfork.int();
+
+    // notify when the child or one of its threads is about to exit
+    opts |= PtraceSetOptions.clone.int();
+
+    try posix.ptrace(linux.PTRACE.SETOPTIONS, pid.int(), 0, opts);
 }
 
 pub fn pauseSubordinate(self: *Self, pid: types.PID) !void {
@@ -167,7 +215,7 @@ pub fn pauseSubordinate(self: *Self, pid: types.PID) !void {
 
     self.assertCorrectThreadIsCallingPtrace();
 
-    try posix.kill(pid.int(), posix.SIG.STOP);
+    try posix.kill(pid.int(), SIG.STOP);
 }
 
 /// temporarilyPauseSubordinate is like pauseSubordinate, but it doesn't call back
@@ -180,7 +228,7 @@ pub fn temporarilyPauseSubordinate(self: *Self, pid: types.PID) !void {
 
     self.assertCorrectThreadIsCallingPtrace();
 
-    try posix.kill(pid.int(), posix.SIG.USR2);
+    try posix.kill(pid.int(), SIG.USR2);
     Futex.wait(&self.temp_pause_done, DoneVal);
 }
 
@@ -517,6 +565,63 @@ pub fn unsetBreakpoint(
     try self.pokeData(pid, load_addr, bp.addr, &buf);
 }
 
+/// After the subordinate has paused, this call checks whether or not a new
+/// thread was created in the subordinate via a `clone` call.
+pub fn handleEvent(self: *Self, pid: types.PID) !?debugger.SubordinateEvent {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    self.assertCorrectThreadIsCallingPtrace();
+
+    var siginfo = mem.zeroes(posix.siginfo_t);
+    try posix.ptrace(linux.PTRACE.GETSIGINFO, pid.int(), 0, @intFromPtr(&siginfo));
+
+    if (siginfo.signo == SIG.TRAP) {
+        switch (siginfo.code) {
+            SIG.TRAP | (PtraceEvent.FORK << 8),
+            SIG.TRAP | (PtraceEvent.VFORK << 8),
+            SIG.TRAP | (PtraceEvent.CLONE << 8),
+            => {
+                // a new thread was spawned, get its PID
+                var cloned_pid: c_long = 0;
+                try posix.ptrace(linux.PTRACE.GETEVENTMSG, pid.int(), 0, @intFromPtr(&cloned_pid));
+                assert(cloned_pid > 0);
+                return .{ .new_thread_spawned = types.PID.from(@intCast(cloned_pid)) };
+            },
+
+            SIG.TRAP | (PtraceEvent.EXEC << 8) => {
+                log.warn("EVENT: EXEC");
+            },
+
+            SIG.TRAP | (PtraceEvent.EXIT << 8) => {
+                log.warn("EVENT: EXIT");
+            },
+
+            0, TrapEvent.TRACE => {
+                log.warn("EVENT: TRACE");
+            },
+
+            SIG.TRAP, SIG.TRAP | 0x80 => {
+                log.warn("EVENT: TRAP");
+            },
+
+            else => {
+                log.errf("unknown ptrace SIGTRAP code: {d}", .{siginfo.code});
+                return null;
+            },
+        }
+    }
+
+    return null;
+}
+
+const WaitFlags = struct {
+    const WNOHANG = 1;
+    const WNOTHREAD = 0x20000000;
+    const WALL = 0x40000000;
+    const WCLONE = 0x80000000;
+};
+
 /// wait4Loop spawns a loop that runs on a background thread forever, waiting for results
 /// to come in from the subordinate process
 fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
@@ -549,7 +654,8 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
             if (req.shutdown) return;
         }
 
-        const res = wait4(req.pid, 0, null) catch {
+        const wait_flags = WaitFlags.WALL | WaitFlags.WNOTHREAD | WaitFlags.WNOHANG;
+        const res = wait4(req.pid, wait_flags, null) catch {
             log.warnf("thread {d} forcibly exited", .{req.pid.int()});
             continue;
         };
@@ -558,7 +664,6 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
 
         var should_stop_debugger = true;
         if (status.stopped()) {
-            const SIG = linux.SIG;
             switch (status.stopSignal()) {
                 SIG.WINCH => should_stop_debugger = false,
                 else => {},
@@ -567,7 +672,7 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
 
         // @TODO (jrc): handle status.cloned() case
 
-        if (status.exitStatus() == posix.SIG.USR2) {
+        if (status.exitStatus() == SIG.USR2) {
             // a temporary pause happened, don't call back the debugger layer,
             // just call back the immediate call site
             Futex.wake(&self.temp_pause_done, 1);

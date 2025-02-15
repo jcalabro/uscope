@@ -628,7 +628,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             self.data.subordinate.?.child.stdout_behavior = .Pipe;
             self.data.subordinate.?.child.stderr_behavior = .Pipe;
-            self.data.subordinate.?.child.ptrace_traceme = true;
 
             try self.adapter.spawnSubordinate(&self.data.subordinate.?.child);
 
@@ -677,6 +676,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             // wait for the child to start, at which point it will send us a SIGTRAP
             const timeout_secs = if (flags.CI) 20 else 2; // Github Actions default runners are insanely slow
             try self.adapter.waitForSignalSync(pid, timeout_secs * time.ns_per_s);
+
+            // we need to wait for the subordinate to have been spawned before settings tracing options
+            try self.adapter.setSubordinateTracingOptions(pid);
 
             // apply all breakpoints that the user has already requested
             for (self.data.state.breakpoints.items) |*bp| {
@@ -1994,8 +1996,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
-            try self.adapter.spawnWait4Loop(&self.requests, new_pid);
-
             try self.data.subordinate.?.threads.append(
                 self.data.subordinate_arena.allocator(),
                 new_pid,
@@ -2018,7 +2018,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 thread_bps.items,
             );
 
-            try self.continueExecution(new_pid);
+            try self.continueExecution(.{});
         }
 
         /// Caller owns returned memory
