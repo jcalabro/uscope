@@ -578,6 +578,8 @@ pub fn handleEvent(self: *Self, pid: types.PID) !?debugger.SubordinateEvent {
 
     if (siginfo.signo == SIG.TRAP) {
         switch (siginfo.code) {
+            PtraceEvent.STOP => return null,
+
             SIG.TRAP | (PtraceEvent.FORK << 8),
             SIG.TRAP | (PtraceEvent.VFORK << 8),
             SIG.TRAP | (PtraceEvent.CLONE << 8),
@@ -592,15 +594,12 @@ pub fn handleEvent(self: *Self, pid: types.PID) !?debugger.SubordinateEvent {
             SIG.TRAP | (PtraceEvent.EXEC << 8) => {
                 log.warn("EVENT: EXEC");
             },
-
             SIG.TRAP | (PtraceEvent.EXIT << 8) => {
                 log.warn("EVENT: EXIT");
             },
-
             0, TrapEvent.TRACE => {
                 log.warn("EVENT: TRACE");
             },
-
             SIG.TRAP, SIG.TRAP | 0x80 => {
                 log.warn("EVENT: TRAP");
             },
@@ -615,8 +614,7 @@ pub fn handleEvent(self: *Self, pid: types.PID) !?debugger.SubordinateEvent {
     return null;
 }
 
-const WaitFlags = struct {
-    const WNOHANG = 1;
+const Wait4Flags = struct {
     const WNOTHREAD = 0x20000000;
     const WALL = 0x40000000;
     const WCLONE = 0x80000000;
@@ -654,8 +652,7 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
             if (req.shutdown) return;
         }
 
-        const wait_flags = WaitFlags.WALL | WaitFlags.WNOTHREAD | WaitFlags.WNOHANG;
-        const res = wait4(req.pid, wait_flags, null) catch {
+        const res = wait4(types.PID.from(-1), Wait4Flags.WALL, null) catch {
             log.warnf("thread {d} forcibly exited", .{req.pid.int()});
             continue;
         };
@@ -681,7 +678,7 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
 
         if (status.exited()) {
             log.debugf("thread {d} exited with status: {d}", .{
-                req.pid.int(),
+                res.pid,
                 status.exitStatus(),
             });
         }
@@ -691,9 +688,11 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
             .debugger_thread => {
                 // inform the main debugger thread that the subordinate was stopped
                 const stopped_req = proto.SubordinateStoppedRequest{
-                    .pid = req.pid,
-                    .exited = status.exited() or (status.signaled() and status.terminationSignal() == 9),
-                    .should_stop_debugger = should_stop_debugger,
+                    .pid = types.PID.from(res.pid),
+                    .flags = .{
+                        .exited = status.exited() or (status.signaled() and status.terminationSignal() == 9),
+                        .should_stop_debugger = should_stop_debugger,
+                    },
                 };
 
                 trace.message(@tagName(stopped_req.req()));

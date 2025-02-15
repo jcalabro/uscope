@@ -5,7 +5,6 @@ const WaitGroup = Thread.WaitGroup;
 
 pub fn main() !void {
     print("starting zigmultithread\n", .{});
-    defer print("zigmultithread done\n", .{});
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
@@ -31,6 +30,7 @@ pub fn main() !void {
     }
 
     wg.wait();
+    print("zigmultithread done\n", .{});
 }
 
 fn sleepThread(wg: *WaitGroup, sleep_secs: u64) void {

@@ -687,10 +687,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             }
 
             if (req.stop_on_entry) {
-                try self.handleSubordinateStoppedAlreadyLocked(scratch, .{
-                    .pid = pid,
-                    .exited = false,
-                });
+                try self.handleSubordinateStoppedAlreadyLocked(scratch, .{ .pid = pid });
             } else {
                 // let the subordinate begin execution
                 try self.adapter.continueExecution(pid);
@@ -1361,8 +1358,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try self.adapter.pokeData(bpp.pid, load_addr, bp.addr, &instruction);
                 }
 
-                const req = proto.SubordinateStoppedRequest{ .pid = bpp.pid, .exited = false };
-                try self.handleSubordinateStoppedAlreadyLocked(scratch, req);
+                try self.handleSubordinateStoppedAlreadyLocked(scratch, .{ .pid = bpp.pid });
                 return;
             }
         }
@@ -1762,16 +1758,17 @@ fn DebuggerType(comptime AdapterType: anytype) type {
         fn handleSubordinateStoppedAlreadyLocked(self: *Self, scratch: Allocator, req: proto.SubordinateStoppedRequest) !void {
             defer self.stateUpdated();
 
-            // the subordinate is reporting that it has shut down
-            if (req.exited or self.data.subordinate == null) {
-                self.resetSubordinateState();
-                try self.clearInternalBreakpoints(scratch);
+            if (self.data.subordinate == null) return;
+
+            // we received a signal that we don't care about, so don't actually pause the debugger
+            if (!req.flags.should_stop_debugger) {
+                try self.continueExecution(.{});
                 return;
             }
 
-            // we received a signal that we don't care about, so don't actually pause the debugger
-            if (!req.should_stop_debugger) {
-                try self.continueExecution(.{});
+            // the subordinate is reporting that a thread has exited
+            if (req.flags.exited) {
+                try self.handleThreadExited(scratch, req.pid);
                 return;
             }
 
@@ -1784,9 +1781,18 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 }
             }
 
-            // we're no longer stopped (edge case)
             var registers = try self.adapter.getRegisters(req.pid);
+
+            // @QUESTION (jrc): can I remove this? I don't remember why this is here.
+            //
+            // we're no longer stopped (edge case)
             if (registers.pc().int() == 0) return;
+
+            // @TODO (jrc)
+            // pause all other threads
+            for (self.data.subordinate.?.threads.items) |thread_pid| {
+                try self.adapter.pauseSubordinate(thread_pid);
+            }
 
             const sub = self.data.subordinate.?;
             const str_cache = try strings.Cache.init(scratch);
@@ -1996,6 +2002,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
+            log.warnf("THREAD SPAWNED: {d}", .{new_pid});
+
             try self.data.subordinate.?.threads.append(
                 self.data.subordinate_arena.allocator(),
                 new_pid,
@@ -2019,6 +2027,40 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             );
 
             try self.continueExecution(.{});
+        }
+
+        fn handleThreadExited(self: *Self, scratch: Allocator, pid: types.PID) !void {
+            const z = trace.zone(@src());
+            defer z.end();
+
+            log.warnf("THREAD EXIT: {d}", .{pid});
+
+            const sub = &self.data.subordinate.?;
+
+            {
+                // remove all thread breakpoints
+                var ndx: usize = 0;
+                while (ndx < sub.thread_breakpoints.items.len) : (ndx += 1) {
+                    if (sub.thread_breakpoints.items[ndx].pid.neq(pid)) continue;
+
+                    _ = sub.thread_breakpoints.orderedRemove(ndx);
+                    if (ndx > 0) ndx -= 1;
+                }
+            }
+
+            // remove the thread
+            for (sub.threads.items, 0..) |thread_pid, ndx| {
+                if (thread_pid.neq(pid)) continue;
+
+                _ = sub.threads.orderedRemove(ndx);
+                break;
+            }
+
+            // clean up all state if the main thread exited
+            if (pid.int() == sub.child.id) {
+                self.resetSubordinateState();
+                try self.clearInternalBreakpoints(scratch);
+            }
         }
 
         /// Caller owns returned memory
