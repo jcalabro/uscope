@@ -27,6 +27,8 @@ const zui = @import("../gui/zui.zig");
 
 const log = logging.Logger.init(logging.Region.Test);
 
+const ValgrindMult = if (flags.Valgrind) 4 else 1;
+
 /// A Mock GUI implementation for the few cross-cutting concerns that
 /// haven't (yet) been eliminated
 pub const TestGUI = struct {
@@ -233,7 +235,10 @@ const Simulator = struct {
 
         // send the Commands that are ready, if any
         for (self.commands.items) |*cmd| {
-            if (cmd.send_after_ticks < 0 or self.last_event != cmd.order) continue;
+            if (cmd.send_after_ticks < 0 or self.last_event != cmd.order) {
+                if (flags.Valgrind) Thread.sleep(time.ns_per_ms);
+                continue;
+            }
 
             defer cmd.send_after_ticks -= 1;
 
@@ -402,7 +407,7 @@ test "sim:cfastloop" {
         .req = (proto.LoadSymbolsRequest{ .path = "assets/cfastloop/out" }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(20000),
+        .max_ticks = msToTicks(20000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -439,7 +444,7 @@ test "sim:cfastloop" {
         }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must be launched",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -452,7 +457,7 @@ test "sim:cfastloop" {
         }.cond,
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -479,7 +484,7 @@ test "sim:cfastloop" {
         .req = (proto.ToggleBreakpointRequest{ .id = types.BID.from(1) }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(250),
+        .max_ticks = msToTicks(250) * ValgrindMult,
         .desc = "the breakpoint must be toggled off",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -506,7 +511,7 @@ test "sim:cfastloop" {
     })
     .addCondition(.{
         .desc = "subordinate must be running after continue, and should not be stopped at the breakpoint that has been toggled off",
-        .max_ticks = msToTicks(500),
+        .max_ticks = msToTicks(500) * ValgrindMult,
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 s.dbg.data.mu.lock();
@@ -525,7 +530,7 @@ test "sim:cfastloop" {
         .req = (proto.ToggleBreakpointRequest{ .id = types.BID.from(1) }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(500),
+        .max_ticks = msToTicks(500) * ValgrindMult,
         .desc = "the breakpoint must be toggled back on and the subordinate must be stopped at it",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -557,7 +562,7 @@ test "sim:cfastloop" {
         .req = (proto.ContinueRequest{}).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "breakpoint must have been deleted and the subordinate must be executing",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -581,7 +586,7 @@ test "sim:cfastloop" {
     })
     .addCondition(.{
         .desc = "subordinate must have been killed",
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 s.dbg.data.mu.lock();
@@ -603,7 +608,7 @@ test "sim:cfastloop" {
         }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must be launched again",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -644,7 +649,7 @@ test "sim:zigprint" {
         .path = exe_path,
     }).req() })
     .addCondition(.{
-        .max_ticks = msToTicks(20000),
+        .max_ticks = msToTicks(20000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -680,7 +685,7 @@ test "sim:zigprint" {
         }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -932,8 +937,8 @@ test "sim:zigprint" {
     })
     .addCondition(.{
         .desc = "subordinate must have finished execution and all subordinate output must be displayed",
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(4000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(4000) * ValgrindMult,
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 {
@@ -972,8 +977,8 @@ test "sim:zigprint" {
     })
     .addCondition(.{
         .desc = "subordinate must have finished execution and all subordinate output must be displayed on the second run",
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(4000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(4000) * ValgrindMult,
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 s.dbg.data.mu.lock();
@@ -1071,7 +1076,7 @@ test "sim:cmulticu" {
         .req = (proto.LoadSymbolsRequest{ .path = "assets/cmulticu/out" }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(20000),
+        .max_ticks = msToTicks(20000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1118,7 +1123,7 @@ test "sim:cmulticu" {
         }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must be launched",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1131,7 +1136,7 @@ test "sim:cmulticu" {
         }.cond,
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the first breakpoint in main.c",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1156,8 +1161,8 @@ test "sim:cmulticu" {
         .req = (proto.ContinueRequest{}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint in second.c",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1183,8 +1188,8 @@ test "sim:cmulticu" {
         .req = (proto.ContinueRequest{}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the second breakpoint in main.c",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1218,7 +1223,7 @@ test "sim:cmulticu" {
         }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must be launched",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1231,7 +1236,7 @@ test "sim:cmulticu" {
         }.cond,
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint in main.c",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1254,8 +1259,8 @@ test "sim:cmulticu" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to second.c",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1279,8 +1284,8 @@ test "sim:cmulticu" {
         .req = (proto.StepRequest{.step_type = .out_of}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped out back in to main.c",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1303,8 +1308,8 @@ test "sim:cmulticu" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "the subordinate must be paused at line 10 in main.c",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1327,8 +1332,8 @@ test "sim:cmulticu" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "the correct value for my_struct must be rendered",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1384,7 +1389,7 @@ test "sim:cbacktrace" {
         .req = (proto.LoadSymbolsRequest{ .path = cbacktrace_exe }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(20000),
+        .max_ticks = msToTicks(20000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1434,7 +1439,7 @@ test "sim:cbacktrace" {
         }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must be launched",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1447,7 +1452,7 @@ test "sim:cbacktrace" {
         }.cond,
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint in main()",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1480,8 +1485,8 @@ test "sim:cbacktrace" {
         .req = (proto.ContinueRequest{}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(4000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(4000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint in FuncC()",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1517,8 +1522,8 @@ test "sim:cbacktrace" {
         .req = (proto.ContinueRequest{}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(1000),
-        .max_ticks = msToTicks(4000),
+        .wait_for_ticks = msToTicks(1000) * ValgrindMult,
+        .max_ticks = msToTicks(4000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint in FuncE()",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1646,7 +1651,7 @@ test "sim:step_over_until_end" {
         .req = (proto.LoadSymbolsRequest{ .path = zigbacktrace_exe }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(20000),
+        .max_ticks = msToTicks(20000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1681,8 +1686,8 @@ test "sim:step_over_until_end" {
     })
 
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(5000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(5000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1696,8 +1701,8 @@ test "sim:step_over_until_end" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped over one function call",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1715,8 +1720,8 @@ test "sim:step_over_until_end" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(5000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(5000) * ValgrindMult,
         .desc = "subordinate must have stepped over two function calls",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1730,8 +1735,8 @@ test "sim:step_over_until_end" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(5000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(5000) * ValgrindMult,
         .desc = "subordinate must have stepped until the final line of the program",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1764,7 +1769,7 @@ test "sim:step_over_returns_to_caller" {
         .req = (proto.LoadSymbolsRequest{ .path = cbacktrace_exe }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(20000),
+        .max_ticks = msToTicks(20000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1799,8 +1804,8 @@ test "sim:step_over_returns_to_caller" {
     })
 
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint in FuncA",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1826,8 +1831,8 @@ test "sim:step_over_returns_to_caller" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped over (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1841,8 +1846,8 @@ test "sim:step_over_returns_to_caller" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped over (2)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1875,7 +1880,7 @@ test "sim:step_in_and_out" {
         .req = (proto.LoadSymbolsRequest{ .path = zigbacktrace_exe }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(20000),
+        .max_ticks = msToTicks(20000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1910,8 +1915,8 @@ test "sim:step_in_and_out" {
     })
 
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1925,8 +1930,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to funcA (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1940,8 +1945,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to funcB (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1955,8 +1960,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to funcC (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1970,8 +1975,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to funcD (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -1985,8 +1990,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to funcE (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2000,8 +2005,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .out_of}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped out to funcD (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2015,8 +2020,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .out_of}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped out to funcC (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2030,8 +2035,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .out_of}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped out to funcB (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2045,8 +2050,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .out_of}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped out to funcA (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2060,8 +2065,8 @@ test "sim:step_in_and_out" {
         .req = (proto.StepRequest{.step_type = .out_of}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped out to main (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2094,7 +2099,7 @@ test "sim:step_in_then_over_then_out" {
         .req = (proto.LoadSymbolsRequest{ .path = zigbacktrace_exe }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(20000),
+        .max_ticks = msToTicks(20000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2129,8 +2134,8 @@ test "sim:step_in_then_over_then_out" {
     })
 
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2144,8 +2149,8 @@ test "sim:step_in_then_over_then_out" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to funcA (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2159,8 +2164,8 @@ test "sim:step_in_then_over_then_out" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped over funcB (2)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2174,8 +2179,8 @@ test "sim:step_in_then_over_then_out" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped over funcB (2)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2215,7 +2220,7 @@ test "sim:cprint" {
         .path = exe_path,
     }).req() })
     .addCondition(.{
-        .max_ticks = msToTicks(20000),
+        .max_ticks = msToTicks(20000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2259,7 +2264,7 @@ test "sim:cprint" {
         }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint in my_func and rendered its variables correctly",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2319,8 +2324,8 @@ test "sim:cprint" {
         .req = (proto.ContinueRequest{}).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
-        .wait_for_ticks = msToTicks(100),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint in main and rendered its variables correctly",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2483,8 +2488,8 @@ test "sim:cprint" {
     })
     .addCondition(.{
         .desc = "subordinate must have finished execution and all subordinate output must be displayed",
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(4000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(4000) * ValgrindMult,
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 {
@@ -2541,7 +2546,7 @@ test "sim:crecursion" {
         .req = (proto.LoadSymbolsRequest{ .path = crecursion_exe }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(4000),
+        .max_ticks = msToTicks(4000) * ValgrindMult,
         .desc = "debug symbols must be loaded",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2575,7 +2580,7 @@ test "sim:crecursion" {
         }).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(2000),
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have hit the breakpoint",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2608,8 +2613,8 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to the recursive function",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2632,8 +2637,8 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have done the first step",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2649,8 +2654,8 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have done the second step",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2666,8 +2671,8 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have done the third step",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2685,8 +2690,8 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have done the fourth step and *depth should be 1",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2704,8 +2709,8 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to Recursion for the second time",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2729,8 +2734,8 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .out_of}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped out of the second call to Recursion",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2749,7 +2754,7 @@ test "sim:crecursion" {
         .req = (proto.KillSubordinateRequest{}).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must have been killed",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2769,8 +2774,8 @@ test "sim:crecursion" {
         }).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(1000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must have been launched again and stopped at the ",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2792,8 +2797,8 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .into}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(250),
-        .max_ticks = msToTicks(2000),
+        .wait_for_ticks = msToTicks(250) * ValgrindMult,
+        .max_ticks = msToTicks(2000) * ValgrindMult,
         .desc = "subordinate must have stepped in to Recursion",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2817,7 +2822,7 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must have stepped once in Recursion",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2835,7 +2840,7 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must have stepped twice in Recursion",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2853,7 +2858,7 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must have stepped three times in Recursion",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2871,7 +2876,7 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must have stepped four times in Recursion",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2889,7 +2894,7 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .max_ticks = msToTicks(1000),
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must have stepped five times in Recursion",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
@@ -2909,8 +2914,8 @@ test "sim:crecursion" {
         .req = (proto.StepRequest{.step_type = .over}).req(),
     })
     .addCondition(.{
-        .wait_for_ticks = msToTicks(100),
-        .max_ticks = msToTicks(1000),
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(1000) * ValgrindMult,
         .desc = "subordinate must have stepped out of Recursion",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
