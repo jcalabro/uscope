@@ -28,6 +28,7 @@ const Debugger = debugger.Debugger;
 const elf = @import("elf.zig");
 const Expression = @import("Expression.zig");
 const file = @import("../file.zig");
+const flags = @import("../flags.zig");
 const frame = @import("dwarf/frame.zig");
 const logging = @import("../logging.zig");
 const PID = types.PID;
@@ -74,13 +75,12 @@ pub fn init(thread_safe_alloc: *ThreadSafeAllocator, req_q: *Queue(proto.Request
     const self = try perm_alloc.create(Self);
     errdefer perm_alloc.destroy(self);
 
+    const mult = if (flags.Valgrind) 5 else 1;
     self.* = Self{
         .perm_alloc = perm_alloc,
-
-        .wait4_q = Queue(*Wait4Request).init(
-            thread_safe_alloc,
-            .{ .timeout_ns = time.ns_per_s },
-        ),
+        .wait4_q = Queue(*Wait4Request).init(thread_safe_alloc, .{
+            .timeout_ns = mult * time.ns_per_s,
+        }),
     };
 
     self.shutdown_wg.start();
@@ -100,6 +100,11 @@ pub fn deinit(self: *Self) void {
             .dest = .local_call_site,
             .shutdown = true,
         };
+        defer {
+            self.wait4_mu.lock();
+            defer self.wait4_mu.unlock();
+            self.perm_alloc.destroy(req);
+        }
 
         self.wait4_q.put(req) catch unreachable;
         Futex.timedWait(&req.done, DoneVal, time.ns_per_ms * 50) catch {};
@@ -531,26 +536,29 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
     while (true) {
         // wait for a signal that tells us to start the wait4 call
         var req = self.wait4_q.get() catch continue;
-        defer self.perm_alloc.destroy(req);
         defer {
             self.wait4_mu.lock();
             defer self.wait4_mu.unlock();
 
-            if (req.dest == .local_call_site) {
-                Futex.wake(&req.done, 1);
+            switch (req.dest) {
+                .local_call_site => Futex.wake(&req.done, 1),
+                .debugger_thread => {
+                    self.perm_alloc.destroy(req);
+                },
             }
         }
 
-        {
+        const req_local = blk: {
             self.wait4_mu.lock();
             defer self.wait4_mu.unlock();
 
             // the debugger is fully shutting down, stop the loop
             if (req.shutdown) return;
-        }
+            break :blk req.*;
+        };
 
-        const res = wait4(req.pid, 0, null) catch {
-            log.warnf("thread {d} forcibly exited", .{req.pid.int()});
+        const res = wait4(req_local.pid, 0, null) catch {
+            log.warnf("thread {d} forcibly exited", .{req_local.pid.int()});
             continue;
         };
 
@@ -576,17 +584,17 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
 
         if (status.exited()) {
             log.debugf("thread {d} exited with status: {d}", .{
-                req.pid.int(),
+                req_local.pid.int(),
                 status.exitStatus(),
             });
         }
 
-        switch (req.dest) {
+        switch (req_local.dest) {
             .local_call_site => {}, // nothing to do
             .debugger_thread => {
                 // inform the main debugger thread that the subordinate was stopped
                 const stopped_req = proto.SubordinateStoppedRequest{
-                    .pid = req.pid,
+                    .pid = req_local.pid,
                     .exited = status.exited() or (status.signaled() and status.terminationSignal() == 9),
                     .should_stop_debugger = should_stop_debugger,
                 };
@@ -605,10 +613,10 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
 
 /// we use our own fork of wait4 because the zig stdlib doesn't gracefully handle the
 /// case where the subordinate process is forcibly terminated (the .CHILD case)
-fn wait4(pid: types.PID, flags: u32, ru: ?*posix.rusage) !posix.WaitPidResult {
+fn wait4(pid: types.PID, wait_flags: u32, ru: ?*posix.rusage) !posix.WaitPidResult {
     const Status = if (builtin.link_libc) c_int else u32;
     var status: Status = undefined;
-    const coerced_flags = if (builtin.link_libc) @as(c_int, @intCast(flags)) else flags;
+    const coerced_flags = if (builtin.link_libc) @as(c_int, @intCast(wait_flags)) else wait_flags;
     while (true) {
         const rc = posix.system.wait4(@intCast(pid.int()), &status, coerced_flags, ru);
         switch (posix.errno(rc)) {
@@ -699,6 +707,11 @@ pub fn waitForSignalSync(self: *Self, pid: types.PID, timeout_ns: u64) !void {
         };
         break :blk r;
     };
+    defer {
+        self.wait4_mu.lock();
+        defer self.wait4_mu.unlock();
+        self.perm_alloc.destroy(req);
+    }
 
     try self.wait4_q.put(req);
     try Futex.timedWait(&req.done, DoneVal, timeout_ns);

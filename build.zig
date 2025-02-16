@@ -19,6 +19,11 @@ const Flags = struct {
     /// Whether or not to build the binary with LLVM enabled. We need
     /// LLVM for TSan.
     llvm: bool = false,
+
+    /// Whether or not the built test binary is intended to be run under valgrind.
+    /// This changes the timings of certain conditions for our old, slow CI runners
+    /// that are running valgrind with full leak checking.
+    valgrind: bool = false,
 };
 
 pub fn build(b: *Build) !void {
@@ -52,7 +57,7 @@ pub fn build(b: *Build) !void {
     flags.tracy = b.option(bool, "tracy", "Enable tracy (default: false)") orelse false;
     opts.addOption(bool, "tracy_enabled", flags.tracy);
 
-    flags.race = b.option(bool, "race", "Enable TSan (default: true)") orelse false;
+    flags.race = b.option(bool, "race", "Enable TSan (default: false)") orelse false;
     opts.addOption(bool, "race", flags.race);
 
     // @NOTE (jrc): swap to the self-hosted backend when it's more reliable
@@ -60,6 +65,9 @@ pub fn build(b: *Build) !void {
     const llvm_help = try std.fmt.allocPrint(b.allocator, "Enable LLVM (default: {any})", .{llvm_default});
     flags.llvm = b.option(bool, "llvm", llvm_help) orelse llvm_default;
     opts.addOption(bool, "llvm", flags.llvm);
+
+    flags.valgrind = b.option(bool, "valgrind", "Indicates the binary is intended to be run under valgrind (default: false)") orelse false;
+    opts.addOption(bool, "valgrind", flags.valgrind);
 
     //
     // Define all the possible executables and objects we'd ever want to build

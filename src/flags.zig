@@ -17,6 +17,7 @@ pub const Release = flag(bool, "release");
 pub const ResetGUI = flag(bool, "reset_gui");
 pub const SpallEnabled = flag(bool, "spall_enabled");
 pub const TracyEnabled = flag(bool, "tracy_enabled");
+pub const Valgrind = flag(bool, "valgrind");
 
 fn flag(comptime T: type, comptime name: []const u8) T {
     if (@hasDecl(options, name)) {
@@ -36,6 +37,8 @@ fn flag(comptime T: type, comptime name: []const u8) T {
             return options.spall_enabled;
         } else if (eql(u8, name, "tracy_enabled")) {
             return options.tracy_enabled;
+        } else if (eql(u8, name, "valgrind")) {
+            return options.valgrind;
         } else {
             @compileError("unknown compile-time flag: " ++ name);
         }
@@ -53,4 +56,5 @@ pub fn logAll() void {
     if (ResetGUI) log.infof("reset_gui: {any}", .{ResetGUI});
     if (SpallEnabled) log.infof("spall: {any}", .{SpallEnabled});
     if (TracyEnabled) log.infof("tracy: {any}", .{TracyEnabled});
+    if (Valgrind) log.infof("valgrind: {any}", .{Valgrind});
 }
