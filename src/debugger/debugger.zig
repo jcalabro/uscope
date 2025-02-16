@@ -1118,9 +1118,13 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             }
         }
 
-        const ContinueExecutionOpts = packed struct {
+        const ContinueExecutionOpts = struct {
             force: bool = true,
             step_over: bool = false,
+
+            /// If provided, runs continue on only these thread PIDs
+            /// rather than all known threads
+            pids: ?[]const types.PID = null,
         };
 
         fn continueExecution(self: *Self, opts: ContinueExecutionOpts) !void {
@@ -1193,10 +1197,12 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             self.data.subordinate.?.clearAndFreePauseData();
 
-            for (self.data.subordinate.?.threads.items) |thread_pid| {
+            const pids = if (opts.pids) |p| p else self.data.subordinate.?.threads.items;
+            for (pids) |thread_pid| {
                 try self.adapter.continueExecution(thread_pid);
-                try self.adapter.waitForSignalAsync(thread_pid);
             }
+
+            try self.adapter.waitForSignalAsync(types.PID.from(self.data.subordinate.?.child.id));
         }
 
         const BreakpointAndPID = struct {
@@ -2026,7 +2032,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 thread_bps.items,
             );
 
-            try self.continueExecution(.{});
+            try self.continueExecution(.{ .pids = &.{
+                types.PID.from(self.data.subordinate.?.child.id),
+                new_pid,
+            } });
         }
 
         fn handleThreadExited(self: *Self, scratch: Allocator, pid: types.PID) !void {
