@@ -94,6 +94,7 @@ controller_thread_id: atomic.Value(Thread.Id) = atomic.Value(Thread.Id).init(und
 /// memory if sync
 wait_queue: Queue(*WaitRequest) = undefined,
 wait_mu: Mutex = .{},
+wait_thread: Thread = undefined,
 
 temp_pause_done: atomic.Value(u32) = atomic.Value(u32).init(DoneVal),
 
@@ -111,9 +112,8 @@ pub fn init(thread_safe_alloc: *ThreadSafeAllocator, req_q: *Queue(proto.Request
     };
 
     self.shutdown_wg.start();
-    const wait_thread = try Thread.spawn(.{}, waitpidLoop, .{ self, req_q });
-    safe.setThreadName(wait_thread, "waitpidLoop");
-    wait_thread.detach();
+    self.wait_thread = try Thread.spawn(.{}, waitpidLoop, .{ self, req_q });
+    safe.setThreadName(self.wait_thread, "waitpidLoop");
 
     return self;
 }
@@ -138,6 +138,7 @@ pub fn deinit(self: *Self) void {
     }
 
     self.shutdown_wg.wait();
+    self.wait_thread.join();
 
     self.reset();
     self.wait_queue.deinit();
