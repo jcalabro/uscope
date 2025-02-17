@@ -953,7 +953,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 if (sub.paused != null) break :blk false;
 
                 // the subordinate has been started and is not already paused
-                try self.adapter.temporarilyPauseSubordinate(subordinate_pid);
+                for (sub.threads.items) |thread_pid| {
+                    self.adapter.temporarilyPauseSubordinate(subordinate_pid, thread_pid);
+                }
                 break :blk true;
             };
 
@@ -1043,7 +1045,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 }
 
                 // the subordinate has been started and is not already paused
-                try self.adapter.temporarilyPauseSubordinate(subordinate_pid);
+                for (sub.threads.items) |thread_pid| {
+                    self.adapter.temporarilyPauseSubordinate(subordinate_pid, thread_pid);
+                }
                 break :blk true;
             };
 
@@ -1794,14 +1798,15 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             // we're no longer stopped (edge case)
             if (registers.pc().int() == 0) return;
 
-            // @TODO (jrc)
-            // pause all other threads
-            for (self.data.subordinate.?.threads.items) |thread_pid| {
-                try self.adapter.pauseSubordinate(thread_pid);
-            }
-
             const sub = self.data.subordinate.?;
             const str_cache = try strings.Cache.init(scratch);
+
+            // pause all other threads that are not already stopped
+            for (sub.threads.items) |thread_pid| {
+                if (thread_pid.eql(req.pid)) continue;
+
+                self.adapter.pauseSubordinate(types.PID.from(sub.child.id), thread_pid);
+            }
 
             //
             // @SEARCH: STACKRBP
@@ -2008,8 +2013,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
-            log.warnf("THREAD SPAWNED: {d}", .{new_pid});
-
             try self.data.subordinate.?.threads.append(
                 self.data.subordinate_arena.allocator(),
                 new_pid,
@@ -2042,8 +2045,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
-            log.warnf("THREAD EXIT: {d}", .{pid});
-
             const sub = &self.data.subordinate.?;
 
             {
@@ -2069,7 +2070,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             if (pid.int() == sub.child.id) {
                 self.resetSubordinateState();
                 try self.clearInternalBreakpoints(scratch);
+                return;
             }
+
+            try self.continueExecution(.{});
         }
 
         /// Caller owns returned memory
