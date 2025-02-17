@@ -614,16 +614,13 @@ pub fn handleEvent(self: *Self, pid: types.PID) !?debugger.SubordinateEvent {
             },
 
             SIG.TRAP | (PtraceEvent.EXEC << 8) => {
-                log.warn("EVENT: EXEC");
+                // @TODO (jrc): handle process spawn
             },
             SIG.TRAP | (PtraceEvent.EXIT << 8) => {
-                log.warn("EVENT: EXIT");
-            },
-            0, TrapEvent.TRACE => {
-                log.warn("EVENT: TRACE");
+                // @TODO (jrc): handle process exit
             },
             SIG.TRAP, SIG.TRAP | 0x80 => {
-                log.warn("EVENT: TRAP");
+                // @TODO (jrc): handle trap
             },
 
             else => {
