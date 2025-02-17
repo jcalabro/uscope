@@ -468,6 +468,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             var sub = self.data.subordinate.?;
 
             sub.child.extremeKillPosix() catch {};
+            self.adapter.waitForSignalSync(
+                types.PID.from(sub.child.id),
+                100 * time.ns_per_ms,
+            ) catch {};
 
             sub.clearAndFreePauseData();
 
@@ -582,6 +586,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
+            defer log.flush();
             defer self.stateUpdated();
 
             self.data.mu.lock();
@@ -1791,15 +1796,13 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 }
             }
 
-            var registers = try self.adapter.getRegisters(req.pid);
-
-            // @QUESTION (jrc): can I remove this? I don't remember why this is here.
-            //
-            // we're no longer stopped (edge case)
-            if (registers.pc().int() == 0) return;
-
             const sub = self.data.subordinate.?;
             const str_cache = try strings.Cache.init(scratch);
+
+            // having a PC of zero means that the subordinate is still running, which
+            // would indicate a logical error in the debugger
+            var registers = try self.adapter.getRegisters(req.pid);
+            assert(registers.pc().neqInt(0));
 
             // pause all other threads that are not already stopped
             for (sub.threads.items) |thread_pid| {
