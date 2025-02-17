@@ -134,7 +134,7 @@ pub fn deinit(self: *Self) void {
         }
 
         self.wait_queue.put(req) catch unreachable;
-        Futex.timedWait(&req.done, DoneVal, time.ns_per_ms * 50) catch {};
+        Futex.timedWait(&req.done, DoneVal, time.ns_per_ms * 500) catch {};
     }
 
     self.shutdown_wg.wait();
@@ -651,8 +651,9 @@ fn waitpidLoop(self: *Self, req_queue: *Queue(proto.Request)) void {
     defer self.shutdown_wg.finish();
 
     while (true) {
-        // wait for a signal that tells us to start the wait4 call
+        // wait for a signal that tells us to start the waitpid call
         var req = self.wait_queue.get() catch continue;
+
         defer {
             self.wait_mu.lock();
             defer self.wait_mu.unlock();
@@ -673,9 +674,6 @@ fn waitpidLoop(self: *Self, req_queue: *Queue(proto.Request)) void {
             if (req.shutdown) return;
             break :blk req.*;
         };
-
-        // the debugger is fully shutting down, stop the loop
-        if (req_local.shutdown) return;
 
         const res = waitpid(types.PID.from(-1), WaitFlags.WALL) catch {
             log.warnf("thread {d} forcibly exited", .{req_local.pid.int()});
@@ -818,10 +816,7 @@ pub fn waitForSignalSync(self: *Self, pid: types.PID, timeout_ns: u64) !void {
         defer self.wait_mu.unlock();
 
         const r = try self.perm_alloc.create(WaitRequest);
-        r.* = .{
-            .pid = pid,
-            .dest = .local_call_site,
-        };
+        r.* = .{ .pid = pid, .dest = .local_call_site };
         break :blk r;
     };
     defer {
@@ -848,10 +843,7 @@ pub fn waitForSignalAsync(self: *Self, pid: types.PID) !void {
         const r = try self.perm_alloc.create(WaitRequest);
         errdefer self.perm_alloc.destroy(r);
 
-        r.* = .{
-            .pid = pid,
-            .dest = .debugger_thread,
-        };
+        r.* = .{ .pid = pid, .dest = .debugger_thread };
         break :blk r;
     };
 
