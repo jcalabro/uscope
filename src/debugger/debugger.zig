@@ -2411,7 +2411,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             // special-case: slices (known length plus an array)
             if (params.encoder.isSlice(enc_params)) {
                 const res = try params.encoder.renderSlice(enc_params);
-
                 try fields.append(params.scratch, .{
                     .data = null,
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
