@@ -134,7 +134,7 @@ pub fn deinit(self: *Self) void {
         }
 
         self.wait_queue.put(req) catch unreachable;
-        Futex.timedWait(&req.done, DoneVal, time.ns_per_ms * 500) catch {};
+        waitForRequest(&req.done, 500 * time.ns_per_ms) catch {};
     }
 
     self.shutdown_wg.wait();
@@ -147,6 +147,11 @@ pub fn deinit(self: *Self) void {
 /// Clears the adapter to its default state
 pub fn reset(self: *Self) void {
     self.wait_queue.reset();
+}
+
+fn waitForRequest(done: *atomic.Value(u32), timeout_ns: u64) !void {
+    const valgrind_mult = if (flags.Valgrind) 10 else 1;
+    try Futex.timedWait(done, DoneVal, valgrind_mult * timeout_ns);
 }
 
 /// Loads the given ELF/DWARF data from disk and maps it to a generic Target. Caller
@@ -826,7 +831,7 @@ pub fn waitForSignalSync(self: *Self, pid: types.PID, timeout_ns: u64) !void {
     }
 
     try self.wait_queue.put(req);
-    try Futex.timedWait(&req.done, DoneVal, timeout_ns);
+    try waitForRequest(&req.done, timeout_ns);
 }
 
 pub fn waitForSignalAsync(self: *Self, pid: types.PID) !void {
