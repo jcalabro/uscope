@@ -1342,8 +1342,7 @@ fn renderLength(len: usize) void {
 }
 
 fn renderWatchBoolean(scratch: Allocator, buf: []const u8) Allocator.Error![]const u8 {
-    assert(buf.len == 1);
-
+    // @NOTE (jrc): Odin has bools of varying lengths
     const res = if (buf.len > 0 and buf[0] != 0) "true" else "false";
     return try strings.clone(scratch, res);
 }
