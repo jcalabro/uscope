@@ -2969,7 +2969,7 @@ test "sim:odinprint" {
     const exe_path = "assets/odinprint/out";
     const odinprint_main_odin_hash = try fileHash(t.allocator, "assets/odinprint/main.odin");
 
-    const expected_output_len = 288;
+    const expected_output_len = 307;
 
     // zig fmt: off
     sim.lock()
@@ -3001,7 +3001,7 @@ test "sim:odinprint" {
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
             .file_hash = odinprint_main_odin_hash,
-            .line = types.SourceLine.from(66),
+            .line = types.SourceLine.from(71),
         }}}).req(),
     })
 
@@ -3041,7 +3041,7 @@ test "sim:odinprint" {
                         if (s.state.subordinate_output.len == 0) return null;
 
                         // spot check a few fields
-                        const num_locals = 29;
+                        const num_locals = 32;
                         if (checkeq(usize, 11, s.state.subordinate_output.len, "unexpected program output len") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") and
                             checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") and
@@ -3160,6 +3160,32 @@ test "sim:odinprint" {
                                         return false;
                                     }
                                     if (!checkstr(paused.strings, "this is the second field", member.data.?, "incorrect value for \"y.second\"")) return false;
+                                }
+                            }
+
+                            {
+                                // check rendering an enum value
+                                const ad = paused.getLocalByName("ad") orelse return falseWithErr("unable to get local \"ad\"", .{});
+                                const first = ad.fields[0];
+                                const second = ad.fields[1];
+                                if (first.encoding != .@"enum") {
+                                    log.errf("variable \"ad\" encoding was not an enum, got {s}", .{@tagName(first.encoding)});
+                                    return false;
+                                }
+                                if (second.encoding != .primitive) {
+                                    log.errf("variable \"ad\" value encoding was not primitive, got {s}", .{@tagName(second.encoding)});
+                                    return false;
+                                }
+
+                                if (!check(second.data != null, "enum data must not be null")) return false;
+                                if (paused.strings.get(second.data.?)) |enum_data| {
+                                    const enum_val = mem.readVarInt(i128, enum_data, .little);
+                                    if (!checkeq(i128, 1, enum_val, "unexpected enum value \"ad\"")) return false;
+                                }
+
+                                if (!check(second.name != null, "enum name must not be null") or
+                                    !checkstr(paused.strings, "Second", second.name.?, "unexpected name for enum \"ad\"")) {
+                                    return false;
                                 }
                             }
 

@@ -61,6 +61,11 @@ main :: proc() {
 	aa := uintptr(k)
 	ab := rawptr(aa)
 
+	MyEnum :: enum {First, Second, Third}
+	ac := MyEnum.First
+	ad := MyEnum.Second
+	ae := MyEnum.Third
+
 	fmt.println(a)
 	fmt.println(b)
 	fmt.println(c) // sim:odinprint stops here
@@ -95,4 +100,8 @@ main :: proc() {
 
 	fmt.println(aa)
 	fmt.println(ab)
+
+	fmt.println(ac)
+	fmt.println(ad)
+	fmt.println(ae)
 }
