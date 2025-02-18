@@ -55,6 +55,10 @@ pub const RenderStringResult = struct {
 
     /// A preview of the string (this may be shorter than the actual string)
     str: String,
+
+    /// The final calculated size of the full string (not just the preview). This is null in
+    /// the case of very long null-terminated strings.
+    len: ?usize,
 };
 
 pub const RenderSliceResult = struct {

@@ -1087,7 +1087,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
     defer z.end();
 
     const val = switch (field.encoding) {
-        .primitive => try renderWatchValue(scratch, paused, field, .{ .render_length = true }),
+        .primitive, .string => try renderWatchValue(scratch, paused, field, .{ .render_length = true }),
 
         .@"enum" => |enm| blk: {
             // render the enum name and its underlying value
@@ -1202,8 +1202,7 @@ fn renderExpandedTree(
     recursive_opts.depth += 1;
 
     switch (field.encoding) {
-        .primitive => unreachable,
-        .@"enum" => unreachable,
+        .primitive, .string, .@"enum" => unreachable,
 
         .array => |arr| {
             renderLength(arr.items.len);
@@ -1302,6 +1301,11 @@ fn renderWatchValue(
         // noop for these since we are rendering the preview via other fields in the list
         .array, .@"struct", .@"enum" => "",
 
+        .string => |str| e: {
+            if (opts.render_length) renderLength(str.len);
+            break :e data;
+        },
+
         .primitive => |primitive| switch (primitive.encoding) {
             .boolean => renderWatchBoolean(scratch, data) catch |err| e: {
                 log.errf("unable to render boolean watch value: {!}", .{err});
@@ -1335,9 +1339,13 @@ fn renderWatchValue(
     };
 }
 
-fn renderLength(len: usize) void {
+fn renderLength(len: ?usize) void {
     zui.pushStyleColor4f(.{ .idx = .text, .c = colors.EncodingMetaText });
-    zui.textWrapped("len: {d}", .{len});
+    if (len) |l| {
+        zui.textWrapped("len: {d}", .{l});
+    } else {
+        zui.textWrapped("len: {s}", .{types.Unknown});
+    }
     zui.popStyleColor(.{});
 }
 

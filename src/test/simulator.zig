@@ -1039,12 +1039,8 @@ fn checkNestedZigStructMembers(paused: types.PauseData, res: types.ExpressionRes
             return false;
         };
 
-        if (member.encoding != .primitive) {
-            log.errf("\"ap.field_b\" was not a primitive, got {s}", .{@tagName(member.encoding)});
-            return false;
-        }
-        if (member.encoding.primitive.encoding != .string) {
-            log.errf("\"ap.field_b\" was not a string, got {s}", .{@tagName(member.encoding.primitive.encoding)});
+        if (member.encoding != .string) {
+            log.errf("\"ap.field_b\" was not a string, got {s}", .{@tagName(member.encoding)});
             return false;
         }
 

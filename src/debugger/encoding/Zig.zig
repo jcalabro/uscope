@@ -87,6 +87,7 @@ fn renderString(
     return .{
         .address = addr,
         .str = try str.toOwnedSlice(params.scratch),
+        .len = len,
     };
 }
 
