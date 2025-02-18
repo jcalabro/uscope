@@ -45,14 +45,16 @@ fn renderSlice(_: *const encoding.Params) encoding.EncodeVariableError!encoding.
 }
 
 /// Read C-style strings one byte at a time until we encounter a null terminator
-fn renderString(
+pub fn renderString(
     params: *const encoding.Params,
     len: u64,
 ) encoding.EncodeVariableError!encoding.RenderStringResult {
     const addr = types.Address.from(mem.readInt(u64, @ptrCast(params.val), endian));
 
     var str = ArrayListUnmanaged(u8){};
-    const max_str_len = 256;
+    var final_len: ?usize = 0;
+
+    const max_str_len = std.math.pow(usize, 2, 12);
     for (0..max_str_len) |ndx| {
         var buf = [_]u8{0};
         params.adapter.peekData(
@@ -67,7 +69,13 @@ fn renderString(
         if (buf[0] == 0) break;
 
         try str.append(params.scratch, buf[0]);
-        if (ndx == max_str_len - 1) try str.appendSlice(params.scratch, "...");
+        final_len.? += 1;
+
+        if (ndx == max_str_len - 1) {
+            try str.appendSlice(params.scratch, "...");
+            final_len = null; // length unknown
+            break;
+        }
 
         if (len > 0 and ndx > len) break;
     }
@@ -75,5 +83,6 @@ fn renderString(
     return .{
         .address = addr,
         .str = try str.toOwnedSlice(params.scratch),
+        .len = final_len,
     };
 }

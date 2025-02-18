@@ -56,10 +56,19 @@ main :: proc() {
 		13,
 		"this is the second field",
 	}
+	z := &y
+
+	aa := uintptr(k)
+	ab := rawptr(aa)
+
+	MyEnum :: enum {First, Second, Third}
+	ac := MyEnum.First
+	ad := MyEnum.Second
+	ae := MyEnum.Third
 
 	fmt.println(a)
 	fmt.println(b)
-	fmt.println(c) // breakpoint here
+	fmt.println(c) // sim:odinprint stops here
 	fmt.println(d)
 	fmt.println(e)
 
@@ -87,4 +96,12 @@ main :: proc() {
 	fmt.println(x)
 
 	fmt.println(y)
+	fmt.println(z)
+
+	fmt.println(aa)
+	fmt.println(ab)
+
+	fmt.println(ac)
+	fmt.println(ad)
+	fmt.println(ae)
 }

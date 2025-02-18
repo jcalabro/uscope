@@ -2262,6 +2262,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             const encoder = switch (cu.language) {
                 .C => @import("encoding/C.zig").encoder(),
+                .Odin => @import("encoding/Odin.zig").encoder(),
                 .Zig => @import("encoding/Zig.zig").encoder(),
                 else => @import("encoding/Unknown.zig").encoder(),
             };
@@ -2402,16 +2403,14 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),
                     .address = res.address,
                     .name = try self.data.subordinate.?.paused.?.strings.add(var_name),
-                    .encoding = .{ .primitive = .{ .encoding = .string } },
+                    .encoding = .{ .string = .{ .len = res.len } },
                 });
-
                 return;
             }
 
             // special-case: slices (known length plus an array)
             if (params.encoder.isSlice(enc_params)) {
                 const res = try params.encoder.renderSlice(enc_params);
-
                 try fields.append(params.scratch, .{
                     .data = null,
                     .data_type_name = try self.data.subordinate.?.paused.?.strings.add(data_type_name),

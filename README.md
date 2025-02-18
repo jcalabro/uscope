@@ -24,9 +24,9 @@ This is a birds-eye overview of the features I'd like implemented before I'd per
   - Basic variable value rendering
   - Stack unwinding
   - etc.
-- Support for visualization of common data types in several languages (preliminary C and Zig support is already underway)
+- Support for visualization of common data types in several languages (preliminary C, Zig, and Odin support is already underway)
   - Adding at least C++ and Go even though they're very complicated languages since that's what I use for work
-  - Also planning on supporting at Rust, Odin, Crystal, and Jai
+  - Also planning on supporting at Rust, Crystal, and Jai
   - In general, we will design a system that handles transforming data in to user-friendly visualization that is flexible, extensible, and not tied to any one language
 - Support for multi-threaded programs
 - Debug tests by clicking on them, at least for programs with built-in testing solutions like Zig, Go, etc.
@@ -39,7 +39,7 @@ Other long-term features that will be implemented are:
 
 - Build as a library so other people can build other interesting things as well
   - The GUI debugger will be the first consumer of that library (in the same way [Ghostty](https://github.com/mitchellh/ghostty) is the first consumer of libghostty)
-- Many more types of Primary -specific data visualizations
+- Many more types of workload-specific data visualizations
   - For example, I work on chess engines for my day job, and it would be amazing to have a debugger that natively understands my position encoding and automatically visually renders interactive chess boards
 - Remote debugging
 - Conditional breakpoints

@@ -1084,8 +1084,7 @@ pub const ExpressionResult = struct {
                 .@"struct" => |s| dupe.encoding.@"struct".members = try safe.copySlice(ExpressionFieldNdx, alloc, s.members),
 
                 // nothing to do for these tags
-                .@"enum" => {},
-                .primitive => {},
+                .primitive, .string, .@"enum" => {},
             }
 
             try fields.append(alloc, dupe);
@@ -1122,8 +1121,7 @@ pub const ExpressionRenderField = struct {
             .@"struct" => |s| alloc.free(s.members),
 
             // nothing to do for these tags
-            .@"enum" => {},
-            .primitive => {},
+            .primitive, .string, .@"enum" => {},
         }
     }
 };
@@ -1134,6 +1132,13 @@ pub const ExpressionFieldEncoding = union(enum) {
     array: ArrayRenderer,
     @"struct": StructRenderer,
     @"enum": EnumRenderer,
+
+    /// Even though some languages (i.e. C, C++, Zig) don't have "string" as a primitive,
+    /// we respect that the vast majority of the time, a `char*` and `[]const u8` should
+    /// be treated as some kind of string, so we use that as the common case to display
+    /// it not just as binary, but also in a user-friendly format in the UI. This is why
+    /// we differentiate string vs. array of bytes.
+    string: StringRenderer,
 };
 
 /// The full list of types that could constitute a primitive
@@ -1144,11 +1149,9 @@ pub const PrimitiveTypeEncoding = enum(u8) {
     float,
     complex,
 
-    /// Even though some languages (i.e. C, C++, Zig) don't have "string" as a primitive,
-    /// we respect that the vast majority of the time, a `char*` and `[]const u8` should
-    /// be treated as some kind of string, so we use that as the common case to display
-    /// it not just as binary, but also in a user-friendly format in the UI. This is why
-    /// we differentiate string vs. array of bytes.
+    /// Note that in some debug info, there are primitive encodings for strings in
+    /// addition to the complex types that are typically composed at a higher level
+    /// (i.e. a string slice). This is rarely used however.
     string,
 };
 
@@ -1179,4 +1182,12 @@ pub const EnumRenderer = struct {
 
     /// The user-friendly name of the enum value to display (if known)
     name: ?strings.Hash,
+};
+
+/// Renders a string.
+pub const StringRenderer = struct {
+    /// The full length of the string (not just the preview). This is null in the case
+    /// that we can't detect the size of the string (i.e. a very, very large null
+    /// terminated string).
+    len: ?usize,
 };
