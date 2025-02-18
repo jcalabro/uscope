@@ -38,6 +38,10 @@ pub const Adapter = switch (builtin.os.tag) {
     else => @compileError("unsupported platform: " ++ @tagName(builtin.os.tag)),
 };
 
+pub const SubordinateEvent = union(enum) {
+    new_thread_spawned: types.PID,
+};
+
 pub const Debugger = DebuggerType(Adapter);
 
 /// Stores all data that lives outside the scope of a single run of a subordinate process. For
@@ -464,6 +468,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             var sub = self.data.subordinate.?;
 
             sub.child.extremeKillPosix() catch {};
+            self.adapter.waitForSignalSync(
+                types.PID.from(sub.child.id),
+                100 * time.ns_per_ms,
+            ) catch {};
 
             sub.clearAndFreePauseData();
 
@@ -578,6 +586,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
+            defer log.flush();
             defer self.stateUpdated();
 
             self.data.mu.lock();
@@ -624,7 +633,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             self.data.subordinate.?.child.stdout_behavior = .Pipe;
             self.data.subordinate.?.child.stderr_behavior = .Pipe;
-            self.data.subordinate.?.child.ptrace_traceme = true;
 
             try self.adapter.spawnSubordinate(&self.data.subordinate.?.child);
 
@@ -674,6 +682,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const timeout_secs = if (flags.CI) 20 else 2; // Github Actions default runners are insanely slow
             try self.adapter.waitForSignalSync(pid, timeout_secs * time.ns_per_s);
 
+            // we need to wait for the subordinate to have been spawned before settings tracing options
+            try self.adapter.setSubordinateTracingOptions(pid);
+
             // apply all breakpoints that the user has already requested
             for (self.data.state.breakpoints.items) |*bp| {
                 if (!bp.flags.active) continue;
@@ -681,10 +692,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             }
 
             if (req.stop_on_entry) {
-                try self.handleSubordinateStoppedAlreadyLocked(scratch, .{
-                    .pid = pid,
-                    .exited = false,
-                });
+                try self.handleSubordinateStoppedAlreadyLocked(scratch, .{ .pid = pid });
             } else {
                 // let the subordinate begin execution
                 try self.adapter.continueExecution(pid);
@@ -950,7 +958,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 if (sub.paused != null) break :blk false;
 
                 // the subordinate has been started and is not already paused
-                try self.adapter.temporarilyPauseSubordinate(subordinate_pid);
+                for (sub.threads.items) |thread_pid| {
+                    self.adapter.temporarilyPauseSubordinate(subordinate_pid, thread_pid);
+                }
                 break :blk true;
             };
 
@@ -1040,7 +1050,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 }
 
                 // the subordinate has been started and is not already paused
-                try self.adapter.temporarilyPauseSubordinate(subordinate_pid);
+                for (sub.threads.items) |thread_pid| {
+                    self.adapter.temporarilyPauseSubordinate(subordinate_pid, thread_pid);
+                }
                 break :blk true;
             };
 
@@ -1115,9 +1127,13 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             }
         }
 
-        const ContinueExecutionOpts = packed struct {
+        const ContinueExecutionOpts = struct {
             force: bool = true,
             step_over: bool = false,
+
+            /// If provided, runs continue on only these thread PIDs
+            /// rather than all known threads
+            pids: ?[]const types.PID = null,
         };
 
         fn continueExecution(self: *Self, opts: ContinueExecutionOpts) !void {
@@ -1139,16 +1155,15 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             //
 
             if (self.data.subordinate == null) {
-                log.warn("cannot continue execution: subordinate is not running");
+                self.sendMessage(.warning, "cannot continue execution: subordinate is not running", .{});
                 return;
             }
 
             defer self.stateUpdated();
 
-            const pid = types.PID.from(self.data.subordinate.?.child.id);
-            const load_addr = self.data.subordinate.?.load_addr;
-
             if (self.data.subordinate.?.paused) |paused| done: {
+                const load_addr = self.data.subordinate.?.load_addr;
+
                 if (paused.breakpoint) |bp| {
                     const exists = e: {
                         for (self.data.state.breakpoints.items) |b| {
@@ -1166,20 +1181,20 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     }
 
                     var buf = [_]u8{0};
-                    try self.adapter.peekData(pid, load_addr, bp.addr, &buf);
+                    try self.adapter.peekData(paused.pid, load_addr, bp.addr, &buf);
 
                     var instruction = [_]u8{bp.instruction_byte};
                     if (buf[0] == arch.InterruptInstruction) {
-                        try self.adapter.pokeData(pid, load_addr, bp.addr, &instruction);
+                        try self.adapter.pokeData(paused.pid, load_addr, bp.addr, &instruction);
                     }
 
-                    try self.adapter.singleStepAndWait(pid);
+                    try self.adapter.singleStepAndWait(paused.pid);
 
                     // we still want to reset to the interrupt instruction in the case that
                     // we're stepping out of a recursive function
                     if (!bp.flags.internal or bp.max_stack_frames != null) {
                         instruction[0] = arch.InterruptInstruction;
-                        try self.adapter.pokeData(pid, load_addr, bp.addr, &instruction);
+                        try self.adapter.pokeData(paused.pid, load_addr, bp.addr, &instruction);
                     }
                 }
             } else if (!opts.force) {
@@ -1191,8 +1206,12 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             self.data.subordinate.?.clearAndFreePauseData();
 
-            try self.adapter.continueExecution(pid);
-            try self.adapter.waitForSignalAsync(pid);
+            const pids = if (opts.pids) |p| p else self.data.subordinate.?.threads.items;
+            for (pids) |thread_pid| {
+                try self.adapter.continueExecution(thread_pid);
+            }
+
+            try self.adapter.waitForSignalAsync(types.PID.from(self.data.subordinate.?.child.id));
         }
 
         const BreakpointAndPID = struct {
@@ -1354,8 +1373,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     try self.adapter.pokeData(bpp.pid, load_addr, bp.addr, &instruction);
                 }
 
-                const req = proto.SubordinateStoppedRequest{ .pid = bpp.pid, .exited = false };
-                try self.handleSubordinateStoppedAlreadyLocked(scratch, req);
+                try self.handleSubordinateStoppedAlreadyLocked(scratch, .{ .pid = bpp.pid });
                 return;
             }
         }
@@ -1755,25 +1773,43 @@ fn DebuggerType(comptime AdapterType: anytype) type {
         fn handleSubordinateStoppedAlreadyLocked(self: *Self, scratch: Allocator, req: proto.SubordinateStoppedRequest) !void {
             defer self.stateUpdated();
 
-            // the subordinate is reporting that it has shut down
-            if (req.exited or self.data.subordinate == null) {
-                self.resetSubordinateState();
-                try self.clearInternalBreakpoints(scratch);
-                return;
-            }
+            if (self.data.subordinate == null) return;
 
             // we received a signal that we don't care about, so don't actually pause the debugger
-            if (!req.should_stop_debugger) {
+            if (!req.flags.should_stop_debugger) {
                 try self.continueExecution(.{});
                 return;
             }
 
-            // we're no longer stopped (edge case)
-            var registers = try self.adapter.getRegisters(req.pid);
-            if (registers.pc().int() == 0) return;
+            // the subordinate is reporting that a thread has exited
+            if (req.flags.exited) {
+                try self.handleThreadExited(scratch, req.pid);
+                return;
+            }
+
+            if (try self.adapter.handleEvent(req.pid)) |event| {
+                switch (event) {
+                    .new_thread_spawned => |new_pid| {
+                        try self.handleThreadSpawned(scratch, new_pid);
+                        return;
+                    },
+                }
+            }
 
             const sub = self.data.subordinate.?;
             const str_cache = try strings.Cache.init(scratch);
+
+            // having a PC of zero means that the subordinate is still running, which
+            // would indicate a logical error in the debugger
+            var registers = try self.adapter.getRegisters(req.pid);
+            assert(registers.pc().neqInt(0));
+
+            // pause all other threads that are not already stopped
+            for (sub.threads.items) |thread_pid| {
+                if (thread_pid.eql(req.pid)) continue;
+
+                self.adapter.pauseSubordinate(types.PID.from(sub.child.id), thread_pid);
+            }
 
             //
             // @SEARCH: STACKRBP
@@ -1974,6 +2010,73 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 try self.calculateLocalVariables(scratch, try local_variables.toOwnedSlice());
                 try self.findHexWindowContents();
             }
+        }
+
+        fn handleThreadSpawned(self: *Self, scratch: Allocator, new_pid: types.PID) !void {
+            const z = trace.zone(@src());
+            defer z.end();
+
+            try self.data.subordinate.?.threads.append(
+                self.data.subordinate_arena.allocator(),
+                new_pid,
+            );
+
+            // apply all active breakpoints to the new subordinate thread
+            const load_addr = self.data.subordinate.?.load_addr;
+            var thread_bps = ArrayList(types.ThreadBreakpoint).init(scratch);
+            for (self.data.state.breakpoints.items) |bp| {
+                if (!bp.flags.active) continue;
+
+                // make a copy to avoid modifying the source slice
+                var bp_copy = bp;
+                const tbp = try self.adapter.setBreakpoint(load_addr, &bp_copy, new_pid);
+                try thread_bps.append(tbp);
+            }
+
+            try self.data.subordinate.?.thread_breakpoints.appendSlice(
+                self.data.subordinate_arena.allocator(),
+                thread_bps.items,
+            );
+
+            try self.continueExecution(.{ .pids = &.{
+                types.PID.from(self.data.subordinate.?.child.id),
+                new_pid,
+            } });
+        }
+
+        fn handleThreadExited(self: *Self, scratch: Allocator, pid: types.PID) !void {
+            const z = trace.zone(@src());
+            defer z.end();
+
+            const sub = &self.data.subordinate.?;
+
+            {
+                // remove all thread breakpoints
+                var ndx: usize = 0;
+                while (ndx < sub.thread_breakpoints.items.len) : (ndx += 1) {
+                    if (sub.thread_breakpoints.items[ndx].pid.neq(pid)) continue;
+
+                    _ = sub.thread_breakpoints.orderedRemove(ndx);
+                    if (ndx > 0) ndx -= 1;
+                }
+            }
+
+            // remove the thread
+            for (sub.threads.items, 0..) |thread_pid, ndx| {
+                if (thread_pid.neq(pid)) continue;
+
+                _ = sub.threads.orderedRemove(ndx);
+                break;
+            }
+
+            // clean up all state if the main thread exited
+            if (pid.int() == sub.child.id) {
+                self.resetSubordinateState();
+                try self.clearInternalBreakpoints(scratch);
+                return;
+            }
+
+            try self.continueExecution(.{});
         }
 
         /// Caller owns returned memory

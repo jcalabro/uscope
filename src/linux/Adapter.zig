@@ -14,6 +14,7 @@ const Mutex = Thread.Mutex;
 const posix = std.posix;
 const pow = std.math.pow;
 const rand = std.rand;
+const SIG = posix.SIG;
 const t = std.testing;
 const time = std.time;
 const Thread = std.Thread;
@@ -47,26 +48,53 @@ const log = logging.Logger.init(logging.Region.Linux);
 const Self = @This();
 
 const PtraceSetOptions = enum(usize) {
-    tracesysgood = 0x00000001,
-    tracefork = 0x00000002,
-    tracevfork = 0x00000004,
-    traceclone = 0x00000008,
-    traceexec = 0x00000010,
-    tracevforkdone = 0x00000020,
-    traceexit = 0x00000040,
-    mask = 0x0000007f,
+    mask = 0x7f,
+
+    clone = 0x08,
+    exec = 0x10,
+    exit = 0x40,
+    fork = 0x02,
+    sysgood = 0x01,
+    vfork = 0x04,
+    vforkdone = 0x20,
+
+    fn int(self: @This()) usize {
+        return @intFromEnum(self);
+    }
+};
+
+/// Wait extended result codes for trace options
+const PtraceEvent = struct {
+    const FORK = 1;
+    const VFORK = 2;
+    const CLONE = 3;
+    const EXEC = 4;
+    const VFORK_DONE = 5;
+    const EXIT = 6;
+    const SECCOMP = 7;
+
+    /// Extended result codes which enabled by means other than options
+    const STOP = 128;
+};
+
+const TrapEvent = struct {
+    const BRKPT = 1;
+    const TRACE = 2;
+    const BRANCH = 3;
+    const HWBKPT = 4;
+    const UNK = 5;
 };
 
 perm_alloc: Allocator = undefined,
-
 shutdown_wg: WaitGroup = .{},
 
 controller_thread_id: atomic.Value(Thread.Id) = atomic.Value(Thread.Id).init(undefined),
 
 /// queue consumer owns allocated memory if async, queue producer owns allocated
 /// memory if sync
-wait4_q: Queue(*Wait4Request) = undefined,
-wait4_mu: Mutex = .{},
+wait_queue: Queue(*WaitRequest) = undefined,
+wait_mu: Mutex = .{},
+wait_thread: Thread = undefined,
 
 temp_pause_done: atomic.Value(u32) = atomic.Value(u32).init(DoneVal),
 
@@ -78,50 +106,52 @@ pub fn init(thread_safe_alloc: *ThreadSafeAllocator, req_q: *Queue(proto.Request
     const mult = if (flags.Valgrind) 5 else 1;
     self.* = Self{
         .perm_alloc = perm_alloc,
-        .wait4_q = Queue(*Wait4Request).init(thread_safe_alloc, .{
+        .wait_queue = Queue(*WaitRequest).init(thread_safe_alloc, .{
             .timeout_ns = mult * time.ns_per_s,
         }),
     };
 
     self.shutdown_wg.start();
-    const wait4Thread = try Thread.spawn(.{}, wait4Loop, .{ self, req_q });
-    safe.setThreadName(wait4Thread, "wait4Loop");
-    wait4Thread.detach();
+    self.wait_thread = try Thread.spawn(.{}, waitpidLoop, .{ self, req_q });
+    safe.setThreadName(self.wait_thread, "waitpidLoop");
 
     return self;
 }
 
 pub fn deinit(self: *Self) void {
     {
-        // stop the wait4 loop with a "poison pill"
-        const req = self.perm_alloc.create(Wait4Request) catch unreachable;
+        // stop the waitpid loop with a "poison pill"
+        const req = self.perm_alloc.create(WaitRequest) catch unreachable;
         req.* = .{
             .pid = undefined,
             .dest = .local_call_site,
             .shutdown = true,
         };
         defer {
-            self.wait4_mu.lock();
-            defer self.wait4_mu.unlock();
+            self.wait_mu.lock();
+            defer self.wait_mu.unlock();
             self.perm_alloc.destroy(req);
         }
 
-        self.wait4_q.put(req) catch unreachable;
-        Futex.timedWait(&req.done, DoneVal, time.ns_per_ms * 50) catch {};
+        self.wait_queue.put(req) catch unreachable;
+        Futex.timedWait(&req.done, DoneVal, time.ns_per_ms * 500) catch {};
     }
 
     self.shutdown_wg.wait();
+    self.wait_thread.join();
 
     self.reset();
-    self.wait4_q.deinit();
+    self.wait_queue.deinit();
 }
 
+/// Clears the adapter to its default state
 pub fn reset(self: *Self) void {
-    self.wait4_q.reset();
+    self.wait_queue.reset();
 }
 
-/// Loads the given ELF/DWARF data from disk and maps it to a generic Target. Caller owns returned memory,
-/// and the allocator must be an arena capable of freeing everything on error or when finished with the data.
+/// Loads the given ELF/DWARF data from disk and maps it to a generic Target. Caller
+/// owns returned memory, and the allocator must be an arena capable of freeing
+/// everything on error or when finished with the data.
 pub fn loadDebugSymbols(
     self: *Self,
     alloc: Allocator,
@@ -155,38 +185,73 @@ pub fn spawnSubordinate(self: *Self, subordinate: *Child) !void {
 
     // @NOTE (jrc): the child must have been started with PTRACE_TRACEME
     // after fork() but before exec(), which is why we use our own Child.zig
+    subordinate.ptrace_traceme = true;
     try subordinate.spawn();
-
-    // trace clone's to be notified of all child threads that should also be traced
-    try posix.ptrace(
-        linux.PTRACE.SETOPTIONS,
-        subordinate.id,
-        0,
-        @intFromEnum(PtraceSetOptions.traceclone),
-    );
 }
 
-pub fn pauseSubordinate(self: *Self, pid: types.PID) !void {
+/// Should only be called after the subordinate has spawned and set us its initial SIGTRAP
+pub fn setSubordinateTracingOptions(self: *Self, pid: types.PID) !void {
     const z = trace.zone(@src());
     defer z.end();
 
     self.assertCorrectThreadIsCallingPtrace();
 
-    try posix.kill(pid.int(), posix.SIG.STOP);
+    var opts: usize = 0;
+
+    // notify when the child spawns a new thread with `clone`
+    opts |= PtraceSetOptions.clone.int();
+
+    // notify when the child spawns a new thread with `clone`
+    opts |= PtraceSetOptions.clone.int();
+
+    // notify when the child spawns a process with `fork`
+    opts |= PtraceSetOptions.fork.int();
+
+    // notify when the child spawns a process with `vfork`
+    opts |= PtraceSetOptions.vfork.int();
+
+    // notify when the child or one of its threads is about to exit
+    opts |= PtraceSetOptions.clone.int();
+
+    try posix.ptrace(linux.PTRACE.SETOPTIONS, pid.int(), 0, opts);
 }
 
-/// temporarilyPauseSubordinate is like pauseSubordinate, but it doesn't call back
+/// Stops the subordiante thread with `thread_pid` in the thread group `group_id`
+pub fn pauseSubordinate(self: *Self, group_id: types.PID, thread_pid: types.PID) void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    self.assertCorrectThreadIsCallingPtrace();
+
+    _ = sendSignal(group_id, thread_pid, SIG.STOP);
+}
+
+/// `temporarilyPauseSubordinate` is like `pauseSubordinate`, but it doesn't call back
 /// to the debugger layer via a SubordinateStopRequest. This is useful for when the
 /// debugger needs to pause the subordinate for a moment, then continue it (i.e. if
 /// we want to set a brekapoint in a process that is currently executing).
-pub fn temporarilyPauseSubordinate(self: *Self, pid: types.PID) !void {
+pub fn temporarilyPauseSubordinate(self: *Self, group_id: types.PID, thread_id: types.PID) void {
     const z = trace.zone(@src());
     defer z.end();
 
     self.assertCorrectThreadIsCallingPtrace();
 
-    try posix.kill(pid.int(), posix.SIG.USR2);
-    Futex.wait(&self.temp_pause_done, DoneVal);
+    if (sendSignal(group_id, thread_id, SIG.USR2)) {
+        Futex.wait(&self.temp_pause_done, DoneVal);
+    }
+}
+
+fn sendSignal(group_id: types.PID, thread_pid: types.PID, sig: i32) bool {
+    const status = linux.tgkill(group_id.int(), thread_pid.int(), sig);
+    if (status != 0) {
+        log.errf("unable to stop subordinate thread {d} in group {d}: {d}", .{
+            thread_pid,
+            group_id,
+            status,
+        });
+        return false;
+    }
+    return true;
 }
 
 pub fn singleStep(self: *Self, pid: types.PID) !void {
@@ -522,9 +587,61 @@ pub fn unsetBreakpoint(
     try self.pokeData(pid, load_addr, bp.addr, &buf);
 }
 
-/// wait4Loop spawns a loop that runs on a background thread forever, waiting for results
-/// to come in from the subordinate process
-fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
+/// After the subordinate has paused, this call checks whether or not a new
+/// thread was created in the subordinate via a `clone` call.
+pub fn handleEvent(self: *Self, pid: types.PID) !?debugger.SubordinateEvent {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    self.assertCorrectThreadIsCallingPtrace();
+
+    var siginfo = mem.zeroes(posix.siginfo_t);
+    try posix.ptrace(linux.PTRACE.GETSIGINFO, pid.int(), 0, @intFromPtr(&siginfo));
+
+    if (siginfo.signo == SIG.TRAP) {
+        switch (siginfo.code) {
+            PtraceEvent.STOP => return null,
+
+            SIG.TRAP | (PtraceEvent.FORK << 8),
+            SIG.TRAP | (PtraceEvent.VFORK << 8),
+            SIG.TRAP | (PtraceEvent.CLONE << 8),
+            => {
+                // a new thread was spawned, get its PID
+                var cloned_pid: c_long = 0;
+                try posix.ptrace(linux.PTRACE.GETEVENTMSG, pid.int(), 0, @intFromPtr(&cloned_pid));
+                assert(cloned_pid > 0);
+                return .{ .new_thread_spawned = types.PID.from(@intCast(cloned_pid)) };
+            },
+
+            SIG.TRAP | (PtraceEvent.EXEC << 8) => {
+                // @TODO (jrc): handle process spawn
+            },
+            SIG.TRAP | (PtraceEvent.EXIT << 8) => {
+                // @TODO (jrc): handle process exit
+            },
+            SIG.TRAP, SIG.TRAP | 0x80 => {
+                // @TODO (jrc): handle trap
+            },
+
+            else => {
+                log.errf("unknown ptrace SIGTRAP code: {d}", .{siginfo.code});
+                return null;
+            },
+        }
+    }
+
+    return null;
+}
+
+const WaitFlags = struct {
+    const WNOTHREAD = 0x20000000;
+    const WALL = 0x40000000;
+    const WCLONE = 0x80000000;
+};
+
+/// Spawns a loop that runs on a background thread forever, waiting for the subordinate
+/// process to change state
+fn waitpidLoop(self: *Self, req_queue: *Queue(proto.Request)) void {
     trace.initThread();
     defer trace.deinitThread();
 
@@ -534,11 +651,12 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
     defer self.shutdown_wg.finish();
 
     while (true) {
-        // wait for a signal that tells us to start the wait4 call
-        var req = self.wait4_q.get() catch continue;
+        // wait for a signal that tells us to start the waitpid call
+        var req = self.wait_queue.get() catch continue;
+
         defer {
-            self.wait4_mu.lock();
-            defer self.wait4_mu.unlock();
+            self.wait_mu.lock();
+            defer self.wait_mu.unlock();
 
             switch (req.dest) {
                 .local_call_site => Futex.wake(&req.done, 1),
@@ -549,15 +667,15 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
         }
 
         const req_local = blk: {
-            self.wait4_mu.lock();
-            defer self.wait4_mu.unlock();
+            self.wait_mu.lock();
+            defer self.wait_mu.unlock();
 
             // the debugger is fully shutting down, stop the loop
             if (req.shutdown) return;
             break :blk req.*;
         };
 
-        const res = wait4(req_local.pid, 0, null) catch {
+        const res = waitpid(types.PID.from(-1), WaitFlags.WALL) catch {
             log.warnf("thread {d} forcibly exited", .{req_local.pid.int()});
             continue;
         };
@@ -566,16 +684,13 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
 
         var should_stop_debugger = true;
         if (status.stopped()) {
-            const SIG = linux.SIG;
             switch (status.stopSignal()) {
                 SIG.WINCH => should_stop_debugger = false,
                 else => {},
             }
         }
 
-        // @TODO (jrc): handle status.cloned() case
-
-        if (status.exitStatus() == posix.SIG.USR2) {
+        if (status.exitStatus() == SIG.USR2) {
             // a temporary pause happened, don't call back the debugger layer,
             // just call back the immediate call site
             Futex.wake(&self.temp_pause_done, 1);
@@ -584,7 +699,7 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
 
         if (status.exited()) {
             log.debugf("thread {d} exited with status: {d}", .{
-                req_local.pid.int(),
+                res.pid,
                 status.exitStatus(),
             });
         }
@@ -594,13 +709,15 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
             .debugger_thread => {
                 // inform the main debugger thread that the subordinate was stopped
                 const stopped_req = proto.SubordinateStoppedRequest{
-                    .pid = req_local.pid,
-                    .exited = status.exited() or (status.signaled() and status.terminationSignal() == 9),
-                    .should_stop_debugger = should_stop_debugger,
+                    .pid = types.PID.from(res.pid),
+                    .flags = .{
+                        .exited = status.exited() or (status.signaled() and status.terminationSignal() == 9),
+                        .should_stop_debugger = should_stop_debugger,
+                    },
                 };
 
                 trace.message(@tagName(stopped_req.req()));
-                request_q.put(stopped_req.req()) catch |err| {
+                req_queue.put(stopped_req.req()) catch |err| {
                     log.errf("unable to enqueue command {s}: {!}", .{
                         @typeName(@TypeOf(stopped_req)),
                         err,
@@ -611,18 +728,16 @@ fn wait4Loop(self: *Self, request_q: *Queue(proto.Request)) void {
     }
 }
 
-/// we use our own fork of wait4 because the zig stdlib doesn't gracefully handle the
+/// We use our own fork of wait4 because the zig stdlib doesn't gracefully handle the
 /// case where the subordinate process is forcibly terminated (the .CHILD case)
-fn wait4(pid: types.PID, wait_flags: u32, ru: ?*posix.rusage) !posix.WaitPidResult {
-    const Status = if (builtin.link_libc) c_int else u32;
-    var status: Status = undefined;
-    const coerced_flags = if (builtin.link_libc) @as(c_int, @intCast(wait_flags)) else wait_flags;
+fn waitpid(pid: types.PID, wait_flags: u32) !posix.WaitPidResult {
+    var status: if (builtin.link_libc) c_int else u32 = undefined;
     while (true) {
-        const rc = posix.system.wait4(@intCast(pid.int()), &status, coerced_flags, ru);
+        const rc = posix.system.waitpid(pid.int(), &status, @intCast(wait_flags));
         switch (posix.errno(rc)) {
             .SUCCESS => return .{
-                .pid = rc,
-                .status = @as(u32, @bitCast(status)),
+                .pid = @intCast(rc),
+                .status = @bitCast(status),
             },
             .INTR => continue,
             .CHILD => {
@@ -675,14 +790,14 @@ pub const WaitStatus = struct {
 };
 
 /// Indicates where we will forward the signal after a wait4 call finishes
-pub const Wait4SignalDest = enum(u8) {
+pub const WaitSignalDest = enum(u8) {
     local_call_site,
     debugger_thread,
 };
 
-const Wait4Request = struct {
+const WaitRequest = struct {
     pid: types.PID,
-    dest: Wait4SignalDest,
+    dest: WaitSignalDest,
 
     /// Contains the "status" field of the WaitStatus result
     done: atomic.Value(u32) = atomic.Value(u32).init(DoneVal),
@@ -697,23 +812,20 @@ pub fn waitForSignalSync(self: *Self, pid: types.PID, timeout_ns: u64) !void {
     defer z.end();
 
     const req = blk: {
-        self.wait4_mu.lock();
-        defer self.wait4_mu.unlock();
+        self.wait_mu.lock();
+        defer self.wait_mu.unlock();
 
-        const r = try self.perm_alloc.create(Wait4Request);
-        r.* = .{
-            .pid = pid,
-            .dest = .local_call_site,
-        };
+        const r = try self.perm_alloc.create(WaitRequest);
+        r.* = .{ .pid = pid, .dest = .local_call_site };
         break :blk r;
     };
     defer {
-        self.wait4_mu.lock();
-        defer self.wait4_mu.unlock();
+        self.wait_mu.lock();
+        defer self.wait_mu.unlock();
         self.perm_alloc.destroy(req);
     }
 
-    try self.wait4_q.put(req);
+    try self.wait_queue.put(req);
     try Futex.timedWait(&req.done, DoneVal, timeout_ns);
 }
 
@@ -722,23 +834,20 @@ pub fn waitForSignalAsync(self: *Self, pid: types.PID) !void {
     defer z.end();
 
     const req = blk: {
-        // @NOTE (jrc): we need to take this lock because the wait4 loop also
+        // @NOTE (jrc): we need to take this lock because the waitpid loop also
         // accesses the memory we allocate, and the allocator may re-use the
         // memory free up, which leads to race conditions/data corruption
-        self.wait4_mu.lock();
-        defer self.wait4_mu.unlock();
+        self.wait_mu.lock();
+        defer self.wait_mu.unlock();
 
-        const r = try self.perm_alloc.create(Wait4Request);
+        const r = try self.perm_alloc.create(WaitRequest);
         errdefer self.perm_alloc.destroy(r);
 
-        r.* = .{
-            .pid = pid,
-            .dest = .debugger_thread,
-        };
+        r.* = .{ .pid = pid, .dest = .debugger_thread };
         break :blk r;
     };
 
-    try self.wait4_q.put(req);
+    try self.wait_queue.put(req);
 }
 
 /// @QUESTION (jrc): Can we use std.os.linux.getauxval(std.elf.AT_BASE) instead of parsing the file?
