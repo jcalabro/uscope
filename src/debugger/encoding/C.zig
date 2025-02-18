@@ -45,7 +45,7 @@ fn renderSlice(_: *const encoding.Params) encoding.EncodeVariableError!encoding.
 }
 
 /// Read C-style strings one byte at a time until we encounter a null terminator
-fn renderString(
+pub fn renderString(
     params: *const encoding.Params,
     len: u64,
 ) encoding.EncodeVariableError!encoding.RenderStringResult {

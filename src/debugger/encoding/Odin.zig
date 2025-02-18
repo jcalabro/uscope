@@ -6,6 +6,7 @@ const fmt = std.fmt;
 const math = std.math;
 const mem = std.mem;
 
+const C = @import("C.zig");
 const encoding = @import("encoding.zig");
 const logging = @import("../../logging.zig");
 const strings = @import("../../strings.zig");
@@ -33,68 +34,20 @@ fn isOpaquePointer(params: *const encoding.Params) bool {
 }
 
 fn isString(params: *const encoding.Params) ?u64 {
-    _ = params;
-
-    // const name = params.data_type_name;
-
-    // // string slices
-    // if (params.data_type.form == .@"struct" and strings.eql(params.data_type_name, "[]u8")) {
-    //     if (readUsizeStructMember(params, "len") catch null) |len| return len.data;
-    //     return null;
-    // }
-
-    // // string literals (i.e. *[13:0]u8)
-    // if (params.data_type.form == .pointer and
-    //     mem.startsWith(u8, name, "*[") and mem.endsWith(u8, name, ":0]u8"))
-    // {
-    //     var num_str = mem.trimLeft(u8, name, "*[");
-    //     num_str = mem.trimRight(u8, num_str, ":0]u8");
-    //     return fmt.parseInt(u64, num_str, 10) catch |err| {
-    //         log.warnf("unable to parse zig string length: {!}", .{err});
-    //         return 0;
-    //     };
-    // }
+    // null-terminated c strings
+    if (params.data_type.form == .pointer and strings.eql(params.data_type_name, "cstring")) {
+        return 0;
+    }
 
     return null;
 }
 
-/// Read Zig-style strings, which are a byte slice whose length we determine from the type name
+/// Read C-style null terminated strings
 fn renderString(
     params: *const encoding.Params,
     len: u64,
 ) encoding.EncodeVariableError!encoding.RenderStringResult {
-    _ = params;
-    _ = len;
-
-    unreachable;
-
-    // const addr = types.Address.from(mem.readInt(u64, @ptrCast(params.val), endian));
-
-    // var str = ArrayListUnmanaged(u8){};
-    // const max_str_len = math.pow(usize, 2, 12);
-    // for (0..max_str_len) |ndx| {
-    //     var buf = [_]u8{0};
-    //     params.adapter.peekData(
-    //         params.pid,
-    //         params.load_addr,
-    //         addr.addInt(ndx),
-    //         &buf,
-    //     ) catch {
-    //         return error.ReadDataError;
-    //     };
-
-    //     if (buf[0] == 0) break;
-
-    //     try str.append(params.scratch, buf[0]);
-    //     if (ndx == max_str_len - 1) try str.appendSlice(params.scratch, "...");
-
-    //     if (len > 0 and ndx > len) break;
-    // }
-
-    // return .{
-    //     .address = addr,
-    //     .str = try str.toOwnedSlice(params.scratch),
-    // };
+    return try C.renderString(params, len);
 }
 
 // fn memberNameIs(params: *const encoding.Params, name: strings.Hash, comptime expected: String) bool {
