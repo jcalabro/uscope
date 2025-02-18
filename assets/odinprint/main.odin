@@ -63,7 +63,7 @@ main :: proc() {
 
 	fmt.println(a)
 	fmt.println(b)
-	fmt.println(c) // breakpoint here
+	fmt.println(c) // sim:odinprint stops here
 	fmt.println(d)
 	fmt.println(e)
 
