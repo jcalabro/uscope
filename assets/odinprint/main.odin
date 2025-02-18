@@ -56,6 +56,10 @@ main :: proc() {
 		13,
 		"this is the second field",
 	}
+	z := &y
+
+	aa := uintptr(k)
+	ab := rawptr(aa)
 
 	fmt.println(a)
 	fmt.println(b)
@@ -87,4 +91,8 @@ main :: proc() {
 	fmt.println(x)
 
 	fmt.println(y)
+	fmt.println(z)
+
+	fmt.println(aa)
+	fmt.println(ab)
 }

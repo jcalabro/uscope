@@ -2262,6 +2262,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             const encoder = switch (cu.language) {
                 .C => @import("encoding/C.zig").encoder(),
+                .Odin => @import("encoding/Odin.zig").encoder(),
                 .Zig => @import("encoding/Zig.zig").encoder(),
                 else => @import("encoding/Unknown.zig").encoder(),
             };
