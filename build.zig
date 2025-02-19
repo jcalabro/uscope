@@ -212,9 +212,14 @@ fn ensureCorrectZigVersion() void {
     const actual = builtin.zig_version;
 
     if (actual.major != expected.major or actual.minor != expected.minor) {
-        @compileError(std.fmt.comptimePrint("Your Zig version v{} does not meet the required build version of v{}. \nAn example of how to install the exactly correct version can be found in the Dockerfile in this repo.", .{
-            actual,
-            expected,
-        }));
+        @compileError(std.fmt.comptimePrint(
+            "Your Zig version v{} does not meet the required build version of v{}. \n" ++
+                "An example of how to install the exactly correct version can be " ++
+                "found in the Dockerfile in this repo.",
+            .{
+                actual,
+                expected,
+            },
+        ));
     }
 }
