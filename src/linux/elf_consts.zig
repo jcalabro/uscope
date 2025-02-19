@@ -100,6 +100,7 @@ pub const SectionType = enum(u32) {
     gnu_versym = 0x6fffffff, // GNU version symbol table
     // hios = 0x6fffffff, // Last of OS specific semantics
     loproc = 0x70000000, // reserved range for processor
+    x86_64_unwind = 0x70000001,
     mips_abiflags = 0x7000002a, // .MIPS.abiflags
     hiproc = 0x7fffffff, // specific section header types
     louser = 0x80000000, // reserved range for application

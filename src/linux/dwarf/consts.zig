@@ -116,7 +116,8 @@ pub const AttributeTag = enum(u16) {
     DW_TAG_APPLE_property = 0x4200,
 
     // Zig extensions
-    DW_TAG_ZIG_padding = 0xfdb1,
+    DW_TAG_zig_padding = 0xfdb1,
+    DW_TAG_zig_comptime_value = 0xfdb2,
 };
 
 pub const AttributeName = enum(u32) {
@@ -343,6 +344,14 @@ pub const AttributeName = enum(u32) {
     DW_AT_go_package_name = 0x2905, // Attribute for DW_TAG_compile_unit
     DW_AT_go_dict_index = 0x2906, // Attribute for DW_TAG_typedef_type, index of the dictionary entry describing the real type of this type shape
     DW_AT_go_closure_offset = 0x2907, // Attribute for DW_TAG_variable, offset in the closure struct where this captured variable resides
+
+    // Zig extensions
+    DW_AT_zig_parent = 0x2ccd,
+    DW_AT_zig_padding = 0x2cce,
+    DW_AT_zig_relative_decl = 0x2cd0,
+    DW_AT_zig_decl_line_relative = 0x2cd1,
+    DW_AT_zig_comptime_value = 0x2cd2,
+    DW_AT_zig_sentinel = 0x2ce2,
 
     // DW_AT_internal_location = 253, // params and locals; not emitted
 };
