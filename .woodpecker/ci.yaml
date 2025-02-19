@@ -10,16 +10,16 @@ steps:
       ./build.sh CI
       popd > /dev/null
 
-  - name: Build and Test (debug, tsan)
+  - name: Build and Test (tsan)
     image: jcalabro/uscope-dev:2025-02-14
     commands: |
       zigup run $(cat zig_version.txt) build --summary all -freference-trace -Drace -Dci -Dllvm
       ./zig-out/bin/uscope-tests
 
-  - name: Build and Test (debug, valgrind)
+  - name: Build and Test (valgrind)
     image: jcalabro/uscope-dev:2025-02-14
     commands: |
-      zigup run $(cat zig_version.txt) build --summary all -freference-trace -Dci -Dllvm -Dvalgrind
+      zigup run $(cat zig_version.txt) build --summary all -freference-trace -Doptimize=ReleaseSafe -Dci -Dllvm -Dvalgrind
       valgrind --leak-check=full --error-exitcode=1 ./zig-out/bin/uscope-tests
 
   - name: Build and Test (release)

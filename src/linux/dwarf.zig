@@ -306,10 +306,11 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
     // the data structures used to orchestrate multi-threaded parsing get their own
     // thread-safe scratch arena since we are using this memory from multiple threads
     const parse_scratch_arena = try parse_alloc.allocator().create(ArenaAllocator);
+    defer parse_alloc.allocator().destroy(parse_scratch_arena);
     parse_scratch_arena.* = ArenaAllocator.init(parse_alloc.allocator());
     defer parse_scratch_arena.deinit();
 
-    const parse_scratch_tsa = try parse_alloc.allocator().create(ThreadSafeAllocator);
+    const parse_scratch_tsa = try parse_scratch_arena.allocator().create(ThreadSafeAllocator);
     parse_scratch_tsa.* = .{ .child_allocator = parse_scratch_arena.allocator() };
     const parse_scratch = parse_scratch_tsa.allocator();
 
