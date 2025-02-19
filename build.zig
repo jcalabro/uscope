@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Build = std.Build;
 
 const Flags = struct {
@@ -198,5 +199,22 @@ fn defineStep(b: *Build, def: stepDef) void {
         });
         exe.root_module.addImport("ztracy", ztracy.module("root"));
         exe.linkLibrary(ztracy.artifact("tracy"));
+    }
+}
+
+comptime {
+    ensureCorrectZigVersion();
+}
+
+fn ensureCorrectZigVersion() void {
+    const version_str = std.mem.trimRight(u8, @embedFile("zig_version.txt"), "\n");
+    const expected = std.SemanticVersion.parse(version_str) catch unreachable;
+    const actual = builtin.zig_version;
+
+    if (actual.major != expected.major or actual.minor != expected.minor) {
+        @compileError(std.fmt.comptimePrint("Your Zig version v{} does not meet the required build version of v{}. \nAn example of how to install the exactly correct version can be found in the Dockerfile in this repo.", .{
+            actual,
+            expected,
+        }));
     }
 }
