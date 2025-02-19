@@ -166,8 +166,20 @@ pub fn getMousePos() zui.ImVec2 {
     return pos;
 }
 
+pub fn getScrollY() f32 {
+    return imgui.igGetScrollY();
+}
+
 pub fn setScrollYFloat(scroll_y: f32) void {
     imgui.igSetScrollY_Float(scroll_y);
+}
+
+pub fn getScrollMaxY() f32 {
+    return imgui.igGetScrollMaxY();
+}
+
+pub fn setScrollHereY(center_y_ratio: f32) void {
+    imgui.igSetScrollHereY(center_y_ratio);
 }
 
 ////////////////////////////////////////////////////////////////

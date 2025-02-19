@@ -238,8 +238,14 @@ pub fn update(self: *Self) State.View {
                 text[ndx] = self.state.subordinate_output.get(ndx);
             }
 
-            // @TODO (jrc): scroll to follow the latest text (can use zui.setScrollYFloat)
             zui.textWrapped("{s}", .{text});
+
+            // (gaweringo): Scroll output down if new text is added
+            // and the scrollbar is currently at the bottom
+            const auto_scroll_threshold = 0.5;
+            if (zui.getScrollMaxY() - zui.getScrollY() <= auto_scroll_threshold) {
+                zui.setScrollHereY(1);
+            }
         }
     }
 
