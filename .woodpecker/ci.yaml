@@ -4,26 +4,26 @@ when:
 
 steps:
   - name: Build Assets
-    image: jcalabro/uscope-dev:2025-02-14
+    image: jcalabro/uscope-dev:2025-02-20
     commands: |
       pushd assets > /dev/null
       ./build.sh CI
       popd > /dev/null
 
   - name: Build and Test (tsan)
-    image: jcalabro/uscope-dev:2025-02-14
+    image: jcalabro/uscope-dev:2025-02-20
     commands: |
       zigup run $(cat zig_version.txt) build --summary all -freference-trace -Drace -Dci -Dllvm
       ./zig-out/bin/uscope-tests
 
   - name: Build and Test (valgrind)
-    image: jcalabro/uscope-dev:2025-02-14
+    image: jcalabro/uscope-dev:2025-02-20
     commands: |
       zigup run $(cat zig_version.txt) build --summary all -freference-trace -Doptimize=ReleaseSafe -Dci -Dllvm -Dvalgrind
       valgrind --leak-check=full --error-exitcode=1 ./zig-out/bin/uscope-tests
 
   - name: Build and Test (release)
-    image: jcalabro/uscope-dev:2025-02-14
+    image: jcalabro/uscope-dev:2025-02-20
     commands: |
       zigup run $(cat zig_version.txt) build --summary all -freference-trace -Doptimize=ReleaseSafe -Dci -Dllvm
       ./zig-out/bin/uscope-tests
