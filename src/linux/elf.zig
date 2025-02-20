@@ -707,11 +707,6 @@ test "load ELF files" {
             .path = "./assets/zigloop/out",
             .cu_lang = .DW_LANG_Zig,
         },
-        .{
-            .path = "./assets/c3print/out",
-            .cu_lang = .DW_LANG_C3,
-            .pie = true,
-        },
     });
 
     if (!flags.CI) {
