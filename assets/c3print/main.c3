@@ -49,12 +49,12 @@ fn void main()
 
 	MyEnum y = MyEnum.FIRST;
 	MyEnum z = MyEnum.SECOND;
-	MyEnum aa = MyEnum.THIRD;
+	MyEnum aa = MyEnum.THIRD; // sim:c3print stops here
 
     io::printn(a);
     io::printn(b);
 
-	io::printn(c); // sim:c3print stops here
+	io::printn(c);
 	io::printn(d);
 	io::printn(e);
 	io::printn(f);
