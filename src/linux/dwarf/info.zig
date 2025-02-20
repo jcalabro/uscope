@@ -37,6 +37,7 @@ pub const CompileUnit = struct {
 
     str_offsets_table: []Offset = undefined,
     addr_table: []usize = undefined,
+    rnglists_base: usize = 0,
 
     info_r: *Reader,
     info_offset: usize,
@@ -139,6 +140,8 @@ pub const CompileUnit = struct {
                 continue;
             }
 
+            defer log.flush();
+
             const abbrev_decl = try self.abbrev_table.getDecl(abbrev_code);
             var specs = try ArrayList(abbrev.FormValue).initCapacity(
                 self.opts.scratch,
@@ -152,7 +155,25 @@ pub const CompileUnit = struct {
                     .form = undefined,
                     .class = undefined,
                 });
+
+                // delay to avoid out-of-order range list parse issues
+                if (abbrev_decl.tag == .DW_TAG_compile_unit and attr.form == .DW_FORM_rnglistx) continue;
+
                 try attr.chooseFormAndAdvanceBySize(&specs.items[attr_ndx], self);
+
+                if (abbrev_decl.tag == .DW_TAG_compile_unit and attr.name == .DW_AT_rnglists_base) {
+                    self.rnglists_base = try specs.items[attr_ndx].parseNumeric(usize, self);
+                    continue;
+                }
+            }
+
+            // now, parse the rnglistx forms (if any)
+            if (abbrev_decl.tag == .DW_TAG_compile_unit) {
+                for (abbrev_decl.attrs.items, 0..) |attr, attr_ndx| {
+                    if (attr.form != .DW_FORM_rnglistx) continue;
+
+                    try attr.chooseFormAndAdvanceBySize(&specs.items[attr_ndx], self);
+                }
             }
 
             const die = try dies.addOne();
@@ -170,7 +191,9 @@ pub const CompileUnit = struct {
             assert(die_ndx < max - 1);
         }
 
-        assert(self.info_r.offset() == self.header.total_len);
+        // @TODO (jrc): add this back once this issue is resolved:
+        //              https://github.com/ziglang/zig/issues/22949
+        // assert(self.info_r.offset() == self.header.total_len);
 
         return dies.toOwnedSlice();
     }

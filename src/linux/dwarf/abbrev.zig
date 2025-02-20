@@ -316,20 +316,32 @@ pub const Attr = struct {
                 };
             },
 
-            // .DW_FORM_ref_sup4 => {},
-            // .DW_FORM_ref_sup8 => {},
-            // .DW_FORM_ref_sig8 => {},
-            // .DW_FORM_loclistx => {},
-            // .DW_FORM_rnglistx => {},
+            .DW_FORM_rnglistx => {
+                // @SRC (jrc): https://go.dev/src/debug/dwarf/entry.go?s=26069:26121
+                // offset is from DW_AT_rnglists_base, NOT from the start of the rnglists section
+                var offset_loc = try dwarf.readULEB128(cu.info_r);
+                offset_loc *= cu.header.addr_size.bytes();
+                offset_loc += cu.rnglists_base;
 
-            // .DW_FORM_GNU_addr_index => {},
-            // .DW_FORM_GNU_str_index => {},
+                if (offset_loc >= cu.opts.sections.rnglists.contents.len) {
+                    log.err("DW_FORM_rnglistx offset out of bounds");
+                    return error.InvalidDWARFInfo;
+                }
 
-            // .DW_FORM_GNU_ref_alt => {},
-            // .DW_FORM_GNU_strp_alt => {},
+                var r: Reader = undefined;
+                r.init(cu.opts.sections.rnglists.contents);
+                r.seek(offset_loc);
+                const offset = switch (cu.header.addr_size) {
+                    .four => try dwarf.read(&r, u32),
+                    .eight => try dwarf.read(&r, u64),
+                };
+
+                val.offset = cu.rnglists_base + offset;
+                val.class = .rnglist;
+            },
 
             else => {
-                // @TODO (jrc): implement the rest of the above
+                // @TODO (jrc): implement all other form types
                 log.errf("unimplemented form type: {s}", .{@tagName(form)});
                 return error.InvalidDWARFInfo;
             },

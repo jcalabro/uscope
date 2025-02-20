@@ -659,12 +659,17 @@ pub const LineNumberOpcodes = enum(u8) {
 
 // Line table directory and file name entry formats.
 // These are new in DWARF 5.
-pub const LineTableContentType = enum(u8) {
+pub const LineTableContentType = enum(u16) {
     path = 0x01,
     directory_ndx = 0x02,
     timestamp = 0x03,
     size = 0x04,
     md5 = 0x05,
+
+    lo_user = 0x2000,
+    hi_user = 0x3fff,
+
+    LLVM_source = 0x2001,
 };
 
 pub const LineTableStandardOpcodes = enum(u8) {
@@ -680,9 +685,13 @@ pub const LineTableStandardOpcodes = enum(u8) {
     set_prologue_end = 0x0a,
     set_epilogue_begin = 0x0b,
     set_isa = 0x0c,
+
+    // Zig extensions
+    zig_set_decl = 0xec,
 };
 
 pub const LineTableExtendedOpcodes = enum(u8) {
+    padding = 0x00,
     end_sequence = 0x01,
     set_address = 0x02,
     define_file = 0x03,

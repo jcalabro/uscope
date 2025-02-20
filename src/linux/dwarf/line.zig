@@ -120,6 +120,7 @@ fn parseLineEntries(
 
             const ext_opcode = try dwarf.readEnum(r, u8, consts.LineTableExtendedOpcodes);
             switch (ext_opcode) {
+                .padding => {},
                 .end_sequence => {
                     // fully reset state
                     entry = Entry{
@@ -188,6 +189,7 @@ fn parseLineEntries(
                 .set_prologue_end => entry.prologue_end = true,
                 .set_epilogue_begin => entry.epilogue_begin = true,
                 .set_isa => entry.isa = try dwarf.readULEB128(r),
+                .zig_set_decl => {},
             }
         }
 

@@ -581,12 +581,15 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                         sources = try line.parse(&opts, &cu.source_abs_path_hashes, comp_dir, line_offset);
                     }
 
+                    // parse .debug_aranges
                     var range_opts = aranges.ParseOpts{
                         .opts = &opts,
                         .sources = sources,
                         .func_statements = null,
                     };
                     ranges = try aranges.parse(&range_opts);
+
+                    // @TODO (jrc): parse .debug_rnglist
                 },
 
                 .DW_TAG_subprogram => {
