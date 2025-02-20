@@ -2164,7 +2164,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             if (buf.len > 0) try self.adapter.peekData(
                 self.data.subordinate.?.paused.?.pid,
-                self.data.subordinate.?.load_addr,
+                types.Address.from(0), // load address has already been applied
                 addr,
                 buf,
             );
@@ -2262,6 +2262,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
             const encoder = switch (cu.language) {
                 .C => @import("encoding/C.zig").encoder(),
+                .C3 => @import("encoding/C3.zig").encoder(),
                 .Odin => @import("encoding/Odin.zig").encoder(),
                 .Zig => @import("encoding/Zig.zig").encoder(),
                 else => @import("encoding/Unknown.zig").encoder(),
@@ -2385,7 +2386,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 .scratch = params.scratch,
                 .adapter = self.adapter,
                 .pid = params.pid,
-                .load_addr = params.load_addr,
                 .cu = params.cu,
                 .target_strings = self.data.target.?.strings,
                 .data_type = &data_type,
@@ -2520,9 +2520,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     // follow typedefs to their base
                     const ptr_type = typedefBaseType(params, base_data_type_ndx.?);
 
-                    // look up the bytes for this pointer's value in the subordinate
+                    // look up the bytes for this pointer's value in the subordinate (the load address
+                    // has already been applied)
                     const ptr_buf = try params.scratch.alloc(u8, ptr_type.data_type.size_bytes);
-                    try self.adapter.peekData(params.pid, params.load_addr, address, ptr_buf);
+                    try self.adapter.peekData(params.pid, types.Address.from(0), address, ptr_buf);
 
                     // recurse using the base data type
                     var recursive_params = params;

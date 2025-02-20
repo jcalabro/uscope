@@ -59,7 +59,7 @@ pub fn renderString(
         var buf = [_]u8{0};
         params.adapter.peekData(
             params.pid,
-            params.load_addr,
+            types.Address.from(0),
             addr.addInt(ndx),
             &buf,
         ) catch {

@@ -568,6 +568,8 @@ pub const Language = enum(u8) {
     pub fn fromPath(fpath: String) @This() {
         const ext = std.fs.path.extension(fpath);
 
+        if (strings.eql(ext, ".c3")) return .C3;
+
         if (strings.eql(ext, ".c")) return .C;
         if (strings.eql(ext, ".h")) return .C;
 
@@ -584,8 +586,6 @@ pub const Language = enum(u8) {
         if (strings.eql(ext, ".go")) return .Go;
 
         if (strings.eql(ext, ".jai")) return .Jai;
-
-        if (strings.eql(ext, ".c3")) return .C3;
 
         return .Unsupported;
     }
