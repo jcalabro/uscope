@@ -40,8 +40,8 @@ fn void main()
 	String* t = &s;
 	void* u = t;
 
-	int[*] v = { 11, 22, 33 }; // array
-	int[]  w = &v;          // slice
+	int[*] v = { 11, 12, 13 }; // array
+	int[]  w = &v;             // slice
 
 	MyStruct x;
     x.field_a = 18;
@@ -49,7 +49,7 @@ fn void main()
 
 	MyEnum y = MyEnum.FIRST;
 	MyEnum z = MyEnum.SECOND;
-	MyEnum aa = MyEnum.THIRD; // sim:c3print stops here
+	MyEnum aa = MyEnum.THIRD; // sim:c3print stops here because all the prints are inlined
 
     io::printn(a);
     io::printn(b);
