@@ -643,7 +643,10 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                     });
                 },
 
-                .DW_TAG_variable, .DW_TAG_formal_parameter => {
+                .DW_TAG_variable, .DW_TAG_formal_parameter => b: {
+                    const name = try optionalAttribute(&opts, String, .DW_AT_name) orelse "";
+                    if (name.len == 0) break :b;
+
                     if (try optionalAttribute(&opts, Offset, .DW_AT_type)) |type_offset| {
                         try variable_types.append(.{
                             .type_offset = type_offset,
@@ -660,7 +663,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                     }
 
                     try variables.append(.{
-                        .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
+                        .name = try str_cache.add(name),
                         .data_type = undefined, // will be assigned later
                         .platform_data = switch (builtin.os.tag) {
                             .linux => .{
