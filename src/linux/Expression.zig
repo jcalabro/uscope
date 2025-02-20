@@ -1003,8 +1003,11 @@ fn evalFBReg(state: *Self, peek_data: PeekFunc) !void {
     const addr = mem.readInt(u64, @ptrCast(res), endianness);
     const loc = dwarf.applyOffset(addr, offset);
 
+    // @NOTE (jrc): We intentionally use zero as the load address in fbreg and breg because
+    // the address we're looking up in memory already came from a register, so the value
+    // in the RBP register for instance already has the load address applied
     const data = try state.alloc.alloc(u8, state.variable_size);
-    try peek_data(state.pid, state.load_addr, types.Address.from(loc), data);
+    try peek_data(state.pid, types.Address.from(0), types.Address.from(loc), data);
     try state.stack.append(data);
 }
 
@@ -1039,7 +1042,7 @@ fn evalBReg(state: *Self, peek_data: PeekFunc, register: u64) !void {
     const loc = dwarf.applyOffset(val, offset);
 
     const data = try state.alloc.alloc(u8, state.variable_size);
-    try peek_data(state.pid, state.load_addr, types.Address.from(loc), data);
+    try peek_data(state.pid, types.Address.from(0), types.Address.from(loc), data);
     try state.stack.append(data);
 }
 
@@ -1474,9 +1477,10 @@ const TestExpression = switch (builtin.is_test) {
             addr: types.Address,
             buf: []u8,
         ) !void {
+            _ = load_addr;
+
             // we use asserts instead of `try testing.expectEqual` so the error return set is unchanged
             assert(pid.eqlInt(0x1));
-            assert(load_addr.eqlInt(0x2));
             assert(buf.len == 8);
 
             const val = peek_values.get(addr);
