@@ -19,7 +19,6 @@ pub const Params = struct {
 
     adapter: *Adapter,
     pid: types.PID,
-    load_addr: types.Address,
     cu: *const types.CompileUnit,
     target_strings: *strings.Cache,
 
@@ -171,7 +170,7 @@ pub fn renderSlice(
     const preview_len = @min(len, 100);
 
     const full_buf = try params.scratch.alloc(u8, preview_len * member_size_bytes);
-    params.adapter.peekData(params.pid, params.load_addr, addr, full_buf) catch {
+    params.adapter.peekData(params.pid, types.Address.from(0), addr, full_buf) catch {
         return error.ReadDataError;
     };
 

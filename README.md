@@ -24,7 +24,7 @@ This is a birds-eye overview of the features I'd like implemented before I'd per
   - Basic variable value rendering
   - Stack unwinding
   - etc.
-- Support for visualization of common data types in several languages (preliminary C, Zig, and Odin support is already underway)
+- Support for visualization of common data types in several languages (preliminary C, Zig, Odin, and C3 support is already underway)
   - Adding at least C++ and Go even though they're very complicated languages since that's what I use for work
   - Also planning on supporting at Rust, Crystal, and Jai
   - In general, we will design a system that handles transforming data in to user-friendly visualization that is flexible, extensible, and not tied to any one language

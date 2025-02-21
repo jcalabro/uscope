@@ -362,8 +362,8 @@ fn checkeq(comptime T: type, expected: T, actual: T, desc: String) bool {
     if (T == String) {
         if (!mem.eql(u8, expected, actual)) {
             log.errf(msg, args);
-            log.errf("want: {s}", .{expected});
-            log.errf("got: {s}", .{actual});
+            log.errf("want (len {d}): {s}", .{ expected.len, expected });
+            log.errf("got  (len {d}): {s}", .{ actual.len, actual });
             return false;
         }
     } else {
@@ -3185,6 +3185,275 @@ test "sim:odinprint" {
 
                                 if (!check(second.name != null, "enum name must not be null") or
                                     !checkstr(paused.strings, "Second", second.name.?, "unexpected name for enum \"ad\"")) {
+                                    return false;
+                                }
+                            }
+
+                            return true;
+                        }
+
+                        // we return null here because it might be the case that the capture stdout thread
+                        // has not yet received its data and passed it to the GUI
+                        return null;
+                    }
+                } else |err| {
+                    log.errf("unable to get state snapshot: {!}", .{err});
+                    return false;
+                }
+
+                return null;
+            }
+
+        }.cond,
+    })
+
+    // continue execution and let it run to the end
+    .addCommand(.{
+        .send_after_ticks = 1,
+        .req = (proto.ContinueRequest{}).req(),
+    })
+    .addCondition(.{
+        .desc = "subordinate must have finished execution and all subordinate output must be displayed",
+        .wait_for_ticks = msToTicks(100) * ValgrindMult,
+        .max_ticks = msToTicks(4000) * ValgrindMult,
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                {
+                    s.dbg.data.mu.lock();
+                    defer s.dbg.data.mu.unlock();
+
+                    if (s.dbg.data.subordinate != null) return null;
+                }
+
+                {
+                    s.state.subordinate_output_mu.lock();
+                    defer s.state.subordinate_output_mu.unlock();
+
+                    if (expected_output_len == s.state.subordinate_output.len) {
+                        return true;
+                    }
+                }
+
+                return null;
+            }
+        }.cond,
+    })
+
+    .quit().unlock();
+    // zig fmt: on
+
+    try sim.run(@src().fn_name);
+}
+test "sim:c3print" {
+    //
+    // Tests the ability to render various variable values in a C3 program that tests
+    // many primitive types, and a couple others
+    //
+
+    const sim = try Simulator.init(t.allocator);
+    defer sim.deinit(t.allocator);
+
+    const exe_path = "assets/c3print/out";
+    const c3print_main_odin_hash = try fileHash(t.allocator, "assets/c3print/main.c3");
+
+    const expected_output_len = 188;
+
+    // zig fmt: off
+    sim.lock()
+
+    // load symbols
+    .addCommand(.{ .req = (proto.LoadSymbolsRequest{
+        .path = exe_path,
+    }).req() })
+    .addCondition(.{
+        .max_ticks = msToTicks(20000) * ValgrindMult,
+        .desc = "debug symbols must be loaded",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                s.dbg.data.mu.lock();
+                defer s.dbg.data.mu.unlock();
+
+                if (s.dbg.data.target != null) {
+                    return check(s.dbg.data.subordinate == null, "subordinate must not be launched");
+                }
+
+                return null;
+            }
+        }.cond,
+    })
+
+    // set a breakpoint
+    .addCommand(.{
+        .send_after_ticks = 1,
+        .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
+            .file_hash = c3print_main_odin_hash,
+            .line = types.SourceLine.from(52),
+        }}}).req(),
+    })
+
+    // launch subordinate and ensure it hits the breakpoint
+   .addCommand(.{
+        .send_after_ticks = msToTicks(250),
+        .req = (proto.LaunchSubordinateRequest{
+            .path = exe_path,
+            .args = "",
+            .stop_on_entry = false,
+        }).req(),
+    })
+    .addCondition(.{
+        .max_ticks = msToTicks(2000) * ValgrindMult,
+        .desc = "subordinate must have hit the breakpoint",
+        .cond = struct {
+            fn cond(s: *Simulator) ?bool {
+                if (s.state.getStateSnapshot(s.arena.allocator())) |ss| {
+                    if (ss.state.paused) |paused| {
+                        s.state.subordinate_output_mu.lock();
+                        defer s.state.subordinate_output_mu.unlock();
+
+                        // spot check a few fields
+                        const num_locals = 27;
+                        if (checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variables") and
+                            checkeq(usize, num_locals, paused.locals.len, "unexpected number of local variable expression results") and
+                            checkeq(usize, 0, paused.watches.len, "unexpected number of watch expressions") and
+                            checkeq(String, "a", paused.strings.get(paused.locals[0].expression) orelse "", "first local expression was incorrect") and
+                            checkeq(String, "b", paused.strings.get(paused.locals[1].expression) orelse "", "second local expression was incorrect")) {
+
+                            {
+                                // test rendering a basic string
+                                const s_var = paused.getLocalByName("s") orelse return falseWithErr("unable to get local \"s\"", .{});
+                                const data_hash = s_var.fields[0].data orelse return falseWithErr("data not set on variable \"s\"", .{});
+                                if (!checkstr(paused.strings, "Hello, world!", data_hash, "unexpected render value for field \"s\"")) {
+                                    return false;
+                                }
+                            }
+
+                            {
+                                // test rendering an opaque pointer
+                                const u = paused.getLocalByName("u") orelse return falseWithErr("unable to get local \"u\"", .{});
+                                if (u.fields[0].data != null) return falseWithErr("data should not set on variable \"u\"", .{});
+                                if (u.fields[0].address == null) return falseWithErr("address should be set on variable \"u\"", .{});
+                                if (!check(u.fields[0].address.?.neqInt(0), "address of \"u\" should not be zero")) return false;
+                            }
+
+                            {
+                                // test rendering an int slice
+                                const w = paused.getLocalByName("w") orelse return falseWithErr("unable to get local \"w\"", .{});
+                                const field = w.fields[0];
+                                if (field.encoding != .array) {
+                                    log.errf("variable \"w\" encoding was not an array, got {s}", .{@tagName(field.encoding)});
+                                    return false;
+                                }
+
+                                if (!checkeq(usize, 3, field.encoding.array.items.len, "unexpected number of array items for \"w\"")) {
+                                    return false;
+                                }
+
+                                for (field.encoding.array.items, 0..) |field_ndx, i| {
+                                    const item = w.fields[field_ndx.int()];
+                                    if (item.encoding != .primitive) {
+                                        log.errf("expected element w ndx {d} of \"w\" to be a primitive, got {s}", .{
+                                            field_ndx,
+                                            @tagName(item.encoding),
+                                        });
+                                        return false;
+                                    }
+                                    if (!checkeq(
+                                        types.PrimitiveTypeEncoding,
+                                        .signed,
+                                        item.encoding.primitive.encoding,
+                                        "item element encoding should be an unsigned primitive for \"w\"",
+                                    )) return false;
+
+                                    const data_hash = w.fields[field_ndx.int()].data orelse return falseWithErr(
+                                        "unable to get data for \"w\" at field ndx {d}",
+                                        .{field_ndx},
+                                    );
+
+                                    const i_u8: u8 = @intCast(i);
+                                    const expected_char: u8 = 11 + i_u8; // starts from 14 and counts up
+                                    if (!checkstr(paused.strings, &.{expected_char, 0, 0, 0 }, data_hash, "unexpected data for variable \"w\"")) {
+                                        return false;
+                                    }
+                                }
+                            }
+
+                            {
+                                // test rendering a simple struct
+                                const x = paused.getLocalByName("x") orelse return falseWithErr("unable to get local \"x\"", .{});
+                                const field = x.fields[0];
+                                if (field.encoding != .@"struct") {
+                                    log.errf("variable \"x\" encoding was not a struct, got {s}", .{@tagName(field.encoding)});
+                                    return false;
+                                }
+
+                                if (!checkeq(usize, 2, field.encoding.@"struct".members.len, "unexpected number of struct members for \"x\"")) {
+                                    return false;
+                                }
+
+                                {
+                                    // check `field_a`
+                                    const member = mem: {
+                                        for (x.fields) |f| {
+                                            const name = paused.strings.get(f.name orelse 0).?;
+                                            if (strings.eql(name, "field_a")) break :mem f;
+                                        }
+                                        log.err("\"field_a\" not found in struct \"x\"");
+                                        return false;
+                                    };
+
+                                    if (member.encoding != .primitive) {
+                                        log.errf("\"x.field_a\" was not a primitive, got {s}", .{@tagName(member.encoding)});
+                                        return false;
+                                    }
+                                    if (member.encoding.primitive.encoding != .unsigned) {
+                                        log.errf("\"x.field_a\" was not an unsigned integer, got {s}", .{@tagName(member.encoding.primitive.encoding)});
+                                        return false;
+                                    }
+
+                                    if (!checkstr(paused.strings, &.{18}, member.data.?, "incorrect value for \"x.field_a\"")) return false;
+                                }
+
+                                {
+                                    // check `field_b`
+                                    const member = mem: {
+                                        for (x.fields) |f| {
+                                            const name = paused.strings.get(f.name orelse 0).?;
+                                            if (strings.eql(name, "field_b")) break :mem f;
+                                        }
+                                        log.err("\"field_b\" not found in struct \"x\"");
+                                        return false;
+                                    };
+
+                                    if (member.encoding != .string) {
+                                        log.errf("\"x.field_b\" was not a string, got {s}", .{@tagName(member.encoding)});
+                                        return false;
+                                    }
+                                    if (!checkstr(paused.strings, "this is the second field", member.data.?, "incorrect value for \"x.field_b\"")) return false;
+                                }
+                            }
+
+                            {
+                                // check rendering an enum value
+                                const z = paused.getLocalByName("z") orelse return falseWithErr("unable to get local \"z\"", .{});
+                                const first = z.fields[0];
+                                const second = z.fields[1];
+                                if (first.encoding != .@"enum") {
+                                    log.errf("variable \"z\" encoding was not an enum, got {s}", .{@tagName(first.encoding)});
+                                    return false;
+                                }
+                                if (second.encoding != .primitive) {
+                                    log.errf("variable \"z\" value encoding was not primitive, got {s}", .{@tagName(second.encoding)});
+                                    return false;
+                                }
+
+                                if (!check(second.data != null, "enum data must not be null")) return false;
+                                if (paused.strings.get(second.data.?)) |enum_data| {
+                                    const enum_val = mem.readVarInt(i128, enum_data, .little);
+                                    if (!checkeq(i128, 1, enum_val, "unexpected enum value \"z\"")) return false;
+                                }
+
+                                if (!check(second.name != null, "enum name must not be null") or
+                                    !checkstr(paused.strings, "SECOND", second.name.?, "unexpected name for enum \"z\"")) {
                                     return false;
                                 }
                             }

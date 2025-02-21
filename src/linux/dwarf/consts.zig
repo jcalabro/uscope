@@ -474,11 +474,13 @@ pub const Language = enum(u16) {
     // not yet added, pick some random high value
     DW_LANG_Jai = 0xb103,
     DW_LANG_Odin = 0xb104,
+    DW_LANG_C3 = 0xb105,
 
     pub fn fromProducer(producer: []const u8) ?@This() {
         if (mem.startsWith(u8, producer, "zig")) return .DW_LANG_Zig;
         if (mem.startsWith(u8, producer, "odin")) return .DW_LANG_Odin;
         if (mem.containsAtLeast(u8, producer, 1, "Jai")) return .DW_LANG_Jai;
+        if (mem.startsWith(u8, producer, "c3c")) return .DW_LANG_C3;
 
         return null;
     }
@@ -505,6 +507,7 @@ pub const Language = enum(u16) {
             .DW_LANG_Zig => .Zig,
             .DW_LANG_Jai => .Jai,
             .DW_LANG_Odin => .Odin,
+            .DW_LANG_C3 => .C3,
 
             .DW_LANG_nasm => .Assembly,
 

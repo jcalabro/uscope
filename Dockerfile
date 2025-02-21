@@ -11,6 +11,11 @@ RUN dnf install -y \
         golang-1.23.2-2.fc41 \
         rust-1.81.0-6.fc41
 
+ENV PATH="${PATH}:/usr/local/bin/c3"
+RUN curl -L -o c3.tar.gz https://github.com/c3lang/c3c/releases/download/latest/c3-linux.tar.gz && \
+    tar xzf c3.tar.gz && \
+    mv c3 /usr/local/bin
+
 RUN curl -L -o odin.zip https://github.com/odin-lang/Odin/releases/download/dev-2025-01/odin-ubuntu-amd64-dev-2025-01.zip && \
     unzip odin.zip && rm -f odin.zip && \
     tar -xzf dist.tar.gz && rm -rf dist.tar.gz && \

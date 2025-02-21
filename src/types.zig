@@ -562,10 +562,13 @@ pub const Language = enum(u8) {
     Go,
     Odin,
     Jai,
+    C3,
     Assembly,
 
     pub fn fromPath(fpath: String) @This() {
         const ext = std.fs.path.extension(fpath);
+
+        if (strings.eql(ext, ".c3")) return .C3;
 
         if (strings.eql(ext, ".c")) return .C;
         if (strings.eql(ext, ".h")) return .C;
@@ -608,6 +611,7 @@ pub const Language = enum(u8) {
             .{ .path = "/path/to/file.rs", .lang = .Rust },
             .{ .path = "/path/to/file.go", .lang = .Go },
             .{ .path = "/path/to/file.jai", .lang = .Jai },
+            .{ .path = "/path/to/file.c3", .lang = .C3 },
         };
 
         for (cases) |case| try t.expectEqual(case.lang, fromPath(case.path));
