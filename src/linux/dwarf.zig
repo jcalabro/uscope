@@ -272,217 +272,70 @@ pub const TableOffsets = struct {
     debug_addr: usize = 0,
 };
 
+fn validateSectionNotEmpty(comptime name: String, section: String) ParseError!void {
+    if (section.len == 0) {
+        log.errf("unable to parse dwarf: {s} is empty", .{name});
+        return error.InvalidDWARFInfo;
+    }
+}
+
 /// Parses the DWARF symbols from the given binary in to a platform-agnostic type. `perm_alloc` must be
 /// a ThreadSafeAllocator under the hood.
 pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Target) ParseError!void {
     const z = trace.zoneN(@src(), "parse dwarf");
     defer z.end();
 
-    assert(opts.sections.info.contents.len > 0);
-    assert(opts.sections.abbrev.contents.len > 0);
-    assert(opts.sections.line.contents.len > 0);
-
-    //
-    // @SEARCH: MULTITHREADED_DWARF
-    //
-    // We spin up N worker threads to parse and map (most) debug info per compile unit
-    // because the tasks are embarassingly parallel and we've observed sizable performance
-    // gains when loading large real-world projects.
-    //
-    // The main thread parses the compile unit header and allocates the resulting memory
-    // that is required, then passes the CU to a worker via a thread safe queue. The worker
-    // picks it up, parses DWARF, and maps it to our x-platform types.
-    //
-    // We use a lot of brand-new, short lived memory arenas here because using a shared
-    // ThreadSafeAllocator results in a TON of lock contention and it's super slow as a result.
-    // We do all our work on thread-unsafe allocators, then at the end take a lock and map it
-    // back to the main perm allocator.
-    //
-
-    // detach from the main thread's allocator for some of the allocations in this function
-    var parse_alloc = MainAllocator.init();
-    defer parse_alloc.deinit();
-
-    // the data structures used to orchestrate multi-threaded parsing get their own
-    // thread-safe scratch arena since we are using this memory from multiple threads
-    const parse_scratch_arena = try parse_alloc.allocator().create(ArenaAllocator);
-    defer parse_alloc.allocator().destroy(parse_scratch_arena);
-    parse_scratch_arena.* = ArenaAllocator.init(parse_alloc.allocator());
-    defer parse_scratch_arena.deinit();
-
-    const parse_scratch_tsa = try parse_scratch_arena.allocator().create(ThreadSafeAllocator);
-    parse_scratch_tsa.* = .{ .child_allocator = parse_scratch_arena.allocator() };
-    const parse_scratch = parse_scratch_tsa.allocator();
-
-    const req_queue = try opts.scratch.create(Queue(?CompileUnitRequest));
-    req_queue.* = Queue(?CompileUnitRequest).init(parse_scratch_tsa, .{
-        .timeout_ns = 100 * std.time.ns_per_ms,
-    });
-    defer req_queue.deinit();
-
-    const err_queue = try parse_scratch.create(Queue(ParseError));
-    err_queue.* = Queue(ParseError).init(parse_scratch_tsa, .{});
-    defer err_queue.deinit();
-
-    // accumulate responses in this array (must lock the mutex)
-    var cus = try parse_scratch.create(ArrayList(types.CompileUnit));
-    cus.* = ArrayList(types.CompileUnit).init(perm_alloc);
-    const cus_mu = try parse_scratch.create(Thread.Mutex);
-    cus_mu.* = .{};
-
-    // set a limit on the number of threads because some machines out there are truly giant
-    const num_threads = @max(32, Thread.getCpuCount() catch 4);
-
-    // start worker threads
-    var threads = try ArrayList(Thread).initCapacity(opts.scratch, num_threads);
-    for (0..num_threads) |_| {
-        const thread = try Thread.spawn(.{}, parseAndMapCompileUnits, .{
-            perm_alloc,
-            opts.file_cache,
-            req_queue,
-            err_queue,
-            cus,
-            target.strings,
-            cus_mu,
-        });
-        safe.setThreadName(thread, "parseAndMapCompileUnit");
-        threads.appendAssumeCapacity(thread);
-    }
+    try validateSectionNotEmpty(".debug_info", opts.sections.info.contents);
+    try validateSectionNotEmpty(".debug_abbrev", opts.sections.abbrev.contents);
+    try validateSectionNotEmpty(".debug_line", opts.sections.line.contents);
 
     const abbrev_tables = try abbrev.parse(opts);
+
+    var compile_units = ArrayList(types.CompileUnit).init(perm_alloc);
+    errdefer compile_units.deinit();
 
     var offset: usize = 0;
     var offsets = TableOffsets{};
 
-    // parse each CU header and send them to the worker threads
-    const max = pow(usize, 2, 32);
+    const max = pow(usize, 2, 18);
     for (0..max) |cu_ndx| {
-        if (offset >= opts.sections.info.contents.len) {
-            // send poison pills to tell all workers to shutdown
-            for (0..num_threads) |_| try req_queue.put(null);
-            break;
-        }
+        if (offset >= opts.sections.info.contents.len) break;
 
-        const dwarf_cu = blk: {
-            cus_mu.lock();
-            defer cus_mu.unlock();
-
-            _ = try cus.addOne();
-            break :blk try info.CompileUnit.create(opts, offset);
-        };
-
-        // lock is needed because we're sharing the permanent allocator
-        cus_mu.lock();
-        defer cus_mu.unlock();
-
+        // parse the compile unit header
+        const dwarf_cu = try info.CompileUnit.create(opts, offset);
         try dwarf_cu.parseHeader(abbrev_tables, &offsets);
         if (dwarf_cu.header.addr_size.bytes() > target.addr_size.bytes()) {
             target.addr_size = dwarf_cu.header.addr_size;
         }
 
-        try req_queue.put(.{ .ndx = cus.items.len - 1, .dwarf_cu = dwarf_cu });
-        offset += dwarf_cu.header.total_len;
+        // parse all DIEs for this compile unit
+        const dies = try dwarf_cu.parseDIEs();
+        offset += dwarf_cu.info_r.offset();
 
-        assert(cu_ndx <= max - 1);
-    }
+        // map to a generic type
+        const generic_cu = try mapDWARFToTarget(dwarf_cu, dies);
 
-    for (threads.items) |thread| thread.join();
+        // copy to permanent memory
+        const perm_cu = try compile_units.addOne();
+        try perm_cu.copyFrom(perm_alloc, generic_cu.cu);
 
-    // check for errors
-    if (err_queue.getOrNull()) |err| return err;
-
-    target.compile_units = try cus.toOwnedSlice();
-    target.unwinder = .{ .cies = try frame.loadTable(perm_alloc, opts) };
-}
-
-/// Sent from the main thread to the worker thread
-const CompileUnitRequest = struct {
-    ndx: usize,
-    dwarf_cu: *info.CompileUnit,
-};
-
-fn parseAndMapCompileUnits(
-    main_thread_perm_alloc: Allocator, // the allocator in use by the main debugger.zig thread
-    file_cache: *file_utils.Cache,
-    cu_req_queue: *Queue(?CompileUnitRequest),
-    err_queue: *Queue(ParseError),
-    compile_units: *ArrayList(types.CompileUnit),
-    all_strings: *strings.Cache,
-    compile_units_mu: *Thread.Mutex,
-) void {
-    const z = trace.zone(@src());
-    defer z.end();
-
-    var thread_alloc = MainAllocator.init();
-    defer thread_alloc.deinit();
-
-    var scratch = ArenaAllocator.init(thread_alloc.allocator());
-    defer scratch.deinit();
-
-    const max = pow(usize, 2, 16);
-    for (0..max) |cu_ndx| {
-        if (cu_req_queue.get() catch continue) |*req| {
-            const opts = ParseOpts{
-                .scratch = scratch.allocator(),
-                .file_cache = file_cache,
-                .sections = req.dwarf_cu.opts.sections,
-            };
-            req.dwarf_cu.opts = &opts;
-
-            parseAndMapOneCompileUnit(
-                main_thread_perm_alloc,
-                req,
-                compile_units,
-                all_strings,
-                compile_units_mu,
-            ) catch |err| {
-                err_queue.put(err) catch |e| {
-                    log.errf("unable to add to dwarf parsing error queue: {!} (original error: {!})", .{ e, err });
-                };
-            };
-        } else {
-            // we're done
-            break;
-        }
-
-        assert(cu_ndx <= max - 1);
-    }
-}
-
-fn parseAndMapOneCompileUnit(
-    main_thread_perm_alloc: Allocator,
-    req: *const CompileUnitRequest,
-    compile_units: *ArrayList(types.CompileUnit),
-    all_strings: *strings.Cache,
-    compile_units_mu: *Thread.Mutex,
-) ParseError!void {
-    const z = trace.zone(@src());
-    defer z.end();
-
-    const dies = try req.dwarf_cu.parseDIEs();
-    const res = try mapDWARFToTarget(req.dwarf_cu, dies);
-
-    {
-        // copy the types.CompileUnit and string table to the main thread's permanent allocator
-        compile_units_mu.lock();
-        defer compile_units_mu.unlock();
-
-        try compile_units.items[req.ndx].copyFrom(main_thread_perm_alloc, res.cu);
-
-        // append to the global string table (no need to take a lock
-        // on Cache.mu because we're already locked)
-        try all_strings.map.ensureTotalCapacity(
-            all_strings.alloc,
-            all_strings.map.size + res.strings.map.size,
+        try target.strings.map.ensureTotalCapacity(
+            target.strings.alloc,
+            target.strings.map.size + generic_cu.strings.map.size,
         );
-        var str_it = res.strings.map.iterator();
+        var str_it = generic_cu.strings.map.iterator();
         while (str_it.next()) |str| {
-            all_strings.map.putAssumeCapacity(
+            target.strings.map.putAssumeCapacity(
                 str.key_ptr.*,
-                try strings.clone(all_strings.alloc, str.value_ptr.*),
+                try strings.clone(target.strings.alloc, str.value_ptr.*),
             );
         }
+
+        assert(cu_ndx <= max - 1);
     }
+
+    target.compile_units = try compile_units.toOwnedSlice();
+    target.unwinder = .{ .cies = try frame.loadTable(perm_alloc, opts) };
 }
 
 const CompileUnitWithStrings = struct {
