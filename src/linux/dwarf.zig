@@ -5,8 +5,10 @@ const builtin = @import("builtin");
 const Allocator = mem.Allocator;
 const ArenaAllocator = heap.ArenaAllocator;
 const ArrayList = std.ArrayList;
+const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const assert = std.debug.assert;
 const AutoHashMap = std.AutoHashMap;
+const AutoHashMapUnmanaged = std.AutoHashMapUnmanaged;
 const heap = std.heap;
 const mem = std.mem;
 const pow = std.math.pow;
@@ -62,6 +64,7 @@ pub const Version = enum(u4) {
 /// Offset is a common integer primitive in DWARF debug info. Its size depends on
 /// whether or not the CU is using 32 or 64 bit debug information. 32 bit mode
 /// is overwhelmingly more common, though we support 64 bit mode as well
+/// @TODO (jrc): make this a `types.Numeric`
 pub const Offset = u64;
 
 pub const Section = struct {
@@ -338,6 +341,73 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
     target.unwinder = .{ .cies = try frame.loadTable(perm_alloc, opts) };
 }
 
+/// DWARF often gives us type info out-of-order, so we need to track which data needs its
+/// references resolved once all compile units have been parsed. Much of the time, we could
+/// just resolve all references, but some compilers (i.e. Go) use FormClass.reference, which
+/// means we should be using global offsets (GOFF in dwarfdump) from the start of the entire
+/// `.debug_info` section rather than from the start of the current compile unit. This is why
+/// we can't easily use a parallel DWARF parser unfortunately.
+const DelayedReferences = struct {
+    const OffsetRange = struct {
+        low: Offset,
+        high: Offset,
+
+        // Checks if `offset` is contained in [low, high)
+        fn contains(self: @This(), offset: Offset) bool {
+            return offset >= self.low and offset < self.high;
+        }
+    };
+
+    /// The start offset of this compile unit
+    offset: OffsetRange,
+
+    /// Reverse mapping of Offset -> type index
+    data_type_map: AutoHashMapUnmanaged(Offset, types.TypeNdx) = .{},
+
+    variable_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
+    array_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
+    const_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
+    typedef_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
+    pointer_types: ArrayListUnmanaged(PointerTypeEntry) = .{},
+    struct_member_types: ArrayListUnmanaged(StructMemberTypeEntry) = .{},
+
+    fn addDataType(
+        self: *@This(),
+        scratch: Allocator,
+        die: *const info.DIE,
+        data_types: *const ArrayList(types.DataType),
+    ) Allocator.Error!void {
+        try self.data_type_map.put(
+            scratch,
+            die.offset,
+            types.TypeNdx.from(data_types.items.len),
+        );
+    }
+};
+
+// We accumulate DW_AT_type (an offset) mapped to the index in the variables array in
+// this temporary buffer so we can stitch type information together after the first pass
+const VariableTypeEntry = struct {
+    type_offset: Offset,
+    variable_ndx: types.VariableNdx,
+};
+
+/// Pointers types are nullable in the case that a pointer is opaque
+/// (i.e. for *u8, we want to set its reference type to u8)
+const PointerTypeEntry = struct {
+    type_offset: ?Offset,
+    variable_ndx: types.VariableNdx,
+};
+
+const StructMemberTypeEntry = struct {
+    /// the offset of the type of the member
+    type_offset: Offset,
+    /// the offset to the struct in the struct_members list
+    struct_ndx: usize,
+    /// the index of the member within the struct's member list
+    member_ndx: usize,
+};
+
 const CompileUnitWithStrings = struct {
     cu: types.CompileUnit,
     strings: *strings.Cache,
@@ -362,48 +432,16 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
     var functions = ArrayList(types.Function).init(cu.opts.scratch);
     var function_ranges = ArrayList(types.CompileUnit.Functions.Range).init(cu.opts.scratch);
 
-    // we accumulate DW_AT_type (an offset) mapped to the index in the variables array in
-    // this temporary buffer so we can stitch type information together after the first pass
-    const VariableTypeEntry = struct {
-        type_offset: Offset,
-        variable_ndx: types.VariableNdx,
-    };
-    var variable_types = ArrayList(VariableTypeEntry).init(cu.opts.scratch);
-    var data_type_map = AutoHashMap(Offset, types.TypeNdx).init(cu.opts.scratch);
-
-    // do the same thing for array types that we do for variables
-    // (i.e. for []u8, we want to set its element type to u8)
-    var array_types = ArrayList(VariableTypeEntry).init(cu.opts.scratch);
-
-    // do the same thing for pointer types
-    // (i.e. for *u8, we want to set its reference type to u8)
-    const PointerTypeEntry = struct {
-        type_offset: ?Offset,
-        variable_ndx: types.VariableNdx,
-    };
-    var pointer_types = ArrayList(PointerTypeEntry).init(cu.opts.scratch);
-
-    // do the same for const types
-    var const_types = ArrayList(VariableTypeEntry).init(cu.opts.scratch);
-
-    // do the same thing for typedefs
-    var typedef_types = ArrayList(VariableTypeEntry).init(cu.opts.scratch);
-
-    // accumulate type info for struct members
     const StructMemberListEntry = struct {
         struct_ndx: types.TypeNdx,
         members: ArrayList(types.MemberType),
     };
     var struct_members = ArrayList(StructMemberListEntry).init(cu.opts.scratch);
-    const StructMemberTypeEntry = struct {
-        /// the offset of the type of the member
-        type_offset: Offset,
-        /// the offset to the struct in the struct_members list
-        struct_ndx: usize,
-        /// the index of the member within the struct's member list
-        member_ndx: usize,
-    };
-    var struct_member_types = ArrayList(StructMemberTypeEntry).init(cu.opts.scratch);
+
+    var delayed_refs = DelayedReferences{ .offset = .{
+        .low = cu.info_offset,
+        .high = cu.info_offset + cu.header.total_len,
+    } };
 
     {
         const z1 = trace.zoneN(@src(), "map DIEs");
@@ -486,9 +524,9 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                     try function_variables.append(ArrayList(types.VariableNdx).init(cu.opts.scratch));
                 },
 
+                // type declarations for function pointers
                 .DW_TAG_subroutine_type => {
-                    // store this function declaration as a DataType so we can use it for function pointers
-                    try data_type_map.put(opts.die.offset, types.TypeNdx.from(data_types.items.len));
+                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, &data_types);
                     try data_types.append(.{
                         .size_bytes = opts.cu.header.addr_size.bytes(),
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -496,12 +534,13 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                     });
                 },
 
+                // variables are locals, formals parameters are function parameters
                 .DW_TAG_variable, .DW_TAG_formal_parameter => b: {
                     const name = try optionalAttribute(&opts, String, .DW_AT_name) orelse "";
                     if (name.len == 0) break :b;
 
                     if (try optionalAttribute(&opts, Offset, .DW_AT_type)) |type_offset| {
-                        try variable_types.append(.{
+                        try delayed_refs.variable_types.append(cu.opts.scratch, .{
                             .type_offset = type_offset,
                             .variable_ndx = types.VariableNdx.from(variables.items.len),
                         });
@@ -528,7 +567,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                 },
 
                 .DW_TAG_unspecified_type => {
-                    try data_type_map.put(opts.die.offset, types.TypeNdx.from(data_types.items.len));
+                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, &data_types);
                     try data_types.append(.{
                         .size_bytes = 0,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -537,7 +576,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                 },
 
                 .DW_TAG_base_type => {
-                    try data_type_map.put(opts.die.offset, types.TypeNdx.from(data_types.items.len));
+                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, &data_types);
                     try data_types.append(.{
                         .size_bytes = try requiredAttribute(&opts, u32, .DW_AT_byte_size),
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -549,13 +588,13 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
 
                 .DW_TAG_const_type => {
                     if (try optionalAttribute(&opts, Offset, .DW_AT_type)) |type_offset| {
-                        try const_types.append(.{
+                        try delayed_refs.const_types.append(cu.opts.scratch, .{
                             .type_offset = type_offset,
                             .variable_ndx = types.VariableNdx.from(data_types.items.len),
                         });
                     }
 
-                    try data_type_map.put(opts.die.offset, types.TypeNdx.from(data_types.items.len));
+                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, &data_types);
                     try data_types.append(.{
                         .size_bytes = 0, // callers must follow the const to get the size of this type
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -569,13 +608,13 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
 
                 .DW_TAG_typedef => {
                     if (try optionalAttribute(&opts, Offset, .DW_AT_type)) |type_offset| {
-                        try typedef_types.append(.{
+                        try delayed_refs.typedef_types.append(cu.opts.scratch, .{
                             .type_offset = type_offset,
                             .variable_ndx = types.VariableNdx.from(data_types.items.len),
                         });
                     }
 
-                    try data_type_map.put(opts.die.offset, types.TypeNdx.from(data_types.items.len));
+                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, &data_types);
                     try data_types.append(.{
                         .size_bytes = 0, // callers must follow the typedef to get the size of this type
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -598,14 +637,14 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                 => {
                     // DW_TAG_pointer_type without a DW_AT_type just tells us how large
                     // a pointer size is on this target, which we don't care about
-                    try pointer_types.append(.{
+                    try delayed_refs.pointer_types.append(cu.opts.scratch, .{
                         .type_offset = try optionalAttribute(&opts, Offset, .DW_AT_type),
                         .variable_ndx = types.VariableNdx.from(data_types.items.len),
                     });
 
                     const num_bytes = cu.header.addr_size.bytes();
 
-                    try data_type_map.put(opts.die.offset, types.TypeNdx.from(data_types.items.len));
+                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, &data_types);
                     try data_types.append(.{
                         .size_bytes = try optionalAttribute(&opts, u32, .DW_AT_byte_size) orelse num_bytes,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -619,7 +658,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
 
                 .DW_TAG_array_type => {
                     if (try optionalAttribute(&opts, Offset, .DW_AT_type)) |type_offset| {
-                        try array_types.append(.{
+                        try delayed_refs.array_types.append(cu.opts.scratch, .{
                             .type_offset = type_offset,
                             .variable_ndx = types.VariableNdx.from(data_types.items.len),
                         });
@@ -646,7 +685,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                         break :l null; // array len is unknown
                     };
 
-                    try data_type_map.put(opts.die.offset, types.TypeNdx.from(data_types.items.len));
+                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, &data_types);
                     try data_types.append(.{
                         .size_bytes = 0,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -685,7 +724,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                             .offset_bytes = try optionalAttribute(&member_opts, u32, .DW_AT_data_member_location) orelse 0,
                             .data_type = undefined, // will be assigned later
                         });
-                        try struct_member_types.append(.{
+                        try delayed_refs.struct_member_types.append(cu.opts.scratch, .{
                             .type_offset = try requiredAttribute(&member_opts, Offset, .DW_AT_type),
                             .struct_ndx = struct_members.items.len,
                             .member_ndx = member_ndx,
@@ -701,7 +740,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                         .members = members,
                     });
 
-                    try data_type_map.put(opts.die.offset, types.TypeNdx.from(struct_type_ndx));
+                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, &data_types);
                     try data_types.append(.{
                         .size_bytes = try optionalAttribute(&opts, u32, .DW_AT_byte_size) orelse 0,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -745,7 +784,7 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
                         assert(value_ndx <= max_values - 1);
                     }
 
-                    try data_type_map.put(opts.die.offset, types.TypeNdx.from(data_types.items.len));
+                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, &data_types);
                     try data_types.append(.{
                         .size_bytes = try optionalAttribute(&opts, u32, .DW_AT_byte_size) orelse 0,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -762,185 +801,185 @@ fn mapDWARFToTarget(cu: *info.CompileUnit, dies: []const info.DIE) ParseError!Co
         }
     }
 
-    {
-        const z1 = trace.zoneN(@src(), "assign const types");
-        defer z1.end();
+    // {
+    //     const z1 = trace.zoneN(@src(), "assign const types");
+    //     defer z1.end();
 
-        for (const_types.items) |const_type| {
-            const data_type_ndx = dt: {
-                if (data_type_map.get(const_type.type_offset)) |dt_ndx| {
-                    if (dt_ndx.int() < data_types.items.len) {
-                        break :dt dt_ndx;
-                    }
-                }
+    //     for (const_types.items) |const_type| {
+    //         const data_type_ndx = dt: {
+    //             if (data_type_map.get(const_type.type_offset)) |dt_ndx| {
+    //                 if (dt_ndx.int() < data_types.items.len) {
+    //                     break :dt dt_ndx;
+    //                 }
+    //             }
 
-                log.errf("unable to find data type for const with offset 0x{x}", .{
-                    const_type.type_offset,
-                });
-                return error.InvalidDWARFInfo;
-            };
+    //             log.errf("unable to find data type for const with offset 0x{x}", .{
+    //                 const_type.type_offset,
+    //             });
+    //             return error.InvalidDWARFInfo;
+    //         };
 
-            const constant = &data_types.items[const_type.variable_ndx.int()];
-            constant.*.form.constant.data_type = data_type_ndx;
-        }
-    }
+    //         const constant = &data_types.items[const_type.variable_ndx.int()];
+    //         constant.*.form.constant.data_type = data_type_ndx;
+    //     }
+    // }
 
-    {
-        const z1 = trace.zoneN(@src(), "assign typedef types");
-        defer z1.end();
+    // {
+    //     const z1 = trace.zoneN(@src(), "assign typedef types");
+    //     defer z1.end();
 
-        for (typedef_types.items) |typedef_type| {
-            const data_type_ndx = dt: {
-                if (data_type_map.get(typedef_type.type_offset)) |dt_ndx| {
-                    if (dt_ndx.int() < data_types.items.len) {
-                        break :dt dt_ndx;
-                    }
-                }
+    //     for (typedef_types.items) |typedef_type| {
+    //         const data_type_ndx = dt: {
+    //             if (data_type_map.get(typedef_type.type_offset)) |dt_ndx| {
+    //                 if (dt_ndx.int() < data_types.items.len) {
+    //                     break :dt dt_ndx;
+    //                 }
+    //             }
 
-                log.errf("unable to find data type for typedef with offset 0x{x}", .{
-                    typedef_type.type_offset,
-                });
-                return error.InvalidDWARFInfo;
-            };
+    //             log.errf("unable to find data type for typedef with offset 0x{x}", .{
+    //                 typedef_type.type_offset,
+    //             });
+    //             return error.InvalidDWARFInfo;
+    //         };
 
-            const ptr = &data_types.items[typedef_type.variable_ndx.int()];
-            ptr.*.form.typedef.data_type = data_type_ndx;
-        }
-    }
+    //         const ptr = &data_types.items[typedef_type.variable_ndx.int()];
+    //         ptr.*.form.typedef.data_type = data_type_ndx;
+    //     }
+    // }
 
-    {
-        const z1 = trace.zoneN(@src(), "assign struct member types");
-        defer z1.end();
+    // {
+    //     const z1 = trace.zoneN(@src(), "assign struct member types");
+    //     defer z1.end();
 
-        // first, assign all types to members
-        for (struct_member_types.items) |member_type| {
-            const data_type_ndx = dt: {
-                if (data_type_map.get(member_type.type_offset)) |dt_ndx| {
-                    if (dt_ndx.int() < data_types.items.len) {
-                        break :dt dt_ndx;
-                    }
-                }
+    //     // first, assign all types to members
+    //     for (struct_member_types.items) |member_type| {
+    //         const data_type_ndx = dt: {
+    //             if (data_type_map.get(member_type.type_offset)) |dt_ndx| {
+    //                 if (dt_ndx.int() < data_types.items.len) {
+    //                     break :dt dt_ndx;
+    //                 }
+    //             }
 
-                log.errf("unable to find data type for member of struct with offset 0x{x}", .{
-                    member_type.type_offset,
-                });
-                return error.InvalidDWARFInfo;
-            };
+    //             log.errf("unable to find data type for member of struct with offset 0x{x}", .{
+    //                 member_type.type_offset,
+    //             });
+    //             return error.InvalidDWARFInfo;
+    //         };
 
-            struct_members.items[member_type.struct_ndx]
-                .members.items[member_type.member_ndx].data_type = data_type_ndx;
-        }
+    //         struct_members.items[member_type.struct_ndx]
+    //             .members.items[member_type.member_ndx].data_type = data_type_ndx;
+    //     }
 
-        // then, assign all member arrays to structs
-        for (struct_members.items) |*members| {
-            const data_type = &data_types.items[members.struct_ndx.int()];
-            switch (data_type.*.form) {
-                .@"struct" => |*s| s.members = try members.members.toOwnedSlice(),
-                .@"union" => |*u| u.members = try members.members.toOwnedSlice(),
-                else => unreachable,
-            }
-        }
-    }
+    //     // then, assign all member arrays to structs
+    //     for (struct_members.items) |*members| {
+    //         const data_type = &data_types.items[members.struct_ndx.int()];
+    //         switch (data_type.*.form) {
+    //             .@"struct" => |*s| s.members = try members.members.toOwnedSlice(),
+    //             .@"union" => |*u| u.members = try members.members.toOwnedSlice(),
+    //             else => unreachable,
+    //         }
+    //     }
+    // }
 
-    {
-        const z1 = trace.zoneN(@src(), "assign pointer types");
-        defer z1.end();
+    // {
+    //     const z1 = trace.zoneN(@src(), "assign pointer types");
+    //     defer z1.end();
 
-        for (pointer_types.items) |ptr_type| {
-            if (ptr_type.type_offset == null) continue;
+    //     for (pointer_types.items) |ptr_type| {
+    //         if (ptr_type.type_offset == null) continue;
 
-            const data_type_ndx = dt: {
-                if (data_type_map.get(ptr_type.type_offset.?)) |dt_ndx| {
-                    if (dt_ndx.int() < data_types.items.len) {
-                        break :dt dt_ndx;
-                    }
-                }
+    //         const data_type_ndx = dt: {
+    //             if (data_type_map.get(ptr_type.type_offset.?)) |dt_ndx| {
+    //                 if (dt_ndx.int() < data_types.items.len) {
+    //                     break :dt dt_ndx;
+    //                 }
+    //             }
 
-                log.errf("unable to find data type for pointer with offset 0x{x}", .{
-                    ptr_type.type_offset.?,
-                });
-                return error.InvalidDWARFInfo;
-            };
+    //             log.errf("unable to find data type for pointer with offset 0x{x}", .{
+    //                 ptr_type.type_offset.?,
+    //             });
+    //             return error.InvalidDWARFInfo;
+    //         };
 
-            const ptr = &data_types.items[ptr_type.variable_ndx.int()];
-            ptr.*.form.pointer.data_type = data_type_ndx;
+    //         const ptr = &data_types.items[ptr_type.variable_ndx.int()];
+    //         ptr.*.form.pointer.data_type = data_type_ndx;
 
-            // pointer name may or may not already be set at this time
-            const ptr_name = str_cache.get(ptr.name);
-            if (ptr_name == null or ptr_name.?.len == 0) {
-                const data_type = data_types.items[data_type_ndx.int()];
-                const item_type_name = str_cache.get(data_type.name) orelse types.Unknown;
-                const type_name = try types.PointerType.nameFromItemType(cu.opts.scratch, item_type_name);
-                ptr.*.name = try str_cache.add(type_name);
-            }
-        }
-    }
+    //         // pointer name may or may not already be set at this time
+    //         const ptr_name = str_cache.get(ptr.name);
+    //         if (ptr_name == null or ptr_name.?.len == 0) {
+    //             const data_type = data_types.items[data_type_ndx.int()];
+    //             const item_type_name = str_cache.get(data_type.name) orelse types.Unknown;
+    //             const type_name = try types.PointerType.nameFromItemType(cu.opts.scratch, item_type_name);
+    //             ptr.*.name = try str_cache.add(type_name);
+    //         }
+    //     }
+    // }
 
-    {
-        const z1 = trace.zoneN(@src(), "assign array types");
-        defer z1.end();
+    // {
+    //     const z1 = trace.zoneN(@src(), "assign array types");
+    //     defer z1.end();
 
-        for (array_types.items) |arr_type| {
-            const data_type_ndx = dt: {
-                if (data_type_map.get(arr_type.type_offset)) |dt_ndx| {
-                    if (dt_ndx.int() < data_types.items.len) {
-                        break :dt dt_ndx;
-                    }
-                }
+    //     for (array_types.items) |arr_type| {
+    //         const data_type_ndx = dt: {
+    //             if (data_type_map.get(arr_type.type_offset)) |dt_ndx| {
+    //                 if (dt_ndx.int() < data_types.items.len) {
+    //                     break :dt dt_ndx;
+    //                 }
+    //             }
 
-                log.errf("unable to find data type for array with offset 0x{x}", .{
-                    arr_type.type_offset,
-                });
-                return error.InvalidDWARFInfo;
-            };
+    //             log.errf("unable to find data type for array with offset 0x{x}", .{
+    //                 arr_type.type_offset,
+    //             });
+    //             return error.InvalidDWARFInfo;
+    //         };
 
-            const data_type = data_types.items[data_type_ndx.int()];
-            const item_type_name = str_cache.get(data_type.name) orelse types.Unknown;
-            const type_name = try types.ArrayType.nameFromItemType(cu.opts.scratch, item_type_name);
+    //         const data_type = data_types.items[data_type_ndx.int()];
+    //         const item_type_name = str_cache.get(data_type.name) orelse types.Unknown;
+    //         const type_name = try types.ArrayType.nameFromItemType(cu.opts.scratch, item_type_name);
 
-            const arr_ptr = &data_types.items[arr_type.variable_ndx.int()];
-            arr_ptr.*.form.array.element_type = data_type_ndx;
-            arr_ptr.*.name = try str_cache.add(type_name);
+    //         const arr_ptr = &data_types.items[arr_type.variable_ndx.int()];
+    //         arr_ptr.*.form.array.element_type = data_type_ndx;
+    //         arr_ptr.*.name = try str_cache.add(type_name);
 
-            arr_ptr.*.size_bytes = 0;
-            if (arr_ptr.form.array.len) |len| {
-                arr_ptr.*.size_bytes = data_type.size_bytes * len;
-            }
-        }
-    }
+    //         arr_ptr.*.size_bytes = 0;
+    //         if (arr_ptr.form.array.len) |len| {
+    //             arr_ptr.*.size_bytes = data_type.size_bytes * len;
+    //         }
+    //     }
+    // }
 
-    {
-        const z1 = trace.zoneN(@src(), "assign function variables");
-        defer z1.end();
+    // {
+    //     const z1 = trace.zoneN(@src(), "assign function variables");
+    //     defer z1.end();
 
-        assert(functions.items.len == function_variables.items.len);
-        for (functions.items, 0..) |*f, ndx| {
-            f.variables = try function_variables.items[ndx].toOwnedSlice();
-        }
-    }
+    //     assert(functions.items.len == function_variables.items.len);
+    //     for (functions.items, 0..) |*f, ndx| {
+    //         f.variables = try function_variables.items[ndx].toOwnedSlice();
+    //     }
+    // }
 
-    {
-        const z1 = trace.zoneN(@src(), "assign variable types");
-        defer z1.end();
+    // {
+    //     const z1 = trace.zoneN(@src(), "assign variable types");
+    //     defer z1.end();
 
-        for (variable_types.items) |vt| {
-            const data_type_ndx = dt: {
-                if (data_type_map.get(vt.type_offset)) |dt_ndx| {
-                    if (dt_ndx.int() < data_types.items.len) {
-                        break :dt dt_ndx;
-                    }
-                }
+    //     for (variable_types.items) |vt| {
+    //         const data_type_ndx = dt: {
+    //             if (data_type_map.get(vt.type_offset)) |dt_ndx| {
+    //                 if (dt_ndx.int() < data_types.items.len) {
+    //                     break :dt dt_ndx;
+    //                 }
+    //             }
 
-                log.errf("unable to find data type for variable with offset 0x{x}", .{
-                    vt.type_offset,
-                });
-                return error.InvalidDWARFInfo;
-            };
+    //             log.errf("unable to find data type for variable with offset 0x{x}", .{
+    //                 vt.type_offset,
+    //             });
+    //             return error.InvalidDWARFInfo;
+    //         };
 
-            const var_ptr = &variables.items[vt.variable_ndx.int()];
-            var_ptr.*.data_type = data_type_ndx;
-        }
-    }
+    //         const var_ptr = &variables.items[vt.variable_ndx.int()];
+    //         var_ptr.*.data_type = data_type_ndx;
+    //     }
+    // }
 
     return .{
         .strings = str_cache,
