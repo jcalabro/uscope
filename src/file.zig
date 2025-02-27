@@ -112,13 +112,14 @@ pub const Cache = struct {
         }
 
         const file_hash = hashAbsPath(abs_path);
-        if (self.get(file_hash) != null) {
-            // entry already exists
-            return file_hash;
-        }
 
         self.mu.lock();
         defer self.mu.unlock();
+
+        if (self.map.get(file_hash) != null) {
+            // entry already exists
+            return file_hash;
+        }
 
         // copy to the local allocator so this cache owns the memory
         const abs = try strings.clone(self.alloc, abs_path);
