@@ -27,8 +27,6 @@ pub fn hashAbsPath(abs_path: String) Hash {
     const z = trace.zone(@src());
     defer z.end();
 
-    // @TODO (jrc): just use XxHash3 rather than FNV once the self-hosted backend supports it
-    if (flags.LLVM) return std.hash.XxHash3.hash(0, abs_path);
     return std.hash.Fnv1a_32.hash(abs_path);
 }
 
