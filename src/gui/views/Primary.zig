@@ -244,7 +244,12 @@ pub fn update(self: *Self) State.View {
                 if (settings.settings.project.target.follow_output) |f| break :fo f;
                 break :fo settings.settings.global.display.follow_output;
             };
-            if (follow_output) zui.setScrollHereY(1);
+
+            // only auto-scroll as new text comes in if we are at the bottom of the window
+            const auto_scroll_threshold = 0.5;
+            if (zui.getScrollMaxY() - zui.getScrollY() <= auto_scroll_threshold) {
+                if (follow_output) zui.setScrollHereY(1);
+            }
         }
     }
 
