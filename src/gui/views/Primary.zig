@@ -240,12 +240,11 @@ pub fn update(self: *Self) State.View {
 
             zui.textWrapped("{s}", .{text});
 
-            // (gaweringo): Scroll output down if new text is added
-            // and the scrollbar is currently at the bottom
-            const auto_scroll_threshold = 0.5;
-            if (zui.getScrollMaxY() - zui.getScrollY() <= auto_scroll_threshold) {
-                zui.setScrollHereY(1);
-            }
+            const follow_output = fo: {
+                if (settings.settings.project.target.follow_output) |f| break :fo f;
+                break :fo settings.settings.global.display.follow_output;
+            };
+            if (follow_output) zui.setScrollHereY(1);
         }
     }
 
