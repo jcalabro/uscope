@@ -64,9 +64,10 @@ pub const Cache = struct {
 
             var it = self.map.iterator();
             while (it.next()) |item| self.alloc.free(item.value_ptr.*.abs_path);
+
+            self.map.deinit(self.alloc);
         }
 
-        self.map.deinit(self.alloc);
         self.alloc.destroy(self);
     }
 
@@ -142,7 +143,7 @@ test "file hashing and caching" {
 
     // @TODO (jrc): just use XxHash3 rather than FNV once the self-backend compiler supports it
     // generated using a 3rd party XxHash3/FNV1A32 implementation
-    const hash_val = if (flags.LLVM) 0xc75d51990100f90b else 0xebcfc00e;
+    const hash_val = 0xebcfc00e;
 
     for (0..100) |_| {
         const h = try cache.add(str);
