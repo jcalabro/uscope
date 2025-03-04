@@ -316,6 +316,7 @@ pub fn load(opts: *const LoadOpts) LoadError!*types.Target {
         .addr_size = .four,
         .unwinder = undefined,
         .compile_units = undefined,
+        .data_types = undefined,
         .strings = try strings.Cache.init(opts.perm),
     };
 
@@ -787,7 +788,6 @@ fn findCompileUnitCopyAllocationFailures(alloc: Allocator, cu: types.CompileUnit
     alloc.free(dst.ranges);
     for (dst.sources) |s| alloc.free(s.statements);
     alloc.free(dst.sources);
-    alloc.free(dst.data_types);
     alloc.free(dst.variables);
     for (dst.functions.functions) |f| f.deinit(alloc);
     alloc.free(dst.functions.functions);

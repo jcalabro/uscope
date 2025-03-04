@@ -20,6 +20,7 @@ pub const Params = struct {
     adapter: *Adapter,
     pid: types.PID,
     cu: *const types.CompileUnit,
+    data_types: []const types.DataType,
     target_strings: *strings.Cache,
 
     data_type: *const types.DataType,
@@ -133,7 +134,7 @@ pub fn renderSlice(
         for (params.data_type.form.@"struct".members) |m| {
             const name_str = params.target_strings.get(m.name) orelse continue;
             if (strings.eql(data_name, name_str)) {
-                var base_data_type = params.cu.data_types[m.data_type.int()];
+                var base_data_type = params.data_types[m.data_type.int()];
 
                 // follow pointers and typedefs to their base type
                 var done = false;
@@ -141,12 +142,12 @@ pub fn renderSlice(
                     switch (base_data_type.form) {
                         .pointer => |p| {
                             if (p.data_type) |ptr_type|
-                                base_data_type = params.cu.data_types[ptr_type.int()];
+                                base_data_type = params.data_types[ptr_type.int()];
                         },
 
                         .typedef => |td| {
                             if (td.data_type) |td_type|
-                                base_data_type = params.cu.data_types[td_type.int()];
+                                base_data_type = params.data_types[td_type.int()];
                         },
 
                         else => done = true,
@@ -182,7 +183,7 @@ pub fn renderSlice(
     }
 
     // dereference the pointer (i.e. []u32 -> *u32 -> u32)
-    const ptr_t = params.cu.data_types[ptr.data_type.int()];
+    const ptr_t = params.data_types[ptr.data_type.int()];
     const ptr_data_type = switch (ptr_t.form) {
         .pointer => |p| p.data_type,
         else => return error.InvalidDataType,

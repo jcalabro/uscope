@@ -27,7 +27,7 @@ pub fn hashAbsPath(abs_path: String) Hash {
     const z = trace.zone(@src());
     defer z.end();
 
-    return std.hash.Fnv1a_32.hash(abs_path);
+    return std.hash.Fnv1a_64.hash(abs_path);
 }
 
 pub const SourceFile = struct {
