@@ -40,6 +40,10 @@ const Global = struct {
             try global.log.mapEntry(allocator, entry);
             return;
         }
+        if (mem.eql(u8, entry.section, "display")) {
+            try global.display.mapEntry(allocator, entry);
+            return;
+        }
         if (mem.eql(u8, entry.section, "rust")) {
             try global.rust.mapEntry(allocator, entry);
             return;
@@ -95,6 +99,22 @@ fn logLevelFromStr(alloc: Allocator, level: []const u8) !logging.Level {
 const Display = struct {
     /// How many lines of program output to retain on each run (larger values use more memory)
     output_bytes: usize = 1024 * 8,
+
+    /// Whether or not to automatically follow the latest program stdout/stderr in the output window.
+    /// Note that this is the global default setting, but this can also be overwritten on a per-project
+    /// basis.
+    follow_output: bool = true,
+
+    fn mapEntry(self: *@This(), _: Allocator, entry: *const IniEntry) !void {
+        if (mem.eql(u8, entry.key, "output_bytes")) {
+            self.output_bytes = try fmt.parseInt(usize, entry.val, 10);
+            return;
+        }
+        if (mem.eql(u8, entry.key, "follow_output")) {
+            self.follow_output = try parseBool(entry.val);
+            return;
+        }
+    }
 };
 
 /// Rust builds to special paths on the user's system, so progammers using rust need
@@ -205,6 +225,10 @@ const Target = struct {
     /// The default set of expressions to use in the watch window
     watch_expressions: [][]const u8 = &.{},
 
+    /// Whether or not to automatically follow the latest program stdout/stderr in the output window.
+    /// If supplied, this overrides the global setting.
+    follow_output: ?bool = null,
+
     fn mapEntry(self: *@This(), allocator: Allocator, entry: *const IniEntry) !void {
         if (mem.eql(u8, entry.key, "path")) {
             self.path = try allocString(allocator, entry.val);
@@ -228,6 +252,10 @@ const Target = struct {
         }
         if (mem.eql(u8, entry.key, "watch_expressions")) {
             self.watch_expressions = try allocStringSlice(allocator, entry.val);
+            return;
+        }
+        if (mem.eql(u8, entry.key, "follow_output")) {
+            self.follow_output = try parseBool(entry.val);
             return;
         }
     }

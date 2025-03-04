@@ -65,7 +65,13 @@ pub fn setKeyboardFocusHere(_: i32) void {  }
 
 pub fn getMousePos() zui.ImVec2 { return .{}; }
 
+pub fn getScrollY() f32 { return 0; }
+
 pub fn setScrollYFloat(_: f32) void {  }
+
+pub fn getScrollMaxY() f32 { return 0; }
+
+pub fn setScrollHereY(_: f32) void {  }
 
 pub fn beginTable(_: [:0]const u8, _: zui.BeginTable) bool { return true; }
 
