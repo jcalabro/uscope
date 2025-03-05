@@ -1009,6 +1009,16 @@ fn mapDWARFToTarget(
         }
     }
 
+    {
+        const z1 = trace.zoneN(@src(), "assign function variables");
+        defer z1.end();
+
+        assert(functions.items.len == function_variables.items.len);
+        for (functions.items, 0..) |*f, ndx| {
+            f.variables = try function_variables.items[ndx].toOwnedSlice();
+        }
+    }
+
     return PartiallyReadyCompileUnit{
         .strings = str_cache,
         .delayed_refs = delayed_refs,
