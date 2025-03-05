@@ -142,9 +142,7 @@ test "file hashing and caching" {
 
     const str = "/home/jcalabro/test/file.txt";
 
-    // @TODO (jrc): just use XxHash3 rather than FNV once the self-backend compiler supports it
-    // generated using a 3rd party XxHash3/FNV1A32 implementation
-    const hash_val = 0xebcfc00e;
+    const hash_val = 0xebf9ad2433faf02e;
 
     for (0..100) |_| {
         const h = try cache.add(str);
