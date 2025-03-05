@@ -528,12 +528,8 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
         }
 
         for (data_types.items) |dt| {
-            var dt_copy = try data_types.addOne();
+            var dt_copy = try perm_data_types.addOne();
             try dt_copy.copyFrom(perm_alloc, dt);
-
-            // @TODO (jrc): figure out this bug
-            log.debugf("OK: {s}", .{target.strings.get(dt.name).?});
-            log.flush();
         }
 
         target.data_types = try perm_data_types.toOwnedSlice();
