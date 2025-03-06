@@ -913,10 +913,6 @@ fn mapDWARFToTarget(
                 },
 
                 .DW_TAG_array_type => {
-                    if (opts.die.offset == 0x1a5) {
-                        log.debug("HERE!!!");
-                    }
-
                     if (try optionalAttributeWithForm(&opts, Offset, .DW_AT_type)) |type_offset| {
                         try delayed_refs.array_types.append(cu.opts.scratch, .{
                             .is_global_offset = type_offset.isGlobalOffset(),
