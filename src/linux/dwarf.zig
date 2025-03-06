@@ -362,8 +362,9 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
                         }
                     }
 
-                    log.errf("unable to find data type for const with offset 0x{x}", .{
+                    log.errf("unable to find data type for const with offset 0x{x} in compile unit with offset 0x{x}", .{
                         const_type.type_offset,
+                        partial_cu.delayed_refs.offset_range.low,
                     });
                     return error.InvalidDWARFInfo;
                 };
@@ -375,14 +376,16 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
             // Typedef types
             for (partial_cu.delayed_refs.typedef_types.items) |typedef_type| {
                 const data_type_ndx = dt: {
-                    if (partial_cu.delayed_refs.data_type_map.get(typedef_type.type_offset)) |dt_ndx| {
+                    const offset_map = mapForVariableTypeEntry(partial_compile_units.items, partial_cu, typedef_type);
+                    if (offset_map.get(typedef_type.type_offset)) |dt_ndx| {
                         if (dt_ndx.int() < data_types.items.len) {
                             break :dt dt_ndx;
                         }
                     }
 
-                    log.errf("unable to find data type for typedef with offset 0x{x}", .{
+                    log.errf("unable to find data type for typedef with offset 0x{x} in compile unit with offset 0x{x}", .{
                         typedef_type.type_offset,
+                        partial_cu.delayed_refs.offset_range.low,
                     });
                     return error.InvalidDWARFInfo;
                 };
@@ -391,18 +394,20 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
                 td.*.form.typedef.data_type = data_type_ndx;
             }
 
-            // Struct member types
+            // Struct/class/union member types
             // first, assign all types to members
             for (partial_cu.delayed_refs.struct_member_types.items) |member_type| {
                 const data_type_ndx = dt: {
-                    if (partial_cu.delayed_refs.data_type_map.get(member_type.type_offset)) |dt_ndx| {
+                    const offset_map = mapForVariableTypeEntry(partial_compile_units.items, partial_cu, member_type);
+                    if (offset_map.get(member_type.type_offset)) |dt_ndx| {
                         if (dt_ndx.int() < data_types.items.len) {
                             break :dt dt_ndx;
                         }
                     }
 
-                    log.errf("unable to find data type for member of struct with offset 0x{x}", .{
+                    log.errf("unable to find data type for struct member with offset 0x{x} in compile unit with offset 0x{x}", .{
                         member_type.type_offset,
+                        partial_cu.delayed_refs.offset_range.low,
                     });
                     return error.InvalidDWARFInfo;
                 };
@@ -410,8 +415,7 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
                 partial_cu.delayed_refs.struct_members.items[member_type.struct_ndx]
                     .members.items[member_type.member_ndx].data_type = data_type_ndx;
             }
-
-            // then, assign all member arrays to structs
+            // then, assign all member arrays to structs/classes/unions
             for (partial_cu.delayed_refs.struct_members.items) |*members| {
                 const data_type = &data_types.items[members.struct_ndx.int()];
                 switch (data_type.*.form) {
@@ -432,8 +436,9 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
                         }
                     }
 
-                    log.errf("unable to find data type for pointer with offset 0x{x}", .{
+                    log.errf("unable to find data type for pointer with offset 0x{x} in compile unit with offset 0x{x}", .{
                         ptr_type.type_offset.?,
+                        partial_cu.delayed_refs.offset_range.low,
                     });
                     return error.InvalidDWARFInfo;
                 };
@@ -460,8 +465,9 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
                         }
                     }
 
-                    log.errf("unable to find data type for array with offset 0x{x}", .{
+                    log.errf("unable to find data type for array with offset 0x{x} in compile unit with offset 0x{x}", .{
                         arr_type.type_offset,
+                        partial_cu.delayed_refs.offset_range.low,
                     });
                     return error.InvalidDWARFInfo;
                 };
@@ -483,14 +489,16 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
             // Variable types
             for (partial_cu.delayed_refs.variable_types.items) |vt| {
                 const data_type_ndx = dt: {
-                    if (partial_cu.delayed_refs.data_type_map.get(vt.type_offset)) |dt_ndx| {
+                    const offset_map = mapForVariableTypeEntry(partial_compile_units.items, partial_cu, vt);
+                    if (offset_map.get(vt.type_offset)) |dt_ndx| {
                         if (dt_ndx.int() < data_types.items.len) {
                             break :dt dt_ndx;
                         }
                     }
 
-                    log.errf("unable to find data type for variable with offset 0x{x}", .{
+                    log.errf("unable to find data type for variable with offset 0x{x} in compile unit with offset 0x{x}", .{
                         vt.type_offset,
+                        partial_cu.delayed_refs.offset_range.low,
                     });
                     return error.InvalidDWARFInfo;
                 };
@@ -538,6 +546,8 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
     target.unwinder = .{ .cies = try frame.loadTable(perm_alloc, opts) };
 }
 
+const OffsetTypeMap = AutoHashMapUnmanaged(Offset, types.TypeNdx);
+
 /// DWARF often gives us type info out-of-order, so we need to track which data needs its
 /// references resolved once all compile units have been parsed. Much of the time, we could
 /// just resolve all references, but some compilers (i.e. Go) use FormClass.reference, which
@@ -558,8 +568,13 @@ const DelayedReferences = struct {
     /// The start offset of this compile unit
     offset_range: OffsetRange,
 
-    /// Reverse mapping of Offset -> type index
-    data_type_map: AutoHashMapUnmanaged(Offset, types.TypeNdx) = .{},
+    /// Reverse mapping of Offset -> type index within a single compile unit. The Offset
+    /// in this case is an offset from the start of the compile unit DIE.
+    data_type_map: OffsetTypeMap = .{},
+
+    /// Reverse mapping of Offset -> type index across all compile units. The Offset
+    /// in this case is an offset from the start of the .debug_info section.
+    global_data_type_map: OffsetTypeMap = .{},
 
     variable_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
     array_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
@@ -571,20 +586,26 @@ const DelayedReferences = struct {
 
     fn addDataType(
         self: *@This(),
-        scratch: Allocator,
+        cu: *const info.CompileUnit,
         die: *const info.DIE,
         data_types: *const ArrayList(types.DataType),
     ) Allocator.Error!void {
         try self.data_type_map.put(
-            scratch,
+            cu.opts.scratch,
             die.offset,
+            types.TypeNdx.from(data_types.items.len),
+        );
+
+        try self.global_data_type_map.put(
+            cu.opts.scratch,
+            cu.info_offset + die.offset,
             types.TypeNdx.from(data_types.items.len),
         );
     }
 };
 
-// We accumulate DW_AT_type (an offset) mapped to the index in the variables array in
-// this temporary buffer so we can stitch type information together after the first pass
+/// We accumulate DW_AT_type (an offset) mapped to the index in the variables array in
+/// this temporary buffer so we can stitch type information together after the first pass
 const VariableTypeEntry = struct {
     /// Whether or not `type_offset` is an offset from the start of the compile unit or
     /// an offset from the start of the .debug_info section
@@ -592,6 +613,29 @@ const VariableTypeEntry = struct {
     type_offset: Offset,
     variable_ndx: types.VariableNdx,
 };
+
+/// Find the appropriate reverse mapping collection (Offset -> TypeNdx) for the given
+/// variable type. This can either be the current `PartiallyReadyCompileUnit`, or a
+/// different one altogether if the variable's type references a type definition in a
+/// different CU.
+fn mapForVariableTypeEntry(
+    partial_compile_units: []PartiallyReadyCompileUnit,
+    partial_cu: *const PartiallyReadyCompileUnit,
+    type_entry: anytype,
+) OffsetTypeMap {
+    var containing_cu = partial_cu;
+    for (partial_compile_units) |*pcu| {
+        if (pcu.delayed_refs.offset_range.contains(type_entry.type_offset)) {
+            containing_cu = pcu;
+            break;
+        }
+    }
+
+    return switch (type_entry.is_global_offset) {
+        false => containing_cu.delayed_refs.data_type_map,
+        true => containing_cu.delayed_refs.global_data_type_map,
+    };
+}
 
 /// Pointers types are nullable in the case that a pointer is opaque
 /// (i.e. for *u8, we want to set its reference type to u8)
@@ -601,6 +645,9 @@ const PointerTypeEntry = struct {
 };
 
 const StructMemberTypeEntry = struct {
+    /// Whether or not `type_offset` is an offset from the start of the compile unit or
+    /// an offset from the start of the .debug_info section
+    is_global_offset: bool,
     /// the offset of the type of the member
     type_offset: Offset,
     /// the offset to the struct in the struct_members list
@@ -730,7 +777,7 @@ fn mapDWARFToTarget(
 
                 // type declarations for function pointers
                 .DW_TAG_subroutine_type => {
-                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, data_types);
+                    try delayed_refs.addDataType(cu, opts.die, data_types);
                     try data_types.append(.{
                         .size_bytes = opts.cu.header.addr_size.bytes(),
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -772,7 +819,7 @@ fn mapDWARFToTarget(
                 },
 
                 .DW_TAG_unspecified_type => {
-                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, data_types);
+                    try delayed_refs.addDataType(cu, opts.die, data_types);
                     try data_types.append(.{
                         .size_bytes = 0,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -781,7 +828,7 @@ fn mapDWARFToTarget(
                 },
 
                 .DW_TAG_base_type => {
-                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, data_types);
+                    try delayed_refs.addDataType(cu, opts.die, data_types);
                     try data_types.append(.{
                         .size_bytes = try requiredAttribute(&opts, u32, .DW_AT_byte_size),
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -800,7 +847,7 @@ fn mapDWARFToTarget(
                         });
                     }
 
-                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, data_types);
+                    try delayed_refs.addDataType(cu, opts.die, data_types);
                     try data_types.append(.{
                         .size_bytes = 0, // callers must follow the const to get the size of this type
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -821,7 +868,7 @@ fn mapDWARFToTarget(
                         });
                     }
 
-                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, data_types);
+                    try delayed_refs.addDataType(cu, opts.die, data_types);
                     try data_types.append(.{
                         .size_bytes = 0, // callers must follow the typedef to get the size of this type
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -851,7 +898,7 @@ fn mapDWARFToTarget(
 
                     const num_bytes = cu.header.addr_size.bytes();
 
-                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, data_types);
+                    try delayed_refs.addDataType(cu, opts.die, data_types);
                     try data_types.append(.{
                         .size_bytes = try optionalAttribute(&opts, u32, .DW_AT_byte_size) orelse num_bytes,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -893,7 +940,7 @@ fn mapDWARFToTarget(
                         break :l null; // array len is unknown
                     };
 
-                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, data_types);
+                    try delayed_refs.addDataType(cu, opts.die, data_types);
                     try data_types.append(.{
                         .size_bytes = 0,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -932,8 +979,15 @@ fn mapDWARFToTarget(
                             .offset_bytes = try optionalAttribute(&member_opts, u32, .DW_AT_data_member_location) orelse 0,
                             .data_type = undefined, // will be assigned later
                         });
+
+                        const type_offset = switch (language) {
+                            .Go => try requiredAttributeWithForm(&member_opts, Offset, .DW_AT_go_kind),
+                            else => try requiredAttributeWithForm(&member_opts, Offset, .DW_AT_type),
+                        };
+
                         try delayed_refs.struct_member_types.append(cu.opts.scratch, .{
-                            .type_offset = try requiredAttribute(&member_opts, Offset, .DW_AT_type),
+                            .is_global_offset = type_offset.isGlobalOffset(),
+                            .type_offset = type_offset.data,
                             .struct_ndx = delayed_refs.struct_members.items.len,
                             .member_ndx = member_ndx,
                         });
@@ -948,7 +1002,7 @@ fn mapDWARFToTarget(
                         .members = members,
                     });
 
-                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, data_types);
+                    try delayed_refs.addDataType(cu, opts.die, data_types);
                     try data_types.append(.{
                         .size_bytes = try optionalAttribute(&opts, u32, .DW_AT_byte_size) orelse 0,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -992,7 +1046,7 @@ fn mapDWARFToTarget(
                         assert(value_ndx <= max_values - 1);
                     }
 
-                    try delayed_refs.addDataType(cu.opts.scratch, opts.die, data_types);
+                    try delayed_refs.addDataType(cu, opts.die, data_types);
                     try data_types.append(.{
                         .size_bytes = try optionalAttribute(&opts, u32, .DW_AT_byte_size) orelse 0,
                         .name = try parseAndCacheString(&opts, .DW_AT_name, str_cache),
@@ -1070,12 +1124,12 @@ fn AttributeWithForm(comptime T: type) type {
     };
 }
 
-pub fn requiredAttribute(
+pub fn requiredAttributeWithForm(
     opts: *const AttributeParseOpts,
     comptime T: type,
     name: consts.AttributeName,
-) ParseError!T {
-    if (try optionalAttribute(opts, T, name)) |v| return v;
+) ParseError!AttributeWithForm(T) {
+    if (try optionalAttributeWithForm(opts, T, name)) |v| return v;
 
     log.errf("required attribute {s} of type {any} not found on DIE of type {s} with offset 0x{x} in compile unit at offset 0x{x}", .{
         @tagName(name),
@@ -1085,6 +1139,15 @@ pub fn requiredAttribute(
         opts.cu.info_offset,
     });
     return error.InvalidDWARFInfo;
+}
+
+pub fn requiredAttribute(
+    opts: *const AttributeParseOpts,
+    comptime T: type,
+    name: consts.AttributeName,
+) ParseError!T {
+    const res = try requiredAttributeWithForm(opts, T, name);
+    return res.data;
 }
 
 /// Only strings allocate; all numeric values are just returned on the stack. If a string
