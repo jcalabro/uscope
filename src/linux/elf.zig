@@ -704,11 +704,6 @@ test "load ELF files" {
             .cu_lang = .DW_LANG_Go,
         },
         .{
-            .path = "./assets/rustloop/out",
-            .pie = true,
-            .cu_lang = .DW_LANG_Rust,
-        },
-        .{
             .path = "./assets/zigloop/out",
             .cu_lang = .DW_LANG_Zig,
         },
@@ -719,11 +714,18 @@ test "load ELF files" {
     });
 
     if (!flags.CI) {
-        // @NOTE (jrc): we test jai in local builds while the
-        // compiler it still in beta
+        // @NOTE (jrc): we test jai in local builds while the compiler it still in beta
         try cases.append(.{
             .path = "./assets/jailoop/out",
             .cu_lang = .DW_LANG_Jai,
+        });
+
+        // @NOTE (jrc): there's an issue loading rustloop on the CI boxes, but it works locally.
+        // Rust isn't supported yet, so leaving this out of CI.
+        try cases.append(.{
+            .path = "./assets/rustloop/out",
+            .pie = true,
+            .cu_lang = .DW_LANG_Rust,
         });
     }
 
