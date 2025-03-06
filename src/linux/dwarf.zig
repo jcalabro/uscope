@@ -356,7 +356,8 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
             // Const types
             for (partial_cu.delayed_refs.const_types.items) |const_type| {
                 const data_type_ndx = dt: {
-                    if (partial_cu.delayed_refs.data_type_map.get(const_type.type_offset)) |dt_ndx| {
+                    const offset_map = try mapForVariableTypeEntry(partial_compile_units.items, partial_cu, const_type);
+                    if (offset_map.get(const_type.type_offset)) |dt_ndx| {
                         if (dt_ndx.int() < data_types.items.len) {
                             break :dt dt_ndx;
                         }
@@ -409,7 +410,6 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
                         member_type.type_offset,
                         partial_cu.delayed_refs.offset_range.low,
                     });
-                    _ = try mapForVariableTypeEntry(partial_compile_units.items, partial_cu, member_type);
                     return error.InvalidDWARFInfo;
                 };
 
@@ -431,7 +431,8 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
                 if (ptr_type.type_offset == null) continue;
 
                 const data_type_ndx = dt: {
-                    if (partial_cu.delayed_refs.data_type_map.get(ptr_type.type_offset.?)) |dt_ndx| {
+                    const offset_map = try mapForVariableTypeEntry(partial_compile_units.items, partial_cu, ptr_type);
+                    if (offset_map.get(ptr_type.type_offset.?)) |dt_ndx| {
                         if (dt_ndx.int() < data_types.items.len) {
                             break :dt dt_ndx;
                         }
@@ -460,7 +461,8 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
             // Array types
             for (partial_cu.delayed_refs.array_types.items) |arr_type| {
                 const data_type_ndx = dt: {
-                    if (partial_cu.delayed_refs.data_type_map.get(arr_type.type_offset)) |dt_ndx| {
+                    const offset_map = try mapForVariableTypeEntry(partial_compile_units.items, partial_cu, arr_type);
+                    if (offset_map.get(arr_type.type_offset)) |dt_ndx| {
                         if (dt_ndx.int() < data_types.items.len) {
                             break :dt dt_ndx;
                         }
@@ -626,22 +628,30 @@ fn mapForVariableTypeEntry(
 ) error{InvalidDWARFInfo}!OffsetTypeMap {
     if (!type_entry.is_global_offset) return partial_cu.delayed_refs.data_type_map;
 
+    const offset = o: {
+        if (comptime @TypeOf(type_entry.type_offset) == ?Offset) {
+            break :o type_entry.type_offset.?;
+        } else {
+            break :o type_entry.type_offset;
+        }
+    };
+
     for (partial_compile_units) |pcu| {
-        if (pcu.delayed_refs.offset_range.contains(type_entry.type_offset)) {
+        if (pcu.delayed_refs.offset_range.contains(offset)) {
             return pcu.delayed_refs.global_data_type_map;
         }
     }
 
-    log.errf(
-        "no compilation unit found when looking up type with global offset 0x{x}",
-        .{type_entry.type_offset},
-    );
+    log.errf("no compilation unit found for type with global offset 0x{x}", .{offset});
     return error.InvalidDWARFInfo;
 }
 
 /// Pointers types are nullable in the case that a pointer is opaque
 /// (i.e. for *u8, we want to set its reference type to u8)
 const PointerTypeEntry = struct {
+    /// Whether or not `type_offset` is an offset from the start of the compile unit or
+    /// an offset from the start of the .debug_info section
+    is_global_offset: bool,
     type_offset: ?Offset,
     variable_ndx: types.VariableNdx,
 };
@@ -893,8 +903,10 @@ fn mapDWARFToTarget(
                 => {
                     // DW_TAG_pointer_type without a DW_AT_type just tells us how large
                     // a pointer size is on this target, which we don't care about
+                    const ptr_type = try optionalAttributeWithForm(&opts, Offset, .DW_AT_type);
                     try delayed_refs.pointer_types.append(cu.opts.scratch, .{
-                        .type_offset = try optionalAttribute(&opts, Offset, .DW_AT_type),
+                        .is_global_offset = if (ptr_type) |p| p.isGlobalOffset() else false,
+                        .type_offset = if (ptr_type) |p| p.data else null,
                         .variable_ndx = types.VariableNdx.from(data_types.items.len),
                     });
 
@@ -982,9 +994,14 @@ fn mapDWARFToTarget(
                             .data_type = undefined, // will be assigned later
                         });
 
-                        const type_offset = switch (language) {
-                            .Go => try requiredAttributeWithForm(&member_opts, Offset, .DW_AT_go_kind),
-                            else => try requiredAttributeWithForm(&member_opts, Offset, .DW_AT_type),
+                        const type_offset = to: {
+                            if (language == .Go) {
+                                if (try optionalAttributeWithForm(&member_opts, Offset, .DW_AT_go_kind)) |go_kind| {
+                                    break :to go_kind;
+                                }
+                            }
+
+                            break :to try requiredAttributeWithForm(&member_opts, Offset, .DW_AT_type);
                         };
 
                         try delayed_refs.struct_member_types.append(cu.opts.scratch, .{
