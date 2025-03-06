@@ -134,7 +134,7 @@ pub const Attr = struct {
             .DW_FORM_ref_addr => {
                 _ = try cu.readInfoOffset();
                 val.form = FormOffset.formType();
-                val.class = .reference;
+                val.class = .global_reference;
             },
             .DW_FORM_ref1 => {
                 _ = try dwarf.read(cu.info_r, u8);
@@ -765,6 +765,12 @@ pub const FormClass = enum(u8) {
     reference,
     string,
     stroffsetptr,
+
+    /// @NOTE (jrc): This is not a real class in the DWARF spec. I added it to differentiate
+    /// between `DW_FORM_ref_addr` and `DW_FORM_ref*`, which is needed when determining if an
+    /// offset is global (from the start of the `.debug_info` section), or local (from the start
+    /// of the compile unit DIE).
+    global_reference,
 
     pub fn contents(self: @This(), cu: *const info.CompileUnit, offset: Offset) error{InvalidDWARFInfo}![]const u8 {
         const buf = switch (self) {

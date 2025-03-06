@@ -32,7 +32,7 @@ pub fn hash(str: String) Hash {
     const z = trace.zone(@src());
     defer z.end();
 
-    return std.hash.Fnv1a_32.hash(str);
+    return std.hash.Fnv1a_64.hash(str);
 }
 
 /// A simple data structure used to do string interning

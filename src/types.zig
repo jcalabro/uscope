@@ -242,6 +242,9 @@ pub const Target = struct {
     /// information on disk
     compile_units: []const CompileUnit,
 
+    /// The full list of all known data types in the program
+    data_types: []const DataType,
+
     /// Finds and returns a pointer to the CompileUnit that contains the given address. This function
     /// does not have knowledge of the subordinate's load address for PIE binaries.
     pub fn compileUnitForAddr(self: Self, addr: Address) ?CompileUnit {
@@ -343,14 +346,11 @@ pub const CompileUnit = struct {
     /// The list of the source files that were used in this compile unit
     sources: []const SourceFile,
 
-    /// The list of all data types declared within this compile unit
-    data_types: []const DataType,
-
     /// The list of functions and their address ranges in this compile unit
     functions: Functions,
 
     /// All variables declared at any point in this compile unit
-    variables: []const Variable,
+    variables: []Variable,
 
     /// Returns true if there is an address range in this compile unit that contains `addr`
     pub fn containsAddress(self: Self, addr: Address) bool {
@@ -374,30 +374,6 @@ pub const CompileUnit = struct {
             .file_hash = s.file_hash,
             .statements = try safe.copySlice(SourceStatement, alloc, s.statements),
         });
-
-        var data_types = ArrayListUnmanaged(DataType){};
-        errdefer {
-            for (data_types.items) |dt| {
-                switch (dt.form) {
-                    .@"struct" => |s| alloc.free(s.members),
-                    .@"union" => |u| alloc.free(u.members),
-                    .@"enum" => |e| alloc.free(e.values),
-                    else => {},
-                }
-            }
-            data_types.deinit(alloc);
-        }
-        for (src.data_types) |src_dt| {
-            var copy_dt = src_dt;
-            switch (src_dt.form) {
-                .@"struct" => |s| copy_dt.form.@"struct".members = try safe.copySlice(MemberType, alloc, s.members),
-                .@"union" => |u| copy_dt.form.@"union".members = try safe.copySlice(MemberType, alloc, u.members),
-                .@"enum" => |e| copy_dt.form.@"enum".values = try safe.copySlice(EnumValue, alloc, e.values),
-                else => {},
-            }
-            try data_types.append(alloc, copy_dt);
-        }
-        // const data_types = try safe.copySlice(DataType, alloc, src.data_types);
 
         const variables = try safe.copySlice(Variable, alloc, src.variables);
         errdefer alloc.free(variables);
@@ -439,7 +415,6 @@ pub const CompileUnit = struct {
             .address_size = src.address_size,
             .ranges = ranges,
             .sources = try sources.toOwnedSlice(alloc),
-            .data_types = try data_types.toOwnedSlice(alloc),
             .variables = variables,
             .functions = .{
                 .functions = try functions.toOwnedSlice(alloc),
@@ -665,6 +640,8 @@ pub const Function = struct {
 
 /// A type declaration within a CompileUnit
 pub const DataType = struct {
+    const Self = @This();
+
     /// The number of bytes required to store a variable of this type
     size_bytes: u64,
 
@@ -673,6 +650,25 @@ pub const DataType = struct {
 
     /// The form of the variable (primitive, array, struct, etc.)
     form: DataTypeForm,
+
+    pub fn deinit(self: Self, alloc: Allocator) void {
+        switch (self.form) {
+            .@"struct" => |s| alloc.free(s.members),
+            .@"union" => |u| alloc.free(u.members),
+            .@"enum" => |e| alloc.free(e.values),
+            else => {},
+        }
+    }
+
+    pub fn copyFrom(dst: *Self, alloc: Allocator, src: Self) Allocator.Error!void {
+        dst.* = src;
+        switch (src.form) {
+            .@"struct" => |s| dst.form.@"struct".members = try safe.copySlice(MemberType, alloc, s.members),
+            .@"union" => |u| dst.form.@"union".members = try safe.copySlice(MemberType, alloc, u.members),
+            .@"enum" => |e| dst.form.@"enum".values = try safe.copySlice(EnumValue, alloc, e.values),
+            else => {},
+        }
+    }
 };
 
 /// One of the many forms a variable could take

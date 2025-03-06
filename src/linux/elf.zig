@@ -316,6 +316,7 @@ pub fn load(opts: *const LoadOpts) LoadError!*types.Target {
         .addr_size = .four,
         .unwinder = undefined,
         .compile_units = undefined,
+        .data_types = undefined,
         .strings = try strings.Cache.init(opts.perm),
     };
 
@@ -674,6 +675,10 @@ test "load ELF files" {
             .cu_lang = .DW_LANG_C11,
         },
         .{
+            .path = "./assets/cinline/out",
+            .cu_lang = .DW_LANG_C11,
+        },
+        .{
             // should follow symlinks
             .path = "./assets/test_files/symlink_linux_x86-64_cloop_out",
             .cu_lang = .DW_LANG_C11,
@@ -694,40 +699,33 @@ test "load ELF files" {
             .path = "./assets/cprint/out",
             .cu_lang = .DW_LANG_C11,
         },
-        // .{
-        //     .path = "./assets/goloop/out",
-        //     .cu_lang = .DW_LANG_Go,
-        // },
-        // .{
-        //     .path = "./assets/rustloop/out",
-        //     .pie = true,
-        //     .cu_lang = .DW_LANG_Rust,
-        // },
+        .{
+            .path = "./assets/goloop/out",
+            .cu_lang = .DW_LANG_Go,
+        },
         .{
             .path = "./assets/zigloop/out",
             .cu_lang = .DW_LANG_Zig,
         },
+        .{
+            .path = "./assets/odinloop/out",
+            .cu_lang = .DW_LANG_Odin,
+        },
     });
 
     if (!flags.CI) {
-        // @NOTE (jrc): we test jai in local builds while the
-        // compiler it still in beta
+        // @NOTE (jrc): we test jai in local builds while the compiler it still in beta
         try cases.append(.{
             .path = "./assets/jailoop/out",
             .cu_lang = .DW_LANG_Jai,
         });
 
-        // @TODO (jrc): fix cinline in CI (it works locally)
+        // @NOTE (jrc): there's an issue loading rustloop on the CI boxes, but it works locally.
+        // Rust isn't supported yet, so leaving this out of CI.
         try cases.append(.{
-            .path = "./assets/cinline/out",
-            .cu_lang = .DW_LANG_C11,
-        });
-
-        // There appears to be a bug in odin related to libedit
-        // https://github.com/odin-lang/Odin/issues/2271
-        try cases.append(.{
-            .path = "./assets/odinloop/out",
-            .cu_lang = .DW_LANG_Odin,
+            .path = "./assets/rustloop/out",
+            .pie = true,
+            .cu_lang = .DW_LANG_Rust,
         });
     }
 
@@ -787,7 +785,6 @@ fn findCompileUnitCopyAllocationFailures(alloc: Allocator, cu: types.CompileUnit
     alloc.free(dst.ranges);
     for (dst.sources) |s| alloc.free(s.statements);
     alloc.free(dst.sources);
-    alloc.free(dst.data_types);
     alloc.free(dst.variables);
     for (dst.functions.functions) |f| f.deinit(alloc);
     alloc.free(dst.functions.functions);

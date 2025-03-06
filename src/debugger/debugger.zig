@@ -2348,7 +2348,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 else => @compileError("build target not supported"),
             };
 
-            const data_type = params.cu.data_types[params.variable.data_type.int()];
+            const data_types = self.data.target.?.data_types;
+            const data_type = data_types[params.variable.data_type.int()];
             const data_type_name = self.data.target.?.strings.get(data_type.name) orelse types.Unknown;
 
             // follow pointer values to their underlying base type
@@ -2356,7 +2357,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             var base_data_type_ndx: ?types.TypeNdx = null;
             while (base_data_type.form == .pointer) {
                 if (base_data_type.form.pointer.data_type) |ptr_type| {
-                    base_data_type = params.cu.data_types[ptr_type.int()];
+                    base_data_type = data_types[ptr_type.int()];
                     base_data_type_ndx = ptr_type;
                     continue;
                 }
@@ -2387,6 +2388,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 .adapter = self.adapter,
                 .pid = params.pid,
                 .cu = params.cu,
+                .data_types = data_types,
                 .target_strings = self.data.target.?.strings,
                 .data_type = &data_type,
                 .data_type_name = data_type_name,
@@ -2518,7 +2520,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     }
 
                     // follow typedefs to their base
-                    const ptr_type = typedefBaseType(params, base_data_type_ndx.?);
+                    const ptr_type = self.typedefBaseType(base_data_type_ndx.?);
 
                     // look up the bytes for this pointer's value in the subordinate (the load address
                     // has already been applied)
@@ -2545,7 +2547,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 },
 
                 .array => |arr| {
-                    const element_data_type = params.cu.data_types[arr.element_type.int()];
+                    const element_data_type = data_types[arr.element_type.int()];
 
                     // find the array buffer and length of the array (if not already known)
                     var arr_buf: []const u8 = &.{};
@@ -2606,7 +2608,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
                     var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
                     for (strct.members) |member| {
-                        const member_data_type = typedefBaseType(params, member.data_type);
+                        const member_data_type = self.typedefBaseType(member.data_type);
                         const buf_start = member.offset_bytes;
                         const buf_end = buf_start + member_data_type.data_type.size_bytes;
 
@@ -2699,15 +2701,15 @@ fn DebuggerType(comptime AdapterType: anytype) type {
         }
 
         /// Follows a given data type that may be a typedef to the first non-typedef type in the chain
-        fn typedefBaseType(params: RenderVariableParams, type_ndx: types.TypeNdx) struct {
+        fn typedefBaseType(self: Self, type_ndx: types.TypeNdx) struct {
             data_type: types.DataType,
             data_type_ndx: types.TypeNdx,
         } {
-            var data_type = params.cu.data_types[type_ndx.int()];
+            var data_type = self.data.target.?.data_types[type_ndx.int()];
             var data_type_ndx = type_ndx;
             while (data_type.form == .typedef) {
                 if (data_type.form.typedef.data_type) |typedef_type| {
-                    data_type = params.cu.data_types[typedef_type.int()];
+                    data_type = self.data.target.?.data_types[typedef_type.int()];
                     data_type_ndx = typedef_type;
                     continue;
                 }
