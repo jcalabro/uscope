@@ -415,7 +415,6 @@ pub const CompileUnit = struct {
             .address_size = src.address_size,
             .ranges = ranges,
             .sources = try sources.toOwnedSlice(alloc),
-            // .data_types = try data_types.toOwnedSlice(alloc),
             .variables = variables,
             .functions = .{
                 .functions = try functions.toOwnedSlice(alloc),
