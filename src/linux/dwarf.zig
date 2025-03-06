@@ -376,7 +376,7 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
             // Typedef types
             for (partial_cu.delayed_refs.typedef_types.items) |typedef_type| {
                 const data_type_ndx = dt: {
-                    const offset_map = mapForVariableTypeEntry(partial_compile_units.items, partial_cu, typedef_type);
+                    const offset_map = try mapForVariableTypeEntry(partial_compile_units.items, partial_cu, typedef_type);
                     if (offset_map.get(typedef_type.type_offset)) |dt_ndx| {
                         if (dt_ndx.int() < data_types.items.len) {
                             break :dt dt_ndx;
@@ -398,7 +398,7 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
             // first, assign all types to members
             for (partial_cu.delayed_refs.struct_member_types.items) |member_type| {
                 const data_type_ndx = dt: {
-                    const offset_map = mapForVariableTypeEntry(partial_compile_units.items, partial_cu, member_type);
+                    const offset_map = try mapForVariableTypeEntry(partial_compile_units.items, partial_cu, member_type);
                     if (offset_map.get(member_type.type_offset)) |dt_ndx| {
                         if (dt_ndx.int() < data_types.items.len) {
                             break :dt dt_ndx;
@@ -409,6 +409,7 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
                         member_type.type_offset,
                         partial_cu.delayed_refs.offset_range.low,
                     });
+                    _ = try mapForVariableTypeEntry(partial_compile_units.items, partial_cu, member_type);
                     return error.InvalidDWARFInfo;
                 };
 
@@ -489,7 +490,7 @@ pub fn parse(perm_alloc: Allocator, opts: *const ParseOpts, target: *types.Targe
             // Variable types
             for (partial_cu.delayed_refs.variable_types.items) |vt| {
                 const data_type_ndx = dt: {
-                    const offset_map = mapForVariableTypeEntry(partial_compile_units.items, partial_cu, vt);
+                    const offset_map = try mapForVariableTypeEntry(partial_compile_units.items, partial_cu, vt);
                     if (offset_map.get(vt.type_offset)) |dt_ndx| {
                         if (dt_ndx.int() < data_types.items.len) {
                             break :dt dt_ndx;
@@ -622,19 +623,20 @@ fn mapForVariableTypeEntry(
     partial_compile_units: []PartiallyReadyCompileUnit,
     partial_cu: *const PartiallyReadyCompileUnit,
     type_entry: anytype,
-) OffsetTypeMap {
-    var containing_cu = partial_cu;
-    for (partial_compile_units) |*pcu| {
+) error{InvalidDWARFInfo}!OffsetTypeMap {
+    if (!type_entry.is_global_offset) return partial_cu.delayed_refs.data_type_map;
+
+    for (partial_compile_units) |pcu| {
         if (pcu.delayed_refs.offset_range.contains(type_entry.type_offset)) {
-            containing_cu = pcu;
-            break;
+            return pcu.delayed_refs.global_data_type_map;
         }
     }
 
-    return switch (type_entry.is_global_offset) {
-        false => containing_cu.delayed_refs.data_type_map,
-        true => containing_cu.delayed_refs.global_data_type_map,
-    };
+    log.errf(
+        "no compilation unit found when looking up type with global offset 0x{x}",
+        .{type_entry.type_offset},
+    );
+    return error.InvalidDWARFInfo;
 }
 
 /// Pointers types are nullable in the case that a pointer is opaque
@@ -911,6 +913,10 @@ fn mapDWARFToTarget(
                 },
 
                 .DW_TAG_array_type => {
+                    if (opts.die.offset == 0x1a5) {
+                        log.debug("HERE!!!");
+                    }
+
                     if (try optionalAttributeWithForm(&opts, Offset, .DW_AT_type)) |type_offset| {
                         try delayed_refs.array_types.append(cu.opts.scratch, .{
                             .is_global_offset = type_offset.isGlobalOffset(),
@@ -1119,7 +1125,7 @@ fn AttributeWithForm(comptime T: type) type {
         }
 
         fn isGlobalOffset(self: @This()) bool {
-            return self.class == .reference;
+            return self.class == .global_reference;
         }
     };
 }
