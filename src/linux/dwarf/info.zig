@@ -136,7 +136,7 @@ pub const CompileUnit = struct {
                 if (die_tree.items.len <= 1) break;
 
                 // this DIE has no more children
-                _ = die_tree.popOrNull();
+                _ = die_tree.pop();
                 continue;
             }
 
