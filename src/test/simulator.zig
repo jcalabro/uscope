@@ -2172,6 +2172,7 @@ test "sim:step_in_then_over_then_out" {
 
     // step over again twice to return to main
     .addCommand(.{ .req = (proto.StepRequest{.step_type = .over}).req() })
+    .addCommand(.{ .req = (proto.StepRequest{.step_type = .over}).req() })
     .addCondition(.{
         .wait_for_ticks = msToTicks(250) * ValgrindMult,
         .max_ticks = msToTicks(2000) * ValgrindMult,
