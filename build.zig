@@ -162,35 +162,15 @@ fn defineStep(b: *Build, def: stepDef) void {
         // Set up module dependencies
         //
 
-        exe.root_module.addIncludePath(b.path("libs/stb_image"));
-        exe.addCSourceFile(.{ .file = b.path("libs/stb_image/stb_image.c") });
-
         exe.root_module.addIncludePath(b.path("libs/spall"));
 
         const time_dep = b.dependency("time", .{});
         const time_mod = time_dep.module("time");
         exe.root_module.addImport("time", time_mod);
 
-        const cimgui_dep = b.dependency("cimgui", .{
-            .target = def.target,
-            .optimize = def.optimize,
-        });
-        exe.root_module.addImport("cimgui", cimgui_dep.module("cimgui"));
-        exe.linkLibrary(cimgui_dep.artifact("cimgui"));
-
         if (b.lazyDependency("system_sdk", .{})) |system_sdk| {
             exe.addLibraryPath(system_sdk.path("linux/lib/x86_64-linux-gnu"));
         }
-
-        const zglfw = b.dependency("zglfw", .{
-            .target = def.target,
-            .optimize = def.optimize,
-        });
-        exe.root_module.addImport("zglfw", zglfw.module("root"));
-        exe.linkLibrary(zglfw.artifact("glfw"));
-
-        const zopengl = b.dependency("zopengl", .{});
-        exe.root_module.addImport("zopengl", zopengl.module("root"));
 
         const ztracy = b.dependency("ztracy", .{
             .enable_ztracy = def.flags.tracy,
