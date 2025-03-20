@@ -135,8 +135,11 @@ fn defineStep(b: *Build, def: stepDef) void {
         const is_debug = exe.root_module.optimize == .Debug;
 
         b.installArtifact(exe);
-        exe.linkLibC();
         exe.root_module.addOptions("build_options", def.opts);
+
+        if (def.flags.tracy or def.flags.spall) {
+            exe.linkLibC();
+        }
 
         exe.use_llvm = def.flags.llvm;
         exe.use_lld = def.flags.llvm;
