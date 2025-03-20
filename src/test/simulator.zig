@@ -2162,7 +2162,7 @@ test "sim:step_in_then_over_then_out" {
     .addCondition(.{
         .wait_for_ticks = msToTicks(250) * ValgrindMult,
         .max_ticks = msToTicks(2000) * ValgrindMult,
-        .desc = "subordinate must have stepped over funcB (2)",
+        .desc = "subordinate must have stepped over funcB (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
                 return checkZigBacktraceLine(s, zigbacktrace_a_loc.addInt(1), 4);
