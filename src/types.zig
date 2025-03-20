@@ -985,12 +985,7 @@ pub const PauseData = struct {
         }
 
         var locals = ArrayListUnmanaged(ExpressionResult).empty;
-        // for (self.locals) |l| try locals.append(arena_alloc, try l.copy(arena_alloc));
-        for (self.locals) |l| {
-            std.debug.print("\n------NAME: {s}\n", .{self.strings.get(l.expression).?});
-            try locals.append(arena_alloc, try l.copy(arena_alloc));
-            std.debug.print("DONE--------\n", .{});
-        }
+        for (self.locals) |l| try locals.append(arena_alloc, try l.copy(arena_alloc));
 
         var watches = ArrayListUnmanaged(ExpressionResult).empty;
         for (self.watches) |l| try watches.append(arena_alloc, try l.copy(arena_alloc));
@@ -1084,8 +1079,6 @@ pub const ExpressionResult = struct {
 
         for (src.fields) |f| {
             var dupe = f;
-
-            std.debug.print("ENC: {any} :::::::: {any}\n", .{ f.encoding, dupe.encoding });
 
             switch (f.encoding) {
                 .array => |arr| dupe.encoding.array.items = try safe.copySlice(ExpressionFieldNdx, alloc, arr.items),

@@ -971,13 +971,6 @@ fn mapDWARFToTarget(
                     const original_die_ndx = die_ndx;
                     defer die_ndx = original_die_ndx;
 
-                    if (try optionalAttribute(&opts, []const u8, .DW_AT_name)) |name| {
-                        if (strings.eql(name, "CircularPointer")) {
-                            log.debug("HERE!\n");
-                            log.flush();
-                        }
-                    }
-
                     var members = ArrayList(types.MemberType).init(cu.opts.scratch);
                     const max_members = pow(usize, 2, 12);
                     var member_ndx: usize = 0;

@@ -2339,10 +2339,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const var_name = if (self.data.target.?.strings.get(params.variable.name)) |n| n else return;
             if (var_name.len == 0) return;
 
-            if (strings.eql(var_name, "circular_a")) {
-                log.debug("HERE!!!");
-            }
-
             const var_platform_data = switch (builtin.target.os.tag) {
                 .linux => if (params.variable.platform_data.location_expression) |loc|
                     self.data.target.?.strings.get(loc) orelse ""
@@ -2503,15 +2499,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                         return;
                     }
 
-                    if (strings.eql(var_name, "circular_a")) {
-                        log.debugf("pointer lookup: 0x{x} :: {any}", .{ address, pointers.get(address) });
-                        log.flush();
-                    }
-
                     // check if we've seen this pointer before for this variable
                     if (pointers.get(address)) |field_ndx| {
-                        const original_pointer_field = fields.items[field_ndx.int()];
-                        try fields.append(params.scratch, original_pointer_field);
+                        const copy = try fields.addOne(params.scratch);
+                        copy.* = fields.items[field_ndx.int()];
                         return;
                     }
 
@@ -2707,9 +2698,6 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     log.warnf("unsupported data type: {s}", .{@tagName(data_type.form)});
                 },
             }
-
-            log.debugf("FINAL FOR {s}: {d}", .{ var_name, fields.items.len });
-            log.flush();
         }
 
         /// Follows a given data type that may be a typedef to the first non-typedef type in the chain
