@@ -55,10 +55,10 @@ const State = struct {
 
     strings: *strings.Cache,
 
-    breakpoints: ArrayListUnmanaged(types.Breakpoint) = .{},
+    breakpoints: ArrayListUnmanaged(types.Breakpoint) = .empty,
     max_breakpoint_id: atomic.Value(u64) = atomic.Value(u64).init(1),
 
-    watch_expressions: ArrayListUnmanaged(String) = .{},
+    watch_expressions: ArrayListUnmanaged(String) = .empty,
 
     /// The address the user would like to display in the memory viewer window
     hex_window_address: ?types.Address = null,
@@ -119,8 +119,8 @@ const Subordinate = struct {
     /// gets a new value every time we launch the subordinate.
     load_addr: types.Address = types.Address.from(0),
 
-    threads: ArrayListUnmanaged(types.PID) = .{},
-    thread_breakpoints: ArrayListUnmanaged(types.ThreadBreakpoint) = .{},
+    threads: ArrayListUnmanaged(types.PID) = .empty,
+    thread_breakpoints: ArrayListUnmanaged(types.ThreadBreakpoint) = .empty,
 
     /// Stores only the data for `paused`
     paused_arena: ArenaAllocator,
@@ -2240,7 +2240,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
-            var fields = ArrayListUnmanaged(types.ExpressionRenderField){};
+            var fields = ArrayListUnmanaged(types.ExpressionRenderField).empty;
 
             log.debugf("calculating expression: {s}", .{expression});
 
@@ -2339,6 +2339,10 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const var_name = if (self.data.target.?.strings.get(params.variable.name)) |n| n else return;
             if (var_name.len == 0) return;
 
+            if (strings.eql(var_name, "circular_a")) {
+                log.debug("HERE!!!");
+            }
+
             const var_platform_data = switch (builtin.target.os.tag) {
                 .linux => if (params.variable.platform_data.location_expression) |loc|
                     self.data.target.?.strings.get(loc) orelse ""
@@ -2422,7 +2426,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 });
                 const slice_field_ndx = fields.items.len - 1;
 
-                var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
+                var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx).empty;
 
                 // only attempt to render the slice preview if the pointer type isn't opaque
                 if (res.item_data_type) |item_data_type| {
@@ -2497,6 +2501,11 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                             .encoding = .{ .primitive = .{ .encoding = .string } },
                         });
                         return;
+                    }
+
+                    if (strings.eql(var_name, "circular_a")) {
+                        log.debugf("pointer lookup: 0x{x} :: {any}", .{ address, pointers.get(address) });
+                        log.flush();
                     }
 
                     // check if we've seen this pointer before for this variable
@@ -2606,7 +2615,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     });
                     const struct_field_ndx = fields.items.len - 1;
 
-                    var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
+                    var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx).empty;
                     for (strct.members) |member| {
                         const member_data_type = self.typedefBaseType(member.data_type);
                         const buf_start = member.offset_bytes;
@@ -2698,6 +2707,9 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     log.warnf("unsupported data type: {s}", .{@tagName(data_type.form)});
                 },
             }
+
+            log.debugf("FINAL FOR {s}: {d}", .{ var_name, fields.items.len });
+            log.flush();
         }
 
         /// Follows a given data type that may be a typedef to the first non-typedef type in the chain

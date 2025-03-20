@@ -24,7 +24,7 @@ pub fn Queue(comptime T: anytype) type {
 
         /// The zero'th element in the list is the most recently
         /// inserted, the last element is the next one to be dequeued
-        queue: ArrayListUnmanaged(T) = .{},
+        queue: ArrayListUnmanaged(T) = .empty,
 
         alloc: Allocator,
         opts: Options,

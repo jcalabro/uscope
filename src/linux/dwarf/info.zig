@@ -42,7 +42,7 @@ pub const CompileUnit = struct {
     info_r: *Reader,
     info_offset: usize,
 
-    source_abs_path_hashes: ArrayListUnmanaged(file_util.Hash) = .{},
+    source_abs_path_hashes: ArrayListUnmanaged(file_util.Hash) = .empty,
 
     pub fn create(
         opts: *const dwarf.ParseOpts,

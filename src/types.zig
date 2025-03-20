@@ -984,7 +984,7 @@ pub const PauseData = struct {
             hex_displays.appendAssumeCapacity(hex_copy);
         }
 
-        var locals = ArrayListUnmanaged(ExpressionResult){};
+        var locals = ArrayListUnmanaged(ExpressionResult).empty;
         // for (self.locals) |l| try locals.append(arena_alloc, try l.copy(arena_alloc));
         for (self.locals) |l| {
             std.debug.print("\n------NAME: {s}\n", .{self.strings.get(l.expression).?});
@@ -992,7 +992,7 @@ pub const PauseData = struct {
             std.debug.print("DONE--------\n", .{});
         }
 
-        var watches = ArrayListUnmanaged(ExpressionResult){};
+        var watches = ArrayListUnmanaged(ExpressionResult).empty;
         for (self.watches) |l| try watches.append(arena_alloc, try l.copy(arena_alloc));
 
         const strs = try self.strings.copy(arena_alloc);
@@ -1076,7 +1076,7 @@ pub const ExpressionResult = struct {
     }
 
     fn copy(src: Self, alloc: Allocator) Allocator.Error!Self {
-        var fields = ArrayListUnmanaged(ExpressionRenderField){};
+        var fields = ArrayListUnmanaged(ExpressionRenderField).empty;
         errdefer {
             for (fields.items) |f| f.deinit(alloc);
             fields.deinit(alloc);

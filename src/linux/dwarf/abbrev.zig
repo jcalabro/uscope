@@ -38,7 +38,7 @@ pub const Table = struct {
 pub const Decl = struct {
     tag: consts.AttributeTag,
     has_children: bool,
-    attrs: ArrayListUnmanaged(Attr) = .{},
+    attrs: ArrayListUnmanaged(Attr) = .empty,
 };
 
 pub const Attr = struct {
@@ -422,7 +422,7 @@ pub fn parse(opts: *const dwarf.ParseOpts) dwarf.ParseError![]Table {
     const max = pow(usize, 2, 24);
     assert(opts.sections.abbrev.contents.len < max);
 
-    var tables: ArrayListUnmanaged(Table) = .{};
+    var tables: ArrayListUnmanaged(Table) = .empty;
 
     var r: Reader = undefined;
     r.init(opts.sections.abbrev.contents);

@@ -51,7 +51,7 @@ pub fn renderString(
 ) encoding.EncodeVariableError!encoding.RenderStringResult {
     const addr = types.Address.from(mem.readInt(u64, @ptrCast(params.val), endian));
 
-    var str = ArrayListUnmanaged(u8){};
+    var str = ArrayListUnmanaged(u8).empty;
     var final_len: ?usize = 0;
 
     const max_str_len = std.math.pow(usize, 2, 12);

@@ -60,7 +60,7 @@ fn renderString(
 ) encoding.EncodeVariableError!encoding.RenderStringResult {
     const addr = types.Address.from(mem.readInt(u64, @ptrCast(params.val), encoding.endian));
 
-    var str = ArrayListUnmanaged(u8){};
+    var str: ArrayListUnmanaged(u8) = .empty;
     const max_str_len = math.pow(usize, 2, 12);
     for (0..max_str_len) |ndx| {
         var buf = [_]u8{0};
