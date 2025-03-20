@@ -2085,14 +2085,14 @@ test "sim:step_in_then_over_then_out" {
     const sim = try Simulator.init(t.allocator);
     defer sim.deinit(t.allocator);
 
-    const zigbacktrace_main_zig_hash = try fileHash(t.allocator, zigbacktrace_main_zig);
+    const cbacktrace_main_c_hash = try fileHash(t.allocator, cbacktrace_main_c);
 
     // zig fmt: off
     sim.lock()
 
     // load symbols
     .addCommand(.{
-        .req = (proto.LoadSymbolsRequest{ .path = zigbacktrace_exe }).req(),
+        .req = (proto.LoadSymbolsRequest{ .path = cbacktrace_exe }).req(),
     })
     .addCondition(.{
         .max_ticks = msToTicks(20000) * ValgrindMult,
@@ -2103,7 +2103,7 @@ test "sim:step_in_then_over_then_out" {
                 defer s.dbg.data.mu.unlock();
 
                 if (s.dbg.data.target) |target| {
-                    return checkeq(usize, 2, target.compile_units.len, "must have two compilation units") and
+                    return checkeq(usize, 1, target.compile_units.len, "must have one compilation unit") and
                         check(s.dbg.data.subordinate == null, "subordinate must not be launched");
                 }
 
@@ -2116,14 +2116,14 @@ test "sim:step_in_then_over_then_out" {
     .addCommand(.{
         .send_after_ticks = 1,
         .req = (proto.UpdateBreakpointRequest{ .loc = .{ .source = .{
-            .file_hash = zigbacktrace_main_zig_hash,
-            .line = zigbacktrace_main_loc,
+            .file_hash = cbacktrace_main_c_hash,
+            .line = cbacktrace_main_loc,
         }}}).req(),
     })
     .addCommand(.{
         .send_after_ticks = msToTicks(100),
         .req = (proto.LaunchSubordinateRequest{
-            .path = zigbacktrace_exe,
+            .path = cbacktrace_exe,
             .args = "",
             .stop_on_entry = false,
         }).req(),
@@ -2132,10 +2132,21 @@ test "sim:step_in_then_over_then_out" {
     .addCondition(.{
         .wait_for_ticks = msToTicks(250) * ValgrindMult,
         .max_ticks = msToTicks(2000) * ValgrindMult,
-        .desc = "subordinate must have hit the breakpoint (1)",
+        .desc = "subordinate must have hit the breakpoint in main",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
-                return checkZigBacktraceLine(s, zigbacktrace_main_loc, 3);
+                {
+                    s.dbg.data.mu.lock();
+                    defer s.dbg.data.mu.unlock();
+
+                    if (s.dbg.data.subordinate) |sub| {
+                        if (sub.paused) |paused| {
+                            cbacktrace_initial_stack_depth = paused.stack_frames.len;
+                        }
+                    }
+                }
+
+                return checkCBacktraceLine(s, cbacktrace_main_loc, 0);
             }
         }.cond,
     })
@@ -2150,7 +2161,7 @@ test "sim:step_in_then_over_then_out" {
         .desc = "subordinate must have stepped in to funcA (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
-                return checkZigBacktraceLine(s, zigbacktrace_a_loc, 4);
+                return checkCBacktraceLine(s, cbacktrace_a_loc, 1);
             }
         }.cond,
     })
@@ -2165,13 +2176,12 @@ test "sim:step_in_then_over_then_out" {
         .desc = "subordinate must have stepped over funcB (1)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
-                return checkZigBacktraceLine(s, zigbacktrace_a_loc.addInt(1), 4);
+                return checkCBacktraceLine(s, cbacktrace_a_loc.addInt(1), 1);
             }
         }.cond,
     })
 
     // step over again twice to return to main
-    .addCommand(.{ .req = (proto.StepRequest{.step_type = .over}).req() })
     .addCommand(.{ .req = (proto.StepRequest{.step_type = .over}).req() })
     .addCondition(.{
         .wait_for_ticks = msToTicks(250) * ValgrindMult,
@@ -2179,7 +2189,7 @@ test "sim:step_in_then_over_then_out" {
         .desc = "subordinate must have stepped over funcB (2)",
         .cond = struct {
             fn cond(s: *Simulator) ?bool {
-                return checkZigBacktraceLine(s, zigbacktrace_main_loc.addInt(1), 3);
+                return checkCBacktraceLine(s, cbacktrace_main_loc.addInt(1), 0);
             }
         }.cond,
     })
