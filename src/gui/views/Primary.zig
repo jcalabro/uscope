@@ -1122,7 +1122,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
         .array => |arr| blk: {
             renderLength(arr.items.len);
 
-            var preview = ArrayListUnmanaged(u8){};
+            var preview = ArrayListUnmanaged(u8).empty;
             try preview.appendSlice(scratch, "{ ");
 
             var elem_ndx: usize = 1;
@@ -1154,7 +1154,7 @@ fn renderPrimitiveOrCollapsedTreePreview(
         },
 
         .@"struct" => |strct| blk: {
-            var preview = ArrayListUnmanaged(u8){};
+            var preview = ArrayListUnmanaged(u8).empty;
             try preview.appendSlice(scratch, "{ ");
 
             for (strct.members) |member_ndx| {

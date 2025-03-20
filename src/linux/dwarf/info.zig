@@ -42,7 +42,7 @@ pub const CompileUnit = struct {
     info_r: *Reader,
     info_offset: usize,
 
-    source_abs_path_hashes: ArrayListUnmanaged(file_util.Hash) = .{},
+    source_abs_path_hashes: ArrayListUnmanaged(file_util.Hash) = .empty,
 
     pub fn create(
         opts: *const dwarf.ParseOpts,
@@ -136,7 +136,7 @@ pub const CompileUnit = struct {
                 if (die_tree.items.len <= 1) break;
 
                 // this DIE has no more children
-                _ = die_tree.popOrNull();
+                _ = die_tree.pop();
                 continue;
             }
 

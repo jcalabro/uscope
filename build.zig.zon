@@ -1,5 +1,6 @@
 .{
-    .name = "uscope",
+    .name = .uscope,
+    .fingerprint = 0x2ca09f1fadf72495,
     .version = "0.1.0",
     .paths = .{
         "build.zig",

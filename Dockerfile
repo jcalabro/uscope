@@ -25,5 +25,5 @@ RUN curl -L -o odin.zip https://github.com/odin-lang/Odin/releases/download/dev-
 ADD zig_version.txt .
 RUN curl -L https://github.com/marler8997/zigup/releases/download/v2025_01_02/zigup-x86_64-linux.tar.gz | tar xz && \
     mv zigup /usr/bin && \
-    zigup --index https://machengine.org/zig/index.json fetch 2024.11.0-mach && \
+    zigup fetch $(cat zig_version.txt) && \
     zigup default $(cat zig_version.txt) && rm zig_version.txt

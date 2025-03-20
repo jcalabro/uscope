@@ -27,7 +27,7 @@ const log = logging.Logger.init(logging.Region.Symbols);
 /// Like `types.SourceFile`, but with a mutable list of statements
 pub const SourceFile = struct {
     hash: file_util.Hash,
-    statements: ArrayListUnmanaged(types.SourceStatement) = .{},
+    statements: ArrayListUnmanaged(types.SourceStatement) = .empty,
 };
 
 /// Reads all information from the .debug_line section for this compile unit. Returned
@@ -221,10 +221,10 @@ const Header = struct {
     opcode_base: u8 = 0,
 
     /// always are absolute paths
-    include_dirs: ArrayListUnmanaged([]const u8) = .{},
+    include_dirs: ArrayListUnmanaged([]const u8) = .empty,
 
     /// always are absolute paths
-    file_paths: ArrayListUnmanaged([]const u8) = .{},
+    file_paths: ArrayListUnmanaged([]const u8) = .empty,
 
     //
     // new in v4
@@ -240,10 +240,10 @@ const Header = struct {
     segment_selector_size: u8 = 0,
     dir_entry_format_count: u8 = 0,
     dir_count: u64 = 0,
-    dir_entry_formats: ArrayListUnmanaged(EntryFormat) = .{},
+    dir_entry_formats: ArrayListUnmanaged(EntryFormat) = .empty,
     file_entry_format_count: u8 = 0,
     file_count: u64 = 0,
-    file_entry_formats: ArrayListUnmanaged(EntryFormat) = .{},
+    file_entry_formats: ArrayListUnmanaged(EntryFormat) = .empty,
 
     fn parse(
         opts: *const dwarf.AttributeParseOpts,
@@ -672,7 +672,7 @@ const Entry = struct {
             while (ndx < self.prologue_len) : (ndx += 1) {
                 const stmt_ndx = num_statements - ndx - 1;
                 if (stmt_ndx < 0) break;
-                _ = src.statements.popOrNull();
+                _ = src.statements.pop();
             }
         }
 

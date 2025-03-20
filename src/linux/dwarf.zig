@@ -579,13 +579,13 @@ const DelayedReferences = struct {
     /// in this case is an offset from the start of the .debug_info section.
     global_data_type_map: OffsetTypeMap = .{},
 
-    variable_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
-    array_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
-    const_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
-    typedef_types: ArrayListUnmanaged(VariableTypeEntry) = .{},
-    pointer_types: ArrayListUnmanaged(PointerTypeEntry) = .{},
-    struct_member_types: ArrayListUnmanaged(StructMemberTypeEntry) = .{},
-    struct_members: ArrayListUnmanaged(StructMemberListEntry) = .{},
+    variable_types: ArrayListUnmanaged(VariableTypeEntry) = .empty,
+    array_types: ArrayListUnmanaged(VariableTypeEntry) = .empty,
+    const_types: ArrayListUnmanaged(VariableTypeEntry) = .empty,
+    typedef_types: ArrayListUnmanaged(VariableTypeEntry) = .empty,
+    pointer_types: ArrayListUnmanaged(PointerTypeEntry) = .empty,
+    struct_member_types: ArrayListUnmanaged(StructMemberTypeEntry) = .empty,
+    struct_members: ArrayListUnmanaged(StructMemberListEntry) = .empty,
 
     fn addDataType(
         self: *@This(),

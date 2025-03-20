@@ -24,7 +24,7 @@ pub fn Queue(comptime T: anytype) type {
 
         /// The zero'th element in the list is the most recently
         /// inserted, the last element is the next one to be dequeued
-        queue: ArrayListUnmanaged(T) = .{},
+        queue: ArrayListUnmanaged(T) = .empty,
 
         alloc: Allocator,
         opts: Options,
@@ -82,7 +82,7 @@ pub fn Queue(comptime T: anytype) type {
             }
 
             // dequeue from the back
-            return self.queue.pop();
+            return self.queue.pop().?;
         }
 
         /// Dequeues an item, returning `null` immediately if no items are on the queue
@@ -90,7 +90,6 @@ pub fn Queue(comptime T: anytype) type {
             self.mu.lock();
             defer self.mu.unlock();
 
-            if (self.queue.items.len == 0) return null;
             return self.queue.pop();
         }
     };

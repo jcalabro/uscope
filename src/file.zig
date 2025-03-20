@@ -172,7 +172,7 @@ pub const MMapError = posix.MMapError || fs.File.OpenError ||
     FileEmpty,
 };
 
-pub fn mapWholeFile(fp: fs.File) MMapError![]align(mem.page_size) const u8 {
+pub fn mapWholeFile(fp: fs.File) MMapError![]align(std.heap.page_size_min) const u8 {
     const file_len = math.cast(usize, try fp.getEndPos()) orelse math.maxInt(usize);
 
     // cannot map a zero-byte file

@@ -984,10 +984,10 @@ pub const PauseData = struct {
             hex_displays.appendAssumeCapacity(hex_copy);
         }
 
-        var locals = ArrayListUnmanaged(ExpressionResult){};
+        var locals = ArrayListUnmanaged(ExpressionResult).empty;
         for (self.locals) |l| try locals.append(arena_alloc, try l.copy(arena_alloc));
 
-        var watches = ArrayListUnmanaged(ExpressionResult){};
+        var watches = ArrayListUnmanaged(ExpressionResult).empty;
         for (self.watches) |l| try watches.append(arena_alloc, try l.copy(arena_alloc));
 
         const strs = try self.strings.copy(arena_alloc);
@@ -1071,7 +1071,7 @@ pub const ExpressionResult = struct {
     }
 
     fn copy(src: Self, alloc: Allocator) Allocator.Error!Self {
-        var fields = ArrayListUnmanaged(ExpressionRenderField){};
+        var fields = ArrayListUnmanaged(ExpressionRenderField).empty;
         errdefer {
             for (fields.items) |f| f.deinit(alloc);
             fields.deinit(alloc);
@@ -1079,6 +1079,7 @@ pub const ExpressionResult = struct {
 
         for (src.fields) |f| {
             var dupe = f;
+
             switch (f.encoding) {
                 .array => |arr| dupe.encoding.array.items = try safe.copySlice(ExpressionFieldNdx, alloc, arr.items),
                 .@"struct" => |s| dupe.encoding.@"struct".members = try safe.copySlice(ExpressionFieldNdx, alloc, s.members),

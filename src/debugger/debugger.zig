@@ -55,10 +55,10 @@ const State = struct {
 
     strings: *strings.Cache,
 
-    breakpoints: ArrayListUnmanaged(types.Breakpoint) = .{},
+    breakpoints: ArrayListUnmanaged(types.Breakpoint) = .empty,
     max_breakpoint_id: atomic.Value(u64) = atomic.Value(u64).init(1),
 
-    watch_expressions: ArrayListUnmanaged(String) = .{},
+    watch_expressions: ArrayListUnmanaged(String) = .empty,
 
     /// The address the user would like to display in the memory viewer window
     hex_window_address: ?types.Address = null,
@@ -119,8 +119,8 @@ const Subordinate = struct {
     /// gets a new value every time we launch the subordinate.
     load_addr: types.Address = types.Address.from(0),
 
-    threads: ArrayListUnmanaged(types.PID) = .{},
-    thread_breakpoints: ArrayListUnmanaged(types.ThreadBreakpoint) = .{},
+    threads: ArrayListUnmanaged(types.PID) = .empty,
+    thread_breakpoints: ArrayListUnmanaged(types.ThreadBreakpoint) = .empty,
 
     /// Stores only the data for `paused`
     paused_arena: ArenaAllocator,
@@ -2240,7 +2240,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
             const z = trace.zone(@src());
             defer z.end();
 
-            var fields = ArrayListUnmanaged(types.ExpressionRenderField){};
+            var fields = ArrayListUnmanaged(types.ExpressionRenderField).empty;
 
             log.debugf("calculating expression: {s}", .{expression});
 
@@ -2422,7 +2422,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                 });
                 const slice_field_ndx = fields.items.len - 1;
 
-                var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
+                var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx).empty;
 
                 // only attempt to render the slice preview if the pointer type isn't opaque
                 if (res.item_data_type) |item_data_type| {
@@ -2501,8 +2501,8 @@ fn DebuggerType(comptime AdapterType: anytype) type {
 
                     // check if we've seen this pointer before for this variable
                     if (pointers.get(address)) |field_ndx| {
-                        const original_pointer_field = fields.items[field_ndx.int()];
-                        try fields.append(params.scratch, original_pointer_field);
+                        const copy = try fields.addOne(params.scratch);
+                        copy.* = fields.items[field_ndx.int()];
                         return;
                     }
 
@@ -2606,7 +2606,7 @@ fn DebuggerType(comptime AdapterType: anytype) type {
                     });
                     const struct_field_ndx = fields.items.len - 1;
 
-                    var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx){};
+                    var item_ndxes = ArrayListUnmanaged(types.ExpressionFieldNdx).empty;
                     for (strct.members) |member| {
                         const member_data_type = self.typedefBaseType(member.data_type);
                         const buf_start = member.offset_bytes;
