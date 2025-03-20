@@ -16,16 +16,17 @@ const debugger = @import("../debugger.zig");
 const Debugger = debugger.Debugger;
 const file_utils = @import("../file.zig");
 const flags = @import("../flags.zig");
-const GUI = @import("../gui/GUI.zig");
 const logging = @import("../logging.zig");
 const proto = debugger.proto;
 const State = @import("../gui/State.zig");
 const strings = @import("../strings.zig");
 const String = strings.String;
 const types = @import("../types.zig");
-const zui = @import("../gui/zui.zig");
 
 const log = logging.Logger.init(logging.Region.Test);
+
+pub const MaxFPS: u64 = 60;
+const FrameMicros: u64 = @divFloor(time.us_per_s, MaxFPS);
 
 const ValgrindMult = if (flags.Valgrind) 4 else 1;
 
@@ -33,18 +34,6 @@ const ValgrindMult = if (flags.Valgrind) 4 else 1;
 /// haven't (yet) been eliminated
 pub const TestGUI = struct {
     const Self = @This();
-
-    pub fn getMainDockspaceID(_: Self) zui.ID {
-        return 0;
-    }
-
-    pub fn getSingleFocusWindowSize(self: Self) GUI.WindowSize {
-        return self.getSingleFocusWindowSizeWithScale(0);
-    }
-
-    pub fn getSingleFocusWindowSizeWithScale(_: Self, _: f32) GUI.WindowSize {
-        return .{ .x = 0, .y = 0, .w = 800, .h = 600 };
-    }
 };
 
 fn fileHash(alloc: Allocator, path: String) !file_utils.Hash {
@@ -288,10 +277,22 @@ const Simulator = struct {
             }
         }
 
-        self.last_frame_render_micros = GUI.frameRateLimit(self.last_frame_render_micros);
+        self.last_frame_render_micros = frameRateLimit(self.last_frame_render_micros);
         return self.state.dbg.shuttingDown();
     }
 };
+
+/// Locks us to our maximum frame limit
+fn frameRateLimit(last_frame_render_micros: u64) u64 {
+    const now: u64 = @intCast(time.microTimestamp());
+    const frame_duration = now - last_frame_render_micros;
+    if (frame_duration < FrameMicros) {
+        const wait_for = FrameMicros - frame_duration;
+        std.Thread.sleep(wait_for * time.ns_per_us);
+    }
+
+    return @intCast(time.microTimestamp());
+}
 
 /// Indicates a request that will be send from the client to the debugger
 const Command = struct {
@@ -334,7 +335,7 @@ const Condition = struct {
 /// @TODO (jrc): detach the simulator loop from the real GUI's frame limit so we can handle
 /// variable refresh rate displays, or just displays at something other than 60fps
 fn msToTicks(ms: i32) i32 {
-    const fps = @as(i32, GUI.MaxFPS);
+    const fps = @as(i32, MaxFPS);
     const ms_per_frame = math.divCeil(i32, 1000, fps) catch unreachable;
     return math.divCeil(i32, ms, ms_per_frame) catch unreachable;
 }
@@ -699,8 +700,8 @@ test "sim:zigprint" {
                     break :blk s.dbg.data.state.breakpoints.items[0];
                 };
 
-                s.state.primary.addWatchValue("a") catch unreachable;
-                defer s.state.primary.watch_vars.clearAndFree();
+                s.state.addWatchValue("a") catch unreachable;
+                defer s.state.watch_vars.clearAndFree();
 
                 if (s.state.getStateSnapshot(s.arena.allocator())) |ss| {
                     if (ss.state.paused) |paused| {

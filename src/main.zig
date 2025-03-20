@@ -13,7 +13,6 @@ const logging = @import("logging.zig");
 const Debugger = @import("debugger.zig").Debugger;
 const file = @import("file.zig");
 const flags = @import("flags.zig");
-const gui = @import("gui.zig");
 const MainAllocator = @import("MainAllocator.zig");
 const settings = @import("settings.zig");
 const trace = @import("trace.zig");
@@ -71,10 +70,6 @@ pub fn main() !void {
     defer threads.deinit();
 
     try threads.append(try dbg.serveRequestsForever());
-
-    var gui_arena = ArenaAllocator.init(main_allocator.allocator());
-    defer gui_arena.deinit();
-    try gui.run(gui_arena.allocator(), dbg);
 
     log.info("shutting down");
 

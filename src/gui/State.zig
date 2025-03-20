@@ -11,16 +11,13 @@ const Mutex = std.Thread.Mutex;
 const time = std.time;
 const t = std.testing;
 
-const BreakpointView = @import("views/Breakpoint.zig");
 const CircularBuffer = @import("../circularBuffer.zig").CircularBuffer;
 const debugger = @import("../debugger.zig");
 const Debugger = debugger.Debugger;
-const FilePickerView = @import("views/FilePicker.zig");
 const file_util = @import("../file.zig");
-const Input = @import("Input.zig");
 const logging = @import("../logging.zig");
-const PrimaryView = @import("views/Primary.zig");
 const proto = debugger.proto;
+const safe = @import("../safe.zig");
 const settings = @import("../settings.zig");
 const strings = @import("../strings.zig");
 const String = strings.String;
@@ -30,9 +27,10 @@ const Watcher = @import("watcher.zig").Watcher;
 
 const Self = @This();
 
+// @TODO (jrc): dynamically determine ui type on startup
 pub const GUIType = switch (builtin.is_test) {
     true => @import("../test/simulator.zig").TestGUI,
-    false => @import("GUI.zig"),
+    false => @import("../test/simulator.zig").TestGUI,
 };
 
 const log = logging.Logger.init(logging.Region.GUI);
@@ -55,14 +53,10 @@ watcher: *Watcher = undefined,
 subordinate_output: CircularBuffer(u8),
 subordinate_output_mu: Mutex = Mutex{},
 
-active_view: View = undefined,
-
-primary: *PrimaryView = undefined,
-file_picker: *FilePickerView = undefined,
-breakpoint: *BreakpointView = undefined,
-
 open_files: ArrayList(OpenFile),
 open_source_file_ndx: usize = 0,
+
+watch_vars: ArrayList(String),
 
 scroll_to_line_of_text: ?types.SourceLocation = null,
 /// @NOTE (jrc): I'm not sure why, but the imgui flag to
@@ -78,17 +72,9 @@ has_waited_one_frame_to_scroll_to_line_of_text: bool = true,
 /// This message is displayed to the user when an
 modal_message: ?proto.MessageResponse = null,
 
-pub const View = union(enum) {
-    primary: *PrimaryView,
-    file_picker: *FilePickerView,
-    breakpoint: *BreakpointView,
-};
-
-pub fn init(alloc: Allocator, dbg: *Debugger, gui: *GUIType) !*Self {
+pub fn init(alloc: Allocator, dbg: *Debugger, _: *GUIType) !*Self {
     const z = trace.zoneN(@src(), "State.init");
     defer z.end();
-
-    Input.init(alloc);
 
     const self = try alloc.create(Self);
     errdefer alloc.destroy(self);
@@ -98,6 +84,7 @@ pub fn init(alloc: Allocator, dbg: *Debugger, gui: *GUIType) !*Self {
         .scratch_arena = ArenaAllocator.init(alloc),
         .dbg = dbg,
         .open_files = ArrayList(OpenFile).init(alloc),
+        .watch_vars = ArrayList(String).init(alloc),
         .subordinate_output = try CircularBuffer(u8).init(
             self.perm_alloc,
             settings.settings.global.display.output_bytes,
@@ -121,13 +108,6 @@ pub fn init(alloc: Allocator, dbg: *Debugger, gui: *GUIType) !*Self {
     };
 
     self.scratch_alloc = self.scratch_arena.allocator();
-
-    self.primary = try PrimaryView.init(self, gui);
-    self.file_picker = try FilePickerView.init(self, gui);
-    self.breakpoint = try BreakpointView.init(self, gui);
-
-    self.active_view = View{ .primary = self.primary };
-
     return self;
 }
 
@@ -159,10 +139,6 @@ pub fn update(self: *Self) void {
     const z = trace.zoneN(@src(), "State.update");
     defer z.end();
 
-    Input.calculateMouseMovement();
-
-    switch (self.active_view) {
-        inline else => |view| {
             if (self.state_updated) {
                 self.state_updated = false;
                 _ = self.scratch_arena.reset(.free_all);
@@ -177,9 +153,6 @@ pub fn update(self: *Self) void {
             }
 
             self.handleDebuggerResponses();
-            self.active_view = view.update();
-        },
-    }
 
     self.first_frame = false;
 
@@ -416,6 +389,7 @@ test "load source files for display" {
         .scratch_arena = ArenaAllocator.init(alloc),
         .dbg = undefined,
         .open_files = ArrayList(OpenFile).init(alloc),
+        .watch_vars = ArrayList(String).init(alloc),
         .subordinate_output = try CircularBuffer(u8).init(alloc, 1024),
     };
     self.scratch_alloc = self.scratch_arena.allocator();
@@ -478,4 +452,49 @@ fn updateSourceLocationInFocus(self: *Self, new_state: types.StateSnapshot) void
 
     self.scroll_to_line_of_text = new_loc;
     self.has_waited_one_frame_to_scroll_to_line_of_text = false;
+}
+
+
+pub fn addWatchValue(self: *Self, val: []const u8) Allocator.Error!void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    if (val.len == 0) return;
+
+    // copy to the heap
+    const str = try safe.copySlice(u8, self.perm_alloc, val);
+
+    // ensure there are no duplicates
+    for (self.watch_vars.items) |w| {
+        if (strings.eql(w, str)) {
+            log.warnf("skipping dupliate watch value: {s}", .{str});
+            self.perm_alloc.free(str);
+            return;
+        }
+    }
+
+    try self.watch_vars.append(str);
+    try self.sendSetWatchExpressionsRequest();
+}
+
+pub fn sendSetWatchExpressionsRequest(self: *Self) Allocator.Error!void {
+    const z = trace.zone(@src());
+    defer z.end();
+
+    const alloc = self.dbg.requests.alloc;
+    var num_allocated: usize = 0;
+    const expressions = try alloc.alloc([]const u8, self.watch_vars.items.len);
+    errdefer {
+        for (0..num_allocated) |ndx| alloc.free(expressions[ndx]);
+        alloc.free(expressions);
+    }
+
+    for (self.watch_vars.items, 0..) |it, ndx| {
+        expressions[ndx] = try safe.copySlice(u8, alloc, it);
+        num_allocated += 1;
+    }
+
+    self.dbg.enqueue(proto.SetWatchExpressionsRequest{
+        .expressions = expressions,
+    });
 }
