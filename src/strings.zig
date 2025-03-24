@@ -74,9 +74,9 @@ pub const Cache = struct {
             defer self.mu.unlock();
 
             self.arena.deinit();
+            alloc.destroy(self.arena);
         }
 
-        alloc.destroy(self.arena);
         alloc.destroy(self);
     }
 
