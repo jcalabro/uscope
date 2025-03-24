@@ -16,7 +16,7 @@ pub inline fn init() Self {
         .gpa = gpa,
         .alloc = switch (builtin.mode) {
             .Debug => gpa.allocator(),
-            else => heap.c_allocator,
+            else => heap.smp_allocator,
         },
     };
 }
