@@ -78,6 +78,8 @@ pub fn main() !void {
 
 fn openOrCreateLogFile(file_path: []const u8) !fs.File {
     if (fs.openFileAbsolute(file_path, fs.File.OpenFlags{ .mode = .read_write })) |fp| {
+        errdefer fp.close();
+
         // the file exists, read until the end to we don't overwrite its contents
         const stat = try fp.stat();
         try fp.seekTo(stat.size);
