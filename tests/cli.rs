@@ -63,3 +63,23 @@ fn batch_mode_streams_commands_from_stdin() {
     assert!(stdout.contains("breakpoint set"));
     assert!(stdout.contains("stopped at breakpoint"));
 }
+
+#[test]
+fn batch_mode_reports_command_context() {
+    let executable = fixture("build/test-programs/basic");
+    assert!(
+        executable.exists(),
+        "missing test fixture; run `just build-test-programs`"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["--batch", "--eval", "invalid"])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 error output");
+
+    assert!(!output.status.success());
+    assert!(stderr.contains("--eval #1"));
+    assert!(stderr.contains("invalid command: invalid"));
+}
