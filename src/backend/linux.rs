@@ -728,8 +728,12 @@ fn spawn_waiter(pid: Pid, messages: mpsc::Sender<ControllerMessage>) -> Result<J
     reason = "pre_exec is the only way to request PTRACE_TRACEME in the child"
 )]
 fn trace_child(command: &mut ProcessCommand) {
+    // SAFETY: after fork, the closure only invokes the ptrace syscall and converts
+    // errno without allocating or acquiring locks before Command performs exec.
     unsafe {
-        command.pre_exec(|| ptrace::traceme().map_err(std::io::Error::other));
+        command.pre_exec(|| {
+            ptrace::traceme().map_err(|error| std::io::Error::from_raw_os_error(error as i32))
+        });
     }
 }
 
