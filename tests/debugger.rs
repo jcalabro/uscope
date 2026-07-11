@@ -1,39 +1,25 @@
-use std::path::PathBuf;
-use std::time::Duration;
-use tokio::time::timeout;
-use uscope::{
-    BreakpointSpec, Debugger, DebuggerEvent, Error, ExitStatus, InferiorState, StopReason,
-};
+mod support;
 
-fn fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build/test-programs/basic")
-}
+use uscope::{BreakpointLocation, Error, ExitStatus, InferiorState, StopReason, UnwindTermination};
+
+use support::Scenario;
 
 #[tokio::test]
-async fn breakpoint_is_reinserted_and_inferior_memory_can_be_read() {
-    let fixture = fixture();
-    assert!(
-        fixture.exists(),
-        "missing test fixture; run `just build-test-programs`"
-    );
+async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
+    let mut scenario = Scenario::new("breakpoint lifecycle", Scenario::fixture("basic"));
 
-    let debugger = Debugger::new(&fixture).expect("load debugger");
-    let handle = debugger.handle();
-    let mut events = handle.subscribe();
-    let breakpoint = handle
-        .add_breakpoint(BreakpointSpec::Function("breakpoint_target".into()))
-        .await
-        .expect("set breakpoint");
+    let breakpoint = scenario.add_breakpoint("breakpoint_target").await;
+    let first = scenario.run_to_stop().await;
 
-    let first = handle.run().await.expect("run to first breakpoint");
     let first_address = match first {
         StopReason::Breakpoint { address } => address,
         other => panic!("expected breakpoint, got {other:?}"),
     };
-    let location = handle
-        .current_location()
-        .await
-        .expect("resolve stop location");
+
+    let location = scenario
+        .operation("current location", scenario.handle().current_location())
+        .await;
+
     assert_eq!(location.address, first_address);
     assert_eq!(
         location
@@ -43,159 +29,132 @@ async fn breakpoint_is_reinserted_and_inferior_memory_can_be_read() {
             .map(|function| function.name.as_ref()),
         Some("breakpoint_target")
     );
+
     let source = location.image.source.as_ref().expect("source location");
-    let source_file = handle
+    let source_file = scenario
+        .handle()
         .module_image()
         .source_file(source.file)
         .expect("source file");
+
     assert!(source_file.path.ends_with("basic.c"));
     assert!(source.line.get() > 0);
-    let image_breakpoint = match breakpoint {
-        uscope::BreakpointLocation::Image(address) => address,
-        uscope::BreakpointLocation::Virtual(_) => panic!("function breakpoint was not image-based"),
+
+    let BreakpointLocation::Image(image_address) = breakpoint else {
+        panic!("function breakpoint was not image-based")
     };
+
     assert_ne!(
         first_address.get(),
-        image_breakpoint.get(),
+        image_address.get(),
         "PIE was not relocated"
     );
-    let mut launched = false;
-    let mut last_revision = 0;
-    let stopped = loop {
-        let event = timeout(Duration::from_secs(1), events.recv())
-            .await
-            .expect("event timeout")
-            .expect("event stream");
 
-        match event {
-            DebuggerEvent::StateChanged { revision } => last_revision = revision,
-            DebuggerEvent::InferiorLaunched { .. } => launched = true,
-            DebuggerEvent::InferiorStopped { reason, .. } => break reason,
-            _ => {}
-        }
-    };
-    assert!(launched);
-    assert_eq!(stopped, first);
+    let snapshot = scenario.snapshot().await;
 
-    let snapshot = handle.snapshot().await.expect("state snapshot");
-    assert_eq!(snapshot.revision, last_revision);
+    assert_eq!(snapshot.revision, scenario.last_revision());
     assert!(matches!(
         snapshot.inferior,
         InferiorState::Stopped { reason, .. } if reason == first
     ));
     assert_eq!(snapshot.breakpoints.as_ref(), &[breakpoint]);
 
-    let main_breakpoint = handle
-        .add_breakpoint(BreakpointSpec::Function("main".into()))
-        .await
-        .expect("set breakpoint after launch");
-    let snapshot = handle.snapshot().await.expect("updated state snapshot");
+    let duplicate = scenario.add_breakpoint("breakpoint_target").await;
+
+    assert_eq!(duplicate, breakpoint);
     assert_eq!(
-        snapshot.breakpoints.as_ref(),
+        scenario.snapshot().await.breakpoints.as_ref(),
+        &[breakpoint]
+    );
+
+    let main_breakpoint = scenario.add_breakpoint("main").await;
+
+    assert_eq!(
+        scenario.snapshot().await.breakpoints.as_ref(),
         &[breakpoint, main_breakpoint]
     );
 
-    let value_address = handle
-        .runtime_address("uscope_value")
-        .await
-        .expect("resolve global");
+    let value_address = scenario
+        .operation(
+            "resolve uscope_value",
+            scenario.handle().runtime_address("uscope_value"),
+        )
+        .await;
+
     assert_eq!(
-        handle
-            .read_word(value_address)
-            .await
-            .expect("read inferior memory"),
+        scenario
+            .operation(
+                "read uscope_value",
+                scenario.handle().read_word(value_address)
+            )
+            .await,
         0x1122_3344_5566_7788
     );
 
     assert_eq!(
-        handle.resume().await.expect("run to second breakpoint"),
+        scenario.resume_to_stop().await,
         StopReason::Breakpoint {
             address: first_address
         }
     );
     assert_eq!(
-        handle.resume().await.expect("finish inferior"),
+        scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
     );
-    debugger.shutdown().await.expect("shutdown worker");
+
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
-async fn shutdown_interrupts_and_reaps_a_running_inferior() {
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build/test-programs/spin");
-    assert!(
-        fixture.exists(),
-        "missing test fixture; run `just build-test-programs`"
-    );
+async fn shutdown_reaps_running_and_stopped_inferiors() {
+    let mut running = Scenario::new("shutdown running", Scenario::fixture("spin"));
 
-    let debugger = Debugger::new(&fixture).expect("load debugger");
-    let handle = debugger.handle();
-    let mut events = handle.subscribe();
-    let run = tokio::spawn({
-        let handle = handle.clone();
-        async move { handle.run().await }
-    });
+    let run = running.start_running().await;
 
-    loop {
-        let event = timeout(Duration::from_secs(1), events.recv())
-            .await
-            .expect("event timeout")
-            .expect("event stream");
-        if matches!(event, DebuggerEvent::InferiorLaunched { .. }) {
-            break;
-        }
-    }
-
-    let snapshot = timeout(Duration::from_secs(1), handle.snapshot())
-        .await
-        .expect("snapshot timeout")
-        .expect("state snapshot");
-    assert!(matches!(snapshot.inferior, InferiorState::Running { .. }));
-
-    debugger.shutdown().await.expect("shutdown worker");
-
-    let exited = loop {
-        let event = timeout(Duration::from_secs(1), events.recv())
-            .await
-            .expect("event timeout")
-            .expect("event stream");
-        if let DebuggerEvent::InferiorExited { status, .. } = event {
-            break status;
-        }
-    };
     assert!(matches!(
-        exited,
+        running.snapshot().await.inferior,
+        InferiorState::Running { .. }
+    ));
+
+    let status = running.shutdown().await.expect("inferior exit event");
+
+    assert!(matches!(
+        status,
         ExitStatus::Terminated(exception) if exception.code == 9
     ));
     assert!(matches!(
         run.await.expect("run task"),
         Err(Error::RequestCancelled)
     ));
+
+    let mut stopped = Scenario::new("shutdown stopped", Scenario::fixture("basic"));
+
+    stopped.add_breakpoint("breakpoint_target").await;
+
+    assert!(matches!(
+        stopped.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+
+    stopped.shutdown().await;
 }
 
 #[tokio::test]
-async fn dwarf_cfi_unwinds_nested_calls_without_frame_pointers() {
-    for fixture_name in ["unwind-o0", "unwind-o2", "unwind-nopie"] {
-        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("build/test-programs")
-            .join(fixture_name);
-        assert!(
-            fixture.exists(),
-            "missing test fixture; run `just build-test-programs`"
-        );
+async fn dwarf_cfi_unwinds_the_compiler_and_linker_matrix() {
+    for fixture in ["unwind-o0", "unwind-o2", "unwind-nopie", "unwind-clang-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
 
-        let debugger = Debugger::new(&fixture).expect("load debugger");
-        let handle = debugger.handle();
-        handle
-            .add_breakpoint(BreakpointSpec::Function("deepest".into()))
-            .await
-            .expect("set breakpoint");
+        scenario.add_breakpoint("deepest").await;
+
         assert!(matches!(
-            handle.run().await.expect("run to breakpoint"),
+            scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
         ));
 
-        let trace = handle.backtrace().await.expect("collect backtrace");
+        let trace = scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await;
+
         let names: Vec<_> = trace
             .frames
             .iter()
@@ -205,12 +164,38 @@ async fn dwarf_cfi_unwinds_nested_calls_without_frame_pointers() {
 
         assert!(
             names.starts_with(&["deepest", "middle", "outer", "main"]),
-            "unexpected {fixture_name} backtrace: {trace:?}"
+            "unexpected {fixture} backtrace: {trace:?}"
         );
         assert!(
             trace.frames.len() >= 4,
             "backtrace was truncated: {trace:?}"
         );
-        debugger.shutdown().await.expect("shutdown worker");
+        assert!(matches!(
+            trace.termination,
+            UnwindTermination::ModuleNotFound { .. }
+                | UnwindTermination::NoUnwindInfo { .. }
+                | UnwindTermination::Complete
+        ));
+
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn repeated_debug_sessions_leave_no_inferiors_behind() {
+    for iteration in 0..8 {
+        let mut scenario = Scenario::new(
+            format!("repeated session {iteration}"),
+            Scenario::fixture("basic"),
+        );
+
+        scenario.add_breakpoint("breakpoint_target").await;
+
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        scenario.shutdown().await;
     }
 }
