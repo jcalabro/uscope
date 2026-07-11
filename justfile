@@ -10,17 +10,7 @@ dev *ARGS="":
 
 # Builds the native test fixtures without running Rust tests.
 build-test-programs:
-    mkdir -p build/test-programs
-    NIX_HARDENING_ENABLE= gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -fPIE -pie \
-        tests/fixtures/basic.c -o build/test-programs/basic
-    NIX_HARDENING_ENABLE= gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -fPIE -pie \
-        tests/fixtures/spin.c -o build/test-programs/spin
-    NIX_HARDENING_ENABLE= gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -fno-omit-frame-pointer -fPIE -pie \
-        tests/fixtures/unwind.c -o build/test-programs/unwind-o0
-    NIX_HARDENING_ENABLE= gcc -std=c17 -Wall -Wextra -Werror -O2 -g3 -fomit-frame-pointer -fPIE -pie \
-        tests/fixtures/unwind.c -o build/test-programs/unwind-o2
-    NIX_HARDENING_ENABLE= gcc -std=c17 -Wall -Wextra -Werror -O2 -g3 -fomit-frame-pointer -no-pie \
-        tests/fixtures/unwind.c -o build/test-programs/unwind-nopie
+    ./scripts/build-test-programs.sh
 
 # Builds the native test fixtures and uscope.
 build: build-test-programs
