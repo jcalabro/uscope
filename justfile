@@ -6,7 +6,7 @@ default: check
 
 # Enters the Nix development shell.
 dev *ARGS="":
-    exec ./dev.sh "$@"
+    exec ./scripts/dev.sh "$@"
 
 # Builds the native test fixtures without running Rust tests.
 build-test-programs:
