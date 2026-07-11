@@ -2,9 +2,6 @@
 
 `uscope` is an early Linux x86-64 native debugger written in Rust.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the async controller, event, and
-platform-backend design.
-
 ## Development
 
 Enter the pinned development environment and run the checks:

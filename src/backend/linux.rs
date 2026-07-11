@@ -15,11 +15,26 @@ use nix::unistd::Pid;
 use tokio::sync::{broadcast, mpsc};
 
 use super::ControllerMessage;
-use crate::protocol::{DebuggerEvent, InferiorState, Reply, Request, StateSnapshot, StopReason};
+use crate::protocol::{
+    DebuggerEvent, ExceptionInfo, ExitStatus, InferiorState, ProcessId, Reply, Request,
+    StateSnapshot, StopReason,
+};
 use crate::{Error, Result};
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
 const WAITER_THREAD_NAME: &str = "uscope-waitpid";
+
+fn backend_error(error: LinuxError) -> Error {
+    Error::backend(error)
+}
+
+fn process_id(pid: Pid) -> ProcessId {
+    ProcessId::new(u64::from(pid.as_raw().unsigned_abs()))
+}
+
+fn exception_info(signal: NixSignal) -> ExceptionInfo {
+    ExceptionInfo::new(u64::from(signal as u32), signal.to_string())
+}
 
 pub type WaitEvent = WaitStatus;
 
@@ -27,11 +42,21 @@ struct Breakpoint {
     original_byte: u8,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ExecutionState {
     Starting,
     Running,
     Stopped(StopReason),
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LinuxError {
+    #[error("system tracing operation failed: {0}")]
+    System(#[from] nix::Error),
+    #[error("unexpected wait status: {0}")]
+    UnexpectedWait(String),
+    #[error("could not determine load bias for {0}")]
+    LoadBias(PathBuf),
 }
 
 struct Inferior {
@@ -165,12 +190,14 @@ impl Controller {
         let Some(pending) = self.pending_run.take() else {
             match status {
                 WaitStatus::Exited(pid, code) => {
-                    let _ = self.complete_exit(pid, StopReason::Exited(code));
+                    let _ = self.complete_exit(pid, ExitStatus::Code(i64::from(code)));
                 }
                 WaitStatus::Signaled(pid, signal, _) => {
-                    let _ = self.complete_exit(pid, StopReason::Signaled(signal as i32));
+                    let _ = self.complete_exit(pid, ExitStatus::Terminated(exception_info(signal)));
                 }
-                _ => self.fail_inferior(Error::UnexpectedWait(format!("{status:?}"))),
+                _ => self.fail_inferior(backend_error(LinuxError::UnexpectedWait(format!(
+                    "{status:?}"
+                )))),
             }
             return true;
         };
@@ -231,7 +258,7 @@ impl Controller {
                         return;
                     }
                 };
-                let pid_u32 = pid.as_raw().unsigned_abs();
+                let process_id = process_id(pid);
 
                 self.inferior = Some(Inferior {
                     pid,
@@ -248,7 +275,7 @@ impl Controller {
                 self.bump_revision();
                 let _ = self
                     .events
-                    .send(DebuggerEvent::InferiorLaunched { pid: pid_u32 });
+                    .send(DebuggerEvent::InferiorLaunched { process_id });
             }
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -296,7 +323,7 @@ impl Controller {
 
     fn handle_initial_stop(&mut self, status: WaitStatus, reply: Reply<StopReason>) {
         let WaitStatus::Stopped(pid, NixSignal::SIGTRAP) = status else {
-            let error = Error::UnexpectedWait(format!("{status:?}"));
+            let error = backend_error(LinuxError::UnexpectedWait(format!("{status:?}")));
             self.fail_run(reply, error);
             return;
         };
@@ -381,37 +408,43 @@ impl Controller {
                     inferior.stopped_at = Some(address);
                     StopReason::Breakpoint { address }
                 } else {
-                    StopReason::Signal(NixSignal::SIGTRAP as i32)
+                    StopReason::Exception(exception_info(NixSignal::SIGTRAP))
                 };
 
                 (pid, reason)
             }
-            WaitStatus::Stopped(pid, signal) => (pid, StopReason::Signal(signal as i32)),
+            WaitStatus::Stopped(pid, signal) => {
+                (pid, StopReason::Exception(exception_info(signal)))
+            }
             WaitStatus::Exited(pid, code) => {
-                let reason = StopReason::Exited(code);
-                self.complete_exit(pid, reason)?;
-                return Ok(reason);
+                let status = ExitStatus::Code(i64::from(code));
+                self.complete_exit(pid, status.clone())?;
+                return Ok(StopReason::Exited(status));
             }
             WaitStatus::Signaled(pid, signal, _) => {
-                let reason = StopReason::Signaled(signal as i32);
-                self.complete_exit(pid, reason)?;
-                return Ok(reason);
+                let status = ExitStatus::Terminated(exception_info(signal));
+                self.complete_exit(pid, status.clone())?;
+                return Ok(StopReason::Exited(status));
             }
-            other => return Err(Error::UnexpectedWait(format!("{other:?}"))),
+            other => {
+                return Err(backend_error(LinuxError::UnexpectedWait(format!(
+                    "{other:?}"
+                ))));
+            }
         };
 
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        inferior.state = ExecutionState::Stopped(reason);
+        inferior.state = ExecutionState::Stopped(reason.clone());
         self.bump_revision();
-        let pid_u32 = pid.as_raw().unsigned_abs();
+        let process_id = process_id(pid);
         let _ = self.events.send(DebuggerEvent::InferiorStopped {
-            pid: pid_u32,
-            reason,
+            process_id,
+            reason: reason.clone(),
         });
         Ok(reason)
     }
 
-    fn complete_exit(&mut self, pid: Pid, reason: StopReason) -> Result<()> {
+    fn complete_exit(&mut self, pid: Pid, status: ExitStatus) -> Result<()> {
         let mut inferior = self.inferior.take().ok_or(Error::NotRunning)?;
         if let Some(waiter) = inferior.waiter.take() {
             waiter.join().map_err(|_| Error::BackendThreadPanicked)?;
@@ -419,11 +452,10 @@ impl Controller {
 
         self.pending_run = None;
         self.bump_revision();
-        let pid_u32 = pid.as_raw().unsigned_abs();
-        let _ = self.events.send(DebuggerEvent::InferiorExited {
-            pid: pid_u32,
-            reason,
-        });
+        let process_id = process_id(pid);
+        let _ = self
+            .events
+            .send(DebuggerEvent::InferiorExited { process_id, status });
         Ok(())
     }
 
@@ -449,11 +481,14 @@ impl Controller {
             .inferior
             .as_ref()
             .map_or(InferiorState::NotRunning, |inferior| {
-                let pid = inferior.pid.as_raw().unsigned_abs();
-                match inferior.state {
-                    ExecutionState::Stopped(reason) => InferiorState::Stopped { pid, reason },
+                let process_id = process_id(inferior.pid);
+                match &inferior.state {
+                    ExecutionState::Stopped(reason) => InferiorState::Stopped {
+                        process_id,
+                        reason: reason.clone(),
+                    },
                     ExecutionState::Starting | ExecutionState::Running => {
-                        InferiorState::Running { pid }
+                        InferiorState::Running { process_id }
                     }
                 }
             });
@@ -491,12 +526,16 @@ impl Controller {
 
     fn handle_shutdown_wait(&mut self, status: WaitStatus) -> bool {
         let result = match status {
-            WaitStatus::Exited(pid, code) => self.complete_exit(pid, StopReason::Exited(code)),
+            WaitStatus::Exited(pid, code) => {
+                self.complete_exit(pid, ExitStatus::Code(i64::from(code)))
+            }
             WaitStatus::Signaled(pid, signal, _) => {
-                self.complete_exit(pid, StopReason::Signaled(signal as i32))
+                self.complete_exit(pid, ExitStatus::Terminated(exception_info(signal)))
             }
             WaitStatus::Stopped(_, _) => self.kill_inferior(),
-            other => Err(Error::UnexpectedWait(format!("{other:?}"))),
+            other => Err(backend_error(LinuxError::UnexpectedWait(format!(
+                "{other:?}"
+            )))),
         };
 
         if self.inferior.is_none() || result.is_err() {
@@ -515,7 +554,7 @@ impl Controller {
         };
         match signal::kill(inferior.pid, NixSignal::SIGKILL) {
             Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
-            Err(error) => Err(error.into()),
+            Err(error) => Err(backend_error(LinuxError::System(error))),
         }
     }
 
@@ -568,35 +607,37 @@ impl LinuxPtrace {
 
     fn read_word(&self, pid: Pid, address: u64) -> Result<u64> {
         self.assert_owner_thread();
-        let value = ptrace::read(pid, address as ptrace::AddressType)?;
+        let value = ptrace::read(pid, address as ptrace::AddressType)
+            .map_err(|error| backend_error(LinuxError::System(error)))?;
         Ok(u64::from_ne_bytes(value.to_ne_bytes()))
     }
 
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()> {
         self.assert_owner_thread();
         let value = libc::c_long::from_ne_bytes(value.to_ne_bytes());
-        ptrace::write(pid, address as ptrace::AddressType, value)?;
+        ptrace::write(pid, address as ptrace::AddressType, value)
+            .map_err(|error| backend_error(LinuxError::System(error)))?;
         Ok(())
     }
 
     fn continue_execution(&self, pid: Pid) -> Result<()> {
         self.assert_owner_thread();
-        Ok(ptrace::cont(pid, None)?)
+        ptrace::cont(pid, None).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn step(&self, pid: Pid) -> Result<()> {
         self.assert_owner_thread();
-        Ok(ptrace::step(pid, None)?)
+        ptrace::step(pid, None).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
         self.assert_owner_thread();
-        Ok(ptrace::getregs(pid)?)
+        ptrace::getregs(pid).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
         self.assert_owner_thread();
-        Ok(ptrace::setregs(pid, registers)?)
+        ptrace::setregs(pid, registers).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn install_breakpoint(&self, inferior: &mut Inferior, address: u64) -> Result<()> {
@@ -713,10 +754,12 @@ fn load_bias(pid: Pid, executable: &Path) -> Result<u64> {
             continue;
         };
         return u64::from_str_radix(start, 16)
-            .map_err(|_| Error::LoadBias(executable.as_ref().into()));
+            .map_err(|_| backend_error(LinuxError::LoadBias(executable.as_ref().into())));
     }
 
-    Err(Error::LoadBias(executable.as_ref().into()))
+    Err(backend_error(LinuxError::LoadBias(
+        executable.as_ref().into(),
+    )))
 }
 
 #[cfg(test)]

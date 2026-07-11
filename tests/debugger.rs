@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
-use uscope::{BreakpointSpec, Debugger, DebuggerEvent, Error, InferiorState, StopReason};
+use uscope::{
+    BreakpointSpec, Debugger, DebuggerEvent, Error, ExitStatus, InferiorState, StopReason,
+};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("build/test-programs/basic")
@@ -74,7 +76,7 @@ async fn breakpoint_is_reinserted_and_inferior_memory_can_be_read() {
     );
     assert_eq!(
         handle.resume().await.expect("finish inferior"),
-        StopReason::Exited(0)
+        StopReason::Exited(ExitStatus::Code(0))
     );
     debugger.shutdown().await.expect("shutdown worker");
 }
@@ -118,11 +120,14 @@ async fn shutdown_interrupts_and_reaps_a_running_inferior() {
             .await
             .expect("event timeout")
             .expect("event stream");
-        if let DebuggerEvent::InferiorExited { reason, .. } = event {
-            break reason;
+        if let DebuggerEvent::InferiorExited { status, .. } = event {
+            break status;
         }
     };
-    assert_eq!(exited, StopReason::Signaled(9));
+    assert!(matches!(
+        exited,
+        ExitStatus::Terminated(exception) if exception.code == 9
+    ));
     assert!(matches!(
         run.await.expect("run task"),
         Err(Error::RequestCancelled)
