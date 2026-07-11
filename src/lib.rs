@@ -28,7 +28,7 @@ impl Debugger {
         let worker_executable = executable.clone();
         let worker = thread::Builder::new()
             .name("uscope-ptrace".into())
-            .spawn(move || worker::run(worker_executable, receiver))?;
+            .spawn(move || worker::run(worker_executable, &receiver))?;
         Ok(Self {
             executable,
             symbols,
@@ -37,6 +37,7 @@ impl Debugger {
         })
     }
 
+    #[must_use]
     pub fn executable(&self) -> &Path {
         &self.executable
     }

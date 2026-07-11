@@ -31,7 +31,7 @@ struct Worker {
     pending_breakpoints: Vec<(u64, bool)>,
 }
 
-pub(crate) fn run(executable: PathBuf, commands: Receiver<Command>) {
+pub fn run(executable: PathBuf, commands: &Receiver<Command>) {
     let mut worker = Worker {
         executable,
         inferior: None,
@@ -116,9 +116,7 @@ impl Worker {
             return Err(Error::AlreadyRunning);
         }
         let mut command = ProcessCommand::new(&self.executable);
-        unsafe {
-            command.pre_exec(|| ptrace::traceme().map_err(std::io::Error::other));
-        }
+        trace_child(&mut command);
         let child = command.spawn()?;
         let pid = Pid::from_raw(i32::try_from(child.id()).map_err(|_| Error::AddressOverflow)?);
         match waitpid(pid, None)? {
@@ -189,7 +187,7 @@ impl Worker {
     fn read_word(&self, address: u64) -> Result<u64> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let value = ptrace::read(inferior.pid, address as ptrace::AddressType)?;
-        Ok(value as u64)
+        Ok(u64::from_ne_bytes(value.to_ne_bytes()))
     }
 
     fn kill_inferior(&mut self) -> Result<()> {
@@ -207,13 +205,23 @@ impl Worker {
     }
 }
 
+#[allow(
+    unsafe_code,
+    reason = "pre_exec is the only way to request PTRACE_TRACEME in the child"
+)]
+fn trace_child(command: &mut ProcessCommand) {
+    unsafe {
+        command.pre_exec(|| ptrace::traceme().map_err(std::io::Error::other));
+    }
+}
+
 impl Inferior {
     fn install_breakpoint(&mut self, address: u64) -> Result<()> {
         if self.breakpoints.contains_key(&address) {
             return Ok(());
         }
-        let word = ptrace::read(self.pid, address as ptrace::AddressType)? as u64;
-        let original_byte = word as u8;
+        let word = read_word(self.pid, address)?;
+        let original_byte = word.to_ne_bytes()[0];
         let trap_word = (word & !0xff) | 0xcc;
         ptrace_write(self.pid, address, trap_word)?;
         self.breakpoints
@@ -226,7 +234,7 @@ impl Inferior {
             .breakpoints
             .get_mut(&address)
             .expect("known breakpoint");
-        let word = ptrace::read(self.pid, address as ptrace::AddressType)? as u64;
+        let word = read_word(self.pid, address)?;
         ptrace_write(
             self.pid,
             address,
@@ -235,17 +243,23 @@ impl Inferior {
         Ok(())
     }
 
-    fn enable_breakpoint(&mut self, address: u64) -> Result<()> {
+    fn enable_breakpoint(&self, address: u64) -> Result<()> {
         assert!(self.breakpoints.contains_key(&address), "known breakpoint");
-        let word = ptrace::read(self.pid, address as ptrace::AddressType)? as u64;
+        let word = read_word(self.pid, address)?;
         ptrace_write(self.pid, address, (word & !0xff) | 0xcc)?;
         Ok(())
     }
 }
 
 fn ptrace_write(pid: Pid, address: u64, value: u64) -> Result<()> {
-    ptrace::write(pid, address as ptrace::AddressType, value as libc::c_long)?;
+    let value = libc::c_long::from_ne_bytes(value.to_ne_bytes());
+    ptrace::write(pid, address as ptrace::AddressType, value)?;
     Ok(())
+}
+
+fn read_word(pid: Pid, address: u64) -> Result<u64> {
+    let value = ptrace::read(pid, address as ptrace::AddressType)?;
+    Ok(u64::from_ne_bytes(value.to_ne_bytes()))
 }
 
 fn finish_status(status: WaitStatus) -> Result<StopReason> {
