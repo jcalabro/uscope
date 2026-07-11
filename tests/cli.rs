@@ -25,7 +25,7 @@ fn batch_mode_executes_a_command_file() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .args(["--batch", "--command"])
+        .args(["--batch", "-c"])
         .arg(fixture("tests/fixtures/basic.uscope"))
         .arg(executable)
         .output()
