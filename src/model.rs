@@ -236,7 +236,7 @@ impl ColumnNumber {
 pub struct SourceFile {
     /// The file's session-scoped identifier.
     pub id: SourceFileId,
-    /// The path recorded by the compiler.
+    /// The source path resolved from the debug metadata.
     pub path: Arc<PathBuf>,
 }
 
@@ -249,6 +249,26 @@ pub struct SourceLocation {
     pub line: LineNumber,
     /// The one-based column, when present in the debug information.
     pub column: Option<ColumnNumber>,
+}
+
+/// One numbered line read from a source file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLine {
+    /// The one-based line number.
+    pub number: LineNumber,
+    /// The source text without its line terminator.
+    pub text: Arc<str>,
+}
+
+/// Source lines surrounding an execution location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceContext {
+    /// The source file that was read.
+    pub file: SourceFile,
+    /// The execution location within the file.
+    pub location: SourceLocation,
+    /// Contiguous source lines ordered by line number.
+    pub lines: Arc<[SourceLine]>,
 }
 
 /// Static information about a function in a module image.

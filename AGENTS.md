@@ -10,6 +10,7 @@
 - All ptrace operations must execute on the dedicated controller OS thread that created the tracee. The waiter thread may call `waitpid` and send messages back; it must not call ptrace.
 - Tokio coordinates asynchronous clients and message passing. Blocking process control remains on the controller thread.
 - Debug-info providers normalize data at the boundary. The generic unwind loop iterates caller contexts; gimli owns DWARF CFI interpretation.
+- Resolve source paths while loading debug metadata, but read source contents lazily outside the ptrace controller thread.
 - Make unsupported states and partial results explicit. Never silently guess when doing so could produce a convincing but incorrect debugger result.
 - Unsafe code is denied unless narrowly required. Every exception needs a safety comment and must satisfy the configured lints.
 

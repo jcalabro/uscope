@@ -10,9 +10,9 @@ pub use model::{
     AddressRange, Architecture, Backtrace, BreakpointLocation, ByteOrder, ColumnNumber,
     ExecutionLocation, FrameKind, FunctionId, FunctionInfo, ImageAddress, ImageLocation,
     LineNumber, LoadedModule, ModuleId, ModuleImage, ModuleImageId, PointerWidth,
-    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, SourceFile,
-    SourceFileId, SourceLocation, StackFrame, StackFrameId, SymbolId, SymbolInfo,
-    TargetDescription, ThreadId, UnwindTermination, VirtualAddress,
+    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, SourceContext,
+    SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId, SymbolId,
+    SymbolInfo, TargetDescription, ThreadId, UnwindTermination, VirtualAddress,
 };
 pub use protocol::{
     BreakpointSpec, DebuggerEvent, ExceptionInfo, ExitStatus, InferiorState, ProcessId,
@@ -194,6 +194,60 @@ impl DebuggerHandle {
             module: loaded.id,
             address,
             image: self.module_image.locate(image_address),
+        })
+    }
+
+    /// Lazily reads source lines surrounding the stopped instruction.
+    pub async fn source_context(&self, radius: u32) -> Result<SourceContext> {
+        let execution = self.current_location().await?;
+        let location = execution
+            .image
+            .source
+            .ok_or(Error::SourceLocationUnavailable)?;
+        let file = self
+            .module_image
+            .source_file(location.file)
+            .cloned()
+            .expect("source location references a known file");
+        let contents = tokio::fs::read_to_string(file.path.as_ref())
+            .await
+            .map_err(|source| Error::SourceFileRead {
+                path: file.path.as_ref().clone(),
+                source,
+            })?;
+        let all_lines: Vec<_> = contents.lines().collect();
+        let line = location.line.get();
+        let target = usize::try_from(line)
+            .ok()
+            .and_then(|line| line.checked_sub(1))
+            .filter(|line| *line < all_lines.len())
+            .ok_or_else(|| Error::SourceLineOutOfRange {
+                path: file.path.as_ref().clone(),
+                line,
+            })?;
+        let radius = usize::try_from(radius).expect("u32 fits in usize");
+        let start = target.saturating_sub(radius);
+        let end = target
+            .saturating_add(radius)
+            .saturating_add(1)
+            .min(all_lines.len());
+        let lines = all_lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, text)| SourceLine {
+                number: LineNumber::new(
+                    u64::try_from(start + offset + 1).expect("source line number fits u64"),
+                )
+                .expect("source line number is nonzero"),
+                text: Arc::from(*text),
+            })
+            .collect::<Vec<_>>()
+            .into();
+
+        Ok(SourceContext {
+            file,
+            location,
+            lines,
         })
     }
 

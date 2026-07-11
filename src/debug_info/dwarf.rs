@@ -351,7 +351,7 @@ fn load_lines(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit: &gimli::Unit<Reader<'_>>,
     source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<String, SourceFileId>,
+    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
     lines: &mut Vec<LineEntry>,
 ) -> std::result::Result<(), DwarfError> {
     let Some(program) = unit.line_program.clone() else {
@@ -371,10 +371,7 @@ fn load_lines(
             let Some(file) = row.file(header) else {
                 continue;
             };
-            let path = dwarf
-                .attr_string(unit, file.path_name())?
-                .to_string_lossy()
-                .into_owned();
+            let path = source_path(dwarf, unit, header, file)?;
             let file_id = source_file_id(path, source_files, source_file_ids);
             let Some(line) = row.line().and_then(|line| LineNumber::new(line.get())) else {
                 continue;
@@ -394,9 +391,9 @@ fn load_lines(
 }
 
 fn source_file_id(
-    path: String,
+    path: PathBuf,
     source_files: &mut Vec<SourceFile>,
-    source_file_ids: &mut HashMap<String, SourceFileId>,
+    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> SourceFileId {
     *source_file_ids.entry(path.clone()).or_insert_with(|| {
         let id = SourceFileId::new(
@@ -404,10 +401,51 @@ fn source_file_id(
         );
         source_files.push(SourceFile {
             id,
-            path: Arc::new(PathBuf::from(path)),
+            path: Arc::new(path),
         });
         id
     })
+}
+
+fn source_path(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    header: &gimli::LineProgramHeader<Reader<'_>>,
+    file: &gimli::FileEntry<Reader<'_>>,
+) -> std::result::Result<PathBuf, DwarfError> {
+    let file_name = dwarf
+        .attr_string(unit, file.path_name())?
+        .to_string_lossy()
+        .into_owned();
+    let file_name = PathBuf::from(file_name);
+    if file_name.is_absolute() {
+        return Ok(file_name);
+    }
+
+    let directory = file
+        .directory(header)
+        .map(|directory| dwarf.attr_string(unit, directory))
+        .transpose()?
+        .map(|directory| PathBuf::from(directory.to_string_lossy().into_owned()));
+    let compilation_directory = unit
+        .comp_dir
+        .as_ref()
+        .map(|directory| PathBuf::from(directory.to_string_lossy().into_owned()));
+    let mut path = PathBuf::new();
+
+    if let Some(directory) = directory {
+        if !directory.is_absolute()
+            && let Some(compilation_directory) = compilation_directory
+        {
+            path.push(compilation_directory);
+        }
+        path.push(directory);
+    } else if let Some(compilation_directory) = compilation_directory {
+        path.push(compilation_directory);
+    }
+    path.push(file_name);
+
+    Ok(path)
 }
 
 fn push_line_range(
