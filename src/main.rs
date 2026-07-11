@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
+use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
@@ -32,12 +33,17 @@ struct Args {
     batch: bool,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<()> {
     let args = Args::parse();
-    let mut debugger = Debugger::new(&args.executable)?;
+    let mut debugger = Debugger::new(&args.executable).with_context(|| {
+        format!(
+            "failed to initialize debugger for {}",
+            args.executable.display()
+        )
+    })?;
 
     let result = run(&debugger, &args);
-    let shutdown = debugger.shutdown();
+    let shutdown = debugger.shutdown().context("failed to shut down debugger");
 
     result?;
     shutdown?;
@@ -45,11 +51,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run(debugger: &Debugger, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+fn run(debugger: &Debugger, args: &Args) -> Result<()> {
     let mut output = vec![format!("debugging {}", debugger.executable().display())];
 
     for path in &args.command_files {
-        let contents = fs::read_to_string(path)?;
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read command file {}", path.display()))?;
 
         if !run_lines(
             debugger,
@@ -115,7 +122,7 @@ fn run_lines<'a>(
     source: &str,
     batch: bool,
     output: &mut Vec<String>,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> Result<bool> {
     for (index, line) in lines.enumerate() {
         if !run_line(
             debugger,
@@ -137,13 +144,13 @@ fn run_line(
     source: &str,
     batch: bool,
     output: &mut Vec<String>,
-) -> Result<bool, Box<dyn std::error::Error>> {
+) -> Result<bool> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return Ok(true);
     }
 
-    match execute(debugger, line).map_err(|error| io::Error::other(format!("{source}: {error}")))? {
+    match execute(debugger, line).with_context(|| source.to_owned())? {
         Control::Continue(message) => {
             if !message.is_empty() {
                 if batch {
@@ -161,19 +168,20 @@ fn run_line(
     }
 }
 
-fn repl(debugger: &Debugger, output: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
-    enable_raw_mode()?;
+fn repl(debugger: &Debugger, output: Vec<String>) -> Result<()> {
+    enable_raw_mode().context("failed to enable terminal raw mode")?;
 
     let backend = CrosstermBackend::new(io::stdout());
     let options = TerminalOptions {
         viewport: Viewport::Inline(12),
     };
-    let mut terminal = Terminal::with_options(backend, options)?;
+    let mut terminal =
+        Terminal::with_options(backend, options).context("failed to initialize terminal")?;
 
     let result = run_repl(&mut terminal, debugger, output);
 
-    disable_raw_mode()?;
-    terminal.show_cursor()?;
+    disable_raw_mode().context("failed to disable terminal raw mode")?;
+    terminal.show_cursor().context("failed to restore cursor")?;
 
     result
 }
@@ -182,7 +190,7 @@ fn run_repl(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     debugger: &Debugger,
     mut output: Vec<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let mut input = String::new();
 
     loop {
