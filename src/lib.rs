@@ -1,14 +1,13 @@
 mod backend;
+mod debug_info;
 mod error;
 mod protocol;
-mod symbols;
 
 pub use error::{Error, Result};
 pub use protocol::{
     BreakpointSpec, DebuggerEvent, ExceptionInfo, ExitStatus, InferiorState, ProcessId,
     StateSnapshot, StopReason,
 };
-pub use symbols::Symbols;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -19,6 +18,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::timeout;
 
 use backend::ControllerMessage;
+use debug_info::DebugInfo;
 use protocol::Request;
 
 const REQUEST_CAPACITY: usize = 32;
@@ -34,7 +34,7 @@ pub struct Debugger {
 #[derive(Clone)]
 pub struct DebuggerHandle {
     executable: Arc<PathBuf>,
-    symbols: Arc<Symbols>,
+    debug_info: Arc<dyn DebugInfo>,
     requests: mpsc::Sender<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
 }
@@ -42,7 +42,7 @@ pub struct DebuggerHandle {
 impl Debugger {
     pub fn new(executable: impl AsRef<Path>) -> Result<Self> {
         let executable = Arc::new(executable.as_ref().canonicalize()?);
-        let symbols = Arc::new(Symbols::load(&executable)?);
+        let debug_info = debug_info::load(&executable)?;
         let (requests, receiver) = mpsc::channel(REQUEST_CAPACITY);
         let shutdown_permit = requests
             .clone()
@@ -59,7 +59,7 @@ impl Debugger {
         Ok(Self {
             handle: DebuggerHandle {
                 executable,
-                symbols,
+                debug_info,
                 requests,
                 events,
             },
@@ -121,7 +121,7 @@ impl DebuggerHandle {
     pub async fn add_breakpoint(&self, spec: BreakpointSpec) -> Result<u64> {
         let (address, relocate) = match spec {
             BreakpointSpec::Address(address) => (address, false),
-            BreakpointSpec::Function(name) => (self.symbols.function_address(&name)?, true),
+            BreakpointSpec::Function(name) => (self.debug_info.function_address(&name)?, true),
         };
 
         self.request(|reply| Request::AddBreakpoint {
@@ -148,7 +148,7 @@ impl DebuggerHandle {
     }
 
     pub async fn runtime_address(&self, name: &str) -> Result<u64> {
-        let link_address = self.symbols.symbol_address(name)?;
+        let link_address = self.debug_info.symbol_address(name)?;
 
         self.request(|reply| Request::Relocate {
             link_address,

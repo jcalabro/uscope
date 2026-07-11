@@ -4,10 +4,8 @@ use std::error::Error as StdError;
 pub enum Error {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("ELF error: {0}")]
-    Object(#[from] object::Error),
-    #[error("DWARF error: {0}")]
-    Dwarf(#[from] gimli::Error),
+    #[error("debug information error: {0}")]
+    DebugInfo(#[source] Box<dyn StdError + Send + Sync>),
     #[error("debugger backend error: {0}")]
     Backend(#[source] Box<dyn StdError + Send + Sync>),
 
@@ -45,6 +43,10 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    pub(crate) fn debug_info(error: impl StdError + Send + Sync + 'static) -> Self {
+        Self::DebugInfo(Box::new(error))
+    }
+
     pub(crate) fn backend(error: impl StdError + Send + Sync + 'static) -> Self {
         Self::Backend(Box::new(error))
     }
