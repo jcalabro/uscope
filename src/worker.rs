@@ -37,13 +37,17 @@ pub fn run(executable: PathBuf, commands: &Receiver<Command>) {
         inferior: None,
         pending_breakpoints: Vec::new(),
     };
+
     while let Ok(command) = commands.recv() {
         let shutdown = matches!(command, Command::Shutdown { .. });
+
         worker.handle(command);
+
         if shutdown {
             break;
         }
     }
+
     let _ = worker.kill_inferior();
 }
 
@@ -56,18 +60,22 @@ impl Worker {
                 reply,
             } => {
                 let result = self.add_breakpoint(address, relocate);
+
                 let _ = reply.send(result);
             }
             Command::Launch { reply } => {
                 let result = self.launch();
+
                 let _ = reply.send(result);
             }
             Command::Continue { reply } => {
                 let result = self.resume();
+
                 let _ = reply.send(result);
             }
             Command::ReadWord { address, reply } => {
                 let result = self.read_word(address);
+
                 let _ = reply.send(result);
             }
             Command::Relocate {
@@ -84,10 +92,12 @@ impl Worker {
                             .checked_add(link_address)
                             .ok_or(Error::AddressOverflow)
                     });
+
                 let _ = reply.send(result);
             }
             Command::Shutdown { reply } => {
                 let result = self.kill_inferior();
+
                 let _ = reply.send(result);
             }
         }
@@ -103,11 +113,14 @@ impl Worker {
             } else {
                 address
             };
+
             return inferior.install_breakpoint(runtime);
         }
+
         if !self.pending_breakpoints.contains(&(address, relocate)) {
             self.pending_breakpoints.push((address, relocate));
         }
+
         Ok(())
     }
 
@@ -115,14 +128,18 @@ impl Worker {
         if self.inferior.is_some() {
             return Err(Error::AlreadyRunning);
         }
+
         let mut command = ProcessCommand::new(&self.executable);
         trace_child(&mut command);
+
         let child = command.spawn()?;
         let pid = Pid::from_raw(i32::try_from(child.id()).map_err(|_| Error::AddressOverflow)?);
+
         match waitpid(pid, None)? {
             WaitStatus::Stopped(_, Signal::SIGTRAP) => {}
             status => return Err(Error::UnexpectedWait(format!("{status:?}"))),
         }
+
         let load_bias = match load_bias(pid, &self.executable) {
             Ok(load_bias) => load_bias,
             Err(error) => {
@@ -131,12 +148,14 @@ impl Worker {
                 return Err(error);
             }
         };
+
         let mut inferior = Inferior {
             pid,
             load_bias,
             breakpoints: BTreeMap::new(),
             stopped_at: None,
         };
+
         for &(address, relocate) in &self.pending_breakpoints {
             let runtime = if relocate {
                 load_bias
@@ -145,32 +164,41 @@ impl Worker {
             } else {
                 address
             };
+
             inferior.install_breakpoint(runtime)?;
         }
+
         self.inferior = Some(inferior);
+
         self.resume()
     }
 
     fn resume(&mut self) -> Result<StopReason> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+
         if let Some(address) = inferior.stopped_at.take() {
             ptrace::step(inferior.pid, None)?;
+
             match waitpid(inferior.pid, None)? {
                 WaitStatus::Stopped(_, Signal::SIGTRAP) => inferior.enable_breakpoint(address)?,
                 status => return finish_status(status),
             }
         }
+
         ptrace::cont(inferior.pid, None)?;
         let status = waitpid(inferior.pid, None)?;
+
         let result = match status {
             WaitStatus::Stopped(_, Signal::SIGTRAP) => {
                 let mut registers = ptrace::getregs(inferior.pid)?;
                 let address = registers.rip.checked_sub(1).ok_or(Error::AddressOverflow)?;
+
                 if inferior.breakpoints.contains_key(&address) {
                     inferior.disable_breakpoint(address)?;
                     registers.rip = address;
                     ptrace::setregs(inferior.pid, registers)?;
                     inferior.stopped_at = Some(address);
+
                     StopReason::Breakpoint { address }
                 } else {
                     StopReason::Signal(Signal::SIGTRAP)
@@ -178,15 +206,18 @@ impl Worker {
             }
             other => finish_status(other)?,
         };
+
         if matches!(result, StopReason::Exited(_) | StopReason::Signaled(_)) {
             self.inferior = None;
         }
+
         Ok(result)
     }
 
     fn read_word(&self, address: u64) -> Result<u64> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let value = ptrace::read(inferior.pid, address as ptrace::AddressType)?;
+
         Ok(u64::from_ne_bytes(value.to_ne_bytes()))
     }
 
@@ -194,10 +225,12 @@ impl Worker {
         let Some(inferior) = self.inferior.take() else {
             return Ok(());
         };
+
         match signal::kill(inferior.pid, Signal::SIGKILL) {
             Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
             Err(error) => return Err(error.into()),
         }
+
         match waitpid(inferior.pid, None) {
             Ok(_) | Err(nix::errno::Errno::ECHILD) => Ok(()),
             Err(error) => Err(error.into()),
@@ -220,12 +253,15 @@ impl Inferior {
         if self.breakpoints.contains_key(&address) {
             return Ok(());
         }
+
         let word = read_word(self.pid, address)?;
         let original_byte = word.to_ne_bytes()[0];
         let trap_word = (word & !0xff) | 0xcc;
+
         ptrace_write(self.pid, address, trap_word)?;
         self.breakpoints
             .insert(address, Breakpoint { original_byte });
+
         Ok(())
     }
 
@@ -235,30 +271,37 @@ impl Inferior {
             .get_mut(&address)
             .expect("known breakpoint");
         let word = read_word(self.pid, address)?;
+
         ptrace_write(
             self.pid,
             address,
             (word & !0xff) | u64::from(breakpoint.original_byte),
         )?;
+
         Ok(())
     }
 
     fn enable_breakpoint(&self, address: u64) -> Result<()> {
         assert!(self.breakpoints.contains_key(&address), "known breakpoint");
+
         let word = read_word(self.pid, address)?;
         ptrace_write(self.pid, address, (word & !0xff) | 0xcc)?;
+
         Ok(())
     }
 }
 
 fn ptrace_write(pid: Pid, address: u64, value: u64) -> Result<()> {
     let value = libc::c_long::from_ne_bytes(value.to_ne_bytes());
+
     ptrace::write(pid, address as ptrace::AddressType, value)?;
+
     Ok(())
 }
 
 fn read_word(pid: Pid, address: u64) -> Result<u64> {
     let value = ptrace::read(pid, address as ptrace::AddressType)?;
+
     Ok(u64::from_ne_bytes(value.to_ne_bytes()))
 }
 
@@ -274,6 +317,7 @@ fn finish_status(status: WaitStatus) -> Result<StopReason> {
 fn load_bias(pid: Pid, executable: &Path) -> Result<u64> {
     let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
     let executable = executable.to_string_lossy();
+
     for line in maps.lines() {
         let mut fields = line.split_whitespace();
         let Some(range) = fields.next() else { continue };
@@ -287,11 +331,14 @@ fn load_bias(pid: Pid, executable: &Path) -> Result<u64> {
         if path != executable || offset != "00000000" {
             continue;
         }
+
         let Some(start) = range.split('-').next() else {
             continue;
         };
+
         return u64::from_str_radix(start, 16)
             .map_err(|_| Error::LoadBias(executable.as_ref().into()));
     }
+
     Err(Error::LoadBias(executable.as_ref().into()))
 }
