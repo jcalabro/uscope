@@ -19,10 +19,12 @@ build: build-test-programs
 
 # Builds the native test fixtures and runs the Rust test suite.
 test: build-test-programs
-    cargo test
+    cargo nextest run --all-targets
+    cargo test --doc
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
 check: build-test-programs
     cargo fmt --check
     cargo clippy --all-targets --all-features -- -D warnings
-    cargo test
+    cargo nextest run --all-targets
+    cargo test --doc

@@ -16,9 +16,9 @@ pub enum StopReason {
     Signaled(Signal),
 }
 
-pub(crate) type Reply<T> = SyncSender<Result<T>>;
+pub type Reply<T> = SyncSender<Result<T>>;
 
-pub(crate) enum Command {
+pub enum Command {
     AddBreakpoint {
         address: u64,
         relocate: bool,

@@ -4,6 +4,26 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A Linux x86-64 native debugger"
+repository = "https://github.com/jcalabro/uscope"
+readme = "README.md"
+keywords = ["debugger", "dwarf", "linux", "ptrace"]
+categories = ["command-line-utilities", "development-tools::debugging"]
+
+[lints.rust]
+future_incompatible = { level = "deny", priority = -1 }
+rust_2018_idioms = { level = "deny", priority = -1 }
+unsafe_code = "deny"
+unused = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+multiple_crate_versions = "allow"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

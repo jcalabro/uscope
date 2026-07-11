@@ -22,6 +22,7 @@
         RUSTFLAGS = "-C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
         packages = with pkgs; [
           rust
+          cargo-nextest
           just
           gcc
           clang

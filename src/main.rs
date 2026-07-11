@@ -69,8 +69,7 @@ fn run(debugger: &Debugger, args: &Args) -> Result<(), Box<dyn std::error::Error
     }
     if args.batch {
         if args.command_files.is_empty() && args.commands.is_empty() {
-            let stdin = io::stdin();
-            let mut stdin = stdin.lock();
+            let mut stdin = io::stdin().lock();
             let mut line = String::new();
             let mut number = 0;
             loop {
@@ -89,6 +88,7 @@ fn run(debugger: &Debugger, args: &Args) -> Result<(), Box<dyn std::error::Error
                     break;
                 }
             }
+            drop(stdin);
         }
         Ok(())
     } else {
@@ -183,7 +183,13 @@ fn run_repl(
                 Paragraph::new(format!("> {input}")).block(Block::default().borders(Borders::ALL)),
                 prompt,
             );
-            frame.set_cursor_position((prompt.x + 2 + input.len() as u16, prompt.y + 1));
+            let input_width = u16::try_from(input.len()).unwrap_or(u16::MAX);
+            let cursor_x = prompt
+                .x
+                .saturating_add(2)
+                .saturating_add(input_width)
+                .min(prompt.right().saturating_sub(2));
+            frame.set_cursor_position((cursor_x, prompt.y + 1));
         })?;
         let Event::Key(key) = event::read()? else {
             continue;
@@ -221,10 +227,10 @@ fn execute(debugger: &Debugger, line: &str) -> uscope::Result<Control> {
     match command {
         "break" | "b" => {
             let argument = one_argument(&mut words, "break <function|address>")?;
-            let spec = match parse_address(argument) {
-                Ok(address) => BreakpointSpec::Address(address),
-                Err(_) => BreakpointSpec::Function(argument.to_owned()),
-            };
+            let spec = parse_address(argument).map_or_else(
+                |_| BreakpointSpec::Function(argument.to_owned()),
+                BreakpointSpec::Address,
+            );
             let address = debugger.add_breakpoint(spec)?;
             Ok(Control::Continue(format!(
                 "breakpoint set at link/runtime address {address:#x}"
