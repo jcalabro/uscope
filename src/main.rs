@@ -6,7 +6,7 @@ use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, TerminalOptions, Viewport};
@@ -183,13 +183,7 @@ fn run_repl(
                 Paragraph::new(format!("> {input}")).block(Block::default().borders(Borders::ALL)),
                 prompt,
             );
-            let input_width = u16::try_from(input.len()).unwrap_or(u16::MAX);
-            let cursor_x = prompt
-                .x
-                .saturating_add(2)
-                .saturating_add(input_width)
-                .min(prompt.right().saturating_sub(2));
-            frame.set_cursor_position((cursor_x, prompt.y + 1));
+            frame.set_cursor_position((prompt_cursor_x(prompt, input.len()), prompt.y + 1));
         })?;
         let Event::Key(key) = event::read()? else {
             continue;
@@ -214,6 +208,15 @@ fn run_repl(
             _ => {}
         }
     }
+}
+
+fn prompt_cursor_x(prompt: Rect, input_len: usize) -> u16 {
+    let input_width = u16::try_from(input_len).unwrap_or(u16::MAX);
+    prompt
+        .x
+        .saturating_add(3)
+        .saturating_add(input_width)
+        .min(prompt.right().saturating_sub(2))
 }
 
 enum Control {
@@ -283,5 +286,19 @@ fn format_stop(reason: StopReason) -> String {
         StopReason::Signal(signal) => format!("stopped by {signal}"),
         StopReason::Exited(code) => format!("inferior exited with status {code}"),
         StopReason::Signaled(signal) => format!("inferior terminated by {signal}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_cursor_follows_input_and_stays_inside_border() {
+        let prompt = Rect::new(10, 0, 20, 3);
+
+        assert_eq!(prompt_cursor_x(prompt, 0), 13);
+        assert_eq!(prompt_cursor_x(prompt, 5), 18);
+        assert_eq!(prompt_cursor_x(prompt, usize::MAX), 28);
     }
 }
