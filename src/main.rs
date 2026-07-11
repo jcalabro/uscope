@@ -192,7 +192,9 @@ fn run_repl(
             continue;
         }
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+            KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Ok(());
+            }
             KeyCode::Char(character) => input.push(character),
             KeyCode::Backspace => {
                 input.pop();
