@@ -26,6 +26,10 @@ pub enum Error {
     NotStopped,
     #[error("address arithmetic overflow")]
     AddressOverflow,
+    #[error("address is outside the loaded module")]
+    AddressOutsideModule,
+    #[error("the stopped location is unavailable")]
+    LocationUnavailable,
 
     #[error("debugger backend thread panicked")]
     BackendThreadPanicked,

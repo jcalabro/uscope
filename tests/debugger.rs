@@ -20,7 +20,7 @@ async fn breakpoint_is_reinserted_and_inferior_memory_can_be_read() {
     let debugger = Debugger::new(&fixture).expect("load debugger");
     let handle = debugger.handle();
     let mut events = handle.subscribe();
-    handle
+    let breakpoint = handle
         .add_breakpoint(BreakpointSpec::Function("breakpoint_target".into()))
         .await
         .expect("set breakpoint");
@@ -30,6 +30,35 @@ async fn breakpoint_is_reinserted_and_inferior_memory_can_be_read() {
         StopReason::Breakpoint { address } => address,
         other => panic!("expected breakpoint, got {other:?}"),
     };
+    let location = handle
+        .current_location()
+        .await
+        .expect("resolve stop location");
+    assert_eq!(location.address, first_address);
+    assert_eq!(
+        location
+            .image
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some("breakpoint_target")
+    );
+    let source = location.image.source.as_ref().expect("source location");
+    let source_file = handle
+        .module_image()
+        .source_file(source.file)
+        .expect("source file");
+    assert!(source_file.path.ends_with("basic.c"));
+    assert!(source.line.get() > 0);
+    let image_breakpoint = match breakpoint {
+        uscope::BreakpointLocation::Image(address) => address,
+        uscope::BreakpointLocation::Virtual(_) => panic!("function breakpoint was not image-based"),
+    };
+    assert_ne!(
+        first_address.get(),
+        image_breakpoint.get(),
+        "PIE was not relocated"
+    );
     let mut launched = false;
     let mut last_revision = 0;
     let stopped = loop {
@@ -54,7 +83,17 @@ async fn breakpoint_is_reinserted_and_inferior_memory_can_be_read() {
         snapshot.inferior,
         InferiorState::Stopped { reason, .. } if reason == first
     ));
-    assert_eq!(snapshot.breakpoints.as_ref(), &[first_address]);
+    assert_eq!(snapshot.breakpoints.as_ref(), &[breakpoint]);
+
+    let main_breakpoint = handle
+        .add_breakpoint(BreakpointSpec::Function("main".into()))
+        .await
+        .expect("set breakpoint after launch");
+    let snapshot = handle.snapshot().await.expect("updated state snapshot");
+    assert_eq!(
+        snapshot.breakpoints.as_ref(),
+        &[breakpoint, main_breakpoint]
+    );
 
     let value_address = handle
         .runtime_address("uscope_value")

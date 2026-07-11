@@ -12,7 +12,10 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use uscope::{BreakpointSpec, Debugger, DebuggerHandle, Error, ExitStatus, StopReason};
+use uscope::{
+    BreakpointLocation, BreakpointSpec, Debugger, DebuggerHandle, Error, ExitStatus, StopReason,
+    VirtualAddress,
+};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -279,12 +282,16 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
             let argument = one_argument(&mut words, "break <function|address>")?;
             let spec = parse_address(argument).map_or_else(
                 |_| BreakpointSpec::Function(argument.to_owned()),
-                BreakpointSpec::Address,
+                |address| BreakpointSpec::Address(VirtualAddress::new(address)),
             );
-            let address = debugger.add_breakpoint(spec).await?;
+            let location = debugger.add_breakpoint(spec).await?;
+            let (space, address) = match location {
+                BreakpointLocation::Image(address) => ("image", address.get()),
+                BreakpointLocation::Virtual(address) => ("virtual", address.get()),
+            };
 
             Ok(Control::Continue(format!(
-                "breakpoint set at link/runtime address {address:#x}"
+                "breakpoint set at {space} address {address:#x}"
             )))
         }
         "run" | "r" => Ok(Control::Continue(format_stop(debugger.run().await?))),
@@ -294,7 +301,7 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
 
             Ok(Control::Continue(format!(
                 "{address:#018x}: {:#018x}",
-                debugger.read_word(address).await?
+                debugger.read_word(VirtualAddress::new(address)).await?
             )))
         }
         "address" => {
@@ -302,8 +309,27 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
 
             Ok(Control::Continue(format!(
                 "{name}: {:#x}",
-                debugger.runtime_address(name).await?
+                debugger.runtime_address(name).await?.get()
             )))
+        }
+        "where" => {
+            let location = debugger.current_location().await?;
+            let function = location
+                .image
+                .function
+                .as_ref()
+                .map_or("<unknown>", |function| function.name.as_ref());
+            let source = location.image.source.as_ref().and_then(|source| {
+                debugger
+                    .module_image()
+                    .source_file(source.file)
+                    .map(|file| format!("{}:{}", file.path.display(), source.line.get()))
+            });
+
+            Ok(Control::Continue(match source {
+                Some(source) => format!("{function} at {source} ({:#x})", location.address.get()),
+                None => format!("{function} at {:#x}", location.address.get()),
+            }))
         }
         "quit" | "q" => Ok(Control::Quit),
         "" => Ok(Control::Continue(String::new())),
@@ -335,7 +361,9 @@ fn parse_address(value: &str) -> uscope::Result<u64> {
 
 fn format_stop(reason: StopReason) -> String {
     match reason {
-        StopReason::Breakpoint { address } => format!("stopped at breakpoint {address:#x}"),
+        StopReason::Breakpoint { address } => {
+            format!("stopped at breakpoint {:#x}", address.get())
+        }
         StopReason::Exception(exception) => format!(
             "stopped by {} ({:#x})",
             exception.description, exception.code
