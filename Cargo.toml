@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "development-tools::debugging"]
 future_incompatible = { level = "deny", priority = -1 }
 rust_2018_idioms = { level = "deny", priority = -1 }
 unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
 unused = { level = "deny", priority = -1 }
 
 [lints.clippy]
@@ -22,8 +23,10 @@ nursery = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+missing_safety_doc = "deny"
 module_name_repetitions = "allow"
 multiple_crate_versions = "allow"
+undocumented_unsafe_blocks = "deny"
 
 [dependencies]
 anyhow = "1.0"
