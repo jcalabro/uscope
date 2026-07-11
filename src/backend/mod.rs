@@ -10,8 +10,8 @@ use std::thread::JoinHandle;
 
 use tokio::sync::{broadcast, mpsc};
 
-use crate::Result;
 use crate::protocol::{DebuggerEvent, Request};
+use crate::{ModuleImageId, Result};
 
 pub enum ControllerMessage {
     Request(Request),
@@ -21,9 +21,10 @@ pub enum ControllerMessage {
 
 pub fn spawn_controller(
     executable: Arc<PathBuf>,
+    module_image: ModuleImageId,
     message_sender: mpsc::Sender<ControllerMessage>,
     messages: mpsc::Receiver<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
 ) -> Result<JoinHandle<()>> {
-    linux::spawn_controller(executable, message_sender, messages, events)
+    linux::spawn_controller(executable, module_image, message_sender, messages, events)
 }

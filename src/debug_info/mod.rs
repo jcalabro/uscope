@@ -7,13 +7,8 @@ mod dwarf;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::Result;
+use crate::{ModuleImage, Result};
 
-pub trait DebugInfo: Send + Sync {
-    fn function_address(&self, name: &str) -> Result<u64>;
-    fn symbol_address(&self, name: &str) -> Result<u64>;
-}
-
-pub fn load(path: &Path) -> Result<Arc<dyn DebugInfo>> {
+pub fn load(path: &Path) -> Result<Arc<ModuleImage>> {
     dwarf::load(path)
 }

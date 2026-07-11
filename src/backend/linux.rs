@@ -19,7 +19,7 @@ use crate::protocol::{
     DebuggerEvent, ExceptionInfo, ExitStatus, InferiorState, ProcessId, Reply, Request,
     StateSnapshot, StopReason,
 };
-use crate::{Error, Result};
+use crate::{BreakpointLocation, Error, LoadedModule, ModuleImageId, Result, VirtualAddress};
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
 const WAITER_THREAD_NAME: &str = "uscope-waitpid";
@@ -61,16 +61,16 @@ enum LinuxError {
 
 struct Inferior {
     pid: Pid,
-    load_bias: u64,
-    breakpoints: BTreeMap<u64, Breakpoint>,
-    stopped_at: Option<u64>,
+    loaded_module: LoadedModule,
+    breakpoints: BTreeMap<VirtualAddress, Breakpoint>,
+    stopped_at: Option<VirtualAddress>,
     state: ExecutionState,
     waiter: Option<JoinHandle<()>>,
 }
 
 enum WaitPhase {
     InitialExec,
-    SingleStep(u64),
+    SingleStep(VirtualAddress),
     Continue,
 }
 
@@ -81,12 +81,13 @@ struct PendingRun {
 
 struct Controller {
     executable: Arc<PathBuf>,
+    module_image: ModuleImageId,
     messages: mpsc::Receiver<ControllerMessage>,
     message_sender: mpsc::Sender<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
     ptrace: LinuxPtrace,
     inferior: Option<Inferior>,
-    pending_breakpoints: Vec<(u64, bool)>,
+    pending_breakpoints: Vec<BreakpointLocation>,
     pending_run: Option<PendingRun>,
     shutdown_reply: Option<Reply<()>>,
     revision: u64,
@@ -94,24 +95,29 @@ struct Controller {
 
 pub fn spawn_controller(
     executable: Arc<PathBuf>,
+    module_image: ModuleImageId,
     message_sender: mpsc::Sender<ControllerMessage>,
     messages: mpsc::Receiver<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
 ) -> Result<JoinHandle<()>> {
     Ok(thread::Builder::new()
         .name(CONTROLLER_THREAD_NAME.into())
-        .spawn(move || Controller::new(executable, messages, message_sender, events).run())?)
+        .spawn(move || {
+            Controller::new(executable, module_image, messages, message_sender, events).run();
+        })?)
 }
 
 impl Controller {
     fn new(
         executable: Arc<PathBuf>,
+        module_image: ModuleImageId,
         messages: mpsc::Receiver<ControllerMessage>,
         message_sender: mpsc::Sender<ControllerMessage>,
         events: broadcast::Sender<DebuggerEvent>,
     ) -> Self {
         Self {
             executable,
+            module_image,
             messages,
             message_sender,
             events,
@@ -151,12 +157,8 @@ impl Controller {
 
     fn handle_request(&mut self, request: Request) -> bool {
         match request {
-            Request::AddBreakpoint {
-                address,
-                relocate,
-                reply,
-            } => {
-                let result = self.add_breakpoint(address, relocate);
+            Request::AddBreakpoint { location, reply } => {
+                let result = self.add_breakpoint(location);
                 let _ = reply.send(result);
             }
             Request::Launch { reply } => self.launch(reply),
@@ -164,11 +166,11 @@ impl Controller {
             Request::ReadWord { address, reply } => {
                 let _ = reply.send(self.read_word(address));
             }
-            Request::Relocate {
-                link_address,
-                reply,
-            } => {
-                let _ = reply.send(self.relocate(link_address));
+            Request::LoadedModule { reply } => {
+                let _ = reply.send(self.loaded_module());
+            }
+            Request::StoppedLocation { reply } => {
+                let _ = reply.send(self.stopped_location());
             }
             Request::Snapshot { reply } => {
                 let _ = reply.send(Ok(self.snapshot()));
@@ -213,25 +215,26 @@ impl Controller {
         true
     }
 
-    fn add_breakpoint(&mut self, address: u64, relocate: bool) -> Result<()> {
+    fn add_breakpoint(&mut self, location: BreakpointLocation) -> Result<()> {
+        if self.pending_breakpoints.contains(&location) {
+            return Ok(());
+        }
+
         if let Some(inferior) = self.inferior.as_mut() {
             if !matches!(inferior.state, ExecutionState::Stopped(_)) {
                 return Err(Error::NotStopped);
             }
 
-            let runtime = if relocate {
-                inferior
-                    .load_bias
-                    .checked_add(address)
-                    .ok_or(Error::AddressOverflow)?
-            } else {
-                address
+            let address = match location {
+                BreakpointLocation::Image(address) => {
+                    inferior.loaded_module.virtual_address(address)?
+                }
+                BreakpointLocation::Virtual(address) => address,
             };
 
-            self.ptrace.install_breakpoint(inferior, runtime)?;
-        } else if !self.pending_breakpoints.contains(&(address, relocate)) {
-            self.pending_breakpoints.push((address, relocate));
+            self.ptrace.install_breakpoint(inferior, address)?;
         }
+        self.pending_breakpoints.push(location);
 
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::BreakpointsChanged {
@@ -262,7 +265,7 @@ impl Controller {
 
                 self.inferior = Some(Inferior {
                     pid,
-                    load_bias: 0,
+                    loaded_module: LoadedModule::main(self.module_image, 0),
                     breakpoints: BTreeMap::new(),
                     stopped_at: None,
                     state: ExecutionState::Starting,
@@ -343,17 +346,16 @@ impl Controller {
     fn initialize_inferior(&mut self, pid: Pid) -> Result<()> {
         let load_bias = load_bias(pid, &self.executable)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        inferior.load_bias = load_bias;
+        inferior.loaded_module = LoadedModule::main(self.module_image, load_bias);
 
-        for &(address, relocate) in &self.pending_breakpoints {
-            let runtime = if relocate {
-                load_bias
-                    .checked_add(address)
-                    .ok_or(Error::AddressOverflow)?
-            } else {
-                address
+        for &location in &self.pending_breakpoints {
+            let address = match location {
+                BreakpointLocation::Image(address) => {
+                    inferior.loaded_module.virtual_address(address)?
+                }
+                BreakpointLocation::Virtual(address) => address,
             };
-            self.ptrace.install_breakpoint(inferior, runtime)?;
+            self.ptrace.install_breakpoint(inferior, address)?;
         }
 
         self.ptrace.continue_execution(pid)?;
@@ -361,7 +363,12 @@ impl Controller {
         Ok(())
     }
 
-    fn handle_single_step(&mut self, status: WaitStatus, address: u64, reply: Reply<StopReason>) {
+    fn handle_single_step(
+        &mut self,
+        status: WaitStatus,
+        address: VirtualAddress,
+        reply: Reply<StopReason>,
+    ) {
         match status {
             WaitStatus::Stopped(pid, NixSignal::SIGTRAP) => {
                 let result = self
@@ -399,11 +406,13 @@ impl Controller {
             WaitStatus::Stopped(pid, NixSignal::SIGTRAP) => {
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
                 let mut registers = self.ptrace.registers(pid)?;
-                let address = registers.rip.checked_sub(1).ok_or(Error::AddressOverflow)?;
+                let address = VirtualAddress::new(
+                    registers.rip.checked_sub(1).ok_or(Error::AddressOverflow)?,
+                );
 
                 let reason = if inferior.breakpoints.contains_key(&address) {
                     self.ptrace.disable_breakpoint(inferior, address)?;
-                    registers.rip = address;
+                    registers.rip = address.get();
                     self.ptrace.set_registers(pid, registers)?;
                     inferior.stopped_at = Some(address);
                     StopReason::Breakpoint { address }
@@ -459,21 +468,33 @@ impl Controller {
         Ok(())
     }
 
-    fn read_word(&self, address: u64) -> Result<u64> {
+    fn read_word(&self, address: VirtualAddress) -> Result<u64> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         if !matches!(inferior.state, ExecutionState::Stopped(_)) {
             return Err(Error::NotStopped);
         }
 
-        self.ptrace.read_word(inferior.pid, address)
+        self.ptrace.read_word(inferior.pid, address.get())
     }
 
-    fn relocate(&self, link_address: u64) -> Result<u64> {
+    fn stopped_location(&self) -> Result<(LoadedModule, VirtualAddress)> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        inferior
-            .load_bias
-            .checked_add(link_address)
-            .ok_or(Error::AddressOverflow)
+        let ExecutionState::Stopped(StopReason::Breakpoint { address }) = inferior.state else {
+            return Err(if matches!(inferior.state, ExecutionState::Stopped(_)) {
+                Error::LocationUnavailable
+            } else {
+                Error::NotStopped
+            });
+        };
+
+        Ok((inferior.loaded_module, address))
+    }
+
+    fn loaded_module(&self) -> Result<LoadedModule> {
+        self.inferior
+            .as_ref()
+            .map(|inferior| inferior.loaded_module)
+            .ok_or(Error::NotRunning)
     }
 
     fn snapshot(&self) -> StateSnapshot {
@@ -492,15 +513,7 @@ impl Controller {
                     }
                 }
             });
-        let breakpoints: Arc<[u64]> = self.inferior.as_ref().map_or_else(
-            || {
-                self.pending_breakpoints
-                    .iter()
-                    .map(|(address, _)| *address)
-                    .collect()
-            },
-            |inferior| inferior.breakpoints.keys().copied().collect(),
-        );
+        let breakpoints: Arc<[BreakpointLocation]> = self.pending_breakpoints.clone().into();
 
         StateSnapshot {
             revision: self.revision,
@@ -640,43 +653,43 @@ impl LinuxPtrace {
         ptrace::setregs(pid, registers).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
-    fn install_breakpoint(&self, inferior: &mut Inferior, address: u64) -> Result<()> {
+    fn install_breakpoint(&self, inferior: &mut Inferior, address: VirtualAddress) -> Result<()> {
         self.assert_owner_thread();
         if inferior.breakpoints.contains_key(&address) {
             return Ok(());
         }
 
-        let word = self.read_word(inferior.pid, address)?;
+        let word = self.read_word(inferior.pid, address.get())?;
         let original_byte = word.to_ne_bytes()[0];
-        self.write_word(inferior.pid, address, (word & !0xff) | 0xcc)?;
+        self.write_word(inferior.pid, address.get(), (word & !0xff) | 0xcc)?;
         inferior
             .breakpoints
             .insert(address, Breakpoint { original_byte });
         Ok(())
     }
 
-    fn disable_breakpoint(&self, inferior: &Inferior, address: u64) -> Result<()> {
+    fn disable_breakpoint(&self, inferior: &Inferior, address: VirtualAddress) -> Result<()> {
         self.assert_owner_thread();
         let breakpoint = inferior
             .breakpoints
             .get(&address)
             .expect("known breakpoint");
-        let word = self.read_word(inferior.pid, address)?;
+        let word = self.read_word(inferior.pid, address.get())?;
         self.write_word(
             inferior.pid,
-            address,
+            address.get(),
             (word & !0xff) | u64::from(breakpoint.original_byte),
         )
     }
 
-    fn enable_breakpoint(&self, inferior: &Inferior, address: u64) -> Result<()> {
+    fn enable_breakpoint(&self, inferior: &Inferior, address: VirtualAddress) -> Result<()> {
         self.assert_owner_thread();
         assert!(
             inferior.breakpoints.contains_key(&address),
             "known breakpoint"
         );
-        let word = self.read_word(inferior.pid, address)?;
-        self.write_word(inferior.pid, address, (word & !0xff) | 0xcc)
+        let word = self.read_word(inferior.pid, address.get())?;
+        self.write_word(inferior.pid, address.get(), (word & !0xff) | 0xcc)
     }
 }
 

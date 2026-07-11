@@ -33,6 +33,8 @@ fn batch_mode_executes_a_command_file() {
     let stdout = assert_success(output);
 
     assert_eq!(stdout.matches("stopped at breakpoint").count(), 2);
+    assert!(stdout.contains("breakpoint_target at"));
+    assert!(stdout.contains("basic.c:"));
     assert!(stdout.contains("inferior exited with status 0"));
 }
 
