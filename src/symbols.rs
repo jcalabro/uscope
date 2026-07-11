@@ -12,6 +12,7 @@ impl Symbols {
     pub fn load(path: &Path) -> Result<Self> {
         let data = fs::read(path)?;
         let object = object::File::parse(data.as_slice())?;
+
         let sections = DwarfSections::load(|id: SectionId| -> Result<Cow<'_, [u8]>> {
             match object.section_by_name(id.name()) {
                 Some(section) => Ok(section.uncompressed_data()?),
@@ -19,11 +20,14 @@ impl Symbols {
             }
         })?;
         let dwarf = sections.borrow(|section| EndianSlice::new(section, LittleEndian));
+
         let mut functions: HashMap<String, Vec<u64>> = HashMap::new();
         let mut units = dwarf.units();
+
         while let Some(header) = units.next()? {
             let unit = dwarf.unit(header)?;
             let mut entries = unit.entries();
+
             while let Some(entry) = entries.next_dfs()? {
                 if entry.tag() != gimli::DW_TAG_subprogram {
                     continue;
@@ -32,9 +36,11 @@ impl Symbols {
                 else {
                     continue;
                 };
+
                 let Some(name) = entry.attr(gimli::DW_AT_name) else {
                     continue;
                 };
+
                 let name = dwarf
                     .attr_string(&unit, name.value())?
                     .to_string_lossy()
@@ -42,18 +48,22 @@ impl Symbols {
                 functions.entry(name).or_default().push(address);
             }
         }
+
         let mut symbols: HashMap<String, Vec<u64>> = HashMap::new();
+
         for symbol in object.symbols().chain(object.dynamic_symbols()) {
             if symbol.address() == 0 {
                 continue;
             }
             if let Ok(name) = symbol.name() {
                 let values = symbols.entry(name.to_owned()).or_default();
+
                 if !values.contains(&symbol.address()) {
                     values.push(symbol.address());
                 }
             }
         }
+
         Ok(Self { functions, symbols })
     }
 

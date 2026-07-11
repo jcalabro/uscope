@@ -35,17 +35,22 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let mut debugger = Debugger::new(&args.executable)?;
+
     let result = run(&debugger, &args);
     let shutdown = debugger.shutdown();
+
     result?;
     shutdown?;
+
     Ok(())
 }
 
 fn run(debugger: &Debugger, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut output = vec![format!("debugging {}", debugger.executable().display())];
+
     for path in &args.command_files {
         let contents = fs::read_to_string(path)?;
+
         if !run_lines(
             debugger,
             contents.lines(),
@@ -56,6 +61,7 @@ fn run(debugger: &Debugger, args: &Args) -> Result<(), Box<dyn std::error::Error
             return Ok(());
         }
     }
+
     for (index, command) in args.commands.iter().enumerate() {
         if !run_line(
             debugger,
@@ -67,17 +73,22 @@ fn run(debugger: &Debugger, args: &Args) -> Result<(), Box<dyn std::error::Error
             return Ok(());
         }
     }
+
     if args.batch {
         if args.command_files.is_empty() && args.commands.is_empty() {
             let mut stdin = io::stdin().lock();
             let mut line = String::new();
             let mut number = 0;
+
             loop {
                 line.clear();
+
                 if stdin.read_line(&mut line)? == 0 {
                     break;
                 }
+
                 number += 1;
+
                 if !run_line(
                     debugger,
                     &line,
@@ -88,8 +99,10 @@ fn run(debugger: &Debugger, args: &Args) -> Result<(), Box<dyn std::error::Error
                     break;
                 }
             }
+
             drop(stdin);
         }
+
         Ok(())
     } else {
         repl(debugger, output)
@@ -114,6 +127,7 @@ fn run_lines<'a>(
             return Ok(false);
         }
     }
+
     Ok(true)
 }
 
@@ -128,6 +142,7 @@ fn run_line(
     if line.is_empty() || line.starts_with('#') {
         return Ok(true);
     }
+
     match execute(debugger, line).map_err(|error| io::Error::other(format!("{source}: {error}")))? {
         Control::Continue(message) => {
             if !message.is_empty() {
@@ -139,6 +154,7 @@ fn run_line(
                     output.push(message);
                 }
             }
+
             Ok(true)
         }
         Control::Quit => Ok(false),
@@ -147,14 +163,18 @@ fn run_line(
 
 fn repl(debugger: &Debugger, output: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
+
     let backend = CrosstermBackend::new(io::stdout());
     let options = TerminalOptions {
         viewport: Viewport::Inline(12),
     };
     let mut terminal = Terminal::with_options(backend, options)?;
+
     let result = run_repl(&mut terminal, debugger, output);
+
     disable_raw_mode()?;
     terminal.show_cursor()?;
+
     result
 }
 
@@ -164,33 +184,40 @@ fn run_repl(
     mut output: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut input = String::new();
+
     loop {
         terminal.draw(|frame| {
             let [history, prompt] =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(frame.area());
             let visible = history.height.saturating_sub(2) as usize;
             let start = output.len().saturating_sub(visible);
+
             let lines: Vec<Line<'_>> = output[start..]
                 .iter()
                 .map(String::as_str)
                 .map(Line::from)
                 .collect();
+
             frame.render_widget(
                 Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("uscope")),
                 history,
             );
+
             frame.render_widget(
                 Paragraph::new(format!("> {input}")).block(Block::default().borders(Borders::ALL)),
                 prompt,
             );
             frame.set_cursor_position((prompt_cursor_x(prompt, input.len()), prompt.y + 1));
         })?;
+
         let Event::Key(key) = event::read()? else {
             continue;
         };
+
         if key.kind != KeyEventKind::Press {
             continue;
         }
+
         match key.code {
             KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return Ok(());
@@ -201,6 +228,7 @@ fn run_repl(
             }
             KeyCode::Enter => {
                 let command = std::mem::take(&mut input);
+
                 match run_line(debugger, &command, "repl", false, &mut output) {
                     Ok(true) => {}
                     Ok(false) => return Ok(()),
@@ -214,6 +242,7 @@ fn run_repl(
 
 fn prompt_cursor_x(prompt: Rect, input_len: usize) -> u16 {
     let input_width = u16::try_from(input_len).unwrap_or(u16::MAX);
+
     prompt
         .x
         .saturating_add(3)
@@ -229,6 +258,7 @@ enum Control {
 fn execute(debugger: &Debugger, line: &str) -> uscope::Result<Control> {
     let mut words = line.split_whitespace();
     let command = words.next().unwrap_or("");
+
     match command {
         "break" | "b" => {
             let argument = one_argument(&mut words, "break <function|address>")?;
@@ -237,6 +267,7 @@ fn execute(debugger: &Debugger, line: &str) -> uscope::Result<Control> {
                 BreakpointSpec::Address,
             );
             let address = debugger.add_breakpoint(spec)?;
+
             Ok(Control::Continue(format!(
                 "breakpoint set at link/runtime address {address:#x}"
             )))
@@ -245,6 +276,7 @@ fn execute(debugger: &Debugger, line: &str) -> uscope::Result<Control> {
         "continue" | "c" => Ok(Control::Continue(format_stop(debugger.resume()?))),
         "x" => {
             let address = parse_address(one_argument(&mut words, "x <runtime-address>")?)?;
+
             Ok(Control::Continue(format!(
                 "{address:#018x}: {:#018x}",
                 debugger.read_word(address)?
@@ -252,6 +284,7 @@ fn execute(debugger: &Debugger, line: &str) -> uscope::Result<Control> {
         }
         "address" => {
             let name = one_argument(&mut words, "address <symbol>")?;
+
             Ok(Control::Continue(format!(
                 "{name}: {:#x}",
                 debugger.runtime_address(name)?
@@ -270,14 +303,17 @@ fn one_argument<'a>(
     let argument = words
         .next()
         .ok_or_else(|| Error::InvalidCommand(usage.to_owned()))?;
+
     if words.next().is_some() {
         return Err(Error::InvalidCommand(usage.to_owned()));
     }
+
     Ok(argument)
 }
 
 fn parse_address(value: &str) -> uscope::Result<u64> {
     let value = value.strip_prefix("0x").unwrap_or(value);
+
     u64::from_str_radix(value, 16)
         .map_err(|_| Error::InvalidCommand(format!("invalid hexadecimal address: {value}")))
 }
