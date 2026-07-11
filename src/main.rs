@@ -1,20 +1,14 @@
+use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph};
-use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
-    BreakpointLocation, BreakpointSpec, Debugger, DebuggerHandle, Error, ExitStatus, StopReason,
-    VirtualAddress,
+    BreakpointLocation, BreakpointSpec, ByteOrder, Debugger, DebuggerHandle, Error, ExitStatus,
+    RegisterSnapshot, StopReason, VirtualAddress,
 };
 
 #[derive(Parser)]
@@ -32,7 +26,7 @@ struct Args {
     #[arg(short = 'e', long = "eval", value_name = "COMMAND")]
     commands: Vec<String>,
 
-    /// Print plain-text results without opening the terminal UI.
+    /// Execute commands without starting the interactive REPL.
     #[arg(long)]
     batch: bool,
 }
@@ -47,7 +41,11 @@ async fn main() -> Result<()> {
         )
     })?;
 
-    let result = run(&debugger.handle(), &args).await;
+    let handle = debugger.handle();
+    let result = tokio::select! {
+        result = run(&handle, &args) => result,
+        signal = tokio::signal::ctrl_c() => signal.context("failed to listen for Ctrl-C"),
+    };
     let shutdown = debugger
         .shutdown()
         .await
@@ -60,35 +58,22 @@ async fn main() -> Result<()> {
 }
 
 async fn run(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
-    let mut output = vec![format!("debugging {}", debugger.executable().display())];
+    if !args.batch {
+        println!("debugging {}", debugger.executable().display());
+        io::stdout().flush()?;
+    }
 
     for path in &args.command_files {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read command file {}", path.display()))?;
 
-        if !run_lines(
-            debugger,
-            contents.lines(),
-            &path.display().to_string(),
-            args.batch,
-            &mut output,
-        )
-        .await?
-        {
+        if !run_lines(debugger, contents.lines(), &path.display().to_string()).await? {
             return Ok(());
         }
     }
 
     for (index, command) in args.commands.iter().enumerate() {
-        if !run_line(
-            debugger,
-            command,
-            &format!("--eval #{}", index + 1),
-            args.batch,
-            &mut output,
-        )
-        .await?
-        {
+        if !run_line(debugger, command, &format!("--eval #{}", index + 1)).await? {
             return Ok(());
         }
     }
@@ -96,20 +81,12 @@ async fn run(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
     if args.batch {
         if args.command_files.is_empty() && args.commands.is_empty() {
             let mut lines = BufReader::new(tokio::io::stdin()).lines();
-            let mut number = 0;
+            let mut number = 0_u64;
 
             while let Some(line) = lines.next_line().await? {
-                number += 1;
+                number = number.checked_add(1).expect("stdin line number overflow");
 
-                if !run_line(
-                    debugger,
-                    &line,
-                    &format!("stdin:{number}"),
-                    true,
-                    &mut output,
-                )
-                .await?
-                {
+                if !run_line(debugger, &line, &format!("stdin:{number}")).await? {
                     break;
                 }
             }
@@ -117,7 +94,7 @@ async fn run(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
 
         Ok(())
     } else {
-        repl(debugger, output).await
+        repl(debugger).await
     }
 }
 
@@ -125,19 +102,9 @@ async fn run_lines<'a>(
     debugger: &DebuggerHandle,
     lines: impl Iterator<Item = &'a str>,
     source: &str,
-    batch: bool,
-    output: &mut Vec<String>,
 ) -> Result<bool> {
     for (index, line) in lines.enumerate() {
-        if !run_line(
-            debugger,
-            line,
-            &format!("{source}:{}", index + 1),
-            batch,
-            output,
-        )
-        .await?
-        {
+        if !run_line(debugger, line, &format!("{source}:{}", index + 1)).await? {
             return Ok(false);
         }
     }
@@ -145,13 +112,7 @@ async fn run_lines<'a>(
     Ok(true)
 }
 
-async fn run_line(
-    debugger: &DebuggerHandle,
-    line: &str,
-    source: &str,
-    batch: bool,
-    output: &mut Vec<String>,
-) -> Result<bool> {
+async fn run_line(debugger: &DebuggerHandle, line: &str, source: &str) -> Result<bool> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return Ok(true);
@@ -163,13 +124,8 @@ async fn run_line(
     {
         Control::Continue(message) => {
             if !message.is_empty() {
-                if batch {
-                    println!("{message}");
-                    io::stdout().flush()?;
-                } else {
-                    output.push(format!("> {line}"));
-                    append_output(output, &message);
-                }
+                println!("{message}");
+                io::stdout().flush()?;
             }
 
             Ok(true)
@@ -178,98 +134,31 @@ async fn run_line(
     }
 }
 
-fn append_output(output: &mut Vec<String>, message: &str) {
-    output.extend(message.lines().map(str::to_owned));
-}
-
-async fn repl(debugger: &DebuggerHandle, output: Vec<String>) -> Result<()> {
-    enable_raw_mode().context("failed to enable terminal raw mode")?;
-
-    let backend = CrosstermBackend::new(io::stdout());
-    let options = TerminalOptions {
-        viewport: Viewport::Inline(12),
-    };
-    let mut terminal =
-        Terminal::with_options(backend, options).context("failed to initialize terminal")?;
-
-    let result = run_repl(&mut terminal, debugger, output).await;
-
-    disable_raw_mode().context("failed to disable terminal raw mode")?;
-    terminal.show_cursor().context("failed to restore cursor")?;
-
-    result
-}
-
-async fn run_repl(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    debugger: &DebuggerHandle,
-    mut output: Vec<String>,
-) -> Result<()> {
-    let mut input = String::new();
+async fn repl(debugger: &DebuggerHandle) -> Result<()> {
+    let show_prompt = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    let mut number = 0_u64;
 
     loop {
-        terminal.draw(|frame| {
-            let [history, prompt] =
-                Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(frame.area());
-            let visible = history.height.saturating_sub(2) as usize;
-            let start = output.len().saturating_sub(visible);
-
-            let lines: Vec<Line<'_>> = output[start..]
-                .iter()
-                .map(String::as_str)
-                .map(Line::from)
-                .collect();
-
-            frame.render_widget(
-                Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("uscope")),
-                history,
-            );
-
-            frame.render_widget(
-                Paragraph::new(format!("> {input}")).block(Block::default().borders(Borders::ALL)),
-                prompt,
-            );
-            frame.set_cursor_position((prompt_cursor_x(prompt, input.len()), prompt.y + 1));
-        })?;
-
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-
-        if key.kind != KeyEventKind::Press {
-            continue;
+        if show_prompt {
+            print!("> ");
+            io::stdout().flush()?;
         }
 
-        match key.code {
-            KeyCode::Char('c' | 'd') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Ok(());
+        let Some(line) = lines.next_line().await? else {
+            if show_prompt {
+                println!();
             }
-            KeyCode::Char(character) => input.push(character),
-            KeyCode::Backspace => {
-                input.pop();
-            }
-            KeyCode::Enter => {
-                let command = std::mem::take(&mut input);
+            return Ok(());
+        };
+        number = number.checked_add(1).expect("REPL line number overflow");
 
-                match run_line(debugger, &command, "repl", false, &mut output).await {
-                    Ok(true) => {}
-                    Ok(false) => return Ok(()),
-                    Err(error) => output.push(format!("error: {error}")),
-                }
-            }
-            _ => {}
+        match run_line(debugger, &line, &format!("repl:{number}")).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(error) => eprintln!("error: {error:#}"),
         }
     }
-}
-
-fn prompt_cursor_x(prompt: Rect, input_len: usize) -> u16 {
-    let input_width = u16::try_from(input_len).unwrap_or(u16::MAX);
-
-    prompt
-        .x
-        .saturating_add(3)
-        .saturating_add(input_width)
-        .min(prompt.right().saturating_sub(2))
 }
 
 enum Control {
@@ -361,10 +250,60 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
 
             Ok(Control::Continue(lines.join("\n")))
         }
+        "registers" | "regs" => {
+            let registers = debugger.registers().await?;
+
+            Ok(Control::Continue(format_registers(
+                &registers,
+                registers.target.byte_order,
+            )))
+        }
         "quit" | "q" => Ok(Control::Quit),
         "" => Ok(Control::Continue(String::new())),
         other => Err(Error::InvalidCommand(other.to_owned())),
     }
+}
+
+fn format_registers(registers: &RegisterSnapshot, byte_order: ByteOrder) -> String {
+    let name_width = registers
+        .registers
+        .iter()
+        .map(|value| value.register.name.len())
+        .max()
+        .unwrap_or(0);
+
+    registers
+        .registers
+        .iter()
+        .map(|value| {
+            format!(
+                "{:<name_width$} {}",
+                value.register.name,
+                format_register_bytes(&value.bytes, byte_order)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_register_bytes(bytes: &[u8], byte_order: ByteOrder) -> String {
+    let mut output = String::with_capacity(2 + bytes.len() * 2);
+    output.push_str("0x");
+
+    match byte_order {
+        ByteOrder::Little => {
+            for byte in bytes.iter().rev() {
+                write!(output, "{byte:02x}").expect("writing to a String cannot fail");
+            }
+        }
+        ByteOrder::Big => {
+            for byte in bytes {
+                write!(output, "{byte:02x}").expect("writing to a String cannot fail");
+            }
+        }
+    }
+
+    output
 }
 
 fn one_argument<'a>(
@@ -413,20 +352,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_cursor_follows_input_and_stays_inside_border() {
-        let prompt = Rect::new(10, 0, 20, 3);
-
-        assert_eq!(prompt_cursor_x(prompt, 0), 13);
-        assert_eq!(prompt_cursor_x(prompt, 5), 18);
-        assert_eq!(prompt_cursor_x(prompt, usize::MAX), 28);
-    }
-
-    #[test]
-    fn multiline_command_output_uses_separate_history_rows() {
-        let mut output = vec!["existing".to_owned()];
-
-        append_output(&mut output, "#0 deepest\n#1 middle\n#2 main");
-
-        assert_eq!(output, ["existing", "#0 deepest", "#1 middle", "#2 main"]);
+    fn register_bytes_are_rendered_in_target_byte_order() {
+        assert_eq!(
+            format_register_bytes(&[0x78, 0x56, 0x34, 0x12], ByteOrder::Little),
+            "0x12345678"
+        );
+        assert_eq!(
+            format_register_bytes(&[0x12, 0x34, 0x56, 0x78], ByteOrder::Big),
+            "0x12345678"
+        );
     }
 }

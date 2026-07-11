@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
-use crate::{Backtrace, BreakpointLocation, LoadedModule, Result, VirtualAddress};
+use crate::{
+    Backtrace, BreakpointLocation, LoadedModule, RegisterSnapshot, Result, VirtualAddress,
+};
 
 /// A user-facing request for a logical breakpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +152,9 @@ pub enum Request {
     },
     Backtrace {
         reply: Reply<Backtrace>,
+    },
+    Registers {
+        reply: Reply<RegisterSnapshot>,
     },
     Shutdown {
         reply: Reply<()>,

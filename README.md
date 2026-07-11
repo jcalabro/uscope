@@ -20,3 +20,6 @@ just
 # start the debugger
 just run build/test-programs/basic
 ```
+
+At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
+The interactive debugger is a plain terminal REPL, so output remains available in normal terminal scrollback. Use `--batch` with command files, `--eval`, or stdin when no interactive prompt is wanted.

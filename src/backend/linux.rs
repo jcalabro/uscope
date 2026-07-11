@@ -26,7 +26,8 @@ use crate::unwind::{
     collect_backtrace,
 };
 use crate::{
-    Backtrace, BreakpointLocation, Error, FrameKind, LoadedModule, ModuleImage, Result, StackFrame,
+    Backtrace, BreakpointLocation, Error, FrameKind, LoadedModule, ModuleImage, RegisterDescriptor,
+    RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, Result, StackFrame,
     ThreadId as DebugThreadId, UnwindTermination, VirtualAddress,
 };
 
@@ -200,6 +201,9 @@ impl Controller {
             }
             Request::Backtrace { reply } => {
                 let _ = reply.send(self.backtrace());
+            }
+            Request::Registers { reply } => {
+                let _ = reply.send(self.registers());
             }
             Request::Shutdown { reply } => {
                 self.begin_shutdown(Some(reply));
@@ -614,6 +618,22 @@ impl Controller {
         ))
     }
 
+    fn registers(&self) -> Result<RegisterSnapshot> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        if !matches!(inferior.state, ExecutionState::Stopped(_)) {
+            return Err(Error::NotStopped);
+        }
+
+        let native = self.ptrace.registers(inferior.pid)?;
+
+        Ok(x86_64_register_snapshot(
+            self.revision,
+            inferior.pid,
+            self.module_image.target(),
+            &native,
+        ))
+    }
+
     fn begin_shutdown(&mut self, reply: Option<Reply<()>>) {
         self.shutdown_reply = reply;
         self.pending_run = None;
@@ -778,6 +798,69 @@ fn x86_64_registers(registers: &libc::user_regs_struct) -> RegisterFile {
         (16, registers.rip),
         (49, registers.eflags),
     ])
+}
+
+fn x86_64_register_snapshot(
+    revision: u64,
+    pid: Pid,
+    target: crate::TargetDescription,
+    native: &libc::user_regs_struct,
+) -> RegisterSnapshot {
+    let values = [
+        ("rax", 64, None, native.rax),
+        ("rbx", 64, None, native.rbx),
+        ("rcx", 64, None, native.rcx),
+        ("rdx", 64, None, native.rdx),
+        ("rsi", 64, None, native.rsi),
+        ("rdi", 64, None, native.rdi),
+        ("rbp", 64, Some(RegisterRole::FramePointer), native.rbp),
+        ("rsp", 64, Some(RegisterRole::StackPointer), native.rsp),
+        ("r8", 64, None, native.r8),
+        ("r9", 64, None, native.r9),
+        ("r10", 64, None, native.r10),
+        ("r11", 64, None, native.r11),
+        ("r12", 64, None, native.r12),
+        ("r13", 64, None, native.r13),
+        ("r14", 64, None, native.r14),
+        ("r15", 64, None, native.r15),
+        ("rip", 64, Some(RegisterRole::ProgramCounter), native.rip),
+        ("rflags", 64, None, native.eflags),
+        ("cs", 16, None, native.cs),
+        ("ss", 16, None, native.ss),
+        ("ds", 16, None, native.ds),
+        ("es", 16, None, native.es),
+        ("fs", 16, None, native.fs),
+        ("gs", 16, None, native.gs),
+        ("fs_base", 64, None, native.fs_base),
+        ("gs_base", 64, None, native.gs_base),
+        ("orig_rax", 64, None, native.orig_rax),
+    ];
+    let registers = values
+        .into_iter()
+        .enumerate()
+        .map(|(id, (name, bits, role, value))| {
+            let bytes = value.to_le_bytes();
+            let byte_count = usize::from(bits / 8);
+
+            RegisterValue {
+                register: RegisterDescriptor {
+                    id: RegisterId::new(u32::try_from(id).expect("x86-64 register ID fits u32")),
+                    name: name.into(),
+                    bits,
+                    role,
+                },
+                bytes: Arc::from(&bytes[..byte_count]),
+            }
+        })
+        .collect::<Vec<_>>()
+        .into();
+
+    RegisterSnapshot {
+        revision,
+        thread: DebugThreadId::new(process_id(pid).get()),
+        target,
+        registers,
+    }
 }
 
 struct LinuxPtrace {
