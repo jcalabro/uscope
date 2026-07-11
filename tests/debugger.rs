@@ -2,7 +2,8 @@ mod support;
 
 use uscope::{
     Architecture, BreakpointLocation, ByteOrder, Error, ExitStatus, InferiorState, PointerWidth,
-    RegisterRole, StopReason, UnwindTermination, VirtualAddress,
+    RegisterRole, SourceContext, SourceFile, SourceLocation, StopReason, UnwindTermination,
+    VirtualAddress,
 };
 
 use support::Scenario;
@@ -38,15 +39,28 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
         Some("breakpoint_target")
     );
 
-    let source = location.image.source.as_ref().expect("source location");
+    let source = location
+        .image
+        .source
+        .as_ref()
+        .expect("source location")
+        .clone();
     let source_file = scenario
         .handle()
         .module_image()
         .source_file(source.file)
-        .expect("source file");
+        .expect("source file")
+        .clone();
 
     assert!(source_file.path.ends_with("basic.c"));
+    assert!(source_file.path.is_absolute());
     assert!(source.line.get() > 0);
+
+    let context = scenario
+        .operation("source context", scenario.handle().source_context(3))
+        .await;
+
+    assert_basic_source_context(&context, &source_file, &source);
 
     let BreakpointLocation::Image(image_address) = breakpoint else {
         panic!("function breakpoint was not image-based")
@@ -172,6 +186,39 @@ fn register_u64(registers: &uscope::RegisterSnapshot, role: RegisterRole) -> u64
     u64::from_le_bytes(bytes)
 }
 
+fn assert_basic_source_context(
+    context: &SourceContext,
+    source_file: &SourceFile,
+    source: &SourceLocation,
+) {
+    let current = context
+        .lines
+        .iter()
+        .find(|line| line.number == context.location.line)
+        .expect("current source line");
+
+    assert_eq!(&context.file, source_file);
+    assert_eq!(&context.location, source);
+    assert_eq!(context.location.line.get(), 5);
+    assert_eq!(
+        current.text.as_ref(),
+        "__attribute__((noinline)) uint64_t breakpoint_target(void) {"
+    );
+    assert_eq!(
+        context
+            .lines
+            .first()
+            .expect("first source line")
+            .number
+            .get(),
+        2
+    );
+    assert_eq!(
+        context.lines.last().expect("last source line").number.get(),
+        8
+    );
+}
+
 fn assert_register_snapshot(
     registers: &uscope::RegisterSnapshot,
     state: &uscope::StateSnapshot,
@@ -210,6 +257,20 @@ async fn dwarf_cfi_unwinds_the_compiler_and_linker_matrix() {
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
         ));
+
+        let source = scenario
+            .operation("source context", scenario.handle().source_context(1))
+            .await;
+
+        assert!(source.file.path.ends_with("unwind.c"));
+        assert!(source.file.path.is_absolute());
+        assert!(
+            source
+                .lines
+                .iter()
+                .any(|line| line.text.contains("deepest")),
+            "unexpected {fixture} source context: {source:?}"
+        );
 
         let trace = scenario
             .operation("backtrace", scenario.handle().backtrace())

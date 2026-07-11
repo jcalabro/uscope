@@ -8,7 +8,7 @@ use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
     BreakpointLocation, BreakpointSpec, ByteOrder, Debugger, DebuggerHandle, Error, ExitStatus,
-    RegisterSnapshot, StopReason, VirtualAddress,
+    RegisterSnapshot, SourceContext, StopReason, VirtualAddress,
 };
 
 #[derive(Parser)]
@@ -187,8 +187,12 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 "breakpoint set at {space} address {address:#x}"
             )))
         }
-        "run" | "r" => Ok(Control::Continue(format_stop(debugger.run().await?))),
-        "continue" | "c" => Ok(Control::Continue(format_stop(debugger.resume().await?))),
+        "run" | "r" => Ok(Control::Continue(
+            format_stop_with_source(debugger, debugger.run().await?).await,
+        )),
+        "continue" | "c" => Ok(Control::Continue(
+            format_stop_with_source(debugger, debugger.resume().await?).await,
+        )),
         "x" => {
             let address = parse_address(one_argument(&mut words, "x <runtime-address>")?)?;
 
@@ -224,6 +228,9 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 None => format!("{function} at {:#x}", location.address.get()),
             }))
         }
+        "list" | "l" => Ok(Control::Continue(format_source_context(
+            &debugger.source_context(3).await?,
+        ))),
         "backtrace" | "bt" => {
             let trace = debugger.backtrace().await?;
             let mut lines = Vec::with_capacity(trace.frames.len() + 1);
@@ -301,6 +308,55 @@ fn format_register_bytes(bytes: &[u8], byte_order: ByteOrder) -> String {
                 write!(output, "{byte:02x}").expect("writing to a String cannot fail");
             }
         }
+    }
+
+    output
+}
+
+async fn format_stop_with_source(debugger: &DebuggerHandle, reason: StopReason) -> String {
+    let stopped_at_breakpoint = matches!(reason, StopReason::Breakpoint { .. });
+    let mut output = format_stop(reason);
+
+    if stopped_at_breakpoint {
+        match debugger.source_context(3).await {
+            Ok(context) => {
+                output.push('\n');
+                output.push_str(&format_source_context(&context));
+            }
+            Err(error) => {
+                write!(output, "\nsource unavailable: {error}")
+                    .expect("writing to a String cannot fail");
+            }
+        }
+    }
+
+    output
+}
+
+fn format_source_context(context: &SourceContext) -> String {
+    let line_width = context
+        .lines
+        .last()
+        .map_or(1, |line| line.number.get().to_string().len());
+    let mut output = format!(
+        "{}:{}",
+        context.file.path.display(),
+        context.location.line.get()
+    );
+
+    for line in context.lines.iter() {
+        let marker = if line.number == context.location.line {
+            "=>"
+        } else {
+            "  "
+        };
+        write!(
+            output,
+            "\n{marker} {:>line_width$} | {}",
+            line.number.get(),
+            line.text
+        )
+        .expect("writing to a String cannot fail");
     }
 
     output

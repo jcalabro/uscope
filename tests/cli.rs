@@ -155,6 +155,65 @@ fn batch_mode_prints_registers_one_per_line() {
 }
 
 #[test]
+fn breakpoint_stops_print_source_context_from_any_working_directory() {
+    let executable = fixture("build/test-programs/basic");
+    assert!(
+        executable.exists(),
+        "missing test fixture; run `just build-test-programs`"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .current_dir("/")
+        .args([
+            "--batch",
+            "--eval",
+            "break breakpoint_target",
+            "--eval",
+            "run",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+
+    assert!(stdout.contains("tests/fixtures/basic.c:5"));
+    assert!(stdout.contains("=> 5 | __attribute__((noinline)) uint64_t breakpoint_target(void) {"));
+    assert!(stdout.contains("   8 |"));
+}
+
+#[test]
+fn list_command_prints_the_current_source_context() {
+    let executable = fixture("build/test-programs/basic");
+    assert!(
+        executable.exists(),
+        "missing test fixture; run `just build-test-programs`"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break breakpoint_target",
+            "--eval",
+            "run",
+            "--eval",
+            "l",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+
+    assert_eq!(stdout.matches("tests/fixtures/basic.c:5").count(), 2);
+    assert_eq!(
+        stdout
+            .matches("=> 5 | __attribute__((noinline)) uint64_t breakpoint_target(void) {")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn plain_repl_preserves_output_and_exits_at_eof() {
     let executable = fixture("build/test-programs/basic");
     assert!(

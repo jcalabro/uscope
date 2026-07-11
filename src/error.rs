@@ -1,4 +1,5 @@
 use std::error::Error as StdError;
+use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,6 +31,16 @@ pub enum Error {
     AddressOutsideModule,
     #[error("the stopped location is unavailable")]
     LocationUnavailable,
+    #[error("no source location is available for the stopped instruction")]
+    SourceLocationUnavailable,
+    #[error("failed to read source file {path}: {source}")]
+    SourceFileRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("source line {line} is outside {path}")]
+    SourceLineOutOfRange { path: PathBuf, line: u64 },
 
     #[error("debugger backend thread panicked")]
     BackendThreadPanicked,
