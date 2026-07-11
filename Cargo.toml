@@ -1,0 +1,15 @@
+[package]
+name = "uscope"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A Linux x86-64 native debugger"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+crossterm = "0"
+gimli = "0"
+nix = { version = "0", features = ["ptrace", "process", "signal"] }
+object = { version = "0", features = ["read"] }
+ratatui = { version = "0", default-features = false, features = ["crossterm"] }
+thiserror = "2"
