@@ -1,24 +1,49 @@
-use crate::{Error, Result};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+
 use gimli::{AttributeValue, DwarfSections, EndianSlice, LittleEndian, SectionId};
 use object::{Object, ObjectSection, ObjectSymbol};
-use std::{borrow::Cow, collections::HashMap, fs, path::Path};
 
-pub struct Symbols {
+use super::DebugInfo;
+use crate::{Error, Result};
+
+#[derive(Debug, thiserror::Error)]
+enum DwarfError {
+    #[error("failed to read debug information: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("failed to parse object file: {0}")]
+    Object(#[from] object::Error),
+    #[error("failed to parse DWARF: {0}")]
+    Dwarf(#[from] gimli::Error),
+}
+
+struct DwarfDebugInfo {
     functions: HashMap<String, Vec<u64>>,
     symbols: HashMap<String, Vec<u64>>,
 }
 
-impl Symbols {
-    pub fn load(path: &Path) -> Result<Self> {
+pub fn load(path: &Path) -> Result<Arc<dyn DebugInfo>> {
+    DwarfDebugInfo::load(path)
+        .map(|debug_info| Arc::new(debug_info) as Arc<dyn DebugInfo>)
+        .map_err(Error::debug_info)
+}
+
+impl DwarfDebugInfo {
+    fn load(path: &Path) -> std::result::Result<Self, DwarfError> {
         let data = fs::read(path)?;
         let object = object::File::parse(data.as_slice())?;
 
-        let sections = DwarfSections::load(|id: SectionId| -> Result<Cow<'_, [u8]>> {
-            match object.section_by_name(id.name()) {
-                Some(section) => Ok(section.uncompressed_data()?),
-                None => Ok(Cow::Borrowed(&[])),
-            }
-        })?;
+        let sections = DwarfSections::load(
+            |id: SectionId| -> std::result::Result<Cow<'_, [u8]>, DwarfError> {
+                match object.section_by_name(id.name()) {
+                    Some(section) => Ok(section.uncompressed_data()?),
+                    None => Ok(Cow::Borrowed(&[])),
+                }
+            },
+        )?;
         let dwarf = sections.borrow(|section| EndianSlice::new(section, LittleEndian));
 
         let mut functions: HashMap<String, Vec<u64>> = HashMap::new();
@@ -66,8 +91,10 @@ impl Symbols {
 
         Ok(Self { functions, symbols })
     }
+}
 
-    pub fn function_address(&self, name: &str) -> Result<u64> {
+impl DebugInfo for DwarfDebugInfo {
+    fn function_address(&self, name: &str) -> Result<u64> {
         unique(
             &self.functions,
             name,
@@ -76,7 +103,7 @@ impl Symbols {
         )
     }
 
-    pub fn symbol_address(&self, name: &str) -> Result<u64> {
+    fn symbol_address(&self, name: &str) -> Result<u64> {
         unique(
             &self.symbols,
             name,
