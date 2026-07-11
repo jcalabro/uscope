@@ -172,3 +172,45 @@ async fn shutdown_interrupts_and_reaps_a_running_inferior() {
         Err(Error::RequestCancelled)
     ));
 }
+
+#[tokio::test]
+async fn dwarf_cfi_unwinds_nested_calls_without_frame_pointers() {
+    for fixture_name in ["unwind-o0", "unwind-o2", "unwind-nopie"] {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("build/test-programs")
+            .join(fixture_name);
+        assert!(
+            fixture.exists(),
+            "missing test fixture; run `just build-test-programs`"
+        );
+
+        let debugger = Debugger::new(&fixture).expect("load debugger");
+        let handle = debugger.handle();
+        handle
+            .add_breakpoint(BreakpointSpec::Function("deepest".into()))
+            .await
+            .expect("set breakpoint");
+        assert!(matches!(
+            handle.run().await.expect("run to breakpoint"),
+            StopReason::Breakpoint { .. }
+        ));
+
+        let trace = handle.backtrace().await.expect("collect backtrace");
+        let names: Vec<_> = trace
+            .frames
+            .iter()
+            .filter_map(|frame| frame.function.as_ref())
+            .map(|function| function.name.as_ref())
+            .collect();
+
+        assert!(
+            names.starts_with(&["deepest", "middle", "outer", "main"]),
+            "unexpected {fixture_name} backtrace: {trace:?}"
+        );
+        assert!(
+            trace.frames.len() >= 4,
+            "backtrace was truncated: {trace:?}"
+        );
+        debugger.shutdown().await.expect("shutdown worker");
+    }
+}

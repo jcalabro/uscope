@@ -82,6 +82,28 @@ id_type!(
     SymbolId,
     "Identifies a linker symbol within a module image."
 );
+id_type!(
+    StackFrameId,
+    "Identifies a stack frame within one stop revision."
+);
+
+/// Identifies a thread within a debug session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ThreadId(u64);
+
+impl ThreadId {
+    /// Creates a thread identifier from its platform value.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the platform value of this identifier.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 /// The target CPU architecture described by a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -243,6 +265,94 @@ pub struct ExecutionLocation {
     pub image: ImageLocation,
 }
 
+/// Describes how a stack frame was reconstructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    /// A normal machine-code activation.
+    Physical,
+    /// A signal trampoline activation.
+    Signal,
+}
+
+/// A platform-independent stack frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackFrame {
+    /// The frame's identifier within the current stop revision.
+    pub id: StackFrameId,
+    /// Zero-based position, beginning with the stopped frame.
+    pub level: u32,
+    /// How the frame was reconstructed.
+    pub kind: FrameKind,
+    /// The loaded module containing the instruction, when known.
+    pub module: Option<ModuleId>,
+    /// The exact instruction or resume address for the frame.
+    pub instruction: VirtualAddress,
+    /// The containing function, when known.
+    pub function: Option<FunctionInfo>,
+    /// The corresponding source location, when known.
+    pub source: Option<SourceLocation>,
+}
+
+impl StackFrame {
+    pub(crate) fn new(
+        level: u32,
+        kind: FrameKind,
+        module: Option<ModuleId>,
+        instruction: VirtualAddress,
+        location: Option<ImageLocation>,
+    ) -> Self {
+        let (function, source) = location.map_or((None, None), |location| {
+            (location.function, location.source)
+        });
+
+        Self {
+            id: StackFrameId::new(level),
+            level,
+            kind,
+            module,
+            instruction,
+            function,
+            source,
+        }
+    }
+}
+
+/// Explains why a backtrace stopped growing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnwindTermination {
+    /// The unwind metadata declared that no caller exists.
+    Complete,
+    /// No unwind information covered the supplied instruction.
+    NoUnwindInfo { address: VirtualAddress },
+    /// The instruction could not be associated with a loaded module.
+    ModuleNotFound { address: VirtualAddress },
+    /// Valid metadata used a feature not implemented by this debugger.
+    UnsupportedUnwindInfo { feature: Arc<str> },
+    /// The unwind metadata was malformed.
+    CorruptUnwindInfo { description: Arc<str> },
+    /// A register required to reconstruct the caller was unavailable.
+    RegisterUnavailable { register: Arc<str> },
+    /// Inferior memory required by an unwind rule could not be read.
+    MemoryReadFailed { address: VirtualAddress },
+    /// The reconstructed caller did not make valid progress.
+    InvalidCaller { description: Arc<str> },
+    /// A previously visited frame state was encountered again.
+    CycleDetected,
+    /// The configured maximum frame count was reached.
+    DepthLimit,
+}
+
+/// A backtrace and the reason its reconstruction ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Backtrace {
+    /// The thread whose stack was inspected.
+    pub thread: ThreadId,
+    /// Frames ordered from the stopped frame outward.
+    pub frames: Arc<[StackFrame]>,
+    /// The completion or failure reason for the trace.
+    pub termination: UnwindTermination,
+}
+
 /// An internal image-address range associated with a source location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineEntry {
@@ -256,6 +366,7 @@ pub struct ModuleImage {
     id: ModuleImageId,
     path: Arc<PathBuf>,
     target: TargetDescription,
+    address_range: AddressRange<ImageAddress>,
     functions: Arc<[FunctionInfo]>,
     symbols: Arc<[SymbolInfo]>,
     source_files: Arc<[SourceFile]>,
@@ -266,6 +377,7 @@ impl ModuleImage {
     pub(crate) fn new(
         path: PathBuf,
         target: TargetDescription,
+        address_range: AddressRange<ImageAddress>,
         functions: Vec<FunctionInfo>,
         symbols: Vec<SymbolInfo>,
         source_files: Vec<SourceFile>,
@@ -275,6 +387,7 @@ impl ModuleImage {
             id: ModuleImageId::new(0),
             path: Arc::new(path),
             target,
+            address_range,
             functions: functions.into(),
             symbols: symbols.into(),
             source_files: source_files.into(),
@@ -298,6 +411,12 @@ impl ModuleImage {
     #[must_use]
     pub const fn target(&self) -> TargetDescription {
         self.target
+    }
+
+    /// Returns whether an image address lies in this module's loadable range.
+    #[must_use]
+    pub fn contains_address(&self, address: ImageAddress) -> bool {
+        self.address_range.contains(address)
     }
 
     /// Returns all functions described by this image.
