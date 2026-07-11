@@ -1,4 +1,5 @@
-use std::io;
+use std::fs;
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -14,28 +15,144 @@ use uscope::{BreakpointSpec, Debugger, Error, StopReason};
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
+    /// Native executable to debug.
     #[arg(value_name = "EXECUTABLE")]
     executable: PathBuf,
+
+    /// Execute commands from a file. May be repeated.
+    #[arg(short = 'x', long = "command", value_name = "FILE")]
+    command_files: Vec<PathBuf>,
+
+    /// Execute one command. May be repeated.
+    #[arg(short = 'e', long = "eval", value_name = "COMMAND")]
+    commands: Vec<String>,
+
+    /// Print plain-text results without opening the terminal UI.
+    #[arg(long)]
+    batch: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let mut debugger = Debugger::new(args.executable)?;
-    let result = repl(&debugger);
+    let mut debugger = Debugger::new(&args.executable)?;
+    let result = run(&debugger, &args);
     let shutdown = debugger.shutdown();
     result?;
     shutdown?;
     Ok(())
 }
 
-fn repl(debugger: &Debugger) -> Result<(), Box<dyn std::error::Error>> {
+fn run(debugger: &Debugger, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = vec![format!("debugging {}", debugger.executable().display())];
+    for path in &args.command_files {
+        let contents = fs::read_to_string(path)?;
+        if !run_lines(
+            debugger,
+            contents.lines(),
+            &path.display().to_string(),
+            args.batch,
+            &mut output,
+        )? {
+            return Ok(());
+        }
+    }
+    for (index, command) in args.commands.iter().enumerate() {
+        if !run_line(
+            debugger,
+            command,
+            &format!("--eval #{}", index + 1),
+            args.batch,
+            &mut output,
+        )? {
+            return Ok(());
+        }
+    }
+    if args.batch {
+        if args.command_files.is_empty() && args.commands.is_empty() {
+            let stdin = io::stdin();
+            let mut stdin = stdin.lock();
+            let mut line = String::new();
+            let mut number = 0;
+            loop {
+                line.clear();
+                if stdin.read_line(&mut line)? == 0 {
+                    break;
+                }
+                number += 1;
+                if !run_line(
+                    debugger,
+                    &line,
+                    &format!("stdin:{number}"),
+                    true,
+                    &mut output,
+                )? {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    } else {
+        repl(debugger, output)
+    }
+}
+
+fn run_lines<'a>(
+    debugger: &Debugger,
+    lines: impl Iterator<Item = &'a str>,
+    source: &str,
+    batch: bool,
+    output: &mut Vec<String>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    for (index, line) in lines.enumerate() {
+        if !run_line(
+            debugger,
+            line,
+            &format!("{source}:{}", index + 1),
+            batch,
+            output,
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn run_line(
+    debugger: &Debugger,
+    line: &str,
+    source: &str,
+    batch: bool,
+    output: &mut Vec<String>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return Ok(true);
+    }
+    match execute(debugger, line).map_err(|error| io::Error::other(format!("{source}: {error}")))? {
+        Control::Continue(message) => {
+            if !message.is_empty() {
+                if batch {
+                    println!("{message}");
+                    io::stdout().flush()?;
+                } else {
+                    output.push(format!("> {line}"));
+                    output.push(message);
+                }
+            }
+            Ok(true)
+        }
+        Control::Quit => Ok(false),
+    }
+}
+
+fn repl(debugger: &Debugger, output: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let backend = CrosstermBackend::new(io::stdout());
     let options = TerminalOptions {
         viewport: Viewport::Inline(12),
     };
     let mut terminal = Terminal::with_options(backend, options)?;
-    let result = run_repl(&mut terminal, debugger);
+    let result = run_repl(&mut terminal, debugger, output);
     disable_raw_mode()?;
     terminal.show_cursor()?;
     result
@@ -44,9 +161,9 @@ fn repl(debugger: &Debugger) -> Result<(), Box<dyn std::error::Error>> {
 fn run_repl(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     debugger: &Debugger,
+    mut output: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut input = String::new();
-    let mut output = vec![format!("debugging {}", debugger.executable().display())];
     loop {
         terminal.draw(|frame| {
             let [history, prompt] =
@@ -82,10 +199,9 @@ fn run_repl(
             }
             KeyCode::Enter => {
                 let command = std::mem::take(&mut input);
-                output.push(format!("> {command}"));
-                match execute(debugger, &command) {
-                    Ok(Control::Continue(message)) => output.push(message),
-                    Ok(Control::Quit) => return Ok(()),
+                match run_line(debugger, &command, "repl", false, &mut output) {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(()),
                     Err(error) => output.push(format!("error: {error}")),
                 }
             }
