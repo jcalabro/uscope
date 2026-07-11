@@ -4,7 +4,10 @@ mod protocol;
 mod symbols;
 
 pub use error::{Error, Result};
-pub use protocol::{BreakpointSpec, DebuggerEvent, InferiorState, StateSnapshot, StopReason};
+pub use protocol::{
+    BreakpointSpec, DebuggerEvent, ExceptionInfo, ExitStatus, InferiorState, ProcessId,
+    StateSnapshot, StopReason,
+};
 pub use symbols::Symbols;
 
 use std::path::{Path, PathBuf};

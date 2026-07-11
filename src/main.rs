@@ -12,7 +12,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use uscope::{BreakpointSpec, Debugger, DebuggerHandle, Error, StopReason};
+use uscope::{BreakpointSpec, Debugger, DebuggerHandle, Error, ExitStatus, StopReason};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -336,9 +336,17 @@ fn parse_address(value: &str) -> uscope::Result<u64> {
 fn format_stop(reason: StopReason) -> String {
     match reason {
         StopReason::Breakpoint { address } => format!("stopped at breakpoint {address:#x}"),
-        StopReason::Signal(signal) => format!("stopped by signal {signal}"),
-        StopReason::Exited(code) => format!("inferior exited with status {code}"),
-        StopReason::Signaled(signal) => format!("inferior terminated by signal {signal}"),
+        StopReason::Exception(exception) => format!(
+            "stopped by {} ({:#x})",
+            exception.description, exception.code
+        ),
+        StopReason::Exited(ExitStatus::Code(code)) => {
+            format!("inferior exited with status {code}")
+        }
+        StopReason::Exited(ExitStatus::Terminated(exception)) => format!(
+            "inferior terminated by {} ({:#x})",
+            exception.description, exception.code
+        ),
     }
 }
 

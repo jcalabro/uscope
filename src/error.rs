@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::error::Error as StdError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -8,8 +8,8 @@ pub enum Error {
     Object(#[from] object::Error),
     #[error("DWARF error: {0}")]
     Dwarf(#[from] gimli::Error),
-    #[error("ptrace error: {0}")]
-    Ptrace(#[from] nix::Error),
+    #[error("debugger backend error: {0}")]
+    Backend(#[source] Box<dyn StdError + Send + Sync>),
 
     #[error("no function named '{0}' was found")]
     FunctionNotFound(String),
@@ -26,10 +26,6 @@ pub enum Error {
     NotRunning,
     #[error("the inferior is not stopped")]
     NotStopped,
-    #[error("unexpected wait status: {0}")]
-    UnexpectedWait(String),
-    #[error("could not determine load bias for {0}")]
-    LoadBias(PathBuf),
     #[error("address arithmetic overflow")]
     AddressOverflow,
 
@@ -47,3 +43,9 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    pub(crate) fn backend(error: impl StdError + Send + Sync + 'static) -> Self {
+        Self::Backend(Box::new(error))
+    }
+}
