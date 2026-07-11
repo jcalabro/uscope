@@ -26,10 +26,10 @@ module_name_repetitions = "allow"
 multiple_crate_versions = "allow"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-crossterm = "0"
-gimli = "0"
-nix = { version = "0", features = ["ptrace", "process", "signal"] }
-object = { version = "0", features = ["read"] }
-ratatui = { version = "0", default-features = false, features = ["crossterm"] }
-thiserror = "2"
+clap = { version = "4.6", features = ["derive"] }
+crossterm = "0.29"
+gimli = "0.34"
+nix = { version = "0.31", features = ["ptrace", "process", "signal"] }
+object = { version = "0.39", features = ["read"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+thiserror = "2.0"
