@@ -1,12 +1,20 @@
 mod support;
 
-use uscope::{BreakpointLocation, Error, ExitStatus, InferiorState, StopReason, UnwindTermination};
+use uscope::{
+    Architecture, BreakpointLocation, ByteOrder, Error, ExitStatus, InferiorState, PointerWidth,
+    RegisterRole, StopReason, UnwindTermination, VirtualAddress,
+};
 
 use support::Scenario;
 
 #[tokio::test]
 async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
     let mut scenario = Scenario::new("breakpoint lifecycle", Scenario::fixture("basic"));
+
+    assert!(matches!(
+        scenario.handle().registers().await,
+        Err(Error::NotRunning)
+    ));
 
     let breakpoint = scenario.add_breakpoint("breakpoint_target").await;
     let first = scenario.run_to_stop().await;
@@ -54,10 +62,16 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
 
     assert_eq!(snapshot.revision, scenario.last_revision());
     assert!(matches!(
-        snapshot.inferior,
-        InferiorState::Stopped { reason, .. } if reason == first
+        &snapshot.inferior,
+        InferiorState::Stopped { reason, .. } if *reason == first
     ));
     assert_eq!(snapshot.breakpoints.as_ref(), &[breakpoint]);
+
+    let registers = scenario
+        .operation("read registers", scenario.handle().registers())
+        .await;
+
+    assert_register_snapshot(&registers, &snapshot, first_address);
 
     let duplicate = scenario.add_breakpoint("breakpoint_target").await;
 
@@ -115,6 +129,10 @@ async fn shutdown_reaps_running_and_stopped_inferiors() {
         running.snapshot().await.inferior,
         InferiorState::Running { .. }
     ));
+    assert!(matches!(
+        running.handle().registers().await,
+        Err(Error::NotStopped)
+    ));
 
     let status = running.shutdown().await.expect("inferior exit event");
 
@@ -137,6 +155,48 @@ async fn shutdown_reaps_running_and_stopped_inferiors() {
     ));
 
     stopped.shutdown().await;
+}
+
+fn register_u64(registers: &uscope::RegisterSnapshot, role: RegisterRole) -> u64 {
+    let value = registers
+        .registers
+        .iter()
+        .find(|value| value.register.role == Some(role))
+        .unwrap_or_else(|| panic!("missing {role:?} register"));
+    let bytes: [u8; 8] = value
+        .bytes
+        .as_ref()
+        .try_into()
+        .unwrap_or_else(|_| panic!("{} was not 64 bits", value.register.name));
+
+    u64::from_le_bytes(bytes)
+}
+
+fn assert_register_snapshot(
+    registers: &uscope::RegisterSnapshot,
+    state: &uscope::StateSnapshot,
+    instruction: VirtualAddress,
+) {
+    assert_eq!(registers.revision, state.revision);
+    assert_eq!(registers.target.architecture, Architecture::X86_64);
+    assert_eq!(registers.target.byte_order, ByteOrder::Little);
+    assert_eq!(registers.target.pointer_width, PointerWidth::Bits64);
+    assert_eq!(
+        registers.thread.get(),
+        match &state.inferior {
+            InferiorState::Stopped { process_id, .. } => process_id.get(),
+            _ => panic!("inferior was not stopped"),
+        }
+    );
+    assert_eq!(
+        register_u64(registers, RegisterRole::ProgramCounter),
+        instruction.get()
+    );
+    assert_ne!(register_u64(registers, RegisterRole::StackPointer), 0);
+    assert_ne!(register_u64(registers, RegisterRole::FramePointer), 0);
+    assert!(registers.registers.iter().any(|value| {
+        value.register.name.as_ref() == "rax" && value.register.bits == 64 && value.bytes.len() == 8
+    }));
 }
 
 #[tokio::test]

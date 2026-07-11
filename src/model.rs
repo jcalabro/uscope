@@ -86,6 +86,10 @@ id_type!(
     StackFrameId,
     "Identifies a stack frame within one stop revision."
 );
+id_type!(
+    RegisterId,
+    "Identifies a register within a target architecture."
+);
 
 /// Identifies a thread within a debug session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -103,6 +107,53 @@ impl ThreadId {
     pub const fn get(self) -> u64 {
         self.0
     }
+}
+
+/// The architecture-independent purpose of a distinguished register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RegisterRole {
+    /// The address of the current instruction.
+    ProgramCounter,
+    /// The address of the top of the current stack.
+    StackPointer,
+    /// The base address conventionally used for the current stack frame.
+    FramePointer,
+}
+
+/// Static information about a target register.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterDescriptor {
+    /// The register's identifier within its target architecture.
+    pub id: RegisterId,
+    /// The canonical architecture-defined register name.
+    pub name: Arc<str>,
+    /// The number of meaningful bits in the register.
+    pub bits: u16,
+    /// The register's architecture-independent role, when distinguished.
+    pub role: Option<RegisterRole>,
+}
+
+/// One target register and its captured value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterValue {
+    /// The register represented by this value.
+    pub register: RegisterDescriptor,
+    /// The register bytes in the target's byte order.
+    pub bytes: Arc<[u8]>,
+}
+
+/// The general register set of a stopped thread at one debugger revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterSnapshot {
+    /// The debugger revision at which these values were read.
+    pub revision: u64,
+    /// The thread whose registers were read.
+    pub thread: ThreadId,
+    /// The architecture and data representation of the register values.
+    pub target: TargetDescription,
+    /// Register values in the architecture's canonical display order.
+    pub registers: Arc<[RegisterValue]>,
 }
 
 /// The target CPU architecture described by a module.

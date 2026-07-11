@@ -9,7 +9,8 @@ pub use error::{Error, Result};
 pub use model::{
     AddressRange, Architecture, Backtrace, BreakpointLocation, ByteOrder, ColumnNumber,
     ExecutionLocation, FrameKind, FunctionId, FunctionInfo, ImageAddress, ImageLocation,
-    LineNumber, LoadedModule, ModuleId, ModuleImage, ModuleImageId, PointerWidth, SourceFile,
+    LineNumber, LoadedModule, ModuleId, ModuleImage, ModuleImageId, PointerWidth,
+    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, SourceFile,
     SourceFileId, SourceLocation, StackFrame, StackFrameId, SymbolId, SymbolInfo,
     TargetDescription, ThreadId, UnwindTermination, VirtualAddress,
 };
@@ -204,6 +205,11 @@ impl DebuggerHandle {
     /// Reconstructs the stopped thread's stack frames.
     pub async fn backtrace(&self) -> Result<Backtrace> {
         self.request(|reply| Request::Backtrace { reply }).await
+    }
+
+    /// Reads the general register set of the stopped thread.
+    pub async fn registers(&self) -> Result<RegisterSnapshot> {
+        self.request(|reply| Request::Registers { reply }).await
     }
 
     async fn loaded_module(&self) -> Result<LoadedModule> {
