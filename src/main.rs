@@ -21,7 +21,7 @@ struct Args {
     executable: PathBuf,
 
     /// Execute commands from a file. May be repeated.
-    #[arg(short = 'x', long = "command", value_name = "FILE")]
+    #[arg(short = 'c', long = "command", value_name = "FILE")]
     command_files: Vec<PathBuf>,
 
     /// Execute one command. May be repeated.
