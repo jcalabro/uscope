@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -11,7 +11,8 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, TerminalOptions, Viewport};
-use uscope::{BreakpointSpec, Debugger, Error, StopReason};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use uscope::{BreakpointSpec, Debugger, DebuggerHandle, Error, StopReason};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -33,17 +34,21 @@ struct Args {
     batch: bool,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let args = Args::parse();
-    let mut debugger = Debugger::new(&args.executable).with_context(|| {
+    let debugger = Debugger::new(&args.executable).with_context(|| {
         format!(
             "failed to initialize debugger for {}",
             args.executable.display()
         )
     })?;
 
-    let result = run(&debugger, &args);
-    let shutdown = debugger.shutdown().context("failed to shut down debugger");
+    let result = run(&debugger.handle(), &args).await;
+    let shutdown = debugger
+        .shutdown()
+        .await
+        .context("failed to shut down debugger");
 
     result?;
     shutdown?;
@@ -51,7 +56,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run(debugger: &Debugger, args: &Args) -> Result<()> {
+async fn run(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
     let mut output = vec![format!("debugging {}", debugger.executable().display())];
 
     for path in &args.command_files {
@@ -64,7 +69,9 @@ fn run(debugger: &Debugger, args: &Args) -> Result<()> {
             &path.display().to_string(),
             args.batch,
             &mut output,
-        )? {
+        )
+        .await?
+        {
             return Ok(());
         }
     }
@@ -76,24 +83,19 @@ fn run(debugger: &Debugger, args: &Args) -> Result<()> {
             &format!("--eval #{}", index + 1),
             args.batch,
             &mut output,
-        )? {
+        )
+        .await?
+        {
             return Ok(());
         }
     }
 
     if args.batch {
         if args.command_files.is_empty() && args.commands.is_empty() {
-            let mut stdin = io::stdin().lock();
-            let mut line = String::new();
+            let mut lines = BufReader::new(tokio::io::stdin()).lines();
             let mut number = 0;
 
-            loop {
-                line.clear();
-
-                if stdin.read_line(&mut line)? == 0 {
-                    break;
-                }
-
+            while let Some(line) = lines.next_line().await? {
                 number += 1;
 
                 if !run_line(
@@ -102,22 +104,22 @@ fn run(debugger: &Debugger, args: &Args) -> Result<()> {
                     &format!("stdin:{number}"),
                     true,
                     &mut output,
-                )? {
+                )
+                .await?
+                {
                     break;
                 }
             }
-
-            drop(stdin);
         }
 
         Ok(())
     } else {
-        repl(debugger, output)
+        repl(debugger, output).await
     }
 }
 
-fn run_lines<'a>(
-    debugger: &Debugger,
+async fn run_lines<'a>(
+    debugger: &DebuggerHandle,
     lines: impl Iterator<Item = &'a str>,
     source: &str,
     batch: bool,
@@ -130,7 +132,9 @@ fn run_lines<'a>(
             &format!("{source}:{}", index + 1),
             batch,
             output,
-        )? {
+        )
+        .await?
+        {
             return Ok(false);
         }
     }
@@ -138,8 +142,8 @@ fn run_lines<'a>(
     Ok(true)
 }
 
-fn run_line(
-    debugger: &Debugger,
+async fn run_line(
+    debugger: &DebuggerHandle,
     line: &str,
     source: &str,
     batch: bool,
@@ -150,7 +154,10 @@ fn run_line(
         return Ok(true);
     }
 
-    match execute(debugger, line).with_context(|| source.to_owned())? {
+    match execute(debugger, line)
+        .await
+        .with_context(|| source.to_owned())?
+    {
         Control::Continue(message) => {
             if !message.is_empty() {
                 if batch {
@@ -168,7 +175,7 @@ fn run_line(
     }
 }
 
-fn repl(debugger: &Debugger, output: Vec<String>) -> Result<()> {
+async fn repl(debugger: &DebuggerHandle, output: Vec<String>) -> Result<()> {
     enable_raw_mode().context("failed to enable terminal raw mode")?;
 
     let backend = CrosstermBackend::new(io::stdout());
@@ -178,7 +185,7 @@ fn repl(debugger: &Debugger, output: Vec<String>) -> Result<()> {
     let mut terminal =
         Terminal::with_options(backend, options).context("failed to initialize terminal")?;
 
-    let result = run_repl(&mut terminal, debugger, output);
+    let result = run_repl(&mut terminal, debugger, output).await;
 
     disable_raw_mode().context("failed to disable terminal raw mode")?;
     terminal.show_cursor().context("failed to restore cursor")?;
@@ -186,9 +193,9 @@ fn repl(debugger: &Debugger, output: Vec<String>) -> Result<()> {
     result
 }
 
-fn run_repl(
+async fn run_repl(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    debugger: &Debugger,
+    debugger: &DebuggerHandle,
     mut output: Vec<String>,
 ) -> Result<()> {
     let mut input = String::new();
@@ -237,7 +244,7 @@ fn run_repl(
             KeyCode::Enter => {
                 let command = std::mem::take(&mut input);
 
-                match run_line(debugger, &command, "repl", false, &mut output) {
+                match run_line(debugger, &command, "repl", false, &mut output).await {
                     Ok(true) => {}
                     Ok(false) => return Ok(()),
                     Err(error) => output.push(format!("error: {error}")),
@@ -263,7 +270,7 @@ enum Control {
     Quit,
 }
 
-fn execute(debugger: &Debugger, line: &str) -> uscope::Result<Control> {
+async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Control> {
     let mut words = line.split_whitespace();
     let command = words.next().unwrap_or("");
 
@@ -274,20 +281,20 @@ fn execute(debugger: &Debugger, line: &str) -> uscope::Result<Control> {
                 |_| BreakpointSpec::Function(argument.to_owned()),
                 BreakpointSpec::Address,
             );
-            let address = debugger.add_breakpoint(spec)?;
+            let address = debugger.add_breakpoint(spec).await?;
 
             Ok(Control::Continue(format!(
                 "breakpoint set at link/runtime address {address:#x}"
             )))
         }
-        "run" | "r" => Ok(Control::Continue(format_stop(debugger.run()?))),
-        "continue" | "c" => Ok(Control::Continue(format_stop(debugger.resume()?))),
+        "run" | "r" => Ok(Control::Continue(format_stop(debugger.run().await?))),
+        "continue" | "c" => Ok(Control::Continue(format_stop(debugger.resume().await?))),
         "x" => {
             let address = parse_address(one_argument(&mut words, "x <runtime-address>")?)?;
 
             Ok(Control::Continue(format!(
                 "{address:#018x}: {:#018x}",
-                debugger.read_word(address)?
+                debugger.read_word(address).await?
             )))
         }
         "address" => {
@@ -295,7 +302,7 @@ fn execute(debugger: &Debugger, line: &str) -> uscope::Result<Control> {
 
             Ok(Control::Continue(format!(
                 "{name}: {:#x}",
-                debugger.runtime_address(name)?
+                debugger.runtime_address(name).await?
             )))
         }
         "quit" | "q" => Ok(Control::Quit),
@@ -329,9 +336,9 @@ fn parse_address(value: &str) -> uscope::Result<u64> {
 fn format_stop(reason: StopReason) -> String {
     match reason {
         StopReason::Breakpoint { address } => format!("stopped at breakpoint {address:#x}"),
-        StopReason::Signal(signal) => format!("stopped by {signal}"),
+        StopReason::Signal(signal) => format!("stopped by signal {signal}"),
         StopReason::Exited(code) => format!("inferior exited with status {code}"),
-        StopReason::Signaled(signal) => format!("inferior terminated by {signal}"),
+        StopReason::Signaled(signal) => format!("inferior terminated by signal {signal}"),
     }
 }
 

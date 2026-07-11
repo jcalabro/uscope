@@ -34,3 +34,4 @@ nix = { version = "0.31", features = ["ptrace", "process", "signal"] }
 object = { version = "0.39", features = ["read"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 thiserror = "2.0"
+tokio = { version = "1.52", features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }

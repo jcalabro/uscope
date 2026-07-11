@@ -26,11 +26,6 @@ pub enum Error {
     NotRunning,
     #[error("the inferior is not stopped")]
     NotStopped,
-    #[error("inferior exited with status {0}")]
-    InferiorExited(i32),
-    #[error("inferior was terminated by signal {0}")]
-    InferiorSignaled(nix::sys::signal::Signal),
-
     #[error("unexpected wait status: {0}")]
     UnexpectedWait(String),
     #[error("could not determine load bias for {0}")]
@@ -38,10 +33,14 @@ pub enum Error {
     #[error("address arithmetic overflow")]
     AddressOverflow,
 
-    #[error("debugger worker stopped unexpectedly")]
-    WorkerStopped,
-    #[error("debugger worker panicked")]
-    WorkerPanicked,
+    #[error("debugger backend thread panicked")]
+    BackendThreadPanicked,
+    #[error("debugger request was cancelled")]
+    RequestCancelled,
+    #[error("debugger request queue is closed")]
+    RequestQueueClosed,
+    #[error("debugger shutdown timed out")]
+    ShutdownTimedOut,
 
     #[error("invalid command: {0}")]
     InvalidCommand(String),

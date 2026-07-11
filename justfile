@@ -12,6 +12,8 @@ build-test-programs:
     mkdir -p build/test-programs
     NIX_HARDENING_ENABLE= gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -fPIE -pie \
         tests/fixtures/basic.c -o build/test-programs/basic
+    NIX_HARDENING_ENABLE= gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -fPIE -pie \
+        tests/fixtures/spin.c -o build/test-programs/spin
 
 # Builds the native test fixtures and uscope.
 build: build-test-programs
