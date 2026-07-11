@@ -85,3 +85,37 @@ fn batch_mode_reports_command_context() {
     assert!(stderr.contains("--eval #1"));
     assert!(stderr.contains("invalid command: invalid"));
 }
+
+#[test]
+fn batch_mode_prints_a_nested_backtrace() {
+    let executable = fixture("build/test-programs/unwind-o2");
+    assert!(
+        executable.exists(),
+        "missing test fixture; run `just build-test-programs`"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break deepest",
+            "--eval",
+            "run",
+            "--eval",
+            "backtrace",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+    let deepest = stdout.find("in deepest").expect("deepest frame");
+    let middle = stdout.find("in middle").expect("middle frame");
+    let outer = stdout.find("in outer").expect("outer frame");
+    let main = stdout.find("in main").expect("main frame");
+
+    assert!(
+        deepest < middle && middle < outer && outer < main,
+        "{stdout}"
+    );
+    assert!(stdout.contains("unwind stopped:"));
+}

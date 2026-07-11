@@ -168,7 +168,7 @@ async fn run_line(
                     io::stdout().flush()?;
                 } else {
                     output.push(format!("> {line}"));
-                    output.push(message);
+                    append_output(output, &message);
                 }
             }
 
@@ -176,6 +176,10 @@ async fn run_line(
         }
         Control::Quit => Ok(false),
     }
+}
+
+fn append_output(output: &mut Vec<String>, message: &str) {
+    output.extend(message.lines().map(str::to_owned));
 }
 
 async fn repl(debugger: &DebuggerHandle, output: Vec<String>) -> Result<()> {
@@ -331,6 +335,32 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 None => format!("{function} at {:#x}", location.address.get()),
             }))
         }
+        "backtrace" | "bt" => {
+            let trace = debugger.backtrace().await?;
+            let mut lines = Vec::with_capacity(trace.frames.len() + 1);
+
+            for frame in trace.frames.iter() {
+                let name = frame
+                    .function
+                    .as_ref()
+                    .map_or("<unknown>", |function| function.name.as_ref());
+                let source = frame.source.as_ref().and_then(|source| {
+                    debugger
+                        .module_image()
+                        .source_file(source.file)
+                        .map(|file| format!(" at {}:{}", file.path.display(), source.line.get()))
+                });
+                lines.push(format!(
+                    "#{:<2} {:#018x} in {name}{}",
+                    frame.level,
+                    frame.instruction.get(),
+                    source.unwrap_or_default()
+                ));
+            }
+            lines.push(format!("unwind stopped: {:?}", trace.termination));
+
+            Ok(Control::Continue(lines.join("\n")))
+        }
         "quit" | "q" => Ok(Control::Quit),
         "" => Ok(Control::Continue(String::new())),
         other => Err(Error::InvalidCommand(other.to_owned())),
@@ -389,5 +419,14 @@ mod tests {
         assert_eq!(prompt_cursor_x(prompt, 0), 13);
         assert_eq!(prompt_cursor_x(prompt, 5), 18);
         assert_eq!(prompt_cursor_x(prompt, usize::MAX), 28);
+    }
+
+    #[test]
+    fn multiline_command_output_uses_separate_history_rows() {
+        let mut output = vec!["existing".to_owned()];
+
+        append_output(&mut output, "#0 deepest\n#1 middle\n#2 main");
+
+        assert_eq!(output, ["existing", "#0 deepest", "#1 middle", "#2 main"]);
     }
 }

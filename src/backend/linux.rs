@@ -8,18 +8,27 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle, ThreadId};
 
 use nix::libc;
-use nix::sys::ptrace;
+use nix::sys::ptrace::{self, Options};
 use nix::sys::signal::{self, Signal as NixSignal};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
+use object::{Object, ObjectSegment};
 use tokio::sync::{broadcast, mpsc};
 
 use super::ControllerMessage;
+use crate::debug_info::UnwindInfo;
 use crate::protocol::{
     DebuggerEvent, ExceptionInfo, ExitStatus, InferiorState, ProcessId, Reply, Request,
     StateSnapshot, StopReason,
 };
-use crate::{BreakpointLocation, Error, LoadedModule, ModuleImageId, Result, VirtualAddress};
+use crate::unwind::{
+    CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, MemoryReader, RegisterFile,
+    collect_backtrace,
+};
+use crate::{
+    Backtrace, BreakpointLocation, Error, FrameKind, LoadedModule, ModuleImage, Result, StackFrame,
+    ThreadId as DebugThreadId, UnwindTermination, VirtualAddress,
+};
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
 const WAITER_THREAD_NAME: &str = "uscope-waitpid";
@@ -53,6 +62,8 @@ enum ExecutionState {
 enum LinuxError {
     #[error("system tracing operation failed: {0}")]
     System(#[from] nix::Error),
+    #[error("failed to parse executable object: {0}")]
+    Object(#[from] object::Error),
     #[error("unexpected wait status: {0}")]
     UnexpectedWait(String),
     #[error("could not determine load bias for {0}")]
@@ -81,7 +92,8 @@ struct PendingRun {
 
 struct Controller {
     executable: Arc<PathBuf>,
-    module_image: ModuleImageId,
+    module_image: Arc<ModuleImage>,
+    unwind_info: Arc<dyn UnwindInfo>,
     messages: mpsc::Receiver<ControllerMessage>,
     message_sender: mpsc::Sender<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
@@ -95,7 +107,8 @@ struct Controller {
 
 pub fn spawn_controller(
     executable: Arc<PathBuf>,
-    module_image: ModuleImageId,
+    module_image: Arc<ModuleImage>,
+    unwind_info: Arc<dyn UnwindInfo>,
     message_sender: mpsc::Sender<ControllerMessage>,
     messages: mpsc::Receiver<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
@@ -103,14 +116,23 @@ pub fn spawn_controller(
     Ok(thread::Builder::new()
         .name(CONTROLLER_THREAD_NAME.into())
         .spawn(move || {
-            Controller::new(executable, module_image, messages, message_sender, events).run();
+            Controller::new(
+                executable,
+                module_image,
+                unwind_info,
+                messages,
+                message_sender,
+                events,
+            )
+            .run();
         })?)
 }
 
 impl Controller {
     fn new(
         executable: Arc<PathBuf>,
-        module_image: ModuleImageId,
+        module_image: Arc<ModuleImage>,
+        unwind_info: Arc<dyn UnwindInfo>,
         messages: mpsc::Receiver<ControllerMessage>,
         message_sender: mpsc::Sender<ControllerMessage>,
         events: broadcast::Sender<DebuggerEvent>,
@@ -118,6 +140,7 @@ impl Controller {
         Self {
             executable,
             module_image,
+            unwind_info,
             messages,
             message_sender,
             events,
@@ -174,6 +197,9 @@ impl Controller {
             }
             Request::Snapshot { reply } => {
                 let _ = reply.send(Ok(self.snapshot()));
+            }
+            Request::Backtrace { reply } => {
+                let _ = reply.send(self.backtrace());
             }
             Request::Shutdown { reply } => {
                 self.begin_shutdown(Some(reply));
@@ -265,7 +291,7 @@ impl Controller {
 
                 self.inferior = Some(Inferior {
                     pid,
-                    loaded_module: LoadedModule::main(self.module_image, 0),
+                    loaded_module: LoadedModule::main(self.module_image.id(), 0),
                     breakpoints: BTreeMap::new(),
                     stopped_at: None,
                     state: ExecutionState::Starting,
@@ -344,9 +370,10 @@ impl Controller {
     }
 
     fn initialize_inferior(&mut self, pid: Pid) -> Result<()> {
+        self.ptrace.set_options(pid)?;
         let load_bias = load_bias(pid, &self.executable)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        inferior.loaded_module = LoadedModule::main(self.module_image, load_bias);
+        inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
 
         for &location in &self.pending_breakpoints {
             let address = match location {
@@ -388,7 +415,18 @@ impl Controller {
                     Err(error) => self.fail_run(reply, error),
                 }
             }
-            other => self.finish_run(other, reply),
+            other => {
+                let result = self
+                    .inferior
+                    .as_ref()
+                    .ok_or(Error::NotRunning)
+                    .and_then(|inferior| self.ptrace.enable_breakpoint(inferior, address));
+
+                match result {
+                    Ok(()) => self.finish_run(other, reply),
+                    Err(error) => self.fail_run(reply, error),
+                }
+            }
         }
     }
 
@@ -522,6 +560,60 @@ impl Controller {
         }
     }
 
+    fn backtrace(&self) -> Result<Backtrace> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        if !matches!(inferior.state, ExecutionState::Stopped(_)) {
+            return Err(Error::NotStopped);
+        }
+
+        let native = self.ptrace.registers(inferior.pid)?;
+        let registers = x86_64_registers(&native);
+        let initial = FrameContext {
+            instruction: VirtualAddress::new(native.rip),
+            cfa: None,
+            signal_frame: false,
+        };
+        let mut provider = DwarfCallerProvider {
+            unwind_info: self.unwind_info.as_ref(),
+            loaded_module: inferior.loaded_module,
+            module_image: &self.module_image,
+            registers,
+            memory: PtraceMemory {
+                ptrace: &self.ptrace,
+                pid: inferior.pid,
+            },
+            first: true,
+        };
+        let module_image = Arc::clone(&self.module_image);
+        let loaded_module = inferior.loaded_module;
+
+        Ok(collect_backtrace(
+            DebugThreadId::new(process_id(inferior.pid).get()),
+            initial,
+            &mut provider,
+            |level, context| {
+                let location = loaded_module
+                    .image_address(context.instruction)
+                    .ok()
+                    .filter(|address| module_image.contains_address(*address))
+                    .map(|address| module_image.locate(address));
+
+                StackFrame::new(
+                    level,
+                    if context.signal_frame {
+                        FrameKind::Signal
+                    } else {
+                        FrameKind::Physical
+                    },
+                    location.as_ref().map(|_| loaded_module.id),
+                    context.instruction,
+                    location,
+                )
+            },
+            DEFAULT_MAX_FRAMES,
+        ))
+    }
+
     fn begin_shutdown(&mut self, reply: Option<Reply<()>>) {
         self.shutdown_reply = reply;
         self.pending_run = None;
@@ -591,6 +683,103 @@ impl Controller {
     }
 }
 
+struct PtraceMemory<'a> {
+    ptrace: &'a LinuxPtrace,
+    pid: Pid,
+}
+
+impl MemoryReader for PtraceMemory<'_> {
+    fn read_u64(&mut self, address: VirtualAddress) -> std::result::Result<u64, ()> {
+        self.ptrace
+            .read_word(self.pid, address.get())
+            .map_err(|_| ())
+    }
+}
+
+struct DwarfCallerProvider<'a> {
+    unwind_info: &'a dyn UnwindInfo,
+    loaded_module: LoadedModule,
+    module_image: &'a ModuleImage,
+    registers: RegisterFile,
+    memory: PtraceMemory<'a>,
+    first: bool,
+}
+
+impl CallerProvider for DwarfCallerProvider<'_> {
+    fn caller(&mut self, current: &FrameContext) -> CallerResult {
+        let lookup = if self.first || current.signal_frame {
+            current.instruction
+        } else {
+            let Some(address) = current.instruction.get().checked_sub(1) else {
+                return CallerResult::Finished(UnwindTermination::Complete);
+            };
+            VirtualAddress::new(address)
+        };
+        self.first = false;
+        let Ok(image_address) = self.loaded_module.image_address(lookup) else {
+            return CallerResult::Finished(UnwindTermination::ModuleNotFound { address: lookup });
+        };
+        if !self.module_image.contains_address(image_address) {
+            return CallerResult::Finished(UnwindTermination::ModuleNotFound { address: lookup });
+        }
+        let step = match self
+            .unwind_info
+            .unwind(image_address, &self.registers, &mut self.memory)
+        {
+            Ok(step) => step,
+            Err(mut termination) => {
+                if let UnwindTermination::NoUnwindInfo { address } = &mut termination {
+                    *address = lookup;
+                }
+                return CallerResult::Finished(termination);
+            }
+        };
+        let Some(instruction) = step.registers.get(16) else {
+            return CallerResult::Finished(UnwindTermination::Complete);
+        };
+        if instruction == 0 {
+            return CallerResult::Finished(UnwindTermination::Complete);
+        }
+        if step.cfa.get() == current.cfa.map_or(0, VirtualAddress::get)
+            && instruction == current.instruction.get()
+        {
+            return CallerResult::Finished(UnwindTermination::InvalidCaller {
+                description: "caller did not make progress".into(),
+            });
+        }
+
+        self.registers = step.registers;
+        CallerResult::Caller(FrameContext {
+            instruction: VirtualAddress::new(instruction),
+            cfa: Some(step.cfa),
+            signal_frame: step.signal_frame,
+        })
+    }
+}
+
+fn x86_64_registers(registers: &libc::user_regs_struct) -> RegisterFile {
+    RegisterFile::new([
+        (0, registers.rax),
+        (1, registers.rdx),
+        (2, registers.rcx),
+        (3, registers.rbx),
+        (4, registers.rsi),
+        (5, registers.rdi),
+        (6, registers.rbp),
+        (7, registers.rsp),
+        (8, registers.r8),
+        (9, registers.r9),
+        (10, registers.r10),
+        (11, registers.r11),
+        (12, registers.r12),
+        (13, registers.r13),
+        (14, registers.r14),
+        (15, registers.r15),
+        (16, registers.rip),
+        (49, registers.eflags),
+    ])
+}
+
 struct LinuxPtrace {
     affinity: ThreadAffinity,
     not_send_or_sync: PhantomData<Rc<()>>,
@@ -646,6 +835,12 @@ impl LinuxPtrace {
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
         self.assert_owner_thread();
         ptrace::getregs(pid).map_err(|error| backend_error(LinuxError::System(error)))
+    }
+
+    fn set_options(&self, pid: Pid) -> Result<()> {
+        self.assert_owner_thread();
+        ptrace::setoptions(pid, Options::PTRACE_O_EXITKILL)
+            .map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
@@ -752,6 +947,14 @@ fn trace_child(command: &mut ProcessCommand) {
 
 fn load_bias(pid: Pid, executable: &Path) -> Result<u64> {
     let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    let data = std::fs::read(executable)?;
+    let object = object::File::parse(data.as_slice())
+        .map_err(|error| Error::backend(LinuxError::Object(error)))?;
+    let image_base = object
+        .segments()
+        .map(|segment| segment.address())
+        .min()
+        .unwrap_or(0);
     let executable = executable.to_string_lossy();
 
     for line in maps.lines() {
@@ -770,8 +973,11 @@ fn load_bias(pid: Pid, executable: &Path) -> Result<u64> {
         let Some(start) = range.split('-').next() else {
             continue;
         };
-        return u64::from_str_radix(start, 16)
-            .map_err(|_| backend_error(LinuxError::LoadBias(executable.as_ref().into())));
+        let mapping_start = u64::from_str_radix(start, 16)
+            .map_err(|_| backend_error(LinuxError::LoadBias(executable.as_ref().into())))?;
+        return mapping_start
+            .checked_sub(image_base)
+            .ok_or_else(|| backend_error(LinuxError::LoadBias(executable.as_ref().into())));
     }
 
     Err(backend_error(LinuxError::LoadBias(

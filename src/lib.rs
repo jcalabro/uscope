@@ -3,13 +3,15 @@ mod debug_info;
 mod error;
 pub(crate) mod model;
 mod protocol;
+mod unwind;
 
 pub use error::{Error, Result};
 pub use model::{
-    AddressRange, Architecture, BreakpointLocation, ByteOrder, ColumnNumber, ExecutionLocation,
-    FunctionId, FunctionInfo, ImageAddress, ImageLocation, LineNumber, LoadedModule, ModuleId,
-    ModuleImage, ModuleImageId, PointerWidth, SourceFile, SourceFileId, SourceLocation, SymbolId,
-    SymbolInfo, TargetDescription, VirtualAddress,
+    AddressRange, Architecture, Backtrace, BreakpointLocation, ByteOrder, ColumnNumber,
+    ExecutionLocation, FrameKind, FunctionId, FunctionInfo, ImageAddress, ImageLocation,
+    LineNumber, LoadedModule, ModuleId, ModuleImage, ModuleImageId, PointerWidth, SourceFile,
+    SourceFileId, SourceLocation, StackFrame, StackFrameId, SymbolId, SymbolInfo,
+    TargetDescription, ThreadId, UnwindTermination, VirtualAddress,
 };
 pub use protocol::{
     BreakpointSpec, DebuggerEvent, ExceptionInfo, ExitStatus, InferiorState, ProcessId,
@@ -49,7 +51,8 @@ impl Debugger {
     /// Creates a debugger for a native executable and starts its backend controller.
     pub fn new(executable: impl AsRef<Path>) -> Result<Self> {
         let executable = Arc::new(executable.as_ref().canonicalize()?);
-        let module_image = debug_info::load(&executable)?;
+        let debug_info = debug_info::load(&executable)?;
+        let module_image = Arc::clone(&debug_info.image);
         let (requests, receiver) = mpsc::channel(REQUEST_CAPACITY);
         let shutdown_permit = requests
             .clone()
@@ -58,7 +61,8 @@ impl Debugger {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let controller = backend::spawn_controller(
             Arc::clone(&executable),
-            module_image.id(),
+            Arc::clone(&module_image),
+            debug_info.unwind,
             requests.clone(),
             receiver,
             events.clone(),
@@ -195,6 +199,11 @@ impl DebuggerHandle {
     /// Returns an immutable snapshot of the debugger's current state.
     pub async fn snapshot(&self) -> Result<StateSnapshot> {
         self.request(|reply| Request::Snapshot { reply }).await
+    }
+
+    /// Reconstructs the stopped thread's stack frames.
+    pub async fn backtrace(&self) -> Result<Backtrace> {
+        self.request(|reply| Request::Backtrace { reply }).await
     }
 
     async fn loaded_module(&self) -> Result<LoadedModule> {
