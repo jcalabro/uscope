@@ -1,11 +1,12 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
+set positional-arguments := true
 
 # Lints the Rust code and runs the complete test suite.
 default: check
 
 # Enters the Nix development shell.
 dev *ARGS="":
-    exec ./dev.sh {{ARGS}}
+    exec ./dev.sh "$@"
 
 # Builds the native test fixtures without running Rust tests.
 build-test-programs:
@@ -18,6 +19,10 @@ build-test-programs:
 # Builds the native test fixtures and uscope.
 build: build-test-programs
     cargo build
+
+# Builds uscope and runs it with the supplied arguments.
+run *ARGS="": build
+    ./target/debug/uscope "$@"
 
 # Builds the native test fixtures and runs the Rust test suite.
 test: build-test-programs
