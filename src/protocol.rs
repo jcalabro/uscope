@@ -1,9 +1,9 @@
-use std::{fmt, sync::Arc};
+use std::{fmt, path::PathBuf, sync::Arc};
 
 use tokio::sync::oneshot;
 
 use crate::{
-    Backtrace, BreakpointLocation, CodeInstanceId, ExecutionLocation, LoadedModule,
+    Backtrace, BreakpointLocation, CodeInstanceId, ExecutionLocation, LineNumber, LoadedModule,
     RegisterSnapshot, Result, ThreadId, VirtualAddress,
 };
 
@@ -12,6 +12,10 @@ use crate::{
 pub enum BreakpointSpec {
     /// Break at the uniquely named function.
     Function(String),
+    /// Break at every statement address for an exact source line.
+    Source { path: PathBuf, line: LineNumber },
+    /// Break at every concrete instance of a function declared in one source file.
+    FileFunction { path: PathBuf, function: String },
     /// Break at an absolute process virtual address.
     Address(VirtualAddress),
 }
@@ -363,6 +367,13 @@ pub enum Request {
     AddBreakpoint {
         spec: BreakpointSpec,
         reply: Reply<Breakpoint>,
+    },
+    RemoveBreakpoint {
+        id: BreakpointId,
+        reply: Reply<Breakpoint>,
+    },
+    RemoveAllBreakpoints {
+        reply: Reply<Arc<[Breakpoint]>>,
     },
     Launch {
         reply: Reply<ExecutionId>,

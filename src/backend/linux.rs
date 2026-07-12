@@ -288,6 +288,8 @@ enum LinuxError {
     BreakpointIdExhausted,
     #[error("breakpoint installation failed ({cause}) and rollback also failed ({recovery})")]
     BreakpointInstallRecovery { cause: String, recovery: String },
+    #[error("breakpoint removal failed ({cause}) and rollback also failed ({recovery})")]
+    BreakpointRemoveRecovery { cause: String, recovery: String },
     #[error("resume failed ({cause}) and recovery also failed ({recovery})")]
     ResumeRecovery { cause: String, recovery: String },
 }
@@ -398,6 +400,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         match request {
             Request::AddBreakpoint { spec, reply } => {
                 let _ = reply.send(self.add_breakpoint(spec));
+            }
+            Request::RemoveBreakpoint { id, reply } => {
+                let _ = reply.send(self.remove_breakpoint(id));
+            }
+            Request::RemoveAllBreakpoints { reply } => {
+                let _ = reply.send(self.remove_all_breakpoints());
             }
             Request::Launch { reply } => self.launch(reply),
             Request::Continue {
@@ -599,34 +607,55 @@ impl<P: LinuxTraceOps> Controller<P> {
                 location: BreakpointLocation::Virtual(*address),
                 code_instances: Arc::from([]),
             }]),
-            BreakpointSpec::Function(name) => {
-                let function = self.module_image.function_named(name)?;
-                let instances = self
+            BreakpointSpec::Function(name) => self.resolve_function_breakpoint(std::iter::once(
+                self.module_image.function_named(name)?,
+            ))?,
+            BreakpointSpec::FileFunction { path, function } => {
+                let source = self.module_image.source_file_matching(path)?;
+                let functions = self
                     .module_image
-                    .instances_for_function(function.id)
+                    .functions()
+                    .iter()
+                    .filter(|candidate| candidate.name.as_ref() == function)
+                    .filter(|candidate| {
+                        candidate
+                            .declaration
+                            .as_ref()
+                            .is_some_and(|location| location.file == source.id)
+                    })
                     .collect::<Vec<_>>();
-                if instances.is_empty()
-                    || instances
-                        .iter()
-                        .any(|instance| instance.breakpoint_entry.is_none())
-                {
-                    return Err(Error::LocationUnavailable);
+                if functions.is_empty() {
+                    return Err(Error::FunctionNotFound(function.clone()));
                 }
-
-                let mut by_address = BTreeMap::<_, Vec<_>>::new();
-                for instance in instances {
-                    let entry = instance.breakpoint_entry.expect("entries were validated");
-                    by_address
-                        .entry(entry.address)
-                        .or_default()
-                        .push(instance.id);
+                self.resolve_function_breakpoint(functions.into_iter())?
+            }
+            BreakpointSpec::Source { path, line } => {
+                let source = self.module_image.source_file_matching(path)?;
+                let addresses = self
+                    .module_image
+                    .statement_addresses(source.id, *line)
+                    .collect::<Vec<_>>();
+                if addresses.is_empty() {
+                    return Err(Error::SourceLineUnavailable {
+                        path: path.clone(),
+                        line: line.get(),
+                    });
                 }
-
-                by_address
+                addresses
                     .into_iter()
-                    .map(|(address, code_instances)| ResolvedBreakpointLocation {
-                        location: BreakpointLocation::Image(address),
-                        code_instances: code_instances.into(),
+                    .map(|address| {
+                        let code_instances = self
+                            .module_image
+                            .code_instances()
+                            .iter()
+                            .filter(|instance| instance.contains(address))
+                            .map(|instance| instance.id)
+                            .collect::<Vec<_>>()
+                            .into();
+                        ResolvedBreakpointLocation {
+                            location: BreakpointLocation::Image(address),
+                            code_instances,
+                        }
                     })
                     .collect::<Vec<_>>()
                     .into()
@@ -638,6 +667,105 @@ impl<P: LinuxTraceOps> Controller<P> {
             spec,
             locations,
         })
+    }
+
+    fn resolve_function_breakpoint<'a>(
+        &self,
+        functions: impl IntoIterator<Item = &'a crate::FunctionInfo>,
+    ) -> Result<Arc<[ResolvedBreakpointLocation]>> {
+        let mut instances = Vec::new();
+        for function in functions {
+            instances.extend(self.module_image.instances_for_function(function.id));
+        }
+        if instances.is_empty()
+            || instances
+                .iter()
+                .any(|instance| instance.breakpoint_entry.is_none())
+        {
+            return Err(Error::LocationUnavailable);
+        }
+
+        let mut by_address = BTreeMap::<_, Vec<_>>::new();
+        for instance in instances {
+            let entry = instance.breakpoint_entry.expect("entries were validated");
+            by_address
+                .entry(entry.address)
+                .or_default()
+                .push(instance.id);
+        }
+
+        Ok(by_address
+            .into_iter()
+            .map(|(address, code_instances)| ResolvedBreakpointLocation {
+                location: BreakpointLocation::Image(address),
+                code_instances: code_instances.into(),
+            })
+            .collect::<Vec<_>>()
+            .into())
+    }
+
+    fn remove_breakpoint(&mut self, id: BreakpointId) -> Result<Breakpoint> {
+        let index = self
+            .breakpoints
+            .iter()
+            .position(|breakpoint| breakpoint.id == id)
+            .ok_or(Error::BreakpointNotFound(id.get()))?;
+        let breakpoint = self.breakpoints[index].clone();
+        if let Some(inferior) = self.inferior.as_mut() {
+            validate_public_stop(inferior, None)?;
+            remove_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
+        }
+        self.breakpoints.remove(index);
+        self.publish_breakpoints_changed();
+        Ok(breakpoint)
+    }
+
+    fn remove_all_breakpoints(&mut self) -> Result<Arc<[Breakpoint]>> {
+        if self.breakpoints.is_empty() {
+            return Ok(Arc::from([]));
+        }
+        if let Some(inferior) = self.inferior.as_mut() {
+            validate_public_stop(inferior, None)?;
+            let stopped_at = inferior
+                .threads
+                .iter()
+                .map(|(&pid, thread)| (pid, thread.stopped_at_breakpoint))
+                .collect::<Vec<_>>();
+            let mut removed = Vec::new();
+            for breakpoint in &self.breakpoints {
+                if let Err(cause) = remove_logical_breakpoint(&self.ptrace, inferior, breakpoint) {
+                    for prior in removed.iter().rev() {
+                        if let Err(recovery) =
+                            install_logical_breakpoint(&self.ptrace, inferior, prior)
+                        {
+                            return Err(backend_error(LinuxError::BreakpointRemoveRecovery {
+                                cause: cause.to_string(),
+                                recovery: recovery.to_string(),
+                            }));
+                        }
+                    }
+                    for (pid, address) in stopped_at {
+                        inferior
+                            .threads
+                            .get_mut(&pid)
+                            .expect("captured thread remains stopped")
+                            .stopped_at_breakpoint = address;
+                    }
+                    return Err(cause);
+                }
+                removed.push(breakpoint.clone());
+            }
+        }
+        let removed: Arc<[Breakpoint]> = std::mem::take(&mut self.breakpoints).into();
+        self.publish_breakpoints_changed();
+        Ok(removed)
+    }
+
+    fn publish_breakpoints_changed(&mut self) {
+        self.bump_revision();
+        let _ = self.events.send(DebuggerEvent::BreakpointsChanged {
+            revision: self.revision,
+        });
     }
 
     fn launch(&mut self, reply: Reply<ExecutionId>) {
@@ -3402,6 +3530,66 @@ fn install_logical_breakpoint(
         installed.push(address);
     }
 
+    Ok(())
+}
+
+fn remove_logical_breakpoint(
+    ptrace: &dyn LinuxTraceOps,
+    inferior: &mut Inferior,
+    breakpoint: &Breakpoint,
+) -> Result<()> {
+    let owner = BreakpointOwner::User(breakpoint.id);
+    let addresses = breakpoint
+        .locations
+        .iter()
+        .map(|resolved| runtime_breakpoint_address(inferior, resolved.location))
+        .collect::<Result<Vec<_>>>()?;
+
+    for &address in &addresses {
+        let site = inferior
+            .breakpoints
+            .get(&address)
+            .ok_or_else(|| backend_error(LinuxError::BreakpointSiteMissing(address)))?;
+        if !site.owners.contains(&owner) {
+            return Err(backend_error(LinuxError::BreakpointOwnerMissing(address)));
+        }
+    }
+
+    let mut removed = Vec::new();
+    for address in addresses {
+        if let Err(cause) = remove_breakpoint_owner_from(ptrace, inferior, address, owner) {
+            for prior in removed.into_iter().rev() {
+                if let Err(recovery) = ptrace.install_breakpoint(
+                    inferior.tgid,
+                    &mut inferior.breakpoints,
+                    prior,
+                    owner,
+                ) {
+                    return Err(backend_error(LinuxError::BreakpointRemoveRecovery {
+                        cause: cause.to_string(),
+                        recovery: recovery.to_string(),
+                    }));
+                }
+            }
+            return Err(cause);
+        }
+        removed.push(address);
+    }
+    let removed_sites = removed
+        .iter()
+        .copied()
+        .filter(|address| !inferior.breakpoints.contains_key(address))
+        .collect::<BTreeSet<_>>();
+    for thread in inferior.threads.values_mut() {
+        if thread
+            .stopped_at_breakpoint
+            .is_some_and(|address| removed_sites.contains(&address))
+        {
+            // Breakpoint PCs are normalized when the trap is classified. With the
+            // original instruction restored there is no repair step left to run.
+            thread.stopped_at_breakpoint = None;
+        }
+    }
     Ok(())
 }
 

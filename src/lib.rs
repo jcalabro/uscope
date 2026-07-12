@@ -151,6 +151,18 @@ impl DebuggerHandle {
             .await
     }
 
+    /// Removes one logical breakpoint and returns its prior definition.
+    pub async fn remove_breakpoint(&self, id: BreakpointId) -> Result<Breakpoint> {
+        self.request(|reply| Request::RemoveBreakpoint { id, reply })
+            .await
+    }
+
+    /// Removes every logical breakpoint and returns their prior definitions.
+    pub async fn remove_all_breakpoints(&self) -> Result<Arc<[Breakpoint]>> {
+        self.request(|reply| Request::RemoveAllBreakpoints { reply })
+            .await
+    }
+
     /// Launches the inferior and acknowledges once native execution has started.
     pub async fn launch(&self) -> Result<ExecutionId> {
         self.request(|reply| Request::Launch { reply }).await

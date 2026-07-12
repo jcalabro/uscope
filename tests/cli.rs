@@ -95,6 +95,40 @@ fn batch_mode_prints_every_location_of_an_inline_breakpoint() {
 }
 
 #[test]
+fn batch_mode_sets_lists_and_deletes_source_and_file_function_breakpoints() {
+    let executable = fixture("build/test-programs/basic");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break basic.c:11",
+            "--eval",
+            "break basic.c:breakpoint_target",
+            "--eval",
+            "breakpoints",
+            "--eval",
+            "delete 1",
+            "--eval",
+            "clear all",
+            "--eval",
+            "info breakpoints",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+
+    assert!(stdout.contains("1  basic.c:11  1 location"), "{stdout}");
+    assert!(
+        stdout.contains("2  basic.c:breakpoint_target  1 location"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("deleted breakpoint 1"), "{stdout}");
+    assert!(stdout.contains("deleted 1 breakpoint"), "{stdout}");
+    assert!(stdout.ends_with("no breakpoints\n"), "{stdout}");
+}
+
+#[test]
 fn batch_mode_reports_command_context() {
     let executable = fixture("build/test-programs/basic");
     assert!(
