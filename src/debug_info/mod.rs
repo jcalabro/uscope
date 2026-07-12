@@ -31,9 +31,9 @@ pub trait VariableRuntime {
 }
 
 pub trait VariableInfo: Send + Sync {
-    /// Inspects the variables lexically visible in one selected logical
+    /// Inspects the parameters and local variables visible in one selected logical
     /// frame. `selected` names the presented inline instance, or `None` for
-    /// the physical frame; variables belonging to other logical frames at the
+    /// the physical frame; data objects belonging to other logical frames at the
     /// same address are out of scope.
     fn inspect(
         &self,

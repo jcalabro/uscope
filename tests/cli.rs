@@ -203,6 +203,40 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
 }
 
 #[test]
+fn print_and_p_render_parameters_and_locals() {
+    let executable = fixture("build/test-programs/variables-parameters-gcc-o0");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "help print",
+            "--eval",
+            "break variables-parameters.c:22",
+            "--eval",
+            "run",
+            "--eval",
+            "p signed_int",
+            "--eval",
+            "print",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+
+    assert!(
+        stdout.contains("Print one or all visible variables"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("(int) signed_int = -1234567").count(), 2);
+    assert!(
+        stdout.contains("(long double) extended = 3.125"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("(int) local = 99"), "{stdout}");
+}
+
+#[test]
 fn batch_mode_reports_command_context() {
     let executable = fixture("build/test-programs/basic");
     assert!(

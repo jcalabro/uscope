@@ -29,12 +29,10 @@ pub enum Error {
     SymbolNotFound(String),
     #[error("multiple symbols named '{0}' were found")]
     DuplicateSymbol(String),
-    #[error("no visible local variable named '{0}' was found")]
+    #[error("no visible variable or parameter named '{0}' was found")]
     VariableNotFound(String),
-    #[error("multiple equally visible local variables named '{0}' were found")]
+    #[error("multiple equally visible variables or parameters named '{0}' were found")]
     AmbiguousVariable(String),
-    #[error("'{0}' is a formal parameter; parameter values are not supported yet")]
-    ParameterUnsupported(String),
     #[error("variable inspection is unavailable for the selected logical frame")]
     VariableContextUnsupported,
 

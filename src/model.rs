@@ -328,9 +328,21 @@ pub enum VariableState {
     Malformed(VariableMalformedReason),
 }
 
-/// One local variable visible in the selected stopped frame.
+/// The source-level role of a visible data object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariableKind {
+    /// A formal parameter of the selected function or inline instance.
+    Parameter,
+    /// A local variable declared within the selected function.
+    Local,
+}
+
+/// One variable or parameter visible in the selected stopped frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Variable {
+    /// Whether this data object is a parameter or local variable.
+    pub kind: VariableKind,
     /// The source-level variable name.
     pub name: Arc<str>,
     /// Its declaration location, when supplied by debug metadata.
@@ -354,7 +366,7 @@ pub struct VariableSnapshot {
     pub frame: crate::PresentedFrame,
     /// Target data representation used for decoding.
     pub target: TargetDescription,
-    /// Visible variables in source declaration order.
+    /// Visible parameters followed by local variables in source declaration order.
     pub variables: Arc<[Variable]>,
 }
 
