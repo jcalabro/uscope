@@ -4,24 +4,20 @@ set -euo pipefail
 
 readonly output_dir="build/test-programs"
 
-build_fixture() {
-    local compiler="$1"
+build_program() {
+    local tool="$1"
     local source="$2"
     local output="$3"
     shift 3
 
     local -a command=(
-        "$compiler"
-        -std=c17
-        -Wall
-        -Wextra
-        -Werror
+        "$tool"
         "$@"
         "$source"
         -o "$output"
     )
     local version
-    version=$("$compiler" --version)
+    version=$("$tool" --version)
     version=${version%%$'\n'*}
 
     local command_text
@@ -45,6 +41,32 @@ build_fixture() {
     mv "${stamp}.tmp" "$stamp"
 }
 
+build_fixture() {
+    local compiler="$1"
+    local source="$2"
+    local output="$3"
+    shift 3
+    build_program "$compiler" "$source" "$output" \
+        -std=c17 -Wall -Wextra -Werror "$@"
+}
+
+build_cpp_fixture() {
+    local compiler="$1"
+    local source="$2"
+    local output="$3"
+    shift 3
+    build_program "$compiler" "$source" "$output" \
+        -std=c++20 -Wall -Wextra -Werror "$@"
+}
+
+build_rust_fixture() {
+    local source="$1"
+    local output="$2"
+    shift 2
+    build_program rustc "$source" "$output" \
+        --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 "$@"
+}
+
 mkdir -p "$output_dir"
 
 build_fixture gcc tests/fixtures/basic.c "$output_dir/basic" \
@@ -61,6 +83,18 @@ build_fixture gcc tests/fixtures/variables-parameters.c "$output_dir/variables-p
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang tests/fixtures/variables-parameters.c "$output_dir/variables-parameters-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_cpp_fixture g++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_cpp_fixture clang++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_cpp_fixture g++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_cpp_fixture clang++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_rust_fixture tests/fixtures/variables-rust.rs "$output_dir/variables-rust-o0" \
+    -C opt-level=0 -C force-frame-pointers=yes
+build_rust_fixture tests/fixtures/variables-rust.rs "$output_dir/variables-rust-o2" \
+    -C opt-level=2 -C force-frame-pointers=no
 build_fixture gcc tests/fixtures/variables-threads.c "$output_dir/variables-threads" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_fixture gcc tests/fixtures/variables-inline.c "$output_dir/variables-inline-gcc-o0" \
