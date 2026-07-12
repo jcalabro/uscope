@@ -23,6 +23,155 @@ fn single_image_breakpoint_address(breakpoint: &uscope::Breakpoint) -> uscope::I
 }
 
 #[tokio::test]
+async fn source_line_breakpoint_stops_through_the_public_scenario_path() {
+    let mut scenario = Scenario::new("source line breakpoint", Scenario::fixture("basic"));
+    let breakpoint = scenario.add_source_breakpoint("basic.c", 11).await;
+    assert_eq!(breakpoint.locations.len(), 1);
+
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let context = scenario
+        .operation("source context", scenario.handle().source_context(0))
+        .await;
+    assert_eq!(context.location.line.get(), 11);
+    assert!(context.file.path.ends_with("tests/fixtures/basic.c"));
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(uscope::ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn file_qualified_function_breakpoint_stops_at_the_selected_function() {
+    let mut scenario = Scenario::new("file function breakpoint", Scenario::fixture("basic"));
+    scenario
+        .add_file_function_breakpoint("tests/fixtures/basic.c", "breakpoint_target")
+        .await;
+
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let context = scenario
+        .operation("source context", scenario.handle().source_context(0))
+        .await;
+    assert_eq!(context.location.line.get(), 5);
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn breakpoint_deletion_preserves_shared_sites_and_stopped_instruction_execution() {
+    let mut scenario = Scenario::new("breakpoint deletion", Scenario::fixture("basic"));
+    let function = scenario.add_breakpoint("breakpoint_target").await;
+    let source = scenario.add_source_breakpoint("basic.c", 5).await;
+    assert_eq!(function.locations[0].location, source.locations[0].location);
+
+    let revision = scenario.snapshot().await.revision;
+    assert_eq!(scenario.remove_breakpoint(function.id).await, function);
+    let snapshot = scenario.snapshot().await;
+    assert_eq!(snapshot.revision, revision + 1);
+    assert_eq!(snapshot.breakpoints.as_ref(), std::slice::from_ref(&source));
+
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    scenario.remove_breakpoint(source.id).await;
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(uscope::ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn deleting_all_breakpoints_is_one_coherent_public_mutation() {
+    let mut scenario = Scenario::new("delete all breakpoints", Scenario::fixture("basic"));
+    let first = scenario.add_breakpoint("main").await;
+    let second = scenario.add_breakpoint("breakpoint_target").await;
+    let revision = scenario.snapshot().await.revision;
+
+    assert_eq!(scenario.remove_all_breakpoints().await, vec![first, second]);
+    let snapshot = scenario.snapshot().await;
+    assert_eq!(snapshot.revision, revision + 1);
+    assert!(snapshot.breakpoints.is_empty());
+    assert_eq!(
+        scenario.run_to_stop().await,
+        StopReason::Exited(uscope::ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn deleting_an_unknown_breakpoint_does_not_mutate_public_state() {
+    let mut scenario = Scenario::new("unknown breakpoint deletion", Scenario::fixture("basic"));
+    scenario.add_breakpoint("main").await;
+    let before = scenario.snapshot().await;
+
+    let error = scenario
+        .handle()
+        .remove_breakpoint(uscope::BreakpointId::new(999))
+        .await
+        .expect_err("unknown breakpoint must fail");
+    assert!(matches!(error, uscope::Error::BreakpointNotFound(999)));
+    let after = scenario.snapshot().await;
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.breakpoints, before.breakpoints);
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn unresolved_source_breakpoints_fail_without_mutating_public_state() {
+    let mut scenario = Scenario::new("unresolved source breakpoint", Scenario::fixture("basic"));
+    let before = scenario.snapshot().await;
+    let missing_file = scenario
+        .handle()
+        .add_breakpoint(uscope::BreakpointSpec::Source {
+            path: "missing.c".into(),
+            line: uscope::LineNumber::new(1).unwrap(),
+        })
+        .await;
+    assert!(matches!(missing_file, Err(Error::SourceFileNotFound(_))));
+    let missing_line = scenario
+        .handle()
+        .add_breakpoint(uscope::BreakpointSpec::Source {
+            path: "basic.c".into(),
+            line: uscope::LineNumber::new(999).unwrap(),
+        })
+        .await;
+    assert!(matches!(
+        missing_line,
+        Err(Error::SourceLineUnavailable { .. })
+    ));
+    let after = scenario.snapshot().await;
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.breakpoints, before.breakpoints);
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn deleting_breakpoints_while_running_is_rejected_without_mutation() {
+    let mut scenario = Scenario::new("delete while running", Scenario::fixture("spin"));
+    let breakpoint = scenario.add_breakpoint("unreached").await;
+    let run = scenario.start_running().await;
+    let before = scenario.snapshot().await;
+
+    assert!(matches!(
+        scenario.handle().remove_breakpoint(breakpoint.id).await,
+        Err(Error::NotStopped)
+    ));
+    let after = scenario.snapshot().await;
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.breakpoints, before.breakpoints);
+
+    scenario.shutdown().await;
+    assert!(run.await.expect("run task").is_ok());
+}
+
+#[tokio::test]
 async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
     let mut scenario = Scenario::new("breakpoint lifecycle", Scenario::fixture("basic"));
 

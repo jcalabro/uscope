@@ -6,8 +6,9 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uscope::{
-    Breakpoint, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle, ExceptionDisposition,
-    ExitStatus, ProcessId, Result, StateSnapshot, StepKind, StopReason,
+    Breakpoint, BreakpointId, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle,
+    ExceptionDisposition, ExitStatus, LineNumber, ProcessId, Result, StateSnapshot, StepKind,
+    StopReason,
 };
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -63,16 +64,56 @@ impl Scenario {
     }
 
     pub async fn add_breakpoint(&mut self, name: &str) -> Breakpoint {
-        self.transcript.push(format!("request: break {name}"));
-        let result = within(
-            self.handle
-                .add_breakpoint(BreakpointSpec::Function(name.to_owned())),
-        )
+        self.add_breakpoint_spec(BreakpointSpec::Function(name.to_owned()))
+            .await
+    }
+
+    pub async fn add_source_breakpoint(&mut self, path: &str, line: u64) -> Breakpoint {
+        self.add_breakpoint_spec(BreakpointSpec::Source {
+            path: PathBuf::from(path),
+            line: LineNumber::new(line).expect("scenario source line is one-based"),
+        })
         .await
-        .unwrap_or_else(|error| self.fail(&format!("add breakpoint failed: {error}")));
+    }
+
+    pub async fn add_file_function_breakpoint(&mut self, path: &str, function: &str) -> Breakpoint {
+        self.add_breakpoint_spec(BreakpointSpec::FileFunction {
+            path: PathBuf::from(path),
+            function: function.to_owned(),
+        })
+        .await
+    }
+
+    pub async fn add_breakpoint_spec(&mut self, spec: BreakpointSpec) -> Breakpoint {
+        let description = format!("{spec:?}");
+        self.transcript
+            .push(format!("request: break {description}"));
+        let result = within(self.handle.add_breakpoint(spec))
+            .await
+            .unwrap_or_else(|error| self.fail(&format!("add breakpoint failed: {error}")));
         self.transcript.push(format!("reply: {result:?}"));
         self.drain_events();
         result
+    }
+
+    pub async fn remove_breakpoint(&mut self, id: BreakpointId) -> Breakpoint {
+        self.transcript.push(format!("request: delete {id}"));
+        let result = within(self.handle.remove_breakpoint(id))
+            .await
+            .unwrap_or_else(|error| self.fail(&format!("remove breakpoint failed: {error}")));
+        self.transcript.push(format!("reply: {result:?}"));
+        self.drain_events();
+        result
+    }
+
+    pub async fn remove_all_breakpoints(&mut self) -> Vec<Breakpoint> {
+        self.transcript.push("request: delete all".to_owned());
+        let result = within(self.handle.remove_all_breakpoints())
+            .await
+            .unwrap_or_else(|error| self.fail(&format!("remove all breakpoints failed: {error}")));
+        self.transcript.push(format!("reply: {result:?}"));
+        self.drain_events();
+        result.to_vec()
     }
 
     pub async fn run_to_stop(&mut self) -> StopReason {

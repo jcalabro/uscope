@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
-    Breakpoint, BreakpointLocation, BreakpointSpec, ByteOrder, Debugger, DebuggerHandle, Error,
-    ExitStatus, RegisterSnapshot, SourceContext, StateSnapshot, StepKind, StopReason, ThreadId,
-    ThreadState, VirtualAddress,
+    Breakpoint, BreakpointId, BreakpointLocation, BreakpointSpec, ByteOrder, Debugger,
+    DebuggerHandle, Error, ExitStatus, LineNumber, RegisterSnapshot, SourceContext, StateSnapshot,
+    StepKind, StopReason, ThreadId, ThreadState, VirtualAddress,
 };
 
 #[derive(Parser)]
@@ -189,13 +189,23 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
     match command {
         "break" | "b" => {
             let argument = one_argument(&mut words, "break <function|address>")?;
-            let spec = parse_address(argument).map_or_else(
-                |_| BreakpointSpec::Function(argument.to_owned()),
-                |address| BreakpointSpec::Address(VirtualAddress::new(address)),
-            );
-            let breakpoint = debugger.add_breakpoint(spec).await?;
-
-            Ok(Control::Continue(format_breakpoint(&breakpoint)))
+            execute_break(debugger, argument).await
+        }
+        "breakpoints" => {
+            no_arguments(&mut words, "breakpoints")?;
+            execute_list_breakpoints(debugger).await
+        }
+        "info" => {
+            let argument = one_argument(&mut words, "info breakpoints")?;
+            if argument != "breakpoints" && argument != "break" {
+                return Err(Error::InvalidCommand(format!("info {argument}")));
+            }
+            execute_list_breakpoints(debugger).await
+        }
+        "delete" | "clear" => {
+            let usage = format!("{command} <id|all>");
+            let argument = one_argument(&mut words, &usage)?;
+            execute_delete_breakpoint(debugger, argument, &usage).await
         }
         "run" | "r" => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.run().await?).await,
@@ -266,6 +276,69 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
         "" => Ok(Control::Continue(String::new())),
         other => Err(Error::InvalidCommand(other.to_owned())),
     }
+}
+
+async fn execute_break(debugger: &DebuggerHandle, argument: &str) -> uscope::Result<Control> {
+    let breakpoint = debugger
+        .add_breakpoint(parse_breakpoint_spec(argument)?)
+        .await?;
+    Ok(Control::Continue(format_breakpoint(&breakpoint)))
+}
+
+async fn execute_list_breakpoints(debugger: &DebuggerHandle) -> uscope::Result<Control> {
+    Ok(Control::Continue(format_breakpoints(
+        debugger.snapshot().await?.breakpoints.as_ref(),
+    )))
+}
+
+async fn execute_delete_breakpoint(
+    debugger: &DebuggerHandle,
+    argument: &str,
+    usage: &str,
+) -> uscope::Result<Control> {
+    if argument == "all" {
+        let removed = debugger.remove_all_breakpoints().await?;
+        return Ok(Control::Continue(format!(
+            "deleted {} breakpoint{}",
+            removed.len(),
+            if removed.len() == 1 { "" } else { "s" }
+        )));
+    }
+    let id = argument
+        .parse::<u64>()
+        .map_err(|_| Error::InvalidCommand(usage.to_owned()))?;
+    let removed = debugger.remove_breakpoint(BreakpointId::new(id)).await?;
+    Ok(Control::Continue(format!(
+        "deleted breakpoint {}",
+        removed.id
+    )))
+}
+
+fn parse_breakpoint_spec(argument: &str) -> uscope::Result<BreakpointSpec> {
+    if let Ok(address) = parse_address(argument) {
+        return Ok(BreakpointSpec::Address(VirtualAddress::new(address)));
+    }
+    if let Some((path, location)) = argument.rsplit_once(':') {
+        if path.is_empty() || location.is_empty() {
+            return Err(Error::InvalidCommand(
+                "break <function|address|file:line|file:function>".to_owned(),
+            ));
+        }
+        if let Ok(line) = location.parse::<u64>() {
+            let line = LineNumber::new(line).ok_or_else(|| {
+                Error::InvalidCommand("source line numbers are one-based".to_owned())
+            })?;
+            return Ok(BreakpointSpec::Source {
+                path: PathBuf::from(path),
+                line,
+            });
+        }
+        return Ok(BreakpointSpec::FileFunction {
+            path: PathBuf::from(path),
+            function: location.to_owned(),
+        });
+    }
+    Ok(BreakpointSpec::Function(argument.to_owned()))
 }
 
 async fn execute_step(debugger: &DebuggerHandle, kind: StepKind) -> uscope::Result<Control> {
@@ -443,6 +516,13 @@ fn one_argument<'a>(
     Ok(argument)
 }
 
+fn no_arguments<'a>(words: &mut impl Iterator<Item = &'a str>, usage: &str) -> uscope::Result<()> {
+    if words.next().is_some() {
+        return Err(Error::InvalidCommand(usage.to_owned()));
+    }
+    Ok(())
+}
+
 fn parse_address(value: &str) -> uscope::Result<u64> {
     let value = value.strip_prefix("0x").unwrap_or(value);
 
@@ -480,6 +560,50 @@ fn format_breakpoint(breakpoint: &Breakpoint) -> String {
     }
 
     output
+}
+
+fn format_breakpoints(breakpoints: &[Breakpoint]) -> String {
+    if breakpoints.is_empty() {
+        return "no breakpoints".to_owned();
+    }
+    let mut output = String::new();
+    for (index, breakpoint) in breakpoints.iter().enumerate() {
+        if index != 0 {
+            output.push('\n');
+        }
+        write!(
+            output,
+            "{}  {}  {} location{}",
+            breakpoint.id,
+            format_breakpoint_spec(&breakpoint.spec),
+            breakpoint.locations.len(),
+            if breakpoint.locations.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        )
+        .expect("writing to a String cannot fail");
+        for resolved in breakpoint.locations.iter() {
+            match resolved.location {
+                BreakpointLocation::Image(address) => write!(output, "\n   image {address}"),
+                BreakpointLocation::Virtual(address) => write!(output, "\n   virtual {address}"),
+            }
+            .expect("writing to a String cannot fail");
+        }
+    }
+    output
+}
+
+fn format_breakpoint_spec(spec: &BreakpointSpec) -> String {
+    match spec {
+        BreakpointSpec::Function(function) => function.clone(),
+        BreakpointSpec::Address(address) => address.to_string(),
+        BreakpointSpec::Source { path, line } => format!("{}:{line}", path.display()),
+        BreakpointSpec::FileFunction { path, function } => {
+            format!("{}:{function}", path.display())
+        }
+    }
 }
 
 fn format_stop(reason: StopReason) -> String {

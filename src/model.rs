@@ -769,11 +769,11 @@ fn build_module_indexes(metadata: &ModuleMetadata) -> ModuleIndexes {
             .map(|instance| (instance.function, instance.id)),
     );
     let mut statements_by_source_line =
-        grouped_index(metadata.statements.iter().map(|statement| {
-            (
+        grouped_index(metadata.statements.iter().filter_map(|statement| {
+            statement.flags.is_statement().then_some((
                 (statement.location.file, statement.location.line),
                 statement.address,
-            )
+            ))
         }));
     for addresses in statements_by_source_line.values_mut() {
         let mut unique = addresses.to_vec();
@@ -932,6 +932,26 @@ impl ModuleImage {
     #[must_use]
     pub fn source_files(&self) -> &[SourceFile] {
         &self.source_files
+    }
+
+    /// Finds one source file using an absolute path or trailing path components.
+    pub fn source_file_matching(&self, path: &Path) -> Result<&SourceFile> {
+        let matches = self
+            .source_files
+            .iter()
+            .filter(|source| path_matches(source.path.as_path(), path))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [source] => Ok(source),
+            [] => Err(Error::SourceFileNotFound(path.to_path_buf())),
+            _ => Err(Error::AmbiguousSourceFile {
+                path: path.to_path_buf(),
+                matches: matches
+                    .iter()
+                    .map(|source| source.path.as_ref().clone())
+                    .collect(),
+            }),
+        }
     }
 
     /// Returns every ordered source line-program row in this image.
@@ -1133,6 +1153,16 @@ impl ModuleImage {
     }
 }
 
+fn path_matches(candidate: &Path, requested: &Path) -> bool {
+    if requested.is_absolute() {
+        return candidate == requested;
+    }
+    let candidate = candidate.components().collect::<Vec<_>>();
+    let requested = requested.components().collect::<Vec<_>>();
+    requested.len() <= candidate.len()
+        && candidate[candidate.len() - requested.len()..] == requested[..]
+}
+
 /// A module image mapped into a running process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoadedModule {
@@ -1174,6 +1204,16 @@ impl LoadedModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_path_matching_uses_whole_trailing_components() {
+        let candidate = Path::new("/build/project/src/main.c");
+        assert!(path_matches(candidate, Path::new("main.c")));
+        assert!(path_matches(candidate, Path::new("src/main.c")));
+        assert!(path_matches(candidate, candidate));
+        assert!(!path_matches(candidate, Path::new("rc/main.c")));
+        assert!(!path_matches(candidate, Path::new("other/main.c")));
+    }
 
     fn source(line: u64) -> SourceLocation {
         SourceLocation {

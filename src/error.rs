@@ -14,6 +14,17 @@ pub enum Error {
     FunctionNotFound(String),
     #[error("multiple functions named '{0}' were found")]
     DuplicateFunction(String),
+    #[error("no source file matching '{0}' was found")]
+    SourceFileNotFound(PathBuf),
+    #[error("source path '{path}' is ambiguous; matches: {matches:?}")]
+    AmbiguousSourceFile {
+        path: PathBuf,
+        matches: Vec<PathBuf>,
+    },
+    #[error("source line {line} in {path} has no breakpoint location")]
+    SourceLineUnavailable { path: PathBuf, line: u64 },
+    #[error("breakpoint {0} was not found")]
+    BreakpointNotFound(u64),
     #[error("no symbol named '{0}' was found")]
     SymbolNotFound(String),
     #[error("multiple symbols named '{0}' were found")]
