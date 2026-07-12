@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uscope::{
     Breakpoint, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle, ExceptionDisposition,
-    ExitStatus, Result, StateSnapshot, StepKind, StopReason,
+    ExitStatus, ProcessId, Result, StateSnapshot, StepKind, StopReason,
 };
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -18,7 +18,7 @@ pub struct Scenario {
     handle: DebuggerHandle,
     events: broadcast::Receiver<DebuggerEvent>,
     transcript: Vec<String>,
-    process_id: Option<u64>,
+    process_id: Option<ProcessId>,
     last_revision: u64,
     last_exit: Option<ExitStatus>,
 }
@@ -211,7 +211,7 @@ impl Scenario {
         }
         self.last_revision = revision;
         if let DebuggerEvent::InferiorLaunched { process_id, .. } = event {
-            self.process_id = Some(process_id.get());
+            self.process_id = Some(*process_id);
         }
         if let DebuggerEvent::InferiorExited { status, .. } = event {
             self.last_exit = Some(status.clone());

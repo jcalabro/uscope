@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use tokio::sync::oneshot;
 
@@ -31,6 +31,12 @@ impl BreakpointId {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+impl fmt::Display for BreakpointId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -94,6 +100,12 @@ impl ProcessId {
     }
 }
 
+impl fmt::Display for ProcessId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Identifies an externally observable stopped snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StopId(u64);
@@ -112,6 +124,12 @@ impl StopId {
     }
 }
 
+impl fmt::Display for StopId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Identifies one accepted execution-control operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExecutionId(u64);
@@ -127,6 +145,12 @@ impl ExecutionId {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+impl fmt::Display for ExecutionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 

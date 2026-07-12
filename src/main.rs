@@ -222,8 +222,8 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
             let name = one_argument(&mut words, "address <symbol>")?;
 
             Ok(Control::Continue(format!(
-                "{name}: {:#x}",
-                debugger.runtime_address(name).await?.get()
+                "{name}: {}",
+                debugger.runtime_address(name).await?
             )))
         }
         "where" => {
@@ -237,12 +237,12 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 debugger
                     .module_image()
                     .source_file(source.file)
-                    .map(|file| format!("{}:{}", file.path.display(), source.line.get()))
+                    .map(|file| format!("{}:{}", file.path.display(), source.line))
             });
 
             Ok(Control::Continue(match source {
-                Some(source) => format!("{function} at {source} ({:#x})", location.address.get()),
-                None => format!("{function} at {:#x}", location.address.get()),
+                Some(source) => format!("{function} at {source} ({})", location.address),
+                None => format!("{function} at {}", location.address),
             }))
         }
         "list" | "l" => Ok(Control::Continue(format_source_context(
@@ -288,12 +288,12 @@ async fn format_backtrace(debugger: &DebuggerHandle) -> uscope::Result<Control> 
             debugger
                 .module_image()
                 .source_file(source.file)
-                .map(|file| format!(" at {}:{}", file.path.display(), source.line.get()))
+                .map(|file| format!(" at {}:{}", file.path.display(), source.line))
         });
         lines.push(format!(
             "#{:<2} {:#018x} in {name}{}",
             frame.level,
-            frame.instruction.get(),
+            frame.instruction,
             source.unwrap_or_default()
         ));
     }
@@ -333,7 +333,7 @@ fn format_threads(snapshot: &StateSnapshot) -> String {
                 }
                 ThreadState::Stopped { reason: None } => "stopped".to_owned(),
             };
-            format!("{marker} {} {state}", thread.id.get())
+            format!("{marker} {} {state}", thread.id)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -408,12 +408,8 @@ fn format_source_context(context: &SourceContext) -> String {
     let line_width = context
         .lines
         .last()
-        .map_or(1, |line| line.number.get().to_string().len());
-    let mut output = format!(
-        "{}:{}",
-        context.file.path.display(),
-        context.location.line.get()
-    );
+        .map_or(1, |line| line.number.to_string().len());
+    let mut output = format!("{}:{}", context.file.path.display(), context.location.line);
 
     for line in context.lines.iter() {
         let marker = if line.number == context.location.line {
@@ -424,8 +420,7 @@ fn format_source_context(context: &SourceContext) -> String {
         write!(
             output,
             "\n{marker} {:>line_width$} | {}",
-            line.number.get(),
-            line.text
+            line.number, line.text
         )
         .expect("writing to a String cannot fail");
     }
@@ -457,26 +452,31 @@ fn parse_address(value: &str) -> uscope::Result<u64> {
 
 fn format_breakpoint(breakpoint: &Breakpoint) -> String {
     if let [resolved] = breakpoint.locations.as_ref() {
-        let (space, address) = match resolved.location {
-            BreakpointLocation::Image(address) => ("image", address.get()),
-            BreakpointLocation::Virtual(address) => ("virtual", address.get()),
+        return match resolved.location {
+            BreakpointLocation::Image(address) => {
+                format!("breakpoint set at image address {address}")
+            }
+            BreakpointLocation::Virtual(address) => {
+                format!("breakpoint set at virtual address {address}")
+            }
         };
-
-        return format!("breakpoint set at {space} address {address:#x}");
     }
 
     let mut output = format!(
         "breakpoint {} set at {} locations",
-        breakpoint.id.get(),
+        breakpoint.id,
         breakpoint.locations.len()
     );
     for resolved in breakpoint.locations.iter() {
-        let (space, address) = match resolved.location {
-            BreakpointLocation::Image(address) => ("image", address.get()),
-            BreakpointLocation::Virtual(address) => ("virtual", address.get()),
-        };
-        write!(output, "\n  {space} address {address:#x}")
-            .expect("writing to a String cannot fail");
+        match resolved.location {
+            BreakpointLocation::Image(address) => {
+                write!(output, "\n  image address {address}")
+            }
+            BreakpointLocation::Virtual(address) => {
+                write!(output, "\n  virtual address {address}")
+            }
+        }
+        .expect("writing to a String cannot fail");
     }
 
     output
@@ -485,7 +485,7 @@ fn format_breakpoint(breakpoint: &Breakpoint) -> String {
 fn format_stop(reason: StopReason) -> String {
     match reason {
         StopReason::Breakpoint { address } => {
-            format!("stopped at breakpoint {:#x}", address.get())
+            format!("stopped at breakpoint {address}")
         }
         StopReason::Step { kind } => match kind {
             StepKind::Instruction => "stopped after instruction step".to_owned(),
@@ -502,7 +502,7 @@ fn format_stop(reason: StopReason) -> String {
         StopReason::ThreadExited { thread_id, status } => {
             format!(
                 "thread {} exited: {}",
-                thread_id.get(),
+                thread_id,
                 format_exit_status(status)
             )
         }
