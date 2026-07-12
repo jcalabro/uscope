@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
-    ImageAddress, ModuleImage, Result, UnwindTermination, Variable, VariableQuery,
+    CodeInstanceId, ImageAddress, ModuleImage, Result, UnwindTermination, Variable, VariableQuery,
     VariableUnavailableReason, VirtualAddress,
 };
 
@@ -31,9 +31,14 @@ pub trait VariableRuntime {
 }
 
 pub trait VariableInfo: Send + Sync {
+    /// Inspects the variables lexically visible in one selected logical
+    /// frame. `selected` names the presented inline instance, or `None` for
+    /// the physical frame; variables belonging to other logical frames at the
+    /// same address are out of scope.
     fn inspect(
         &self,
         address: ImageAddress,
+        selected: Option<CodeInstanceId>,
         query: &VariableQuery,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Vec<Variable>>;

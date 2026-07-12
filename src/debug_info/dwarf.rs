@@ -97,7 +97,7 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
         units.push(dwarf.unit(header)?);
     }
 
-    let (functions, code_instances) =
+    let function_metadata =
         load_function_metadata(&dwarf, &units, &mut source_files, &mut source_file_ids)?;
 
     for unit in &units {
@@ -116,6 +116,7 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
         &dwarf,
         &units,
         target,
+        &function_metadata.instance_ids,
         &mut source_files,
         &mut source_file_ids,
     )?;
@@ -124,8 +125,8 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
         target,
         image_address_range(&object)?,
         ModuleMetadata {
-            functions,
-            code_instances,
+            functions: function_metadata.functions,
+            code_instances: function_metadata.code_instances,
             symbols: load_symbols(&object),
             source_files,
             statements,
@@ -388,12 +389,20 @@ struct RawFunction {
     entry: Option<ImageAddress>,
 }
 
+struct FunctionMetadata {
+    functions: Vec<FunctionInfo>,
+    code_instances: Vec<CodeInstanceInfo>,
+    /// Maps each concrete function DIE to its code instance so the variable
+    /// catalog can attribute scopes to logical frames.
+    instance_ids: HashMap<DieKey, CodeInstanceId>,
+}
+
 fn load_function_metadata(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     units: &[gimli::Unit<Reader<'_>>],
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
-) -> std::result::Result<(Vec<FunctionInfo>, Vec<CodeInstanceInfo>), DwarfError> {
+) -> std::result::Result<FunctionMetadata, DwarfError> {
     let raw = collect_function_dies(dwarf, units, source_files, source_file_ids)?;
     let by_key: HashMap<_, _> = raw
         .iter()
@@ -479,7 +488,11 @@ fn load_function_metadata(
         instance_ids.insert(function.key, id);
     }
 
-    Ok((functions, code_instances))
+    Ok(FunctionMetadata {
+        functions,
+        code_instances,
+        instance_ids,
+    })
 }
 
 fn collect_function_dies(
