@@ -178,7 +178,11 @@ impl Scenario {
         self.transcript.push("request: run".to_owned());
         let handle = self.handle.clone();
         let task = tokio::spawn(async move { handle.run().await });
-        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorLaunched { .. }))
+        // InferiorLaunched precedes the initial exec stop and launch
+        // acknowledgement. Waiting through InferiorContinued guarantees the
+        // returned run task is past launch, so an immediate shutdown tests an
+        // active execution rather than racing cancellation of launch itself.
+        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
             .await;
         task
     }

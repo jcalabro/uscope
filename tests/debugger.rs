@@ -286,6 +286,95 @@ async fn optimized_physical_parameters_preserve_catalog_and_supported_stack_valu
 }
 
 #[tokio::test]
+async fn cpp_and_rust_stack_scalars_use_the_public_variable_path() {
+    for (fixture, source, line) in [
+        ("variables-cpp-gcc-o0", "variables-cpp.cpp", 14),
+        ("variables-cpp-clang-o0", "variables-cpp.cpp", 14),
+        ("variables-rust-o0", "variables-rust.rs", 18),
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint(source, line).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let snapshot = scenario
+            .operation("inspect language scalars", scenario.handle().variables())
+            .await;
+        assert_language_scalar_values(&snapshot, fixture);
+        assert_eq!(
+            scenario
+                .operation(
+                    "inspect language parameter",
+                    scenario.handle().variable("signed_value")
+                )
+                .await,
+            snapshot.variables[1]
+        );
+        assert_eq!(
+            scenario
+                .operation(
+                    "inspect language local",
+                    scenario.handle().variable("local_double")
+                )
+                .await,
+            snapshot.variables[9]
+        );
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn optimized_cpp_and_rust_scalars_remain_visible_when_unavailable() {
+    for (fixture, source, line) in [
+        ("variables-cpp-gcc-o2", "variables-cpp.cpp", 14),
+        ("variables-cpp-clang-o2", "variables-cpp.cpp", 14),
+        ("variables-rust-o2", "variables-rust.rs", 19),
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint(source, line).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let snapshot = scenario
+            .operation(
+                "inspect optimized language scalars",
+                scenario.handle().variables(),
+            )
+            .await;
+        assert_language_scalar_catalog(&snapshot, fixture);
+        assert!(
+            snapshot
+                .variables
+                .iter()
+                .all(|variable| matches!(variable.state, VariableState::Unavailable(_))),
+            "{fixture}: {snapshot:?}"
+        );
+        assert_eq!(
+            scenario
+                .operation(
+                    "inspect optimized language parameter",
+                    scenario.handle().variable("signed_value")
+                )
+                .await,
+            snapshot.variables[1]
+        );
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn parameters_use_live_values_and_participate_in_lexical_shadowing() {
     let mut changing = Scenario::new(
         "changing parameter",
@@ -751,6 +840,74 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
         matches!(snapshot.variables[15].state, VariableState::Unavailable(_)),
         "{fixture}: {:?}",
         snapshot.variables[15]
+    );
+}
+
+fn assert_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    assert_language_scalar_catalog(snapshot, fixture);
+    let expected = [
+        ScalarValue::Boolean(true),
+        ScalarValue::Signed(-42),
+        ScalarValue::Unsigned(42),
+        ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+        ScalarValue::Boolean(false),
+        ScalarValue::Signed(-41),
+        ScalarValue::Unsigned(44),
+        ScalarValue::Floating(uscope::FloatValue::Binary32(1.75_f32.to_bits())),
+        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.75_f64).to_bits())),
+    ];
+    let sizes = [1, 4, 8, 4, 8, 1, 4, 8, 4, 8];
+    for ((variable, expected), size) in snapshot.variables.iter().zip(expected).zip(sizes) {
+        assert_variable_value(variable, expected);
+        assert_eq!(
+            variable
+                .type_info
+                .as_ref()
+                .expect("available language scalar type")
+                .byte_size,
+            size,
+            "{fixture}: {variable:?}"
+        );
+        let VariableState::Available { storage, raw, .. } = &variable.state else {
+            unreachable!("value assertion checked availability")
+        };
+        assert!(matches!(storage, uscope::VariableStorage::Memory(_)));
+        assert_eq!(raw.len(), usize::try_from(size).unwrap());
+    }
+}
+
+fn assert_language_scalar_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    let names = snapshot
+        .variables
+        .iter()
+        .map(|variable| variable.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "flag",
+            "signed_value",
+            "unsigned_value",
+            "single",
+            "double_precision",
+            "local_flag",
+            "local_signed",
+            "local_unsigned",
+            "local_single",
+            "local_double",
+        ],
+        "{fixture}"
+    );
+    assert!(
+        snapshot.variables[..5]
+            .iter()
+            .all(|variable| variable.kind == VariableKind::Parameter)
+    );
+    assert!(
+        snapshot.variables[5..]
+            .iter()
+            .all(|variable| variable.kind == VariableKind::Local)
     );
 }
 

@@ -248,7 +248,7 @@ pub enum FloatValue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ScalarValue {
-    /// A C truth value.
+    /// A source-language truth value.
     Boolean(bool),
     /// A sign-extended integer.
     Signed(i128),
