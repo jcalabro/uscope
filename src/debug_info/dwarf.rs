@@ -75,11 +75,13 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
             }
         },
     )?;
+
     let endian = if object.is_little_endian() {
         RunTimeEndian::Little
     } else {
         RunTimeEndian::Big
     };
+
     let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
     let mut source_files = Vec::new();
     let mut source_file_ids = HashMap::new();
