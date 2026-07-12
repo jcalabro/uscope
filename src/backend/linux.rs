@@ -18,7 +18,7 @@ use object::{Object, ObjectSegment};
 use tokio::sync::{broadcast, mpsc};
 
 use super::ControllerMessage;
-use crate::debug_info::{UnwindInfo, VariableInfo, VariableRuntime};
+use crate::debug_info::{UnwindInfo, VariableInfo, VariableRegister, VariableRuntime};
 use crate::model::FrameMetadata;
 use crate::protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
@@ -278,6 +278,8 @@ enum LinuxError {
     SessionActive,
     #[error("unsupported clone created a different thread group {0}")]
     UnsupportedClone(i32),
+    #[error("floating-point register reads are unsupported by this tracing effect")]
+    UnsupportedFloatingRegisters,
     #[error("the inferior replaced its executable image; loading the new image is not supported")]
     UnsupportedExec,
     #[error("could not determine the caller frame for step out: {0:?}")]
@@ -2707,7 +2709,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             pid,
             loaded_module: inferior.loaded_module,
             breakpoints: &inferior.breakpoints,
-            registers: &registers,
+            native: &native,
+            floating: None,
             cfa,
         };
         let variables =
@@ -3070,13 +3073,35 @@ struct LinuxVariableRuntime<'a, P> {
     pid: Pid,
     loaded_module: LoadedModule,
     breakpoints: &'a BTreeMap<VirtualAddress, BreakpointSite>,
-    registers: &'a RegisterFile,
+    native: &'a libc::user_regs_struct,
+    floating: Option<std::result::Result<libc::user_fpregs_struct, Arc<str>>>,
     cfa: std::result::Result<VirtualAddress, VariableUnavailableReason>,
 }
 
 impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
-    fn register(&self, register: u16) -> Option<u64> {
-        self.registers.get(register)
+    fn register(
+        &mut self,
+        register: u16,
+    ) -> std::result::Result<VariableRegister, VariableUnavailableReason> {
+        if let Some(value) = x86_64_general_variable_register(self.native, register) {
+            return Ok(value);
+        }
+        if (17..=32).contains(&register) {
+            let floating = self.floating.get_or_insert_with(|| {
+                self.ptrace
+                    .floating_registers(self.pid)
+                    .map_err(|error| Arc::from(error.to_string()))
+            });
+            return floating
+                .as_ref()
+                .map_err(|error| {
+                    VariableUnavailableReason::RegisterUnavailable(
+                        format!("xmm{} ({error})", register - 17).into(),
+                    )
+                })
+                .map(|floating| x86_64_xmm_variable_register(floating, register));
+        }
+        Err(crate::UnsupportedVariableFeature::RegisterClass.into())
     }
 
     fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
@@ -3242,31 +3267,115 @@ fn x86_64_registers(registers: &libc::user_regs_struct) -> RegisterFile {
     ])
 }
 
+fn x86_64_general_variable_register(
+    registers: &libc::user_regs_struct,
+    dwarf: u16,
+) -> Option<VariableRegister> {
+    let descriptor = x86_64_general_register_descriptor(dwarf)?;
+    let value = match dwarf {
+        0 => registers.rax,
+        1 => registers.rdx,
+        2 => registers.rcx,
+        3 => registers.rbx,
+        4 => registers.rsi,
+        5 => registers.rdi,
+        6 => registers.rbp,
+        7 => registers.rsp,
+        8 => registers.r8,
+        9 => registers.r9,
+        10 => registers.r10,
+        11 => registers.r11,
+        12 => registers.r12,
+        13 => registers.r13,
+        14 => registers.r14,
+        15 => registers.r15,
+        16 => registers.rip,
+        49 => registers.eflags,
+        _ => return None,
+    };
+    Some(VariableRegister {
+        descriptor,
+        bytes: Arc::from(value.to_le_bytes()),
+    })
+}
+
+fn x86_64_general_register_descriptor(dwarf: u16) -> Option<RegisterDescriptor> {
+    let (id, name, role) = match dwarf {
+        0 => (0, "rax", None),
+        1 => (3, "rdx", None),
+        2 => (2, "rcx", None),
+        3 => (1, "rbx", None),
+        4 => (4, "rsi", None),
+        5 => (5, "rdi", None),
+        6 => (6, "rbp", Some(RegisterRole::FramePointer)),
+        7 => (7, "rsp", Some(RegisterRole::StackPointer)),
+        8 => (8, "r8", None),
+        9 => (9, "r9", None),
+        10 => (10, "r10", None),
+        11 => (11, "r11", None),
+        12 => (12, "r12", None),
+        13 => (13, "r13", None),
+        14 => (14, "r14", None),
+        15 => (15, "r15", None),
+        16 => (16, "rip", Some(RegisterRole::ProgramCounter)),
+        49 => (17, "rflags", None),
+        _ => return None,
+    };
+    Some(RegisterDescriptor {
+        id: RegisterId::new(id),
+        name: name.into(),
+        bits: 64,
+        role,
+    })
+}
+
+fn x86_64_xmm_variable_register(
+    registers: &libc::user_fpregs_struct,
+    dwarf: u16,
+) -> VariableRegister {
+    let index = usize::from(dwarf - 17);
+    let mut bytes = Vec::with_capacity(16);
+    for word in &registers.xmm_space[index * 4..index * 4 + 4] {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    VariableRegister {
+        descriptor: RegisterDescriptor {
+            id: RegisterId::new(27 + u32::try_from(index).expect("XMM index fits u32")),
+            name: format!("xmm{index}").into(),
+            bits: 128,
+            role: None,
+        },
+        bytes: bytes.into(),
+    }
+}
+
 fn x86_64_register_snapshot(
     revision: u64,
     pid: Pid,
     target: crate::TargetDescription,
     native: &libc::user_regs_struct,
 ) -> RegisterSnapshot {
-    let values = [
-        ("rax", 64, None, native.rax),
-        ("rbx", 64, None, native.rbx),
-        ("rcx", 64, None, native.rcx),
-        ("rdx", 64, None, native.rdx),
-        ("rsi", 64, None, native.rsi),
-        ("rdi", 64, None, native.rdi),
-        ("rbp", 64, Some(RegisterRole::FramePointer), native.rbp),
-        ("rsp", 64, Some(RegisterRole::StackPointer), native.rsp),
-        ("r8", 64, None, native.r8),
-        ("r9", 64, None, native.r9),
-        ("r10", 64, None, native.r10),
-        ("r11", 64, None, native.r11),
-        ("r12", 64, None, native.r12),
-        ("r13", 64, None, native.r13),
-        ("r14", 64, None, native.r14),
-        ("r15", 64, None, native.r15),
-        ("rip", 64, Some(RegisterRole::ProgramCounter), native.rip),
-        ("rflags", 64, None, native.eflags),
+    let general = [
+        (0, native.rax),
+        (3, native.rbx),
+        (2, native.rcx),
+        (1, native.rdx),
+        (4, native.rsi),
+        (5, native.rdi),
+        (6, native.rbp),
+        (7, native.rsp),
+        (8, native.r8),
+        (9, native.r9),
+        (10, native.r10),
+        (11, native.r11),
+        (12, native.r12),
+        (13, native.r13),
+        (14, native.r14),
+        (15, native.r15),
+        (16, native.rip),
+        (49, native.eflags),
+    ];
+    let special = [
         ("cs", 16, None, native.cs),
         ("ss", 16, None, native.ss),
         ("ds", 16, None, native.ds),
@@ -3277,22 +3386,33 @@ fn x86_64_register_snapshot(
         ("gs_base", 64, None, native.gs_base),
         ("orig_rax", 64, None, native.orig_rax),
     ];
-    let registers = values
+    let registers = general
         .into_iter()
-        .enumerate()
-        .map(|(id, (name, bits, role, value))| {
-            let bytes = value.to_le_bytes();
-            let byte_count = usize::from(bits / 8);
-            RegisterValue {
-                register: RegisterDescriptor {
-                    id: RegisterId::new(u32::try_from(id).expect("x86-64 register ID fits u32")),
-                    name: name.into(),
-                    bits,
-                    role,
-                },
-                bytes: Arc::from(&bytes[..byte_count]),
-            }
+        .map(|(dwarf, value)| RegisterValue {
+            register: x86_64_general_register_descriptor(dwarf)
+                .expect("snapshot uses supported DWARF registers"),
+            bytes: Arc::from(value.to_le_bytes()),
         })
+        .chain(
+            special
+                .into_iter()
+                .enumerate()
+                .map(|(offset, (name, bits, role, value))| {
+                    let bytes = value.to_le_bytes();
+                    let byte_count = usize::from(bits / 8);
+                    RegisterValue {
+                        register: RegisterDescriptor {
+                            id: RegisterId::new(
+                                18 + u32::try_from(offset).expect("x86-64 register ID fits u32"),
+                            ),
+                            name: name.into(),
+                            bits,
+                            role,
+                        },
+                        bytes: Arc::from(&bytes[..byte_count]),
+                    }
+                }),
+        )
         .collect::<Vec<_>>()
         .into();
     RegisterSnapshot {
@@ -3316,6 +3436,9 @@ trait LinuxTraceOps {
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()>;
     fn step(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct>;
+    fn floating_registers(&self, _pid: Pid) -> Result<libc::user_fpregs_struct> {
+        Err(backend_error(LinuxError::UnsupportedFloatingRegisters))
+    }
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()>;
     fn set_options(&self, pid: Pid) -> Result<()>;
     fn event_message(&self, pid: Pid) -> Result<libc::c_long>;
@@ -3436,6 +3559,12 @@ impl LinuxTraceOps for LinuxPtrace {
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
         self.assert_owner_thread();
         ptrace::getregs(pid).map_err(|error| backend_error(LinuxError::System(error)))
+    }
+
+    fn floating_registers(&self, pid: Pid) -> Result<libc::user_fpregs_struct> {
+        self.assert_owner_thread();
+        ptrace::getregset::<ptrace::regset::NT_PRFPREG>(pid)
+            .map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {

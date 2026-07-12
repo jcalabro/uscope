@@ -15,8 +15,9 @@ pub use model::{
     RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, ScalarValue,
     SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId,
     StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId,
-    UnwindTermination, Variable, VariableKind, VariableMalformedReason, VariableSnapshot,
-    VariableState, VariableStorage, VariableUnavailableReason, VirtualAddress,
+    UnsupportedVariableFeature, UnwindTermination, Variable, VariableKind, VariableMalformedReason,
+    VariableSnapshot, VariableState, VariableUnavailableReason, VariableValueSource,
+    VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,

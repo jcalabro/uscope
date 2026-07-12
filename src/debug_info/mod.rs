@@ -9,9 +9,14 @@ use std::sync::Arc;
 
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
-    CodeInstanceId, ImageAddress, ModuleImage, Result, UnwindTermination, Variable, VariableQuery,
-    VariableUnavailableReason, VirtualAddress,
+    CodeInstanceId, ImageAddress, ModuleImage, RegisterDescriptor, Result, UnwindTermination,
+    Variable, VariableQuery, VariableUnavailableReason, VirtualAddress,
 };
+
+pub struct VariableRegister {
+    pub descriptor: RegisterDescriptor,
+    pub bytes: Arc<[u8]>,
+}
 
 pub struct DebugInfo {
     pub image: Arc<ModuleImage>,
@@ -20,7 +25,10 @@ pub struct DebugInfo {
 }
 
 pub trait VariableRuntime {
-    fn register(&self, register: u16) -> Option<u64>;
+    fn register(
+        &mut self,
+        register: u16,
+    ) -> std::result::Result<VariableRegister, VariableUnavailableReason>;
     fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason>;
     fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>>;
     fn read_memory(

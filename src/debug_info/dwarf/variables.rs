@@ -11,17 +11,62 @@ use crate::{
     AddressRange, Architecture, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
     ColumnNumber, Error, FloatValue, ImageAddress, LineNumber, Result, ScalarValue, SourceFile,
     SourceFileId, SourceLocation, TargetDescription, Variable, VariableKind,
-    VariableMalformedReason, VariableQuery, VariableState, VariableStorage,
-    VariableUnavailableReason, VirtualAddress,
+    VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
+    VariableValueSource, VirtualAddress,
 };
 
 const MAX_SCALAR_BYTES: u64 = 16;
 const MAX_EVALUATION_ITERATIONS: u32 = 10_000;
+const MAX_EVALUATION_MEMORY_READS: u32 = 64;
+const MAX_EVALUATION_MEMORY_BYTES: usize = 1_024;
+const MAX_LOCATION_PIECES: usize = 64;
+
+#[derive(Default)]
+struct EvaluationBudget {
+    memory_reads: u32,
+    memory_bytes: usize,
+}
+
+impl EvaluationBudget {
+    fn consume_memory(
+        &mut self,
+        size: usize,
+    ) -> std::result::Result<(), VariableUnavailableReason> {
+        self.memory_reads = self
+            .memory_reads
+            .checked_add(1)
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        self.memory_bytes = self
+            .memory_bytes
+            .checked_add(size)
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        if self.memory_reads > MAX_EVALUATION_MEMORY_READS
+            || self.memory_bytes > MAX_EVALUATION_MEMORY_BYTES
+        {
+            return Err(VariableUnavailableReason::EvaluationLimit);
+        }
+        Ok(())
+    }
+}
+
+enum FrameBaseCache {
+    Empty,
+    Available(VirtualAddress),
+    Unavailable(VariableUnavailableReason),
+    Malformed(Arc<str>),
+}
 
 #[derive(Clone)]
 struct Expression {
     bytes: Arc<[u8]>,
     encoding: gimli::Encoding,
+    unit: usize,
+    indexed_addresses: Arc<HashMap<usize, u64>>,
+    requires_frame_base: bool,
+}
+
+struct EvaluationUnit {
+    base_types: HashMap<usize, gimli::ValueType>,
 }
 
 #[derive(Clone)]
@@ -76,6 +121,19 @@ enum Metadata<T> {
 }
 
 #[derive(Clone)]
+enum ConstantValue {
+    Unsigned(u128),
+    Signed(i128),
+    Bytes(Arc<[u8]>),
+}
+
+#[derive(Clone)]
+enum ValueDescription {
+    Location(LocationDescription),
+    Constant(ConstantValue),
+}
+
+#[derive(Clone)]
 struct CatalogDataObject {
     kind: VariableKind,
     name: Arc<str>,
@@ -87,7 +145,7 @@ struct CatalogDataObject {
     lexical_depth: u32,
     order: u64,
     type_info: TypeResolution,
-    location: Metadata<LocationDescription>,
+    value: Metadata<ValueDescription>,
     frame_base: Metadata<LocationDescription>,
     malformed: Option<Arc<str>>,
 }
@@ -116,6 +174,7 @@ pub(super) struct DwarfVariableInfo {
     objects: Arc<[CatalogDataObject]>,
     functions: Arc<[CatalogFunction]>,
     address_index: BTreeMap<ImageAddress, Arc<[usize]>>,
+    evaluation_units: Arc<[EvaluationUnit]>,
     target: TargetDescription,
     endian: RunTimeEndian,
 }
@@ -135,6 +194,7 @@ pub(super) fn load_variable_info(
     let mut objects = Vec::new();
     let mut functions = Vec::new();
     let mut order = 0_u64;
+    let evaluation_units = load_evaluation_units(units)?;
 
     for (unit_index, unit) in units.iter().enumerate() {
         let mut entries = unit.entries();
@@ -159,6 +219,7 @@ pub(super) fn load_variable_info(
                         lexical_depth: 0,
                         frame_base: copy_optional_location(
                             dwarf,
+                            unit_index,
                             unit,
                             entry.attr_value(gimli::DW_AT_frame_base),
                         ),
@@ -308,7 +369,7 @@ pub(super) fn load_variable_info(
                         lexical_depth: scope.lexical_depth,
                         order,
                         type_info: resolve_variable_type(dwarf, units, type_unit, type_value),
-                        location: copy_data_object_location(dwarf, unit, entry),
+                        value: copy_data_object_value(dwarf, unit_index, unit, entry),
                         frame_base: scope.frame_base.clone(),
                         malformed: declaration
                             .err()
@@ -338,6 +399,7 @@ pub(super) fn load_variable_info(
             .into_iter()
             .map(|(address, functions)| (address, functions.into()))
             .collect(),
+        evaluation_units: evaluation_units.into(),
         target,
         endian: match target.byte_order {
             ByteOrder::Little => RunTimeEndian::Little,
@@ -545,34 +607,66 @@ fn copy_ranges<'data>(
 
 fn copy_optional_location(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     value: Option<gimli::AttributeValue<Reader<'_>>>,
 ) -> Metadata<LocationDescription> {
     let Some(value) = value else {
         return Metadata::Unavailable("no location was supplied".into());
     };
-    match copy_location(dwarf, unit, value) {
+    match copy_location(dwarf, unit_index, unit, value) {
         Ok(location) => Metadata::Value(location),
         Err(error) => Metadata::Malformed(error.to_string().into()),
     }
 }
 
-fn copy_data_object_location(
+fn copy_data_object_value(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
-) -> Metadata<LocationDescription> {
+) -> Metadata<ValueDescription> {
     if let Some(location) = entry.attr_value(gimli::DW_AT_location) {
-        return copy_optional_location(dwarf, unit, Some(location));
+        return match copy_optional_location(dwarf, unit_index, unit, Some(location)) {
+            Metadata::Value(location) => Metadata::Value(ValueDescription::Location(location)),
+            Metadata::Unavailable(reason) => Metadata::Unavailable(reason),
+            Metadata::Malformed(reason) => Metadata::Malformed(reason),
+        };
     }
-    if entry.attr_value(gimli::DW_AT_const_value).is_some() {
-        return Metadata::Unavailable("constant data-object values are unsupported".into());
+    if let Some(value) = entry.attr_value(gimli::DW_AT_const_value) {
+        return match copy_constant(value) {
+            Ok(value) => Metadata::Value(ValueDescription::Constant(value)),
+            Err(error) => Metadata::Malformed(error),
+        };
     }
     Metadata::Unavailable("no location was supplied".into())
 }
 
+fn copy_constant(
+    value: gimli::AttributeValue<Reader<'_>>,
+) -> std::result::Result<ConstantValue, Arc<str>> {
+    Ok(match value {
+        gimli::AttributeValue::Data1(value) => ConstantValue::Unsigned(u128::from(value)),
+        gimli::AttributeValue::Data2(value) => ConstantValue::Unsigned(u128::from(value)),
+        gimli::AttributeValue::Data4(value) => ConstantValue::Unsigned(u128::from(value)),
+        gimli::AttributeValue::Data8(value) | gimli::AttributeValue::Udata(value) => {
+            ConstantValue::Unsigned(u128::from(value))
+        }
+        gimli::AttributeValue::Data16(value) => ConstantValue::Unsigned(value),
+        gimli::AttributeValue::Sdata(value) => ConstantValue::Signed(i128::from(value)),
+        gimli::AttributeValue::Block(value) => ConstantValue::Bytes(Arc::from(
+            value
+                .to_slice()
+                .map_err(|error| Arc::from(error.to_string()))?
+                .into_owned(),
+        )),
+        _ => return Err("unsupported DW_AT_const_value form".into()),
+    })
+}
+
 fn copy_location(
     dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     value: gimli::AttributeValue<Reader<'_>>,
 ) -> std::result::Result<LocationDescription, DwarfError> {
@@ -581,7 +675,7 @@ fn copy_location(
         return Ok(LocationDescription {
             entries: vec![LocationEntry {
                 range: None,
-                expression: copy_expression(expression, encoding)?,
+                expression: copy_expression(dwarf, unit_index, unit, expression, encoding)?,
             }]
             .into(),
         });
@@ -601,7 +695,7 @@ fn copy_location(
         if is_default {
             entries.push(LocationEntry {
                 range: None,
-                expression: copy_expression(location.data, encoding)?,
+                expression: copy_expression(dwarf, unit_index, unit, location.data, encoding)?,
             });
             continue;
         }
@@ -614,7 +708,7 @@ fn copy_location(
                     start: ImageAddress::new(location.range.begin),
                     end: ImageAddress::new(location.range.end),
                 }),
-                expression: copy_expression(location.data, encoding)?,
+                expression: copy_expression(dwarf, unit_index, unit, location.data, encoding)?,
             });
         }
     }
@@ -624,14 +718,95 @@ fn copy_location(
 }
 
 fn copy_expression(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit_index: usize,
+    unit: &gimli::Unit<Reader<'_>>,
     expression: gimli::Expression<Reader<'_>>,
     encoding: gimli::Encoding,
 ) -> std::result::Result<Expression, DwarfError> {
+    let mut indexed_addresses = HashMap::new();
+    let mut requires_frame_base = false;
+    let mut operations = expression.operations(encoding);
+    while let Some(operation) = operations.next()? {
+        if matches!(operation, gimli::Operation::FrameOffset { .. }) {
+            requires_frame_base = true;
+        }
+        let (gimli::Operation::AddressIndex { index } | gimli::Operation::ConstantIndex { index }) =
+            operation
+        else {
+            continue;
+        };
+        let address = dwarf.address(unit, index)?;
+        indexed_addresses.insert(index.0, address);
+    }
     let bytes: Cow<'_, [u8]> = expression.0.to_slice()?;
     Ok(Expression {
         bytes: Arc::from(bytes.into_owned()),
         encoding,
+        unit: unit_index,
+        indexed_addresses: Arc::new(indexed_addresses),
+        requires_frame_base,
     })
+}
+
+fn load_evaluation_units(
+    units: &[gimli::Unit<Reader<'_>>],
+) -> std::result::Result<Vec<EvaluationUnit>, DwarfError> {
+    units
+        .iter()
+        .map(|unit| {
+            let mut base_types = HashMap::new();
+            let mut entries = unit.entries();
+            while let Some(entry) = entries.next_dfs()? {
+                if entry.tag() != gimli::DW_TAG_base_type {
+                    continue;
+                }
+                let Some(byte_size) = entry
+                    .attr(gimli::DW_AT_byte_size)
+                    .and_then(gimli::Attribute::udata_value)
+                else {
+                    continue;
+                };
+                let Some(raw_encoding) = entry
+                    .attr(gimli::DW_AT_encoding)
+                    .and_then(gimli::Attribute::udata_value)
+                else {
+                    continue;
+                };
+                let encoding = gimli::DwAte(u8::try_from(raw_encoding).unwrap_or(u8::MAX));
+                if let Some(value_type) = dwarf_value_type(encoding, byte_size) {
+                    base_types.insert(entry.offset().0, value_type);
+                }
+            }
+            Ok(EvaluationUnit { base_types })
+        })
+        .collect()
+}
+
+const fn dwarf_value_type(encoding: gimli::DwAte, byte_size: u64) -> Option<gimli::ValueType> {
+    use gimli::ValueType::{F32, F64, I8, I16, I32, I64, U8, U16, U32, U64};
+    if encoding.0 == gimli::DW_ATE_float.0 {
+        return match byte_size {
+            4 => Some(F32),
+            8 => Some(F64),
+            _ => None,
+        };
+    }
+    let signed = encoding.0 == gimli::DW_ATE_signed.0 || encoding.0 == gimli::DW_ATE_signed_char.0;
+    let unsigned = encoding.0 == gimli::DW_ATE_boolean.0
+        || encoding.0 == gimli::DW_ATE_unsigned.0
+        || encoding.0 == gimli::DW_ATE_unsigned_char.0;
+    match (signed, unsigned, byte_size) {
+        (true, false, 1) => Some(I8),
+        (true, false, 2) => Some(I16),
+        (true, false, 4) => Some(I32),
+        (true, false, 8) => Some(I64),
+        (false, true, 1) => Some(U8),
+        (false, true, 2) => Some(U16),
+        (false, true, 4) => Some(U32),
+        (false, true, 8) => Some(U64),
+        _ => None,
+    }
 }
 
 fn resolve_variable_type(
@@ -801,9 +976,10 @@ impl VariableInfo for DwarfVariableInfo {
                 },
             )
         });
+        let mut frame_base = FrameBaseCache::Empty;
         Ok(selected
             .into_iter()
-            .map(|object| self.inspect_data_object(object, address, runtime))
+            .map(|object| self.inspect_data_object(object, address, runtime, &mut frame_base))
             .collect())
     }
 }
@@ -824,11 +1000,16 @@ impl DwarfVariableInfo {
             })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "inspection preserves distinct malformed and unavailable metadata outcomes"
+    )]
     fn inspect_data_object(
         &self,
         variable: &CatalogDataObject,
         address: ImageAddress,
         runtime: &mut dyn VariableRuntime,
+        frame_base_cache: &mut FrameBaseCache,
     ) -> Variable {
         if let Some(description) = &variable.malformed {
             return malformed(variable, None, Arc::clone(description));
@@ -842,7 +1023,7 @@ impl DwarfVariableInfo {
                 return malformed(variable, None, Arc::clone(description));
             }
         };
-        let location = match &variable.location {
+        let description = match &variable.value {
             Metadata::Value(location) => location,
             Metadata::Unavailable(description) => {
                 return unavailable(variable, Some(type_info), Arc::clone(description).into());
@@ -850,6 +1031,22 @@ impl DwarfVariableInfo {
             Metadata::Malformed(description) => {
                 return malformed(variable, Some(type_info), Arc::clone(description));
             }
+        };
+        if let ValueDescription::Constant(constant) = description {
+            let raw = match materialize_constant(constant, &type_info, self.target) {
+                Ok(raw) => raw,
+                Err(reason) => return unavailable(variable, Some(type_info), reason),
+            };
+            return available(
+                variable,
+                type_info,
+                VariableValueSource::Constant,
+                raw,
+                self.target,
+            );
+        }
+        let ValueDescription::Location(location) = description else {
+            unreachable!("constant values returned above")
         };
         let expression = match location.expression(address) {
             Ok(Some(expression)) => expression,
@@ -862,56 +1059,90 @@ impl DwarfVariableInfo {
                 );
             }
         };
-        let frame_base = match &variable.frame_base {
-            Metadata::Value(frame_base) => match frame_base.expression(address) {
-                Ok(Some(expression)) => match evaluate_frame_base(expression, self.endian, runtime)
-                {
-                    Ok(value) => value,
-                    Err(reason) => {
-                        return unavailable(variable, Some(type_info), reason);
+        let mut budget = EvaluationBudget::default();
+        let frame_base = if expression.requires_frame_base {
+            if matches!(frame_base_cache, FrameBaseCache::Empty) {
+                *frame_base_cache = match &variable.frame_base {
+                    Metadata::Value(frame_base) => match frame_base.expression(address) {
+                        Ok(Some(expression)) => match evaluate_frame_base(
+                            expression,
+                            self.endian,
+                            &self.evaluation_units,
+                            runtime,
+                            &mut budget,
+                        ) {
+                            Ok(value) => FrameBaseCache::Available(value),
+                            Err(reason) => FrameBaseCache::Unavailable(reason),
+                        },
+                        Err(reason) => FrameBaseCache::Unavailable(reason),
+                        Ok(None) => FrameBaseCache::Unavailable(
+                            "no frame base at the current instruction".into(),
+                        ),
+                    },
+                    Metadata::Unavailable(description) => {
+                        FrameBaseCache::Unavailable(Arc::clone(description).into())
                     }
-                },
-                Err(reason) => return unavailable(variable, Some(type_info), reason),
-                Ok(None) => {
-                    return unavailable(
-                        variable,
-                        Some(type_info),
-                        "no frame base at the current instruction".into(),
-                    );
+                    Metadata::Malformed(description) => {
+                        FrameBaseCache::Malformed(Arc::clone(description))
+                    }
+                };
+            }
+            Some(match frame_base_cache {
+                FrameBaseCache::Available(value) => *value,
+                FrameBaseCache::Unavailable(reason) => {
+                    return unavailable(variable, Some(type_info), reason.clone());
                 }
-            },
-            Metadata::Unavailable(description) => {
-                return unavailable(variable, Some(type_info), Arc::clone(description).into());
-            }
-            Metadata::Malformed(description) => {
-                return malformed(variable, Some(type_info), Arc::clone(description));
-            }
+                FrameBaseCache::Malformed(description) => {
+                    return malformed(variable, Some(type_info), Arc::clone(description));
+                }
+                FrameBaseCache::Empty => unreachable!("frame base cache was populated"),
+            })
+        } else {
+            None
         };
-        let storage = match evaluate_variable_location(expression, self.endian, frame_base, runtime)
-        {
-            Ok(address) => address,
-            Err(description) => return unavailable(variable, Some(type_info), description),
+        let pieces = match evaluate(
+            expression,
+            self.endian,
+            frame_base,
+            &self.evaluation_units,
+            runtime,
+            &mut budget,
+        ) {
+            Ok(pieces) => pieces,
+            Err(reason) => return unavailable(variable, Some(type_info), reason),
         };
-        let size = usize::try_from(type_info.byte_size).expect("scalar size fits usize");
-        let raw = match runtime.read_memory(storage, size) {
-            Ok(raw) => raw,
-            Err(description) => return unavailable(variable, Some(type_info), description.into()),
-        };
-        let value = match decode_scalar(&type_info, &raw, self.target) {
+        let (source, raw) = match materialize_pieces(
+            &pieces,
+            &type_info,
+            self.endian,
+            self.target,
+            runtime,
+            &mut budget,
+        ) {
             Ok(value) => value,
-            Err(description) => return unavailable(variable, Some(type_info), description),
+            Err(reason) => return unavailable(variable, Some(type_info), reason),
         };
-        Variable {
-            kind: variable.kind,
-            name: Arc::clone(&variable.name),
-            declaration: variable.declaration.clone(),
-            type_info: Some(type_info),
-            state: VariableState::Available {
-                storage: VariableStorage::Memory(storage),
-                raw,
-                value,
-            },
-        }
+        available(variable, type_info, source, raw, self.target)
+    }
+}
+
+fn available(
+    variable: &CatalogDataObject,
+    type_info: BaseType,
+    source: VariableValueSource,
+    raw: Arc<[u8]>,
+    target: TargetDescription,
+) -> Variable {
+    let state = match decode_scalar(&type_info, &raw, target) {
+        Ok(value) => VariableState::Available { source, raw, value },
+        Err(reason) => VariableState::Unavailable(reason),
+    };
+    Variable {
+        kind: variable.kind,
+        name: Arc::clone(&variable.name),
+        declaration: variable.declaration.clone(),
+        type_info: Some(type_info),
+        state,
     }
 }
 
@@ -946,9 +1177,11 @@ fn malformed(
 fn evaluate_frame_base(
     expression: &Expression,
     endian: RunTimeEndian,
+    units: &[EvaluationUnit],
     runtime: &mut dyn VariableRuntime,
+    budget: &mut EvaluationBudget,
 ) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
-    let (pieces, _) = evaluate(expression, endian, None, runtime)?;
+    let pieces = evaluate(expression, endian, None, units, runtime, budget)?;
     let [piece] = pieces.as_slice() else {
         return Err("frame base is not one complete piece".into());
     };
@@ -957,33 +1190,10 @@ fn evaluate_frame_base(
     }
     match piece.location {
         Location::Address { address } => Ok(VirtualAddress::new(address)),
-        Location::Register { register } => runtime
-            .register(register.0)
-            .map(VirtualAddress::new)
-            .ok_or_else(|| format!("DWARF register {} is unavailable", register.0).into()),
+        Location::Register { register } => {
+            register_u64(runtime, register.0, endian).map(VirtualAddress::new)
+        }
         _ => Err("frame base did not evaluate to an address or register".into()),
-    }
-}
-
-fn evaluate_variable_location(
-    expression: &Expression,
-    endian: RunTimeEndian,
-    frame_base: VirtualAddress,
-    runtime: &mut dyn VariableRuntime,
-) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
-    let (pieces, used_frame_base) = evaluate(expression, endian, Some(frame_base), runtime)?;
-    if !used_frame_base {
-        return Err("variable location is not frame-relative stack storage".into());
-    }
-    let [piece] = pieces.as_slice() else {
-        return Err("variable location is not one complete piece".into());
-    };
-    if piece.size_in_bits.is_some() || piece.bit_offset.is_some() {
-        return Err("variable location is a partial piece".into());
-    }
-    match piece.location {
-        Location::Address { address } => Ok(VirtualAddress::new(address)),
-        _ => Err("variable is not stored in memory".into()),
     }
 }
 
@@ -991,50 +1201,63 @@ fn evaluate<'expression>(
     expression: &'expression Expression,
     endian: RunTimeEndian,
     frame_base: Option<VirtualAddress>,
+    units: &[EvaluationUnit],
     runtime: &mut dyn VariableRuntime,
-) -> std::result::Result<(Vec<gimli::Piece<Reader<'expression>>>, bool), VariableUnavailableReason>
-{
+    budget: &mut EvaluationBudget,
+) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, VariableUnavailableReason> {
     let reader = gimli::EndianSlice::new(&expression.bytes, endian);
     let mut evaluation = gimli::Expression(reader).evaluation(expression.encoding);
     // Bound evaluation so a malformed expression with a backward branch cannot
     // hang the controller thread.
     evaluation.set_max_iterations(MAX_EVALUATION_ITERATIONS);
     let mut result = evaluation.evaluate().map_err(evaluation_error)?;
-    let mut used_frame_base = false;
     loop {
         result = match result {
-            EvaluationResult::Complete => return Ok((evaluation.result(), used_frame_base)),
+            EvaluationResult::Complete => return Ok(evaluation.result()),
             EvaluationResult::RequiresRegister {
                 register,
                 base_type,
             } => {
-                // A non-zero offset means DW_OP_regval_type requested typed
-                // semantics we do not implement; refuse rather than guess.
-                if base_type.0 != 0 {
-                    return Err("typed DWARF register values are unsupported".into());
-                }
-                let value = runtime.register(register.0).ok_or_else(|| {
-                    Arc::<str>::from(format!("DWARF register {} is unavailable", register.0))
-                })?;
+                let register = runtime.register(register.0)?;
+                let value = evaluation_value(
+                    &register.bytes,
+                    evaluation_value_type(expression, units, base_type.0)?,
+                    endian,
+                )?;
                 evaluation
-                    .resume_with_register(Value::Generic(value))
+                    .resume_with_register(value)
                     .map_err(evaluation_error)?
             }
-            EvaluationResult::RequiresFrameBase => {
-                used_frame_base = true;
-                evaluation
-                    .resume_with_frame_base(
-                        frame_base
-                            .ok_or_else(|| Arc::<str>::from("frame base is unavailable"))?
-                            .get(),
-                    )
-                    .map_err(evaluation_error)?
-            }
+            EvaluationResult::RequiresFrameBase => evaluation
+                .resume_with_frame_base(
+                    frame_base
+                        .ok_or_else(|| Arc::<str>::from("frame base is unavailable"))?
+                        .get(),
+                )
+                .map_err(evaluation_error)?,
             EvaluationResult::RequiresCallFrameCfa => evaluation
                 .resume_with_call_frame_cfa(runtime.call_frame_cfa()?.get())
                 .map_err(evaluation_error)?,
             EvaluationResult::RequiresRelocatedAddress(address) => evaluation
                 .resume_with_relocated_address(runtime.relocate(ImageAddress::new(address))?.get())
+                .map_err(evaluation_error)?,
+            EvaluationResult::RequiresIndexedAddress { index, relocate } => {
+                let address = expression
+                    .indexed_addresses
+                    .get(&index.0)
+                    .copied()
+                    .ok_or_else(|| Arc::<str>::from("DWARF address index is unavailable"))?;
+                let address = if relocate {
+                    runtime.relocate(ImageAddress::new(address))?.get()
+                } else {
+                    address
+                };
+                evaluation
+                    .resume_with_indexed_address(address)
+                    .map_err(evaluation_error)?
+            }
+            EvaluationResult::RequiresBaseType(offset) => evaluation
+                .resume_with_base_type(evaluation_value_type(expression, units, offset.0)?)
                 .map_err(evaluation_error)?,
             EvaluationResult::RequiresMemory {
                 address,
@@ -1042,18 +1265,261 @@ fn evaluate<'expression>(
                 space: None,
                 base_type,
             } => {
-                if base_type.0 != 0 {
-                    return Err("typed DWARF memory values are unsupported".into());
-                }
+                budget.consume_memory(usize::from(size))?;
                 let bytes = runtime.read_memory(VirtualAddress::new(address), usize::from(size))?;
-                let value = bytes_to_u64(&bytes, endian)?;
+                let value = evaluation_value(
+                    &bytes,
+                    evaluation_value_type(expression, units, base_type.0)?,
+                    endian,
+                )?;
                 evaluation
-                    .resume_with_memory(Value::Generic(value))
+                    .resume_with_memory(value)
                     .map_err(evaluation_error)?
             }
-            other => return Err(format!("unsupported DWARF evaluation request: {other:?}").into()),
+            EvaluationResult::RequiresMemory { space: Some(_), .. } => {
+                return Err(crate::UnsupportedVariableFeature::AddressSpace.into());
+            }
+            EvaluationResult::RequiresEntryValue(_) => {
+                return Err(crate::UnsupportedVariableFeature::EntryValue.into());
+            }
+            EvaluationResult::RequiresParameterRef(_) => {
+                return Err(crate::UnsupportedVariableFeature::ParameterReference.into());
+            }
+            EvaluationResult::RequiresAtLocation(_) => {
+                return Err(crate::UnsupportedVariableFeature::CrossDieEvaluation.into());
+            }
+            EvaluationResult::RequiresTls(_) => {
+                return Err(crate::UnsupportedVariableFeature::Tls.into());
+            }
+            EvaluationResult::RequiresWasmLocal { .. }
+            | EvaluationResult::RequiresWasmGlobal { .. }
+            | EvaluationResult::RequiresWasmStack { .. } => {
+                return Err(crate::UnsupportedVariableFeature::WasmLocation.into());
+            }
         };
     }
+}
+
+fn evaluation_value_type(
+    expression: &Expression,
+    units: &[EvaluationUnit],
+    offset: usize,
+) -> std::result::Result<gimli::ValueType, VariableUnavailableReason> {
+    if offset == 0 {
+        return Ok(gimli::ValueType::Generic);
+    }
+    units
+        .get(expression.unit)
+        .and_then(|unit| unit.base_types.get(&offset))
+        .copied()
+        .ok_or_else(|| crate::UnsupportedVariableFeature::TypedValue.into())
+}
+
+fn evaluation_value(
+    bytes: &[u8],
+    value_type: gimli::ValueType,
+    endian: RunTimeEndian,
+) -> std::result::Result<Value, VariableUnavailableReason> {
+    if value_type == gimli::ValueType::Generic {
+        return bytes_to_u64(bytes, endian).map(Value::Generic);
+    }
+    let size = usize::try_from(value_type.bit_size(u64::MAX) / 8).expect("value size fits usize");
+    if bytes.len() < size {
+        return Err("register or memory value is shorter than its DWARF type".into());
+    }
+    let bytes = match endian {
+        RunTimeEndian::Little => &bytes[..size],
+        RunTimeEndian::Big => &bytes[bytes.len() - size..],
+    };
+    Value::parse(value_type, gimli::EndianSlice::new(bytes, endian)).map_err(evaluation_error)
+}
+
+fn materialize_pieces(
+    pieces: &[gimli::Piece<Reader<'_>>],
+    type_info: &BaseType,
+    endian: RunTimeEndian,
+    target: TargetDescription,
+    runtime: &mut dyn VariableRuntime,
+    budget: &mut EvaluationBudget,
+) -> std::result::Result<(VariableValueSource, Arc<[u8]>), VariableUnavailableReason> {
+    if pieces.len() > MAX_LOCATION_PIECES {
+        return Err(VariableUnavailableReason::EvaluationLimit);
+    }
+    let [piece] = pieces else {
+        return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
+    };
+    let expected_bits = type_info
+        .byte_size
+        .checked_mul(8)
+        .ok_or_else(|| Arc::<str>::from("scalar bit size overflow"))?;
+    if piece.size_in_bits.is_some_and(|size| size != expected_bits) || piece.bit_offset.is_some() {
+        return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
+    }
+    let size = usize::try_from(type_info.byte_size).expect("scalar size fits usize");
+    match piece.location {
+        Location::Empty => Err(VariableUnavailableReason::OptimizedOut),
+        Location::Address { address } => {
+            budget.consume_memory(size)?;
+            runtime
+                .read_memory(VirtualAddress::new(address), size)
+                .map(|raw| {
+                    (
+                        VariableValueSource::Memory(VirtualAddress::new(address)),
+                        raw,
+                    )
+                })
+                .map_err(VariableUnavailableReason::Other)
+        }
+        Location::Register { register } => {
+            let register = runtime.register(register.0)?;
+            let raw = object_bytes(&register.bytes, size, endian)?;
+            Ok((VariableValueSource::Register(register.descriptor), raw))
+        }
+        Location::Value { value } => Ok((
+            VariableValueSource::Computed,
+            dwarf_value_bytes(value, type_info, target)?,
+        )),
+        Location::Bytes { ref value } => {
+            let bytes = value.to_slice().map_err(evaluation_error)?.into_owned();
+            if bytes.len() != size {
+                return Err("implicit value size does not match its scalar type".into());
+            }
+            Ok((VariableValueSource::Constant, bytes.into()))
+        }
+        Location::ImplicitPointer { .. } => {
+            Err(crate::UnsupportedVariableFeature::ImplicitPointer.into())
+        }
+    }
+}
+
+fn object_bytes(
+    bytes: &[u8],
+    size: usize,
+    endian: RunTimeEndian,
+) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+    if bytes.len() < size {
+        return Err("register value is shorter than the scalar type".into());
+    }
+    Ok(match endian {
+        RunTimeEndian::Little => Arc::from(&bytes[..size]),
+        RunTimeEndian::Big => Arc::from(&bytes[bytes.len() - size..]),
+    })
+}
+
+fn dwarf_value_bytes(
+    value: Value,
+    type_info: &BaseType,
+    target: TargetDescription,
+) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+    let size = usize::try_from(type_info.byte_size).expect("scalar size fits usize");
+    let integer = match value {
+        Value::Generic(value) | Value::U64(value) => Some(u128::from(value)),
+        Value::U8(value) => Some(u128::from(value)),
+        Value::U16(value) => Some(u128::from(value)),
+        Value::U32(value) => Some(u128::from(value)),
+        Value::I8(value) => Some(i128::from(value).cast_unsigned()),
+        Value::I16(value) => Some(i128::from(value).cast_unsigned()),
+        Value::I32(value) => Some(i128::from(value).cast_unsigned()),
+        Value::I64(value) => Some(i128::from(value).cast_unsigned()),
+        Value::F32(value) if size == 4 => {
+            return integer_bytes(u128::from(value.to_bits()), size, target);
+        }
+        Value::F64(value) if size == 8 => {
+            return integer_bytes(u128::from(value.to_bits()), size, target);
+        }
+        Value::F32(_) | Value::F64(_) => {
+            return Err("computed floating-point size mismatch".into());
+        }
+    };
+    let mut integer = integer.expect("integer DWARF values were classified above");
+    // GCC and Clang represent optimized source booleans with word-sized
+    // bitwise expressions (notably DW_OP_not). The source truth value is the
+    // low bit after conversion to the declared one-byte boolean type.
+    if type_info.encoding == BaseTypeEncoding::Boolean {
+        integer &= 1;
+    }
+    wrapping_integer_bytes(integer, size, target)
+}
+
+fn wrapping_integer_bytes(
+    value: u128,
+    size: usize,
+    target: TargetDescription,
+) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+    if size == 0 || size > 16 {
+        return Err("unsupported computed integer size".into());
+    }
+    let value = value & low_bits_mask(size * 8);
+    let bytes = match target.byte_order {
+        ByteOrder::Little => value.to_le_bytes()[..size].to_vec(),
+        ByteOrder::Big => value.to_be_bytes()[16 - size..].to_vec(),
+    };
+    Ok(bytes.into())
+}
+
+fn materialize_constant(
+    value: &ConstantValue,
+    type_info: &BaseType,
+    target: TargetDescription,
+) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+    let size = usize::try_from(type_info.byte_size).expect("scalar size fits usize");
+    match value {
+        ConstantValue::Unsigned(value) => integer_bytes(*value, size, target),
+        ConstantValue::Signed(value) => signed_integer_bytes(*value, size, target),
+        ConstantValue::Bytes(bytes) if bytes.len() == size => Ok(Arc::clone(bytes)),
+        ConstantValue::Bytes(_) => Err("constant value size does not match its scalar type".into()),
+    }
+}
+
+fn integer_bytes(
+    value: u128,
+    size: usize,
+    target: TargetDescription,
+) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+    if size == 0 || size > 16 || (size < 16 && value >= (1_u128 << (size * 8))) {
+        return Err("constant value does not fit its scalar type".into());
+    }
+    let bytes = match target.byte_order {
+        ByteOrder::Little => value.to_le_bytes()[..size].to_vec(),
+        ByteOrder::Big => value.to_be_bytes()[16 - size..].to_vec(),
+    };
+    Ok(bytes.into())
+}
+
+fn signed_integer_bytes(
+    value: i128,
+    size: usize,
+    target: TargetDescription,
+) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+    if size == 0 || size > 16 {
+        return Err("unsupported signed constant size".into());
+    }
+    let bits = size * 8;
+    if bits < 128 {
+        let minimum = -(1_i128 << (bits - 1));
+        let maximum = (1_i128 << (bits - 1)) - 1;
+        if !(minimum..=maximum).contains(&value) {
+            return Err("signed constant value does not fit its scalar type".into());
+        }
+    }
+    integer_bytes(value.cast_unsigned() & low_bits_mask(bits), size, target)
+}
+
+const fn low_bits_mask(bits: usize) -> u128 {
+    if bits == 128 {
+        u128::MAX
+    } else {
+        (1_u128 << bits) - 1
+    }
+}
+
+fn register_u64(
+    runtime: &mut dyn VariableRuntime,
+    register: u16,
+    endian: RunTimeEndian,
+) -> std::result::Result<u64, VariableUnavailableReason> {
+    let value = runtime.register(register)?;
+    bytes_to_u64(&value.bytes, endian)
 }
 
 fn evaluation_error(error: gimli::Error) -> VariableUnavailableReason {
@@ -1165,11 +1631,28 @@ mod tests {
     struct Runtime {
         registers: BTreeMap<u16, u64>,
         cfa: std::result::Result<VirtualAddress, VariableUnavailableReason>,
+        memory: Option<Arc<[u8]>>,
+        memory_reads: u32,
     }
 
     impl VariableRuntime for Runtime {
-        fn register(&self, register: u16) -> Option<u64> {
-            self.registers.get(&register).copied()
+        fn register(
+            &mut self,
+            register: u16,
+        ) -> std::result::Result<crate::debug_info::VariableRegister, VariableUnavailableReason>
+        {
+            let value = self.registers.get(&register).copied().ok_or_else(|| {
+                VariableUnavailableReason::RegisterUnavailable(register.to_string().into())
+            })?;
+            Ok(crate::debug_info::VariableRegister {
+                descriptor: crate::RegisterDescriptor {
+                    id: crate::RegisterId::new(u32::from(register)),
+                    name: format!("r{register}").into(),
+                    bits: 64,
+                    role: None,
+                },
+                bytes: Arc::from(value.to_le_bytes()),
+            })
         }
 
         fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
@@ -1183,9 +1666,13 @@ mod tests {
         fn read_memory(
             &mut self,
             _address: VirtualAddress,
-            _size: usize,
+            size: usize,
         ) -> std::result::Result<Arc<[u8]>, Arc<str>> {
-            Err("unexpected memory read".into())
+            self.memory_reads += 1;
+            self.memory
+                .as_ref()
+                .map(|memory| Arc::from(&memory[..size]))
+                .ok_or_else(|| Arc::from("unexpected memory read"))
         }
     }
 
@@ -1197,6 +1684,9 @@ mod tests {
                 version: 5,
                 address_size: 8,
             },
+            unit: 0,
+            indexed_addresses: Arc::new(HashMap::new()),
+            requires_frame_base: bytes.contains(&gimli::DW_OP_fbreg.0),
         }
     }
 
@@ -1217,38 +1707,69 @@ mod tests {
         }
     }
 
+    fn units(
+        base_types: impl IntoIterator<Item = (usize, gimli::ValueType)>,
+    ) -> Vec<EvaluationUnit> {
+        vec![EvaluationUnit {
+            base_types: base_types.into_iter().collect(),
+        }]
+    }
+
     #[test]
     fn frame_base_register_and_fbreg_location_have_distinct_meanings() {
         let mut runtime = Runtime {
             registers: BTreeMap::from([(6, 0x2000)]),
             cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: None,
+            memory_reads: 0,
         };
         let frame_base = evaluate_frame_base(
             &expression(&[gimli::DW_OP_reg6.0]),
             RunTimeEndian::Little,
+            &units([]),
             &mut runtime,
+            &mut EvaluationBudget::default(),
         )
         .expect("register-valued frame base");
         assert_eq!(frame_base, VirtualAddress::new(0x2000));
 
-        let location = evaluate_variable_location(
-            &expression(&[gimli::DW_OP_fbreg.0, 0x70]),
+        let fbreg = expression(&[gimli::DW_OP_fbreg.0, 0x70]);
+        let pieces = evaluate(
+            &fbreg,
             RunTimeEndian::Little,
-            frame_base,
+            Some(frame_base),
+            &units([]),
             &mut runtime,
+            &mut EvaluationBudget::default(),
         )
         .expect("frame-relative memory location");
-        assert_eq!(location, VirtualAddress::new(0x1ff0));
+        assert!(matches!(
+            pieces.as_slice(),
+            [gimli::Piece {
+                location: Location::Address { address: 0x1ff0 },
+                ..
+            }]
+        ));
 
-        assert!(
-            evaluate_variable_location(
-                &expression(&[gimli::DW_OP_reg6.0]),
-                RunTimeEndian::Little,
-                frame_base,
-                &mut runtime,
-            )
-            .is_err()
-        );
+        let direct_register = expression(&[gimli::DW_OP_reg6.0]);
+        let pieces = evaluate(
+            &direct_register,
+            RunTimeEndian::Little,
+            None,
+            &units([]),
+            &mut runtime,
+            &mut EvaluationBudget::default(),
+        )
+        .expect("direct register location");
+        assert!(matches!(
+            pieces.as_slice(),
+            [gimli::Piece {
+                location: Location::Register {
+                    register: gimli::Register(6)
+                },
+                ..
+            }]
+        ));
     }
 
     #[test]
@@ -1256,12 +1777,16 @@ mod tests {
         let mut runtime = Runtime {
             registers: BTreeMap::new(),
             cfa: Err(VariableUnavailableReason::CfaExpression),
+            memory: None,
+            memory_reads: 0,
         };
         assert_eq!(
             evaluate_frame_base(
                 &expression(&[gimli::DW_OP_call_frame_cfa.0]),
                 RunTimeEndian::Little,
+                &units([]),
                 &mut runtime,
+                &mut EvaluationBudget::default(),
             ),
             Err(VariableUnavailableReason::CfaExpression)
         );
@@ -1272,34 +1797,169 @@ mod tests {
         let mut runtime = Runtime {
             registers: BTreeMap::new(),
             cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: None,
+            memory_reads: 0,
         };
         // DW_OP_skip with a -3 offset branches back onto itself forever.
-        let result = evaluate_variable_location(
-            &expression(&[gimli::DW_OP_skip.0, 0xfd, 0xff]),
+        let looping = expression(&[gimli::DW_OP_skip.0, 0xfd, 0xff]);
+        let result = evaluate(
+            &looping,
             RunTimeEndian::Little,
-            VirtualAddress::new(0x2000),
+            None,
+            &units([]),
             &mut runtime,
+            &mut EvaluationBudget::default(),
         );
         assert!(result.is_err(), "infinite expression must be rejected");
     }
 
     #[test]
-    fn typed_register_requests_are_rejected_not_evaluated_as_generic() {
+    fn typed_register_values_are_evaluated_with_the_referenced_base_type() {
         let mut runtime = Runtime {
             registers: BTreeMap::from([(6, 0x2000)]),
             cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: None,
+            memory_reads: 0,
         };
         // DW_OP_regval_type register 6, base type DIE offset 0x10.
-        let result = evaluate_variable_location(
-            &expression(&[gimli::DW_OP_regval_type.0, 6, 0x10]),
+        let typed = expression(&[
+            gimli::DW_OP_regval_type.0,
+            6,
+            0x10,
+            gimli::DW_OP_stack_value.0,
+        ]);
+        let result = evaluate(
+            &typed,
             RunTimeEndian::Little,
-            VirtualAddress::new(0x2000),
+            None,
+            &units([(0x10, gimli::ValueType::U64)]),
             &mut runtime,
-        );
+            &mut EvaluationBudget::default(),
+        )
+        .expect("typed register expression");
+        assert!(matches!(
+            result.as_slice(),
+            [gimli::Piece {
+                location: Location::Value {
+                    value: Value::U64(0x2000)
+                },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn implicit_and_computed_values_materialize_with_source_provenance() {
+        let mut runtime = Runtime {
+            registers: BTreeMap::new(),
+            cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: None,
+            memory_reads: 0,
+        };
+        let implicit = expression(&[gimli::DW_OP_implicit_value.0, 4, 0xd6, 0xff, 0xff, 0xff]);
+        let pieces = evaluate(
+            &implicit,
+            RunTimeEndian::Little,
+            None,
+            &units([]),
+            &mut runtime,
+            &mut EvaluationBudget::default(),
+        )
+        .expect("implicit scalar expression");
+        let materialized = materialize_pieces(
+            &pieces,
+            &scalar_type(BaseTypeEncoding::Signed, 4),
+            RunTimeEndian::Little,
+            target(ByteOrder::Little),
+            &mut runtime,
+            &mut EvaluationBudget::default(),
+        )
+        .expect("implicit scalar value");
+        assert_eq!(materialized.0, VariableValueSource::Constant);
+        assert_eq!(materialized.1.as_ref(), &[0xd6, 0xff, 0xff, 0xff]);
+
+        let computed = dwarf_value_bytes(
+            Value::Generic(u64::MAX - 1),
+            &scalar_type(BaseTypeEncoding::Boolean, 1),
+            target(ByteOrder::Little),
+        )
+        .expect("word-sized boolean expression");
+        assert_eq!(computed.as_ref(), &[0]);
+    }
+
+    #[test]
+    fn deferred_operations_and_missing_types_have_stable_typed_reasons() {
+        let mut runtime = Runtime {
+            registers: BTreeMap::from([(0, 1)]),
+            cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: None,
+            memory_reads: 0,
+        };
+        let entry = expression(&[
+            gimli::DW_OP_entry_value.0,
+            1,
+            gimli::DW_OP_reg0.0,
+            gimli::DW_OP_stack_value.0,
+        ]);
         assert_eq!(
-            result,
-            Err("typed DWARF register values are unsupported".into())
+            evaluate(
+                &entry,
+                RunTimeEndian::Little,
+                None,
+                &units([]),
+                &mut runtime,
+                &mut EvaluationBudget::default(),
+            ),
+            Err(crate::UnsupportedVariableFeature::EntryValue.into())
         );
+
+        let missing_type = expression(&[
+            gimli::DW_OP_regval_type.0,
+            0,
+            0x10,
+            gimli::DW_OP_stack_value.0,
+        ]);
+        assert_eq!(
+            evaluate(
+                &missing_type,
+                RunTimeEndian::Little,
+                None,
+                &units([]),
+                &mut runtime,
+                &mut EvaluationBudget::default(),
+            ),
+            Err(crate::UnsupportedVariableFeature::TypedValue.into())
+        );
+    }
+
+    #[test]
+    fn expression_memory_reads_are_strictly_bounded() {
+        let mut bytes = Vec::new();
+        for address in 0..=MAX_EVALUATION_MEMORY_READS {
+            bytes.push(gimli::DW_OP_addr.0);
+            bytes.extend_from_slice(&u64::from(address).to_le_bytes());
+            bytes.extend_from_slice(&[gimli::DW_OP_deref_size.0, 1, gimli::DW_OP_drop.0]);
+        }
+        bytes.extend_from_slice(&[gimli::DW_OP_lit0.0, gimli::DW_OP_stack_value.0]);
+        let expression = expression(&bytes);
+        let mut runtime = Runtime {
+            registers: BTreeMap::new(),
+            cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: Some(Arc::from([0_u8; 16])),
+            memory_reads: 0,
+        };
+        assert_eq!(
+            evaluate(
+                &expression,
+                RunTimeEndian::Little,
+                None,
+                &units([]),
+                &mut runtime,
+                &mut EvaluationBudget::default(),
+            ),
+            Err(VariableUnavailableReason::EvaluationLimit)
+        );
+        assert_eq!(runtime.memory_reads, MAX_EVALUATION_MEMORY_READS);
     }
 
     #[test]

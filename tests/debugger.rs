@@ -95,11 +95,11 @@ async fn stack_scalar_variables_are_read_through_the_public_scenario_path() {
                     .byte_size,
                 expected_size
             );
-            let VariableState::Available { storage, raw, .. } = &variable.state else {
+            let VariableState::Available { source, raw, .. } = &variable.state else {
                 unreachable!("value assertion checked availability")
             };
             assert!(
-                matches!(storage, uscope::VariableStorage::Memory(address) if address.get() != 0)
+                matches!(source, uscope::VariableValueSource::Memory(address) if address.get() != 0)
             );
             assert_eq!(raw.len(), usize::try_from(expected_size).unwrap());
         }
@@ -236,7 +236,7 @@ async fn stack_scalar_parameters_are_read_through_the_public_scenario_path() {
 }
 
 #[tokio::test]
-async fn optimized_physical_parameters_preserve_catalog_and_supported_stack_values() {
+async fn optimized_physical_parameters_materialize_supported_dwarf_locations() {
     for fixture in [
         "variables-parameters-gcc-o2",
         "variables-parameters-clang-o2",
@@ -262,7 +262,7 @@ async fn optimized_physical_parameters_preserve_catalog_and_supported_stack_valu
         assert_eq!(
             scenario
                 .operation(
-                    "inspect unavailable optimized parameter",
+                    "inspect optimized register parameter",
                     scenario.handle().variable("boolean")
                 )
                 .await,
@@ -277,6 +277,38 @@ async fn optimized_physical_parameters_preserve_catalog_and_supported_stack_valu
                 .await,
             snapshot.variables[6]
         );
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn static_locals_resolve_relocated_and_indexed_addresses() {
+    for fixture in [
+        "variables-static-gcc-o2",
+        "variables-static-clang-o2",
+        "variables-static-gcc-nopie",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario
+            .add_source_breakpoint("variables-static.c", 7)
+            .await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let snapshot = scenario
+            .operation("inspect static local", scenario.handle().variables())
+            .await;
+        assert_eq!(snapshot.variables.len(), 1, "{fixture}: {snapshot:?}");
+        assert_eq!(snapshot.variables[0].name.as_ref(), "static_value");
+        assert_variable_value(&snapshot.variables[0], ScalarValue::Signed(73));
+        assert_memory_source(&snapshot.variables[0], fixture);
+
         assert_eq!(
             scenario.resume_to_stop().await,
             StopReason::Exited(ExitStatus::Code(0))
@@ -330,7 +362,7 @@ async fn cpp_and_rust_stack_scalars_use_the_public_variable_path() {
 }
 
 #[tokio::test]
-async fn optimized_cpp_and_rust_scalars_remain_visible_when_unavailable() {
+async fn optimized_cpp_and_rust_scalars_materialize_supported_locations() {
     for (fixture, source, line) in [
         ("variables-cpp-gcc-o2", "variables-cpp.cpp", 14),
         ("variables-cpp-clang-o2", "variables-cpp.cpp", 14),
@@ -350,13 +382,7 @@ async fn optimized_cpp_and_rust_scalars_remain_visible_when_unavailable() {
             )
             .await;
         assert_language_scalar_catalog(&snapshot, fixture);
-        assert!(
-            snapshot
-                .variables
-                .iter()
-                .all(|variable| matches!(variable.state, VariableState::Unavailable(_))),
-            "{fixture}: {snapshot:?}"
-        );
+        assert_optimized_language_scalar_values(&snapshot, fixture);
         assert_eq!(
             scenario
                 .operation(
@@ -542,7 +568,7 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
 }
 
 #[tokio::test]
-async fn optimized_inline_variables_preserve_scope_when_values_are_unavailable() {
+async fn optimized_inline_variables_preserve_scope_and_computed_values() {
     for fixture in ["variables-inline-gcc-o1", "variables-inline-clang-o1"] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
         scenario.add_breakpoint("inline_target").await;
@@ -576,12 +602,17 @@ async fn optimized_inline_variables_preserve_scope_when_values_are_unavailable()
         assert_eq!(names, ["value", "inline_local"], "{fixture}: {listed:?}");
         assert_eq!(listed.variables[0].kind, VariableKind::Parameter);
         assert_eq!(listed.variables[1].kind, VariableKind::Local);
+        assert_variable_value(&listed.variables[0], ScalarValue::Signed(8));
+        assert_variable_value(&listed.variables[1], ScalarValue::Signed(11));
         assert!(
-            listed
-                .variables
-                .iter()
-                .all(|variable| matches!(variable.state, VariableState::Unavailable(_))),
-            "{fixture} should report optimized inline data objects as explicitly unavailable: {listed:?}"
+            listed.variables.iter().all(|variable| matches!(
+                variable.state,
+                VariableState::Available {
+                    source: uscope::VariableValueSource::Computed,
+                    ..
+                }
+            )),
+            "{fixture}: {listed:?}"
         );
         let parameter = scenario
             .operation(
@@ -743,12 +774,12 @@ fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &st
                 .byte_size,
             expected_size
         );
-        let VariableState::Available { storage, raw, .. } = &variable.state else {
+        let VariableState::Available { source, raw, .. } = &variable.state else {
             unreachable!("value assertion checked availability")
         };
         assert!(matches!(
-            storage,
-            uscope::VariableStorage::Memory(address) if address.get() != 0
+            source,
+            uscope::VariableValueSource::Memory(address) if address.get() != 0
         ));
         assert_eq!(raw.len(), usize::try_from(expected_size).unwrap());
     }
@@ -791,72 +822,141 @@ fn assert_parameter_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) 
 }
 
 fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
-    for variable in &snapshot.variables[..6] {
-        assert!(
-            matches!(variable.state, VariableState::Unavailable(_)),
-            "{fixture}: {variable:?}"
-        );
-    }
-    let stack_values = [
+    let expected = [
+        ScalarValue::Boolean(true),
+        ScalarValue::Signed(65),
+        ScalarValue::Signed(-12),
+        ScalarValue::Unsigned(250),
+        ScalarValue::Signed(-1234),
+        ScalarValue::Unsigned(54_321),
         ScalarValue::Signed(-1_234_567),
         ScalarValue::Unsigned(3_456_789_012),
         ScalarValue::Signed(-123_456_789),
         ScalarValue::Unsigned(123_456_789),
         ScalarValue::Signed(-1_234_567_890_123),
         ScalarValue::Unsigned(12_345_678_901_234),
+        ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
     ];
-    for (variable, expected) in snapshot.variables[6..12].iter().zip(stack_values) {
-        assert_variable_value(variable, expected);
-        assert!(matches!(
-            variable.state,
-            VariableState::Available {
-                storage: uscope::VariableStorage::Memory(_),
-                ..
-            }
-        ));
-    }
-    assert!(
-        snapshot.variables[12..14]
-            .iter()
-            .all(|variable| matches!(variable.state, VariableState::Unavailable(_))),
-        "{fixture}: {snapshot:?}"
-    );
     match fixture {
-        "variables-parameters-gcc-o2" => assert_variable_value(
-            &snapshot.variables[14],
-            ScalarValue::Floating(uscope::FloatValue::X87Extended {
-                significand: 0xc800_0000_0000_0000,
-                sign_exponent: 0x4000,
-            }),
-        ),
-        "variables-parameters-clang-o2" => assert!(
-            matches!(snapshot.variables[14].state, VariableState::Unavailable(_)),
-            "{fixture}: {:?}",
-            snapshot.variables[14]
-        ),
+        "variables-parameters-gcc-o2" => {
+            for (variable, value) in snapshot.variables[..14].iter().zip(&expected) {
+                assert_variable_value(variable, value.clone());
+            }
+            for (index, register) in [
+                (0, "rdi"),
+                (1, "rsi"),
+                (2, "rdx"),
+                (3, "rcx"),
+                (4, "r8"),
+                (5, "r9"),
+                (12, "xmm0"),
+                (13, "xmm1"),
+            ] {
+                assert_register_source(&snapshot.variables[index], register, fixture);
+            }
+            for variable in &snapshot.variables[6..12] {
+                assert_memory_source(variable, fixture);
+            }
+            assert_variable_value(
+                &snapshot.variables[14],
+                ScalarValue::Floating(uscope::FloatValue::X87Extended {
+                    significand: 0xc800_0000_0000_0000,
+                    sign_exponent: 0x4000,
+                }),
+            );
+            assert_memory_source(&snapshot.variables[14], fixture);
+        }
+        "variables-parameters-clang-o2" => {
+            for (index, value) in [0, 4, 5]
+                .into_iter()
+                .chain(6..14)
+                .map(|index| (index, expected[index].clone()))
+            {
+                assert_variable_value(&snapshot.variables[index], value);
+            }
+            assert!(
+                matches!(
+                    snapshot.variables[0].state,
+                    VariableState::Available {
+                        source: uscope::VariableValueSource::Computed,
+                        ..
+                    }
+                ),
+                "{fixture}: {:?}",
+                snapshot.variables[0]
+            );
+            for index in 1..4 {
+                assert_unsupported(
+                    &snapshot.variables[index],
+                    uscope::UnsupportedVariableFeature::EntryValue,
+                    fixture,
+                );
+            }
+            assert_register_source(&snapshot.variables[4], "r8", fixture);
+            assert_register_source(&snapshot.variables[5], "r9", fixture);
+            for variable in &snapshot.variables[6..12] {
+                assert_memory_source(variable, fixture);
+            }
+            assert_register_source(&snapshot.variables[12], "xmm0", fixture);
+            assert_register_source(&snapshot.variables[13], "xmm1", fixture);
+            assert_unsupported(
+                &snapshot.variables[14],
+                uscope::UnsupportedVariableFeature::CompositeLocation,
+                fixture,
+            );
+        }
         _ => panic!("unexpected optimized parameter fixture {fixture}"),
     }
+    assert_variable_value(&snapshot.variables[15], ScalarValue::Signed(99));
     assert!(
-        matches!(snapshot.variables[15].state, VariableState::Unavailable(_)),
+        matches!(
+            snapshot.variables[15].state,
+            VariableState::Available {
+                source: uscope::VariableValueSource::Constant,
+                ..
+            }
+        ),
         "{fixture}: {:?}",
         snapshot.variables[15]
     );
 }
 
+fn assert_register_source(variable: &uscope::Variable, name: &str, fixture: &str) {
+    assert!(
+        matches!(&variable.state, VariableState::Available {
+        source: uscope::VariableValueSource::Register(register),
+        ..
+    } if register.name.as_ref() == name),
+        "{fixture}: {variable:?}"
+    );
+}
+
+fn assert_memory_source(variable: &uscope::Variable, fixture: &str) {
+    assert!(
+        matches!(variable.state, VariableState::Available {
+        source: uscope::VariableValueSource::Memory(address),
+        ..
+    } if address.get() != 0),
+        "{fixture}: {variable:?}"
+    );
+}
+
+fn assert_unsupported(
+    variable: &uscope::Variable,
+    feature: uscope::UnsupportedVariableFeature,
+    fixture: &str,
+) {
+    assert_eq!(
+        variable.state,
+        VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(feature)),
+        "{fixture}: {variable:?}"
+    );
+}
+
 fn assert_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
     assert_language_scalar_catalog(snapshot, fixture);
-    let expected = [
-        ScalarValue::Boolean(true),
-        ScalarValue::Signed(-42),
-        ScalarValue::Unsigned(42),
-        ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
-        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
-        ScalarValue::Boolean(false),
-        ScalarValue::Signed(-41),
-        ScalarValue::Unsigned(44),
-        ScalarValue::Floating(uscope::FloatValue::Binary32(1.75_f32.to_bits())),
-        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.75_f64).to_bits())),
-    ];
+    let expected = language_scalar_values();
     let sizes = [1, 4, 8, 4, 8, 1, 4, 8, 4, 8];
     for ((variable, expected), size) in snapshot.variables.iter().zip(expected).zip(sizes) {
         assert_variable_value(variable, expected);
@@ -869,11 +969,56 @@ fn assert_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &
             size,
             "{fixture}: {variable:?}"
         );
-        let VariableState::Available { storage, raw, .. } = &variable.state else {
+        let VariableState::Available { source, raw, .. } = &variable.state else {
             unreachable!("value assertion checked availability")
         };
-        assert!(matches!(storage, uscope::VariableStorage::Memory(_)));
+        assert!(matches!(source, uscope::VariableValueSource::Memory(_)));
         assert_eq!(raw.len(), usize::try_from(size).unwrap());
+    }
+}
+
+const fn language_scalar_values() -> [ScalarValue; 10] {
+    [
+        ScalarValue::Boolean(true),
+        ScalarValue::Signed(-42),
+        ScalarValue::Unsigned(42),
+        ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+        ScalarValue::Boolean(false),
+        ScalarValue::Signed(-41),
+        ScalarValue::Unsigned(44),
+        ScalarValue::Floating(uscope::FloatValue::Binary32(1.75_f32.to_bits())),
+        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.75_f64).to_bits())),
+    ]
+}
+
+fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    let expected = language_scalar_values();
+    let available = match fixture {
+        "variables-cpp-gcc-o2" => (0..10).collect::<Vec<_>>(),
+        "variables-cpp-clang-o2" => vec![0, 2, 3, 4, 5, 6, 7],
+        "variables-rust-o2" => vec![0, 1, 2, 3, 4, 5, 6, 7],
+        _ => panic!("unexpected optimized language fixture {fixture}"),
+    };
+    for index in available {
+        assert_variable_value(&snapshot.variables[index], expected[index].clone());
+    }
+    if fixture == "variables-cpp-clang-o2" {
+        assert_unsupported(
+            &snapshot.variables[1],
+            uscope::UnsupportedVariableFeature::EntryValue,
+            fixture,
+        );
+    }
+    if fixture != "variables-cpp-gcc-o2" {
+        for index in 8..10 {
+            assert_eq!(
+                snapshot.variables[index].state,
+                VariableState::Unavailable("no location at the current instruction".into()),
+                "{fixture}: {:?}",
+                snapshot.variables[index]
+            );
+        }
     }
 }
 
