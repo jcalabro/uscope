@@ -134,6 +134,50 @@ fn interactive_control_c_cancels_the_line_and_control_l_redraws() {
 }
 
 #[test]
+fn interactive_empty_lines_repeat_the_last_session_command() {
+    let state = TestStateDir::new("repeat");
+    let mut session = repl(&fixture("basic"), &state.0);
+
+    session.send_line("").expect("send initial empty line");
+    session
+        .expect("> ")
+        .expect("empty line before any command is a no-op");
+
+    session.send_line("break main").expect("set breakpoint");
+    session.expect("breakpoint set").expect("breakpoint reply");
+    session.expect("> ").expect("prompt after breakpoint");
+
+    session.send_line("run").expect("run inferior");
+    session
+        .expect("=>  9 | int main(void) {")
+        .expect("main stop");
+    session.expect("> ").expect("prompt after run");
+
+    session.send_line("next").expect("send next");
+    session.expect("=> 10 | ").expect("first source step");
+    session
+        .expect("> ")
+        .expect("prompt after first source step");
+
+    session.send_line("").expect("repeat next once");
+    session.expect("=> 11 | ").expect("repeated source step");
+    session
+        .expect("> ")
+        .expect("prompt after repeated source step");
+
+    session.send_line("").expect("repeat next twice");
+    session
+        .expect("=> 12 | ")
+        .expect("second repeated source step");
+    session
+        .expect("> ")
+        .expect("prompt after second repeated source step");
+
+    session.send_line("quit").expect("quit repl");
+    session.expect(Eof).expect("repl exited");
+}
+
+#[test]
 fn interactive_history_persists_across_sessions() {
     let state = TestStateDir::new("persistence");
     {

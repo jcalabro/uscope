@@ -361,10 +361,20 @@ async fn interactive_repl(debugger: &DebuggerHandle) -> Result<()> {
         .spawn(move || line_editor(&input_sender, &ack_receiver))?;
 
     let mut outcome = Ok(());
+    let mut last_command = None;
     while let Some(input) = input_receiver.recv().await {
         let keep_running = match input {
             ReplInput::Line { number, text } => {
-                match run_line(debugger, &text, &format!("repl:{number}")).await {
+                let trimmed = text.trim();
+                let command = if trimmed.is_empty() {
+                    last_command.as_deref().unwrap_or(trimmed)
+                } else {
+                    if !trimmed.starts_with('#') {
+                        last_command = Some(trimmed.to_owned());
+                    }
+                    trimmed
+                };
+                match run_line(debugger, command, &format!("repl:{number}")).await {
                     Ok(keep_running) => keep_running,
                     Err(error) => {
                         eprintln!("error: {error:#}");

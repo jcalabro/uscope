@@ -28,4 +28,4 @@ Use `list` or `l` to print that source context again for the current stop.
 Use `stepi`, `step`, `next`, and `finish` for instruction and source-level execution control.
 Use `threads` to list stopped threads and `thread <id>` to select the thread used by register, variable, source, and backtrace commands.
 Press Ctrl-C while the inferior is running to pause it at a coherent all-stop snapshot.
-The interactive debugger is a plain terminal REPL, so output remains available in normal terminal scrollback. Use `--batch` with command files, `--eval`, or stdin when no interactive prompt is wanted.
+The interactive debugger is a plain terminal REPL, so output remains available in normal terminal scrollback. Submit an empty line to repeat the last command entered in the current interactive session. Use `--batch` with command files, `--eval`, or stdin when no interactive prompt is wanted.
