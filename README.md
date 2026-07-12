@@ -22,8 +22,8 @@ just run build/test-programs/basic
 ```
 
 At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
-Use `print <name>` or `p <name>` to print one visible stack scalar, or `print` with no argument to list parameters followed by local variables in the selected logical frame, including an inline function frame.
-Initial scalar inspection supports C, C++, and Rust debug information. Optimized register, computed, entry-value, and composite locations remain explicitly unavailable.
+Use `print <name>` or `p <name>` to print one visible scalar, or `print` with no argument to list parameters followed by local variables in the selected logical frame, including an inline function frame.
+Initial scalar inspection supports C, C++, and Rust debug information, including one-piece values in memory, general-purpose and XMM registers, constants, and computed DWARF stack values. Entry values, composite locations, non-default address spaces, TLS, and cross-DIE evaluation remain explicitly unavailable.
 Breakpoint stops automatically print three surrounding source lines on each side when source is available.
 Use `list` or `l` to print that source context again for the current stop.
 Use `stepi`, `step`, `next`, and `finish` for instruction and source-level execution control.

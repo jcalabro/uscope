@@ -1248,7 +1248,7 @@ mod tests {
                 byte_size: 1,
             }),
             state: uscope::VariableState::Available {
-                storage: uscope::VariableStorage::Memory(uscope::VirtualAddress::new(0x1000)),
+                source: uscope::VariableValueSource::Memory(uscope::VirtualAddress::new(0x1000)),
                 raw: std::sync::Arc::from([u8::try_from(value).expect("test char fits in u8")]),
                 value: uscope::ScalarValue::Signed(value),
             },

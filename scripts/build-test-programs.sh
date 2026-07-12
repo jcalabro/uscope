@@ -83,6 +83,12 @@ build_fixture gcc tests/fixtures/variables-parameters.c "$output_dir/variables-p
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang tests/fixtures/variables-parameters.c "$output_dir/variables-parameters-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture gcc tests/fixtures/variables-static.c "$output_dir/variables-static-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture clang tests/fixtures/variables-static.c "$output_dir/variables-static-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture gcc tests/fixtures/variables-static.c "$output_dir/variables-static-gcc-nopie" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie
 build_cpp_fixture g++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture clang++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-clang-o0" \

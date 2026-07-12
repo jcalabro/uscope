@@ -258,12 +258,44 @@ pub enum ScalarValue {
     Floating(FloatValue),
 }
 
-/// The storage containing a variable's current value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a variable's current value was obtained.
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum VariableStorage {
+pub enum VariableValueSource {
     /// Memory in the inferior's virtual address space.
     Memory(VirtualAddress),
+    /// A target register containing the complete value.
+    Register(RegisterDescriptor),
+    /// Debug metadata supplies the value as a constant.
+    Constant,
+    /// A DWARF expression computes a value that has no storage location.
+    Computed,
+}
+
+/// A valid DWARF feature that variable inspection does not yet implement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnsupportedVariableFeature {
+    /// Reconstructing a value as it existed at function entry.
+    EntryValue,
+    /// Recovering a parameter from the caller's call-site metadata.
+    ParameterReference,
+    /// Evaluating a referenced DIE's location expression.
+    CrossDieEvaluation,
+    /// Resolving a thread-local storage address.
+    Tls,
+    /// Reading from a non-default target address space.
+    AddressSpace,
+    /// Combining multiple or partial location pieces.
+    CompositeLocation,
+    /// Resolving a pointer to an object that has no concrete location.
+    ImplicitPointer,
+    /// Reading WebAssembly execution state.
+    WasmLocation,
+    /// Reading a target register class not captured by this backend.
+    RegisterClass,
+    /// Applying a typed DWARF operation outside the supported scalar types.
+    TypedValue,
 }
 
 /// Why valid variable metadata cannot produce a value at this stop.
@@ -272,6 +304,14 @@ pub enum VariableStorage {
 pub enum VariableUnavailableReason {
     /// The call-frame information uses a CFA expression not yet supported.
     CfaExpression,
+    /// The producer supplied no value or active location at this instruction.
+    OptimizedOut,
+    /// The value requires a valid feature outside the current implementation.
+    Unsupported(UnsupportedVariableFeature),
+    /// A required target register is unavailable.
+    RegisterUnavailable(Arc<str>),
+    /// The expression exceeded the debugger's bounded work limits.
+    EvaluationLimit,
     /// Another explicit limitation or runtime failure.
     Other(Arc<str>),
 }
@@ -280,6 +320,14 @@ impl fmt::Display for VariableUnavailableReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CfaExpression => formatter.write_str("CFA expressions are unsupported"),
+            Self::OptimizedOut => formatter.write_str("the value is optimized out"),
+            Self::Unsupported(feature) => write!(formatter, "{feature:?} is unsupported"),
+            Self::RegisterUnavailable(register) => {
+                write!(formatter, "register {register} is unavailable")
+            }
+            Self::EvaluationLimit => {
+                formatter.write_str("DWARF expression evaluation limit exceeded")
+            }
             Self::Other(description) => formatter.write_str(description),
         }
     }
@@ -303,6 +351,12 @@ impl From<String> for VariableUnavailableReason {
     }
 }
 
+impl From<UnsupportedVariableFeature> for VariableUnavailableReason {
+    fn from(feature: UnsupportedVariableFeature) -> Self {
+        Self::Unsupported(feature)
+    }
+}
+
 /// Why one variable's debug metadata is defective.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariableMalformedReason {
@@ -315,8 +369,8 @@ pub struct VariableMalformedReason {
 pub enum VariableState {
     /// The value was read and decoded exactly.
     Available {
-        /// Where the bytes were read.
-        storage: VariableStorage,
+        /// How the bytes were obtained.
+        source: VariableValueSource,
         /// Exact bytes in target byte order, including ABI padding.
         raw: Arc<[u8]>,
         /// The decoded scalar value.
