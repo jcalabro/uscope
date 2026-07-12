@@ -129,6 +129,36 @@ fn batch_mode_sets_lists_and_deletes_source_and_file_function_breakpoints() {
 }
 
 #[test]
+fn help_and_cls_are_generated_without_changing_clear_semantics() {
+    let executable = fixture("build/test-programs/basic");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "help",
+            "--eval",
+            "help clear",
+            "--eval",
+            "cls",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+
+    assert!(stdout.contains("help [command]"), "{stdout}");
+    assert!(
+        stdout.contains("break <function|address|file:line|file:function> (b)"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("continue (c)"), "{stdout}");
+    assert!(stdout.contains("help [command] (?)"), "{stdout}");
+    assert!(stdout.contains("delete <id|all>"), "{stdout}");
+    assert!(stdout.contains("aliases: clear"), "{stdout}");
+    assert!(stdout.ends_with("\x1b[2J\x1b[H"), "{stdout:?}");
+}
+
+#[test]
 fn batch_mode_reports_command_context() {
     let executable = fixture("build/test-programs/basic");
     assert!(

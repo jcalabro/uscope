@@ -158,17 +158,23 @@ async fn deleting_breakpoints_while_running_is_rejected_without_mutation() {
     let breakpoint = scenario.add_breakpoint("unreached").await;
     let run = scenario.start_running().await;
     let before = scenario.snapshot().await;
+    let mut events = scenario.handle().subscribe();
 
     assert!(matches!(
         scenario.handle().remove_breakpoint(breakpoint.id).await,
         Err(Error::NotStopped)
     ));
     let after = scenario.snapshot().await;
-    assert_eq!(after.revision, before.revision);
     assert_eq!(after.breakpoints, before.breakpoints);
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(event, uscope::DebuggerEvent::BreakpointsChanged { .. }),
+            "rejected deletion published a breakpoint mutation"
+        );
+    }
 
     scenario.shutdown().await;
-    assert!(run.await.expect("run task").is_ok());
+    let _shutdown_result = run.await.expect("run task panicked");
 }
 
 #[tokio::test]

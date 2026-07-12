@@ -2,9 +2,13 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::{env, thread};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
     Breakpoint, BreakpointId, BreakpointLocation, BreakpointSpec, ByteOrder, Debugger,
@@ -31,6 +35,144 @@ struct Args {
     #[arg(long)]
     batch: bool,
 }
+
+#[derive(Clone, Copy)]
+struct CommandSpec {
+    command: Command,
+    name: &'static str,
+    aliases: &'static [&'static str],
+    usage: &'static str,
+    summary: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum Command {
+    Break,
+    Breakpoints,
+    Info,
+    Delete,
+    Run,
+    Continue,
+    Pause,
+    Stepi,
+    Step,
+    Next,
+    Finish,
+    Examine,
+    Address,
+    Where,
+    List,
+    Backtrace,
+    Registers,
+    Threads,
+    Thread,
+    Cls,
+    Help,
+    Quit,
+}
+
+macro_rules! command {
+    ($command:ident, $name:literal, [$($alias:literal),*], $usage:literal, $summary:literal) => {
+        CommandSpec { command: Command::$command, name: $name, aliases: &[$($alias),*], usage: $usage, summary: $summary }
+    };
+}
+
+const COMMANDS: &[CommandSpec] = &[
+    command!(
+        Break,
+        "break",
+        ["b"],
+        "break <function|address|file:line|file:function>",
+        "Set a breakpoint"
+    ),
+    command!(
+        Breakpoints,
+        "breakpoints",
+        [],
+        "breakpoints",
+        "List logical breakpoints"
+    ),
+    command!(
+        Info,
+        "info",
+        [],
+        "info breakpoints",
+        "Show debugger information"
+    ),
+    command!(
+        Delete,
+        "delete",
+        ["clear"],
+        "delete <id|all>",
+        "Delete logical breakpoints"
+    ),
+    command!(Run, "run", ["r"], "run", "Launch the inferior"),
+    command!(
+        Continue,
+        "continue",
+        ["c"],
+        "continue",
+        "Continue execution"
+    ),
+    command!(Pause, "pause", ["p"], "pause", "Pause execution"),
+    command!(Stepi, "stepi", ["si"], "stepi", "Step one instruction"),
+    command!(Step, "step", ["s"], "step", "Step into at source level"),
+    command!(Next, "next", ["n"], "next", "Step over at source level"),
+    command!(
+        Finish,
+        "finish",
+        [],
+        "finish",
+        "Run until the selected frame returns"
+    ),
+    command!(
+        Examine,
+        "x",
+        [],
+        "x <runtime-address>",
+        "Examine one native word"
+    ),
+    command!(
+        Address,
+        "address",
+        [],
+        "address <symbol>",
+        "Resolve a symbol's runtime address"
+    ),
+    command!(
+        Where,
+        "where",
+        [],
+        "where",
+        "Show the current execution location"
+    ),
+    command!(
+        List,
+        "list",
+        ["l"],
+        "list",
+        "Show source around the current location"
+    ),
+    command!(
+        Backtrace,
+        "backtrace",
+        ["bt"],
+        "backtrace",
+        "Show the selected thread's stack"
+    ),
+    command!(
+        Registers,
+        "registers",
+        ["regs"],
+        "registers",
+        "Show native registers"
+    ),
+    command!(Threads, "threads", [], "threads", "List threads"),
+    command!(Thread, "thread", [], "thread <id>", "Select a thread"),
+    command!(Cls, "cls", [], "cls", "Clear and redraw the terminal"),
+    command!(Help, "help", ["?"], "help [command]", "Show command help"),
+    command!(Quit, "quit", ["q"], "quit", "Exit uscope"),
+];
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -146,12 +288,24 @@ async fn run_line(debugger: &DebuggerHandle, line: &str, source: &str) -> Result
 
             Ok(true)
         }
+        Control::ClearScreen => {
+            print!("\x1b[2J\x1b[H");
+            io::stdout().flush()?;
+            Ok(true)
+        }
         Control::Quit => Ok(false),
     }
 }
 
 async fn repl(debugger: &DebuggerHandle) -> Result<()> {
     let show_prompt = io::stdin().is_terminal() && io::stdout().is_terminal();
+    if show_prompt {
+        return interactive_repl(debugger).await;
+    }
+    stream_repl(debugger, false).await
+}
+
+async fn stream_repl(debugger: &DebuggerHandle, show_prompt: bool) -> Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut number = 0_u64;
 
@@ -177,50 +331,214 @@ async fn repl(debugger: &DebuggerHandle) -> Result<()> {
     }
 }
 
+enum ReplInput {
+    Line { number: u64, text: String },
+    Eof,
+    Failed(String),
+}
+
+enum ReplAck {
+    Continue,
+    Quit,
+}
+
+async fn interactive_repl(debugger: &DebuggerHandle) -> Result<()> {
+    let (input_sender, mut input_receiver) = tokio::sync::mpsc::channel(1);
+    let (ack_sender, ack_receiver) = mpsc::channel();
+    let editor = thread::Builder::new()
+        .name("uscope-line-editor".to_owned())
+        .spawn(move || line_editor(&input_sender, &ack_receiver))?;
+
+    let mut outcome = Ok(());
+    while let Some(input) = input_receiver.recv().await {
+        let keep_running = match input {
+            ReplInput::Line { number, text } => {
+                match run_line(debugger, &text, &format!("repl:{number}")).await {
+                    Ok(keep_running) => keep_running,
+                    Err(error) => {
+                        eprintln!("error: {error:#}");
+                        true
+                    }
+                }
+            }
+            ReplInput::Eof => false,
+            ReplInput::Failed(error) => {
+                outcome = Err(anyhow::anyhow!(error));
+                break;
+            }
+        };
+        if ack_sender
+            .send(if keep_running {
+                ReplAck::Continue
+            } else {
+                ReplAck::Quit
+            })
+            .is_err()
+        {
+            outcome = Err(anyhow::anyhow!(
+                "line editor stopped before command acknowledgement"
+            ));
+            break;
+        }
+        if !keep_running {
+            break;
+        }
+    }
+
+    tokio::task::spawn_blocking(move || editor.join())
+        .await
+        .context("failed to join line editor task")?
+        .map_err(|_| anyhow::anyhow!("line editor thread panicked"))?;
+    outcome
+}
+
+fn line_editor(
+    input: &tokio::sync::mpsc::Sender<ReplInput>,
+    acknowledgements: &mpsc::Receiver<ReplAck>,
+) {
+    let mut editor = match DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(error) => {
+            let _ = input.blocking_send(ReplInput::Failed(error.to_string()));
+            return;
+        }
+    };
+    let history = history_path();
+    if history.exists()
+        && let Err(error) = editor.load_history(&history)
+    {
+        eprintln!(
+            "warning: failed to load command history {}: {error}",
+            history.display()
+        );
+    }
+    let mut number = 0_u64;
+    loop {
+        match editor.readline("> ") {
+            Ok(line) => {
+                number = number.checked_add(1).expect("REPL line number overflow");
+                if !line.trim().is_empty()
+                    && let Err(error) = editor.add_history_entry(line.as_str())
+                {
+                    eprintln!("warning: failed to record command history: {error}");
+                }
+                if input
+                    .blocking_send(ReplInput::Line { number, text: line })
+                    .is_err()
+                    || matches!(acknowledgements.recv(), Ok(ReplAck::Quit) | Err(_))
+                {
+                    break;
+                }
+            }
+            Err(ReadlineError::Interrupted) => {}
+            Err(ReadlineError::Eof) => {
+                let _ = input.blocking_send(ReplInput::Eof);
+                let _ = acknowledgements.recv();
+                break;
+            }
+            Err(error) => {
+                let _ = input.blocking_send(ReplInput::Failed(error.to_string()));
+                break;
+            }
+        }
+    }
+    persist_history(&mut editor, &history);
+}
+
+fn history_path() -> PathBuf {
+    history_path_from(
+        env::var_os("XDG_STATE_HOME").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+}
+
+fn history_path_from(
+    xdg_state_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    xdg_state_home.map_or_else(
+        || {
+            home.map_or_else(
+                || PathBuf::from(".uscope_history"),
+                |home| PathBuf::from(home).join(".local/state/uscope/history"),
+            )
+        },
+        |state| PathBuf::from(state).join("uscope/history"),
+    )
+}
+
+fn persist_history(editor: &mut DefaultEditor, path: &std::path::Path) {
+    if let Some(parent) = path.parent()
+        && let Err(error) = fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "warning: failed to create history directory {}: {error}",
+            parent.display()
+        );
+        return;
+    }
+    let result = if path.exists() {
+        editor.append_history(path)
+    } else {
+        editor.save_history(path)
+    };
+    if let Err(error) = result {
+        eprintln!(
+            "warning: failed to save command history {}: {error}",
+            path.display()
+        );
+    }
+}
+
 enum Control {
     Continue(String),
+    ClearScreen,
     Quit,
 }
 
 async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Control> {
     let mut words = line.split_whitespace();
-    let command = words.next().unwrap_or("");
+    let entered = words.next().unwrap_or("");
+    if entered.is_empty() {
+        return Ok(Control::Continue(String::new()));
+    }
+    let spec = command_named(entered).ok_or_else(|| Error::InvalidCommand(entered.to_owned()))?;
 
-    match command {
-        "break" | "b" => {
+    match spec.command {
+        Command::Break => {
             let argument = one_argument(&mut words, "break <function|address>")?;
             execute_break(debugger, argument).await
         }
-        "breakpoints" => {
+        Command::Breakpoints => {
             no_arguments(&mut words, "breakpoints")?;
             execute_list_breakpoints(debugger).await
         }
-        "info" => {
+        Command::Info => {
             let argument = one_argument(&mut words, "info breakpoints")?;
             if argument != "breakpoints" && argument != "break" {
                 return Err(Error::InvalidCommand(format!("info {argument}")));
             }
             execute_list_breakpoints(debugger).await
         }
-        "delete" | "clear" => {
-            let usage = format!("{command} <id|all>");
+        Command::Delete => {
+            let usage = format!("{entered} <id|all>");
             let argument = one_argument(&mut words, &usage)?;
             execute_delete_breakpoint(debugger, argument, &usage).await
         }
-        "run" | "r" => Ok(Control::Continue(
+        Command::Run => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.run().await?).await,
         )),
-        "continue" | "c" => Ok(Control::Continue(
+        Command::Continue => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.resume().await?).await,
         )),
-        "pause" | "p" => Ok(Control::Continue(
+        Command::Pause => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.pause().await?).await,
         )),
-        "stepi" | "si" => execute_step(debugger, StepKind::Instruction).await,
-        "step" | "s" => execute_step(debugger, StepKind::IntoSource).await,
-        "next" | "n" => execute_step(debugger, StepKind::OverSource).await,
-        "finish" => execute_step(debugger, StepKind::Out).await,
-        "x" => {
+        Command::Stepi => execute_step(debugger, StepKind::Instruction).await,
+        Command::Step => execute_step(debugger, StepKind::IntoSource).await,
+        Command::Next => execute_step(debugger, StepKind::OverSource).await,
+        Command::Finish => execute_step(debugger, StepKind::Out).await,
+        Command::Examine => {
             let address = parse_address(one_argument(&mut words, "x <runtime-address>")?)?;
 
             Ok(Control::Continue(format!(
@@ -228,7 +546,7 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 debugger.read_word(VirtualAddress::new(address)).await?
             )))
         }
-        "address" => {
+        Command::Address => {
             let name = one_argument(&mut words, "address <symbol>")?;
 
             Ok(Control::Continue(format!(
@@ -236,7 +554,7 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 debugger.runtime_address(name).await?
             )))
         }
-        "where" => {
+        Command::Where => {
             let location = debugger.current_location().await?;
             let function = location
                 .image
@@ -255,11 +573,11 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 None => format!("{function} at {}", location.address),
             }))
         }
-        "list" | "l" => Ok(Control::Continue(format_source_context(
+        Command::List => Ok(Control::Continue(format_source_context(
             &debugger.source_context(3).await?,
         ))),
-        "backtrace" | "bt" => format_backtrace(debugger).await,
-        "registers" | "regs" => {
+        Command::Backtrace => format_backtrace(debugger).await,
+        Command::Registers => {
             let registers = debugger.registers().await?;
 
             Ok(Control::Continue(format_registers(
@@ -267,15 +585,76 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 registers.target.byte_order,
             )))
         }
-        "threads" => {
+        Command::Threads => {
             let snapshot = debugger.snapshot().await?;
             Ok(Control::Continue(format_threads(&snapshot)))
         }
-        "thread" => select_thread(debugger, &mut words).await,
-        "quit" | "q" => Ok(Control::Quit),
-        "" => Ok(Control::Continue(String::new())),
-        other => Err(Error::InvalidCommand(other.to_owned())),
+        Command::Thread => select_thread(debugger, &mut words).await,
+        Command::Cls => {
+            no_arguments(&mut words, "cls")?;
+            Ok(Control::ClearScreen)
+        }
+        Command::Help => execute_help(&mut words),
+        Command::Quit => Ok(Control::Quit),
     }
+}
+
+fn command_named(name: &str) -> Option<&'static CommandSpec> {
+    COMMANDS
+        .iter()
+        .find(|command| command.name == name || command.aliases.contains(&name))
+}
+
+fn execute_help<'a>(words: &mut impl Iterator<Item = &'a str>) -> uscope::Result<Control> {
+    let command = words.next();
+    if words.next().is_some() {
+        return Err(Error::InvalidCommand("help [command]".to_owned()));
+    }
+    Ok(Control::Continue(match command {
+        Some(name) => {
+            let command =
+                command_named(name).ok_or_else(|| Error::InvalidCommand(format!("help {name}")))?;
+            format_command_help(command)
+        }
+        None => format_help(),
+    }))
+}
+
+fn format_help() -> String {
+    let width = COMMANDS
+        .iter()
+        .map(|command| format_command_label(command).len())
+        .max()
+        .unwrap_or(0);
+    let mut output = "commands:".to_owned();
+    for command in COMMANDS {
+        write!(
+            output,
+            "\n  {:width$}  {}",
+            format_command_label(command),
+            command.summary
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output.push_str("\n\nUse `help <command>` for aliases and usage.");
+    output
+}
+
+fn format_command_label(command: &CommandSpec) -> String {
+    if command.aliases.is_empty() {
+        command.usage.to_owned()
+    } else {
+        format!("{} ({})", command.usage, command.aliases.join(", "))
+    }
+}
+
+fn format_command_help(command: &CommandSpec) -> String {
+    let mut output = format!("{}\n  {}", command.usage, command.summary);
+    if !command.aliases.is_empty() {
+        write!(output, "\n  aliases: {}", command.aliases.join(", "))
+            .expect("writing to a String cannot fail");
+    }
+    output
 }
 
 async fn execute_break(debugger: &DebuggerHandle, argument: &str) -> uscope::Result<Control> {
@@ -655,6 +1034,67 @@ fn format_exit_status(status: ExitStatus) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_registry_has_unique_names_and_aliases() {
+        let mut names = std::collections::BTreeSet::new();
+        for command in COMMANDS {
+            assert!(
+                names.insert(command.name),
+                "duplicate command {}",
+                command.name
+            );
+            for alias in command.aliases {
+                assert!(names.insert(*alias), "duplicate command alias {alias}");
+                assert_eq!(
+                    command_named(alias).map(|found| found.name),
+                    Some(command.name)
+                );
+            }
+            assert_eq!(
+                command_named(command.name).map(|found| found.name),
+                Some(command.name)
+            );
+        }
+    }
+
+    #[test]
+    fn generated_help_contains_every_registered_command() {
+        let help = format_help();
+        for command in COMMANDS {
+            let label = format_command_label(command);
+            assert!(help.contains(&label), "missing help label {label}");
+            let detail = format_command_help(command);
+            assert!(detail.contains(command.usage));
+            assert!(detail.contains(command.summary));
+            for alias in command.aliases {
+                assert!(help.contains(alias), "overview omitted alias {alias}");
+                assert!(
+                    detail.contains(alias),
+                    "detailed help omitted alias {alias}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn history_uses_xdg_then_home_then_a_local_fallback() {
+        assert_eq!(
+            history_path_from(
+                Some(std::ffi::OsStr::new("/state")),
+                Some(std::ffi::OsStr::new("/home/jim"))
+            ),
+            PathBuf::from("/state/uscope/history")
+        );
+        assert_eq!(
+            history_path_from(None, Some(std::ffi::OsStr::new("/home/jim"))),
+            PathBuf::from("/home/jim/.local/state/uscope/history")
+        );
+        assert_eq!(
+            history_path_from(None, None),
+            PathBuf::from(".uscope_history")
+        );
+    }
 
     #[test]
     fn register_bytes_are_rendered_in_target_byte_order() {
