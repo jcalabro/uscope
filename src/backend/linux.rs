@@ -627,7 +627,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 if functions.is_empty() {
                     return Err(Error::FunctionNotFound(function.clone()));
                 }
-                self.resolve_function_breakpoint(functions.into_iter())?
+                self.resolve_function_breakpoint(functions)?
             }
             BreakpointSpec::Source { path, line } => {
                 let source = self.module_image.source_file_matching(path)?;
