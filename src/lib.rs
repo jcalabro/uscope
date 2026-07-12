@@ -311,17 +311,20 @@ impl DebuggerHandle {
             .image
             .source
             .ok_or(Error::SourceLocationUnavailable)?;
+
         let file = self
             .module_image
             .source_file(location.file)
             .cloned()
             .expect("source location references a known file");
+
         let contents = tokio::fs::read_to_string(file.path.as_ref())
             .await
             .map_err(|source| Error::SourceFileRead {
                 path: file.path.as_ref().clone(),
                 source,
             })?;
+
         let all_lines: Vec<_> = contents.lines().collect();
         let line = location.line.get();
         let target = usize::try_from(line)
@@ -332,12 +335,14 @@ impl DebuggerHandle {
                 path: file.path.as_ref().clone(),
                 line,
             })?;
+
         let radius = usize::try_from(radius).expect("u32 fits in usize");
         let start = target.saturating_sub(radius);
         let end = target
             .saturating_add(radius)
             .saturating_add(1)
             .min(all_lines.len());
+
         let lines = all_lines[start..end]
             .iter()
             .enumerate()
