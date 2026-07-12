@@ -22,7 +22,7 @@ just run build/test-programs/basic
 ```
 
 At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
-Use `print <name>` or `p <name>` to print one visible stack-local scalar, or `print` with no argument to list every visible local in the top physical frame.
+Use `print <name>` or `p <name>` to print one visible stack-local scalar, or `print` with no argument to list every visible local in the selected logical frame, including an inline function frame.
 Breakpoint stops automatically print three surrounding source lines on each side when source is available.
 Use `list` or `l` to print that source context again for the current stop.
 Use `stepi`, `step`, `next`, and `finish` for instruction and source-level execution control.

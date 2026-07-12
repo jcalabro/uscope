@@ -2678,9 +2678,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         // physical presentation to the containing function's own variables.
         // An ambiguous presentation has no single active scope chain.
         let presentation = self.presentation_for_stopped_thread(pid)?;
-        let selected_instance = match presentation.frame {
+        let frame = presentation.frame;
+        let selected_instance = match &frame {
             PresentedFrame::Physical => None,
-            PresentedFrame::Inline(instance) => Some(instance),
+            PresentedFrame::Inline(instance) => Some(*instance),
             PresentedFrame::Ambiguous(_) => return Err(Error::VariableContextUnsupported),
         };
         let native = self.ptrace.registers(pid)?;
@@ -2716,6 +2717,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             revision: self.revision,
             stop_id,
             thread: debug_thread_id(pid),
+            frame,
             target: self.module_image.target(),
             variables: variables.into(),
         })

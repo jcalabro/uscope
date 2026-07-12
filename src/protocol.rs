@@ -7,7 +7,7 @@ use crate::{
     RegisterSnapshot, Result, ThreadId, VariableSnapshot, VirtualAddress,
 };
 
-/// Selects variables to inspect in the stopped top physical frame.
+/// Selects variables to inspect in the stopped thread's selected logical frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariableQuery {
     /// Inspect every visible local declaration.

@@ -341,15 +341,17 @@ pub struct Variable {
     pub state: VariableState,
 }
 
-/// Variables inspected from one stopped thread snapshot.
+/// Variables inspected from one logical frame of a stopped thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariableSnapshot {
     /// The debugger revision at which the values were read.
     pub revision: u64,
     /// The stopped snapshot that authorized the reads.
     pub stop_id: crate::StopId,
-    /// The thread whose top physical frame was inspected.
+    /// The thread whose selected logical frame was inspected.
     pub thread: ThreadId,
+    /// The logical frame whose source scope selected these variables.
+    pub frame: crate::PresentedFrame,
     /// Target data representation used for decoding.
     pub target: TargetDescription,
     /// Visible variables in source declaration order.
