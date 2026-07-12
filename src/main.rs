@@ -895,7 +895,7 @@ fn format_scalar(variable: &Variable, value: &ScalarValue) -> String {
                 && let Ok(character) = u8::try_from(*value)
                 && character.is_ascii_graphic()
             {
-                return format!("{value} '{}'", char::from(character));
+                return format!("{value} '{}'", char::from(character).escape_default());
             }
             value.to_string()
         }
@@ -1223,6 +1223,35 @@ mod tests {
         for invalid in ["", "2value", "value.member", "*value", "left + right"] {
             assert!(!is_identifier(invalid));
         }
+    }
+
+    #[test]
+    fn char_rendering_escapes_quote_and_backslash() {
+        let variable = |value: i128| uscope::Variable {
+            name: "c".into(),
+            declaration: None,
+            type_info: Some(uscope::BaseType {
+                name: "char".into(),
+                base_name: "char".into(),
+                encoding: uscope::BaseTypeEncoding::Signed,
+                byte_size: 1,
+            }),
+            state: uscope::VariableState::Available {
+                storage: uscope::VariableStorage::Memory(uscope::VirtualAddress::new(0x1000)),
+                raw: std::sync::Arc::from([u8::try_from(value).expect("test char fits in u8")]),
+                value: uscope::ScalarValue::Signed(value),
+            },
+        };
+        let render = |value: i128| {
+            let variable = variable(value);
+            match &variable.state {
+                uscope::VariableState::Available { value, .. } => format_scalar(&variable, value),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(render(65), "65 'A'");
+        assert_eq!(render(39), r"39 '\''");
+        assert_eq!(render(92), r"92 '\\'");
     }
 
     #[test]

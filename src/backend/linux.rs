@@ -2673,10 +2673,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
+        // Source-level visibility follows the selected logical frame: an
+        // inline presentation scopes lookup to that instance's variables, a
+        // physical presentation to the containing function's own variables.
+        // An ambiguous presentation has no single active scope chain.
         let presentation = self.presentation_for_stopped_thread(pid)?;
-        if !matches!(presentation.frame, PresentedFrame::Physical) {
-            return Err(Error::VariableContextUnsupported);
-        }
+        let selected_instance = match presentation.frame {
+            PresentedFrame::Physical => None,
+            PresentedFrame::Inline(instance) => Some(instance),
+            PresentedFrame::Ambiguous(_) => return Err(Error::VariableContextUnsupported),
+        };
         let native = self.ptrace.registers(pid)?;
         let registers = x86_64_registers(&native);
         let instruction = VirtualAddress::new(native.rip);
@@ -2703,9 +2709,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             registers: &registers,
             cfa,
         };
-        let variables = self
-            .variable_info
-            .inspect(image_address, query, &mut runtime)?;
+        let variables =
+            self.variable_info
+                .inspect(image_address, selected_instance, query, &mut runtime)?;
         Ok(VariableSnapshot {
             revision: self.revision,
             stop_id,
@@ -4159,6 +4165,7 @@ mod tests {
         fn inspect(
             &self,
             _address: ImageAddress,
+            _selected: Option<crate::CodeInstanceId>,
             _query: &VariableQuery,
             _runtime: &mut dyn VariableRuntime,
         ) -> Result<Vec<crate::Variable>> {

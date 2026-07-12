@@ -55,6 +55,12 @@ build_fixture clang tests/fixtures/variables.c "$output_dir/variables-clang-o0" 
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/variables-threads.c "$output_dir/variables-threads" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
+build_fixture gcc tests/fixtures/variables-inline.c "$output_dir/variables-inline-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture clang tests/fixtures/variables-inline.c "$output_dir/variables-inline-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc tests/fixtures/variables-inline.c "$output_dir/variables-inline-gcc-o1" \
+    -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/spin.c "$output_dir/spin" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc tests/fixtures/threads.c "$output_dir/threads" \

@@ -5,16 +5,17 @@ use std::sync::Arc;
 
 use gimli::{EvaluationResult, Location, Reader as _, RunTimeEndian, Value};
 
-use super::{DieKey, DwarfError, Reader, die_reference, entry_source_location};
+use super::{DieKey, DwarfError, Reader, die_reference, source_file_id, source_path};
 use crate::debug_info::{VariableInfo, VariableRuntime};
 use crate::{
-    AddressRange, Architecture, BaseType, BaseTypeEncoding, ByteOrder, Error, FloatValue,
-    ImageAddress, Result, ScalarValue, SourceFile, SourceFileId, SourceLocation, TargetDescription,
-    Variable, VariableMalformedReason, VariableQuery, VariableState, VariableStorage,
-    VariableUnavailableReason, VirtualAddress,
+    AddressRange, Architecture, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
+    ColumnNumber, Error, FloatValue, ImageAddress, LineNumber, Result, ScalarValue, SourceFile,
+    SourceFileId, SourceLocation, TargetDescription, Variable, VariableMalformedReason,
+    VariableQuery, VariableState, VariableStorage, VariableUnavailableReason, VirtualAddress,
 };
 
 const MAX_SCALAR_BYTES: u64 = 16;
+const MAX_EVALUATION_ITERATIONS: u32 = 10_000;
 
 #[derive(Clone)]
 struct Expression {
@@ -38,13 +39,22 @@ impl LocationDescription {
         &self,
         address: ImageAddress,
     ) -> std::result::Result<Option<&Expression>, VariableUnavailableReason> {
-        let mut matching = self
+        // Specific ranged entries override default (range-less) entries per
+        // DWARF 5 default-location semantics.
+        let mut specific = self
             .entries
             .iter()
-            .filter(|entry| entry.range.is_none_or(|range| range.contains(address)));
-        let expression = matching.next().map(|entry| &entry.expression);
-        if matching.next().is_some() {
-            return Err("multiple locations are active at the current instruction".into());
+            .filter(|entry| entry.range.is_some_and(|range| range.contains(address)));
+        if let Some(entry) = specific.next() {
+            if specific.next().is_some() {
+                return Err("multiple locations are active at the current instruction".into());
+            }
+            return Ok(Some(&entry.expression));
+        }
+        let mut defaults = self.entries.iter().filter(|entry| entry.range.is_none());
+        let expression = defaults.next().map(|entry| &entry.expression);
+        if defaults.next().is_some() {
+            return Err("multiple default locations were supplied".into());
         }
         Ok(expression)
     }
@@ -69,6 +79,9 @@ struct CatalogVariable {
     name: Arc<str>,
     declaration: Option<SourceLocation>,
     ranges: Arc<[AddressRange<ImageAddress>]>,
+    /// The inline instance owning this variable, or `None` for the physical
+    /// frame. Lookup only sees variables of the selected logical frame.
+    instance: Option<CodeInstanceId>,
     lexical_depth: u32,
     order: u64,
     type_info: TypeResolution,
@@ -81,6 +94,7 @@ struct CatalogVariable {
 struct CatalogParameter {
     name: Arc<str>,
     ranges: Arc<[AddressRange<ImageAddress>]>,
+    instance: Option<CodeInstanceId>,
 }
 
 #[derive(Clone)]
@@ -88,8 +102,13 @@ struct Scope {
     ranges: Arc<[AddressRange<ImageAddress>]>,
     lexical_depth: u32,
     frame_base: Metadata<LocationDescription>,
-    subprogram: bool,
+    /// True for subprograms and inlined subroutines, whose direct
+    /// `DW_TAG_formal_parameter` children are cataloged parameters.
+    routine: bool,
     function: usize,
+    /// The innermost containing inline instance, or `None` when the scope
+    /// belongs directly to the physical frame.
+    instance: Option<CodeInstanceId>,
     malformed: Option<Arc<str>>,
 }
 
@@ -116,6 +135,7 @@ pub(super) fn load_variable_info(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     units: &[gimli::Unit<Reader<'_>>],
     target: TargetDescription,
+    instance_ids: &HashMap<DieKey, CodeInstanceId>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> std::result::Result<Arc<dyn VariableInfo>, DwarfError> {
@@ -151,8 +171,9 @@ pub(super) fn load_variable_info(
                             unit,
                             entry.attr_value(gimli::DW_AT_frame_base),
                         ),
-                        subprogram: true,
+                        routine: true,
                         function,
+                        instance: None,
                         malformed: None,
                     })
                 }
@@ -166,54 +187,119 @@ pub(super) fn load_variable_info(
                         ranges,
                         lexical_depth: parent.lexical_depth.saturating_add(1),
                         frame_base: parent.frame_base.clone(),
-                        subprogram: false,
+                        routine: false,
                         function: parent.function,
+                        instance: parent.instance,
                         malformed: malformed.or_else(|| parent.malformed.clone()),
                     }
                 }),
-                gimli::DW_TAG_inlined_subroutine => None,
+                // An inline instance keeps the caller's frame base and function
+                // while narrowing to its own code ranges. Unlike a lexical
+                // block, an instance with no usable ranges must not widen to
+                // the caller's extent: give it an empty extent so its locals
+                // and parameters can never contaminate lookups.
+                gimli::DW_TAG_inlined_subroutine => parent.as_ref().map(|parent| {
+                    let instance = instance_ids
+                        .get(&DieKey {
+                            unit: unit_index,
+                            offset: entry.offset().0,
+                        })
+                        .copied();
+                    let (ranges, malformed) = match copy_ranges(dwarf, unit, entry) {
+                        Ok(ranges) if ranges.is_empty() => (
+                            Vec::new().into(),
+                            Some(Arc::from("inlined subroutine has no address ranges")),
+                        ),
+                        // A ranged instance must be identified so lookups can
+                        // scope to it; without an identity its contents could
+                        // only be misattributed.
+                        Ok(_) if instance.is_none() => (
+                            Vec::new().into(),
+                            Some(Arc::from("inlined subroutine has no code instance")),
+                        ),
+                        Ok(ranges) => (ranges, None),
+                        Err(error) => (Vec::new().into(), Some(error.to_string().into())),
+                    };
+                    Scope {
+                        ranges,
+                        lexical_depth: parent.lexical_depth.saturating_add(1),
+                        frame_base: parent.frame_base.clone(),
+                        routine: true,
+                        function: parent.function,
+                        instance,
+                        malformed: malformed.or_else(|| parent.malformed.clone()),
+                    }
+                }),
                 tag if is_type_scope(tag) => None,
                 _ => parent.clone(),
+            };
+            // An empty extent is deliberate containment (a rangeless inline
+            // instance) and must stay empty through every descendant scope;
+            // only a nested subprogram starts an independent extent.
+            let scope = if entry.tag() != gimli::DW_TAG_subprogram
+                && parent
+                    .as_ref()
+                    .is_some_and(|parent| parent.ranges.is_empty())
+            {
+                scope.map(|mut scope| {
+                    scope.ranges = Vec::new().into();
+                    scope
+                })
+            } else {
+                scope
             };
 
             if entry.tag() == gimli::DW_TAG_variable {
                 if let Some(scope) = parent.as_ref().filter(|scope| !scope.ranges.is_empty()) {
-                    let (name, name_error) = match copy_name(dwarf, unit, entry) {
-                        Ok(Some(name)) => (name, None),
-                        Ok(None) => (
-                            format!("<anonymous variable at {:#x}>", entry.offset().0).into(),
-                            Some(Arc::from("variable has no name")),
-                        ),
-                        Err(error) => (
-                            format!("<malformed variable at {:#x}>", entry.offset().0).into(),
-                            Some(error.to_string().into()),
-                        ),
+                    // Concrete inline-instance variables reference their
+                    // abstract origin for name, type, and declaration.
+                    let (chain, chain_error) = match origin_chain(units, unit_index, entry) {
+                        Ok(chain) => (chain, None),
+                        Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
                     };
+                    let (name, name_error) =
+                        match copy_name_with_origins(dwarf, units, unit, entry, &chain) {
+                            Ok(Some(name)) => (name, None),
+                            Ok(None) => (
+                                format!("<anonymous variable at {:#x}>", entry.offset().0).into(),
+                                Some(Arc::from("variable has no name")),
+                            ),
+                            Err(error) => (
+                                format!("<malformed variable at {:#x}>", entry.offset().0).into(),
+                                Some(error.to_string().into()),
+                            ),
+                        };
                     order = order.checked_add(1).expect("variable DIE order overflow");
-                    let declaration = entry_source_location(
+                    let declaration = declaration_with_origins(
                         dwarf,
+                        units,
                         unit,
                         entry,
-                        gimli::DW_AT_decl_file,
-                        gimli::DW_AT_decl_line,
-                        gimli::DW_AT_decl_column,
+                        &chain,
                         source_files,
                         source_file_ids,
                     );
                     let (ranges, scope_error) = variable_scope_ranges(scope, entry);
+                    let (type_unit, type_value) = entry
+                        .attr_value(gimli::DW_AT_type)
+                        .map(|value| (unit_index, Some(value)))
+                        .or_else(|| {
+                            chain.iter().find_map(|(origin_unit, origin_entry)| {
+                                origin_entry
+                                    .attr_value(gimli::DW_AT_type)
+                                    .map(|value| (*origin_unit, Some(value)))
+                            })
+                        })
+                        .unwrap_or((unit_index, None));
                     functions[scope.function].variables.push(variables.len());
                     variables.push(CatalogVariable {
                         name,
                         declaration: declaration.as_ref().ok().cloned().flatten(),
                         ranges,
+                        instance: scope.instance,
                         lexical_depth: scope.lexical_depth,
                         order,
-                        type_info: resolve_variable_type(
-                            dwarf,
-                            units,
-                            unit_index,
-                            entry.attr_value(gimli::DW_AT_type),
-                        ),
+                        type_info: resolve_variable_type(dwarf, units, type_unit, type_value),
                         location: copy_optional_location(
                             dwarf,
                             unit,
@@ -225,18 +311,24 @@ pub(super) fn load_variable_info(
                             .map(|error| error.to_string().into())
                             .or(scope_error)
                             .or_else(|| scope.malformed.clone())
+                            .or(chain_error)
                             .or(name_error),
                     });
                 }
             } else if entry.tag() == gimli::DW_TAG_formal_parameter
-                && let Some(scope) = parent.as_ref().filter(|scope| scope.subprogram)
-                && let Ok(Some(name)) = copy_name(dwarf, unit, entry)
+                && let Some(scope) = parent.as_ref().filter(|scope| scope.routine)
             {
-                functions[scope.function].parameters.push(parameters.len());
-                parameters.push(CatalogParameter {
-                    name,
-                    ranges: Arc::clone(&scope.ranges),
-                });
+                // A broken origin chain must not hide a directly named
+                // parameter; fall back to the concrete DIE's own name.
+                let chain = origin_chain(units, unit_index, entry).unwrap_or_default();
+                if let Ok(Some(name)) = copy_name_with_origins(dwarf, units, unit, entry, &chain) {
+                    functions[scope.function].parameters.push(parameters.len());
+                    parameters.push(CatalogParameter {
+                        name,
+                        ranges: Arc::clone(&scope.ranges),
+                        instance: scope.instance,
+                    });
+                }
             }
 
             scopes.push(scope);
@@ -330,6 +422,117 @@ fn copy_name(
         .map(|value| value.map(|value| Arc::from(value.to_string_lossy().into_owned())))
 }
 
+/// Follows `DW_AT_abstract_origin`/`DW_AT_specification` references
+/// transitively, rejecting cycles, so concrete inline-instance DIEs can
+/// inherit name, type, and declaration metadata from their origins.
+fn origin_chain<'data>(
+    units: &[gimli::Unit<Reader<'data>>],
+    unit_index: usize,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+) -> std::result::Result<Vec<(usize, gimli::DebuggingInformationEntry<Reader<'data>>)>, DwarfError>
+{
+    let mut chain = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current = origin_reference(entry, unit_index, units)?;
+    while let Some(key) = current {
+        if !visited.insert(key) {
+            return Err(DwarfError::ReferenceCycle);
+        }
+        let unit = units
+            .get(key.unit)
+            .ok_or(DwarfError::ReferenceOutsideUnits(key.offset))?;
+        let origin = unit.entry(gimli::UnitOffset(key.offset))?;
+        current = origin_reference(&origin, key.unit, units)?;
+        chain.push((key.unit, origin));
+    }
+    Ok(chain)
+}
+
+fn origin_reference(
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    unit_index: usize,
+    units: &[gimli::Unit<Reader<'_>>],
+) -> std::result::Result<Option<DieKey>, DwarfError> {
+    let value = entry
+        .attr_value(gimli::DW_AT_abstract_origin)
+        .or_else(|| entry.attr_value(gimli::DW_AT_specification));
+    die_reference(value, unit_index, units)
+}
+
+fn copy_name_with_origins(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    units: &[gimli::Unit<Reader<'_>>],
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
+) -> std::result::Result<Option<Arc<str>>, DwarfError> {
+    if let Some(name) = copy_name(dwarf, unit, entry)? {
+        return Ok(Some(name));
+    }
+    for (origin_unit, origin_entry) in chain {
+        if let Some(name) = copy_name(dwarf, &units[*origin_unit], origin_entry)? {
+            return Ok(Some(name));
+        }
+    }
+    Ok(None)
+}
+
+fn declaration_with_origins<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &[gimli::Unit<Reader<'data>>],
+    unit: &gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
+    source_files: &mut Vec<SourceFile>,
+    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+) -> std::result::Result<Option<SourceLocation>, DwarfError> {
+    // DWARF inherits declaration attributes individually: each of decl_file,
+    // decl_line, and decl_column comes from the first DIE in the chain that
+    // supplies it. decl_file indexes the line program of the unit that owns
+    // the DIE supplying it.
+    let mut dies = Vec::with_capacity(chain.len() + 1);
+    dies.push((unit, entry));
+    for (origin_unit, origin_entry) in chain {
+        dies.push((&units[*origin_unit], origin_entry));
+    }
+    let file = dies.iter().find_map(|(unit, entry)| {
+        entry
+            .attr(gimli::DW_AT_decl_file)
+            .and_then(gimli::Attribute::udata_value)
+            .map(|index| (*unit, index))
+    });
+    let line = dies
+        .iter()
+        .find_map(|(_, entry)| {
+            entry
+                .attr(gimli::DW_AT_decl_line)
+                .and_then(gimli::Attribute::udata_value)
+        })
+        .and_then(LineNumber::new);
+    let (Some((file_unit, file_index)), Some(line)) = (file, line) else {
+        return Ok(None);
+    };
+    let Some(program) = file_unit.line_program.as_ref() else {
+        return Ok(None);
+    };
+    let Some(file) = program.header().file(file_index) else {
+        return Ok(None);
+    };
+    let path = source_path(dwarf, file_unit, program.header(), file)?;
+    Ok(Some(SourceLocation {
+        file: source_file_id(path, source_files, source_file_ids),
+        line,
+        column: dies
+            .iter()
+            .find_map(|(_, entry)| {
+                entry
+                    .attr(gimli::DW_AT_decl_column)
+                    .and_then(gimli::Attribute::udata_value)
+            })
+            .and_then(ColumnNumber::new),
+    }))
+}
+
 fn copy_ranges<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
     unit: &gimli::Unit<Reader<'data>>,
@@ -384,7 +587,21 @@ fn copy_location(
         .attr_locations(unit, value)?
         .ok_or(DwarfError::UnsupportedReferenceForm)?;
     let mut entries = Vec::new();
-    while let Some(location) = locations.next()? {
+    // Iterate raw entries so DW_LLE_default_location keeps its fallback
+    // semantics (range: None) instead of becoming a 0..u64::MAX range that
+    // conflicts with every specific entry.
+    while let Some(raw) = locations.next_raw()? {
+        let is_default = matches!(&raw, gimli::RawLocListEntry::DefaultLocation { .. });
+        let Some(location) = locations.convert_raw(raw)? else {
+            continue;
+        };
+        if is_default {
+            entries.push(LocationEntry {
+                range: None,
+                expression: copy_expression(location.data, encoding)?,
+            });
+            continue;
+        }
         if location.range.begin > location.range.end {
             return Err(DwarfError::InvalidRange);
         }
@@ -518,6 +735,7 @@ impl VariableInfo for DwarfVariableInfo {
     fn inspect(
         &self,
         address: ImageAddress,
+        selected: Option<CodeInstanceId>,
         query: &VariableQuery,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Vec<Variable>> {
@@ -527,13 +745,17 @@ impl VariableInfo for DwarfVariableInfo {
                 VariableQuery::Name(name) => Err(Error::VariableNotFound(name.clone())),
             };
         };
+        // Source-level visibility is per logical frame: only variables owned
+        // by the selected inline instance (or the physical frame for `None`)
+        // are in scope, even though siblings share the instruction address.
         let active = function
             .variables
             .iter()
             .map(|&index| &self.variables[index])
+            .filter(|variable| variable.instance == selected)
             .filter(|variable| variable.ranges.iter().any(|range| range.contains(address)))
             .collect::<Vec<_>>();
-        let selected = match query {
+        let selected_variables = match query {
             VariableQuery::All => active,
             VariableQuery::Name(name) => {
                 let mut named = active
@@ -544,6 +766,7 @@ impl VariableInfo for DwarfVariableInfo {
                     if function.parameters.iter().any(|&index| {
                         let parameter = &self.parameters[index];
                         parameter.name.as_ref() == name
+                            && parameter.instance == selected
                             && parameter.ranges.iter().any(|range| range.contains(address))
                     }) {
                         return Err(Error::ParameterUnsupported(name.clone()));
@@ -557,7 +780,7 @@ impl VariableInfo for DwarfVariableInfo {
                 named
             }
         };
-        let mut selected = selected;
+        let mut selected = selected_variables;
         selected.sort_by_key(|variable| {
             variable.declaration.as_ref().map_or(
                 (
@@ -770,12 +993,23 @@ fn evaluate<'expression>(
 {
     let reader = gimli::EndianSlice::new(&expression.bytes, endian);
     let mut evaluation = gimli::Expression(reader).evaluation(expression.encoding);
+    // Bound evaluation so a malformed expression with a backward branch cannot
+    // hang the controller thread.
+    evaluation.set_max_iterations(MAX_EVALUATION_ITERATIONS);
     let mut result = evaluation.evaluate().map_err(evaluation_error)?;
     let mut used_frame_base = false;
     loop {
         result = match result {
             EvaluationResult::Complete => return Ok((evaluation.result(), used_frame_base)),
-            EvaluationResult::RequiresRegister { register, .. } => {
+            EvaluationResult::RequiresRegister {
+                register,
+                base_type,
+            } => {
+                // A non-zero offset means DW_OP_regval_type requested typed
+                // semantics we do not implement; refuse rather than guess.
+                if base_type.0 != 0 {
+                    return Err("typed DWARF register values are unsupported".into());
+                }
                 let value = runtime.register(register.0).ok_or_else(|| {
                     Arc::<str>::from(format!("DWARF register {} is unavailable", register.0))
                 })?;
@@ -803,8 +1037,11 @@ fn evaluate<'expression>(
                 address,
                 size,
                 space: None,
-                ..
+                base_type,
             } => {
+                if base_type.0 != 0 {
+                    return Err("typed DWARF memory values are unsupported".into());
+                }
                 let bytes = runtime.read_memory(VirtualAddress::new(address), usize::from(size))?;
                 let value = bytes_to_u64(&bytes, endian)?;
                 evaluation
@@ -1025,6 +1262,91 @@ mod tests {
             ),
             Err(VariableUnavailableReason::CfaExpression)
         );
+    }
+
+    #[test]
+    fn malformed_backward_branch_expression_fails_instead_of_hanging() {
+        let mut runtime = Runtime {
+            registers: BTreeMap::new(),
+            cfa: Ok(VirtualAddress::new(0x3000)),
+        };
+        // DW_OP_skip with a -3 offset branches back onto itself forever.
+        let result = evaluate_variable_location(
+            &expression(&[gimli::DW_OP_skip.0, 0xfd, 0xff]),
+            RunTimeEndian::Little,
+            VirtualAddress::new(0x2000),
+            &mut runtime,
+        );
+        assert!(result.is_err(), "infinite expression must be rejected");
+    }
+
+    #[test]
+    fn typed_register_requests_are_rejected_not_evaluated_as_generic() {
+        let mut runtime = Runtime {
+            registers: BTreeMap::from([(6, 0x2000)]),
+            cfa: Ok(VirtualAddress::new(0x3000)),
+        };
+        // DW_OP_regval_type register 6, base type DIE offset 0x10.
+        let result = evaluate_variable_location(
+            &expression(&[gimli::DW_OP_regval_type.0, 6, 0x10]),
+            RunTimeEndian::Little,
+            VirtualAddress::new(0x2000),
+            &mut runtime,
+        );
+        assert_eq!(
+            result,
+            Err("typed DWARF register values are unsupported".into())
+        );
+    }
+
+    #[test]
+    fn specific_location_entries_override_default_entries() {
+        let range = |start: u64, end: u64| {
+            Some(AddressRange {
+                start: ImageAddress::new(start),
+                end: ImageAddress::new(end),
+            })
+        };
+        let description = LocationDescription {
+            entries: vec![
+                LocationEntry {
+                    range: None,
+                    expression: expression(&[gimli::DW_OP_reg0.0]),
+                },
+                LocationEntry {
+                    range: range(0x100, 0x200),
+                    expression: expression(&[gimli::DW_OP_reg1.0]),
+                },
+            ]
+            .into(),
+        };
+
+        let specific = description
+            .expression(ImageAddress::new(0x150))
+            .expect("specific entry wins inside its range")
+            .expect("an expression is active");
+        assert_eq!(specific.bytes.as_ref(), &[gimli::DW_OP_reg1.0]);
+
+        let fallback = description
+            .expression(ImageAddress::new(0x300))
+            .expect("default entry applies outside all ranges")
+            .expect("an expression is active");
+        assert_eq!(fallback.bytes.as_ref(), &[gimli::DW_OP_reg0.0]);
+
+        let overlapping = LocationDescription {
+            entries: vec![
+                LocationEntry {
+                    range: range(0x100, 0x200),
+                    expression: expression(&[gimli::DW_OP_reg0.0]),
+                },
+                LocationEntry {
+                    range: range(0x180, 0x280),
+                    expression: expression(&[gimli::DW_OP_reg1.0]),
+                },
+            ]
+            .into(),
+        };
+        assert!(overlapping.expression(ImageAddress::new(0x190)).is_err());
     }
 
     #[test]
