@@ -67,6 +67,19 @@ build_rust_fixture() {
         --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 "$@"
 }
 
+# Fails the build when a fixture's DWARF stops exercising the operation a test
+# depends on, instead of letting the test pass without its coverage.
+require_dwarf_operation() {
+    local output="$1"
+    local operation="$2"
+    # grep reads all input; grep -q would exit early and objdump's SIGPIPE
+    # would fail the pipeline under pipefail despite a successful match.
+    if ! objdump --dwarf=info "$output" | grep "$operation" >/dev/null; then
+        printf 'error: %s does not exercise %s\n' "$output" "$operation" >&2
+        exit 1
+    fi
+}
+
 mkdir -p "$output_dir"
 
 build_fixture gcc tests/fixtures/basic.c "$output_dir/basic" \
@@ -87,8 +100,10 @@ build_fixture gcc tests/fixtures/variables-static.c "$output_dir/variables-stati
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang tests/fixtures/variables-static.c "$output_dir/variables-static-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+require_dwarf_operation "$output_dir/variables-static-clang-o2" DW_OP_addrx
 build_fixture gcc tests/fixtures/variables-static.c "$output_dir/variables-static-gcc-nopie" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie
+require_dwarf_operation "$output_dir/variables-static-gcc-nopie" 'DW_OP_addr:'
 build_cpp_fixture g++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture clang++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-clang-o0" \
