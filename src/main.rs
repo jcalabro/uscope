@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
-    BreakpointLocation, BreakpointSpec, ByteOrder, Debugger, DebuggerHandle, Error, ExitStatus,
-    RegisterSnapshot, SourceContext, StateSnapshot, StepKind, StopReason, ThreadId, ThreadState,
-    VirtualAddress,
+    Breakpoint, BreakpointLocation, BreakpointSpec, ByteOrder, Debugger, DebuggerHandle, Error,
+    ExitStatus, RegisterSnapshot, SourceContext, StateSnapshot, StepKind, StopReason, ThreadId,
+    ThreadState, VirtualAddress,
 };
 
 #[derive(Parser)]
@@ -193,15 +193,9 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 |_| BreakpointSpec::Function(argument.to_owned()),
                 |address| BreakpointSpec::Address(VirtualAddress::new(address)),
             );
-            let location = debugger.add_breakpoint(spec).await?;
-            let (space, address) = match location {
-                BreakpointLocation::Image(address) => ("image", address.get()),
-                BreakpointLocation::Virtual(address) => ("virtual", address.get()),
-            };
+            let breakpoint = debugger.add_breakpoint(spec).await?;
 
-            Ok(Control::Continue(format!(
-                "breakpoint set at {space} address {address:#x}"
-            )))
+            Ok(Control::Continue(format_breakpoint(&breakpoint)))
         }
         "run" | "r" => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.run().await?).await,
@@ -459,6 +453,33 @@ fn parse_address(value: &str) -> uscope::Result<u64> {
 
     u64::from_str_radix(value, 16)
         .map_err(|_| Error::InvalidCommand(format!("invalid hexadecimal address: {value}")))
+}
+
+fn format_breakpoint(breakpoint: &Breakpoint) -> String {
+    if let [resolved] = breakpoint.locations.as_ref() {
+        let (space, address) = match resolved.location {
+            BreakpointLocation::Image(address) => ("image", address.get()),
+            BreakpointLocation::Virtual(address) => ("virtual", address.get()),
+        };
+
+        return format!("breakpoint set at {space} address {address:#x}");
+    }
+
+    let mut output = format!(
+        "breakpoint {} set at {} locations",
+        breakpoint.id.get(),
+        breakpoint.locations.len()
+    );
+    for resolved in breakpoint.locations.iter() {
+        let (space, address) = match resolved.location {
+            BreakpointLocation::Image(address) => ("image", address.get()),
+            BreakpointLocation::Virtual(address) => ("virtual", address.get()),
+        };
+        write!(output, "\n  {space} address {address:#x}")
+            .expect("writing to a String cannot fail");
+    }
+
+    output
 }
 
 fn format_stop(reason: StopReason) -> String {

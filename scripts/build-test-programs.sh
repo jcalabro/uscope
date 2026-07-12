@@ -73,3 +73,15 @@ build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-nopie" \
     -O2 -g3 -fomit-frame-pointer -no-pie
 build_fixture clang tests/fixtures/unwind.c "$output_dir/unwind-clang-o2" \
     -O2 -g3 -fomit-frame-pointer -fPIE -pie
+build_fixture gcc tests/fixtures/inline.c "$output_dir/inline-gcc-o1" \
+    -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc tests/fixtures/inline.c "$output_dir/inline-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture clang tests/fixtures/inline.c "$output_dir/inline-clang-o1" \
+    -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture clang tests/fixtures/inline.c "$output_dir/inline-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture gcc tests/fixtures/inline-threads.c "$output_dir/inline-threads-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread
+build_fixture clang tests/fixtures/inline-threads.c "$output_dir/inline-threads-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread

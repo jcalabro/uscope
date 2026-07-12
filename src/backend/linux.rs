@@ -19,9 +19,11 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::ControllerMessage;
 use crate::debug_info::UnwindInfo;
+use crate::model::FrameMetadata;
 use crate::protocol::{
-    DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId, ExitStatus, InferiorState,
-    ProcessId, Reply, Request, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
+    Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
+    ExecutionId, ExitStatus, FramePresentation, InferiorState, PresentedFrame, ProcessId, Reply,
+    Request, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
     ThreadSnapshot, ThreadState as ObservableThreadState,
 };
 use crate::unwind::{
@@ -29,10 +31,10 @@ use crate::unwind::{
     collect_backtrace,
 };
 use crate::{
-    Backtrace, BreakpointLocation, Error, FrameKind, FunctionId, ImageLocation, LoadedModule,
-    ModuleImage, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
-    Result, SourceLocation, StackFrame, ThreadId as DebugThreadId, UnwindTermination,
-    VirtualAddress,
+    Backtrace, BreakpointLocation, CodeInstanceId, CodeInstanceKind, Error, ExecutionLocation,
+    FrameKind, ImageLocation, InlineFrameLookup, LoadedModule, ModuleImage, RegisterDescriptor,
+    RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame,
+    ThreadId as DebugThreadId, UnwindTermination, VirtualAddress,
 };
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
@@ -77,19 +79,33 @@ fn pending_exception_info(pending: PendingSignal) -> ExceptionInfo {
     )
 }
 
-struct SessionLease;
+struct SessionLease {
+    owns_global_lease: bool,
+}
 
 impl SessionLease {
     fn acquire() -> Result<Self> {
         LINUX_SESSION_ACTIVE
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| backend_error(LinuxError::SessionActive))?;
-        Ok(Self)
+        Ok(Self {
+            owns_global_lease: true,
+        })
+    }
+
+    #[cfg(test)]
+    const fn detached() -> Self {
+        Self {
+            owns_global_lease: false,
+        }
     }
 }
 
 impl Drop for SessionLease {
     fn drop(&mut self) {
+        if !self.owns_global_lease {
+            return;
+        }
         assert!(
             LINUX_SESSION_ACTIVE.swap(false, Ordering::AcqRel),
             "Linux tracing session lease was active"
@@ -105,7 +121,7 @@ struct BreakpointSite {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum BreakpointOwner {
-    User,
+    User(BreakpointId),
     Plan(ExecutionId),
 }
 
@@ -184,8 +200,8 @@ enum ClassifiedStop {
 #[derive(Debug, Clone)]
 struct StepStart {
     source: Option<SourceLocation>,
-    function: Option<FunctionId>,
-    stack_pointer: u64,
+    code_instance: Option<CodeInstanceId>,
+    activation: Option<VirtualAddress>,
     plan_addresses: BTreeSet<VirtualAddress>,
 }
 
@@ -224,6 +240,7 @@ struct PublicStop {
     id: StopId,
     triggering_thread: Pid,
     reason: StopReason,
+    presentations: BTreeMap<Pid, FramePresentation>,
 }
 
 struct Inferior {
@@ -267,11 +284,15 @@ enum LinuxError {
     BreakpointSiteMissing(VirtualAddress),
     #[error("breakpoint site {0:?} did not have the expected owner")]
     BreakpointOwnerMissing(VirtualAddress),
+    #[error("logical breakpoint identifiers were exhausted")]
+    BreakpointIdExhausted,
+    #[error("breakpoint installation failed ({cause}) and rollback also failed ({recovery})")]
+    BreakpointInstallRecovery { cause: String, recovery: String },
     #[error("resume failed ({cause}) and recovery also failed ({recovery})")]
     ResumeRecovery { cause: String, recovery: String },
 }
 
-struct Controller {
+struct Controller<P: LinuxTraceOps> {
     _lease: SessionLease,
     executable: Arc<PathBuf>,
     module_image: Arc<ModuleImage>,
@@ -279,12 +300,19 @@ struct Controller {
     messages: mpsc::Receiver<ControllerMessage>,
     message_sender: mpsc::Sender<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
-    ptrace: LinuxPtrace,
+    ptrace: P,
     inferior: Option<Inferior>,
-    pending_breakpoints: Vec<BreakpointLocation>,
+    breakpoints: Vec<Breakpoint>,
+    next_breakpoint_id: u64,
     launch_reply: Option<Reply<ExecutionId>>,
     shutdown_reply: Option<Reply<()>>,
     revision: u64,
+}
+
+struct ControllerChannels {
+    messages: mpsc::Receiver<ControllerMessage>,
+    message_sender: mpsc::Sender<ControllerMessage>,
+    events: broadcast::Sender<DebuggerEvent>,
 }
 
 pub fn spawn_controller(
@@ -305,35 +333,38 @@ pub fn spawn_controller(
                 executable,
                 module_image,
                 unwind_info,
-                messages,
-                message_sender,
-                events,
+                ControllerChannels {
+                    messages,
+                    message_sender,
+                    events,
+                },
+                LinuxPtrace::new(),
             )
             .run();
         })?)
 }
 
-impl Controller {
+impl<P: LinuxTraceOps> Controller<P> {
     fn new(
         lease: SessionLease,
         executable: Arc<PathBuf>,
         module_image: Arc<ModuleImage>,
         unwind_info: Arc<dyn UnwindInfo>,
-        messages: mpsc::Receiver<ControllerMessage>,
-        message_sender: mpsc::Sender<ControllerMessage>,
-        events: broadcast::Sender<DebuggerEvent>,
+        channels: ControllerChannels,
+        ptrace: P,
     ) -> Self {
         Self {
             _lease: lease,
             executable,
             module_image,
             unwind_info,
-            messages,
-            message_sender,
-            events,
-            ptrace: LinuxPtrace::new(),
+            messages: channels.messages,
+            message_sender: channels.message_sender,
+            events: channels.events,
+            ptrace,
             inferior: None,
-            pending_breakpoints: Vec::new(),
+            breakpoints: Vec::new(),
+            next_breakpoint_id: 1,
             launch_reply: None,
             shutdown_reply: None,
             revision: 0,
@@ -365,8 +396,8 @@ impl Controller {
 
     fn handle_request(&mut self, request: Request) -> bool {
         match request {
-            Request::AddBreakpoint { location, reply } => {
-                let _ = reply.send(self.add_breakpoint(location));
+            Request::AddBreakpoint { spec, reply } => {
+                let _ = reply.send(self.add_breakpoint(spec));
             }
             Request::Launch { reply } => self.launch(reply),
             Request::Continue {
@@ -455,7 +486,7 @@ impl Controller {
     }
 }
 
-impl Controller {
+impl<P: LinuxTraceOps> Controller<P> {
     fn handle_wait(&mut self, status: WaitStatus) -> bool {
         if self.shutdown_reply.is_some() {
             return self.handle_shutdown_wait(status);
@@ -531,28 +562,82 @@ impl Controller {
         }
     }
 
-    fn add_breakpoint(&mut self, location: BreakpointLocation) -> Result<()> {
-        if self.pending_breakpoints.contains(&location) {
-            return Ok(());
+    fn add_breakpoint(&mut self, spec: BreakpointSpec) -> Result<Breakpoint> {
+        if let Some(existing) = self
+            .breakpoints
+            .iter()
+            .find(|breakpoint| breakpoint.spec == spec)
+        {
+            return Ok(existing.clone());
         }
+
+        let id = BreakpointId::new(self.next_breakpoint_id);
+        let next_id = self
+            .next_breakpoint_id
+            .checked_add(1)
+            .ok_or_else(|| backend_error(LinuxError::BreakpointIdExhausted))?;
+        let breakpoint = self.resolve_breakpoint(id, spec)?;
 
         if let Some(inferior) = self.inferior.as_mut() {
             validate_public_stop(inferior, inferior.public_stop.as_ref().map(|stop| stop.id))?;
-            let address = runtime_breakpoint_address(inferior, location)?;
-            self.ptrace.install_breakpoint(
-                inferior.tgid,
-                &mut inferior.breakpoints,
-                address,
-                BreakpointOwner::User,
-            )?;
+            install_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
         }
-        self.pending_breakpoints.push(location);
 
+        self.next_breakpoint_id = next_id;
+        self.breakpoints.push(breakpoint.clone());
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::BreakpointsChanged {
             revision: self.revision,
         });
-        Ok(())
+
+        Ok(breakpoint)
+    }
+
+    fn resolve_breakpoint(&self, id: BreakpointId, spec: BreakpointSpec) -> Result<Breakpoint> {
+        let locations: Arc<[ResolvedBreakpointLocation]> = match &spec {
+            BreakpointSpec::Address(address) => Arc::from([ResolvedBreakpointLocation {
+                location: BreakpointLocation::Virtual(*address),
+                code_instances: Arc::from([]),
+            }]),
+            BreakpointSpec::Function(name) => {
+                let function = self.module_image.function_named(name)?;
+                let instances = self
+                    .module_image
+                    .instances_for_function(function.id)
+                    .collect::<Vec<_>>();
+                if instances.is_empty()
+                    || instances
+                        .iter()
+                        .any(|instance| instance.breakpoint_entry.is_none())
+                {
+                    return Err(Error::LocationUnavailable);
+                }
+
+                let mut by_address = BTreeMap::<_, Vec<_>>::new();
+                for instance in instances {
+                    let entry = instance.breakpoint_entry.expect("entries were validated");
+                    by_address
+                        .entry(entry.address)
+                        .or_default()
+                        .push(instance.id);
+                }
+
+                by_address
+                    .into_iter()
+                    .map(|(address, code_instances)| ResolvedBreakpointLocation {
+                        location: BreakpointLocation::Image(address),
+                        code_instances: code_instances.into(),
+                    })
+                    .collect::<Vec<_>>()
+                    .into()
+            }
+        };
+
+        Ok(Breakpoint {
+            id,
+            spec,
+            locations,
+        })
     }
 
     fn launch(&mut self, reply: Reply<ExecutionId>) {
@@ -563,11 +648,11 @@ impl Controller {
 
         match self.ptrace.spawn(&self.executable) {
             Ok(pid) => {
-                let waiter = match spawn_waiter(self.message_sender.clone()) {
+                let waiter = match self.ptrace.spawn_waiter(self.message_sender.clone()) {
                     Ok(waiter) => waiter,
                     Err(error) => {
-                        let _ = signal::kill(pid, NixSignal::SIGKILL);
-                        let _ = waitpid(pid, Some(WaitPidFlag::__WALL));
+                        let _ = self.ptrace.kill(pid, NixSignal::SIGKILL);
+                        let _ = self.ptrace.reap(pid);
                         let _ = reply.send(Err(error));
                         return;
                     }
@@ -616,18 +701,12 @@ impl Controller {
 
     fn handle_initial_stop(&mut self, pid: Pid) -> Result<()> {
         self.ptrace.set_options(pid)?;
-        let load_bias = load_bias(pid, &self.executable)?;
+        let load_bias = self.ptrace.load_bias(pid, &self.executable)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
 
-        for &location in &self.pending_breakpoints {
-            let address = runtime_breakpoint_address(inferior, location)?;
-            self.ptrace.install_breakpoint(
-                pid,
-                &mut inferior.breakpoints,
-                address,
-                BreakpointOwner::User,
-            )?;
+        for breakpoint in &self.breakpoints {
+            install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
         }
 
         self.ptrace.continue_execution(pid, None)?;
@@ -675,6 +754,17 @@ impl Controller {
         reply: Reply<ExecutionId>,
     ) {
         let scope = ResumeScope::Thread(debug_thread_id(pid));
+        match self.try_virtual_step(process_id, stop_id, pid, kind) {
+            Ok(Some(execution)) => {
+                let _ = reply.send(Ok(execution));
+                return;
+            }
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+            Ok(None) => {}
+        }
         let result = self.step_start(pid, kind).and_then(|start| {
             self.begin_execution(
                 process_id,
@@ -689,6 +779,83 @@ impl Controller {
             )
         });
         self.reply_execution(result, scope, reply);
+    }
+
+    fn try_virtual_step(
+        &mut self,
+        requested_process: ProcessId,
+        stop_id: StopId,
+        pid: Pid,
+        kind: StepKind,
+    ) -> Result<Option<ExecutionId>> {
+        if kind != StepKind::IntoSource {
+            return Ok(None);
+        }
+
+        let (process_id, execution_id, next_stop_id, presentation) = {
+            let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+            validate_process(inferior, requested_process)?;
+            validate_public_stop(inferior, Some(stop_id))?;
+            validate_stopped_thread(inferior, pid)?;
+            let stop = inferior
+                .public_stop
+                .as_ref()
+                .expect("public stop was validated");
+            let Some(current) = stop.presentations.get(&pid) else {
+                return Ok(None);
+            };
+            if current.hidden_inline_frames == 0
+                || matches!(current.frame, PresentedFrame::Ambiguous(_))
+            {
+                return Ok(None);
+            }
+
+            let image_address = inferior.loaded_module.image_address(current.instruction)?;
+            let location = self.module_image.locate(image_address);
+            let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
+                return Err(Error::AmbiguousInlineFrame);
+            };
+            let visible = presentation_visible_count(&location, current)?;
+            let presentation =
+                make_presentation(current.instruction, chain.instances.as_ref(), visible + 1)?;
+
+            (
+                process_id(inferior.tgid),
+                ExecutionId::new(inferior.next_execution.wrapping_add(1)),
+                StopId::new(inferior.next_stop.wrapping_add(1)),
+                presentation,
+            )
+        };
+
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        inferior.next_execution = execution_id.get();
+        inferior.next_stop = next_stop_id.get();
+        let stop = inferior
+            .public_stop
+            .as_mut()
+            .expect("public stop was validated");
+        stop.id = next_stop_id;
+        stop.reason = StopReason::Step { kind };
+        stop.presentations.insert(pid, presentation);
+        inferior
+            .threads
+            .get_mut(&pid)
+            .expect("stopped thread exists")
+            .reason = Some(StopReason::Step { kind });
+        inferior.selected_thread = Some(pid);
+
+        self.bump_revision();
+        let _ = self.events.send(DebuggerEvent::InferiorStopped {
+            revision: self.revision,
+            process_id,
+            execution_id: Some(execution_id),
+            stop_id: next_stop_id,
+            thread_id: debug_thread_id(pid),
+            all_threads_stopped: true,
+            reason: StopReason::Step { kind },
+        });
+
+        Ok(Some(execution_id))
     }
 
     fn pause(&mut self, process_id: ProcessId, reply: Reply<ExecutionId>) {
@@ -735,7 +902,7 @@ impl Controller {
                         if let Err(recovery) =
                             remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)
                         {
-                            let _ = signal::kill(inferior.tgid, NixSignal::SIGKILL);
+                            let _ = self.ptrace.kill(inferior.tgid, NixSignal::SIGKILL);
                             return Err(backend_error(LinuxError::ResumeRecovery {
                                 cause: error.to_string(),
                                 recovery: recovery.to_string(),
@@ -854,7 +1021,7 @@ impl Controller {
     }
 }
 
-impl Controller {
+impl<P: LinuxTraceOps> Controller<P> {
     fn advance_execution(&mut self) -> Result<()> {
         if !self
             .inferior
@@ -1147,7 +1314,11 @@ impl Controller {
                 .inferior
                 .as_ref()
                 .and_then(|inferior| inferior.breakpoints.get(&address))
-                .is_some_and(|site| site.owners.contains(&BreakpointOwner::User));
+                .is_some_and(|site| {
+                    site.owners
+                        .iter()
+                        .any(|owner| matches!(owner, BreakpointOwner::User(_)))
+                });
             if !has_user_owner {
                 self.inferior
                     .as_mut()
@@ -1320,7 +1491,7 @@ impl Controller {
     }
 }
 
-impl Controller {
+impl<P: LinuxTraceOps> Controller<P> {
     fn handle_thread_start(&mut self, pid: Pid) -> Result<()> {
         self.ptrace.set_options(pid)?;
         let (process_id, barrier_active, should_resume) = {
@@ -1412,22 +1583,51 @@ impl Controller {
                 _ => None,
             })
             .expect("source step has a starting state");
-        let location = self.image_location(VirtualAddress::new(registers.rip));
-        let source = location
-            .as_ref()
-            .and_then(|location| location.source.clone());
-        let function = location
-            .as_ref()
-            .and_then(|location| location.function.as_ref())
-            .map(|function| function.id);
-        let changed = source.is_some() && source != start.source;
 
-        Ok(match kind {
-            StepKind::Instruction => true,
-            StepKind::IntoSource => changed,
-            StepKind::OverSource => changed && registers.rsp >= start.stack_pointer,
-            StepKind::Out => registers.rsp > start.stack_pointer && function != start.function,
-        })
+        match kind {
+            StepKind::Instruction => Ok(true),
+            StepKind::IntoSource => {
+                let location = self.image_location(VirtualAddress::new(registers.rip));
+                let presentation = self.presentation_for_thread(
+                    pid,
+                    &StopReason::Step {
+                        kind: StepKind::IntoSource,
+                    },
+                )?;
+                let current_instance = location
+                    .as_ref()
+                    .map(|location| selected_code_instance(location, &presentation))
+                    .transpose()?
+                    .flatten();
+                let source = location.as_ref().and_then(|location| {
+                    current_instance.and_then(|instance| {
+                        source_for_code_instance(&self.module_image, location, instance)
+                    })
+                });
+                let activation = self.top_activation(pid, &registers)?;
+
+                Ok(activation != start.activation.unwrap_or(activation)
+                    || current_instance != start.code_instance
+                    || source_line_changed(start.source.as_ref(), source.as_ref()))
+            }
+            StepKind::OverSource | StepKind::Out => {
+                let Some(activation) = start.activation else {
+                    return Err(Error::LocationUnavailable);
+                };
+                let Some(code_instance) = start.code_instance else {
+                    return Err(Error::LocationUnavailable);
+                };
+                let Some(location) = self.location_for_activation(pid, &registers, activation)?
+                else {
+                    return Ok(true);
+                };
+                let source = source_for_code_instance(&self.module_image, &location, code_instance);
+
+                Ok(source.is_none()
+                    || (kind == StepKind::OverSource
+                        && source_line_changed(start.source.as_ref(), source.as_ref())))
+            }
+        }
     }
 
     fn step_start(&self, pid: Pid, kind: StepKind) -> Result<StepStart> {
@@ -1438,22 +1638,40 @@ impl Controller {
         }
         let registers = self.ptrace.registers(pid)?;
         let location = self.image_location(VirtualAddress::new(registers.rip));
-        let source = location
+        let presentation = self.presentation_for_stopped_thread(pid)?;
+        let code_instance = location
             .as_ref()
-            .and_then(|location| location.source.clone());
-        let function = location
-            .as_ref()
-            .and_then(|location| location.function.as_ref());
+            .map(|location| selected_code_instance(location, &presentation))
+            .transpose()?
+            .flatten();
+        let source = location.as_ref().and_then(|location| {
+            code_instance.and_then(|instance| {
+                source_for_code_instance(&self.module_image, location, instance)
+            })
+        });
+        let activation = (kind != StepKind::Instruction)
+            .then(|| self.top_activation(pid, &registers))
+            .transpose()?;
         let mut plan_addresses = BTreeSet::new();
 
-        if kind == StepKind::Out {
+        let selected_is_inline = code_instance
+            .and_then(|instance| self.module_image.code_instance(instance))
+            .is_some_and(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }));
+        if kind == StepKind::Out && !selected_is_inline {
             plan_addresses.insert(self.caller_address(pid, &registers)?);
         } else if kind == StepKind::OverSource
-            && let (Some(source), Some(function)) = (&source, function)
+            && let (Some(source), Some(instance_id)) = (&source, code_instance)
+            && let Some(instance) = self.module_image.code_instance(instance_id)
         {
             let return_address = self.caller_address(pid, &registers)?;
             for line in self.module_image.line_entries() {
-                if function.contains(line.range.start) && line.location != *source {
+                let location = self.module_image.locate(line.range.start);
+                if instance.contains(line.range.start)
+                    && source_for_code_instance(&self.module_image, &location, instance_id)
+                        .is_some_and(|candidate| {
+                            source_line_changed(Some(source), Some(&candidate))
+                        })
+                {
                     plan_addresses
                         .insert(inferior.loaded_module.virtual_address(line.range.start)?);
                 }
@@ -1463,10 +1681,88 @@ impl Controller {
 
         Ok(StepStart {
             source,
-            function: function.map(|function| function.id),
-            stack_pointer: registers.rsp,
+            code_instance,
+            activation,
             plan_addresses,
         })
+    }
+
+    fn top_activation(&self, pid: Pid, native: &libc::user_regs_struct) -> Result<VirtualAddress> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let current = FrameContext {
+            instruction: VirtualAddress::new(native.rip),
+            cfa: None,
+            signal_frame: false,
+        };
+        let mut provider = DwarfCallerProvider {
+            unwind_info: self.unwind_info.as_ref(),
+            loaded_module: inferior.loaded_module,
+            module_image: &self.module_image,
+            registers: x86_64_registers(native),
+            memory: PtraceMemory {
+                ptrace: &self.ptrace,
+                pid,
+            },
+            first: true,
+        };
+
+        match provider.caller(&current) {
+            CallerResult::Caller(caller) => caller.cfa.ok_or(Error::LocationUnavailable),
+            CallerResult::Finished(reason) => {
+                Err(backend_error(LinuxError::CallerUnavailable(reason)))
+            }
+        }
+    }
+
+    fn location_for_activation(
+        &self,
+        pid: Pid,
+        native: &libc::user_regs_struct,
+        activation: VirtualAddress,
+    ) -> Result<Option<ImageLocation>> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let mut context = FrameContext {
+            instruction: VirtualAddress::new(native.rip),
+            cfa: None,
+            signal_frame: false,
+        };
+        let mut provider = DwarfCallerProvider {
+            unwind_info: self.unwind_info.as_ref(),
+            loaded_module: inferior.loaded_module,
+            module_image: &self.module_image,
+            registers: x86_64_registers(native),
+            memory: PtraceMemory {
+                ptrace: &self.ptrace,
+                pid,
+            },
+            first: true,
+        };
+
+        for level in 0..DEFAULT_MAX_FRAMES {
+            let caller = match provider.caller(&context) {
+                CallerResult::Caller(caller) => caller,
+                CallerResult::Finished(reason) => {
+                    return Err(backend_error(LinuxError::CallerUnavailable(reason)));
+                }
+            };
+            if caller.cfa == Some(activation) {
+                let level = u32::try_from(level).expect("frame limit fits u32");
+                let location = frame_lookup_address(level, &context)
+                    .and_then(|address| inferior.loaded_module.image_address(address).ok())
+                    .filter(|address| self.module_image.contains_address(*address))
+                    .map(|address| self.module_image.locate(address));
+
+                return Ok(location);
+            }
+            // This backend only supports x86-64's downward-growing ordinary stack. Once
+            // unwinding passes the starting CFA, that activation has returned.
+            if caller.cfa.is_some_and(|cfa| cfa > activation) {
+                return Ok(None);
+            }
+            context = caller;
+        }
+
+        Ok(None)
     }
 
     fn caller_address(&self, pid: Pid, native: &libc::user_regs_struct) -> Result<VirtualAddress> {
@@ -1644,6 +1940,13 @@ impl Controller {
         {
             self.cleanup_plan_breakpoints(execution)?;
         }
+        let (triggering_thread, reason) = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.barrier.as_ref())
+            .map(|barrier| (barrier.triggering_thread, barrier.reason.clone()))
+            .expect("ready barrier exists");
+        let presentation = self.presentation_for_thread(triggering_thread, &reason)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         for thread in inferior.threads.values_mut() {
             thread.expected = ExpectedStop::None;
@@ -1655,6 +1958,7 @@ impl Controller {
             id: stop_id,
             triggering_thread: barrier.triggering_thread,
             reason: barrier.reason.clone(),
+            presentations: BTreeMap::from([(triggering_thread, presentation)]),
         });
         inferior.selected_thread = Some(barrier.triggering_thread);
         inferior.active = None;
@@ -1713,10 +2017,10 @@ impl Controller {
             i32::try_from(self.ptrace.event_message(parent)?)
                 .map_err(|_| Error::AddressOverflow)?,
         );
-        let child_tgid = thread_group_id(child)?;
+        let child_tgid = self.ptrace.thread_group_id(child)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         if child_tgid != inferior.tgid {
-            let _ = signal::kill(child, NixSignal::SIGKILL);
+            let _ = self.ptrace.kill(child, NixSignal::SIGKILL);
             return self.begin_visible_stop(
                 parent,
                 StopReason::Unclassifiable {
@@ -1806,7 +2110,7 @@ impl Controller {
     }
 }
 
-impl Controller {
+impl<P: LinuxTraceOps> Controller<P> {
     fn handle_terminal(&mut self, pid: Pid, status: ExitStatus) -> Result<()> {
         let (process_id, execution, thread_scoped, barrier_active, remaining) = {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
@@ -1923,16 +2227,154 @@ impl Controller {
             .write_word(pid, address.get(), u64::from_ne_bytes(physical_bytes))
     }
 
-    fn stopped_location(
+    fn presentation_for_stopped_thread(&self, pid: Pid) -> Result<FramePresentation> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, inferior.public_stop.as_ref().map(|stop| stop.id))?;
+        validate_stopped_thread(inferior, pid)?;
+        let stop = inferior
+            .public_stop
+            .as_ref()
+            .expect("public stop was validated");
+
+        stop.presentations.get(&pid).cloned().map_or_else(
+            || {
+                let reason = inferior
+                    .threads
+                    .get(&pid)
+                    .and_then(|thread| thread.reason.as_ref())
+                    .unwrap_or(&stop.reason);
+                self.presentation_for_thread(pid, reason)
+            },
+            Ok,
+        )
+    }
+
+    fn presentation_for_thread(&self, pid: Pid, reason: &StopReason) -> Result<FramePresentation> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let registers = self.ptrace.registers(pid)?;
+        let instruction = VirtualAddress::new(registers.rip);
+        let image_address = inferior.loaded_module.image_address(instruction)?;
+        let location = self.module_image.locate(image_address);
+
+        let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
+            return Ok(match &location.inline_frames {
+                InlineFrameLookup::Ambiguous(chains) => FramePresentation {
+                    instruction,
+                    frame: PresentedFrame::Ambiguous(
+                        chains
+                            .iter()
+                            .flat_map(|chain| chain.instances.iter().copied())
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                            .into(),
+                    ),
+                    hidden_inline_frames: 0,
+                },
+                InlineFrameLookup::None => FramePresentation {
+                    instruction,
+                    frame: PresentedFrame::Physical,
+                    hidden_inline_frames: 0,
+                },
+                InlineFrameLookup::Unique(_) => unreachable!("matched above"),
+            });
+        };
+
+        let breakpoint_targets = match reason {
+            StopReason::Breakpoint { address } => {
+                self.breakpoint_code_instances(inferior, *address)?
+            }
+            _ => BTreeSet::new(),
+        };
+        if !breakpoint_targets.is_empty() {
+            let active = location
+                .physical_instance
+                .into_iter()
+                .chain(chain.instances.iter().copied())
+                .filter(|instance| breakpoint_targets.contains(instance))
+                .collect::<Vec<_>>();
+
+            if active.len() > 1 {
+                return Ok(FramePresentation {
+                    instruction,
+                    frame: PresentedFrame::Ambiguous(active.into()),
+                    hidden_inline_frames: 0,
+                });
+            }
+            if let Some(target) = active.first().copied() {
+                let visible = chain
+                    .instances
+                    .iter()
+                    .position(|instance| *instance == target)
+                    .map_or(0, |index| index + 1);
+
+                return make_presentation(instruction, chain.instances.as_ref(), visible);
+            }
+        }
+
+        let visible = chain
+            .instances
+            .iter()
+            .position(|instance| {
+                self.module_image
+                    .code_instance(*instance)
+                    .is_some_and(|instance| {
+                        instance
+                            .ranges
+                            .iter()
+                            .any(|range| range.start == image_address)
+                    })
+            })
+            .unwrap_or(chain.instances.len());
+
+        make_presentation(instruction, chain.instances.as_ref(), visible)
+    }
+
+    fn breakpoint_code_instances(
         &self,
-        stop_id: StopId,
-        pid: Pid,
-    ) -> Result<(LoadedModule, VirtualAddress)> {
+        inferior: &Inferior,
+        address: VirtualAddress,
+    ) -> Result<BTreeSet<CodeInstanceId>> {
+        let Some(site) = inferior.breakpoints.get(&address) else {
+            return Ok(BTreeSet::new());
+        };
+        let mut instances = BTreeSet::new();
+
+        for id in site.owners.iter().filter_map(|owner| match owner {
+            BreakpointOwner::User(id) => Some(*id),
+            BreakpointOwner::Plan(_) => None,
+        }) {
+            let breakpoint = self
+                .breakpoints
+                .iter()
+                .find(|breakpoint| breakpoint.id == id)
+                .expect("physical user owner references a logical breakpoint");
+            for resolved in breakpoint.locations.iter() {
+                if runtime_breakpoint_address(inferior, resolved.location)? == address {
+                    instances.extend(resolved.code_instances.iter().copied());
+                }
+            }
+        }
+
+        Ok(instances)
+    }
+
+    fn stopped_location(&self, stop_id: StopId, pid: Pid) -> Result<ExecutionLocation> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
         let registers = self.ptrace.registers(pid)?;
-        Ok((inferior.loaded_module, VirtualAddress::new(registers.rip)))
+        let address = VirtualAddress::new(registers.rip);
+        let image_address = inferior.loaded_module.image_address(address)?;
+        let mut image = self.module_image.locate(image_address);
+        let presentation = self.presentation_for_stopped_thread(pid)?;
+        apply_presentation(&self.module_image, &mut image, &presentation)?;
+
+        Ok(ExecutionLocation {
+            module: inferior.loaded_module.id,
+            address,
+            image,
+        })
     }
 
     fn loaded_module(&self) -> Result<LoadedModule> {
@@ -1950,7 +2392,8 @@ impl Controller {
                 stop_id: None,
                 selected_thread: None,
                 threads: Arc::from([]),
-                breakpoints: self.pending_breakpoints.clone().into(),
+                presentation: None,
+                breakpoints: self.breakpoints.clone().into(),
             };
         };
         let process_id = process_id(inferior.tgid);
@@ -1989,7 +2432,14 @@ impl Controller {
             stop_id: inferior.public_stop.as_ref().map(|stop| stop.id),
             selected_thread: inferior.selected_thread.map(debug_thread_id),
             threads,
-            breakpoints: self.pending_breakpoints.clone().into(),
+            presentation: inferior.selected_thread.and_then(|pid| {
+                inferior
+                    .public_stop
+                    .as_ref()
+                    .and_then(|stop| stop.presentations.get(&pid))
+                    .cloned()
+            }),
+            breakpoints: self.breakpoints.clone().into(),
         }
     }
 
@@ -1997,6 +2447,7 @@ impl Controller {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
+        let presentation = self.presentation_for_stopped_thread(pid)?;
 
         let native = self.ptrace.registers(pid)?;
         let registers = x86_64_registers(&native);
@@ -2019,14 +2470,14 @@ impl Controller {
         let module_image = Arc::clone(&self.module_image);
         let loaded_module = inferior.loaded_module;
 
-        Ok(collect_backtrace(
+        let physical = collect_backtrace(
             debug_thread_id(pid),
             initial,
             &mut provider,
             |level, context| {
-                let location = loaded_module
-                    .image_address(context.instruction)
-                    .ok()
+                let lookup = frame_lookup_address(level, context);
+                let location = lookup
+                    .and_then(|lookup| loaded_module.image_address(lookup).ok())
                     .filter(|address| module_image.contains_address(*address))
                     .map(|address| module_image.locate(address));
                 StackFrame::new(
@@ -2042,7 +2493,14 @@ impl Controller {
                 )
             },
             DEFAULT_MAX_FRAMES,
-        ))
+        );
+
+        expand_inline_backtrace(
+            physical,
+            &self.module_image,
+            inferior.loaded_module,
+            &presentation,
+        )
     }
 
     fn registers(&self, stop_id: StopId, pid: Pid) -> Result<RegisterSnapshot> {
@@ -2059,9 +2517,17 @@ impl Controller {
     }
 
     fn select_thread(&mut self, stop_id: StopId, pid: Pid) -> Result<()> {
-        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
+        let presentation = self.presentation_for_stopped_thread(pid)?;
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        inferior
+            .public_stop
+            .as_mut()
+            .expect("public stop was validated")
+            .presentations
+            .insert(pid, presentation);
         inferior.selected_thread = Some(pid);
         self.bump_revision();
         Ok(())
@@ -2115,10 +2581,7 @@ impl Controller {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
-        match signal::kill(inferior.tgid, NixSignal::SIGKILL) {
-            Ok(()) | Err(Errno::ESRCH) => Ok(()),
-            Err(error) => Err(backend_error(LinuxError::System(error))),
-        }
+        self.ptrace.kill(inferior.tgid, NixSignal::SIGKILL)
     }
 
     fn fail_inferior(&mut self, error: Error) {
@@ -2136,8 +2599,262 @@ impl Controller {
     }
 }
 
+fn frame_lookup_address(level: u32, context: &FrameContext) -> Option<VirtualAddress> {
+    if level == 0 || context.signal_frame {
+        Some(context.instruction)
+    } else {
+        context
+            .instruction
+            .get()
+            .checked_sub(1)
+            .map(VirtualAddress::new)
+    }
+}
+
+fn make_presentation(
+    instruction: VirtualAddress,
+    inline_chain: &[CodeInstanceId],
+    visible: usize,
+) -> Result<FramePresentation> {
+    let hidden = inline_chain
+        .len()
+        .checked_sub(visible)
+        .ok_or(Error::LocationUnavailable)?;
+    let hidden_inline_frames = u32::try_from(hidden).map_err(|_| Error::LocationUnavailable)?;
+    let frame = visible
+        .checked_sub(1)
+        .map_or(PresentedFrame::Physical, |index| {
+            PresentedFrame::Inline(inline_chain[index])
+        });
+
+    Ok(FramePresentation {
+        instruction,
+        frame,
+        hidden_inline_frames,
+    })
+}
+
+fn presentation_visible_count(
+    location: &ImageLocation,
+    presentation: &FramePresentation,
+) -> Result<usize> {
+    if matches!(presentation.frame, PresentedFrame::Ambiguous(_)) {
+        return Err(Error::AmbiguousInlineFrame);
+    }
+    let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
+        return match presentation.frame {
+            PresentedFrame::Physical => Ok(0),
+            PresentedFrame::Inline(_) | PresentedFrame::Ambiguous(_) => {
+                Err(Error::LocationUnavailable)
+            }
+        };
+    };
+    let visible = match presentation.frame {
+        PresentedFrame::Physical => 0,
+        PresentedFrame::Inline(selected) => chain
+            .instances
+            .iter()
+            .position(|instance| *instance == selected)
+            .map(|index| index + 1)
+            .ok_or(Error::LocationUnavailable)?,
+        PresentedFrame::Ambiguous(_) => unreachable!("rejected above"),
+    };
+    let hidden =
+        u32::try_from(chain.instances.len() - visible).map_err(|_| Error::LocationUnavailable)?;
+    if hidden != presentation.hidden_inline_frames {
+        return Err(Error::LocationUnavailable);
+    }
+
+    Ok(visible)
+}
+
+fn apply_presentation(
+    module_image: &ModuleImage,
+    location: &mut ImageLocation,
+    presentation: &FramePresentation,
+) -> Result<()> {
+    let visible = presentation_visible_count(location, presentation)?;
+    let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
+        return Ok(());
+    };
+    let selected_instance = visible
+        .checked_sub(1)
+        .and_then(|index| chain.instances.get(index).copied())
+        .or(location.physical_instance);
+    location.function = selected_instance
+        .and_then(|instance| module_image.code_instance(instance))
+        .and_then(|instance| module_image.function(instance.function))
+        .cloned();
+    location.source = if visible < chain.instances.len() {
+        chain
+            .instances
+            .get(visible)
+            .and_then(|instance| module_image.code_instance(*instance))
+            .and_then(|instance| match &instance.kind {
+                CodeInstanceKind::Inline { call_site } => call_site.clone(),
+                CodeInstanceKind::OutOfLine => None,
+            })
+    } else {
+        location.source.clone()
+    };
+
+    Ok(())
+}
+
+fn selected_code_instance(
+    location: &ImageLocation,
+    presentation: &FramePresentation,
+) -> Result<Option<CodeInstanceId>> {
+    presentation_visible_count(location, presentation)?;
+
+    Ok(match presentation.frame {
+        PresentedFrame::Physical => location.physical_instance,
+        PresentedFrame::Inline(instance) => Some(instance),
+        PresentedFrame::Ambiguous(_) => return Err(Error::AmbiguousInlineFrame),
+    })
+}
+
+fn source_for_code_instance(
+    module_image: &ModuleImage,
+    location: &ImageLocation,
+    selected: CodeInstanceId,
+) -> Option<SourceLocation> {
+    let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
+        return (location.physical_instance == Some(selected))
+            .then(|| location.source.clone())
+            .flatten();
+    };
+    let visible = if location.physical_instance == Some(selected) {
+        0
+    } else {
+        chain
+            .instances
+            .iter()
+            .position(|instance| *instance == selected)?
+            + 1
+    };
+
+    if visible < chain.instances.len() {
+        chain
+            .instances
+            .get(visible)
+            .and_then(|instance| module_image.code_instance(*instance))
+            .and_then(|instance| match &instance.kind {
+                CodeInstanceKind::Inline { call_site } => call_site.clone(),
+                CodeInstanceKind::OutOfLine => None,
+            })
+    } else {
+        location.source.clone()
+    }
+}
+
+fn source_line_changed(start: Option<&SourceLocation>, current: Option<&SourceLocation>) -> bool {
+    current.is_some_and(|current| {
+        start.is_none_or(|start| start.file != current.file || start.line != current.line)
+    })
+}
+
+fn expand_inline_backtrace(
+    physical: Backtrace,
+    module_image: &ModuleImage,
+    loaded_module: LoadedModule,
+    presentation: &FramePresentation,
+) -> Result<Backtrace> {
+    let mut frames = Vec::new();
+
+    for physical_frame in physical.frames.iter() {
+        let context = FrameContext {
+            instruction: physical_frame.instruction,
+            cfa: None,
+            signal_frame: physical_frame.kind == FrameKind::Signal,
+        };
+        let location = frame_lookup_address(physical_frame.level, &context)
+            .and_then(|address| loaded_module.image_address(address).ok())
+            .filter(|address| module_image.contains_address(*address))
+            .map(|address| module_image.locate(address));
+        let module = location.as_ref().map(|_| loaded_module.id);
+        let physical_source = if let Some(location) = &location
+            && let InlineFrameLookup::Unique(chain) = &location.inline_frames
+        {
+            let visible = if physical_frame.level == 0 {
+                presentation_visible_count(location, presentation)?
+            } else {
+                chain.instances.len()
+            };
+            let mut source = if visible < chain.instances.len() {
+                chain
+                    .instances
+                    .get(visible)
+                    .and_then(|instance| module_image.code_instance(*instance))
+                    .and_then(|instance| match &instance.kind {
+                        CodeInstanceKind::Inline { call_site } => call_site.clone(),
+                        CodeInstanceKind::OutOfLine => None,
+                    })
+            } else {
+                location.source.clone()
+            };
+
+            for &instance_id in chain.instances[..visible].iter().rev() {
+                let instance = module_image
+                    .code_instance(instance_id)
+                    .expect("inline chain references a known instance");
+                let function = module_image.function(instance.function).cloned();
+                let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+
+                frames.push(StackFrame::from_parts(
+                    level,
+                    FrameKind::Inline,
+                    module,
+                    physical_frame.instruction,
+                    FrameMetadata {
+                        code_instance: Some(instance.id),
+                        function,
+                        source,
+                    },
+                ));
+                source = match &instance.kind {
+                    CodeInstanceKind::Inline { call_site } => call_site.clone(),
+                    CodeInstanceKind::OutOfLine => None,
+                };
+            }
+            source
+        } else {
+            location
+                .as_ref()
+                .and_then(|location| location.source.clone())
+        };
+
+        let physical_instance = location
+            .as_ref()
+            .and_then(|location| location.physical_instance)
+            .and_then(|instance| module_image.code_instance(instance));
+        let function = physical_instance
+            .and_then(|instance| module_image.function(instance.function))
+            .cloned();
+        let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+
+        frames.push(StackFrame::from_parts(
+            level,
+            physical_frame.kind,
+            module,
+            physical_frame.instruction,
+            FrameMetadata {
+                code_instance: physical_instance.map(|instance| instance.id),
+                function,
+                source: physical_source,
+            },
+        ));
+    }
+
+    Ok(Backtrace {
+        thread: physical.thread,
+        frames: frames.into(),
+        termination: physical.termination,
+    })
+}
+
 struct PtraceMemory<'a> {
-    ptrace: &'a LinuxPtrace,
+    ptrace: &'a dyn LinuxTraceOps,
     pid: Pid,
 }
 
@@ -2294,6 +3011,45 @@ fn x86_64_register_snapshot(
     }
 }
 
+trait LinuxTraceOps {
+    fn spawn(&self, executable: &Path) -> Result<Pid>;
+    fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<JoinHandle<()>>;
+    fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()>;
+    fn reap(&self, pid: Pid) -> Result<()>;
+    fn thread_group_id(&self, pid: Pid) -> Result<Pid>;
+    fn load_bias(&self, pid: Pid, executable: &Path) -> Result<u64>;
+    fn read_word(&self, pid: Pid, address: u64) -> Result<u64>;
+    fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()>;
+    fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
+    fn continue_during_shutdown(&self, pid: Pid) -> Result<()>;
+    fn step(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
+    fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct>;
+    fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()>;
+    fn set_options(&self, pid: Pid) -> Result<()>;
+    fn event_message(&self, pid: Pid) -> Result<libc::c_long>;
+    fn signal_metadata(&self, pid: Pid) -> std::result::Result<SignalMetadata, Errno>;
+    fn request_stop(&self, process: Pid, thread: Pid) -> Result<()>;
+    fn install_breakpoint(
+        &self,
+        pid: Pid,
+        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+        address: VirtualAddress,
+        owner: BreakpointOwner,
+    ) -> Result<()>;
+    fn remove_breakpoint(
+        &self,
+        pid: Pid,
+        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+        address: VirtualAddress,
+    ) -> Result<()>;
+    fn reinstall_breakpoint(
+        &self,
+        pid: Pid,
+        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+        address: VirtualAddress,
+    ) -> Result<()>;
+}
+
 struct LinuxPtrace {
     affinity: ThreadAffinity,
     not_send_or_sync: PhantomData<Rc<()>>,
@@ -2309,6 +3065,38 @@ impl LinuxPtrace {
 
     fn assert_owner_thread(&self) {
         self.affinity.assert_owner();
+    }
+}
+
+impl LinuxTraceOps for LinuxPtrace {
+    fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<JoinHandle<()>> {
+        self.assert_owner_thread();
+        spawn_waiter(messages)
+    }
+
+    fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
+        self.assert_owner_thread();
+        match signal::kill(pid, signal) {
+            Ok(()) | Err(Errno::ESRCH) => Ok(()),
+            Err(error) => Err(backend_error(LinuxError::System(error))),
+        }
+    }
+
+    fn reap(&self, pid: Pid) -> Result<()> {
+        self.assert_owner_thread();
+        waitpid(pid, Some(WaitPidFlag::__WALL))
+            .map(|_| ())
+            .map_err(|error| backend_error(LinuxError::System(error)))
+    }
+
+    fn thread_group_id(&self, pid: Pid) -> Result<Pid> {
+        self.assert_owner_thread();
+        thread_group_id(pid)
+    }
+
+    fn load_bias(&self, pid: Pid, executable: &Path) -> Result<u64> {
+        self.assert_owner_thread();
+        load_bias(pid, executable)
     }
 
     fn spawn(&self, executable: &Path) -> Result<Pid> {
@@ -2581,6 +3369,42 @@ fn runtime_breakpoint_address(
     }
 }
 
+fn install_logical_breakpoint(
+    ptrace: &dyn LinuxTraceOps,
+    inferior: &mut Inferior,
+    breakpoint: &Breakpoint,
+) -> Result<()> {
+    let owner = BreakpointOwner::User(breakpoint.id);
+    let addresses = breakpoint
+        .locations
+        .iter()
+        .map(|resolved| runtime_breakpoint_address(inferior, resolved.location))
+        .collect::<Result<Vec<_>>>()?;
+    let mut installed = Vec::with_capacity(addresses.len());
+
+    for address in addresses {
+        if let Err(cause) =
+            ptrace.install_breakpoint(inferior.tgid, &mut inferior.breakpoints, address, owner)
+        {
+            for installed_address in installed.into_iter().rev() {
+                if let Err(recovery) =
+                    remove_breakpoint_owner_from(ptrace, inferior, installed_address, owner)
+                {
+                    return Err(backend_error(LinuxError::BreakpointInstallRecovery {
+                        cause: cause.to_string(),
+                        recovery: recovery.to_string(),
+                    }));
+                }
+            }
+
+            return Err(cause);
+        }
+        installed.push(address);
+    }
+
+    Ok(())
+}
+
 fn validate_process(inferior: &Inferior, requested: ProcessId) -> Result<()> {
     if process_id(inferior.tgid) == requested {
         Ok(())
@@ -2622,7 +3446,7 @@ fn scoped_threads(inferior: &Inferior, scope: ResumeScope) -> Result<BTreeSet<Pi
 }
 
 fn remove_breakpoint_owner_from(
-    ptrace: &LinuxPtrace,
+    ptrace: &dyn LinuxTraceOps,
     inferior: &mut Inferior,
     address: VirtualAddress,
     owner: BreakpointOwner,
@@ -2803,7 +3627,461 @@ fn load_bias(pid: Pid, executable: &Path) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
+    use crate::{AddressRange, ImageAddress};
+
+    struct RecordingTrace {
+        actions: Rc<RefCell<Vec<&'static str>>>,
+        pid: Pid,
+    }
+
+    impl RecordingTrace {
+        fn record(&self, action: &'static str) {
+            self.actions.borrow_mut().push(action);
+        }
+
+        fn unexpected<T>(operation: &str) -> T {
+            panic!("unexpected native operation: {operation}")
+        }
+    }
+
+    impl LinuxTraceOps for RecordingTrace {
+        fn spawn(&self, _executable: &Path) -> Result<Pid> {
+            self.record("spawn");
+            Ok(self.pid)
+        }
+
+        fn spawn_waiter(
+            &self,
+            _messages: mpsc::Sender<ControllerMessage>,
+        ) -> Result<JoinHandle<()>> {
+            self.record("spawn_waiter");
+            Ok(thread::spawn(|| {}))
+        }
+
+        fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
+            assert_eq!(pid, self.pid);
+            assert_eq!(signal, NixSignal::SIGKILL);
+            self.record("kill");
+            Ok(())
+        }
+
+        fn reap(&self, _pid: Pid) -> Result<()> {
+            Self::unexpected("reap")
+        }
+
+        fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
+            Self::unexpected("thread_group_id")
+        }
+
+        fn load_bias(&self, pid: Pid, _executable: &Path) -> Result<u64> {
+            assert_eq!(pid, self.pid);
+            self.record("load_bias");
+            Ok(0x5000)
+        }
+
+        fn read_word(&self, _pid: Pid, _address: u64) -> Result<u64> {
+            Self::unexpected("read_word")
+        }
+
+        fn write_word(&self, _pid: Pid, _address: u64, _value: u64) -> Result<()> {
+            Self::unexpected("write_word")
+        }
+
+        fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+            assert_eq!(pid, self.pid);
+            assert_eq!(signal, None);
+            self.record("continue");
+            Ok(())
+        }
+
+        fn continue_during_shutdown(&self, _pid: Pid) -> Result<()> {
+            Self::unexpected("continue_during_shutdown")
+        }
+
+        fn step(&self, _pid: Pid, _signal: Option<NixSignal>) -> Result<()> {
+            Self::unexpected("step")
+        }
+
+        fn registers(&self, _pid: Pid) -> Result<libc::user_regs_struct> {
+            Self::unexpected("registers")
+        }
+
+        fn set_registers(&self, _pid: Pid, _registers: libc::user_regs_struct) -> Result<()> {
+            Self::unexpected("set_registers")
+        }
+
+        fn set_options(&self, pid: Pid) -> Result<()> {
+            assert_eq!(pid, self.pid);
+            self.record("set_options");
+            Ok(())
+        }
+
+        fn event_message(&self, _pid: Pid) -> Result<libc::c_long> {
+            Self::unexpected("event_message")
+        }
+
+        fn signal_metadata(&self, _pid: Pid) -> std::result::Result<SignalMetadata, Errno> {
+            Self::unexpected("signal_metadata")
+        }
+
+        fn request_stop(&self, _process: Pid, _thread: Pid) -> Result<()> {
+            Self::unexpected("request_stop")
+        }
+
+        fn install_breakpoint(
+            &self,
+            _pid: Pid,
+            _sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+            _address: VirtualAddress,
+            _owner: BreakpointOwner,
+        ) -> Result<()> {
+            Self::unexpected("install_breakpoint")
+        }
+
+        fn remove_breakpoint(
+            &self,
+            _pid: Pid,
+            _sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+            _address: VirtualAddress,
+        ) -> Result<()> {
+            Self::unexpected("remove_breakpoint")
+        }
+
+        fn reinstall_breakpoint(
+            &self,
+            _pid: Pid,
+            _sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+            _address: VirtualAddress,
+        ) -> Result<()> {
+            Self::unexpected("reinstall_breakpoint")
+        }
+    }
+
+    struct UnusedUnwindInfo;
+
+    impl UnwindInfo for UnusedUnwindInfo {
+        fn unwind(
+            &self,
+            _address: ImageAddress,
+            _registers: &RegisterFile,
+            _memory: &mut dyn MemoryReader,
+        ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
+            RecordingTrace::unexpected("unwind")
+        }
+    }
+
+    #[test]
+    fn controller_lifecycle_is_driven_through_the_linux_effect_boundary() {
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let pid = Pid::from_raw(4242);
+        let trace = RecordingTrace {
+            actions: Rc::clone(&actions),
+            pid,
+        };
+        let image = Arc::new(ModuleImage::new(
+            PathBuf::from("/test/program"),
+            crate::TargetDescription {
+                architecture: crate::Architecture::X86_64,
+                byte_order: crate::ByteOrder::Little,
+                pointer_width: crate::PointerWidth::Bits64,
+            },
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(0x1000),
+            },
+            crate::model::ModuleMetadata {
+                functions: Vec::new(),
+                code_instances: Vec::new(),
+                symbols: Vec::new(),
+                source_files: Vec::new(),
+                statements: Vec::new(),
+                lines: Vec::new(),
+            },
+        ));
+        let (message_sender, messages) = mpsc::channel(8);
+        let (events, _) = broadcast::channel(8);
+        let mut controller = Controller::new(
+            SessionLease::acquire().expect("acquire test session"),
+            Arc::new(PathBuf::from("/test/program")),
+            image,
+            Arc::new(UnusedUnwindInfo),
+            ControllerChannels {
+                messages,
+                message_sender,
+                events,
+            },
+            trace,
+        );
+        let (launch_reply, launch_result) = tokio::sync::oneshot::channel();
+
+        controller.launch(launch_reply);
+        controller
+            .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
+            .expect("process initial stop");
+
+        assert_eq!(
+            launch_result
+                .blocking_recv()
+                .expect("launch reply")
+                .expect("launch success"),
+            ExecutionId::new(1)
+        );
+
+        let (shutdown_reply, shutdown_result) = tokio::sync::oneshot::channel();
+        controller.begin_shutdown(Some(shutdown_reply));
+        assert!(!controller.handle_shutdown_wait(WaitStatus::Signaled(
+            pid,
+            NixSignal::SIGKILL,
+            false,
+        )));
+        shutdown_result
+            .blocking_recv()
+            .expect("shutdown reply")
+            .expect("shutdown success");
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            [
+                "spawn",
+                "spawn_waiter",
+                "set_options",
+                "load_bias",
+                "continue",
+                "kill",
+            ]
+        );
+    }
+
+    #[test]
+    fn virtual_inline_step_emits_a_new_stop_without_native_operations() {
+        let VirtualStepHarness {
+            mut controller,
+            mut events,
+            actions,
+            pid,
+        } = virtual_step_controller();
+
+        let execution = controller
+            .try_virtual_step(process_id(pid), StopId::new(1), pid, StepKind::IntoSource)
+            .expect("virtual step")
+            .expect("hidden child exists");
+
+        assert_eq!(execution, ExecutionId::new(2));
+        assert!(actions.borrow().is_empty());
+        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert!(emitted.iter().any(|event| matches!(
+            event,
+            DebuggerEvent::InferiorStopped {
+                execution_id: Some(execution_id),
+                ..
+            } if *execution_id == ExecutionId::new(2)
+        )));
+        assert!(
+            !emitted
+                .iter()
+                .any(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
+        );
+        let stop = controller
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.public_stop.as_ref())
+            .expect("new public stop");
+        assert_eq!(stop.id, StopId::new(2));
+        assert_eq!(
+            stop.presentations.get(&pid),
+            Some(&FramePresentation {
+                instruction: VirtualAddress::new(0x10),
+                frame: PresentedFrame::Inline(CodeInstanceId::new(1)),
+                hidden_inline_frames: 1,
+            })
+        );
+        assert!(matches!(
+            controller
+                .try_virtual_step(process_id(pid), StopId::new(1), pid, StepKind::IntoSource,),
+            Err(Error::StaleStop)
+        ));
+        assert!(actions.borrow().is_empty());
+    }
+
+    fn virtual_step_image() -> Arc<ModuleImage> {
+        let source = |line| SourceLocation {
+            file: crate::SourceFileId::new(0),
+            line: crate::LineNumber::new(line).expect("nonzero line"),
+            column: None,
+        };
+        let range = Arc::from([AddressRange {
+            start: ImageAddress::new(0x10),
+            end: ImageAddress::new(0x20),
+        }]);
+        Arc::new(ModuleImage::new(
+            PathBuf::from("/test/inline"),
+            crate::TargetDescription {
+                architecture: crate::Architecture::X86_64,
+                byte_order: crate::ByteOrder::Little,
+                pointer_width: crate::PointerWidth::Bits64,
+            },
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(0x100),
+            },
+            crate::model::ModuleMetadata {
+                functions: ["physical", "middle", "leaf"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, name)| crate::FunctionInfo {
+                        id: crate::FunctionId::new(u32::try_from(id).expect("small count")),
+                        name: name.into(),
+                        linkage_name: None,
+                        declaration: None,
+                    })
+                    .collect(),
+                code_instances: vec![
+                    crate::CodeInstanceInfo {
+                        id: CodeInstanceId::new(0),
+                        function: crate::FunctionId::new(0),
+                        parent: None,
+                        kind: CodeInstanceKind::OutOfLine,
+                        ranges: Arc::from([AddressRange {
+                            start: ImageAddress::new(0),
+                            end: ImageAddress::new(0x100),
+                        }]),
+                        breakpoint_entry: None,
+                    },
+                    crate::CodeInstanceInfo {
+                        id: CodeInstanceId::new(1),
+                        function: crate::FunctionId::new(1),
+                        parent: Some(CodeInstanceId::new(0)),
+                        kind: CodeInstanceKind::Inline {
+                            call_site: Some(source(10)),
+                        },
+                        ranges: Arc::clone(&range),
+                        breakpoint_entry: None,
+                    },
+                    crate::CodeInstanceInfo {
+                        id: CodeInstanceId::new(2),
+                        function: crate::FunctionId::new(2),
+                        parent: Some(CodeInstanceId::new(1)),
+                        kind: CodeInstanceKind::Inline {
+                            call_site: Some(source(20)),
+                        },
+                        ranges: range,
+                        breakpoint_entry: None,
+                    },
+                ],
+                symbols: Vec::new(),
+                source_files: Vec::new(),
+                statements: Vec::new(),
+                lines: Vec::new(),
+            },
+        ))
+    }
+
+    struct VirtualStepHarness {
+        controller: Controller<RecordingTrace>,
+        events: broadcast::Receiver<DebuggerEvent>,
+        actions: Rc<RefCell<Vec<&'static str>>>,
+        pid: Pid,
+    }
+
+    fn virtual_step_controller() -> VirtualStepHarness {
+        let pid = Pid::from_raw(4343);
+        let actions = Rc::new(RefCell::new(Vec::new()));
+        let trace = RecordingTrace {
+            actions: Rc::clone(&actions),
+            pid,
+        };
+        let image = virtual_step_image();
+        let (message_sender, messages) = mpsc::channel(8);
+        let (events, event_receiver) = broadcast::channel(8);
+        let mut controller = Controller::new(
+            SessionLease::detached(),
+            Arc::new(PathBuf::from("/test/inline")),
+            Arc::clone(&image),
+            Arc::new(UnusedUnwindInfo),
+            ControllerChannels {
+                messages,
+                message_sender,
+                events,
+            },
+            trace,
+        );
+        let presentation = FramePresentation {
+            instruction: VirtualAddress::new(0x10),
+            frame: PresentedFrame::Physical,
+            hidden_inline_frames: 2,
+        };
+        controller.inferior = Some(Inferior {
+            tgid: pid,
+            loaded_module: LoadedModule::main(image.id(), 0),
+            breakpoints: BTreeMap::new(),
+            threads: BTreeMap::from([(
+                pid,
+                TraceThread {
+                    state: NativeThreadState::Stopped,
+                    expected: ExpectedStop::None,
+                    pending_signal: None,
+                    reason: Some(StopReason::Pause),
+                    stopped_at_breakpoint: None,
+                    awaiting_breakpoint: None,
+                    debugger_stop_pending: false,
+                },
+            )]),
+            retired_threads: BTreeSet::new(),
+            unowned_stops: BTreeMap::new(),
+            waiter: None,
+            active: None,
+            repairs: VecDeque::new(),
+            barrier: None,
+            public_stop: Some(PublicStop {
+                id: StopId::new(1),
+                triggering_thread: pid,
+                reason: StopReason::Pause,
+                presentations: BTreeMap::from([(pid, presentation)]),
+            }),
+            selected_thread: Some(pid),
+            next_execution: 1,
+            next_stop: 1,
+            next_barrier: 0,
+            exec_unsupported: false,
+        });
+
+        VirtualStepHarness {
+            controller,
+            events: event_receiver,
+            actions,
+            pid,
+        }
+    }
+
+    #[test]
+    fn frame_symbolization_adjusts_only_ordinary_caller_resume_addresses() {
+        let stopped = FrameContext {
+            instruction: VirtualAddress::new(0x1000),
+            cfa: None,
+            signal_frame: false,
+        };
+        let caller = FrameContext {
+            instruction: VirtualAddress::new(0x2000),
+            cfa: Some(VirtualAddress::new(0x3000)),
+            signal_frame: false,
+        };
+        let signal = FrameContext {
+            instruction: VirtualAddress::new(0x4000),
+            cfa: Some(VirtualAddress::new(0x5000)),
+            signal_frame: true,
+        };
+
+        assert_eq!(frame_lookup_address(0, &stopped), Some(stopped.instruction));
+        assert_eq!(
+            frame_lookup_address(1, &caller),
+            Some(VirtualAddress::new(0x1fff))
+        );
+        assert_eq!(frame_lookup_address(2, &signal), Some(signal.instruction));
+    }
 
     #[test]
     fn thread_affinity_rejects_another_os_thread() {

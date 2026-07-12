@@ -6,8 +6,8 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uscope::{
-    BreakpointLocation, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle,
-    ExceptionDisposition, ExitStatus, Result, StateSnapshot, StepKind, StopReason,
+    Breakpoint, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle, ExceptionDisposition,
+    ExitStatus, Result, StateSnapshot, StepKind, StopReason,
 };
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -62,7 +62,7 @@ impl Scenario {
         self.last_revision
     }
 
-    pub async fn add_breakpoint(&mut self, name: &str) -> BreakpointLocation {
+    pub async fn add_breakpoint(&mut self, name: &str) -> Breakpoint {
         self.transcript.push(format!("request: break {name}"));
         let result = within(
             self.handle

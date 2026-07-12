@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -74,6 +75,14 @@ id_type!(
     "Identifies a loaded module within a debug session."
 );
 id_type!(FunctionId, "Identifies a function within a module image.");
+id_type!(
+    CodeInstanceId,
+    "Identifies one concrete code instance within a module image."
+);
+id_type!(
+    LineSequenceId,
+    "Identifies one contiguous line-program sequence within a module image."
+);
 id_type!(
     SourceFileId,
     "Identifies a source file within a module image."
@@ -280,10 +289,65 @@ pub struct FunctionInfo {
     pub name: Arc<str>,
     /// The linker-visible function name, when known.
     pub linkage_name: Option<Arc<str>>,
-    /// The image-address ranges occupied by the function.
-    pub ranges: Arc<[AddressRange<ImageAddress>]>,
     /// The function's declaration location, when known.
     pub declaration: Option<SourceLocation>,
+}
+
+/// Describes whether a function instance is emitted out of line or inlined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeInstanceKind {
+    /// A physical, independently callable function body.
+    OutOfLine,
+    /// A function body expanded at a source call site.
+    Inline {
+        /// The call expression in the containing instance, when described.
+        call_site: Option<SourceLocation>,
+    },
+}
+
+/// Explains how an entry address was selected for a concrete function instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryProvenance {
+    /// The debug format supplied an explicit entry address.
+    Explicit,
+    /// A recommended source statement supplied the entry address.
+    Statement,
+    /// The first concrete address range supplied the entry address.
+    RangeStart,
+}
+
+/// A concrete entry address suitable for a function breakpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BreakpointEntry {
+    /// The entry address in the module image.
+    pub address: ImageAddress,
+    /// How the address was selected.
+    pub provenance: EntryProvenance,
+}
+
+/// One concrete placement of a source-level function in a module image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeInstanceInfo {
+    /// The instance's session-scoped identifier.
+    pub id: CodeInstanceId,
+    /// The source-level function represented by this instance.
+    pub function: FunctionId,
+    /// The nearest containing function instance, for an inline expansion.
+    pub parent: Option<CodeInstanceId>,
+    /// Whether the instance is physical or inlined.
+    pub kind: CodeInstanceKind,
+    /// Every image-address range occupied by the instance.
+    pub ranges: Arc<[AddressRange<ImageAddress>]>,
+    /// The preferred location for a function breakpoint, when one exists.
+    pub breakpoint_entry: Option<BreakpointEntry>,
+}
+
+impl CodeInstanceInfo {
+    /// Returns whether the instance contains an image address.
+    #[must_use]
+    pub fn contains(&self, address: ImageAddress) -> bool {
+        self.ranges.iter().any(|range| range.contains(address))
+    }
 }
 
 /// A linker symbol exported by a module image.
@@ -297,14 +361,6 @@ pub struct SymbolInfo {
     pub address: ImageAddress,
 }
 
-impl FunctionInfo {
-    /// Returns whether the function contains an image address.
-    #[must_use]
-    pub fn contains(&self, address: ImageAddress) -> bool {
-        self.ranges.iter().any(|range| range.contains(address))
-    }
-}
-
 /// A resolved source and function location in a module image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageLocation {
@@ -312,12 +368,34 @@ pub struct ImageLocation {
     pub address: ImageAddress,
     /// The containing function, when known.
     pub function: Option<FunctionInfo>,
+    /// The physical code instance containing the address, when known.
+    pub physical_instance: Option<CodeInstanceId>,
+    /// Active inline frames at this address.
+    pub inline_frames: InlineFrameLookup,
     /// The corresponding source location, when known.
     pub source: Option<SourceLocation>,
 }
 
+/// An ordered set of active inline instances, from outermost to innermost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineChain {
+    /// Concrete inline instances in logical call order.
+    pub instances: Arc<[CodeInstanceId]>,
+}
+
+/// The result of resolving inline frames at one image address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InlineFrameLookup {
+    /// No presentable inline frame is active.
+    None,
+    /// Exactly one logical inline chain is active.
+    Unique(InlineChain),
+    /// The debug metadata describes incompatible active chains.
+    Ambiguous(Arc<[InlineChain]>),
+}
+
 /// The address space in which a breakpoint was resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BreakpointLocation {
     /// A location relative to an immutable module image.
     Image(ImageAddress),
@@ -341,6 +419,8 @@ pub struct ExecutionLocation {
 pub enum FrameKind {
     /// A normal machine-code activation.
     Physical,
+    /// A source-level inline expansion within a physical activation.
+    Inline,
     /// A signal trampoline activation.
     Signal,
 }
@@ -358,9 +438,17 @@ pub struct StackFrame {
     pub module: Option<ModuleId>,
     /// The exact instruction or resume address for the frame.
     pub instruction: VirtualAddress,
+    /// The concrete code instance represented by the frame, when known.
+    pub code_instance: Option<CodeInstanceId>,
     /// The containing function, when known.
     pub function: Option<FunctionInfo>,
     /// The corresponding source location, when known.
+    pub source: Option<SourceLocation>,
+}
+
+pub struct FrameMetadata {
+    pub code_instance: Option<CodeInstanceId>,
+    pub function: Option<FunctionInfo>,
     pub source: Option<SourceLocation>,
 }
 
@@ -376,14 +464,35 @@ impl StackFrame {
             (location.function, location.source)
         });
 
+        Self::from_parts(
+            level,
+            kind,
+            module,
+            instruction,
+            FrameMetadata {
+                code_instance: None,
+                function,
+                source,
+            },
+        )
+    }
+
+    pub(crate) fn from_parts(
+        level: u32,
+        kind: FrameKind,
+        module: Option<ModuleId>,
+        instruction: VirtualAddress,
+        metadata: FrameMetadata,
+    ) -> Self {
         Self {
             id: StackFrameId::new(level),
             level,
             kind,
             module,
             instruction,
-            function,
-            source,
+            code_instance: metadata.code_instance,
+            function: metadata.function,
+            source: metadata.source,
         }
     }
 }
@@ -431,6 +540,237 @@ pub struct LineEntry {
     pub location: SourceLocation,
 }
 
+/// One ordered row emitted by a source line program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementRow {
+    /// The image address associated with this row.
+    pub address: ImageAddress,
+    /// The operation index for architectures with multiple operations per instruction.
+    pub operation_index: u64,
+    /// The corresponding source location.
+    pub location: SourceLocation,
+    /// The producer-defined discriminator for this source position.
+    pub discriminator: u64,
+    /// Semantic flags associated with the row.
+    pub flags: StatementFlags,
+    /// The instruction-set identifier supplied by the producer.
+    pub isa: u64,
+    /// The containing line-program sequence.
+    pub sequence: LineSequenceId,
+    /// The row's order within its sequence, including equal-address rows.
+    pub ordinal: u32,
+}
+
+/// Semantic markers attached to one source line-program row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatementFlags(u8);
+
+impl StatementFlags {
+    const IS_STATEMENT: u8 = 1 << 0;
+    const BASIC_BLOCK: u8 = 1 << 1;
+    const PROLOGUE_END: u8 = 1 << 2;
+    const EPILOGUE_BEGIN: u8 = 1 << 3;
+
+    pub(crate) const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub(crate) const fn with_statement(self, enabled: bool) -> Self {
+        self.with(Self::IS_STATEMENT, enabled)
+    }
+
+    pub(crate) const fn with_basic_block(self, enabled: bool) -> Self {
+        self.with(Self::BASIC_BLOCK, enabled)
+    }
+
+    pub(crate) const fn with_prologue_end(self, enabled: bool) -> Self {
+        self.with(Self::PROLOGUE_END, enabled)
+    }
+
+    pub(crate) const fn with_epilogue_begin(self, enabled: bool) -> Self {
+        self.with(Self::EPILOGUE_BEGIN, enabled)
+    }
+
+    const fn with(self, flag: u8, enabled: bool) -> Self {
+        if enabled { Self(self.0 | flag) } else { self }
+    }
+
+    /// Returns whether the row is a recommended breakpoint location.
+    #[must_use]
+    pub const fn is_statement(self) -> bool {
+        self.0 & Self::IS_STATEMENT != 0
+    }
+
+    /// Returns whether the row begins a basic block.
+    #[must_use]
+    pub const fn basic_block(self) -> bool {
+        self.0 & Self::BASIC_BLOCK != 0
+    }
+
+    /// Returns whether the row marks the end of a function prologue.
+    #[must_use]
+    pub const fn prologue_end(self) -> bool {
+        self.0 & Self::PROLOGUE_END != 0
+    }
+
+    /// Returns whether the row marks the beginning of a function epilogue.
+    #[must_use]
+    pub const fn epilogue_begin(self) -> bool {
+        self.0 & Self::EPILOGUE_BEGIN != 0
+    }
+}
+
+pub struct ModuleMetadata {
+    pub functions: Vec<FunctionInfo>,
+    pub code_instances: Vec<CodeInstanceInfo>,
+    pub symbols: Vec<SymbolInfo>,
+    pub source_files: Vec<SourceFile>,
+    pub statements: Vec<StatementRow>,
+    pub lines: Vec<LineEntry>,
+}
+
+#[derive(Debug)]
+struct RangeIndexEntry<T> {
+    start: u64,
+    end: u64,
+    prefix_max_end: u64,
+    value: T,
+}
+
+#[derive(Debug)]
+struct RangeIndex<T> {
+    entries: Arc<[RangeIndexEntry<T>]>,
+}
+
+impl<T: Copy + Ord> RangeIndex<T> {
+    fn new(entries: impl IntoIterator<Item = (AddressRange<ImageAddress>, T)>) -> Self {
+        let mut entries = entries
+            .into_iter()
+            .map(|(range, value)| RangeIndexEntry {
+                start: range.start.get(),
+                end: range.end.get(),
+                prefix_max_end: 0,
+                value,
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| (entry.start, entry.end, entry.value));
+
+        let mut prefix_max_end = 0;
+        for entry in &mut entries {
+            prefix_max_end = prefix_max_end.max(entry.end);
+            entry.prefix_max_end = prefix_max_end;
+        }
+
+        Self {
+            entries: entries.into(),
+        }
+    }
+
+    fn containing(&self, address: ImageAddress) -> impl Iterator<Item = T> + '_ {
+        let address = address.get();
+        let mut index = self.entries.partition_point(|entry| entry.start <= address);
+
+        std::iter::from_fn(move || {
+            while index > 0 {
+                index -= 1;
+                let entry = &self.entries[index];
+                if entry.prefix_max_end <= address {
+                    return None;
+                }
+                if address < entry.end {
+                    return Some(entry.value);
+                }
+            }
+
+            None
+        })
+    }
+}
+
+struct ModuleIndexes {
+    functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
+    symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
+    instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
+    statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
+}
+
+fn grouped_index<K: Ord, V>(entries: impl IntoIterator<Item = (K, V)>) -> BTreeMap<K, Arc<[V]>> {
+    let mut grouped = BTreeMap::<K, Vec<V>>::new();
+    for (key, value) in entries {
+        grouped.entry(key).or_default().push(value);
+    }
+
+    grouped
+        .into_iter()
+        .map(|(key, values)| (key, values.into()))
+        .collect()
+}
+
+fn build_module_indexes(metadata: &ModuleMetadata) -> ModuleIndexes {
+    let functions_by_name = grouped_index(
+        metadata
+            .functions
+            .iter()
+            .map(|function| (Arc::clone(&function.name), function.id)),
+    );
+    let symbols_by_name = grouped_index(
+        metadata
+            .symbols
+            .iter()
+            .map(|symbol| (Arc::clone(&symbol.name), symbol.id)),
+    );
+    let instances_by_function = grouped_index(
+        metadata
+            .code_instances
+            .iter()
+            .map(|instance| (instance.function, instance.id)),
+    );
+    let mut statements_by_source_line =
+        grouped_index(metadata.statements.iter().map(|statement| {
+            (
+                (statement.location.file, statement.location.line),
+                statement.address,
+            )
+        }));
+    for addresses in statements_by_source_line.values_mut() {
+        let mut unique = addresses.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        *addresses = unique.into();
+    }
+
+    ModuleIndexes {
+        functions_by_name,
+        symbols_by_name,
+        instances_by_function,
+        statements_by_source_line,
+    }
+}
+
+fn validate_dense_ids(metadata: &ModuleMetadata) {
+    for (index, function) in metadata.functions.iter().enumerate() {
+        assert_eq!(
+            usize::try_from(function.id.0).expect("function ID fits usize"),
+            index,
+            "function IDs are dense and ordered"
+        );
+    }
+    for (index, instance) in metadata.code_instances.iter().enumerate() {
+        assert_eq!(
+            usize::try_from(instance.id.0).expect("code instance ID fits usize"),
+            index,
+            "code instance IDs are dense and ordered"
+        );
+    }
+    for (index, source_file) in metadata.source_files.iter().enumerate() {
+        assert_eq!(
+            usize::try_from(source_file.id.0).expect("source file ID fits usize"),
+            index,
+            "source file IDs are dense and ordered"
+        );
+    }
+}
+
 /// Immutable, normalized debug metadata for one executable module.
 #[derive(Debug)]
 pub struct ModuleImage {
@@ -439,9 +779,17 @@ pub struct ModuleImage {
     target: TargetDescription,
     address_range: AddressRange<ImageAddress>,
     functions: Arc<[FunctionInfo]>,
+    code_instances: Arc<[CodeInstanceInfo]>,
     symbols: Arc<[SymbolInfo]>,
     source_files: Arc<[SourceFile]>,
+    statements: Arc<[StatementRow]>,
     lines: Arc<[LineEntry]>,
+    functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
+    symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
+    instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
+    statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
+    code_range_index: RangeIndex<CodeInstanceId>,
+    line_range_index: RangeIndex<u32>,
 }
 
 impl ModuleImage {
@@ -449,20 +797,43 @@ impl ModuleImage {
         path: PathBuf,
         target: TargetDescription,
         address_range: AddressRange<ImageAddress>,
-        functions: Vec<FunctionInfo>,
-        symbols: Vec<SymbolInfo>,
-        source_files: Vec<SourceFile>,
-        lines: Vec<LineEntry>,
+        metadata: ModuleMetadata,
     ) -> Self {
+        validate_dense_ids(&metadata);
+        let indexes = build_module_indexes(&metadata);
+        let code_range_index =
+            RangeIndex::new(metadata.code_instances.iter().flat_map(|instance| {
+                instance
+                    .ranges
+                    .iter()
+                    .copied()
+                    .map(|range| (range, instance.id))
+            }));
+        let line_range_index =
+            RangeIndex::new(metadata.lines.iter().enumerate().map(|(index, line)| {
+                (
+                    line.range,
+                    u32::try_from(index).expect("line entry count fits u32"),
+                )
+            }));
+
         Self {
             id: ModuleImageId::new(0),
             path: Arc::new(path),
             target,
             address_range,
-            functions: functions.into(),
-            symbols: symbols.into(),
-            source_files: source_files.into(),
-            lines: lines.into(),
+            functions: metadata.functions.into(),
+            code_instances: metadata.code_instances.into(),
+            symbols: metadata.symbols.into(),
+            source_files: metadata.source_files.into(),
+            statements: metadata.statements.into(),
+            lines: metadata.lines.into(),
+            functions_by_name: indexes.functions_by_name,
+            symbols_by_name: indexes.symbols_by_name,
+            instances_by_function: indexes.instances_by_function,
+            statements_by_source_line: indexes.statements_by_source_line,
+            code_range_index,
+            line_range_index,
         }
     }
 
@@ -496,6 +867,18 @@ impl ModuleImage {
         &self.functions
     }
 
+    /// Looks up a source-level function by identifier.
+    #[must_use]
+    pub fn function(&self, id: FunctionId) -> Option<&FunctionInfo> {
+        self.functions.get(usize::try_from(id.0).ok()?)
+    }
+
+    /// Returns all concrete code instances described by this image.
+    #[must_use]
+    pub fn code_instances(&self) -> &[CodeInstanceInfo] {
+        &self.code_instances
+    }
+
     /// Returns all linker symbols described by this image.
     #[must_use]
     pub fn symbols(&self) -> &[SymbolInfo] {
@@ -508,69 +891,202 @@ impl ModuleImage {
         &self.source_files
     }
 
+    /// Returns every ordered source line-program row in this image.
+    #[must_use]
+    pub fn statement_rows(&self) -> &[StatementRow] {
+        &self.statements
+    }
+
     pub(crate) fn line_entries(&self) -> &[LineEntry] {
         &self.lines
     }
 
+    /// Looks up a concrete code instance by identifier.
+    #[must_use]
+    pub fn code_instance(&self, id: CodeInstanceId) -> Option<&CodeInstanceInfo> {
+        self.code_instances.get(usize::try_from(id.0).ok()?)
+    }
+
+    /// Returns the concrete instances of one source-level function.
+    pub fn instances_for_function(
+        &self,
+        function: FunctionId,
+    ) -> impl Iterator<Item = &CodeInstanceInfo> {
+        self.instances_by_function
+            .get(&function)
+            .into_iter()
+            .flat_map(|instances| instances.iter())
+            .filter_map(|instance| self.code_instance(*instance))
+    }
+
+    /// Returns image addresses associated with one source line.
+    pub fn statement_addresses(
+        &self,
+        file: SourceFileId,
+        line: LineNumber,
+    ) -> impl Iterator<Item = ImageAddress> + '_ {
+        self.statements_by_source_line
+            .get(&(file, line))
+            .into_iter()
+            .flat_map(|addresses| addresses.iter())
+            .copied()
+    }
+
     /// Finds the single function with the supplied source-level name.
     pub fn function_named(&self, name: &str) -> Result<&FunctionInfo> {
-        let mut matches = self
-            .functions
-            .iter()
-            .filter(|function| function.name.as_ref() == name);
-        let function = matches
-            .next()
+        let matches = self
+            .functions_by_name
+            .get(name)
             .ok_or_else(|| Error::FunctionNotFound(name.to_owned()))?;
-
-        if matches.next().is_some() {
+        let [function] = matches.as_ref() else {
             return Err(Error::DuplicateFunction(name.to_owned()));
-        }
+        };
 
-        Ok(function)
+        Ok(self
+            .function(*function)
+            .expect("name index references a function"))
     }
 
     /// Finds the single linker symbol with the supplied name.
     pub fn symbol_named(&self, name: &str) -> Result<&SymbolInfo> {
-        let mut matches = self
+        let matches = self
+            .symbols_by_name
+            .get(name)
+            .ok_or_else(|| Error::SymbolNotFound(name.to_owned()))?;
+        let [symbol] = matches.as_ref() else {
+            return Err(Error::DuplicateSymbol(name.to_owned()));
+        };
+
+        Ok(self
             .symbols
             .iter()
-            .filter(|symbol| symbol.name.as_ref() == name);
-        let symbol = matches
-            .next()
-            .ok_or_else(|| Error::SymbolNotFound(name.to_owned()))?;
-
-        if matches.next().is_some() {
-            return Err(Error::DuplicateSymbol(name.to_owned()));
-        }
-
-        Ok(symbol)
+            .find(|candidate| candidate.id == *symbol)
+            .expect("name index references a symbol"))
     }
 
     /// Resolves an image address to its available function and source metadata.
     #[must_use]
     pub fn locate(&self, address: ImageAddress) -> ImageLocation {
-        let function = self
-            .functions
-            .iter()
-            .find(|function| function.contains(address))
-            .cloned();
+        let physical = self
+            .code_range_index
+            .containing(address)
+            .filter_map(|instance| self.code_instance(instance))
+            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+            .min_by_key(|instance| instance.id);
+        let inline_frames = self.inline_frames(address, physical.map(|instance| instance.id));
+        let logical_instance = match &inline_frames {
+            InlineFrameLookup::Unique(chain) => chain.instances.last().copied(),
+            InlineFrameLookup::None | InlineFrameLookup::Ambiguous(_) => None,
+        };
+        let function_id = logical_instance
+            .and_then(|instance| self.code_instance(instance))
+            .map(|instance| instance.function)
+            .or_else(|| physical.map(|instance| instance.function));
+        let function = function_id.and_then(|function_id| {
+            self.functions
+                .iter()
+                .find(|function| function.id == function_id)
+                .cloned()
+        });
         let source = self
-            .lines
-            .iter()
-            .find(|entry| entry.range.contains(address))
+            .line_range_index
+            .containing(address)
+            .min()
+            .and_then(|index| {
+                self.lines
+                    .get(usize::try_from(index).expect("u32 fits usize"))
+            })
             .map(|entry| entry.location.clone());
 
         ImageLocation {
             address,
             function,
+            physical_instance: physical.map(|instance| instance.id),
+            inline_frames,
             source,
         }
+    }
+
+    fn inline_frames(
+        &self,
+        address: ImageAddress,
+        physical: Option<CodeInstanceId>,
+    ) -> InlineFrameLookup {
+        let mut chains = Vec::new();
+
+        for instance in self
+            .code_range_index
+            .containing(address)
+            .filter_map(|instance| self.code_instance(instance))
+            .filter(|instance| {
+                matches!(
+                    instance.kind,
+                    CodeInstanceKind::Inline { call_site: Some(_) }
+                )
+            })
+        {
+            if let Some(chain) = self.inline_chain(instance.id, address, physical)
+                && !chains.contains(&chain)
+            {
+                chains.push(chain);
+            }
+        }
+
+        let chains: Vec<_> = chains
+            .iter()
+            .filter(|candidate| {
+                !chains.iter().any(|other| {
+                    candidate.len() < other.len() && other.starts_with(candidate.as_slice())
+                })
+            })
+            .cloned()
+            .map(|instances| InlineChain {
+                instances: instances.into(),
+            })
+            .collect();
+
+        match chains.len() {
+            0 => InlineFrameLookup::None,
+            1 => InlineFrameLookup::Unique(chains.into_iter().next().expect("one chain")),
+            _ => InlineFrameLookup::Ambiguous(chains.into()),
+        }
+    }
+
+    fn inline_chain(
+        &self,
+        mut instance: CodeInstanceId,
+        address: ImageAddress,
+        physical: Option<CodeInstanceId>,
+    ) -> Option<Vec<CodeInstanceId>> {
+        let mut chain = Vec::new();
+
+        loop {
+            let current = self.code_instance(instance)?;
+
+            if !current.contains(address) {
+                return None;
+            }
+            match &current.kind {
+                CodeInstanceKind::Inline { call_site: Some(_) } => chain.push(current.id),
+                CodeInstanceKind::Inline { call_site: None } => return None,
+                CodeInstanceKind::OutOfLine => {
+                    if Some(current.id) != physical {
+                        return None;
+                    }
+                    break;
+                }
+            }
+            instance = current.parent?;
+        }
+
+        chain.reverse();
+        Some(chain)
     }
 
     /// Looks up a source file by its identifier.
     #[must_use]
     pub fn source_file(&self, id: SourceFileId) -> Option<&SourceFile> {
-        self.source_files.iter().find(|file| file.id == id)
+        self.source_files.get(usize::try_from(id.0).ok()?)
     }
 }
 
@@ -616,6 +1132,72 @@ impl LoadedModule {
 mod tests {
     use super::*;
 
+    fn source(line: u64) -> SourceLocation {
+        SourceLocation {
+            file: SourceFileId::new(0),
+            line: LineNumber::new(line).expect("nonzero line"),
+            column: None,
+        }
+    }
+
+    fn instance(
+        id: u32,
+        function: u32,
+        parent: Option<u32>,
+        kind: CodeInstanceKind,
+        ranges: &[(u64, u64)],
+    ) -> CodeInstanceInfo {
+        CodeInstanceInfo {
+            id: CodeInstanceId::new(id),
+            function: FunctionId::new(function),
+            parent: parent.map(CodeInstanceId::new),
+            kind,
+            ranges: ranges
+                .iter()
+                .map(|&(start, end)| AddressRange {
+                    start: ImageAddress::new(start),
+                    end: ImageAddress::new(end),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            breakpoint_entry: None,
+        }
+    }
+
+    fn inline_test_image(code_instances: Vec<CodeInstanceInfo>) -> ModuleImage {
+        let functions = ["physical", "middle", "leaf", "sibling"]
+            .into_iter()
+            .enumerate()
+            .map(|(id, name)| FunctionInfo {
+                id: FunctionId::new(u32::try_from(id).expect("small function count")),
+                name: name.into(),
+                linkage_name: None,
+                declaration: None,
+            })
+            .collect();
+
+        ModuleImage::new(
+            PathBuf::from("/test/inline"),
+            TargetDescription {
+                architecture: Architecture::X86_64,
+                byte_order: ByteOrder::Little,
+                pointer_width: PointerWidth::Bits64,
+            },
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(100),
+            },
+            ModuleMetadata {
+                functions,
+                code_instances,
+                symbols: Vec::new(),
+                source_files: Vec::new(),
+                statements: Vec::new(),
+                lines: Vec::new(),
+            },
+        )
+    }
+
     #[test]
     fn loaded_module_translates_between_address_spaces_with_checked_arithmetic() {
         let module = LoadedModule::main(ModuleImageId::new(0), 0x4000);
@@ -636,5 +1218,89 @@ mod tests {
             module.virtual_address(ImageAddress::new(u64::MAX)),
             Err(Error::AddressOverflow)
         ));
+    }
+
+    #[test]
+    fn inline_lookup_preserves_nested_discontiguous_ranges_and_boundaries() {
+        let image = inline_test_image(vec![
+            instance(0, 0, None, CodeInstanceKind::OutOfLine, &[(0, 100)]),
+            instance(
+                1,
+                1,
+                Some(0),
+                CodeInstanceKind::Inline {
+                    call_site: Some(source(10)),
+                },
+                &[(20, 30), (40, 50)],
+            ),
+            instance(
+                2,
+                2,
+                Some(1),
+                CodeInstanceKind::Inline {
+                    call_site: Some(source(20)),
+                },
+                &[(22, 25)],
+            ),
+            instance(
+                3,
+                3,
+                Some(0),
+                CodeInstanceKind::Inline { call_site: None },
+                &[(60, 70)],
+            ),
+        ]);
+
+        let InlineFrameLookup::Unique(nested) = image.locate(ImageAddress::new(22)).inline_frames
+        else {
+            panic!("nested inline chain was not unique")
+        };
+        assert_eq!(
+            nested.instances.as_ref(),
+            &[CodeInstanceId::new(1), CodeInstanceId::new(2)]
+        );
+        assert!(matches!(
+            image.locate(ImageAddress::new(40)).inline_frames,
+            InlineFrameLookup::Unique(_)
+        ));
+        for address in [30, 35, 50, 60] {
+            assert_eq!(
+                image.locate(ImageAddress::new(address)).inline_frames,
+                InlineFrameLookup::None,
+                "unexpected inline frame at {address}"
+            );
+        }
+    }
+
+    #[test]
+    fn overlapping_sibling_inline_instances_are_explicitly_ambiguous() {
+        let image = inline_test_image(vec![
+            instance(0, 0, None, CodeInstanceKind::OutOfLine, &[(0, 100)]),
+            instance(
+                1,
+                1,
+                Some(0),
+                CodeInstanceKind::Inline {
+                    call_site: Some(source(10)),
+                },
+                &[(20, 30)],
+            ),
+            instance(
+                2,
+                2,
+                Some(0),
+                CodeInstanceKind::Inline {
+                    call_site: Some(source(11)),
+                },
+                &[(25, 35)],
+            ),
+        ]);
+
+        let InlineFrameLookup::Ambiguous(chains) =
+            image.locate(ImageAddress::new(26)).inline_frames
+        else {
+            panic!("overlapping siblings were not reported as ambiguous")
+        };
+        assert_eq!(chains.len(), 2);
     }
 }
