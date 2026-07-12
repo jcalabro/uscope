@@ -56,13 +56,57 @@ enum FrameBaseCache {
     Malformed(Arc<str>),
 }
 
+/// How an evaluation may obtain the frame base if the executed expression
+/// path actually requires one.
+enum FrameBase<'a> {
+    Unsupported,
+    Lazy(FrameBaseContext<'a>),
+}
+
+struct FrameBaseContext<'a> {
+    location: &'a Metadata<LocationDescription>,
+    address: ImageAddress,
+    cache: &'a mut FrameBaseCache,
+}
+
+/// An evaluation failure that preserves the unavailable-versus-malformed
+/// distinction of the frame-base metadata it may consult.
+#[derive(Debug, PartialEq)]
+enum EvaluateError {
+    Unavailable(VariableUnavailableReason),
+    Malformed(Arc<str>),
+}
+
+impl From<VariableUnavailableReason> for EvaluateError {
+    fn from(reason: VariableUnavailableReason) -> Self {
+        Self::Unavailable(reason)
+    }
+}
+
+impl From<Arc<str>> for EvaluateError {
+    fn from(description: Arc<str>) -> Self {
+        Self::Unavailable(description.into())
+    }
+}
+
+impl From<&str> for EvaluateError {
+    fn from(description: &str) -> Self {
+        Self::Unavailable(description.into())
+    }
+}
+
+impl From<crate::UnsupportedVariableFeature> for EvaluateError {
+    fn from(feature: crate::UnsupportedVariableFeature) -> Self {
+        Self::Unavailable(feature.into())
+    }
+}
+
 #[derive(Clone)]
 struct Expression {
     bytes: Arc<[u8]>,
     encoding: gimli::Encoding,
     unit: usize,
     indexed_addresses: Arc<HashMap<usize, u64>>,
-    requires_frame_base: bool,
 }
 
 struct EvaluationUnit {
@@ -124,6 +168,11 @@ enum Metadata<T> {
 enum ConstantValue {
     Unsigned(u128),
     Signed(i128),
+    /// A fixed-width form whose signedness comes from the variable's type.
+    Fixed {
+        value: u128,
+        bits: u32,
+    },
     Bytes(Arc<[u8]>),
 }
 
@@ -646,13 +695,25 @@ fn copy_constant(
     value: gimli::AttributeValue<Reader<'_>>,
 ) -> std::result::Result<ConstantValue, Arc<str>> {
     Ok(match value {
-        gimli::AttributeValue::Data1(value) => ConstantValue::Unsigned(u128::from(value)),
-        gimli::AttributeValue::Data2(value) => ConstantValue::Unsigned(u128::from(value)),
-        gimli::AttributeValue::Data4(value) => ConstantValue::Unsigned(u128::from(value)),
-        gimli::AttributeValue::Data8(value) | gimli::AttributeValue::Udata(value) => {
-            ConstantValue::Unsigned(u128::from(value))
-        }
-        gimli::AttributeValue::Data16(value) => ConstantValue::Unsigned(value),
+        // Fixed-width forms carry raw bits; signedness comes from the type.
+        gimli::AttributeValue::Data1(value) => ConstantValue::Fixed {
+            value: u128::from(value),
+            bits: 8,
+        },
+        gimli::AttributeValue::Data2(value) => ConstantValue::Fixed {
+            value: u128::from(value),
+            bits: 16,
+        },
+        gimli::AttributeValue::Data4(value) => ConstantValue::Fixed {
+            value: u128::from(value),
+            bits: 32,
+        },
+        gimli::AttributeValue::Data8(value) => ConstantValue::Fixed {
+            value: u128::from(value),
+            bits: 64,
+        },
+        gimli::AttributeValue::Data16(value) => ConstantValue::Fixed { value, bits: 128 },
+        gimli::AttributeValue::Udata(value) => ConstantValue::Unsigned(u128::from(value)),
         gimli::AttributeValue::Sdata(value) => ConstantValue::Signed(i128::from(value)),
         gimli::AttributeValue::Block(value) => ConstantValue::Bytes(Arc::from(
             value
@@ -725,12 +786,8 @@ fn copy_expression(
     encoding: gimli::Encoding,
 ) -> std::result::Result<Expression, DwarfError> {
     let mut indexed_addresses = HashMap::new();
-    let mut requires_frame_base = false;
     let mut operations = expression.operations(encoding);
     while let Some(operation) = operations.next()? {
-        if matches!(operation, gimli::Operation::FrameOffset { .. }) {
-            requires_frame_base = true;
-        }
         let (gimli::Operation::AddressIndex { index } | gimli::Operation::ConstantIndex { index }) =
             operation
         else {
@@ -745,7 +802,6 @@ fn copy_expression(
         encoding,
         unit: unit_index,
         indexed_addresses: Arc::new(indexed_addresses),
-        requires_frame_base,
     })
 }
 
@@ -1000,10 +1056,6 @@ impl DwarfVariableInfo {
             })
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "inspection preserves distinct malformed and unavailable metadata outcomes"
-    )]
     fn inspect_data_object(
         &self,
         variable: &CatalogDataObject,
@@ -1060,56 +1112,28 @@ impl DwarfVariableInfo {
             }
         };
         let mut budget = EvaluationBudget::default();
-        let frame_base = if expression.requires_frame_base {
-            if matches!(frame_base_cache, FrameBaseCache::Empty) {
-                *frame_base_cache = match &variable.frame_base {
-                    Metadata::Value(frame_base) => match frame_base.expression(address) {
-                        Ok(Some(expression)) => match evaluate_frame_base(
-                            expression,
-                            self.endian,
-                            &self.evaluation_units,
-                            runtime,
-                            &mut budget,
-                        ) {
-                            Ok(value) => FrameBaseCache::Available(value),
-                            Err(reason) => FrameBaseCache::Unavailable(reason),
-                        },
-                        Err(reason) => FrameBaseCache::Unavailable(reason),
-                        Ok(None) => FrameBaseCache::Unavailable(
-                            "no frame base at the current instruction".into(),
-                        ),
-                    },
-                    Metadata::Unavailable(description) => {
-                        FrameBaseCache::Unavailable(Arc::clone(description).into())
-                    }
-                    Metadata::Malformed(description) => {
-                        FrameBaseCache::Malformed(Arc::clone(description))
-                    }
-                };
-            }
-            Some(match frame_base_cache {
-                FrameBaseCache::Available(value) => *value,
-                FrameBaseCache::Unavailable(reason) => {
-                    return unavailable(variable, Some(type_info), reason.clone());
-                }
-                FrameBaseCache::Malformed(description) => {
-                    return malformed(variable, Some(type_info), Arc::clone(description));
-                }
-                FrameBaseCache::Empty => unreachable!("frame base cache was populated"),
-            })
-        } else {
-            None
-        };
+        // The frame base resolves lazily so an unexecuted DW_OP_fbreg branch
+        // cannot fail a variable whose executed path never needs it.
+        let mut frame_base = FrameBase::Lazy(FrameBaseContext {
+            location: &variable.frame_base,
+            address,
+            cache: frame_base_cache,
+        });
         let pieces = match evaluate(
             expression,
             self.endian,
-            frame_base,
+            &mut frame_base,
             &self.evaluation_units,
             runtime,
             &mut budget,
         ) {
             Ok(pieces) => pieces,
-            Err(reason) => return unavailable(variable, Some(type_info), reason),
+            Err(EvaluateError::Unavailable(reason)) => {
+                return unavailable(variable, Some(type_info), reason);
+            }
+            Err(EvaluateError::Malformed(description)) => {
+                return malformed(variable, Some(type_info), description);
+            }
         };
         let (source, raw) = match materialize_pieces(
             &pieces,
@@ -1174,6 +1198,49 @@ fn malformed(
     }
 }
 
+fn resolve_frame_base(
+    context: &mut FrameBaseContext<'_>,
+    endian: RunTimeEndian,
+    units: &[EvaluationUnit],
+    runtime: &mut dyn VariableRuntime,
+    budget: &mut EvaluationBudget,
+) -> std::result::Result<VirtualAddress, EvaluateError> {
+    if matches!(context.cache, FrameBaseCache::Empty) {
+        *context.cache = match context.location {
+            Metadata::Value(frame_base) => match frame_base.expression(context.address) {
+                Ok(Some(expression)) => {
+                    match evaluate_frame_base(expression, endian, units, runtime, budget) {
+                        Ok(value) => FrameBaseCache::Available(value),
+                        // The budget belongs to the current variable; a limit
+                        // hit here must not poison the cache other variables
+                        // share at this stop.
+                        Err(VariableUnavailableReason::EvaluationLimit) => {
+                            return Err(VariableUnavailableReason::EvaluationLimit.into());
+                        }
+                        Err(reason) => FrameBaseCache::Unavailable(reason),
+                    }
+                }
+                Err(reason) => FrameBaseCache::Unavailable(reason),
+                Ok(None) => {
+                    FrameBaseCache::Unavailable("no frame base at the current instruction".into())
+                }
+            },
+            Metadata::Unavailable(description) => {
+                FrameBaseCache::Unavailable(Arc::clone(description).into())
+            }
+            Metadata::Malformed(description) => FrameBaseCache::Malformed(Arc::clone(description)),
+        };
+    }
+    match context.cache {
+        FrameBaseCache::Available(value) => Ok(*value),
+        FrameBaseCache::Unavailable(reason) => Err(EvaluateError::Unavailable(reason.clone())),
+        FrameBaseCache::Malformed(description) => {
+            Err(EvaluateError::Malformed(Arc::clone(description)))
+        }
+        FrameBaseCache::Empty => unreachable!("frame base cache was populated"),
+    }
+}
+
 fn evaluate_frame_base(
     expression: &Expression,
     endian: RunTimeEndian,
@@ -1181,7 +1248,21 @@ fn evaluate_frame_base(
     runtime: &mut dyn VariableRuntime,
     budget: &mut EvaluationBudget,
 ) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
-    let pieces = evaluate(expression, endian, None, units, runtime, budget)?;
+    // A frame-base expression may not itself require a frame base.
+    let pieces = match evaluate(
+        expression,
+        endian,
+        &mut FrameBase::Unsupported,
+        units,
+        runtime,
+        budget,
+    ) {
+        Ok(pieces) => pieces,
+        Err(EvaluateError::Unavailable(reason)) => return Err(reason),
+        Err(EvaluateError::Malformed(description)) => {
+            return Err(VariableUnavailableReason::Other(description));
+        }
+    };
     let [piece] = pieces.as_slice() else {
         return Err("frame base is not one complete piece".into());
     };
@@ -1200,11 +1281,11 @@ fn evaluate_frame_base(
 fn evaluate<'expression>(
     expression: &'expression Expression,
     endian: RunTimeEndian,
-    frame_base: Option<VirtualAddress>,
+    frame_base: &mut FrameBase<'_>,
     units: &[EvaluationUnit],
     runtime: &mut dyn VariableRuntime,
     budget: &mut EvaluationBudget,
-) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, VariableUnavailableReason> {
+) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, EvaluateError> {
     let reader = gimli::EndianSlice::new(&expression.bytes, endian);
     let mut evaluation = gimli::Expression(reader).evaluation(expression.encoding);
     // Bound evaluation so a malformed expression with a backward branch cannot
@@ -1228,13 +1309,19 @@ fn evaluate<'expression>(
                     .resume_with_register(value)
                     .map_err(evaluation_error)?
             }
-            EvaluationResult::RequiresFrameBase => evaluation
-                .resume_with_frame_base(
-                    frame_base
-                        .ok_or_else(|| Arc::<str>::from("frame base is unavailable"))?
-                        .get(),
-                )
-                .map_err(evaluation_error)?,
+            EvaluationResult::RequiresFrameBase => {
+                let value = match frame_base {
+                    FrameBase::Unsupported => {
+                        return Err("frame base is unavailable".into());
+                    }
+                    FrameBase::Lazy(context) => {
+                        resolve_frame_base(context, endian, units, runtime, budget)?
+                    }
+                };
+                evaluation
+                    .resume_with_frame_base(value.get())
+                    .map_err(evaluation_error)?
+            }
             EvaluationResult::RequiresCallFrameCfa => evaluation
                 .resume_with_call_frame_cfa(runtime.call_frame_cfa()?.get())
                 .map_err(evaluation_error)?,
@@ -1466,6 +1553,18 @@ fn materialize_constant(
     match value {
         ConstantValue::Unsigned(value) => integer_bytes(*value, size, target),
         ConstantValue::Signed(value) => signed_integer_bytes(*value, size, target),
+        ConstantValue::Fixed { value, bits } => {
+            // DW_FORM_dataN carries raw bits; DWARF 5 section 5.1 defers their
+            // interpretation to the referenced type's signedness.
+            if matches!(
+                type_info.encoding,
+                BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
+            ) {
+                signed_integer_bytes(sign_extend(*value, *bits), size, target)
+            } else {
+                integer_bytes(*value, size, target)
+            }
+        }
         ConstantValue::Bytes(bytes) if bytes.len() == size => Ok(Arc::clone(bytes)),
         ConstantValue::Bytes(_) => Err("constant value size does not match its scalar type".into()),
     }
@@ -1503,6 +1602,15 @@ fn signed_integer_bytes(
         }
     }
     integer_bytes(value.cast_unsigned() & low_bits_mask(bits), size, target)
+}
+
+const fn sign_extend(value: u128, bits: u32) -> i128 {
+    if bits == 128 {
+        value.cast_signed()
+    } else {
+        let shift = 128 - bits;
+        (value << shift).cast_signed() >> shift
+    }
 }
 
 const fn low_bits_mask(bits: usize) -> u128 {
@@ -1686,7 +1794,6 @@ mod tests {
             },
             unit: 0,
             indexed_addresses: Arc::new(HashMap::new()),
-            requires_frame_base: bytes.contains(&gimli::DW_OP_fbreg.0),
         }
     }
 
@@ -1734,15 +1841,28 @@ mod tests {
         assert_eq!(frame_base, VirtualAddress::new(0x2000));
 
         let fbreg = expression(&[gimli::DW_OP_fbreg.0, 0x70]);
+        let location = Metadata::Value(LocationDescription {
+            entries: vec![LocationEntry {
+                range: None,
+                expression: expression(&[gimli::DW_OP_reg6.0]),
+            }]
+            .into(),
+        });
+        let mut cache = FrameBaseCache::Empty;
         let pieces = evaluate(
             &fbreg,
             RunTimeEndian::Little,
-            Some(frame_base),
+            &mut FrameBase::Lazy(FrameBaseContext {
+                location: &location,
+                address: ImageAddress::new(0),
+                cache: &mut cache,
+            }),
             &units([]),
             &mut runtime,
             &mut EvaluationBudget::default(),
         )
         .expect("frame-relative memory location");
+        assert!(matches!(cache, FrameBaseCache::Available(_)));
         assert!(matches!(
             pieces.as_slice(),
             [gimli::Piece {
@@ -1755,7 +1875,7 @@ mod tests {
         let pieces = evaluate(
             &direct_register,
             RunTimeEndian::Little,
-            None,
+            &mut FrameBase::Unsupported,
             &units([]),
             &mut runtime,
             &mut EvaluationBudget::default(),
@@ -1805,7 +1925,7 @@ mod tests {
         let result = evaluate(
             &looping,
             RunTimeEndian::Little,
-            None,
+            &mut FrameBase::Unsupported,
             &units([]),
             &mut runtime,
             &mut EvaluationBudget::default(),
@@ -1831,7 +1951,7 @@ mod tests {
         let result = evaluate(
             &typed,
             RunTimeEndian::Little,
-            None,
+            &mut FrameBase::Unsupported,
             &units([(0x10, gimli::ValueType::U64)]),
             &mut runtime,
             &mut EvaluationBudget::default(),
@@ -1860,7 +1980,7 @@ mod tests {
         let pieces = evaluate(
             &implicit,
             RunTimeEndian::Little,
-            None,
+            &mut FrameBase::Unsupported,
             &units([]),
             &mut runtime,
             &mut EvaluationBudget::default(),
@@ -1905,7 +2025,7 @@ mod tests {
             evaluate(
                 &entry,
                 RunTimeEndian::Little,
-                None,
+                &mut FrameBase::Unsupported,
                 &units([]),
                 &mut runtime,
                 &mut EvaluationBudget::default(),
@@ -1923,7 +2043,7 @@ mod tests {
             evaluate(
                 &missing_type,
                 RunTimeEndian::Little,
-                None,
+                &mut FrameBase::Unsupported,
                 &units([]),
                 &mut runtime,
                 &mut EvaluationBudget::default(),
@@ -1952,14 +2072,119 @@ mod tests {
             evaluate(
                 &expression,
                 RunTimeEndian::Little,
-                None,
+                &mut FrameBase::Unsupported,
                 &units([]),
                 &mut runtime,
                 &mut EvaluationBudget::default(),
             ),
-            Err(VariableUnavailableReason::EvaluationLimit)
+            Err(VariableUnavailableReason::EvaluationLimit.into())
         );
         assert_eq!(runtime.memory_reads, MAX_EVALUATION_MEMORY_READS);
+    }
+
+    #[test]
+    fn fixed_width_constants_take_signedness_from_the_variable_type() {
+        let little = target(ByteOrder::Little);
+        // DW_FORM_data1 0xff for a signed 4-byte type is -1, not 255.
+        let negative = ConstantValue::Fixed {
+            value: 0xff,
+            bits: 8,
+        };
+        assert_eq!(
+            materialize_constant(&negative, &scalar_type(BaseTypeEncoding::Signed, 4), little)
+                .expect("sign-extended constant")
+                .as_ref(),
+            &[0xff, 0xff, 0xff, 0xff]
+        );
+        // The same bits for an unsigned type stay zero-extended.
+        assert_eq!(
+            materialize_constant(
+                &negative,
+                &scalar_type(BaseTypeEncoding::Unsigned, 4),
+                little
+            )
+            .expect("zero-extended constant")
+            .as_ref(),
+            &[0xff, 0x00, 0x00, 0x00]
+        );
+        // A non-negative fixed-width value is unchanged by sign extension.
+        let positive = ConstantValue::Fixed {
+            value: 0x7f,
+            bits: 8,
+        };
+        assert_eq!(
+            materialize_constant(&positive, &scalar_type(BaseTypeEncoding::Signed, 2), little)
+                .expect("positive constant")
+                .as_ref(),
+            &[0x7f, 0x00]
+        );
+    }
+
+    #[test]
+    fn unexecuted_fbreg_branches_do_not_require_a_frame_base() {
+        let mut runtime = Runtime {
+            registers: BTreeMap::new(),
+            cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: None,
+            memory_reads: 0,
+        };
+        // DW_OP_lit1 then DW_OP_bra +2 skips the DW_OP_fbreg on the executed
+        // path; the frame base must not be resolved eagerly.
+        let branching = expression(&[
+            gimli::DW_OP_lit1.0,
+            gimli::DW_OP_bra.0,
+            0x02,
+            0x00,
+            gimli::DW_OP_fbreg.0,
+            0x00,
+            gimli::DW_OP_lit0.0,
+            gimli::DW_OP_stack_value.0,
+        ]);
+        let location = Metadata::Unavailable("no frame base metadata".into());
+        let mut cache = FrameBaseCache::Empty;
+        let pieces = evaluate(
+            &branching,
+            RunTimeEndian::Little,
+            &mut FrameBase::Lazy(FrameBaseContext {
+                location: &location,
+                address: ImageAddress::new(0),
+                cache: &mut cache,
+            }),
+            &units([]),
+            &mut runtime,
+            &mut EvaluationBudget::default(),
+        )
+        .expect("executed path never needs the frame base");
+        assert!(matches!(
+            pieces.as_slice(),
+            [gimli::Piece {
+                location: Location::Value {
+                    value: Value::Generic(0)
+                },
+                ..
+            }]
+        ));
+        assert!(
+            matches!(cache, FrameBaseCache::Empty),
+            "frame base must not be resolved for an unexecuted branch"
+        );
+
+        // The same expression taking the fbreg path surfaces the metadata
+        // failure lazily.
+        let taken = expression(&[gimli::DW_OP_fbreg.0, 0x00, gimli::DW_OP_stack_value.0]);
+        let result = evaluate(
+            &taken,
+            RunTimeEndian::Little,
+            &mut FrameBase::Lazy(FrameBaseContext {
+                location: &location,
+                address: ImageAddress::new(0),
+                cache: &mut cache,
+            }),
+            &units([]),
+            &mut runtime,
+            &mut EvaluationBudget::default(),
+        );
+        assert!(matches!(result, Err(EvaluateError::Unavailable(_))));
     }
 
     #[test]
