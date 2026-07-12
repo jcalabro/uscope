@@ -51,6 +51,8 @@ enum DwarfError {
 
 type Reader<'data> = EndianSlice<'data, RunTimeEndian>;
 
+mod variables;
+
 struct DwarfUnwindInfo {
     eh_frame: Arc<[u8]>,
     endian: RunTimeEndian,
@@ -110,6 +112,13 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
         )?;
     }
 
+    let variables = variables::load_variable_info(
+        &dwarf,
+        &units,
+        target,
+        &mut source_files,
+        &mut source_file_ids,
+    )?;
     let image = Arc::new(ModuleImage::new(
         path.to_owned(),
         target,
@@ -125,7 +134,11 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
     ));
     let unwind = Arc::new(load_unwind_info(&object, target)?);
 
-    Ok(DebugInfo { image, unwind })
+    Ok(DebugInfo {
+        image,
+        unwind,
+        variables,
+    })
 }
 
 fn image_address_range(
@@ -193,6 +206,23 @@ fn load_unwind_info(
 }
 
 impl UnwindInfo for DwarfUnwindInfo {
+    fn cfa(
+        &self,
+        address: ImageAddress,
+        registers: &RegisterFile,
+    ) -> std::result::Result<VirtualAddress, UnwindTermination> {
+        let mut section = EhFrame::new(&self.eh_frame, self.endian);
+        section.set_address_size(self.address_size);
+        let fde = section
+            .fde_for_address(&self.bases, address.get(), EhFrame::cie_from_offset)
+            .map_err(|error| cfi_error(error, address))?;
+        let mut context = UnwindContext::new();
+        let row = fde
+            .unwind_info_for_address(&section, &self.bases, &mut context, address.get())
+            .map_err(|error| cfi_error(error, address))?;
+        cfa_from_rule(row.cfa(), registers)
+    }
+
     fn unwind(
         &self,
         address: ImageAddress,
@@ -210,25 +240,7 @@ impl UnwindInfo for DwarfUnwindInfo {
         let row = fde
             .unwind_info_for_address(&section, &self.bases, &mut context, address.get())
             .map_err(|error| cfi_error(error, address))?;
-        let cfa = match row.cfa() {
-            CfaRule::RegisterAndOffset { register, offset } => {
-                let value = registers.get(register.0).ok_or_else(|| {
-                    UnwindTermination::RegisterUnavailable {
-                        register: format!("DWARF register {}", register.0).into(),
-                    }
-                })?;
-                VirtualAddress::new(checked_add(value, *offset).ok_or_else(|| {
-                    UnwindTermination::InvalidCaller {
-                        description: "CFA arithmetic overflow".into(),
-                    }
-                })?)
-            }
-            CfaRule::Expression(_) => {
-                return Err(UnwindTermination::UnsupportedUnwindInfo {
-                    feature: "CFA expression".into(),
-                });
-            }
-        };
+        let cfa = cfa_from_rule(row.cfa(), registers)?;
         let mut caller = registers.clone();
 
         for &(register, ref rule) in row.registers() {
@@ -245,6 +257,29 @@ impl UnwindInfo for DwarfUnwindInfo {
             cfa,
             signal_frame,
         })
+    }
+}
+
+fn cfa_from_rule(
+    rule: &CfaRule<usize>,
+    registers: &RegisterFile,
+) -> std::result::Result<VirtualAddress, UnwindTermination> {
+    match rule {
+        CfaRule::RegisterAndOffset { register, offset } => {
+            let value = registers.get(register.0).ok_or_else(|| {
+                UnwindTermination::RegisterUnavailable {
+                    register: format!("DWARF register {}", register.0).into(),
+                }
+            })?;
+            Ok(VirtualAddress::new(
+                checked_add(value, *offset).ok_or_else(|| UnwindTermination::InvalidCaller {
+                    description: "CFA arithmetic overflow".into(),
+                })?,
+            ))
+        }
+        CfaRule::Expression(_) => Err(UnwindTermination::UnsupportedUnwindInfo {
+            feature: "CFA expression".into(),
+        }),
     }
 }
 

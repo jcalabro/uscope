@@ -10,7 +10,7 @@ use std::thread::JoinHandle;
 
 use tokio::sync::{broadcast, mpsc};
 
-use crate::debug_info::UnwindInfo;
+use crate::debug_info::{UnwindInfo, VariableInfo};
 use crate::protocol::{DebuggerEvent, Request};
 use crate::{ModuleImage, Result};
 
@@ -24,6 +24,7 @@ pub fn spawn_controller(
     executable: Arc<PathBuf>,
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
+    variable_info: Arc<dyn VariableInfo>,
     message_sender: mpsc::Sender<ControllerMessage>,
     messages: mpsc::Receiver<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
@@ -32,6 +33,7 @@ pub fn spawn_controller(
         executable,
         module_image,
         unwind_info,
+        variable_info,
         message_sender,
         messages,
         events,

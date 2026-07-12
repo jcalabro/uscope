@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use uscope::{
     Architecture, BreakpointLocation, ByteOrder, CodeInstanceKind, Debugger, EntryProvenance,
     Error, ExitStatus, InferiorState, InlineFrameLookup, ModuleImage, PointerWidth, RegisterRole,
-    SourceContext, SourceFile, SourceLocation, StepKind, StopReason, ThreadState,
-    UnwindTermination, VirtualAddress,
+    ScalarValue, SourceContext, SourceFile, SourceLocation, StepKind, StopReason, ThreadState,
+    UnwindTermination, VariableState, VirtualAddress,
 };
 
 use nix::sys::signal::{Signal, kill};
@@ -20,6 +20,266 @@ fn single_image_breakpoint_address(breakpoint: &uscope::Breakpoint) -> uscope::I
         BreakpointLocation::Image(address) => address,
         BreakpointLocation::Virtual(_) => panic!("function breakpoint was not image-based"),
     }
+}
+
+#[tokio::test]
+async fn stack_scalar_variables_are_read_through_the_public_scenario_path() {
+    for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint("variables.c", 52).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let before = scenario.snapshot().await;
+        let mut inspection_events = scenario.handle().subscribe();
+
+        let snapshot = scenario
+            .operation("inspect variables", scenario.handle().variables())
+            .await;
+        let names = snapshot
+            .variables
+            .iter()
+            .map(|variable| variable.name.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "boolean",
+                "character",
+                "signed_character",
+                "unsigned_character",
+                "signed_short",
+                "unsigned_short",
+                "signed_int",
+                "unsigned_int",
+                "signed_long",
+                "unsigned_long",
+                "signed_long_long",
+                "unsigned_long_long",
+                "single",
+                "double_precision",
+                "extended",
+            ]
+        );
+        let expected = [
+            ScalarValue::Boolean(true),
+            ScalarValue::Signed(65),
+            ScalarValue::Signed(-12),
+            ScalarValue::Unsigned(250),
+            ScalarValue::Signed(-1234),
+            ScalarValue::Unsigned(54_321),
+            ScalarValue::Signed(-1_234_567),
+            ScalarValue::Unsigned(3_456_789_012),
+            ScalarValue::Signed(-123_456_789),
+            ScalarValue::Unsigned(123_456_789),
+            ScalarValue::Signed(-1_234_567_890_123),
+            ScalarValue::Unsigned(12_345_678_901_234),
+            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+            ScalarValue::Floating(uscope::FloatValue::X87Extended {
+                significand: 0xc800_0000_0000_0000,
+                sign_exponent: 0x4000,
+            }),
+        ];
+        let expected_sizes = [1, 1, 1, 1, 2, 2, 4, 4, 8, 8, 8, 8, 4, 8, 16];
+        for ((variable, expected), expected_size) in
+            snapshot.variables.iter().zip(expected).zip(expected_sizes)
+        {
+            assert_variable_value(variable, expected);
+            assert_eq!(
+                variable
+                    .type_info
+                    .as_ref()
+                    .expect("available scalar type")
+                    .byte_size,
+                expected_size
+            );
+            let VariableState::Available { storage, raw, .. } = &variable.state else {
+                unreachable!("value assertion checked availability")
+            };
+            assert!(
+                matches!(storage, uscope::VariableStorage::Memory(address) if address.get() != 0)
+            );
+            assert_eq!(raw.len(), usize::try_from(expected_size).unwrap());
+        }
+        assert_eq!(
+            scenario
+                .operation(
+                    "inspect signed_int",
+                    scenario.handle().variable("signed_int")
+                )
+                .await,
+            snapshot.variables[6]
+        );
+        let after = scenario.snapshot().await;
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.inferior, before.inferior);
+        assert!(matches!(
+            inspection_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn variable_inspection_uses_live_values_and_lexical_scope() {
+    let mut changing = Scenario::new(
+        "changing stack variable",
+        Scenario::fixture("variables-gcc-o0"),
+    );
+    changing.add_source_breakpoint("variables.c", 11).await;
+    assert!(matches!(
+        changing.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let first = changing
+        .operation(
+            "first changing value",
+            changing.handle().variable("changing"),
+        )
+        .await;
+    assert_variable_value(&first, ScalarValue::Signed(10));
+    assert!(matches!(
+        changing.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let second = changing
+        .operation(
+            "second changing value",
+            changing.handle().variable("changing"),
+        )
+        .await;
+    assert_variable_value(&second, ScalarValue::Signed(17));
+    changing.shutdown().await;
+
+    let mut shadow = Scenario::new(
+        "shadowed stack variables",
+        Scenario::fixture("variables-gcc-o0"),
+    );
+    shadow.add_source_breakpoint("variables.c", 20).await;
+    assert!(matches!(
+        shadow.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let named = shadow
+        .operation("innermost shadow", shadow.handle().variable("shadowed"))
+        .await;
+    assert_variable_value(&named, ScalarValue::Signed(200));
+    let listed = shadow
+        .operation("all shadows", shadow.handle().variables())
+        .await;
+    assert_eq!(listed.variables.len(), 2);
+    assert_variable_value(&listed.variables[0], ScalarValue::Signed(100));
+    assert_variable_value(&listed.variables[1], ScalarValue::Signed(200));
+    shadow.shutdown().await;
+}
+
+#[tokio::test]
+async fn variable_inspection_reports_partial_support_and_parameters_honestly() {
+    let mut partial = Scenario::new(
+        "partial variable support",
+        Scenario::fixture("variables-gcc-o0"),
+    );
+    partial.add_source_breakpoint("variables.c", 29).await;
+    assert!(matches!(
+        partial.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let variables = partial
+        .operation("partial variables", partial.handle().variables())
+        .await;
+    assert_eq!(variables.variables.len(), 2);
+    assert_variable_value(&variables.variables[0], ScalarValue::Signed(42));
+    assert!(matches!(
+        variables.variables[1].state,
+        VariableState::Unavailable(_)
+    ));
+    partial.shutdown().await;
+
+    let mut parameter = Scenario::new(
+        "unsupported parameter",
+        Scenario::fixture("variables-gcc-o0"),
+    );
+    parameter.add_source_breakpoint("variables.c", 5).await;
+    assert!(matches!(
+        parameter.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert!(matches!(
+        parameter.handle().variable("parameter").await,
+        Err(Error::ParameterUnsupported(name)) if name == "parameter"
+    ));
+    assert!(matches!(
+        parameter.handle().variable("missing").await,
+        Err(Error::VariableNotFound(name)) if name == "missing"
+    ));
+    parameter.shutdown().await;
+}
+
+#[tokio::test]
+async fn variable_inspection_requires_a_stopped_inferior() {
+    let mut scenario = Scenario::new("variable state errors", Scenario::fixture("spin"));
+    assert!(matches!(
+        scenario.handle().variables().await,
+        Err(Error::NotRunning)
+    ));
+    let run = scenario.start_running().await;
+    assert!(matches!(
+        scenario.handle().variables().await,
+        Err(Error::NotStopped)
+    ));
+    scenario.shutdown().await;
+    let _ = run.await.expect("run task panicked");
+}
+
+#[tokio::test]
+async fn variable_inspection_uses_the_selected_threads_stack() {
+    let mut scenario = Scenario::new(
+        "thread-local variable inspection",
+        Scenario::fixture("variables-threads"),
+    );
+    scenario
+        .add_source_breakpoint("variables-threads.c", 23)
+        .await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let threads = scenario.snapshot().await.threads.clone();
+    let mut values = BTreeSet::new();
+    for thread in threads.iter() {
+        scenario
+            .operation(
+                "select stopped thread",
+                scenario.handle().select_thread(thread.id),
+            )
+            .await;
+        match scenario.handle().variable("thread_value").await {
+            Ok(variable) => {
+                let VariableState::Available {
+                    value: ScalarValue::Signed(value),
+                    ..
+                } = variable.state
+                else {
+                    panic!("thread_value was not a signed available scalar: {variable:?}");
+                };
+                values.insert(value);
+            }
+            Err(Error::LocationUnavailable | Error::VariableNotFound(_)) => {}
+            Err(error) => panic!("unexpected thread variable error: {error}"),
+        }
+    }
+    assert_eq!(values, BTreeSet::from([101, 202]));
+    scenario.shutdown().await;
+}
+
+fn assert_variable_value(variable: &uscope::Variable, expected: impl Into<ScalarValue>) {
+    let VariableState::Available { value, .. } = &variable.state else {
+        panic!("{} was not available: {:?}", variable.name, variable.state);
+    };
+    assert_eq!(*value, expected.into());
 }
 
 #[tokio::test]

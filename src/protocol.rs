@@ -4,8 +4,17 @@ use tokio::sync::oneshot;
 
 use crate::{
     Backtrace, BreakpointLocation, CodeInstanceId, ExecutionLocation, LineNumber, LoadedModule,
-    RegisterSnapshot, Result, ThreadId, VirtualAddress,
+    RegisterSnapshot, Result, ThreadId, VariableSnapshot, VirtualAddress,
 };
+
+/// Selects variables to inspect in the stopped top physical frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariableQuery {
+    /// Inspect every visible local declaration.
+    All,
+    /// Inspect the innermost visible local with this name.
+    Name(String),
+}
 
 /// A user-facing request for a logical breakpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -430,6 +439,12 @@ pub enum Request {
         stop_id: StopId,
         thread_id: ThreadId,
         reply: Reply<RegisterSnapshot>,
+    },
+    Variables {
+        query: VariableQuery,
+        stop_id: StopId,
+        thread_id: ThreadId,
+        reply: Reply<VariableSnapshot>,
     },
     SelectThread {
         stop_id: StopId,
