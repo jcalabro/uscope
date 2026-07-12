@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +22,24 @@ macro_rules! address_type {
             #[must_use]
             pub const fn get(self) -> u64 {
                 self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{:#x}", self.0)
+            }
+        }
+
+        impl fmt::LowerHex for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::LowerHex::fmt(&self.0, f)
+            }
+        }
+
+        impl fmt::UpperHex for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::UpperHex::fmt(&self.0, f)
             }
         }
     };
@@ -61,6 +80,12 @@ macro_rules! id_type {
         impl $name {
             pub(crate) const fn new(value: u32) -> Self {
                 Self(value)
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
             }
         }
     };
@@ -115,6 +140,12 @@ impl ThreadId {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+impl fmt::Display for ThreadId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -222,6 +253,12 @@ impl LineNumber {
     }
 }
 
+impl fmt::Display for LineNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// A one-based source column number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ColumnNumber(u64);
@@ -237,6 +274,12 @@ impl ColumnNumber {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
+    }
+}
+
+impl fmt::Display for ColumnNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
