@@ -1,0 +1,16 @@
+[
+	{
+		"label": "Debug uscope",
+		"adapter": "CodeLLDB",
+		"request": "launch",
+		"program": "$ZED_WORKTREE_ROOT/target/debug/uscope",
+		"args": [
+			"$ZED_WORKTREE_ROOT/build/test-programs/basic"
+		],
+		"cwd": "$ZED_WORKTREE_ROOT",
+		"sourceLanguages": [
+			"rust"
+		],
+		"build": "build in Nix dev shell"
+	}
+]

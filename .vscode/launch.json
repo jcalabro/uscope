@@ -1,0 +1,21 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+	
+		{
+			"name": "Debug uscope",
+			"type": "lldb",
+			"request": "launch",
+			"preLaunchTask": "build in Nix dev shell",
+			"cargo": {
+				"args": [
+					"run",
+					"--bin=uscope"
+				]
+			},
+			"args": [
+				"./build/test-programs/step"
+			]
+		}
+	]
+}
