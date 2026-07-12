@@ -46,11 +46,30 @@ __attribute__((noinline)) static int changing_parameter(int changing) {
     return changing;
 }
 
+volatile _Bool input_boolean = true;
+volatile char input_character = 65;
+volatile signed char input_signed_character = -12;
+volatile unsigned char input_unsigned_character = 250;
+volatile short input_signed_short = -1234;
+volatile unsigned short input_unsigned_short = 54321;
+volatile int input_signed_int = -1234567;
+volatile unsigned int input_unsigned_int = 3456789012U;
+volatile long input_signed_long = -123456789L;
+volatile unsigned long input_unsigned_long = 123456789UL;
+volatile long long input_signed_long_long = -1234567890123LL;
+volatile unsigned long long input_unsigned_long_long = 12345678901234ULL;
+volatile float input_single = 1.25F;
+volatile double input_double_precision = -2.5;
+volatile long double input_extended = 3.125L;
+
 int main(void) {
-    if (!all_parameters(true, 65, -12, 250, -1234, 54321, -1234567,
-                        3456789012U, -123456789L, 123456789UL,
-                        -1234567890123LL, 12345678901234ULL, 1.25F, -2.5,
-                        3.125L)) {
+    if (!all_parameters(
+            input_boolean, input_character, input_signed_character,
+            input_unsigned_character, input_signed_short, input_unsigned_short,
+            input_signed_int, input_unsigned_int, input_signed_long,
+            input_unsigned_long, input_signed_long_long,
+            input_unsigned_long_long, input_single, input_double_precision,
+            input_extended)) {
         return 1;
     }
     return shadow_parameter(100) == 100 && changing_parameter(10) == 24 ? 0 : 1;

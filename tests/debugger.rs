@@ -236,6 +236,56 @@ async fn stack_scalar_parameters_are_read_through_the_public_scenario_path() {
 }
 
 #[tokio::test]
+async fn optimized_physical_parameters_preserve_catalog_and_supported_stack_values() {
+    for fixture in [
+        "variables-parameters-gcc-o2",
+        "variables-parameters-clang-o2",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario
+            .add_source_breakpoint("variables-parameters.c", 22)
+            .await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let snapshot = scenario
+            .operation(
+                "inspect optimized parameters",
+                scenario.handle().variables(),
+            )
+            .await;
+        assert_eq!(snapshot.frame, uscope::PresentedFrame::Physical);
+        assert_parameter_catalog(&snapshot, fixture);
+        assert_optimized_parameter_values(&snapshot, fixture);
+        assert_eq!(
+            scenario
+                .operation(
+                    "inspect unavailable optimized parameter",
+                    scenario.handle().variable("boolean")
+                )
+                .await,
+            snapshot.variables[0]
+        );
+        assert_eq!(
+            scenario
+                .operation(
+                    "inspect available optimized parameter",
+                    scenario.handle().variable("signed_int")
+                )
+                .await,
+            snapshot.variables[6]
+        );
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn parameters_use_live_values_and_participate_in_lexical_shadowing() {
     let mut changing = Scenario::new(
         "changing parameter",
@@ -569,39 +619,7 @@ fn assert_variable_value(variable: &uscope::Variable, expected: impl Into<Scalar
 }
 
 fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
-    let names = snapshot
-        .variables
-        .iter()
-        .map(|variable| variable.name.as_ref())
-        .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        [
-            "boolean",
-            "character",
-            "signed_character",
-            "unsigned_character",
-            "signed_short",
-            "unsigned_short",
-            "signed_int",
-            "unsigned_int",
-            "signed_long",
-            "unsigned_long",
-            "signed_long_long",
-            "unsigned_long_long",
-            "single",
-            "double_precision",
-            "extended",
-            "local",
-        ],
-        "{fixture}"
-    );
-    assert!(
-        snapshot.variables[..15]
-            .iter()
-            .all(|variable| variable.kind == VariableKind::Parameter)
-    );
-    assert_eq!(snapshot.variables[15].kind, VariableKind::Local);
+    assert_parameter_catalog(snapshot, fixture);
     let expected = [
         ScalarValue::Boolean(true),
         ScalarValue::Signed(65),
@@ -645,6 +663,95 @@ fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &st
         ));
         assert_eq!(raw.len(), usize::try_from(expected_size).unwrap());
     }
+}
+
+fn assert_parameter_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    let names = snapshot
+        .variables
+        .iter()
+        .map(|variable| variable.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "boolean",
+            "character",
+            "signed_character",
+            "unsigned_character",
+            "signed_short",
+            "unsigned_short",
+            "signed_int",
+            "unsigned_int",
+            "signed_long",
+            "unsigned_long",
+            "signed_long_long",
+            "unsigned_long_long",
+            "single",
+            "double_precision",
+            "extended",
+            "local",
+        ],
+        "{fixture}"
+    );
+    assert!(
+        snapshot.variables[..15]
+            .iter()
+            .all(|variable| variable.kind == VariableKind::Parameter)
+    );
+    assert_eq!(snapshot.variables[15].kind, VariableKind::Local);
+}
+
+fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    for variable in &snapshot.variables[..6] {
+        assert!(
+            matches!(variable.state, VariableState::Unavailable(_)),
+            "{fixture}: {variable:?}"
+        );
+    }
+    let stack_values = [
+        ScalarValue::Signed(-1_234_567),
+        ScalarValue::Unsigned(3_456_789_012),
+        ScalarValue::Signed(-123_456_789),
+        ScalarValue::Unsigned(123_456_789),
+        ScalarValue::Signed(-1_234_567_890_123),
+        ScalarValue::Unsigned(12_345_678_901_234),
+    ];
+    for (variable, expected) in snapshot.variables[6..12].iter().zip(stack_values) {
+        assert_variable_value(variable, expected);
+        assert!(matches!(
+            variable.state,
+            VariableState::Available {
+                storage: uscope::VariableStorage::Memory(_),
+                ..
+            }
+        ));
+    }
+    assert!(
+        snapshot.variables[12..14]
+            .iter()
+            .all(|variable| matches!(variable.state, VariableState::Unavailable(_))),
+        "{fixture}: {snapshot:?}"
+    );
+    match fixture {
+        "variables-parameters-gcc-o2" => assert_variable_value(
+            &snapshot.variables[14],
+            ScalarValue::Floating(uscope::FloatValue::X87Extended {
+                significand: 0xc800_0000_0000_0000,
+                sign_exponent: 0x4000,
+            }),
+        ),
+        "variables-parameters-clang-o2" => assert!(
+            matches!(snapshot.variables[14].state, VariableState::Unavailable(_)),
+            "{fixture}: {:?}",
+            snapshot.variables[14]
+        ),
+        _ => panic!("unexpected optimized parameter fixture {fixture}"),
+    }
+    assert!(
+        matches!(snapshot.variables[15].state, VariableState::Unavailable(_)),
+        "{fixture}: {:?}",
+        snapshot.variables[15]
+    );
 }
 
 #[tokio::test]
