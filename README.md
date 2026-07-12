@@ -22,9 +22,10 @@ just run build/test-programs/basic
 ```
 
 At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
+Use `print <name>` or `p <name>` to print one visible stack-local scalar, or `print` with no argument to list every visible local in the top physical frame.
 Breakpoint stops automatically print three surrounding source lines on each side when source is available.
 Use `list` or `l` to print that source context again for the current stop.
 Use `stepi`, `step`, `next`, and `finish` for instruction and source-level execution control.
-Use `threads` to list stopped threads and `thread <id>` to select the thread used by register, source, and backtrace commands.
+Use `threads` to list stopped threads and `thread <id>` to select the thread used by register, variable, source, and backtrace commands.
 Press Ctrl-C while the inferior is running to pause it at a coherent all-stop snapshot.
 The interactive debugger is a plain terminal REPL, so output remains available in normal terminal scrollback. Use `--batch` with command files, `--eval`, or stdin when no interactive prompt is wanted.

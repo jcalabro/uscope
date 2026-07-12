@@ -8,14 +8,44 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
-use crate::{ImageAddress, ModuleImage, Result, UnwindTermination};
+use crate::{
+    ImageAddress, ModuleImage, Result, UnwindTermination, Variable, VariableQuery,
+    VariableUnavailableReason, VirtualAddress,
+};
 
 pub struct DebugInfo {
     pub image: Arc<ModuleImage>,
     pub unwind: Arc<dyn UnwindInfo>,
+    pub variables: Arc<dyn VariableInfo>,
+}
+
+pub trait VariableRuntime {
+    fn register(&self, register: u16) -> Option<u64>;
+    fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason>;
+    fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>>;
+    fn read_memory(
+        &mut self,
+        address: VirtualAddress,
+        size: usize,
+    ) -> std::result::Result<Arc<[u8]>, Arc<str>>;
+}
+
+pub trait VariableInfo: Send + Sync {
+    fn inspect(
+        &self,
+        address: ImageAddress,
+        query: &VariableQuery,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<Vec<Variable>>;
 }
 
 pub trait UnwindInfo: Send + Sync {
+    fn cfa(
+        &self,
+        address: ImageAddress,
+        registers: &RegisterFile,
+    ) -> std::result::Result<VirtualAddress, UnwindTermination>;
+
     fn unwind(
         &self,
         address: ImageAddress,

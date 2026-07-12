@@ -7,20 +7,22 @@ mod unwind;
 
 pub use error::{Error, Result};
 pub use model::{
-    AddressRange, Architecture, Backtrace, BreakpointEntry, BreakpointLocation, ByteOrder,
-    CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, ColumnNumber, EntryProvenance,
-    ExecutionLocation, FrameKind, FunctionId, FunctionInfo, ImageAddress, ImageLocation,
-    InlineChain, InlineFrameLookup, LineNumber, LineSequenceId, LoadedModule, ModuleId,
-    ModuleImage, ModuleImageId, PointerWidth, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, SourceContext, SourceFile, SourceFileId, SourceLine,
-    SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolId, SymbolInfo,
-    TargetDescription, ThreadId, UnwindTermination, VirtualAddress,
+    AddressRange, Architecture, Backtrace, BaseType, BaseTypeEncoding, BreakpointEntry,
+    BreakpointLocation, ByteOrder, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
+    ColumnNumber, EntryProvenance, ExecutionLocation, FloatValue, FrameKind, FunctionId,
+    FunctionInfo, ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, LineNumber,
+    LineSequenceId, LoadedModule, ModuleId, ModuleImage, ModuleImageId, PointerWidth,
+    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, ScalarValue,
+    SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId,
+    StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId,
+    UnwindTermination, Variable, VariableMalformedReason, VariableSnapshot, VariableState,
+    VariableStorage, VariableUnavailableReason, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
     ExecutionId, ExitStatus, FramePresentation, InferiorState, PresentedFrame, ProcessId,
     ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
-    ThreadSnapshot, ThreadState,
+    ThreadSnapshot, ThreadState, VariableQuery,
 };
 
 use std::path::{Path, PathBuf};
@@ -68,6 +70,7 @@ impl Debugger {
             Arc::clone(&executable),
             Arc::clone(&module_image),
             debug_info.unwind,
+            debug_info.variables,
             requests.clone(),
             receiver,
             events.clone(),
@@ -397,6 +400,35 @@ impl DebuggerHandle {
         let selection = self.stopped_selection().await?;
 
         self.request(|reply| Request::Registers {
+            stop_id: selection.stop,
+            thread_id: selection.thread,
+            reply,
+        })
+        .await
+    }
+
+    /// Inspects every visible local variable in the selected top physical frame.
+    pub async fn variables(&self) -> Result<VariableSnapshot> {
+        self.variable_query(VariableQuery::All).await
+    }
+
+    /// Inspects the innermost visible local variable with the supplied name.
+    pub async fn variable(&self, name: impl Into<String>) -> Result<Variable> {
+        let name = name.into();
+        let snapshot = self
+            .variable_query(VariableQuery::Name(name.clone()))
+            .await?;
+        snapshot
+            .variables
+            .first()
+            .cloned()
+            .ok_or(Error::VariableNotFound(name))
+    }
+
+    async fn variable_query(&self, query: VariableQuery) -> Result<VariableSnapshot> {
+        let selection = self.stopped_selection().await?;
+        self.request(|reply| Request::Variables {
+            query,
             stop_id: selection.stop,
             thread_id: selection.thread,
             reply,

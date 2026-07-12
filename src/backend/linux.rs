@@ -18,13 +18,13 @@ use object::{Object, ObjectSegment};
 use tokio::sync::{broadcast, mpsc};
 
 use super::ControllerMessage;
-use crate::debug_info::UnwindInfo;
+use crate::debug_info::{UnwindInfo, VariableInfo, VariableRuntime};
 use crate::model::FrameMetadata;
 use crate::protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
     ExecutionId, ExitStatus, FramePresentation, InferiorState, PresentedFrame, ProcessId, Reply,
     Request, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
-    ThreadSnapshot, ThreadState as ObservableThreadState,
+    ThreadSnapshot, ThreadState as ObservableThreadState, VariableQuery,
 };
 use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, MemoryReader, RegisterFile,
@@ -32,15 +32,17 @@ use crate::unwind::{
 };
 use crate::{
     Backtrace, BreakpointLocation, CodeInstanceId, CodeInstanceKind, Error, ExecutionLocation,
-    FrameKind, ImageLocation, InlineFrameLookup, LoadedModule, ModuleImage, RegisterDescriptor,
-    RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame,
-    ThreadId as DebugThreadId, UnwindTermination, VirtualAddress,
+    FrameKind, ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, ModuleImage,
+    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, Result,
+    SourceLocation, StackFrame, ThreadId as DebugThreadId, UnwindTermination, VariableSnapshot,
+    VariableUnavailableReason, VirtualAddress,
 };
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
 const WAITER_THREAD_NAME: &str = "uscope-waitpid";
 const BREAKPOINT_OPCODE: u8 = 0xcc;
 const TRAP_UNKNOWN: i32 = 5;
+const MAX_LOGICAL_MEMORY_READ: usize = 1024 * 1024;
 
 static LINUX_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -292,6 +294,8 @@ enum LinuxError {
     BreakpointRemoveRecovery { cause: String, recovery: String },
     #[error("resume failed ({cause}) and recovery also failed ({recovery})")]
     ResumeRecovery { cause: String, recovery: String },
+    #[error("logical memory read of {size} bytes exceeds the {maximum}-byte limit")]
+    MemoryReadTooLarge { size: usize, maximum: usize },
 }
 
 struct Controller<P: LinuxTraceOps> {
@@ -299,6 +303,7 @@ struct Controller<P: LinuxTraceOps> {
     executable: Arc<PathBuf>,
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
+    variable_info: Arc<dyn VariableInfo>,
     messages: mpsc::Receiver<ControllerMessage>,
     message_sender: mpsc::Sender<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
@@ -321,6 +326,7 @@ pub fn spawn_controller(
     executable: Arc<PathBuf>,
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
+    variable_info: Arc<dyn VariableInfo>,
     message_sender: mpsc::Sender<ControllerMessage>,
     messages: mpsc::Receiver<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
@@ -335,6 +341,7 @@ pub fn spawn_controller(
                 executable,
                 module_image,
                 unwind_info,
+                variable_info,
                 ControllerChannels {
                     messages,
                     message_sender,
@@ -352,6 +359,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         executable: Arc<PathBuf>,
         module_image: Arc<ModuleImage>,
         unwind_info: Arc<dyn UnwindInfo>,
+        variable_info: Arc<dyn VariableInfo>,
         channels: ControllerChannels,
         ptrace: P,
     ) -> Self {
@@ -360,6 +368,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             executable,
             module_image,
             unwind_info,
+            variable_info,
             messages: channels.messages,
             message_sender: channels.message_sender,
             events: channels.events,
@@ -396,6 +405,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exhaustive request dispatcher keeps protocol routing in one place"
+    )]
     fn handle_request(&mut self, request: Request) -> bool {
         match request {
             Request::AddBreakpoint { spec, reply } => {
@@ -475,6 +488,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.registers(stop_id, debug_pid(thread_id)));
+            }
+            Request::Variables {
+                query,
+                stop_id,
+                thread_id,
+                reply,
+            } => {
+                let _ = reply.send(self.variables(stop_id, debug_pid(thread_id), &query));
             }
             Request::SelectThread {
                 stop_id,
@@ -2313,17 +2334,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         validate_process(inferior, requested_process)?;
         validate_public_stop(inferior, Some(stop_id))?;
         let pid = inferior.selected_thread.ok_or(Error::NotStopped)?;
-        let mut bytes = self.ptrace.read_word(pid, address.get())?.to_ne_bytes();
-        for (&site_address, site) in &inferior.breakpoints {
-            let Some(offset) = site_address.get().checked_sub(address.get()) else {
-                continue;
-            };
-            if site.installed && offset < bytes.len() as u64 {
-                bytes[usize::try_from(offset).expect("word offset fits usize")] =
-                    site.original_byte;
-            }
-        }
-        Ok(u64::from_ne_bytes(bytes))
+        let bytes = read_logical_memory(
+            &self.ptrace,
+            pid,
+            &inferior.breakpoints,
+            address,
+            std::mem::size_of::<u64>(),
+        )?;
+        Ok(u64::from_le_bytes(
+            bytes.try_into().expect("one native word was requested"),
+        ))
     }
 
     fn write_word(
@@ -2642,6 +2662,57 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.module_image.target(),
             &native,
         ))
+    }
+
+    fn variables(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        query: &VariableQuery,
+    ) -> Result<VariableSnapshot> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_stopped_thread(inferior, pid)?;
+        let presentation = self.presentation_for_stopped_thread(pid)?;
+        if !matches!(presentation.frame, PresentedFrame::Physical) {
+            return Err(Error::VariableContextUnsupported);
+        }
+        let native = self.ptrace.registers(pid)?;
+        let registers = x86_64_registers(&native);
+        let instruction = VirtualAddress::new(native.rip);
+        let image_address = inferior.loaded_module.image_address(instruction)?;
+        if !self.module_image.contains_address(image_address) {
+            return Err(Error::LocationUnavailable);
+        }
+        let cfa = self
+            .unwind_info
+            .cfa(image_address, &registers)
+            .map_err(|termination| match termination {
+                UnwindTermination::UnsupportedUnwindInfo { feature }
+                    if feature.as_ref() == "CFA expression" =>
+                {
+                    VariableUnavailableReason::CfaExpression
+                }
+                other => VariableUnavailableReason::Other(format!("{other:?}").into()),
+            });
+        let mut runtime = LinuxVariableRuntime {
+            ptrace: &self.ptrace,
+            pid,
+            loaded_module: inferior.loaded_module,
+            breakpoints: &inferior.breakpoints,
+            registers: &registers,
+            cfa,
+        };
+        let variables = self
+            .variable_info
+            .inspect(image_address, query, &mut runtime)?;
+        Ok(VariableSnapshot {
+            revision: self.revision,
+            stop_id,
+            thread: debug_thread_id(pid),
+            target: self.module_image.target(),
+            variables: variables.into(),
+        })
     }
 
     fn select_thread(&mut self, stop_id: StopId, pid: Pid) -> Result<()> {
@@ -2984,6 +3055,91 @@ fn expand_inline_backtrace(
 struct PtraceMemory<'a> {
     ptrace: &'a dyn LinuxTraceOps,
     pid: Pid,
+}
+
+struct LinuxVariableRuntime<'a, P> {
+    ptrace: &'a P,
+    pid: Pid,
+    loaded_module: LoadedModule,
+    breakpoints: &'a BTreeMap<VirtualAddress, BreakpointSite>,
+    registers: &'a RegisterFile,
+    cfa: std::result::Result<VirtualAddress, VariableUnavailableReason>,
+}
+
+impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
+    fn register(&self, register: u16) -> Option<u64> {
+        self.registers.get(register)
+    }
+
+    fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
+        self.cfa.clone()
+    }
+
+    fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
+        self.loaded_module
+            .virtual_address(address)
+            .map_err(|error| error.to_string().into())
+    }
+
+    fn read_memory(
+        &mut self,
+        address: VirtualAddress,
+        size: usize,
+    ) -> std::result::Result<Arc<[u8]>, Arc<str>> {
+        read_logical_memory(self.ptrace, self.pid, self.breakpoints, address, size)
+            .map(Arc::from)
+            .map_err(|error| error.to_string().into())
+    }
+}
+
+fn read_logical_memory(
+    ptrace: &impl LinuxTraceOps,
+    pid: Pid,
+    breakpoints: &BTreeMap<VirtualAddress, BreakpointSite>,
+    address: VirtualAddress,
+    size: usize,
+) -> Result<Vec<u8>> {
+    read_logical_memory_with(address, size, breakpoints, |current| {
+        ptrace.read_word(pid, current)
+    })
+}
+
+fn read_logical_memory_with(
+    address: VirtualAddress,
+    size: usize,
+    breakpoints: &BTreeMap<VirtualAddress, BreakpointSite>,
+    mut read_word: impl FnMut(u64) -> Result<u64>,
+) -> Result<Vec<u8>> {
+    if size > MAX_LOGICAL_MEMORY_READ {
+        return Err(backend_error(LinuxError::MemoryReadTooLarge {
+            size,
+            maximum: MAX_LOGICAL_MEMORY_READ,
+        }));
+    }
+    let end = address
+        .get()
+        .checked_add(u64::try_from(size).expect("memory read size fits u64"))
+        .ok_or(Error::AddressOverflow)?;
+    let mut bytes = Vec::with_capacity(size);
+    let mut current = address.get();
+    while current < end {
+        let mut word = read_word(current)?.to_le_bytes();
+        for (&site_address, site) in breakpoints {
+            let Some(offset) = site_address.get().checked_sub(current) else {
+                continue;
+            };
+            if site.installed && offset < word.len() as u64 {
+                word[usize::try_from(offset).expect("word offset fits usize")] = site.original_byte;
+            }
+        }
+        let remaining = usize::try_from(end - current).expect("remaining bytes fit usize");
+        let count = remaining.min(word.len());
+        bytes.extend_from_slice(&word[..count]);
+        current = current
+            .checked_add(u64::try_from(count).expect("word size fits u64"))
+            .ok_or(Error::AddressOverflow)?;
+    }
+    Ok(bytes)
 }
 
 impl MemoryReader for PtraceMemory<'_> {
@@ -3821,6 +3977,33 @@ mod tests {
     use super::*;
     use crate::{AddressRange, ImageAddress};
 
+    #[test]
+    fn logical_memory_reads_unaligned_cross_word_ranges_and_hides_traps() {
+        let address = VirtualAddress::new(0x1003);
+        let mut breakpoints = BTreeMap::new();
+        breakpoints.insert(
+            VirtualAddress::new(0x1005),
+            BreakpointSite {
+                original_byte: 0x55,
+                installed: true,
+                owners: BTreeSet::new(),
+            },
+        );
+        let bytes = read_logical_memory_with(address, 10, &breakpoints, |current| {
+            let mut bytes = [0_u8; 8];
+            for (offset, byte) in bytes.iter_mut().enumerate() {
+                *byte = u8::try_from(current + offset as u64 - 0x1000).expect("test byte fits u8");
+            }
+            if current <= 0x1005 && 0x1005 < current + 8 {
+                bytes[usize::try_from(0x1005 - current).expect("test offset fits usize")] =
+                    BREAKPOINT_OPCODE;
+            }
+            Ok(u64::from_le_bytes(bytes))
+        })
+        .expect("logical memory read");
+        assert_eq!(bytes, [3, 4, 0x55, 6, 7, 8, 9, 10, 11, 12]);
+    }
+
     struct RecordingTrace {
         actions: Rc<RefCell<Vec<&'static str>>>,
         pid: Pid,
@@ -3952,6 +4135,14 @@ mod tests {
     struct UnusedUnwindInfo;
 
     impl UnwindInfo for UnusedUnwindInfo {
+        fn cfa(
+            &self,
+            _address: ImageAddress,
+            _registers: &RegisterFile,
+        ) -> std::result::Result<VirtualAddress, UnwindTermination> {
+            panic!("unexpected cfa lookup")
+        }
+
         fn unwind(
             &self,
             _address: ImageAddress,
@@ -3959,6 +4150,19 @@ mod tests {
             _memory: &mut dyn MemoryReader,
         ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
             RecordingTrace::unexpected("unwind")
+        }
+    }
+
+    struct UnusedVariableInfo;
+
+    impl VariableInfo for UnusedVariableInfo {
+        fn inspect(
+            &self,
+            _address: ImageAddress,
+            _query: &VariableQuery,
+            _runtime: &mut dyn VariableRuntime,
+        ) -> Result<Vec<crate::Variable>> {
+            panic!("unexpected variable lookup")
         }
     }
 
@@ -3997,6 +4201,7 @@ mod tests {
             Arc::new(PathBuf::from("/test/program")),
             image,
             Arc::new(UnusedUnwindInfo),
+            Arc::new(UnusedVariableInfo),
             ControllerChannels {
                 messages,
                 message_sender,
@@ -4190,6 +4395,7 @@ mod tests {
             Arc::new(PathBuf::from("/test/inline")),
             Arc::clone(&image),
             Arc::new(UnusedUnwindInfo),
+            Arc::new(UnusedVariableInfo),
             ControllerChannels {
                 messages,
                 message_sender,

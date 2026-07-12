@@ -7,13 +7,16 @@ use std::{env, thread};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use rustc_apfloat::Float as _;
+use rustc_apfloat::ieee::X87DoubleExtended;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
     Breakpoint, BreakpointId, BreakpointLocation, BreakpointSpec, ByteOrder, Debugger,
-    DebuggerHandle, Error, ExitStatus, LineNumber, RegisterSnapshot, SourceContext, StateSnapshot,
-    StepKind, StopReason, ThreadId, ThreadState, VirtualAddress,
+    DebuggerHandle, Error, ExitStatus, FloatValue, LineNumber, RegisterSnapshot, ScalarValue,
+    SourceContext, StateSnapshot, StepKind, StopReason, ThreadId, ThreadState, Variable,
+    VariableSnapshot, VariableState, VirtualAddress,
 };
 
 #[derive(Parser)]
@@ -54,6 +57,7 @@ enum Command {
     Run,
     Continue,
     Pause,
+    Print,
     Stepi,
     Step,
     Next,
@@ -114,7 +118,14 @@ const COMMANDS: &[CommandSpec] = &[
         "continue",
         "Continue execution"
     ),
-    command!(Pause, "pause", ["p"], "pause", "Pause execution"),
+    command!(Pause, "pause", [], "pause", "Pause execution"),
+    command!(
+        Print,
+        "print",
+        ["p"],
+        "print [variable]",
+        "Print one or all visible local variables"
+    ),
     command!(Stepi, "stepi", ["si"], "stepi", "Step one instruction"),
     command!(Step, "step", ["s"], "step", "Step into at source level"),
     command!(Next, "next", ["n"], "next", "Step over at source level"),
@@ -534,6 +545,7 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
         Command::Pause => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.pause().await?).await,
         )),
+        Command::Print => execute_print(debugger, &mut words).await,
         Command::Stepi => execute_step(debugger, StepKind::Instruction).await,
         Command::Step => execute_step(debugger, StepKind::IntoSource).await,
         Command::Next => execute_step(debugger, StepKind::OverSource).await,
@@ -603,6 +615,43 @@ fn command_named(name: &str) -> Option<&'static CommandSpec> {
     COMMANDS
         .iter()
         .find(|command| command.name == name || command.aliases.contains(&name))
+}
+
+async fn execute_print<'a>(
+    debugger: &DebuggerHandle,
+    words: &mut impl Iterator<Item = &'a str>,
+) -> uscope::Result<Control> {
+    let argument = optional_argument(words, "print [variable]")?;
+    match argument {
+        Some(name) => {
+            if !is_identifier(name) {
+                return Err(Error::InvalidCommand("print [variable]".to_owned()));
+            }
+            Ok(Control::Continue(format_variable(
+                &debugger.variable(name).await?,
+            )))
+        }
+        None => Ok(Control::Continue(format_variables(
+            &debugger.variables().await?,
+        ))),
+    }
+}
+
+fn optional_argument<'a>(
+    words: &mut impl Iterator<Item = &'a str>,
+    usage: &str,
+) -> uscope::Result<Option<&'a str>> {
+    let argument = words.next();
+    if words.next().is_some() {
+        return Err(Error::InvalidCommand(usage.to_owned()));
+    }
+    Ok(argument)
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    matches!(characters.next(), Some('_' | 'a'..='z' | 'A'..='Z'))
+        && characters.all(|character| matches!(character, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'))
 }
 
 fn execute_help<'a>(words: &mut impl Iterator<Item = &'a str>) -> uscope::Result<Control> {
@@ -811,6 +860,64 @@ fn format_registers(registers: &RegisterSnapshot, byte_order: ByteOrder) -> Stri
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn format_variables(snapshot: &VariableSnapshot) -> String {
+    snapshot
+        .variables
+        .iter()
+        .map(format_variable)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_variable(variable: &Variable) -> String {
+    let type_name = variable
+        .type_info
+        .as_ref()
+        .map_or("<unknown type>", |type_info| type_info.name.as_ref());
+    let value = match &variable.state {
+        VariableState::Available { value, .. } => format_scalar(variable, value),
+        VariableState::Unavailable(reason) => format!("<unavailable: {reason}>"),
+        VariableState::Malformed(reason) => format!("<malformed: {}>", reason.description),
+    };
+    format!("({type_name}) {} = {value}", variable.name)
+}
+
+fn format_scalar(variable: &Variable, value: &ScalarValue) -> String {
+    match value {
+        ScalarValue::Boolean(value) => value.to_string(),
+        ScalarValue::Signed(value) => {
+            if variable
+                .type_info
+                .as_ref()
+                .is_some_and(|type_info| type_info.base_name.as_ref() == "char")
+                && let Ok(character) = u8::try_from(*value)
+                && character.is_ascii_graphic()
+            {
+                return format!("{value} '{}'", char::from(character));
+            }
+            value.to_string()
+        }
+        ScalarValue::Unsigned(value) => value.to_string(),
+        ScalarValue::Floating(value) => format_float(*value),
+        _ => "<unsupported scalar value>".to_owned(),
+    }
+}
+
+fn format_float(value: FloatValue) -> String {
+    match value {
+        FloatValue::Binary32(bits) => f32::from_bits(bits).to_string(),
+        FloatValue::Binary64(bits) => f64::from_bits(bits).to_string(),
+        FloatValue::X87Extended {
+            significand,
+            sign_exponent,
+        } => X87DoubleExtended::from_bits(
+            u128::from(significand) | (u128::from(sign_exponent) << 64),
+        )
+        .to_string(),
+        _ => "<unsupported floating-point format>".to_owned(),
+    }
 }
 
 fn format_register_bytes(bytes: &[u8], byte_order: ByteOrder) -> String {
@@ -1105,6 +1212,35 @@ mod tests {
         assert_eq!(
             format_register_bytes(&[0x12, 0x34, 0x56, 0x78], ByteOrder::Big),
             "0x12345678"
+        );
+    }
+
+    #[test]
+    fn variable_identifier_grammar_reserves_expressions_for_later() {
+        for valid in ["value", "_value", "value2"] {
+            assert!(is_identifier(valid));
+        }
+        for invalid in ["", "2value", "value.member", "*value", "left + right"] {
+            assert!(!is_identifier(invalid));
+        }
+    }
+
+    #[test]
+    fn floating_values_preserve_special_signs_and_extended_precision() {
+        assert_eq!(
+            format_float(FloatValue::Binary32(f32::INFINITY.to_bits())),
+            "inf"
+        );
+        assert_eq!(
+            format_float(FloatValue::Binary64((-0.0_f64).to_bits())),
+            "-0"
+        );
+        assert_eq!(
+            format_float(FloatValue::X87Extended {
+                significand: 0xc800_0000_0000_0000,
+                sign_exponent: 0x4000,
+            }),
+            "3.125"
         );
     }
 }

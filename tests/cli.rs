@@ -159,6 +159,50 @@ fn help_and_cls_are_generated_without_changing_clear_semantics() {
 }
 
 #[test]
+fn print_and_p_render_stack_scalars_and_generated_alias_help() {
+    let executable = fixture("build/test-programs/variables-gcc-o0");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "help p",
+            "--eval",
+            "help pause",
+            "--eval",
+            "break variables.c:52",
+            "--eval",
+            "run",
+            "--eval",
+            "p signed_int",
+            "--eval",
+            "print",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+
+    assert!(stdout.contains("print [variable]\n"), "{stdout}");
+    assert!(stdout.contains("aliases: p"), "{stdout}");
+    assert!(stdout.contains("pause\n  Pause execution"), "{stdout}");
+    assert!(
+        !stdout.contains("pause\n  Pause execution\n  aliases:"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("(int) signed_int = -1234567").count(), 2);
+    assert!(stdout.contains("(char) character = 65 'A'"), "{stdout}");
+    assert!(stdout.contains("(float) single = 1.25"), "{stdout}");
+    assert!(
+        stdout.contains("(double) double_precision = -2.5"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("(long double) extended = 3.125"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn batch_mode_reports_command_context() {
     let executable = fixture("build/test-programs/basic");
     assert!(

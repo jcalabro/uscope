@@ -196,6 +196,166 @@ pub struct RegisterSnapshot {
     pub registers: Arc<[RegisterValue]>,
 }
 
+/// The source-language encoding of a scalar base type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BaseTypeEncoding {
+    /// A truth value.
+    Boolean,
+    /// A signed integer.
+    Signed,
+    /// A signed character integer.
+    SignedCharacter,
+    /// An unsigned integer.
+    Unsigned,
+    /// An unsigned character integer.
+    UnsignedCharacter,
+    /// A binary floating-point value.
+    Floating,
+}
+
+/// A resolved scalar type independent of its debug-information encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseType {
+    /// The source-facing type name.
+    pub name: Arc<str>,
+    /// The underlying base-type name, before typedef presentation.
+    pub base_name: Arc<str>,
+    /// How values of the type are encoded.
+    pub encoding: BaseTypeEncoding,
+    /// The number of bytes occupied in target storage.
+    pub byte_size: u64,
+}
+
+/// Exact target bits for a supported floating-point value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FloatValue {
+    /// IEEE binary32 bits.
+    Binary32(u32),
+    /// IEEE binary64 bits.
+    Binary64(u64),
+    /// The meaningful 80 bits of an x87 extended value.
+    X87Extended {
+        /// The explicit integer bit and fraction.
+        significand: u64,
+        /// The sign and biased exponent.
+        sign_exponent: u16,
+    },
+}
+
+/// A decoded scalar value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScalarValue {
+    /// A C truth value.
+    Boolean(bool),
+    /// A sign-extended integer.
+    Signed(i128),
+    /// An unsigned integer.
+    Unsigned(u128),
+    /// A binary floating-point value retained as exact target bits.
+    Floating(FloatValue),
+}
+
+/// The storage containing a variable's current value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariableStorage {
+    /// Memory in the inferior's virtual address space.
+    Memory(VirtualAddress),
+}
+
+/// Why valid variable metadata cannot produce a value at this stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariableUnavailableReason {
+    /// The call-frame information uses a CFA expression not yet supported.
+    CfaExpression,
+    /// Another explicit limitation or runtime failure.
+    Other(Arc<str>),
+}
+
+impl fmt::Display for VariableUnavailableReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CfaExpression => formatter.write_str("CFA expressions are unsupported"),
+            Self::Other(description) => formatter.write_str(description),
+        }
+    }
+}
+
+impl From<Arc<str>> for VariableUnavailableReason {
+    fn from(description: Arc<str>) -> Self {
+        Self::Other(description)
+    }
+}
+
+impl From<&str> for VariableUnavailableReason {
+    fn from(description: &str) -> Self {
+        Self::Other(description.into())
+    }
+}
+
+impl From<String> for VariableUnavailableReason {
+    fn from(description: String) -> Self {
+        Self::Other(description.into())
+    }
+}
+
+/// Why one variable's debug metadata is defective.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableMalformedReason {
+    /// A stable human-readable diagnosis.
+    pub description: Arc<str>,
+}
+
+/// The inspection state of one visible variable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VariableState {
+    /// The value was read and decoded exactly.
+    Available {
+        /// Where the bytes were read.
+        storage: VariableStorage,
+        /// Exact bytes in target byte order, including ABI padding.
+        raw: Arc<[u8]>,
+        /// The decoded scalar value.
+        value: ScalarValue,
+    },
+    /// Valid metadata does not provide a supported readable value here.
+    Unavailable(VariableUnavailableReason),
+    /// This entry's metadata is defective.
+    Malformed(VariableMalformedReason),
+}
+
+/// One local variable visible in the selected stopped frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variable {
+    /// The source-level variable name.
+    pub name: Arc<str>,
+    /// Its declaration location, when supplied by debug metadata.
+    pub declaration: Option<SourceLocation>,
+    /// Its resolved scalar type, when valid and supported.
+    pub type_info: Option<BaseType>,
+    /// Its current availability and value.
+    pub state: VariableState,
+}
+
+/// Variables inspected from one stopped thread snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableSnapshot {
+    /// The debugger revision at which the values were read.
+    pub revision: u64,
+    /// The stopped snapshot that authorized the reads.
+    pub stop_id: crate::StopId,
+    /// The thread whose top physical frame was inspected.
+    pub thread: ThreadId,
+    /// Target data representation used for decoding.
+    pub target: TargetDescription,
+    /// Visible variables in source declaration order.
+    pub variables: Arc<[Variable]>,
+}
+
 /// The target CPU architecture described by a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
