@@ -6,8 +6,8 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uscope::{
-    BreakpointLocation, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle, ExitStatus,
-    Result, StateSnapshot, StopReason,
+    BreakpointLocation, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle,
+    ExceptionDisposition, ExitStatus, Result, StateSnapshot, StepKind, StopReason,
 };
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -83,6 +83,21 @@ impl Scenario {
         self.run_request(false).await
     }
 
+    pub async fn resume_with_exception(&mut self, disposition: ExceptionDisposition) -> StopReason {
+        self.transcript
+            .push(format!("request: continue {disposition:?}"));
+        let handle = self.handle.clone();
+        let task = tokio::spawn(async move { handle.resume_with_exception(disposition).await });
+        self.wait_for_request(task, "continue").await
+    }
+
+    pub async fn step_to_stop(&mut self, kind: StepKind) -> StopReason {
+        self.transcript.push(format!("request: step {kind:?}"));
+        let handle = self.handle.clone();
+        let task = tokio::spawn(async move { handle.step(kind).await });
+        self.wait_for_request(task, "step").await
+    }
+
     async fn run_request(&mut self, launch: bool) -> StopReason {
         let operation = if launch { "run" } else { "continue" };
         self.transcript.push(format!("request: {operation}"));
@@ -94,6 +109,14 @@ impl Scenario {
                 handle.resume().await
             }
         });
+        self.wait_for_request(task, operation).await
+    }
+
+    async fn wait_for_request(
+        &mut self,
+        task: JoinHandle<Result<StopReason>>,
+        operation: &str,
+    ) -> StopReason {
         let event = self
             .wait_for(|event| {
                 matches!(
@@ -125,6 +148,10 @@ impl Scenario {
             .unwrap_or_else(|error| self.fail(&format!("snapshot failed: {error}")));
         self.transcript.push(format!("snapshot: {snapshot:?}"));
         snapshot
+    }
+
+    pub fn drain_pending_events(&mut self) {
+        self.drain_events();
     }
 
     pub async fn operation<T>(&self, name: &str, future: impl Future<Output = Result<T>>) -> T {
@@ -166,18 +193,28 @@ impl Scenario {
     fn record_event(&mut self, event: &DebuggerEvent) {
         self.transcript.push(format!("event: {event:?}"));
 
-        match event {
+        let revision = match event {
             DebuggerEvent::StateChanged { revision }
-            | DebuggerEvent::BreakpointsChanged { revision } => {
-                self.last_revision = self.last_revision.max(*revision);
-            }
-            DebuggerEvent::InferiorLaunched { process_id } => {
-                self.process_id = Some(process_id.get());
-            }
-            DebuggerEvent::InferiorExited { status, .. } => {
-                self.last_exit = Some(status.clone());
-            }
-            DebuggerEvent::InferiorStopped { .. } => {}
+            | DebuggerEvent::BreakpointsChanged { revision }
+            | DebuggerEvent::InferiorLaunched { revision, .. }
+            | DebuggerEvent::InferiorContinued { revision, .. }
+            | DebuggerEvent::InferiorStopped { revision, .. }
+            | DebuggerEvent::ThreadStarted { revision, .. }
+            | DebuggerEvent::ThreadExited { revision, .. }
+            | DebuggerEvent::InferiorExited { revision, .. } => *revision,
+        };
+        if revision < self.last_revision {
+            self.fail(&format!(
+                "event revision moved backward from {} to {revision}",
+                self.last_revision
+            ));
+        }
+        self.last_revision = revision;
+        if let DebuggerEvent::InferiorLaunched { process_id, .. } = event {
+            self.process_id = Some(process_id.get());
+        }
+        if let DebuggerEvent::InferiorExited { status, .. } = event {
+            self.last_exit = Some(status.clone());
         }
     }
 

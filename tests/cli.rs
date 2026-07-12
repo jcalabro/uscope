@@ -155,6 +155,40 @@ fn batch_mode_prints_registers_one_per_line() {
 }
 
 #[test]
+fn batch_mode_lists_threads_and_steps_one_instruction() {
+    let executable = fixture("build/test-programs/basic");
+    assert!(
+        executable.exists(),
+        "missing test fixture; run `just build-test-programs`"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break breakpoint_target",
+            "--eval",
+            "run",
+            "--eval",
+            "threads",
+            "--eval",
+            "stepi",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("* ") && line.contains(" stopped")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("stopped after instruction step"));
+}
+
+#[test]
 fn breakpoint_stops_print_source_context_from_any_working_directory() {
     let executable = fixture("build/test-programs/basic");
     assert!(
@@ -314,6 +348,46 @@ fn ctrl_c_shuts_down_and_reaps_a_running_inferior() {
     );
 }
 
+#[test]
+fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
+    let executable = fixture("build/test-programs/spin");
+    assert!(
+        executable.exists(),
+        "missing test fixture; run `just build-test-programs`"
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .arg(executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run uscope");
+    let mut stdin = child.stdin.take().expect("stdin pipe");
+    stdin.write_all(b"run\n").expect("write run command");
+
+    let debugger_pid = child.id();
+    let inferior_pid = wait_for_child_process(debugger_pid).expect("debugger launched inferior");
+    wait_for_running_process(inferior_pid);
+    kill(
+        Pid::from_raw(i32::try_from(debugger_pid).expect("debugger PID fits i32")),
+        Signal::SIGINT,
+    )
+    .expect("pause uscope");
+    stdin
+        .write_all(b"registers\nquit\n")
+        .expect("write inspection commands");
+    drop(stdin);
+
+    let stdout = assert_success(child.wait_with_output().expect("wait for uscope"));
+    assert!(stdout.contains("inferior paused"), "{stdout}");
+    assert!(stdout.lines().any(|line| line.starts_with("rip ")));
+    assert!(
+        !PathBuf::from(format!("/proc/{inferior_pid}")).exists(),
+        "inferior {inferior_pid} survived debugger shutdown"
+    );
+}
+
 fn wait_for_child_process(parent: u32) -> Option<u32> {
     let tasks = PathBuf::from(format!("/proc/{parent}/task"));
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -330,6 +404,24 @@ fn wait_for_child_process(parent: u32) -> Option<u32> {
         if Instant::now() >= deadline {
             return None;
         }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn wait_for_running_process(pid: u32) {
+    let status = PathBuf::from(format!("/proc/{pid}/status"));
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    loop {
+        let contents = fs::read_to_string(&status).expect("read inferior status");
+        let stopped = contents
+            .lines()
+            .find_map(|line| line.strip_prefix("State:"))
+            .is_some_and(|state| state.trim_start().starts_with(['T', 't']));
+        if !stopped {
+            return;
+        }
+        assert!(Instant::now() < deadline, "inferior did not start running");
         thread::sleep(Duration::from_millis(10));
     }
 }
