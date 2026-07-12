@@ -1,0 +1,18 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "build in Nix dev shell",
+			"type": "shell",
+			"command": "just",
+			"args": [
+				"dev",
+				"--command",
+				"just",
+				"build"
+			],
+			"group": "build",
+			"problemMatcher": "$rustc"
+		}
+	]
+}
