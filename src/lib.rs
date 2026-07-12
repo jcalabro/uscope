@@ -407,7 +407,7 @@ impl DebuggerHandle {
         .await
     }
 
-    /// Inspects every visible local variable in the selected top physical frame.
+    /// Inspects every visible local variable in the selected logical frame.
     pub async fn variables(&self) -> Result<VariableSnapshot> {
         self.variable_query(VariableQuery::All).await
     }

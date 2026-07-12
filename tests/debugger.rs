@@ -223,7 +223,7 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
     for fixture in ["variables-inline-gcc-o0", "variables-inline-clang-o0"] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
         scenario
-            .add_source_breakpoint("variables-inline.c", 10)
+            .add_source_breakpoint("variables-inline.c", 11)
             .await;
         assert!(matches!(
             scenario.run_to_stop().await,
@@ -235,6 +235,7 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
         let listed = scenario
             .operation("caller-scope variables", scenario.handle().variables())
             .await;
+        assert_eq!(listed.frame, uscope::PresentedFrame::Physical, "{fixture}");
         let names = listed
             .variables
             .iter()
@@ -245,8 +246,8 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
             "{fixture} caller scope leaked inline locals: {names:?}"
         );
 
-        // Step into the inline body (line 5, after inline_local is assigned).
-        step_to_source_line(&mut scenario, 5).await;
+        // Step into the inline body (line 6, after inline_local is assigned).
+        step_to_source_line(&mut scenario, 6).await;
         let snapshot = scenario.snapshot().await;
         assert!(
             matches!(
@@ -275,6 +276,11 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
         let listed = scenario
             .operation("inline-scope variables", scenario.handle().variables())
             .await;
+        assert_eq!(
+            listed.frame,
+            snapshot.presentation.expect("stopped presentation").frame,
+            "{fixture} variable snapshot did not identify the selected inline instance"
+        );
         let names = listed
             .variables
             .iter()
@@ -288,7 +294,7 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
 
         // Back in the caller after the inline returns: the caller's locals
         // are visible again and the inline local is out of scope.
-        step_to_source_line(&mut scenario, 12).await;
+        step_to_source_line(&mut scenario, 13).await;
         let caller_local = scenario
             .operation("caller local", scenario.handle().variable("caller_local"))
             .await;
@@ -311,6 +317,52 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
 }
 
 #[tokio::test]
+async fn optimized_inline_variables_preserve_scope_when_values_are_unavailable() {
+    for fixture in ["variables-inline-gcc-o1", "variables-inline-clang-o1"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inline_target").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let stopped = scenario.snapshot().await;
+        assert!(matches!(
+            stopped
+                .presentation
+                .as_ref()
+                .expect("stopped presentation")
+                .frame,
+            uscope::PresentedFrame::Inline(_)
+        ));
+
+        let listed = scenario
+            .operation("optimized inline variables", scenario.handle().variables())
+            .await;
+        assert_eq!(
+            listed.frame,
+            stopped.presentation.expect("stopped presentation").frame,
+            "{fixture} variable snapshot did not identify the selected inline instance"
+        );
+        assert_eq!(listed.variables.len(), 1, "{fixture}: {listed:?}");
+        assert_eq!(
+            listed.variables[0].name.as_ref(),
+            "inline_local",
+            "{fixture}"
+        );
+        assert!(
+            matches!(listed.variables[0].state, VariableState::Unavailable(_)),
+            "{fixture} should report its optimized inline value as explicitly unavailable: {listed:?}"
+        );
+        assert!(matches!(
+            scenario.handle().variable("caller_local").await,
+            Err(Error::VariableNotFound(name)) if name == "caller_local"
+        ));
+
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn variable_inspection_refuses_an_ambiguous_inline_presentation() {
     let mut scenario = Scenario::new(
         "ambiguous inline stop",
@@ -319,7 +371,7 @@ async fn variable_inspection_refuses_an_ambiguous_inline_presentation() {
     // A source breakpoint inside the inline body is attributed to both the
     // caller and the inline instance, so the stop has no single logical frame.
     scenario
-        .add_source_breakpoint("variables-inline.c", 5)
+        .add_source_breakpoint("variables-inline.c", 6)
         .await;
     assert!(matches!(
         scenario.run_to_stop().await,
@@ -334,10 +386,11 @@ async fn variable_inspection_refuses_an_ambiguous_inline_presentation() {
 
 async fn step_to_source_line(scenario: &mut Scenario, line: u32) {
     for _ in 0..16 {
-        assert!(matches!(
-            scenario.step_to_stop(StepKind::IntoSource).await,
-            StopReason::Step { .. }
-        ));
+        let reason = scenario.step_to_stop(StepKind::IntoSource).await;
+        assert!(
+            matches!(reason, StopReason::Step { .. }),
+            "source step terminated unexpectedly: {reason:?}"
+        );
         let location = scenario
             .operation("step location", scenario.handle().current_location())
             .await;
