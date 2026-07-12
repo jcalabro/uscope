@@ -73,6 +73,28 @@ fn batch_mode_streams_commands_from_stdin() {
 }
 
 #[test]
+fn batch_mode_prints_every_location_of_an_inline_breakpoint() {
+    let executable = fixture("build/test-programs/inline-gcc-o2");
+    assert!(
+        executable.exists(),
+        "missing test fixture; run `just build-test-programs`"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["--batch", "--eval", "break leaf"])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+
+    assert!(
+        stdout.contains("breakpoint 1 set at 6 locations"),
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("  image address ").count(), 6, "{stdout}");
+}
+
+#[test]
 fn batch_mode_reports_command_context() {
     let executable = fixture("build/test-programs/basic");
     assert!(

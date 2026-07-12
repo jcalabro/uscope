@@ -35,6 +35,8 @@ pub enum Error {
     AddressOutsideModule,
     #[error("the stopped location is unavailable")]
     LocationUnavailable,
+    #[error("the active inline frame is ambiguous")]
+    AmbiguousInlineFrame,
     #[error("no source location is available for the stopped instruction")]
     SourceLocationUnavailable,
     #[error("failed to read source file {path}: {source}")]

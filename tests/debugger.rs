@@ -1,15 +1,26 @@
 mod support;
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use uscope::{
-    Architecture, BreakpointLocation, ByteOrder, Debugger, Error, ExitStatus, InferiorState,
-    PointerWidth, RegisterRole, SourceContext, SourceFile, SourceLocation, StepKind, StopReason,
-    ThreadState, UnwindTermination, VirtualAddress,
+    Architecture, BreakpointLocation, ByteOrder, CodeInstanceKind, Debugger, EntryProvenance,
+    Error, ExitStatus, InferiorState, InlineFrameLookup, ModuleImage, PointerWidth, RegisterRole,
+    SourceContext, SourceFile, SourceLocation, StepKind, StopReason, ThreadState,
+    UnwindTermination, VirtualAddress,
 };
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use support::Scenario;
 use tokio::time::{Duration, timeout};
+
+fn single_image_breakpoint_address(breakpoint: &uscope::Breakpoint) -> uscope::ImageAddress {
+    assert_eq!(breakpoint.locations.len(), 1);
+    match breakpoint.locations[0].location {
+        BreakpointLocation::Image(address) => address,
+        BreakpointLocation::Virtual(_) => panic!("function breakpoint was not image-based"),
+    }
+}
 
 #[tokio::test]
 async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
@@ -65,9 +76,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
 
     assert_basic_source_context(&context, &source_file, &source);
 
-    let BreakpointLocation::Image(image_address) = breakpoint else {
-        panic!("function breakpoint was not image-based")
-    };
+    let image_address = single_image_breakpoint_address(&breakpoint);
 
     assert_ne!(
         first_address.get(),
@@ -82,7 +91,10 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
         &snapshot.inferior,
         InferiorState::Stopped { reason, .. } if *reason == first
     ));
-    assert_eq!(snapshot.breakpoints.as_ref(), &[breakpoint]);
+    assert_eq!(
+        snapshot.breakpoints.as_ref(),
+        std::slice::from_ref(&breakpoint)
+    );
 
     let registers = scenario
         .operation("read registers", scenario.handle().registers())
@@ -95,7 +107,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
     assert_eq!(duplicate, breakpoint);
     assert_eq!(
         scenario.snapshot().await.breakpoints.as_ref(),
-        &[breakpoint]
+        std::slice::from_ref(&breakpoint)
     );
 
     let main_breakpoint = scenario.add_breakpoint("main").await;
@@ -303,6 +315,569 @@ async fn dwarf_cfi_unwinds_the_compiler_and_linker_matrix() {
 
         scenario.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn dwarf_normalization_preserves_inline_instances_and_line_rows() {
+    for fixture in [
+        "inline-gcc-o1",
+        "inline-gcc-o2",
+        "inline-clang-o1",
+        "inline-clang-o2",
+    ] {
+        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("initialize debugger");
+        let image = debugger.handle().module_image().clone();
+        assert_inline_metadata(&image, fixture);
+
+        debugger.shutdown().await.expect("shutdown debugger");
+    }
+}
+
+fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
+    let leaf = image.function_named("leaf").expect("leaf definition");
+    let leaf_instances: Vec<_> = image
+        .instances_for_function(leaf.id)
+        .filter(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }))
+        .collect();
+
+    assert_eq!(
+        leaf_instances.len(),
+        6,
+        "unexpected {fixture} leaf instances"
+    );
+    assert_eq!(
+        image
+            .code_instances()
+            .iter()
+            .filter(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }))
+            .count(),
+        9,
+        "unexpected {fixture} inline instance count"
+    );
+    assert!(
+        image.code_instances().iter().any(|instance| {
+            matches!(instance.kind, CodeInstanceKind::Inline { .. }) && instance.ranges.len() > 1
+        }),
+        "{fixture} lost discontiguous ranges"
+    );
+
+    let mut columns_by_line = BTreeMap::<u64, BTreeSet<u64>>::new();
+    for instance in &leaf_instances {
+        let CodeInstanceKind::Inline {
+            call_site: Some(call_site),
+        } = &instance.kind
+        else {
+            panic!("{fixture} leaf instance has no call site")
+        };
+
+        if let Some(column) = call_site.column {
+            columns_by_line
+                .entry(call_site.line.get())
+                .or_default()
+                .insert(column.get());
+        }
+    }
+    assert!(
+        columns_by_line.values().any(|columns| columns.len() >= 2),
+        "{fixture} did not preserve same-line call columns"
+    );
+
+    let nested_leaf = leaf_instances
+        .iter()
+        .find(|instance| {
+            instance
+                .parent
+                .and_then(|parent| image.code_instance(parent))
+                .and_then(|parent| image.function(parent.function))
+                .is_some_and(|function| function.name.as_ref() == "middle")
+        })
+        .expect("nested leaf instance");
+    let location = image.locate(nested_leaf.ranges[0].start);
+    let InlineFrameLookup::Unique(chain) = location.inline_frames else {
+        panic!("{fixture} did not resolve one inline chain: {location:?}")
+    };
+    let chain_names: Vec<_> = chain
+        .instances
+        .iter()
+        .map(|instance| {
+            let instance = image.code_instance(*instance).expect("known instance");
+            image
+                .function(instance.function)
+                .expect("known function")
+                .name
+                .as_ref()
+        })
+        .collect();
+    assert_eq!(
+        chain_names,
+        ["middle", "leaf"],
+        "unexpected {fixture} chain"
+    );
+
+    assert!(!image.statement_rows().is_empty());
+    if fixture.starts_with("inline-gcc") {
+        assert!(
+            image.statement_rows().windows(2).any(|rows| {
+                rows[0].sequence == rows[1].sequence && rows[0].address == rows[1].address
+            }),
+            "{fixture} lost equal-address line rows"
+        );
+    }
+    let expected_provenance = if fixture.starts_with("inline-gcc") {
+        EntryProvenance::Explicit
+    } else {
+        EntryProvenance::RangeStart
+    };
+    assert!(leaf_instances.iter().all(|instance| {
+        instance
+            .breakpoint_entry
+            .is_some_and(|entry| entry.provenance == expected_provenance)
+    }));
+}
+
+#[tokio::test]
+async fn inline_function_breakpoints_resolve_every_concrete_instance() {
+    for fixture in [
+        "inline-gcc-o1",
+        "inline-gcc-o2",
+        "inline-clang-o1",
+        "inline-clang-o2",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let expected_instances = {
+            let image = scenario.handle().module_image();
+            let function = image.function_named("leaf").expect("leaf function");
+
+            image
+                .instances_for_function(function.id)
+                .map(|instance| instance.id)
+                .collect::<BTreeSet<_>>()
+        };
+        let breakpoint = scenario.add_breakpoint("leaf").await;
+        let resolved_instances = breakpoint
+            .locations
+            .iter()
+            .flat_map(|location| location.code_instances.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let resolved_addresses = breakpoint
+            .locations
+            .iter()
+            .map(|location| location.location)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(resolved_instances, expected_instances, "{fixture}");
+        assert_eq!(
+            resolved_addresses.len(),
+            breakpoint.locations.len(),
+            "{fixture} retained duplicate physical sites"
+        );
+        assert!(
+            breakpoint
+                .locations
+                .iter()
+                .all(|location| matches!(location.location, BreakpointLocation::Image(_))),
+            "{fixture} function breakpoint was not image-relative"
+        );
+
+        let duplicate = scenario.add_breakpoint("leaf").await;
+        assert_eq!(duplicate, breakpoint, "{fixture}");
+        assert_eq!(
+            scenario.snapshot().await.breakpoints.as_ref(),
+            &[breakpoint],
+            "{fixture} duplicated one logical breakpoint"
+        );
+
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn inline_breakpoint_hits_select_the_matching_concrete_instance() {
+    for fixture in ["inline-gcc-o2", "inline-clang-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let breakpoint = scenario.add_breakpoint("leaf").await;
+        let mut reason = scenario.run_to_stop().await;
+        let mut hits = 0;
+        let mut hit_instances = BTreeSet::new();
+
+        while let StopReason::Breakpoint { .. } = reason {
+            hits += 1;
+            let location = scenario
+                .operation(
+                    "inline breakpoint location",
+                    scenario.handle().current_location(),
+                )
+                .await;
+            let snapshot = scenario.snapshot().await;
+            let uscope::PresentedFrame::Inline(selected) = snapshot
+                .presentation
+                .as_ref()
+                .expect("stopped presentation")
+                .frame
+            else {
+                panic!("{fixture} did not select an inline frame: {snapshot:?}")
+            };
+            let resolved = breakpoint
+                .locations
+                .iter()
+                .find(|resolved| {
+                    resolved.location == BreakpointLocation::Image(location.image.address)
+                })
+                .expect("hit one resolved breakpoint location");
+
+            assert!(resolved.code_instances.contains(&selected), "{fixture}");
+            hit_instances.insert(selected);
+            assert_eq!(
+                location
+                    .image
+                    .function
+                    .as_ref()
+                    .map(|function| function.name.as_ref()),
+                Some("leaf"),
+                "{fixture}"
+            );
+
+            reason = scenario.resume_to_stop().await;
+        }
+
+        assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)), "{fixture}");
+        assert_eq!(
+            hits, 5,
+            "{fixture} executed an unexpected set of leaf calls"
+        );
+        let same_line_instances = {
+            let image = scenario.handle().module_image();
+            hit_instances
+                .iter()
+                .filter(|instance| {
+                    image.code_instance(**instance).is_some_and(|instance| {
+                        matches!(
+                            &instance.kind,
+                            CodeInstanceKind::Inline {
+                                call_site: Some(call_site)
+                            } if call_site.line.get() == 30
+                        )
+                    })
+                })
+                .count()
+        };
+        assert_eq!(same_line_instances, 2, "{fixture}");
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn virtual_steps_reveal_inline_frames_without_running_the_inferior() {
+    for fixture in ["inline-gcc-o2", "inline-clang-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("caller").await;
+
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let initial = scenario.snapshot().await;
+        let instruction = scenario
+            .operation("caller location", scenario.handle().current_location())
+            .await;
+        assert_inline_location(fixture, &instruction, "caller", 28, instruction.address);
+
+        let mut events = scenario.handle().subscribe();
+        assert_eq!(
+            scenario.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        );
+        let middle = scenario
+            .operation("middle location", scenario.handle().current_location())
+            .await;
+        assert_inline_location(fixture, &middle, "middle", 14, instruction.address);
+        assert_no_continued_event(fixture, &mut events);
+
+        let mut events = scenario.handle().subscribe();
+        scenario.step_to_stop(StepKind::IntoSource).await;
+        let leaf = scenario
+            .operation("leaf location", scenario.handle().current_location())
+            .await;
+        assert_inline_location(fixture, &leaf, "leaf", 7, instruction.address);
+        assert_no_continued_event(fixture, &mut events);
+        assert_ne!(
+            initial.stop_id,
+            scenario.snapshot().await.stop_id,
+            "{fixture}"
+        );
+
+        let trace = scenario
+            .operation("inline backtrace", scenario.handle().backtrace())
+            .await;
+        assert_inline_backtrace(fixture, &trace);
+
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn next_skips_inline_descendants_of_the_selected_caller() {
+    for fixture in ["inline-gcc-o2", "inline-clang-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("caller").await;
+        scenario.run_to_stop().await;
+
+        assert_eq!(
+            scenario.step_to_stop(StepKind::OverSource).await,
+            StopReason::Step {
+                kind: StepKind::OverSource
+            },
+            "{fixture}"
+        );
+        let location = scenario
+            .operation(
+                "location after inline next",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(
+            location
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("caller"),
+            "{fixture}"
+        );
+        assert_eq!(
+            location
+                .image
+                .source
+                .as_ref()
+                .map(|source| source.line.get()),
+            Some(29),
+            "{fixture}"
+        );
+
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn inline_next_is_owned_by_the_selected_thread() {
+    for fixture in ["inline-threads-gcc-o2", "inline-threads-clang-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("thread_caller").await;
+        scenario.run_to_stop().await;
+        let before = scenario.snapshot().await;
+        let selected = before.selected_thread.expect("selected worker thread");
+
+        assert_eq!(
+            scenario.step_to_stop(StepKind::OverSource).await,
+            StopReason::Step {
+                kind: StepKind::OverSource
+            },
+            "{fixture}"
+        );
+        let after = scenario.snapshot().await;
+        let location = scenario
+            .operation(
+                "thread inline next location",
+                scenario.handle().current_location(),
+            )
+            .await;
+
+        assert_eq!(after.selected_thread, Some(selected), "{fixture}");
+        assert_eq!(
+            location
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("thread_caller"),
+            "{fixture}"
+        );
+        assert_eq!(
+            location
+                .image
+                .source
+                .as_ref()
+                .map(|source| source.line.get()),
+            Some(19),
+            "{fixture}"
+        );
+        assert!(
+            after
+                .threads
+                .iter()
+                .filter(|thread| thread.id != selected)
+                .all(|thread| matches!(thread.state, ThreadState::Stopped { .. })),
+            "{fixture} resumed a non-selected thread"
+        );
+
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn finish_exits_inline_instances_without_unwinding_the_physical_frame() {
+    for fixture in ["inline-gcc-o2", "inline-clang-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("caller").await;
+        scenario.run_to_stop().await;
+        scenario.step_to_stop(StepKind::IntoSource).await;
+        scenario.step_to_stop(StepKind::IntoSource).await;
+
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Step {
+                kind: StepKind::Out
+            },
+            "{fixture}"
+        );
+        let location = scenario
+            .operation(
+                "location after inline finish",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(
+            location
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("caller"),
+            "{fixture}"
+        );
+        assert_eq!(
+            location
+                .image
+                .source
+                .as_ref()
+                .map(|source| source.line.get()),
+            Some(29),
+            "{fixture}"
+        );
+
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn instruction_step_moves_the_pc_before_rebuilding_inline_presentation() {
+    for fixture in ["inline-gcc-o2", "inline-clang-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("caller").await;
+        scenario.run_to_stop().await;
+        let before = scenario
+            .operation(
+                "location before stepi",
+                scenario.handle().current_location(),
+            )
+            .await;
+
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Instruction).await,
+            StopReason::Step {
+                kind: StepKind::Instruction
+            },
+            "{fixture}"
+        );
+        let after = scenario
+            .operation("location after stepi", scenario.handle().current_location())
+            .await;
+        let snapshot = scenario.snapshot().await;
+
+        assert_ne!(after.address, before.address, "{fixture}");
+        assert_eq!(
+            snapshot
+                .presentation
+                .as_ref()
+                .map(|presentation| presentation.instruction),
+            Some(after.address),
+            "{fixture}"
+        );
+
+        scenario.shutdown().await;
+    }
+}
+
+fn assert_inline_location(
+    fixture: &str,
+    location: &uscope::ExecutionLocation,
+    function: &str,
+    line: u64,
+    address: VirtualAddress,
+) {
+    assert_eq!(location.address, address, "{fixture}");
+    assert_eq!(
+        location
+            .image
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some(function),
+        "{fixture}"
+    );
+    assert_eq!(
+        location
+            .image
+            .source
+            .as_ref()
+            .map(|source| source.line.get()),
+        Some(line),
+        "{fixture}"
+    );
+}
+
+fn assert_no_continued_event(
+    fixture: &str,
+    events: &mut tokio::sync::broadcast::Receiver<uscope::DebuggerEvent>,
+) {
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .all(|event| !matches!(event, uscope::DebuggerEvent::InferiorContinued { .. })),
+        "{fixture} virtual step emitted InferiorContinued"
+    );
+}
+
+fn assert_inline_backtrace(fixture: &str, trace: &uscope::Backtrace) {
+    let frames: Vec<_> = trace
+        .frames
+        .iter()
+        .filter_map(|frame| {
+            frame
+                .function
+                .as_ref()
+                .map(|function| (frame, function.name.as_ref()))
+        })
+        .collect();
+
+    assert_eq!(
+        frames
+            .iter()
+            .take(4)
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>(),
+        ["leaf", "middle", "caller", "main"],
+        "unexpected {fixture} frames: {trace:?}"
+    );
+    assert!(frames[..2].iter().all(|(frame, _)| {
+        frame.kind == uscope::FrameKind::Inline && frame.code_instance.is_some()
+    }));
+    assert_eq!(frames[2].0.kind, uscope::FrameKind::Physical);
+    assert_eq!(
+        frames[..3]
+            .iter()
+            .map(|(frame, _)| frame.instruction)
+            .collect::<Vec<_>>(),
+        vec![frames[0].0.instruction; 3]
+    );
+    assert_eq!(
+        frames[..3]
+            .iter()
+            .map(|(frame, _)| frame.source.as_ref().map(|source| source.line.get()))
+            .collect::<Vec<_>>(),
+        [Some(7), Some(14), Some(28)]
+    );
 }
 
 #[tokio::test]
@@ -811,7 +1386,11 @@ async fn a_user_breakpoint_interrupts_finish_at_a_shared_site() {
                 .add_breakpoint(uscope::BreakpointSpec::Address(return_address)),
         )
         .await;
-    assert_eq!(breakpoint, BreakpointLocation::Virtual(return_address));
+    assert_eq!(breakpoint.locations.len(), 1);
+    assert_eq!(
+        breakpoint.locations[0].location,
+        BreakpointLocation::Virtual(return_address)
+    );
 
     assert_eq!(
         scenario.step_to_stop(StepKind::Out).await,
@@ -856,6 +1435,13 @@ async fn source_next_steps_over_calls_but_preserves_user_breakpoints() {
     interrupted.add_breakpoint("middle").await;
     interrupted.add_breakpoint("deepest").await;
     interrupted.run_to_stop().await;
+
+    assert_eq!(
+        interrupted.step_to_stop(StepKind::OverSource).await,
+        StopReason::Step {
+            kind: StepKind::OverSource
+        }
+    );
 
     assert!(matches!(
         interrupted.step_to_stop(StepKind::OverSource).await,

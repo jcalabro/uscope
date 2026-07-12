@@ -1,6 +1,4 @@
 mod backend;
-#[cfg(test)]
-mod control;
 mod debug_info;
 mod error;
 pub(crate) mod model;
@@ -9,16 +7,19 @@ mod unwind;
 
 pub use error::{Error, Result};
 pub use model::{
-    AddressRange, Architecture, Backtrace, BreakpointLocation, ByteOrder, ColumnNumber,
+    AddressRange, Architecture, Backtrace, BreakpointEntry, BreakpointLocation, ByteOrder,
+    CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, ColumnNumber, EntryProvenance,
     ExecutionLocation, FrameKind, FunctionId, FunctionInfo, ImageAddress, ImageLocation,
-    LineNumber, LoadedModule, ModuleId, ModuleImage, ModuleImageId, PointerWidth,
-    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, SourceContext,
-    SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId, SymbolId,
-    SymbolInfo, TargetDescription, ThreadId, UnwindTermination, VirtualAddress,
+    InlineChain, InlineFrameLookup, LineNumber, LineSequenceId, LoadedModule, ModuleId,
+    ModuleImage, ModuleImageId, PointerWidth, RegisterDescriptor, RegisterId, RegisterRole,
+    RegisterSnapshot, RegisterValue, SourceContext, SourceFile, SourceFileId, SourceLine,
+    SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolId, SymbolInfo,
+    TargetDescription, ThreadId, UnwindTermination, VirtualAddress,
 };
 pub use protocol::{
-    BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId, ExitStatus,
-    InferiorState, ProcessId, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
+    Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
+    ExecutionId, ExitStatus, FramePresentation, InferiorState, PresentedFrame, ProcessId,
+    ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
     ThreadSnapshot, ThreadState,
 };
 
@@ -144,24 +145,10 @@ impl DebuggerHandle {
         self.events.subscribe()
     }
 
-    /// Adds a logical breakpoint and returns its resolved address space and address.
-    pub async fn add_breakpoint(&self, spec: BreakpointSpec) -> Result<BreakpointLocation> {
-        let location = match spec {
-            BreakpointSpec::Address(address) => BreakpointLocation::Virtual(address),
-            BreakpointSpec::Function(name) => BreakpointLocation::Image(
-                self.module_image
-                    .function_named(&name)?
-                    .ranges
-                    .first()
-                    .ok_or(Error::LocationUnavailable)?
-                    .start,
-            ),
-        };
-
-        self.request(|reply| Request::AddBreakpoint { location, reply })
-            .await?;
-
-        Ok(location)
+    /// Adds a logical breakpoint and returns all locations resolved by the backend.
+    pub async fn add_breakpoint(&self, spec: BreakpointSpec) -> Result<Breakpoint> {
+        self.request(|reply| Request::AddBreakpoint { spec, reply })
+            .await
     }
 
     /// Launches the inferior and acknowledges once native execution has started.
@@ -314,14 +301,7 @@ impl DebuggerHandle {
 
     /// Resolves the current stop address to normalized function and source metadata.
     pub async fn current_location(&self) -> Result<ExecutionLocation> {
-        let (loaded, address) = self.stopped_location().await?;
-        let image_address = loaded.image_address(address)?;
-
-        Ok(ExecutionLocation {
-            module: loaded.id,
-            address,
-            image: self.module_image.locate(image_address),
-        })
+        self.stopped_location().await
     }
 
     /// Lazily reads source lines surrounding the stopped instruction.
@@ -423,7 +403,7 @@ impl DebuggerHandle {
         self.request(|reply| Request::LoadedModule { reply }).await
     }
 
-    async fn stopped_location(&self) -> Result<(LoadedModule, VirtualAddress)> {
+    async fn stopped_location(&self) -> Result<ExecutionLocation> {
         let selection = self.stopped_selection().await?;
 
         self.request(|reply| Request::StoppedLocation {

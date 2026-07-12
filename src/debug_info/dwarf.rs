@@ -1,22 +1,24 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gimli::{
-    BaseAddresses, CfaRule, DwarfSections, EhFrame, EndianSlice, RegisterRule, RunTimeEndian,
-    SectionId, UnwindContext, UnwindSection,
+    BaseAddresses, CfaRule, ColumnType, DwarfSections, EhFrame, EndianSlice, RegisterRule,
+    RunTimeEndian, SectionId, UnwindContext, UnwindSection,
 };
 use object::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 
 use super::{DebugInfo, UnwindInfo};
-use crate::model::LineEntry;
+use crate::model::{LineEntry, ModuleMetadata};
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
-    AddressRange, Architecture, ByteOrder, Error, FunctionId, FunctionInfo, ImageAddress,
-    LineNumber, ModuleImage, PointerWidth, Result, SourceFile, SourceFileId, SourceLocation,
-    SymbolId, SymbolInfo, TargetDescription, UnwindTermination, VirtualAddress,
+    AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
+    CodeInstanceKind, ColumnNumber, EntryProvenance, Error, FunctionId, FunctionInfo, ImageAddress,
+    LineNumber, LineSequenceId, ModuleImage, PointerWidth, Result, SourceFile, SourceFileId,
+    SourceLocation, StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription,
+    UnwindTermination, VirtualAddress,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -29,6 +31,22 @@ enum DwarfError {
     Dwarf(#[from] gimli::Error),
     #[error("unsupported target architecture: {0:?}")]
     UnsupportedArchitecture(object::Architecture),
+    #[error("unsupported supplementary DWARF reference")]
+    UnsupportedSupplementaryReference,
+    #[error("DWARF entry depth cannot be represented")]
+    InvalidEntryDepth,
+    #[error("DWARF code range is reversed")]
+    InvalidRange,
+    #[error("DWARF debug-info reference {0:#x} is outside every loaded unit")]
+    ReferenceOutsideUnits(usize),
+    #[error("unsupported DWARF reference form")]
+    UnsupportedReferenceForm,
+    #[error("DWARF reference targets an unsupported DIE at unit {unit}, offset {offset:#x}")]
+    ReferencedFunctionMissing { unit: usize, offset: usize },
+    #[error("DWARF reference cycle")]
+    ReferenceCycle,
+    #[error("concrete function has no source-level name")]
+    MissingFunctionName,
 }
 
 type Reader<'data> = EndianSlice<'data, RunTimeEndian>;
@@ -63,21 +81,30 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
         RunTimeEndian::Big
     };
     let dwarf = sections.borrow(|section| EndianSlice::new(section, endian));
-    let mut functions = Vec::new();
     let mut source_files = Vec::new();
     let mut source_file_ids = HashMap::new();
+    let mut statements = Vec::new();
     let mut lines = Vec::new();
-    let mut units = dwarf.units();
+    let mut next_sequence = 0_u32;
+    let mut unit_headers = dwarf.units();
+    let mut units = Vec::new();
 
-    while let Some(header) = units.next()? {
-        let unit = dwarf.unit(header)?;
-        load_functions(&dwarf, &unit, &mut functions)?;
+    while let Some(header) = unit_headers.next()? {
+        units.push(dwarf.unit(header)?);
+    }
+
+    let (functions, code_instances) =
+        load_function_metadata(&dwarf, &units, &mut source_files, &mut source_file_ids)?;
+
+    for unit in &units {
         load_lines(
             &dwarf,
-            &unit,
+            unit,
             &mut source_files,
             &mut source_file_ids,
+            &mut statements,
             &mut lines,
+            &mut next_sequence,
         )?;
     }
 
@@ -85,10 +112,14 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
         path.to_owned(),
         target,
         image_address_range(&object)?,
-        functions,
-        load_symbols(&object),
-        source_files,
-        lines,
+        ModuleMetadata {
+            functions,
+            code_instances,
+            symbols: load_symbols(&object),
+            source_files,
+            statements,
+            lines,
+        },
     ));
     let unwind = Arc::new(load_unwind_info(&object, target)?);
 
@@ -294,43 +325,61 @@ fn cfi_error(error: gimli::Error, address: ImageAddress) -> UnwindTermination {
     }
 }
 
-fn load_functions(
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DieKey {
+    unit: usize,
+    offset: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawFunctionKind {
+    Subprogram,
+    Inline,
+}
+
+struct RawFunction {
+    key: DieKey,
+    kind: RawFunctionKind,
+    parent: Option<DieKey>,
+    abstract_origin: Option<DieKey>,
+    specification: Option<DieKey>,
+    name: Option<Arc<str>>,
+    linkage_name: Option<Arc<str>>,
+    declaration: Option<SourceLocation>,
+    call_site: Option<SourceLocation>,
+    ranges: Vec<AddressRange<ImageAddress>>,
+    entry: Option<ImageAddress>,
+}
+
+fn load_function_metadata(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    unit: &gimli::Unit<Reader<'_>>,
-    functions: &mut Vec<FunctionInfo>,
-) -> std::result::Result<(), DwarfError> {
-    let mut entries = unit.entries();
+    units: &[gimli::Unit<Reader<'_>>],
+    source_files: &mut Vec<SourceFile>,
+    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+) -> std::result::Result<(Vec<FunctionInfo>, Vec<CodeInstanceInfo>), DwarfError> {
+    let raw = collect_function_dies(dwarf, units, source_files, source_file_ids)?;
+    let by_key: HashMap<_, _> = raw
+        .iter()
+        .enumerate()
+        .map(|(index, function)| (function.key, index))
+        .collect();
+    let mut functions = Vec::new();
+    let mut function_ids = HashMap::new();
 
-    while let Some(entry) = entries.next_dfs()? {
-        if entry.tag() != gimli::DW_TAG_subprogram {
+    for function in &raw {
+        let definition = definition_key(function.key, &raw, &by_key)?;
+
+        if function_ids.contains_key(&definition) {
             continue;
         }
-        let Some(name) = entry.attr(gimli::DW_AT_name) else {
-            continue;
-        };
-        let name: Arc<str> = dwarf
-            .attr_string(unit, name.value())?
-            .to_string_lossy()
-            .into_owned()
-            .into();
-        let mut ranges = dwarf.die_ranges(unit, entry)?;
-        let mut function_ranges = Vec::new();
-
-        while let Some(range) = ranges.next()? {
-            function_ranges.push(AddressRange {
-                start: ImageAddress::new(range.begin),
-                end: ImageAddress::new(range.end),
-            });
-        }
-        if function_ranges.is_empty() {
-            continue;
-        }
-
-        let linkage_name = entry
-            .attr(gimli::DW_AT_linkage_name)
-            .map(|attribute| dwarf.attr_string(unit, attribute.value()))
-            .transpose()?
-            .map(|name| Arc::<str>::from(name.to_string_lossy().into_owned()));
+        let name = inherited_value(definition, &raw, &by_key, |function| function.name.clone())?
+            .ok_or(DwarfError::MissingFunctionName)?;
+        let linkage_name = inherited_value(definition, &raw, &by_key, |function| {
+            function.linkage_name.clone()
+        })?;
+        let declaration = inherited_value(definition, &raw, &by_key, |function| {
+            function.declaration.clone()
+        })?;
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
         );
@@ -339,12 +388,327 @@ fn load_functions(
             id,
             name,
             linkage_name,
-            ranges: function_ranges.into(),
-            declaration: None,
+            declaration,
         });
+        function_ids.insert(definition, id);
     }
 
-    Ok(())
+    let mut code_instances = Vec::new();
+    let mut instance_ids = HashMap::new();
+
+    for function in &raw {
+        if function.ranges.is_empty() {
+            continue;
+        }
+        let definition = definition_key(function.key, &raw, &by_key)?;
+        let id = CodeInstanceId::new(
+            u32::try_from(code_instances.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
+        );
+        let parent = if function.kind == RawFunctionKind::Inline {
+            containing_instance(function.parent, &raw, &by_key, &instance_ids)
+        } else {
+            None
+        };
+        let explicit_entry = function
+            .entry
+            .filter(|entry| function.ranges.iter().any(|range| range.contains(*entry)));
+        let breakpoint_entry = explicit_entry
+            .map(|address| BreakpointEntry {
+                address,
+                provenance: EntryProvenance::Explicit,
+            })
+            .or_else(|| {
+                function.ranges.first().map(|range| BreakpointEntry {
+                    address: range.start,
+                    provenance: EntryProvenance::RangeStart,
+                })
+            });
+
+        code_instances.push(CodeInstanceInfo {
+            id,
+            function: *function_ids
+                .get(&definition)
+                .expect("definition has a function ID"),
+            parent,
+            kind: match function.kind {
+                RawFunctionKind::Subprogram => CodeInstanceKind::OutOfLine,
+                RawFunctionKind::Inline => CodeInstanceKind::Inline {
+                    call_site: function.call_site.clone(),
+                },
+            },
+            ranges: function.ranges.clone().into(),
+            breakpoint_entry,
+        });
+        instance_ids.insert(function.key, id);
+    }
+
+    Ok((functions, code_instances))
+}
+
+fn collect_function_dies(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    units: &[gimli::Unit<Reader<'_>>],
+    source_files: &mut Vec<SourceFile>,
+    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+) -> std::result::Result<Vec<RawFunction>, DwarfError> {
+    let mut functions = Vec::new();
+
+    for (unit_index, unit) in units.iter().enumerate() {
+        let mut entries = unit.entries();
+        let mut scopes = Vec::<Option<DieKey>>::new();
+
+        while let Some(entry) = entries.next_dfs()? {
+            let depth =
+                usize::try_from(entry.depth()).map_err(|_| DwarfError::InvalidEntryDepth)?;
+            scopes.truncate(depth);
+            let parent = scopes.iter().rev().find_map(|key| *key);
+            let kind = match entry.tag() {
+                gimli::DW_TAG_subprogram => Some(RawFunctionKind::Subprogram),
+                gimli::DW_TAG_inlined_subroutine => Some(RawFunctionKind::Inline),
+                _ => None,
+            };
+            let key = DieKey {
+                unit: unit_index,
+                offset: entry.offset().0,
+            };
+
+            if let Some(kind) = kind {
+                let mut ranges = dwarf.die_ranges(unit, entry)?;
+                let mut concrete_ranges = Vec::new();
+
+                while let Some(range) = ranges.next()? {
+                    if range.begin > range.end {
+                        return Err(DwarfError::InvalidRange);
+                    }
+                    if range.begin == range.end {
+                        continue;
+                    }
+                    concrete_ranges.push(AddressRange {
+                        start: ImageAddress::new(range.begin),
+                        end: ImageAddress::new(range.end),
+                    });
+                }
+
+                functions.push(RawFunction {
+                    key,
+                    kind,
+                    parent,
+                    abstract_origin: die_reference(
+                        entry.attr_value(gimli::DW_AT_abstract_origin),
+                        unit_index,
+                        units,
+                    )?,
+                    specification: die_reference(
+                        entry.attr_value(gimli::DW_AT_specification),
+                        unit_index,
+                        units,
+                    )?,
+                    name: attribute_string(dwarf, unit, entry.attr(gimli::DW_AT_name))?,
+                    linkage_name: attribute_string(
+                        dwarf,
+                        unit,
+                        entry.attr(gimli::DW_AT_linkage_name),
+                    )?,
+                    declaration: entry_source_location(
+                        dwarf,
+                        unit,
+                        entry,
+                        gimli::DW_AT_decl_file,
+                        gimli::DW_AT_decl_line,
+                        gimli::DW_AT_decl_column,
+                        source_files,
+                        source_file_ids,
+                    )?,
+                    call_site: entry_source_location(
+                        dwarf,
+                        unit,
+                        entry,
+                        gimli::DW_AT_call_file,
+                        gimli::DW_AT_call_line,
+                        gimli::DW_AT_call_column,
+                        source_files,
+                        source_file_ids,
+                    )?,
+                    ranges: concrete_ranges,
+                    entry: entry
+                        .attr(gimli::DW_AT_entry_pc)
+                        .map(|attribute| dwarf.attr_address(unit, attribute.value()))
+                        .transpose()?
+                        .flatten()
+                        .map(ImageAddress::new),
+                });
+                scopes.push(Some(key));
+            } else {
+                scopes.push(None);
+            }
+        }
+    }
+
+    Ok(functions)
+}
+
+fn attribute_string(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    attribute: Option<&gimli::Attribute<Reader<'_>>>,
+) -> std::result::Result<Option<Arc<str>>, DwarfError> {
+    attribute
+        .map(|attribute| dwarf.attr_string(unit, attribute.value()))
+        .transpose()
+        .map_err(DwarfError::from)
+        .map(|value| value.map(|value| Arc::<str>::from(value.to_string_lossy().into_owned())))
+}
+
+fn die_reference(
+    value: Option<gimli::AttributeValue<Reader<'_>>>,
+    unit_index: usize,
+    units: &[gimli::Unit<Reader<'_>>],
+) -> std::result::Result<Option<DieKey>, DwarfError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    match value {
+        gimli::AttributeValue::UnitRef(offset) => Ok(Some(DieKey {
+            unit: unit_index,
+            offset: offset.0,
+        })),
+        gimli::AttributeValue::DebugInfoRef(offset) => units
+            .iter()
+            .enumerate()
+            .find_map(|(unit, candidate)| {
+                offset
+                    .to_unit_offset(&candidate.header)
+                    .map(|offset| DieKey {
+                        unit,
+                        offset: offset.0,
+                    })
+            })
+            .map(Some)
+            .ok_or(DwarfError::ReferenceOutsideUnits(offset.0)),
+        gimli::AttributeValue::DebugInfoRefSup(_) => {
+            Err(DwarfError::UnsupportedSupplementaryReference)
+        }
+        _ => Err(DwarfError::UnsupportedReferenceForm),
+    }
+}
+
+fn definition_key(
+    start: DieKey,
+    raw: &[RawFunction],
+    by_key: &HashMap<DieKey, usize>,
+) -> std::result::Result<DieKey, DwarfError> {
+    let mut key = start;
+    let mut visited = HashSet::new();
+
+    loop {
+        if !visited.insert(key) {
+            return Err(DwarfError::ReferenceCycle);
+        }
+        let function = by_key.get(&key).and_then(|index| raw.get(*index)).ok_or(
+            DwarfError::ReferencedFunctionMissing {
+                unit: key.unit,
+                offset: key.offset,
+            },
+        )?;
+        let Some(next) = function.abstract_origin.or(function.specification) else {
+            return Ok(key);
+        };
+        key = next;
+    }
+}
+
+fn inherited_value<T>(
+    start: DieKey,
+    raw: &[RawFunction],
+    by_key: &HashMap<DieKey, usize>,
+    value: impl Fn(&RawFunction) -> Option<T>,
+) -> std::result::Result<Option<T>, DwarfError> {
+    let mut key = Some(start);
+    let mut visited = HashSet::new();
+
+    while let Some(current) = key {
+        if !visited.insert(current) {
+            return Err(DwarfError::ReferenceCycle);
+        }
+        let function = by_key
+            .get(&current)
+            .and_then(|index| raw.get(*index))
+            .ok_or(DwarfError::ReferencedFunctionMissing {
+                unit: current.unit,
+                offset: current.offset,
+            })?;
+
+        if let Some(value) = value(function) {
+            return Ok(Some(value));
+        }
+        key = function.abstract_origin.or(function.specification);
+    }
+
+    Ok(None)
+}
+
+fn containing_instance(
+    mut key: Option<DieKey>,
+    raw: &[RawFunction],
+    by_key: &HashMap<DieKey, usize>,
+    instances: &HashMap<DieKey, CodeInstanceId>,
+) -> Option<CodeInstanceId> {
+    while let Some(current) = key {
+        if let Some(instance) = instances.get(&current) {
+            return Some(*instance);
+        }
+        key = raw
+            .get(*by_key.get(&current)?)
+            .and_then(|function| function.parent);
+    }
+
+    None
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the three DWARF source attributes and shared interning state form one operation"
+)]
+fn entry_source_location(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    file_attribute: gimli::DwAt,
+    line_attribute: gimli::DwAt,
+    column_attribute: gimli::DwAt,
+    source_files: &mut Vec<SourceFile>,
+    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+) -> std::result::Result<Option<SourceLocation>, DwarfError> {
+    let Some(file_index) = entry
+        .attr(file_attribute)
+        .and_then(gimli::Attribute::udata_value)
+    else {
+        return Ok(None);
+    };
+    let Some(line) = entry
+        .attr(line_attribute)
+        .and_then(gimli::Attribute::udata_value)
+        .and_then(LineNumber::new)
+    else {
+        return Ok(None);
+    };
+    let Some(program) = unit.line_program.as_ref() else {
+        return Ok(None);
+    };
+    let Some(file) = program.header().file(file_index) else {
+        return Ok(None);
+    };
+    let path = source_path(dwarf, unit, program.header(), file)?;
+
+    Ok(Some(SourceLocation {
+        file: source_file_id(path, source_files, source_file_ids),
+        line,
+        column: entry
+            .attr(column_attribute)
+            .and_then(gimli::Attribute::udata_value)
+            .and_then(ColumnNumber::new),
+    }))
 }
 
 fn load_lines(
@@ -352,7 +716,9 @@ fn load_lines(
     unit: &gimli::Unit<Reader<'_>>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    statements: &mut Vec<StatementRow>,
     lines: &mut Vec<LineEntry>,
+    next_sequence: &mut u32,
 ) -> std::result::Result<(), DwarfError> {
     let Some(program) = unit.line_program.clone() else {
         return Ok(());
@@ -360,8 +726,13 @@ fn load_lines(
     let (program, sequences) = program.sequences()?;
 
     for sequence in sequences {
+        let sequence_id = LineSequenceId::new(*next_sequence);
+        *next_sequence = next_sequence
+            .checked_add(1)
+            .ok_or(gimli::Error::UnsupportedOffset)?;
         let mut rows = program.resume_from(&sequence);
         let mut previous: Option<(u64, SourceLocation)> = None;
+        let mut ordinal = 0_u32;
 
         while let Some((header, row)) = rows.next_row()? {
             if row.end_sequence() {
@@ -379,8 +750,29 @@ fn load_lines(
             let location = SourceLocation {
                 file: file_id,
                 line,
-                column: None,
+                column: match row.column() {
+                    ColumnType::LeftEdge => None,
+                    ColumnType::Column(column) => ColumnNumber::new(column.get()),
+                },
             };
+
+            statements.push(StatementRow {
+                address: ImageAddress::new(row.address()),
+                operation_index: row.op_index(),
+                location: location.clone(),
+                discriminator: row.discriminator(),
+                flags: StatementFlags::empty()
+                    .with_statement(row.is_stmt())
+                    .with_basic_block(row.basic_block())
+                    .with_prologue_end(row.prologue_end())
+                    .with_epilogue_begin(row.epilogue_begin()),
+                isa: row.isa(),
+                sequence: sequence_id,
+                ordinal,
+            });
+            ordinal = ordinal
+                .checked_add(1)
+                .ok_or(gimli::Error::UnsupportedOffset)?;
 
             push_line_range(&mut previous, row.address(), lines);
             previous = Some((row.address(), location));

@@ -3,7 +3,8 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use crate::{
-    Backtrace, BreakpointLocation, LoadedModule, RegisterSnapshot, Result, ThreadId, VirtualAddress,
+    Backtrace, BreakpointLocation, CodeInstanceId, ExecutionLocation, LoadedModule,
+    RegisterSnapshot, Result, ThreadId, VirtualAddress,
 };
 
 /// A user-facing request for a logical breakpoint.
@@ -13,6 +14,66 @@ pub enum BreakpointSpec {
     Function(String),
     /// Break at an absolute process virtual address.
     Address(VirtualAddress),
+}
+
+/// Identifies one logical user breakpoint within a debug session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BreakpointId(u64);
+
+impl BreakpointId {
+    /// Creates a breakpoint identifier from its numeric representation.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric representation of this identifier.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// One deduplicated location resolved for a logical breakpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedBreakpointLocation {
+    /// The address and address space where the trap is installed.
+    pub location: BreakpointLocation,
+    /// Concrete code instances represented by this location.
+    pub code_instances: Arc<[CodeInstanceId]>,
+}
+
+/// An immutable logical breakpoint and all locations resolved for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Breakpoint {
+    /// The breakpoint's session-scoped identifier.
+    pub id: BreakpointId,
+    /// The user intent that created the breakpoint.
+    pub spec: BreakpointSpec,
+    /// Every deduplicated location at which the breakpoint is installed.
+    pub locations: Arc<[ResolvedBreakpointLocation]>,
+}
+
+/// The logical frame selected for presentation at a stopped instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentedFrame {
+    /// The physical containing frame is selected.
+    Physical,
+    /// One concrete inline instance is selected.
+    Inline(CodeInstanceId),
+    /// The debug metadata does not identify one compatible inline chain.
+    Ambiguous(Arc<[CodeInstanceId]>),
+}
+
+/// Controller-owned logical presentation for the selected stopped thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FramePresentation {
+    /// The machine instruction to which this presentation is tied.
+    pub instruction: VirtualAddress,
+    /// The logical frame currently selected at that instruction.
+    pub frame: PresentedFrame,
+    /// Active inline frames intentionally hidden below the selection.
+    pub hidden_inline_frames: u32,
 }
 
 /// Identifies an inferior process within a debug session.
@@ -218,8 +279,10 @@ pub struct StateSnapshot {
     pub selected_thread: Option<ThreadId>,
     /// All live threads known at this revision.
     pub threads: Arc<[ThreadSnapshot]>,
+    /// Logical presentation for the selected thread at this stop.
+    pub presentation: Option<FramePresentation>,
     /// The logical breakpoints requested by clients.
-    pub breakpoints: Arc<[BreakpointLocation]>,
+    pub breakpoints: Arc<[Breakpoint]>,
 }
 
 /// A state or lifecycle event emitted by the debugger.
@@ -274,8 +337,8 @@ pub type Reply<T> = oneshot::Sender<Result<T>>;
 
 pub enum Request {
     AddBreakpoint {
-        location: BreakpointLocation,
-        reply: Reply<()>,
+        spec: BreakpointSpec,
+        reply: Reply<Breakpoint>,
     },
     Launch {
         reply: Reply<ExecutionId>,
@@ -318,7 +381,7 @@ pub enum Request {
     StoppedLocation {
         stop_id: StopId,
         thread_id: ThreadId,
-        reply: Reply<(LoadedModule, VirtualAddress)>,
+        reply: Reply<ExecutionLocation>,
     },
     Snapshot {
         reply: Reply<StateSnapshot>,
