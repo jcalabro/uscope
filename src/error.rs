@@ -25,6 +25,10 @@ pub enum Error {
     NotRunning,
     #[error("the inferior is not stopped")]
     NotStopped,
+    #[error("the requested stopped snapshot is no longer current")]
+    StaleStop,
+    #[error("an unclassifiable native stop cannot be resumed safely")]
+    UnclassifiableStop,
     #[error("address arithmetic overflow")]
     AddressOverflow,
     #[error("address is outside the loaded module")]
@@ -48,6 +52,8 @@ pub enum Error {
     RequestCancelled,
     #[error("debugger request queue is closed")]
     RequestQueueClosed,
+    #[error("debugger event subscriber fell behind by {0} events")]
+    EventStreamLagged(u64),
     #[error("debugger shutdown timed out")]
     ShutdownTimedOut,
 

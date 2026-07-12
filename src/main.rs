@@ -8,7 +8,8 @@ use clap::Parser;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
     BreakpointLocation, BreakpointSpec, ByteOrder, Debugger, DebuggerHandle, Error, ExitStatus,
-    RegisterSnapshot, SourceContext, StopReason, VirtualAddress,
+    RegisterSnapshot, SourceContext, StateSnapshot, StepKind, StopReason, ThreadId, ThreadState,
+    VirtualAddress,
 };
 
 #[derive(Parser)]
@@ -42,10 +43,7 @@ async fn main() -> Result<()> {
     })?;
 
     let handle = debugger.handle();
-    let result = tokio::select! {
-        result = run(&handle, &args) => result,
-        signal = tokio::signal::ctrl_c() => signal.context("failed to listen for Ctrl-C"),
-    };
+    let result = run_with_interrupts(&handle, &args).await;
     let shutdown = debugger
         .shutdown()
         .await
@@ -55,6 +53,24 @@ async fn main() -> Result<()> {
     shutdown?;
 
     Ok(())
+}
+
+async fn run_with_interrupts(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
+    let mut terminal = Box::pin(run(debugger, args));
+
+    loop {
+        tokio::select! {
+            result = &mut terminal => return result,
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("failed to listen for Ctrl-C")?;
+                match debugger.pause().await {
+                    Ok(_) => {}
+                    Err(Error::NotRunning | Error::NotStopped) => return Ok(()),
+                    Err(error) => return Err(error).context("failed to pause inferior"),
+                }
+            }
+        }
+    }
 }
 
 async fn run(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
@@ -193,6 +209,13 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
         "continue" | "c" => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.resume().await?).await,
         )),
+        "pause" | "p" => Ok(Control::Continue(
+            format_stop_with_source(debugger, debugger.pause().await?).await,
+        )),
+        "stepi" | "si" => execute_step(debugger, StepKind::Instruction).await,
+        "step" | "s" => execute_step(debugger, StepKind::IntoSource).await,
+        "next" | "n" => execute_step(debugger, StepKind::OverSource).await,
+        "finish" => execute_step(debugger, StepKind::Out).await,
         "x" => {
             let address = parse_address(one_argument(&mut words, "x <runtime-address>")?)?;
 
@@ -231,32 +254,7 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
         "list" | "l" => Ok(Control::Continue(format_source_context(
             &debugger.source_context(3).await?,
         ))),
-        "backtrace" | "bt" => {
-            let trace = debugger.backtrace().await?;
-            let mut lines = Vec::with_capacity(trace.frames.len() + 1);
-
-            for frame in trace.frames.iter() {
-                let name = frame
-                    .function
-                    .as_ref()
-                    .map_or("<unknown>", |function| function.name.as_ref());
-                let source = frame.source.as_ref().and_then(|source| {
-                    debugger
-                        .module_image()
-                        .source_file(source.file)
-                        .map(|file| format!(" at {}:{}", file.path.display(), source.line.get()))
-                });
-                lines.push(format!(
-                    "#{:<2} {:#018x} in {name}{}",
-                    frame.level,
-                    frame.instruction.get(),
-                    source.unwrap_or_default()
-                ));
-            }
-            lines.push(format!("unwind stopped: {:?}", trace.termination));
-
-            Ok(Control::Continue(lines.join("\n")))
-        }
+        "backtrace" | "bt" => format_backtrace(debugger).await,
         "registers" | "regs" => {
             let registers = debugger.registers().await?;
 
@@ -265,10 +263,86 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
                 registers.target.byte_order,
             )))
         }
+        "threads" => {
+            let snapshot = debugger.snapshot().await?;
+            Ok(Control::Continue(format_threads(&snapshot)))
+        }
+        "thread" => select_thread(debugger, &mut words).await,
         "quit" | "q" => Ok(Control::Quit),
         "" => Ok(Control::Continue(String::new())),
         other => Err(Error::InvalidCommand(other.to_owned())),
     }
+}
+
+async fn execute_step(debugger: &DebuggerHandle, kind: StepKind) -> uscope::Result<Control> {
+    let reason = debugger.step(kind).await?;
+    Ok(Control::Continue(
+        format_stop_with_source(debugger, reason).await,
+    ))
+}
+
+async fn format_backtrace(debugger: &DebuggerHandle) -> uscope::Result<Control> {
+    let trace = debugger.backtrace().await?;
+    let mut lines = Vec::with_capacity(trace.frames.len() + 1);
+
+    for frame in trace.frames.iter() {
+        let name = frame
+            .function
+            .as_ref()
+            .map_or("<unknown>", |function| function.name.as_ref());
+        let source = frame.source.as_ref().and_then(|source| {
+            debugger
+                .module_image()
+                .source_file(source.file)
+                .map(|file| format!(" at {}:{}", file.path.display(), source.line.get()))
+        });
+        lines.push(format!(
+            "#{:<2} {:#018x} in {name}{}",
+            frame.level,
+            frame.instruction.get(),
+            source.unwrap_or_default()
+        ));
+    }
+    lines.push(format!("unwind stopped: {:?}", trace.termination));
+
+    Ok(Control::Continue(lines.join("\n")))
+}
+
+async fn select_thread<'a>(
+    debugger: &DebuggerHandle,
+    words: &mut impl Iterator<Item = &'a str>,
+) -> uscope::Result<Control> {
+    let value = one_argument(words, "thread <id>")?;
+    let id = value
+        .parse::<u64>()
+        .map_err(|_| Error::InvalidCommand(format!("invalid thread ID: {value}")))?;
+    debugger.select_thread(ThreadId::new(id)).await?;
+    Ok(Control::Continue(format!("selected thread {id}")))
+}
+
+fn format_threads(snapshot: &StateSnapshot) -> String {
+    snapshot
+        .threads
+        .iter()
+        .map(|thread| {
+            let marker = if snapshot.selected_thread == Some(thread.id) {
+                "*"
+            } else {
+                " "
+            };
+            let state = match &thread.state {
+                ThreadState::Running => "running".to_owned(),
+                ThreadState::Stopped {
+                    reason: Some(reason),
+                } => {
+                    format!("stopped: {}", format_stop(reason.clone()))
+                }
+                ThreadState::Stopped { reason: None } => "stopped".to_owned(),
+            };
+            format!("{marker} {} {state}", thread.id.get())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_registers(registers: &RegisterSnapshot, byte_order: ByteOrder) -> String {
@@ -314,10 +388,13 @@ fn format_register_bytes(bytes: &[u8], byte_order: ByteOrder) -> String {
 }
 
 async fn format_stop_with_source(debugger: &DebuggerHandle, reason: StopReason) -> String {
-    let stopped_at_breakpoint = matches!(reason, StopReason::Breakpoint { .. });
+    let has_source_context = matches!(
+        reason,
+        StopReason::Breakpoint { .. } | StopReason::Step { .. }
+    );
     let mut output = format_stop(reason);
 
-    if stopped_at_breakpoint {
+    if has_source_context {
         match debugger.source_context(3).await {
             Ok(context) => {
                 output.push('\n');
@@ -389,10 +466,28 @@ fn format_stop(reason: StopReason) -> String {
         StopReason::Breakpoint { address } => {
             format!("stopped at breakpoint {:#x}", address.get())
         }
+        StopReason::Step { kind } => match kind {
+            StepKind::Instruction => "stopped after instruction step".to_owned(),
+            StepKind::IntoSource => "stopped after source step".to_owned(),
+            StepKind::OverSource => "stopped after source next".to_owned(),
+            StepKind::Out => "stopped after frame return".to_owned(),
+        },
+        StopReason::Pause => "inferior paused".to_owned(),
         StopReason::Exception(exception) => format!(
             "stopped by {} ({:#x})",
             exception.description, exception.code
         ),
+        StopReason::Exec => "inferior replaced its executable image".to_owned(),
+        StopReason::ThreadExited { thread_id, status } => {
+            format!(
+                "thread {} exited: {}",
+                thread_id.get(),
+                format_exit_status(status)
+            )
+        }
+        StopReason::Unclassifiable { description } => {
+            format!("inferior stopped for an unclassifiable reason: {description}")
+        }
         StopReason::Exited(ExitStatus::Code(code)) => {
             format!("inferior exited with status {code}")
         }
@@ -400,6 +495,15 @@ fn format_stop(reason: StopReason) -> String {
             "inferior terminated by {} ({:#x})",
             exception.description, exception.code
         ),
+    }
+}
+
+fn format_exit_status(status: ExitStatus) -> String {
+    match status {
+        ExitStatus::Code(code) => format!("status {code}"),
+        ExitStatus::Terminated(exception) => {
+            format!("{} ({:#x})", exception.description, exception.code)
+        }
     }
 }
 

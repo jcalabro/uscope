@@ -9,6 +9,9 @@
 - UI clients use `DebuggerHandle`, bounded request channels, events, and immutable snapshots. Do not share mutable debugger state with CLI, TUI, DAP, or future UIs.
 - All ptrace operations must execute on the dedicated controller OS thread that created the tracee. The waiter thread may call `waitpid` and send messages back; it must not call ptrace.
 - Tokio coordinates asynchronous clients and message passing. Blocking process control remains on the controller thread.
+- The public debugger is all-stop. The Linux edge still tracks each tracee independently, classifies raw wait events before publishing them, preserves pending signals per thread, and publishes a stop only after every live thread is known stopped.
+- Run-control requests are acknowledged before their eventual stop events. Every stopped-state mutation carries a `StopId`; stale clients must fail instead of controlling a newer stop.
+- Software breakpoint sites belong to the process address space. Keep physical installation separate from user and execution-plan ownership, hide trap bytes from user memory reads, and repair co-hit threads sequentially while siblings remain stopped.
 - Debug-info providers normalize data at the boundary. The generic unwind loop iterates caller contexts; gimli owns DWARF CFI interpretation.
 - Resolve source paths while loading debug metadata, but read source contents lazily outside the ptrace controller thread.
 - Make unsupported states and partial results explicit. Never silently guess when doing so could produce a convincing but incorrect debugger result.
@@ -24,6 +27,7 @@
 - Native fixtures live in `tests/fixtures`. Rust tests may launch them but must not invoke compilers. `just build-test-programs` builds them incrementally.
 - Exercise a compact compiler/linker matrix where output can affect behavior: GCC and Clang, optimized and unoptimized, PIE and non-PIE, with and without frame pointers as relevant.
 - Any lifecycle or concurrency change must test cleanup, cancellation, event/state consistency, and the absence of surviving inferior processes.
+- Execution-control changes should cover the pure reducer/classifier where applicable, the public scenario harness, and synchronized native fixtures. Avoid scheduler-dependent sleeps.
 
 ## Local Development
 

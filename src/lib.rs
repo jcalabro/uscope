@@ -1,4 +1,6 @@
 mod backend;
+#[cfg(test)]
+mod control;
 mod debug_info;
 mod error;
 pub(crate) mod model;
@@ -15,8 +17,9 @@ pub use model::{
     SymbolInfo, TargetDescription, ThreadId, UnwindTermination, VirtualAddress,
 };
 pub use protocol::{
-    BreakpointSpec, DebuggerEvent, ExceptionInfo, ExitStatus, InferiorState, ProcessId,
-    StateSnapshot, StopReason,
+    BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId, ExitStatus,
+    InferiorState, ProcessId, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
+    ThreadSnapshot, ThreadState,
 };
 
 use std::path::{Path, PathBuf};
@@ -161,20 +164,144 @@ impl DebuggerHandle {
         Ok(location)
     }
 
-    /// Launches the inferior and runs until it stops or exits.
-    pub async fn run(&self) -> Result<StopReason> {
+    /// Launches the inferior and acknowledges once native execution has started.
+    pub async fn launch(&self) -> Result<ExecutionId> {
         self.request(|reply| Request::Launch { reply }).await
     }
 
-    /// Continues the stopped inferior until it stops or exits.
+    /// Launches the inferior and waits until that execution stops or exits.
+    pub async fn run(&self) -> Result<StopReason> {
+        let mut events = self.subscribe();
+        let execution = self.launch().await?;
+
+        self.wait_for_execution(&mut events, execution).await
+    }
+
+    /// Continues the stopped inferior and acknowledges once threads have resumed.
+    pub async fn continue_execution(
+        &self,
+        stop_id: StopId,
+        scope: ResumeScope,
+        exception: ExceptionDisposition,
+    ) -> Result<ExecutionId> {
+        let process_id = match scope {
+            ResumeScope::Process(process_id) => process_id,
+            ResumeScope::Thread(_) => self.stopped_selection().await?.process,
+        };
+
+        self.request(|reply| Request::Continue {
+            process_id,
+            stop_id,
+            scope,
+            exception,
+            reply,
+        })
+        .await
+    }
+
+    /// Continues every thread until the inferior stops or exits.
     pub async fn resume(&self) -> Result<StopReason> {
-        self.request(|reply| Request::Continue { reply }).await
+        self.resume_with_exception(ExceptionDisposition::Pass).await
+    }
+
+    /// Continues every thread with an explicit pending-exception disposition.
+    pub async fn resume_with_exception(
+        &self,
+        exception: ExceptionDisposition,
+    ) -> Result<StopReason> {
+        let selection = self.stopped_selection().await?;
+        let mut events = self.subscribe();
+        let execution = self
+            .continue_execution(
+                selection.stop,
+                ResumeScope::Process(selection.process),
+                exception,
+            )
+            .await?;
+
+        self.wait_for_execution(&mut events, execution).await
+    }
+
+    /// Starts a thread-specific stepping operation.
+    pub async fn start_step(
+        &self,
+        stop_id: StopId,
+        thread_id: ThreadId,
+        kind: StepKind,
+        exception: ExceptionDisposition,
+    ) -> Result<ExecutionId> {
+        let process_id = self.stopped_selection().await?.process;
+
+        self.request(|reply| Request::Step {
+            process_id,
+            stop_id,
+            thread_id,
+            kind,
+            exception,
+            reply,
+        })
+        .await
+    }
+
+    /// Steps the selected thread and waits until the operation stops or exits.
+    pub async fn step(&self, kind: StepKind) -> Result<StopReason> {
+        let selection = self.stopped_selection().await?;
+        let mut events = self.subscribe();
+        let execution = self
+            .start_step(
+                selection.stop,
+                selection.thread,
+                kind,
+                ExceptionDisposition::Pass,
+            )
+            .await?;
+
+        self.wait_for_execution(&mut events, execution).await
+    }
+
+    /// Pauses a running process and waits for a coherent all-stop snapshot.
+    pub async fn pause(&self) -> Result<StopReason> {
+        let snapshot = self.snapshot().await?;
+        let InferiorState::Running { process_id, .. } = snapshot.inferior else {
+            return Err(if matches!(snapshot.inferior, InferiorState::NotRunning) {
+                Error::NotRunning
+            } else {
+                Error::NotStopped
+            });
+        };
+        let mut events = self.subscribe();
+        let execution = self
+            .request(|reply| Request::Pause { process_id, reply })
+            .await?;
+
+        self.wait_for_execution(&mut events, execution).await
     }
 
     /// Reads one native 64-bit word from a stopped inferior.
     pub async fn read_word(&self, address: VirtualAddress) -> Result<u64> {
-        self.request(|reply| Request::ReadWord { address, reply })
-            .await
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::ReadWord {
+            process_id: selection.process,
+            stop_id: selection.stop,
+            address,
+            reply,
+        })
+        .await
+    }
+
+    /// Writes one native 64-bit word while preserving installed debugger breakpoints.
+    pub async fn write_word(&self, address: VirtualAddress, value: u64) -> Result<()> {
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::WriteWord {
+            process_id: selection.process,
+            stop_id: selection.stop,
+            address,
+            value,
+            reply,
+        })
+        .await
     }
 
     /// Resolves a linker symbol to its address in the running process.
@@ -258,12 +385,38 @@ impl DebuggerHandle {
 
     /// Reconstructs the stopped thread's stack frames.
     pub async fn backtrace(&self) -> Result<Backtrace> {
-        self.request(|reply| Request::Backtrace { reply }).await
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::Backtrace {
+            stop_id: selection.stop,
+            thread_id: selection.thread,
+            reply,
+        })
+        .await
     }
 
     /// Reads the general register set of the stopped thread.
     pub async fn registers(&self) -> Result<RegisterSnapshot> {
-        self.request(|reply| Request::Registers { reply }).await
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::Registers {
+            stop_id: selection.stop,
+            thread_id: selection.thread,
+            reply,
+        })
+        .await
+    }
+
+    /// Selects the stopped thread used by implicit inspection commands.
+    pub async fn select_thread(&self, thread_id: ThreadId) -> Result<()> {
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::SelectThread {
+            stop_id: selection.stop,
+            thread_id,
+            reply,
+        })
+        .await
     }
 
     async fn loaded_module(&self) -> Result<LoadedModule> {
@@ -271,8 +424,66 @@ impl DebuggerHandle {
     }
 
     async fn stopped_location(&self) -> Result<(LoadedModule, VirtualAddress)> {
-        self.request(|reply| Request::StoppedLocation { reply })
-            .await
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::StoppedLocation {
+            stop_id: selection.stop,
+            thread_id: selection.thread,
+            reply,
+        })
+        .await
+    }
+
+    async fn stopped_selection(&self) -> Result<StoppedSelection> {
+        let snapshot = self.snapshot().await?;
+        let selected_thread = snapshot.selected_thread;
+        let InferiorState::Stopped {
+            process_id,
+            stop_id,
+            thread_id,
+            ..
+        } = snapshot.inferior
+        else {
+            return Err(if matches!(snapshot.inferior, InferiorState::NotRunning) {
+                Error::NotRunning
+            } else {
+                Error::NotStopped
+            });
+        };
+
+        Ok(StoppedSelection {
+            process: process_id,
+            stop: stop_id,
+            thread: selected_thread.unwrap_or(thread_id),
+        })
+    }
+
+    async fn wait_for_execution(
+        &self,
+        events: &mut broadcast::Receiver<DebuggerEvent>,
+        execution: ExecutionId,
+    ) -> Result<StopReason> {
+        loop {
+            match events.recv().await {
+                Ok(DebuggerEvent::InferiorStopped {
+                    execution_id: Some(event_execution),
+                    reason,
+                    ..
+                }) if event_execution == execution => return Ok(reason),
+                Ok(DebuggerEvent::InferiorExited {
+                    execution_id: Some(event_execution),
+                    status,
+                    ..
+                }) if event_execution == execution => return Ok(StopReason::Exited(status)),
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(Error::RequestCancelled);
+                }
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    return Err(Error::EventStreamLagged(count));
+                }
+            }
+        }
     }
 
     async fn request<T>(
@@ -288,4 +499,11 @@ impl DebuggerHandle {
 
         receive.await.map_err(|_| Error::RequestCancelled)?
     }
+}
+
+#[derive(Clone, Copy)]
+struct StoppedSelection {
+    process: ProcessId,
+    stop: StopId,
+    thread: ThreadId,
 }

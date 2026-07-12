@@ -51,6 +51,20 @@ build_fixture gcc tests/fixtures/basic.c "$output_dir/basic" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc tests/fixtures/spin.c "$output_dir/spin" \
     -O0 -g3 -fPIE -pie
+build_fixture gcc tests/fixtures/threads.c "$output_dir/threads" \
+    -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc tests/fixtures/signals.c "$output_dir/signals" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc tests/fixtures/fatal-signal.c "$output_dir/fatal-signal" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc tests/fixtures/job-control.c "$output_dir/job-control" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc tests/fixtures/thread-exec.c "$output_dir/thread-exec" \
+    -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc tests/fixtures/thread-stress.c "$output_dir/thread-stress" \
+    -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc tests/fixtures/step.c "$output_dir/step" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-o0" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-o2" \

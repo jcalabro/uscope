@@ -508,6 +508,10 @@ impl ModuleImage {
         &self.source_files
     }
 
+    pub(crate) fn line_entries(&self) -> &[LineEntry] {
+        &self.lines
+    }
+
     /// Finds the single function with the supplied source-level name.
     pub fn function_named(&self, name: &str) -> Result<&FunctionInfo> {
         let mut matches = self
