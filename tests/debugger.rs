@@ -6,7 +6,7 @@ use uscope::{
     Architecture, BreakpointLocation, ByteOrder, CodeInstanceKind, Debugger, EntryProvenance,
     Error, ExitStatus, InferiorState, InlineFrameLookup, ModuleImage, PointerWidth, RegisterRole,
     ScalarValue, SourceContext, SourceFile, SourceLocation, StepKind, StopReason, ThreadState,
-    UnwindTermination, VariableState, VirtualAddress,
+    UnwindTermination, VariableKind, VariableState, VirtualAddress,
 };
 
 use nix::sys::signal::{Signal, kill};
@@ -177,7 +177,7 @@ async fn variable_inspection_uses_live_values_and_lexical_scope() {
 }
 
 #[tokio::test]
-async fn variable_inspection_reports_partial_support_and_parameters_honestly() {
+async fn variable_inspection_reports_partial_support() {
     let mut partial = Scenario::new(
         "partial variable support",
         Scenario::fixture("variables-gcc-o0"),
@@ -197,25 +197,103 @@ async fn variable_inspection_reports_partial_support_and_parameters_honestly() {
         VariableState::Unavailable(_)
     ));
     partial.shutdown().await;
+}
 
-    let mut parameter = Scenario::new(
-        "unsupported parameter",
-        Scenario::fixture("variables-gcc-o0"),
+#[tokio::test]
+async fn stack_scalar_parameters_are_read_through_the_public_scenario_path() {
+    for fixture in [
+        "variables-parameters-gcc-o0",
+        "variables-parameters-clang-o0",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario
+            .add_source_breakpoint("variables-parameters.c", 22)
+            .await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let snapshot = scenario
+            .operation("inspect parameters", scenario.handle().variables())
+            .await;
+        assert_all_parameter_values(&snapshot, fixture);
+        assert_eq!(
+            scenario
+                .operation(
+                    "inspect signed parameter",
+                    scenario.handle().variable("signed_int")
+                )
+                .await,
+            snapshot.variables[6]
+        );
+        assert!(matches!(
+            scenario.handle().variable("missing").await,
+            Err(Error::VariableNotFound(name)) if name == "missing"
+        ));
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn parameters_use_live_values_and_participate_in_lexical_shadowing() {
+    let mut changing = Scenario::new(
+        "changing parameter",
+        Scenario::fixture("variables-parameters-gcc-o0"),
     );
-    parameter.add_source_breakpoint("variables.c", 5).await;
+    changing
+        .add_source_breakpoint("variables-parameters.c", 44)
+        .await;
     assert!(matches!(
-        parameter.run_to_stop().await,
+        changing.run_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
+    let first = changing
+        .operation(
+            "first changing parameter",
+            changing.handle().variable("changing"),
+        )
+        .await;
+    assert_variable_value(&first, ScalarValue::Signed(17));
+    assert_eq!(first.kind, VariableKind::Parameter);
     assert!(matches!(
-        parameter.handle().variable("parameter").await,
-        Err(Error::ParameterUnsupported(name)) if name == "parameter"
+        changing.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
     ));
+    let second = changing
+        .operation(
+            "second changing parameter",
+            changing.handle().variable("changing"),
+        )
+        .await;
+    assert_variable_value(&second, ScalarValue::Signed(24));
+    changing.shutdown().await;
+
+    let mut shadow = Scenario::new(
+        "parameter shadowing",
+        Scenario::fixture("variables-parameters-gcc-o0"),
+    );
+    shadow
+        .add_source_breakpoint("variables-parameters.c", 36)
+        .await;
     assert!(matches!(
-        parameter.handle().variable("missing").await,
-        Err(Error::VariableNotFound(name)) if name == "missing"
+        shadow.run_to_stop().await,
+        StopReason::Breakpoint { .. }
     ));
-    parameter.shutdown().await;
+    let named = shadow
+        .operation("shadowing local", shadow.handle().variable("shadowed"))
+        .await;
+    assert_eq!(named.kind, VariableKind::Local);
+    assert_variable_value(&named, ScalarValue::Signed(200));
+    let listed = shadow
+        .operation("parameter and shadow", shadow.handle().variables())
+        .await;
+    assert_eq!(listed.variables.len(), 2);
+    assert_eq!(listed.variables[0].kind, VariableKind::Parameter);
+    assert_variable_value(&listed.variables[0], ScalarValue::Signed(100));
+    assert_eq!(listed.variables[1].kind, VariableKind::Local);
+    assert_variable_value(&listed.variables[1], ScalarValue::Signed(200));
+    shadow.shutdown().await;
 }
 
 #[tokio::test]
@@ -230,8 +308,8 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
             StopReason::Breakpoint { .. }
         ));
 
-        // Physical frame: the caller's locals are visible, the inline
-        // instance's local is not.
+        // Physical frame: the caller's parameter and locals are visible, the
+        // inline instance's data objects are not.
         let listed = scenario
             .operation("caller-scope variables", scenario.handle().variables())
             .await;
@@ -242,9 +320,16 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
             .map(|variable| variable.name.as_ref())
             .collect::<Vec<_>>();
         assert!(
-            names.contains(&"caller_local") && !names.contains(&"inline_local"),
-            "{fixture} caller scope leaked inline locals: {names:?}"
+            names.contains(&"value")
+                && names.contains(&"caller_local")
+                && !names.contains(&"inline_local"),
+            "{fixture} caller scope leaked inline data objects: {names:?}"
         );
+        let caller_parameter = scenario
+            .operation("caller parameter", scenario.handle().variable("value"))
+            .await;
+        assert_eq!(caller_parameter.kind, VariableKind::Parameter);
+        assert_variable_value(&caller_parameter, ScalarValue::Signed(7));
 
         // Step into the inline body (line 6, after inline_local is assigned).
         step_to_source_line(&mut scenario, 6).await;
@@ -261,7 +346,12 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
             "{fixture} did not present the inline frame: {snapshot:?}"
         );
 
-        // Inline frame: only the inline instance's local is in scope.
+        // Inline frame: only the inline instance's parameter and local are in scope.
+        let inline_parameter = scenario
+            .operation("inline parameter", scenario.handle().variable("value"))
+            .await;
+        assert_eq!(inline_parameter.kind, VariableKind::Parameter);
+        assert_variable_value(&inline_parameter, ScalarValue::Signed(8));
         let inline_local = scenario
             .operation("inline local", scenario.handle().variable("inline_local"))
             .await;
@@ -286,11 +376,7 @@ async fn variable_inspection_follows_the_selected_inline_frame() {
             .iter()
             .map(|variable| variable.name.as_ref())
             .collect::<Vec<_>>();
-        assert_eq!(names, ["inline_local"], "{fixture}");
-        assert!(matches!(
-            scenario.handle().variable("value").await,
-            Err(Error::ParameterUnsupported(name)) if name == "value"
-        ));
+        assert_eq!(names, ["value", "inline_local"], "{fixture}");
 
         // Back in the caller after the inline returns: the caller's locals
         // are visible again and the inline local is out of scope.
@@ -343,16 +429,28 @@ async fn optimized_inline_variables_preserve_scope_when_values_are_unavailable()
             stopped.presentation.expect("stopped presentation").frame,
             "{fixture} variable snapshot did not identify the selected inline instance"
         );
-        assert_eq!(listed.variables.len(), 1, "{fixture}: {listed:?}");
-        assert_eq!(
-            listed.variables[0].name.as_ref(),
-            "inline_local",
-            "{fixture}"
-        );
+        let names = listed
+            .variables
+            .iter()
+            .map(|variable| variable.name.as_ref())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["value", "inline_local"], "{fixture}: {listed:?}");
+        assert_eq!(listed.variables[0].kind, VariableKind::Parameter);
+        assert_eq!(listed.variables[1].kind, VariableKind::Local);
         assert!(
-            matches!(listed.variables[0].state, VariableState::Unavailable(_)),
-            "{fixture} should report its optimized inline value as explicitly unavailable: {listed:?}"
+            listed
+                .variables
+                .iter()
+                .all(|variable| matches!(variable.state, VariableState::Unavailable(_))),
+            "{fixture} should report optimized inline data objects as explicitly unavailable: {listed:?}"
         );
+        let parameter = scenario
+            .operation(
+                "optimized inline parameter",
+                scenario.handle().variable("value"),
+            )
+            .await;
+        assert_eq!(parameter, listed.variables[0]);
         assert!(matches!(
             scenario.handle().variable("caller_local").await,
             Err(Error::VariableNotFound(name)) if name == "caller_local"
@@ -468,6 +566,85 @@ fn assert_variable_value(variable: &uscope::Variable, expected: impl Into<Scalar
         panic!("{} was not available: {:?}", variable.name, variable.state);
     };
     assert_eq!(*value, expected.into());
+}
+
+fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    let names = snapshot
+        .variables
+        .iter()
+        .map(|variable| variable.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "boolean",
+            "character",
+            "signed_character",
+            "unsigned_character",
+            "signed_short",
+            "unsigned_short",
+            "signed_int",
+            "unsigned_int",
+            "signed_long",
+            "unsigned_long",
+            "signed_long_long",
+            "unsigned_long_long",
+            "single",
+            "double_precision",
+            "extended",
+            "local",
+        ],
+        "{fixture}"
+    );
+    assert!(
+        snapshot.variables[..15]
+            .iter()
+            .all(|variable| variable.kind == VariableKind::Parameter)
+    );
+    assert_eq!(snapshot.variables[15].kind, VariableKind::Local);
+    let expected = [
+        ScalarValue::Boolean(true),
+        ScalarValue::Signed(65),
+        ScalarValue::Signed(-12),
+        ScalarValue::Unsigned(250),
+        ScalarValue::Signed(-1234),
+        ScalarValue::Unsigned(54_321),
+        ScalarValue::Signed(-1_234_567),
+        ScalarValue::Unsigned(3_456_789_012),
+        ScalarValue::Signed(-123_456_789),
+        ScalarValue::Unsigned(123_456_789),
+        ScalarValue::Signed(-1_234_567_890_123),
+        ScalarValue::Unsigned(12_345_678_901_234),
+        ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+        ScalarValue::Floating(uscope::FloatValue::X87Extended {
+            significand: 0xc800_0000_0000_0000,
+            sign_exponent: 0x4000,
+        }),
+        ScalarValue::Signed(99),
+    ];
+    let expected_sizes = [1, 1, 1, 1, 2, 2, 4, 4, 8, 8, 8, 8, 4, 8, 16, 4];
+    for ((variable, expected), expected_size) in
+        snapshot.variables.iter().zip(expected).zip(expected_sizes)
+    {
+        assert_variable_value(variable, expected);
+        assert_eq!(
+            variable
+                .type_info
+                .as_ref()
+                .expect("available scalar type")
+                .byte_size,
+            expected_size
+        );
+        let VariableState::Available { storage, raw, .. } = &variable.state else {
+            unreachable!("value assertion checked availability")
+        };
+        assert!(matches!(
+            storage,
+            uscope::VariableStorage::Memory(address) if address.get() != 0
+        ));
+        assert_eq!(raw.len(), usize::try_from(expected_size).unwrap());
+    }
 }
 
 #[tokio::test]

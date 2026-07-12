@@ -10,8 +10,9 @@ use crate::debug_info::{VariableInfo, VariableRuntime};
 use crate::{
     AddressRange, Architecture, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
     ColumnNumber, Error, FloatValue, ImageAddress, LineNumber, Result, ScalarValue, SourceFile,
-    SourceFileId, SourceLocation, TargetDescription, Variable, VariableMalformedReason,
-    VariableQuery, VariableState, VariableStorage, VariableUnavailableReason, VirtualAddress,
+    SourceFileId, SourceLocation, TargetDescription, Variable, VariableKind,
+    VariableMalformedReason, VariableQuery, VariableState, VariableStorage,
+    VariableUnavailableReason, VirtualAddress,
 };
 
 const MAX_SCALAR_BYTES: u64 = 16;
@@ -75,7 +76,8 @@ enum Metadata<T> {
 }
 
 #[derive(Clone)]
-struct CatalogVariable {
+struct CatalogDataObject {
+    kind: VariableKind,
     name: Arc<str>,
     declaration: Option<SourceLocation>,
     ranges: Arc<[AddressRange<ImageAddress>]>,
@@ -91,19 +93,12 @@ struct CatalogVariable {
 }
 
 #[derive(Clone)]
-struct CatalogParameter {
-    name: Arc<str>,
-    ranges: Arc<[AddressRange<ImageAddress>]>,
-    instance: Option<CodeInstanceId>,
-}
-
-#[derive(Clone)]
 struct Scope {
     ranges: Arc<[AddressRange<ImageAddress>]>,
     lexical_depth: u32,
     frame_base: Metadata<LocationDescription>,
-    /// True for subprograms and inlined subroutines, whose direct
-    /// `DW_TAG_formal_parameter` children are cataloged parameters.
+    /// True for subprograms and inlined subroutines, whose direct children
+    /// may include formal parameters.
     routine: bool,
     function: usize,
     /// The innermost containing inline instance, or `None` when the scope
@@ -114,13 +109,11 @@ struct Scope {
 
 struct CatalogFunction {
     ranges: Arc<[AddressRange<ImageAddress>]>,
-    variables: Vec<usize>,
-    parameters: Vec<usize>,
+    objects: Vec<usize>,
 }
 
 pub(super) struct DwarfVariableInfo {
-    variables: Arc<[CatalogVariable]>,
-    parameters: Arc<[CatalogParameter]>,
+    objects: Arc<[CatalogDataObject]>,
     functions: Arc<[CatalogFunction]>,
     address_index: BTreeMap<ImageAddress, Arc<[usize]>>,
     target: TargetDescription,
@@ -139,8 +132,7 @@ pub(super) fn load_variable_info(
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> std::result::Result<Arc<dyn VariableInfo>, DwarfError> {
-    let mut variables = Vec::new();
-    let mut parameters = Vec::new();
+    let mut objects = Vec::new();
     let mut functions = Vec::new();
     let mut order = 0_u64;
 
@@ -160,8 +152,7 @@ pub(super) fn load_variable_info(
                     let function = functions.len();
                     functions.push(CatalogFunction {
                         ranges: Arc::clone(&ranges),
-                        variables: Vec::new(),
-                        parameters: Vec::new(),
+                        objects: Vec::new(),
                     });
                     Some(Scope {
                         ranges,
@@ -249,27 +240,43 @@ pub(super) fn load_variable_info(
                 scope
             };
 
-            if entry.tag() == gimli::DW_TAG_variable {
-                if let Some(scope) = parent.as_ref().filter(|scope| !scope.ranges.is_empty()) {
-                    // Concrete inline-instance variables reference their
-                    // abstract origin for name, type, and declaration.
+            let kind = match entry.tag() {
+                gimli::DW_TAG_variable => Some(VariableKind::Local),
+                gimli::DW_TAG_formal_parameter => Some(VariableKind::Parameter),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                let owning_scope = parent.as_ref().filter(|scope| {
+                    !scope.ranges.is_empty() && (kind == VariableKind::Local || scope.routine)
+                });
+                if let Some(scope) = owning_scope {
+                    // Concrete inline-instance entries reference their
+                    // abstract origin for descriptive metadata.
                     let (chain, chain_error) = match origin_chain(units, unit_index, entry) {
                         Ok(chain) => (chain, None),
                         Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
+                    };
+                    let object_name = match kind {
+                        VariableKind::Parameter => "parameter",
+                        VariableKind::Local => "variable",
                     };
                     let (name, name_error) =
                         match copy_name_with_origins(dwarf, units, unit, entry, &chain) {
                             Ok(Some(name)) => (name, None),
                             Ok(None) => (
-                                format!("<anonymous variable at {:#x}>", entry.offset().0).into(),
-                                Some(Arc::from("variable has no name")),
+                                format!("<anonymous {object_name} at {:#x}>", entry.offset().0)
+                                    .into(),
+                                Some(Arc::from(format!("{object_name} has no name"))),
                             ),
                             Err(error) => (
-                                format!("<malformed variable at {:#x}>", entry.offset().0).into(),
+                                format!("<malformed {object_name} at {:#x}>", entry.offset().0)
+                                    .into(),
                                 Some(error.to_string().into()),
                             ),
                         };
-                    order = order.checked_add(1).expect("variable DIE order overflow");
+                    order = order
+                        .checked_add(1)
+                        .expect("data-object DIE order overflow");
                     let declaration = declaration_with_origins(
                         dwarf,
                         units,
@@ -279,7 +286,7 @@ pub(super) fn load_variable_info(
                         source_files,
                         source_file_ids,
                     );
-                    let (ranges, scope_error) = variable_scope_ranges(scope, entry);
+                    let (ranges, scope_error) = data_object_scope_ranges(scope, entry);
                     let (type_unit, type_value) = entry
                         .attr_value(gimli::DW_AT_type)
                         .map(|value| (unit_index, Some(value)))
@@ -291,8 +298,9 @@ pub(super) fn load_variable_info(
                             })
                         })
                         .unwrap_or((unit_index, None));
-                    functions[scope.function].variables.push(variables.len());
-                    variables.push(CatalogVariable {
+                    functions[scope.function].objects.push(objects.len());
+                    objects.push(CatalogDataObject {
+                        kind,
                         name,
                         declaration: declaration.as_ref().ok().cloned().flatten(),
                         ranges,
@@ -300,11 +308,7 @@ pub(super) fn load_variable_info(
                         lexical_depth: scope.lexical_depth,
                         order,
                         type_info: resolve_variable_type(dwarf, units, type_unit, type_value),
-                        location: copy_optional_location(
-                            dwarf,
-                            unit,
-                            entry.attr_value(gimli::DW_AT_location),
-                        ),
+                        location: copy_data_object_location(dwarf, unit, entry),
                         frame_base: scope.frame_base.clone(),
                         malformed: declaration
                             .err()
@@ -313,20 +317,6 @@ pub(super) fn load_variable_info(
                             .or_else(|| scope.malformed.clone())
                             .or(chain_error)
                             .or(name_error),
-                    });
-                }
-            } else if entry.tag() == gimli::DW_TAG_formal_parameter
-                && let Some(scope) = parent.as_ref().filter(|scope| scope.routine)
-            {
-                // A broken origin chain must not hide a directly named
-                // parameter; fall back to the concrete DIE's own name.
-                let chain = origin_chain(units, unit_index, entry).unwrap_or_default();
-                if let Ok(Some(name)) = copy_name_with_origins(dwarf, units, unit, entry, &chain) {
-                    functions[scope.function].parameters.push(parameters.len());
-                    parameters.push(CatalogParameter {
-                        name,
-                        ranges: Arc::clone(&scope.ranges),
-                        instance: scope.instance,
                     });
                 }
             }
@@ -342,8 +332,7 @@ pub(super) fn load_variable_info(
         }
     }
     Ok(Arc::new(DwarfVariableInfo {
-        variables: variables.into(),
-        parameters: parameters.into(),
+        objects: objects.into(),
         functions: functions.into(),
         address_index: address_index
             .into_iter()
@@ -357,7 +346,7 @@ pub(super) fn load_variable_info(
     }))
 }
 
-fn variable_scope_ranges(
+fn data_object_scope_ranges(
     scope: &Scope,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> (Arc<[AddressRange<ImageAddress>]>, Option<Arc<str>>) {
@@ -568,6 +557,20 @@ fn copy_optional_location(
     }
 }
 
+fn copy_data_object_location(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+) -> Metadata<LocationDescription> {
+    if let Some(location) = entry.attr_value(gimli::DW_AT_location) {
+        return copy_optional_location(dwarf, unit, Some(location));
+    }
+    if entry.attr_value(gimli::DW_AT_const_value).is_some() {
+        return Metadata::Unavailable("constant data-object values are unsupported".into());
+    }
+    Metadata::Unavailable("no location was supplied".into())
+}
+
 fn copy_location(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit: &gimli::Unit<Reader<'_>>,
@@ -745,65 +748,62 @@ impl VariableInfo for DwarfVariableInfo {
                 VariableQuery::Name(name) => Err(Error::VariableNotFound(name.clone())),
             };
         };
-        // Source-level visibility is per logical frame: only variables owned
+        // Source-level visibility is per logical frame: only data objects owned
         // by the selected inline instance (or the physical frame for `None`)
         // are in scope, even though siblings share the instruction address.
         let active = function
-            .variables
+            .objects
             .iter()
-            .map(|&index| &self.variables[index])
-            .filter(|variable| variable.instance == selected)
-            .filter(|variable| variable.ranges.iter().any(|range| range.contains(address)))
+            .map(|&index| &self.objects[index])
+            .filter(|object| object.instance == selected)
+            .filter(|object| object.ranges.iter().any(|range| range.contains(address)))
             .collect::<Vec<_>>();
-        let selected_variables = match query {
+        let selected_objects = match query {
             VariableQuery::All => active,
             VariableQuery::Name(name) => {
                 let mut named = active
                     .into_iter()
-                    .filter(|variable| variable.name.as_ref() == name)
+                    .filter(|object| object.name.as_ref() == name)
                     .collect::<Vec<_>>();
-                let Some(depth) = named.iter().map(|variable| variable.lexical_depth).max() else {
-                    if function.parameters.iter().any(|&index| {
-                        let parameter = &self.parameters[index];
-                        parameter.name.as_ref() == name
-                            && parameter.instance == selected
-                            && parameter.ranges.iter().any(|range| range.contains(address))
-                    }) {
-                        return Err(Error::ParameterUnsupported(name.clone()));
-                    }
+                let Some(depth) = named.iter().map(|object| object.lexical_depth).max() else {
                     return Err(Error::VariableNotFound(name.clone()));
                 };
-                named.retain(|variable| variable.lexical_depth == depth);
+                named.retain(|object| object.lexical_depth == depth);
                 if named.len() != 1 {
                     return Err(Error::AmbiguousVariable(name.clone()));
                 }
                 named
             }
         };
-        let mut selected = selected_variables;
-        selected.sort_by_key(|variable| {
-            variable.declaration.as_ref().map_or(
+        let mut selected = selected_objects;
+        selected.sort_by_key(|object| {
+            if object.kind == VariableKind::Parameter {
+                return (0, 0, SourceFileId::new(0), 0, 0, object.order);
+            }
+            object.declaration.as_ref().map_or(
                 (
+                    1,
                     1,
                     SourceFileId::new(u32::MAX),
                     u64::MAX,
                     u64::MAX,
-                    variable.order,
+                    object.order,
                 ),
                 |location| {
                     (
+                        1,
                         0,
                         location.file,
                         location.line.get(),
                         location.column.map_or(0, crate::ColumnNumber::get),
-                        variable.order,
+                        object.order,
                     )
                 },
             )
         });
         Ok(selected
             .into_iter()
-            .map(|variable| self.inspect_variable(variable, address, runtime))
+            .map(|object| self.inspect_data_object(object, address, runtime))
             .collect())
     }
 }
@@ -824,9 +824,9 @@ impl DwarfVariableInfo {
             })
     }
 
-    fn inspect_variable(
+    fn inspect_data_object(
         &self,
-        variable: &CatalogVariable,
+        variable: &CatalogDataObject,
         address: ImageAddress,
         runtime: &mut dyn VariableRuntime,
     ) -> Variable {
@@ -902,6 +902,7 @@ impl DwarfVariableInfo {
             Err(description) => return unavailable(variable, Some(type_info), description),
         };
         Variable {
+            kind: variable.kind,
             name: Arc::clone(&variable.name),
             declaration: variable.declaration.clone(),
             type_info: Some(type_info),
@@ -915,11 +916,12 @@ impl DwarfVariableInfo {
 }
 
 fn unavailable(
-    variable: &CatalogVariable,
+    variable: &CatalogDataObject,
     type_info: Option<BaseType>,
     reason: VariableUnavailableReason,
 ) -> Variable {
     Variable {
+        kind: variable.kind,
         name: Arc::clone(&variable.name),
         declaration: variable.declaration.clone(),
         type_info,
@@ -928,11 +930,12 @@ fn unavailable(
 }
 
 fn malformed(
-    variable: &CatalogVariable,
+    variable: &CatalogDataObject,
     type_info: Option<BaseType>,
     description: Arc<str>,
 ) -> Variable {
     Variable {
+        kind: variable.kind,
         name: Arc::clone(&variable.name),
         declaration: variable.declaration.clone(),
         type_info,

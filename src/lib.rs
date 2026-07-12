@@ -15,8 +15,8 @@ pub use model::{
     RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, ScalarValue,
     SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId,
     StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId,
-    UnwindTermination, Variable, VariableMalformedReason, VariableSnapshot, VariableState,
-    VariableStorage, VariableUnavailableReason, VirtualAddress,
+    UnwindTermination, Variable, VariableKind, VariableMalformedReason, VariableSnapshot,
+    VariableState, VariableStorage, VariableUnavailableReason, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
@@ -407,12 +407,12 @@ impl DebuggerHandle {
         .await
     }
 
-    /// Inspects every visible local variable in the selected logical frame.
+    /// Inspects every visible parameter and local variable in the selected logical frame.
     pub async fn variables(&self) -> Result<VariableSnapshot> {
         self.variable_query(VariableQuery::All).await
     }
 
-    /// Inspects the innermost visible local variable with the supplied name.
+    /// Inspects the innermost visible data object with the supplied name.
     pub async fn variable(&self, name: impl Into<String>) -> Result<Variable> {
         let name = name.into();
         let snapshot = self

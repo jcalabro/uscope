@@ -124,7 +124,7 @@ const COMMANDS: &[CommandSpec] = &[
         "print",
         ["p"],
         "print [variable]",
-        "Print one or all visible local variables"
+        "Print one or all visible variables"
     ),
     command!(Stepi, "stepi", ["si"], "stepi", "Step one instruction"),
     command!(Step, "step", ["s"], "step", "Step into at source level"),
@@ -1238,6 +1238,7 @@ mod tests {
     #[test]
     fn char_rendering_escapes_quote_and_backslash() {
         let variable = |value: i128| uscope::Variable {
+            kind: uscope::VariableKind::Local,
             name: "c".into(),
             declaration: None,
             type_info: Some(uscope::BaseType {
