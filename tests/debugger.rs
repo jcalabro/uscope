@@ -322,7 +322,7 @@ async fn cpp_and_rust_stack_scalars_use_the_public_variable_path() {
     for (fixture, source, line) in [
         ("variables-cpp-gcc-o0", "variables-cpp.cpp", 14),
         ("variables-cpp-clang-o0", "variables-cpp.cpp", 14),
-        ("variables-rust-o0", "variables-rust.rs", 18),
+        ("variables-rust-o0", "variables-rust.rs", 21),
     ] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
         scenario.add_source_breakpoint(source, line).await;
@@ -366,7 +366,7 @@ async fn optimized_cpp_and_rust_scalars_materialize_supported_locations() {
     for (fixture, source, line) in [
         ("variables-cpp-gcc-o2", "variables-cpp.cpp", 14),
         ("variables-cpp-clang-o2", "variables-cpp.cpp", 14),
-        ("variables-rust-o2", "variables-rust.rs", 19),
+        ("variables-rust-o2", "variables-rust.rs", 22),
     ] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
         scenario.add_source_breakpoint(source, line).await;

@@ -63,8 +63,10 @@ build_rust_fixture() {
     local source="$1"
     local output="$2"
     shift 2
+    # The no_std fixture uses the system CRT without pulling std's DWARF into the binary.
     build_program rustc "$source" "$output" \
-        --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 "$@"
+        --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C panic=abort \
+        -C link-arg=-lc "$@"
 }
 
 # Fails the build when a fixture's DWARF stops exercising the operation a test
