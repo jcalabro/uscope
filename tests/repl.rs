@@ -318,6 +318,50 @@ fn interactive_empty_lines_repeat_the_last_session_command() {
 }
 
 #[test]
+fn interactive_repeated_next_crosses_an_inline_return_without_killing_the_inferior() {
+    let state = TestStateDir::new("inline-repeat");
+    let mut session = repl(&fixture("stepping-boundaries-clang-o0"), &state.0);
+
+    session.send_line("break main").expect("set breakpoint");
+    session.expect("breakpoint set").expect("breakpoint reply");
+    session
+        .expect("(uscope) ")
+        .expect("prompt after breakpoint");
+
+    session.send_line("run").expect("run inferior");
+    session.expect("=> 30 | ").expect("main call stop");
+    session.expect("(uscope) ").expect("prompt after run");
+
+    session.send_line("step").expect("enter inline function");
+    session.expect("=> 24 | ").expect("first inline statement");
+    session.expect("(uscope) ").expect("prompt after step");
+
+    session.send_line("next").expect("next in inline function");
+    session.expect("=> 25 | ").expect("second inline statement");
+    session.expect("(uscope) ").expect("prompt after next");
+
+    for (line, description) in [
+        (26, "inline return statement"),
+        (30, "logical caller expression"),
+        (31, "statement following inline call"),
+    ] {
+        session.send_line("").expect("repeat next");
+        session.expect(format!("=> {line} | ")).expect(description);
+        session
+            .expect("(uscope) ")
+            .expect("prompt after repeated next");
+    }
+
+    session.send_line("continue").expect("finish inferior");
+    session
+        .expect("inferior exited with status 0")
+        .expect("inferior exited normally");
+    session.expect("(uscope) ").expect("prompt after exit");
+    session.send_line("quit").expect("quit repl");
+    session.expect(Eof).expect("repl exited");
+}
+
+#[test]
 fn interactive_history_persists_across_sessions() {
     let state = TestStateDir::new("persistence");
     {
