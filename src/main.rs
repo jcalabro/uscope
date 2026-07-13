@@ -87,7 +87,7 @@ enum Command {
     Registers,
     Threads,
     Thread,
-    Cls,
+    Clear,
     Help,
     Quit,
 }
@@ -123,7 +123,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         Delete,
         "delete",
-        ["clear"],
+        ["del", "d"],
         "delete <id|all>",
         "Delete logical breakpoints"
     ),
@@ -197,8 +197,20 @@ const COMMANDS: &[CommandSpec] = &[
     ),
     command!(Threads, "threads", [], "threads", "List threads"),
     command!(Thread, "thread", [], "thread <id>", "Select a thread"),
-    command!(Cls, "cls", [], "cls", "Clear and redraw the terminal"),
-    command!(Help, "help", ["?"], "help [command]", "Show command help"),
+    command!(
+        Clear,
+        "clear",
+        ["cls"],
+        "clear",
+        "Clear and redraw the terminal"
+    ),
+    command!(
+        Help,
+        "help",
+        ["h", "?"],
+        "help [command]",
+        "Show command help"
+    ),
     command!(Quit, "quit", ["q"], "quit", "Exit uscope"),
 ];
 
@@ -691,8 +703,8 @@ async fn execute(
             Ok(Control::Continue(format_threads(&snapshot, renderer)))
         }
         Command::Thread => select_thread(debugger, &mut words, renderer).await,
-        Command::Cls => {
-            no_arguments(&mut words, "cls")?;
+        Command::Clear => {
+            no_arguments(&mut words, "clear")?;
             Ok(Control::ClearScreen)
         }
         Command::Help => execute_help(&mut words, renderer),
@@ -821,18 +833,26 @@ fn execute_help<'a>(
 }
 
 fn format_help(renderer: Renderer) -> String {
-    let width = COMMANDS
+    let name_width = COMMANDS
         .iter()
-        .map(|command| format_command_label(command).len())
+        .map(|command| command.name.len())
         .max()
         .unwrap_or(0);
-    let mut output = format!("{}:", renderer.paint(Role::Name, "commands"));
+    let alias_width = COMMANDS
+        .iter()
+        .map(|command| command.aliases.join(", ").len())
+        .max()
+        .unwrap_or(0);
+    let mut output = "commands:".to_owned();
     for command in COMMANDS {
-        let label = format_command_label(command);
+        let aliases = command.aliases.join(", ");
         write!(
             output,
-            "\n  {}  {}",
-            renderer.paint(Role::Name, format_args!("{label:width$}")),
+            "\n  {}{}  {}{}  {}",
+            renderer.paint(Role::Command, command.name),
+            " ".repeat(name_width - command.name.len()),
+            renderer.paint(Role::Alias, &aliases),
+            " ".repeat(alias_width - aliases.len()),
             command.summary
         )
         .expect("writing to a String cannot fail");
@@ -841,26 +861,23 @@ fn format_help(renderer: Renderer) -> String {
     output
 }
 
-fn format_command_label(command: &CommandSpec) -> String {
-    if command.aliases.is_empty() {
-        command.usage.to_owned()
-    } else {
-        format!("{} ({})", command.usage, command.aliases.join(", "))
-    }
-}
-
 fn format_command_help(command: &CommandSpec, renderer: Renderer) -> String {
-    let mut output = format!(
-        "{}\n  {}",
-        renderer.paint(Role::Name, command.usage),
-        command.summary
-    );
+    let mut output = format!("  {}", command.summary);
     if !command.aliases.is_empty() {
         write!(
             output,
             "\n  {}: {}",
-            renderer.paint(Role::Metadata, "aliases"),
-            renderer.paint(Role::Name, command.aliases.join(", "))
+            renderer.paint(Role::Muted, "aliases"),
+            renderer.paint(Role::Alias, command.aliases.join(", "))
+        )
+        .expect("writing to a String cannot fail");
+    }
+    if command.usage != command.name {
+        write!(
+            output,
+            "\n  {}: {}",
+            renderer.paint(Role::Muted, "usage"),
+            command.usage
         )
         .expect("writing to a String cannot fail");
     }
@@ -1476,6 +1493,14 @@ mod tests {
                 command_named(command.name).map(|found| found.name),
                 Some(command.name)
             );
+            assert!(
+                command
+                    .usage
+                    .strip_prefix(command.name)
+                    .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(' ')),
+                "usage must begin with command name: {}",
+                command.usage
+            );
         }
     }
 
@@ -1483,11 +1508,22 @@ mod tests {
     fn generated_help_contains_every_registered_command() {
         let help = format_help(Renderer::new(false));
         for command in COMMANDS {
-            let label = format_command_label(command);
-            assert!(help.contains(&label), "missing help label {label}");
+            assert!(
+                help.contains(command.name),
+                "missing command {}",
+                command.name
+            );
             let detail = format_command_help(command, Renderer::new(false));
-            assert!(detail.contains(command.usage));
             assert!(detail.contains(command.summary));
+            assert_eq!(
+                detail.contains("\n  usage:"),
+                command.usage != command.name,
+                "usage visibility disagrees for {}",
+                command.name
+            );
+            if command.usage != command.name {
+                assert!(detail.contains(command.usage));
+            }
             for alias in command.aliases {
                 assert!(help.contains(alias), "overview omitted alias {alias}");
                 assert!(
