@@ -1816,12 +1816,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             let return_address = self.caller_address(pid, &registers)?;
             for line in self.module_image.line_entries() {
+                if !instance.contains(line.range.start) {
+                    continue;
+                }
                 let location = self.module_image.locate(line.range.start);
-                if instance.contains(line.range.start)
-                    && source_for_code_instance(&self.module_image, &location, instance_id)
-                        .is_some_and(|candidate| {
-                            source_line_changed(Some(source), Some(&candidate))
-                        })
+                if source_for_code_instance(&self.module_image, &location, instance_id)
+                    .is_some_and(|candidate| source_line_changed(Some(source), Some(&candidate)))
                 {
                     plan_addresses
                         .insert(inferior.loaded_module.virtual_address(line.range.start)?);
