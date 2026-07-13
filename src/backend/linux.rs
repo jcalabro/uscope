@@ -2105,13 +2105,18 @@ impl<P: LinuxTraceOps> Controller<P> {
                 };
                 let Some(location) = self.location_for_activation(pid, &registers, activation)?
                 else {
-                    return Ok(true);
+                    return Ok(self.image_location(instruction).is_some_and(|location| {
+                        source_step_destination(&self.module_image, &location, kind)
+                    }));
                 };
+                if !code_instance_is_active(&location, code_instance) {
+                    return Ok(source_step_destination(&self.module_image, &location, kind));
+                }
                 let source = source_for_code_instance(&self.module_image, &location, code_instance);
 
-                Ok(source.is_none()
-                    || (kind == StepKind::OverSource
-                        && source_line_changed(start.source.as_ref(), source.as_ref())))
+                Ok(kind == StepKind::OverSource
+                    && source_step_destination(&self.module_image, &location, kind)
+                    && source_line_changed(start.source.as_ref(), source.as_ref()))
             }
         }
     }
@@ -3404,6 +3409,31 @@ fn source_for_code_instance(
     } else {
         location.source.clone()
     }
+}
+
+fn code_instance_is_active(location: &ImageLocation, selected: CodeInstanceId) -> bool {
+    if location.physical_instance == Some(selected) {
+        return true;
+    }
+    match &location.inline_frames {
+        InlineFrameLookup::None => false,
+        InlineFrameLookup::Unique(chain) => chain.instances.contains(&selected),
+        InlineFrameLookup::Ambiguous(chains) => chains
+            .iter()
+            .any(|chain| chain.instances.contains(&selected)),
+    }
+}
+
+fn source_step_destination(
+    module_image: &ModuleImage,
+    location: &ImageLocation,
+    kind: StepKind,
+) -> bool {
+    location.source.is_some()
+        && (kind == StepKind::Out
+            || module_image
+                .line_entry_containing(location.address)
+                .is_some_and(|entry| entry.statement))
 }
 
 fn source_line_changed(start: Option<&SourceLocation>, current: Option<&SourceLocation>) -> bool {
