@@ -142,6 +142,8 @@ build_fixture gcc tests/fixtures/thread-stress.c "$output_dir/thread-stress" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc tests/fixtures/step.c "$output_dir/step" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc tests/fixtures/step-over-libc.c "$output_dir/step-over-libc" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-o0" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-o2" \

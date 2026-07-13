@@ -1301,6 +1301,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         if uses_plan_breakpoints {
             return self.continue_thread(pid);
         }
+        if kind == StepKind::IntoSource
+            && self.stopped_outside_described_code(pid)?
+            && self.escape_undescribed_code(pid)?
+        {
+            return Ok(());
+        }
 
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let thread = inferior.threads.get_mut(&pid).ok_or(Error::NotRunning)?;
@@ -1310,6 +1316,57 @@ impl<P: LinuxTraceOps> Controller<P> {
         thread.expected = ExpectedStop::UserStep { kind };
         thread.state = NativeThreadState::Running;
         Ok(())
+    }
+
+    /// Reports whether the thread is stopped at an instruction that no DWARF
+    /// code instance describes (PLT stubs, library code, assembly thunks).
+    fn stopped_outside_described_code(&self, pid: Pid) -> Result<bool> {
+        let registers = self.ptrace.registers(pid)?;
+        Ok(self
+            .image_location(VirtualAddress::new(registers.rip))
+            .is_none_or(|location| {
+                location.physical_instance.is_none() && location.source.is_none()
+            }))
+    }
+
+    /// Runs to the caller instead of instruction-stepping through code without
+    /// debug information. The return address comes from call-frame information
+    /// when it covers the stopped address (PLT stubs), otherwise from the top
+    /// of the stack, which holds the return address immediately after the call
+    /// that entered the undescribed code. Either candidate is trusted only
+    /// when it resolves to a described instruction. Returns false when no
+    /// trustworthy return address exists and the caller should fall back to
+    /// instruction stepping.
+    fn escape_undescribed_code(&mut self, pid: Pid) -> Result<bool> {
+        let registers = self.ptrace.registers(pid)?;
+        let candidate = match self.caller_address(pid, &registers) {
+            Ok(address) => address,
+            Err(_) => match self.ptrace.read_word(pid, registers.rsp) {
+                Ok(word) => VirtualAddress::new(word),
+                Err(_) => return Ok(false),
+            },
+        };
+        let described = self
+            .image_location(candidate)
+            .is_some_and(|location| location.physical_instance.is_some());
+        if !described {
+            return Ok(false);
+        }
+        let execution = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .map(|active| active.id)
+            .ok_or(Error::NotRunning)?;
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        self.ptrace.install_breakpoint(
+            inferior.tgid,
+            &mut inferior.breakpoints,
+            candidate,
+            BreakpointOwner::Plan(execution),
+        )?;
+        self.continue_thread(pid)?;
+        Ok(true)
     }
 
     fn resume_awaiting_thread(&mut self, pid: Pid) -> Result<()> {
@@ -1739,6 +1796,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             StepKind::Instruction => Ok(true),
             StepKind::IntoSource => {
                 let location = self.image_location(VirtualAddress::new(registers.rip));
+                // Code that no DWARF instance describes (PLT stubs, library
+                // code) is never a step destination; the step continues until
+                // execution returns to described code.
+                if location.as_ref().is_none_or(|location| {
+                    location.physical_instance.is_none() && location.source.is_none()
+                }) {
+                    return Ok(false);
+                }
                 let presentation = self.presentation_for_thread(
                     pid,
                     &StopReason::Step {
