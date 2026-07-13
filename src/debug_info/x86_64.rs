@@ -83,11 +83,14 @@ fn decode(decoder: &mut Decoder<'_>) -> Result<Instruction, PrologueAnalysisErro
     Ok(instruction)
 }
 
+// Structural prologue checks compare exact registers: operand-size overrides
+// (`push bp`, `mov ebp, esp`) are not the canonical eight-byte frame
+// operations this proof requires.
 fn is_push_register(instruction: &Instruction, register: Register) -> bool {
     instruction.mnemonic() == Mnemonic::Push
         && instruction.op_count() == 1
         && instruction.op0_kind() == OpKind::Register
-        && full_register(instruction.op0_register()) == register
+        && instruction.op0_register() == register
 }
 
 fn is_register_move(instruction: &Instruction, destination: Register, source: Register) -> bool {
@@ -95,8 +98,8 @@ fn is_register_move(instruction: &Instruction, destination: Register, source: Re
         && instruction.op_count() == 2
         && instruction.op0_kind() == OpKind::Register
         && instruction.op1_kind() == OpKind::Register
-        && full_register(instruction.op0_register()) == destination
-        && full_register(instruction.op1_register()) == source
+        && instruction.op0_register() == destination
+        && instruction.op1_register() == source
 }
 
 fn is_callee_save_push(instruction: &Instruction) -> bool {
@@ -115,7 +118,7 @@ fn is_stack_allocation(instruction: &Instruction) -> bool {
     matches!(instruction.mnemonic(), Mnemonic::Sub | Mnemonic::And)
         && instruction.op_count() == 2
         && instruction.op0_kind() == OpKind::Register
-        && full_register(instruction.op0_register()) == Register::RSP
+        && instruction.op0_register() == Register::RSP
         && is_immediate(instruction.op1_kind())
 }
 
@@ -127,10 +130,17 @@ fn is_argument_copy(instruction: &Instruction, tainted: &mut TaintedRegisters) -
     match (instruction.op0_kind(), instruction.op1_kind()) {
         (OpKind::Register, OpKind::Register) => {
             let source = full_register(instruction.op1_register());
+            let destination = full_register(instruction.op0_register());
+            // Redefining the stack or frame pointer is never argument homing;
+            // accepting it would prove away real work that destroys the frame
+            // this analysis just validated.
+            if matches!(destination, Register::RSP | Register::RBP) {
+                return false;
+            }
             if !tainted.contains(source) {
                 return false;
             }
-            tainted.insert(full_register(instruction.op0_register()));
+            tainted.insert(destination);
             true
         }
         (OpKind::Memory, OpKind::Register) => {
@@ -138,10 +148,13 @@ fn is_argument_copy(instruction: &Instruction, tainted: &mut TaintedRegisters) -
                 && is_frame_store(instruction)
         }
         (OpKind::Register, OpKind::Memory) => {
-            if !is_stack_argument_load(instruction) {
+            let destination = full_register(instruction.op0_register());
+            if matches!(destination, Register::RSP | Register::RBP)
+                || !is_stack_argument_load(instruction)
+            {
                 return false;
             }
-            tainted.insert(full_register(instruction.op0_register()));
+            tainted.insert(destination);
             true
         }
         _ => false,
@@ -178,22 +191,21 @@ const fn is_copy_mnemonic(mnemonic: Mnemonic) -> bool {
     )
 }
 
-fn is_frame_store(instruction: &Instruction) -> bool {
-    if instruction.memory_index() != Register::None {
-        return false;
-    }
+// Frame accesses require the exact 64-bit RBP base with no segment override:
+// an FS/GS prefix targets thread-local storage rather than the stack, and an
+// address-size override truncates the effective address to EBP.
+fn is_plain_frame_access(instruction: &Instruction) -> bool {
+    instruction.memory_index() == Register::None
+        && instruction.segment_prefix() == Register::None
+        && instruction.memory_base() == Register::RBP
+}
 
-    full_register(instruction.memory_base()) == Register::RBP
-        && signed_displacement(instruction) < 0
+fn is_frame_store(instruction: &Instruction) -> bool {
+    is_plain_frame_access(instruction) && signed_displacement(instruction) < 0
 }
 
 fn is_stack_argument_load(instruction: &Instruction) -> bool {
-    if instruction.memory_index() != Register::None {
-        return false;
-    }
-
-    full_register(instruction.memory_base()) == Register::RBP
-        && signed_displacement(instruction) >= 16
+    is_plain_frame_access(instruction) && signed_displacement(instruction) >= 16
 }
 
 const fn signed_displacement(instruction: &Instruction) -> i64 {
@@ -353,6 +365,64 @@ mod tests {
 
         assert_eq!(
             prove_prologue_prefix(&bytes, 0x1000),
+            Err(PrologueAnalysisError::UnsupportedInstruction)
+        );
+    }
+
+    #[test]
+    fn rejects_tainted_copies_into_the_stack_and_frame_pointers() {
+        // push rbp; mov rbp, rsp; mov rsp, rdi
+        let stack = [0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0xfc];
+        assert_eq!(
+            prove_prologue_prefix(&stack, 0x1000),
+            Err(PrologueAnalysisError::UnsupportedInstruction)
+        );
+
+        // push rbp; mov rbp, rsp; mov rbp, rdi
+        let frame = [0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0xfd];
+        assert_eq!(
+            prove_prologue_prefix(&frame, 0x1000),
+            Err(PrologueAnalysisError::UnsupportedInstruction)
+        );
+
+        // push rbp; mov rbp, rsp; mov rbp, [rbp+0x10]
+        let load = [0x55, 0x48, 0x89, 0xe5, 0x48, 0x8b, 0x6d, 0x10];
+        assert_eq!(
+            prove_prologue_prefix(&load, 0x1000),
+            Err(PrologueAnalysisError::UnsupportedInstruction)
+        );
+    }
+
+    #[test]
+    fn rejects_operand_size_overridden_frame_setup() {
+        // push bp; mov rbp, rsp
+        let narrow_save = [0x66, 0x55, 0x48, 0x89, 0xe5];
+        assert_eq!(
+            prove_prologue_prefix(&narrow_save, 0x1000),
+            Err(PrologueAnalysisError::MissingFramePointerSave)
+        );
+
+        // push rbp; mov ebp, esp
+        let narrow_setup = [0x55, 0x89, 0xe5];
+        assert_eq!(
+            prove_prologue_prefix(&narrow_setup, 0x1000),
+            Err(PrologueAnalysisError::MissingFramePointerSetup)
+        );
+    }
+
+    #[test]
+    fn rejects_segment_and_address_size_overridden_frame_stores() {
+        // push rbp; mov rbp, rsp; mov fs:[rbp-8], rdi
+        let segment = [0x55, 0x48, 0x89, 0xe5, 0x64, 0x48, 0x89, 0x7d, 0xf8];
+        assert_eq!(
+            prove_prologue_prefix(&segment, 0x1000),
+            Err(PrologueAnalysisError::UnsupportedInstruction)
+        );
+
+        // push rbp; mov rbp, rsp; mov [ebp-8], rdi
+        let truncated = [0x55, 0x48, 0x89, 0xe5, 0x67, 0x48, 0x89, 0x7d, 0xf8];
+        assert_eq!(
+            prove_prologue_prefix(&truncated, 0x1000),
             Err(PrologueAnalysisError::UnsupportedInstruction)
         );
     }

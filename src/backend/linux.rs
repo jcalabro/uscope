@@ -2167,12 +2167,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             Some(_) => current_physical.is_some() && current_physical != start.physical_instance,
             None => false,
         };
+        // A recommended entry row may carry no source attribution. Source
+        // stepping must keep going until it can publish a renderable source
+        // stop, so a source-less entry is a waypoint, not a destination.
         let at_recommended_entry = location.as_ref().is_some_and(|location| {
-            location.physical_instance.is_some_and(|instance| {
-                self.module_image
-                    .recommended_entries_for_instance(instance)
-                    .any(|entry| entry.address == location.address)
-            })
+            location.source.is_some()
+                && location.physical_instance.is_some_and(|instance| {
+                    self.module_image
+                        .recommended_entries_for_instance(instance)
+                        .any(|entry| entry.address == location.address)
+                })
         });
         if entered_physical_activation && !at_recommended_entry {
             return Ok(false);
