@@ -1554,6 +1554,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                 if kind != StepKind::Instruction {
                     self.begin_epilogue_traversal(pid)?;
                 }
+                if self.source_step_returned_to_undescribed_code(pid, kind)? {
+                    self.cleanup_plan_breakpoints(execution)?;
+                    self.inferior
+                        .as_mut()
+                        .and_then(|inferior| inferior.threads.get_mut(&pid))
+                        .ok_or(Error::NotRunning)?
+                        .stopped_at_breakpoint = None;
+                    return self.continue_thread(pid);
+                }
                 if self.step_is_complete(pid, kind)? {
                     self.cleanup_plan_breakpoints(execution)?;
                     self.inferior
@@ -1796,11 +1805,47 @@ impl<P: LinuxTraceOps> Controller<P> {
         if kind != StepKind::Instruction && self.begin_epilogue_traversal(pid)? {
             return self.start_user_step(pid, kind);
         }
+        if self.source_step_returned_to_undescribed_code(pid, kind)? {
+            let execution = self
+                .inferior
+                .as_ref()
+                .and_then(|inferior| inferior.active.as_ref())
+                .map(|active| active.id)
+                .ok_or(Error::NotRunning)?;
+            self.cleanup_plan_breakpoints(execution)?;
+            return self.continue_thread(pid);
+        }
         if self.step_is_complete(pid, kind)? {
             self.begin_visible_stop(pid, StopReason::Step { kind })
         } else {
             self.start_user_step(pid, kind)
         }
+    }
+
+    /// Source stepping has no truthful stop to publish after its starting
+    /// activation returns into code for which the debugger has no source.
+    /// Keep the operation active so an exit, signal, or user breakpoint is
+    /// reported instead of exposing an unusable synthetic source stop.
+    fn source_step_returned_to_undescribed_code(&self, pid: Pid, kind: StepKind) -> Result<bool> {
+        if !matches!(kind, StepKind::OverSource | StepKind::Out) {
+            return Ok(false);
+        }
+        let activation = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step { start, .. } => start.activation,
+                _ => None,
+            })
+            .ok_or(Error::LocationUnavailable)?;
+        let registers = self.ptrace.registers(pid)?;
+        Ok(x86_64_activation_has_returned(registers.rsp, activation)
+            && self
+                .image_location(VirtualAddress::new(registers.rip))
+                .is_none_or(|location| {
+                    location.physical_instance.is_none() && location.source.is_none()
+                }))
     }
 
     /// Turns an exact DWARF `epilogue_begin` row into an internal control site.
@@ -2163,9 +2208,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         let selected_is_inline = code_instance
             .and_then(|instance| self.module_image.code_instance(instance))
             .is_some_and(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }));
+        // An inline instance has no stack return address of its own. Leaving
+        // its physical caller's return address as the only reachable plan
+        // breakpoint would run the entire containing activation. Instruction
+        // stepping lets `step_is_complete` observe either the next statement
+        // in this instance or the point where the logical frame disappears.
         if kind == StepKind::Out && !selected_is_inline {
             plan_addresses.insert(self.caller_address(pid, &registers)?);
         } else if kind == StepKind::OverSource
+            && !selected_is_inline
             && let (Some(source), Some(instance_id)) = (&source, code_instance)
             && let Some(instance) = self.module_image.code_instance(instance_id)
         {
@@ -2230,6 +2281,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         native: &libc::user_regs_struct,
         activation: VirtualAddress,
     ) -> Result<Option<ImageLocation>> {
+        // On x86-64's downward-growing ordinary stack, a live activation's
+        // CFA remains above RSP. Once RSP reaches that CFA, the return has
+        // already restored the caller's stack. Recognize that transition
+        // before asking the main-module-only unwinder to interpret libc code.
+        if x86_64_activation_has_returned(native.rsp, activation) {
+            return Ok(None);
+        }
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let mut context = FrameContext {
             instruction: VirtualAddress::new(native.rip),
@@ -2821,20 +2879,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
 
-        let visible = chain
-            .instances
-            .iter()
-            .position(|instance| {
-                self.module_image
-                    .code_instance(*instance)
-                    .is_some_and(|instance| {
-                        instance
-                            .ranges
-                            .iter()
-                            .any(|range| range.start == image_address)
-                    })
-            })
-            .unwrap_or(chain.instances.len());
+        let reveal_new_inline = matches!(
+            reason,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        );
+        let visible = default_inline_visible_count(
+            &self.module_image,
+            chain.instances.as_ref(),
+            image_address,
+            reveal_new_inline,
+        );
 
         make_presentation(instruction, chain.instances.as_ref(), visible)
     }
@@ -3201,6 +3257,39 @@ fn make_presentation(
         frame,
         hidden_inline_frames,
     })
+}
+
+fn default_inline_visible_count(
+    module_image: &ModuleImage,
+    inline_chain: &[CodeInstanceId],
+    image_address: ImageAddress,
+    reveal_new_inline: bool,
+) -> usize {
+    inline_chain
+        .iter()
+        .position(|instance| {
+            module_image
+                .code_instance(*instance)
+                .is_some_and(|instance| {
+                    instance
+                        .ranges
+                        .iter()
+                        .any(|range| range.start == image_address)
+                })
+        })
+        .map_or(inline_chain.len(), |index| {
+            // `position` is a zero-based frame index; presentation uses a
+            // count. Source `step` reveals the newly entered frame, while
+            // `next`, `finish`, and instruction stops remain in its parent.
+            index + usize::from(reveal_new_inline)
+        })
+}
+
+const fn x86_64_activation_has_returned(
+    stack_pointer: u64,
+    activation_cfa: VirtualAddress,
+) -> bool {
+    stack_pointer >= activation_cfa.get()
 }
 
 fn presentation_visible_count(
@@ -4795,6 +4884,46 @@ mod tests {
             Err(Error::StaleStop)
         ));
         assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn inline_range_start_presentation_obeys_the_step_kind() {
+        let image = virtual_step_image();
+        let InlineFrameLookup::Unique(chain) = image.locate(ImageAddress::new(0x10)).inline_frames
+        else {
+            panic!("test address has one inline chain");
+        };
+
+        assert_eq!(
+            default_inline_visible_count(
+                &image,
+                chain.instances.as_ref(),
+                ImageAddress::new(0x10),
+                true,
+            ),
+            1,
+            "the middle frame starts here while its nested child remains hidden"
+        );
+        assert_eq!(
+            default_inline_visible_count(
+                &image,
+                chain.instances.as_ref(),
+                ImageAddress::new(0x10),
+                false,
+            ),
+            0,
+            "next and finish retain the parent presentation"
+        );
+        assert_eq!(
+            default_inline_visible_count(
+                &image,
+                chain.instances.as_ref(),
+                ImageAddress::new(0x11),
+                true,
+            ),
+            2,
+            "away from a range boundary the innermost active frame is visible"
+        );
     }
 
     fn virtual_step_image() -> Arc<ModuleImage> {

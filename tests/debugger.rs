@@ -369,7 +369,9 @@ async fn boundary_fixture_preserves_inline_step_and_next_semantics() {
             step.run_to_stop().await,
             StopReason::Breakpoint { .. }
         ));
-        let call = advance_to_boundary_inline_call(&mut step, fixture).await;
+        let physical = step
+            .operation("physical boundary caller", step.handle().current_location())
+            .await;
 
         assert_eq!(
             step.step_to_stop(StepKind::IntoSource).await,
@@ -382,7 +384,7 @@ async fn boundary_fixture_preserves_inline_step_and_next_semantics() {
             .operation("inline boundary location", step.handle().current_location())
             .await;
         assert_eq!(
-            inlined.image.physical_instance, call.image.physical_instance,
+            inlined.image.physical_instance, physical.image.physical_instance,
             "{fixture} entered a physical callee instead of a logical inline frame"
         );
         assert_eq!(
@@ -437,6 +439,310 @@ async fn boundary_fixture_preserves_inline_step_and_next_semantics() {
             "{fixture}"
         );
         next.shutdown().await;
+    }
+}
+
+async fn launch_boundary_scenario(
+    name: String,
+    fixture: &str,
+) -> (Scenario, uscope::ExecutionLocation) {
+    let mut scenario = Scenario::new(name, Scenario::fixture(fixture));
+    scenario.add_breakpoint("main").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let main = scenario
+        .operation("main activation", scenario.handle().current_location())
+        .await;
+    (scenario, main)
+}
+
+async fn boundary_source_step(
+    scenario: &mut Scenario,
+    kind: StepKind,
+    operation: &str,
+) -> uscope::ExecutionLocation {
+    assert_eq!(
+        scenario.step_to_stop(kind).await,
+        StopReason::Step { kind },
+        "{operation}"
+    );
+    scenario
+        .operation(operation, scenario.handle().current_location())
+        .await
+}
+
+fn boundary_function(location: &uscope::ExecutionLocation) -> Option<&str> {
+    location
+        .image
+        .function
+        .as_ref()
+        .map(|function| function.name.as_ref())
+}
+
+fn boundary_line(location: &uscope::ExecutionLocation) -> Option<u64> {
+    location
+        .image
+        .source
+        .as_ref()
+        .map(|source| source.line.get())
+}
+
+fn boundary_sink_address(
+    scenario: &Scenario,
+    location: &uscope::ExecutionLocation,
+) -> VirtualAddress {
+    let sink = scenario
+        .handle()
+        .module_image()
+        .symbol_named("boundary_sink")
+        .expect("boundary_sink symbol")
+        .address;
+    relocate_image_address(sink, location)
+}
+
+async fn boundary_sink_value(scenario: &Scenario, sink: VirtualAddress) -> u64 {
+    scenario
+        .operation("boundary sink", scenario.handle().read_word(sink))
+        .await
+        & u64::from(u32::MAX)
+}
+
+#[tokio::test]
+async fn clang_o0_inline_steps_cover_entry_body_return_caller_and_exit() {
+    let fixture = "stepping-boundaries-clang-o0";
+    let (mut scenario, _) =
+        launch_boundary_scenario("Clang O0 inline lifecycle".into(), fixture).await;
+    let inlined = boundary_source_step(
+        &mut scenario,
+        StepKind::IntoSource,
+        "first inline statement",
+    )
+    .await;
+    assert_eq!(boundary_function(&inlined), Some("inline_adjust"));
+    assert_eq!(boundary_line(&inlined), Some(24));
+    let physical = inlined.image.physical_instance;
+    let sink = boundary_sink_address(&scenario, &inlined);
+    assert_eq!(boundary_sink_value(&scenario, sink).await, 0);
+
+    for (expected_line, expected_sink) in [(25, 0), (26, 6)] {
+        let location =
+            boundary_source_step(&mut scenario, StepKind::OverSource, "next inline statement")
+                .await;
+        assert_eq!(boundary_line(&location), Some(expected_line));
+        assert_eq!(boundary_function(&location), Some("inline_adjust"));
+        assert_eq!(location.image.physical_instance, physical);
+        assert_eq!(
+            boundary_sink_value(&scenario, sink).await,
+            expected_sink,
+            "inline statement {expected_line} has the wrong stop-before side effects"
+        );
+    }
+
+    let caller = boundary_source_step(
+        &mut scenario,
+        StepKind::OverSource,
+        "logical caller after inline return",
+    )
+    .await;
+    assert_eq!(caller.image.physical_instance, physical);
+    assert_eq!(boundary_function(&caller), Some("main"));
+    assert_eq!(boundary_line(&caller), Some(30));
+
+    let following_call = boundary_source_step(
+        &mut scenario,
+        StepKind::OverSource,
+        "statement following inline call",
+    )
+    .await;
+    assert_eq!(boundary_function(&following_call), Some("main"));
+    assert_eq!(boundary_line(&following_call), Some(31));
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn next_walks_the_entire_boundary_fixture_to_a_normal_exit() {
+    for fixture in [
+        "stepping-boundaries-gcc-o0",
+        "stepping-boundaries-clang-o0",
+        "stepping-boundaries-gcc-o2",
+        "stepping-boundaries-clang-o2",
+    ] {
+        let (mut scenario, _) =
+            launch_boundary_scenario(format!("full next walk {fixture}"), fixture).await;
+        let call = advance_to_boundary_inline_call(&mut scenario, fixture).await;
+        let sink = boundary_sink_address(&scenario, &call);
+
+        for (expected_line, expected_sink) in [(31, 6), (33, 11), (34, 22), (35, 4)] {
+            let mut reached = false;
+            for _ in 0..3 {
+                let location = boundary_source_step(
+                    &mut scenario,
+                    StepKind::OverSource,
+                    "full next walk location",
+                )
+                .await;
+                assert_eq!(
+                    boundary_function(&location),
+                    Some("main"),
+                    "{fixture}: {location:?}"
+                );
+                let line = boundary_line(&location).expect("main next stop has source");
+                assert!(
+                    line <= expected_line,
+                    "{fixture} skipped past expected line {expected_line} to {line}"
+                );
+                if line == expected_line {
+                    reached = true;
+                    break;
+                }
+            }
+            assert!(
+                reached,
+                "{fixture} did not reach main line {expected_line} within the step budget"
+            );
+            assert_eq!(
+                boundary_sink_value(&scenario, sink).await,
+                expected_sink,
+                "{fixture} did not execute the expected callee before main line {expected_line}"
+            );
+        }
+
+        let mut exit = scenario.step_to_stop(StepKind::OverSource).await;
+        if matches!(exit, StopReason::Step { .. }) {
+            let closing_brace = scenario
+                .operation(
+                    "optional closing-brace stop",
+                    scenario.handle().current_location(),
+                )
+                .await;
+            assert_eq!(
+                boundary_line(&closing_brace),
+                Some(36),
+                "{fixture} added an unexpected stop after main's return"
+            );
+            exit = scenario.step_to_stop(StepKind::OverSource).await;
+        }
+        assert_eq!(
+            exit,
+            StopReason::Exited(ExitStatus::Code(0)),
+            "{fixture} did not preserve the inferior's normal exit while next completed"
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
+async fn advance_boundary_to_line(
+    scenario: &mut Scenario,
+    fixture: &str,
+    target: u64,
+) -> uscope::ExecutionLocation {
+    for _ in 0..4 {
+        let location = scenario
+            .operation(
+                "advance boundary call site",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(boundary_function(&location), Some("main"));
+        let line = boundary_line(&location).expect("main call site has source");
+        if line == target {
+            return location;
+        }
+        assert!(
+            line < target,
+            "{fixture} skipped target line {target} and stopped at {line}"
+        );
+        boundary_source_step(scenario, StepKind::OverSource, "advance boundary call site").await;
+    }
+    panic!("{fixture} did not reach main line {target} within the step budget");
+}
+
+async fn finish_boundary_physical_call(
+    scenario: &mut Scenario,
+    fixture: &str,
+    main_physical: Option<uscope::CodeInstanceId>,
+    sink: VirtualAddress,
+    case: (u64, &str, u64, u64),
+) {
+    let (call_line, callee, expected_sink, last_caller_line) = case;
+    advance_boundary_to_line(scenario, fixture, call_line).await;
+    let entered =
+        boundary_source_step(scenario, StepKind::IntoSource, "entered physical callee").await;
+    assert_eq!(boundary_function(&entered), Some(callee));
+    assert_ne!(entered.image.physical_instance, main_physical);
+
+    let returned =
+        boundary_source_step(scenario, StepKind::Out, "caller after physical finish").await;
+    assert_eq!(boundary_function(&returned), Some("main"));
+    assert_eq!(returned.image.physical_instance, main_physical);
+    let line = boundary_line(&returned).expect("physical finish has caller source");
+    assert!(
+        (call_line..=last_caller_line).contains(&line),
+        "{fixture} finished {callee} at unexpected line {line}"
+    );
+    assert_eq!(
+        boundary_sink_value(scenario, sink).await,
+        expected_sink,
+        "{fixture} finished the wrong path through {callee}"
+    );
+}
+
+#[tokio::test]
+async fn finish_distinguishes_inline_and_physical_frames_across_the_boundary_fixture() {
+    for fixture in [
+        "stepping-boundaries-gcc-o0",
+        "stepping-boundaries-clang-o0",
+        "stepping-boundaries-gcc-o2",
+        "stepping-boundaries-clang-o2",
+    ] {
+        let (mut scenario, main) =
+            launch_boundary_scenario(format!("inline and physical finish {fixture}"), fixture)
+                .await;
+        let main_physical = main.image.physical_instance;
+
+        let inlined =
+            boundary_source_step(&mut scenario, StepKind::IntoSource, "inline activation").await;
+        assert_eq!(
+            boundary_function(&inlined),
+            Some("inline_adjust"),
+            "{fixture}: {inlined:?}"
+        );
+        assert_eq!(inlined.image.physical_instance, main_physical);
+
+        let after_inline =
+            boundary_source_step(&mut scenario, StepKind::Out, "caller after inline finish").await;
+        assert_eq!(after_inline.image.physical_instance, main_physical);
+        assert_eq!(boundary_function(&after_inline), Some("main"));
+        let after_inline_line = boundary_line(&after_inline).expect("inline finish has source");
+        assert!(
+            (30..=31).contains(&after_inline_line),
+            "{fixture} finished inline_adjust at unexpected line {after_inline_line}"
+        );
+        advance_boundary_to_line(&mut scenario, fixture, 31).await;
+        let sink = boundary_sink_address(&scenario, &after_inline);
+
+        for case in [
+            (31, "marked_returns", 11, 33),
+            (33, "marked_returns", 22, 34),
+            (34, "no_prologue", 4, 35),
+        ] {
+            finish_boundary_physical_call(&mut scenario, fixture, main_physical, sink, case).await;
+        }
+
+        advance_boundary_to_line(&mut scenario, fixture, 35).await;
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Exited(ExitStatus::Code(0)),
+            "{fixture} top-level finish did not preserve normal process exit"
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }
 }
 
@@ -670,9 +976,9 @@ async fn advance_to_boundary_inline_call(
             return location;
         }
         assert_eq!(
-            scenario.step_to_stop(StepKind::IntoSource).await,
+            scenario.step_to_stop(StepKind::OverSource).await,
             StopReason::Step {
-                kind: StepKind::IntoSource
+                kind: StepKind::OverSource
             },
             "{fixture}"
         );
