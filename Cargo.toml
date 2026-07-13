@@ -30,6 +30,8 @@ undocumented_unsafe_blocks = "deny"
 
 [dependencies]
 anyhow = "1.0"
+anstyle = "1.0"
+anstyle-query = "1.1"
 clap = { version = "4.6", features = ["derive"] }
 rustyline = "18.0"
 rustc_apfloat = "=0.2.3"

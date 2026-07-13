@@ -30,3 +30,4 @@ Use `stepi`, `step`, `next`, and `finish` for instruction and source-level execu
 Use `threads` to list stopped threads and `thread <id>` to select the thread used by register, variable, source, and backtrace commands.
 Press Ctrl-C while the inferior is running to pause it at a coherent all-stop snapshot.
 The interactive debugger is a plain terminal REPL, so output remains available in normal terminal scrollback. Submit an empty line to repeat the last command entered in the current interactive session. Use `--batch` with command files, `--eval`, or stdin when no interactive prompt is wanted.
+Interactive output uses a restrained terminal-aware color palette while leaving source code text unstyled. Color is disabled for redirected output, `TERM=dumb`, `NO_COLOR`, and automatic batch output. Use `--color always` or `--color never` to override detection; `CLICOLOR` and `CLICOLOR_FORCE` are also honored.

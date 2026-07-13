@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use rustc_apfloat::Float as _;
 use rustc_apfloat::ieee::X87DoubleExtended;
-use rustyline::DefaultEditor;
+use rustyline::config::Configurer as _;
 use rustyline::error::ReadlineError;
+use rustyline::{ColorMode, DefaultEditor};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
     Breakpoint, BreakpointId, BreakpointLocation, BreakpointSpec, ByteOrder, Debugger,
@@ -18,6 +19,12 @@ use uscope::{
     SourceContext, StateSnapshot, StepKind, StopReason, ThreadId, ThreadState, Variable,
     VariableSnapshot, VariableState, VirtualAddress,
 };
+
+mod terminal;
+
+use terminal::{ColorChoice, ColorEnvironment, Renderer, Role, color_enabled};
+
+const REPL_PROMPT: &str = "(uscope) ";
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -37,6 +44,16 @@ struct Args {
     /// Execute commands without starting the interactive REPL.
     #[arg(long)]
     batch: bool,
+
+    /// Control colored terminal output.
+    #[arg(long, value_enum, default_value_t)]
+    color: ColorChoice,
+}
+
+#[derive(Clone, Copy)]
+struct Renderers {
+    stdout: Renderer,
+    stderr: Renderer,
 }
 
 #[derive(Clone, Copy)]
@@ -188,6 +205,21 @@ const COMMANDS: &[CommandSpec] = &[
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let environment = ColorEnvironment::current();
+    let renderers = Renderers {
+        stdout: Renderer::new(color_enabled(
+            args.color,
+            &environment,
+            io::stdout().is_terminal(),
+            args.batch,
+        )),
+        stderr: Renderer::new(color_enabled(
+            args.color,
+            &environment,
+            io::stderr().is_terminal(),
+            args.batch,
+        )),
+    };
     let debugger = Debugger::new(&args.executable).with_context(|| {
         format!(
             "failed to initialize debugger for {}",
@@ -196,7 +228,7 @@ async fn main() -> Result<()> {
     })?;
 
     let handle = debugger.handle();
-    let result = run_with_interrupts(&handle, &args).await;
+    let result = run_with_interrupts(&handle, &args, renderers).await;
     let shutdown = debugger
         .shutdown()
         .await
@@ -208,8 +240,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_with_interrupts(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
-    let mut terminal = Box::pin(run(debugger, args));
+async fn run_with_interrupts(
+    debugger: &DebuggerHandle,
+    args: &Args,
+    renderers: Renderers,
+) -> Result<()> {
+    let mut terminal = Box::pin(run(debugger, args, renderers));
 
     loop {
         tokio::select! {
@@ -226,9 +262,15 @@ async fn run_with_interrupts(debugger: &DebuggerHandle, args: &Args) -> Result<(
     }
 }
 
-async fn run(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
+async fn run(debugger: &DebuggerHandle, args: &Args, renderers: Renderers) -> Result<()> {
     if !args.batch {
-        println!("debugging {}", debugger.executable().display());
+        println!(
+            "{} {}",
+            renderers.stdout.paint(Role::Success, "debugging"),
+            renderers
+                .stdout
+                .paint(Role::Metadata, debugger.executable().display())
+        );
         io::stdout().flush()?;
     }
 
@@ -236,13 +278,27 @@ async fn run(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
         let contents = fs::read_to_string(path)
             .with_context(|| format!("failed to read command file {}", path.display()))?;
 
-        if !run_lines(debugger, contents.lines(), &path.display().to_string()).await? {
+        if !run_lines(
+            debugger,
+            contents.lines(),
+            &path.display().to_string(),
+            renderers.stdout,
+        )
+        .await?
+        {
             return Ok(());
         }
     }
 
     for (index, command) in args.commands.iter().enumerate() {
-        if !run_line(debugger, command, &format!("--eval #{}", index + 1)).await? {
+        if !run_line(
+            debugger,
+            command,
+            &format!("--eval #{}", index + 1),
+            renderers.stdout,
+        )
+        .await?
+        {
             return Ok(());
         }
     }
@@ -255,7 +311,14 @@ async fn run(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
             while let Some(line) = lines.next_line().await? {
                 number = number.checked_add(1).expect("stdin line number overflow");
 
-                if !run_line(debugger, &line, &format!("stdin:{number}")).await? {
+                if !run_line(
+                    debugger,
+                    &line,
+                    &format!("stdin:{number}"),
+                    renderers.stdout,
+                )
+                .await?
+                {
                     break;
                 }
             }
@@ -263,7 +326,7 @@ async fn run(debugger: &DebuggerHandle, args: &Args) -> Result<()> {
 
         Ok(())
     } else {
-        repl(debugger).await
+        repl(debugger, renderers).await
     }
 }
 
@@ -271,9 +334,10 @@ async fn run_lines<'a>(
     debugger: &DebuggerHandle,
     lines: impl Iterator<Item = &'a str>,
     source: &str,
+    renderer: Renderer,
 ) -> Result<bool> {
     for (index, line) in lines.enumerate() {
-        if !run_line(debugger, line, &format!("{source}:{}", index + 1)).await? {
+        if !run_line(debugger, line, &format!("{source}:{}", index + 1), renderer).await? {
             return Ok(false);
         }
     }
@@ -281,13 +345,18 @@ async fn run_lines<'a>(
     Ok(true)
 }
 
-async fn run_line(debugger: &DebuggerHandle, line: &str, source: &str) -> Result<bool> {
+async fn run_line(
+    debugger: &DebuggerHandle,
+    line: &str,
+    source: &str,
+    renderer: Renderer,
+) -> Result<bool> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return Ok(true);
     }
 
-    match execute(debugger, line)
+    match execute(debugger, line, renderer)
         .await
         .with_context(|| source.to_owned())?
     {
@@ -308,21 +377,25 @@ async fn run_line(debugger: &DebuggerHandle, line: &str, source: &str) -> Result
     }
 }
 
-async fn repl(debugger: &DebuggerHandle) -> Result<()> {
+async fn repl(debugger: &DebuggerHandle, renderers: Renderers) -> Result<()> {
     let show_prompt = io::stdin().is_terminal() && io::stdout().is_terminal();
     if show_prompt {
-        return interactive_repl(debugger).await;
+        return interactive_repl(debugger, renderers).await;
     }
-    stream_repl(debugger, false).await
+    stream_repl(debugger, false, renderers).await
 }
 
-async fn stream_repl(debugger: &DebuggerHandle, show_prompt: bool) -> Result<()> {
+async fn stream_repl(
+    debugger: &DebuggerHandle,
+    show_prompt: bool,
+    renderers: Renderers,
+) -> Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut number = 0_u64;
 
     loop {
         if show_prompt {
-            print!("> ");
+            print!("{REPL_PROMPT}");
             io::stdout().flush()?;
         }
 
@@ -334,10 +407,13 @@ async fn stream_repl(debugger: &DebuggerHandle, show_prompt: bool) -> Result<()>
         };
         number = number.checked_add(1).expect("REPL line number overflow");
 
-        match run_line(debugger, &line, &format!("repl:{number}")).await {
+        match run_line(debugger, &line, &format!("repl:{number}"), renderers.stdout).await {
             Ok(true) => {}
             Ok(false) => return Ok(()),
-            Err(error) => eprintln!("error: {error:#}"),
+            Err(error) => eprintln!(
+                "{}: {error:#}",
+                renderers.stderr.paint(Role::Error, "error")
+            ),
         }
     }
 }
@@ -353,12 +429,12 @@ enum ReplAck {
     Quit,
 }
 
-async fn interactive_repl(debugger: &DebuggerHandle) -> Result<()> {
+async fn interactive_repl(debugger: &DebuggerHandle, renderers: Renderers) -> Result<()> {
     let (input_sender, mut input_receiver) = tokio::sync::mpsc::channel(1);
     let (ack_sender, ack_receiver) = mpsc::channel();
     let editor = thread::Builder::new()
         .name("uscope-line-editor".to_owned())
-        .spawn(move || line_editor(&input_sender, &ack_receiver))?;
+        .spawn(move || line_editor(&input_sender, &ack_receiver, renderers))?;
 
     let mut outcome = Ok(());
     let mut last_command = None;
@@ -374,10 +450,20 @@ async fn interactive_repl(debugger: &DebuggerHandle) -> Result<()> {
                     }
                     trimmed
                 };
-                match run_line(debugger, command, &format!("repl:{number}")).await {
+                match run_line(
+                    debugger,
+                    command,
+                    &format!("repl:{number}"),
+                    renderers.stdout,
+                )
+                .await
+                {
                     Ok(keep_running) => keep_running,
                     Err(error) => {
-                        eprintln!("error: {error:#}");
+                        eprintln!(
+                            "{}: {error:#}",
+                            renderers.stderr.paint(Role::Error, "error")
+                        );
                         true
                     }
                 }
@@ -416,6 +502,7 @@ async fn interactive_repl(debugger: &DebuggerHandle) -> Result<()> {
 fn line_editor(
     input: &tokio::sync::mpsc::Sender<ReplInput>,
     acknowledgements: &mpsc::Receiver<ReplAck>,
+    renderers: Renderers,
 ) {
     let mut editor = match DefaultEditor::new() {
         Ok(editor) => editor,
@@ -424,24 +511,40 @@ fn line_editor(
             return;
         }
     };
+    // Rustyline needs a helper to select the styled prompt. The unit helper's
+    // line highlighter is a no-op, so command input remains unstyled.
+    editor.set_helper(Some(()));
+    editor.set_color_mode(if renderers.stdout.is_colored() {
+        ColorMode::Forced
+    } else {
+        ColorMode::Disabled
+    });
     let history = history_path();
     if history.exists()
         && let Err(error) = editor.load_history(&history)
     {
         eprintln!(
-            "warning: failed to load command history {}: {error}",
+            "{}: failed to load command history {}: {error}",
+            renderers.stderr.paint(Role::Warning, "warning"),
             history.display()
         );
     }
     let mut number = 0_u64;
     loop {
-        match editor.readline("> ") {
+        let styled_prompt = renderers
+            .stdout
+            .paint(Role::Prompt, REPL_PROMPT)
+            .to_string();
+        match editor.readline(&(REPL_PROMPT, &styled_prompt)) {
             Ok(line) => {
                 number = number.checked_add(1).expect("REPL line number overflow");
                 if !line.trim().is_empty()
                     && let Err(error) = editor.add_history_entry(line.as_str())
                 {
-                    eprintln!("warning: failed to record command history: {error}");
+                    eprintln!(
+                        "{}: failed to record command history: {error}",
+                        renderers.stderr.paint(Role::Warning, "warning")
+                    );
                 }
                 if input
                     .blocking_send(ReplInput::Line { number, text: line })
@@ -463,7 +566,7 @@ fn line_editor(
             }
         }
     }
-    persist_history(&mut editor, &history);
+    persist_history(&mut editor, &history, renderers.stderr);
 }
 
 fn history_path() -> PathBuf {
@@ -488,12 +591,13 @@ fn history_path_from(
     )
 }
 
-fn persist_history(editor: &mut DefaultEditor, path: &std::path::Path) {
+fn persist_history(editor: &mut DefaultEditor, path: &std::path::Path, renderer: Renderer) {
     if let Some(parent) = path.parent()
         && let Err(error) = fs::create_dir_all(parent)
     {
         eprintln!(
-            "warning: failed to create history directory {}: {error}",
+            "{}: failed to create history directory {}: {error}",
+            renderer.paint(Role::Warning, "warning"),
             parent.display()
         );
         return;
@@ -505,7 +609,8 @@ fn persist_history(editor: &mut DefaultEditor, path: &std::path::Path) {
     };
     if let Err(error) = result {
         eprintln!(
-            "warning: failed to save command history {}: {error}",
+            "{}: failed to save command history {}: {error}",
+            renderer.paint(Role::Warning, "warning"),
             path.display()
         );
     }
@@ -517,7 +622,11 @@ enum Control {
     Quit,
 }
 
-async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Control> {
+async fn execute(
+    debugger: &DebuggerHandle,
+    line: &str,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
     let mut words = line.split_whitespace();
     let entered = words.next().unwrap_or("");
     if entered.is_empty() {
@@ -528,95 +637,65 @@ async fn execute(debugger: &DebuggerHandle, line: &str) -> uscope::Result<Contro
     match spec.command {
         Command::Break => {
             let argument = one_argument(&mut words, "break <function|address>")?;
-            execute_break(debugger, argument).await
+            execute_break(debugger, argument, renderer).await
         }
         Command::Breakpoints => {
             no_arguments(&mut words, "breakpoints")?;
-            execute_list_breakpoints(debugger).await
+            execute_list_breakpoints(debugger, renderer).await
         }
         Command::Info => {
             let argument = one_argument(&mut words, "info breakpoints")?;
             if argument != "breakpoints" && argument != "break" {
                 return Err(Error::InvalidCommand(format!("info {argument}")));
             }
-            execute_list_breakpoints(debugger).await
+            execute_list_breakpoints(debugger, renderer).await
         }
         Command::Delete => {
             let usage = format!("{entered} <id|all>");
             let argument = one_argument(&mut words, &usage)?;
-            execute_delete_breakpoint(debugger, argument, &usage).await
+            execute_delete_breakpoint(debugger, argument, &usage, renderer).await
         }
         Command::Run => Ok(Control::Continue(
-            format_stop_with_source(debugger, debugger.run().await?).await,
+            format_stop_with_source(debugger, debugger.run().await?, renderer).await,
         )),
         Command::Continue => Ok(Control::Continue(
-            format_stop_with_source(debugger, debugger.resume().await?).await,
+            format_stop_with_source(debugger, debugger.resume().await?, renderer).await,
         )),
         Command::Pause => Ok(Control::Continue(
-            format_stop_with_source(debugger, debugger.pause().await?).await,
+            format_stop_with_source(debugger, debugger.pause().await?, renderer).await,
         )),
-        Command::Print => execute_print(debugger, &mut words).await,
-        Command::Stepi => execute_step(debugger, StepKind::Instruction).await,
-        Command::Step => execute_step(debugger, StepKind::IntoSource).await,
-        Command::Next => execute_step(debugger, StepKind::OverSource).await,
-        Command::Finish => execute_step(debugger, StepKind::Out).await,
-        Command::Examine => {
-            let address = parse_address(one_argument(&mut words, "x <runtime-address>")?)?;
-
-            Ok(Control::Continue(format!(
-                "{address:#018x}: {:#018x}",
-                debugger.read_word(VirtualAddress::new(address)).await?
-            )))
-        }
-        Command::Address => {
-            let name = one_argument(&mut words, "address <symbol>")?;
-
-            Ok(Control::Continue(format!(
-                "{name}: {}",
-                debugger.runtime_address(name).await?
-            )))
-        }
-        Command::Where => {
-            let location = debugger.current_location().await?;
-            let function = location
-                .image
-                .function
-                .as_ref()
-                .map_or("<unknown>", |function| function.name.as_ref());
-            let source = location.image.source.as_ref().and_then(|source| {
-                debugger
-                    .module_image()
-                    .source_file(source.file)
-                    .map(|file| format!("{}:{}", file.path.display(), source.line))
-            });
-
-            Ok(Control::Continue(match source {
-                Some(source) => format!("{function} at {source} ({})", location.address),
-                None => format!("{function} at {}", location.address),
-            }))
-        }
+        Command::Print => execute_print(debugger, &mut words, renderer).await,
+        Command::Stepi => execute_step(debugger, StepKind::Instruction, renderer).await,
+        Command::Step => execute_step(debugger, StepKind::IntoSource, renderer).await,
+        Command::Next => execute_step(debugger, StepKind::OverSource, renderer).await,
+        Command::Finish => execute_step(debugger, StepKind::Out, renderer).await,
+        Command::Examine => execute_examine(debugger, &mut words, renderer).await,
+        Command::Address => execute_address(debugger, &mut words, renderer).await,
+        Command::Where => execute_where(debugger, renderer).await,
         Command::List => Ok(Control::Continue(format_source_context(
             &debugger.source_context(3).await?,
+            renderer,
         ))),
-        Command::Backtrace => format_backtrace(debugger).await,
+        Command::Backtrace => format_backtrace(debugger, renderer).await,
         Command::Registers => {
             let registers = debugger.registers().await?;
 
             Ok(Control::Continue(format_registers(
                 &registers,
                 registers.target.byte_order,
+                renderer,
             )))
         }
         Command::Threads => {
             let snapshot = debugger.snapshot().await?;
-            Ok(Control::Continue(format_threads(&snapshot)))
+            Ok(Control::Continue(format_threads(&snapshot, renderer)))
         }
-        Command::Thread => select_thread(debugger, &mut words).await,
+        Command::Thread => select_thread(debugger, &mut words, renderer).await,
         Command::Cls => {
             no_arguments(&mut words, "cls")?;
             Ok(Control::ClearScreen)
         }
-        Command::Help => execute_help(&mut words),
+        Command::Help => execute_help(&mut words, renderer),
         Command::Quit => Ok(Control::Quit),
     }
 }
@@ -627,9 +706,66 @@ fn command_named(name: &str) -> Option<&'static CommandSpec> {
         .find(|command| command.name == name || command.aliases.contains(&name))
 }
 
+async fn execute_examine<'a>(
+    debugger: &DebuggerHandle,
+    words: &mut impl Iterator<Item = &'a str>,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
+    let address = parse_address(one_argument(words, "x <runtime-address>")?)?;
+    let value = debugger.read_word(VirtualAddress::new(address)).await?;
+    Ok(Control::Continue(format!(
+        "{}: {}",
+        renderer.paint(Role::Metadata, format_args!("{address:#018x}")),
+        renderer.paint(Role::Value, format_args!("{value:#018x}"))
+    )))
+}
+
+async fn execute_address<'a>(
+    debugger: &DebuggerHandle,
+    words: &mut impl Iterator<Item = &'a str>,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
+    let name = one_argument(words, "address <symbol>")?;
+    Ok(Control::Continue(format!(
+        "{}: {}",
+        renderer.paint(Role::Name, name),
+        renderer.paint(Role::Metadata, debugger.runtime_address(name).await?)
+    )))
+}
+
+async fn execute_where(debugger: &DebuggerHandle, renderer: Renderer) -> uscope::Result<Control> {
+    let location = debugger.current_location().await?;
+    let function = location
+        .image
+        .function
+        .as_ref()
+        .map_or("<unknown>", |function| function.name.as_ref());
+    let source = location.image.source.as_ref().and_then(|source| {
+        debugger
+            .module_image()
+            .source_file(source.file)
+            .map(|file| format!("{}:{}", file.path.display(), source.line))
+    });
+
+    Ok(Control::Continue(match source {
+        Some(source) => format!(
+            "{} at {} ({})",
+            renderer.paint(Role::Name, function),
+            renderer.paint(Role::Metadata, source),
+            renderer.paint(Role::Metadata, location.address)
+        ),
+        None => format!(
+            "{} at {}",
+            renderer.paint(Role::Name, function),
+            renderer.paint(Role::Metadata, location.address)
+        ),
+    }))
+}
+
 async fn execute_print<'a>(
     debugger: &DebuggerHandle,
     words: &mut impl Iterator<Item = &'a str>,
+    renderer: Renderer,
 ) -> uscope::Result<Control> {
     let argument = optional_argument(words, "print [variable]")?;
     match argument {
@@ -639,10 +775,12 @@ async fn execute_print<'a>(
             }
             Ok(Control::Continue(format_variable(
                 &debugger.variable(name).await?,
+                renderer,
             )))
         }
         None => Ok(Control::Continue(format_variables(
             &debugger.variables().await?,
+            renderer,
         ))),
     }
 }
@@ -664,7 +802,10 @@ fn is_identifier(value: &str) -> bool {
         && characters.all(|character| matches!(character, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'))
 }
 
-fn execute_help<'a>(words: &mut impl Iterator<Item = &'a str>) -> uscope::Result<Control> {
+fn execute_help<'a>(
+    words: &mut impl Iterator<Item = &'a str>,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
     let command = words.next();
     if words.next().is_some() {
         return Err(Error::InvalidCommand("help [command]".to_owned()));
@@ -673,24 +814,25 @@ fn execute_help<'a>(words: &mut impl Iterator<Item = &'a str>) -> uscope::Result
         Some(name) => {
             let command =
                 command_named(name).ok_or_else(|| Error::InvalidCommand(format!("help {name}")))?;
-            format_command_help(command)
+            format_command_help(command, renderer)
         }
-        None => format_help(),
+        None => format_help(renderer),
     }))
 }
 
-fn format_help() -> String {
+fn format_help(renderer: Renderer) -> String {
     let width = COMMANDS
         .iter()
         .map(|command| format_command_label(command).len())
         .max()
         .unwrap_or(0);
-    let mut output = "commands:".to_owned();
+    let mut output = format!("{}:", renderer.paint(Role::Name, "commands"));
     for command in COMMANDS {
+        let label = format_command_label(command);
         write!(
             output,
-            "\n  {:width$}  {}",
-            format_command_label(command),
+            "\n  {}  {}",
+            renderer.paint(Role::Name, format_args!("{label:width$}")),
             command.summary
         )
         .expect("writing to a String cannot fail");
@@ -707,25 +849,42 @@ fn format_command_label(command: &CommandSpec) -> String {
     }
 }
 
-fn format_command_help(command: &CommandSpec) -> String {
-    let mut output = format!("{}\n  {}", command.usage, command.summary);
+fn format_command_help(command: &CommandSpec, renderer: Renderer) -> String {
+    let mut output = format!(
+        "{}\n  {}",
+        renderer.paint(Role::Name, command.usage),
+        command.summary
+    );
     if !command.aliases.is_empty() {
-        write!(output, "\n  aliases: {}", command.aliases.join(", "))
-            .expect("writing to a String cannot fail");
+        write!(
+            output,
+            "\n  {}: {}",
+            renderer.paint(Role::Metadata, "aliases"),
+            renderer.paint(Role::Name, command.aliases.join(", "))
+        )
+        .expect("writing to a String cannot fail");
     }
     output
 }
 
-async fn execute_break(debugger: &DebuggerHandle, argument: &str) -> uscope::Result<Control> {
+async fn execute_break(
+    debugger: &DebuggerHandle,
+    argument: &str,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
     let breakpoint = debugger
         .add_breakpoint(parse_breakpoint_spec(argument)?)
         .await?;
-    Ok(Control::Continue(format_breakpoint(&breakpoint)))
+    Ok(Control::Continue(format_breakpoint(&breakpoint, renderer)))
 }
 
-async fn execute_list_breakpoints(debugger: &DebuggerHandle) -> uscope::Result<Control> {
+async fn execute_list_breakpoints(
+    debugger: &DebuggerHandle,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
     Ok(Control::Continue(format_breakpoints(
         debugger.snapshot().await?.breakpoints.as_ref(),
+        renderer,
     )))
 }
 
@@ -733,11 +892,13 @@ async fn execute_delete_breakpoint(
     debugger: &DebuggerHandle,
     argument: &str,
     usage: &str,
+    renderer: Renderer,
 ) -> uscope::Result<Control> {
     if argument == "all" {
         let removed = debugger.remove_all_breakpoints().await?;
         return Ok(Control::Continue(format!(
-            "deleted {} breakpoint{}",
+            "{} {} breakpoint{}",
+            renderer.paint(Role::Success, "deleted"),
             removed.len(),
             if removed.len() == 1 { "" } else { "s" }
         )));
@@ -747,8 +908,9 @@ async fn execute_delete_breakpoint(
         .map_err(|_| Error::InvalidCommand(usage.to_owned()))?;
     let removed = debugger.remove_breakpoint(BreakpointId::new(id)).await?;
     Ok(Control::Continue(format!(
-        "deleted breakpoint {}",
-        removed.id
+        "{} breakpoint {}",
+        renderer.paint(Role::Success, "deleted"),
+        renderer.paint(Role::Metadata, removed.id)
     )))
 }
 
@@ -779,14 +941,21 @@ fn parse_breakpoint_spec(argument: &str) -> uscope::Result<BreakpointSpec> {
     Ok(BreakpointSpec::Function(argument.to_owned()))
 }
 
-async fn execute_step(debugger: &DebuggerHandle, kind: StepKind) -> uscope::Result<Control> {
+async fn execute_step(
+    debugger: &DebuggerHandle,
+    kind: StepKind,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
     let reason = debugger.step(kind).await?;
     Ok(Control::Continue(
-        format_stop_with_source(debugger, reason).await,
+        format_stop_with_source(debugger, reason, renderer).await,
     ))
 }
 
-async fn format_backtrace(debugger: &DebuggerHandle) -> uscope::Result<Control> {
+async fn format_backtrace(
+    debugger: &DebuggerHandle,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
     let trace = debugger.backtrace().await?;
     let mut lines = Vec::with_capacity(trace.frames.len() + 1);
 
@@ -799,16 +968,31 @@ async fn format_backtrace(debugger: &DebuggerHandle) -> uscope::Result<Control> 
             debugger
                 .module_image()
                 .source_file(source.file)
-                .map(|file| format!(" at {}:{}", file.path.display(), source.line))
+                .map(|file| format!("{}:{}", file.path.display(), source.line))
         });
         lines.push(format!(
-            "#{:<2} {:#018x} in {name}{}",
-            frame.level,
-            frame.instruction,
-            source.unwrap_or_default()
+            "{} {} in {}{}",
+            renderer.paint(
+                if frame.level == 0 {
+                    Role::Current
+                } else {
+                    Role::Metadata
+                },
+                format_args!("#{:<2}", frame.level)
+            ),
+            renderer.paint(Role::Metadata, format_args!("{:#018x}", frame.instruction)),
+            renderer.paint(Role::Name, name),
+            source.map_or_else(String::new, |source| format!(
+                " at {}",
+                renderer.paint(Role::Metadata, source)
+            ))
         ));
     }
-    lines.push(format!("unwind stopped: {:?}", trace.termination));
+    lines.push(format!(
+        "{}: {:?}",
+        renderer.paint(Role::Metadata, "unwind stopped"),
+        trace.termination
+    ));
 
     Ok(Control::Continue(lines.join("\n")))
 }
@@ -816,16 +1000,21 @@ async fn format_backtrace(debugger: &DebuggerHandle) -> uscope::Result<Control> 
 async fn select_thread<'a>(
     debugger: &DebuggerHandle,
     words: &mut impl Iterator<Item = &'a str>,
+    renderer: Renderer,
 ) -> uscope::Result<Control> {
     let value = one_argument(words, "thread <id>")?;
     let id = value
         .parse::<u64>()
         .map_err(|_| Error::InvalidCommand(format!("invalid thread ID: {value}")))?;
     debugger.select_thread(ThreadId::new(id)).await?;
-    Ok(Control::Continue(format!("selected thread {id}")))
+    Ok(Control::Continue(format!(
+        "{} thread {}",
+        renderer.paint(Role::Success, "selected"),
+        renderer.paint(Role::Metadata, id)
+    )))
 }
 
-fn format_threads(snapshot: &StateSnapshot) -> String {
+fn format_threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
     snapshot
         .threads
         .iter()
@@ -840,17 +1029,29 @@ fn format_threads(snapshot: &StateSnapshot) -> String {
                 ThreadState::Stopped {
                     reason: Some(reason),
                 } => {
-                    format!("stopped: {}", format_stop(reason.clone()))
+                    format!("stopped: {}", format_stop(reason.clone(), renderer))
                 }
                 ThreadState::Stopped { reason: None } => "stopped".to_owned(),
             };
-            format!("{marker} {} {state}", thread.id)
+            let marker = if marker == "*" {
+                renderer.paint(Role::Current, marker).to_string()
+            } else {
+                marker.to_owned()
+            };
+            format!(
+                "{marker} {} {state}",
+                renderer.paint(Role::Metadata, thread.id)
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn format_registers(registers: &RegisterSnapshot, byte_order: ByteOrder) -> String {
+fn format_registers(
+    registers: &RegisterSnapshot,
+    byte_order: ByteOrder,
+    renderer: Renderer,
+) -> String {
     let name_width = registers
         .registers
         .iter()
@@ -863,35 +1064,48 @@ fn format_registers(registers: &RegisterSnapshot, byte_order: ByteOrder) -> Stri
         .iter()
         .map(|value| {
             format!(
-                "{:<name_width$} {}",
-                value.register.name,
-                format_register_bytes(&value.bytes, byte_order)
+                "{} {}",
+                renderer.paint(
+                    Role::Name,
+                    format_args!("{:<name_width$}", value.register.name)
+                ),
+                renderer.paint(Role::Value, format_register_bytes(&value.bytes, byte_order))
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn format_variables(snapshot: &VariableSnapshot) -> String {
+fn format_variables(snapshot: &VariableSnapshot, renderer: Renderer) -> String {
     snapshot
         .variables
         .iter()
-        .map(format_variable)
+        .map(|variable| format_variable(variable, renderer))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn format_variable(variable: &Variable) -> String {
+fn format_variable(variable: &Variable, renderer: Renderer) -> String {
     let type_name = variable
         .type_info
         .as_ref()
         .map_or("<unknown type>", |type_info| type_info.name.as_ref());
     let value = match &variable.state {
-        VariableState::Available { value, .. } => format_scalar(variable, value),
-        VariableState::Unavailable(reason) => format!("<unavailable: {reason}>"),
-        VariableState::Malformed(reason) => format!("<malformed: {}>", reason.description),
+        VariableState::Available { value, .. } => renderer
+            .paint(Role::Value, format_scalar(variable, value))
+            .to_string(),
+        VariableState::Unavailable(reason) => renderer
+            .paint(Role::Warning, format!("<unavailable: {reason}>"))
+            .to_string(),
+        VariableState::Malformed(reason) => renderer
+            .paint(Role::Error, format!("<malformed: {}>", reason.description))
+            .to_string(),
     };
-    format!("({type_name}) {} = {value}", variable.name)
+    format!(
+        "({}) {} = {value}",
+        renderer.paint(Role::Type, type_name),
+        renderer.paint(Role::Name, &variable.name)
+    )
 }
 
 fn format_scalar(variable: &Variable, value: &ScalarValue) -> String {
@@ -950,22 +1164,30 @@ fn format_register_bytes(bytes: &[u8], byte_order: ByteOrder) -> String {
     output
 }
 
-async fn format_stop_with_source(debugger: &DebuggerHandle, reason: StopReason) -> String {
+async fn format_stop_with_source(
+    debugger: &DebuggerHandle,
+    reason: StopReason,
+    renderer: Renderer,
+) -> String {
     let has_source_context = matches!(
         reason,
         StopReason::Breakpoint { .. } | StopReason::Step { .. }
     );
-    let mut output = format_stop(reason);
+    let mut output = format_stop(reason, renderer);
 
     if has_source_context {
         match debugger.source_context(3).await {
             Ok(context) => {
                 output.push('\n');
-                output.push_str(&format_source_context(&context));
+                output.push_str(&format_source_context(&context, renderer));
             }
             Err(error) => {
-                write!(output, "\nsource unavailable: {error}")
-                    .expect("writing to a String cannot fail");
+                write!(
+                    output,
+                    "\n{}: {error}",
+                    renderer.paint(Role::Warning, "source unavailable")
+                )
+                .expect("writing to a String cannot fail");
             }
         }
     }
@@ -973,25 +1195,35 @@ async fn format_stop_with_source(debugger: &DebuggerHandle, reason: StopReason) 
     output
 }
 
-fn format_source_context(context: &SourceContext) -> String {
+fn format_source_context(context: &SourceContext, renderer: Renderer) -> String {
     let line_width = context
         .lines
         .last()
         .map_or(1, |line| line.number.to_string().len());
-    let mut output = format!("{}:{}", context.file.path.display(), context.location.line);
+    let mut output = format!(
+        "{}:{}",
+        renderer.paint(Role::Metadata, context.file.path.display()),
+        renderer.paint(Role::Current, context.location.line)
+    );
 
     for line in context.lines.iter() {
-        let marker = if line.number == context.location.line {
-            "=>"
+        let current = line.number == context.location.line;
+        let marker = if current {
+            renderer.paint(Role::Current, "=>").to_string()
         } else {
-            "  "
+            "  ".to_owned()
         };
-        write!(
-            output,
-            "\n{marker} {:>line_width$} | {}",
-            line.number, line.text
-        )
-        .expect("writing to a String cannot fail");
+        let number = if current {
+            renderer
+                .paint(Role::Current, format_args!("{:>line_width$}", line.number))
+                .to_string()
+        } else {
+            renderer
+                .paint(Role::Metadata, format_args!("{:>line_width$}", line.number))
+                .to_string()
+        };
+        write!(output, "\n{marker} {number} | {}", line.text)
+            .expect("writing to a String cannot fail");
     }
 
     output
@@ -1026,30 +1258,47 @@ fn parse_address(value: &str) -> uscope::Result<u64> {
         .map_err(|_| Error::InvalidCommand(format!("invalid hexadecimal address: {value}")))
 }
 
-fn format_breakpoint(breakpoint: &Breakpoint) -> String {
+fn format_breakpoint(breakpoint: &Breakpoint, renderer: Renderer) -> String {
     if let [resolved] = breakpoint.locations.as_ref() {
         return match resolved.location {
             BreakpointLocation::Image(address) => {
-                format!("breakpoint set at image address {address}")
+                format!(
+                    "{} set at image address {}",
+                    renderer.paint(Role::Success, "breakpoint"),
+                    renderer.paint(Role::Metadata, address)
+                )
             }
             BreakpointLocation::Virtual(address) => {
-                format!("breakpoint set at virtual address {address}")
+                format!(
+                    "{} set at virtual address {}",
+                    renderer.paint(Role::Success, "breakpoint"),
+                    renderer.paint(Role::Metadata, address)
+                )
             }
         };
     }
 
     let mut output = format!(
-        "breakpoint {} set at {} locations",
-        breakpoint.id,
+        "{} {} set at {} locations",
+        renderer.paint(Role::Success, "breakpoint"),
+        renderer.paint(Role::Metadata, breakpoint.id),
         breakpoint.locations.len()
     );
     for resolved in breakpoint.locations.iter() {
         match resolved.location {
             BreakpointLocation::Image(address) => {
-                write!(output, "\n  image address {address}")
+                write!(
+                    output,
+                    "\n  image address {}",
+                    renderer.paint(Role::Metadata, address)
+                )
             }
             BreakpointLocation::Virtual(address) => {
-                write!(output, "\n  virtual address {address}")
+                write!(
+                    output,
+                    "\n  virtual address {}",
+                    renderer.paint(Role::Metadata, address)
+                )
             }
         }
         .expect("writing to a String cannot fail");
@@ -1058,9 +1307,9 @@ fn format_breakpoint(breakpoint: &Breakpoint) -> String {
     output
 }
 
-fn format_breakpoints(breakpoints: &[Breakpoint]) -> String {
+fn format_breakpoints(breakpoints: &[Breakpoint], renderer: Renderer) -> String {
     if breakpoints.is_empty() {
-        return "no breakpoints".to_owned();
+        return renderer.paint(Role::Metadata, "no breakpoints").to_string();
     }
     let mut output = String::new();
     for (index, breakpoint) in breakpoints.iter().enumerate() {
@@ -1070,8 +1319,8 @@ fn format_breakpoints(breakpoints: &[Breakpoint]) -> String {
         write!(
             output,
             "{}  {}  {} location{}",
-            breakpoint.id,
-            format_breakpoint_spec(&breakpoint.spec),
+            renderer.paint(Role::Metadata, breakpoint.id),
+            renderer.paint(Role::Name, format_breakpoint_spec(&breakpoint.spec)),
             breakpoint.locations.len(),
             if breakpoint.locations.len() == 1 {
                 ""
@@ -1082,8 +1331,16 @@ fn format_breakpoints(breakpoints: &[Breakpoint]) -> String {
         .expect("writing to a String cannot fail");
         for resolved in breakpoint.locations.iter() {
             match resolved.location {
-                BreakpointLocation::Image(address) => write!(output, "\n   image {address}"),
-                BreakpointLocation::Virtual(address) => write!(output, "\n   virtual {address}"),
+                BreakpointLocation::Image(address) => write!(
+                    output,
+                    "\n   image {}",
+                    renderer.paint(Role::Metadata, address)
+                ),
+                BreakpointLocation::Virtual(address) => write!(
+                    output,
+                    "\n   virtual {}",
+                    renderer.paint(Role::Metadata, address)
+                ),
             }
             .expect("writing to a String cannot fail");
         }
@@ -1102,48 +1359,95 @@ fn format_breakpoint_spec(spec: &BreakpointSpec) -> String {
     }
 }
 
-fn format_stop(reason: StopReason) -> String {
+fn format_stop(reason: StopReason, renderer: Renderer) -> String {
     match reason {
         StopReason::Breakpoint { address } => {
-            format!("stopped at breakpoint {address}")
+            format!(
+                "{} at breakpoint {}",
+                renderer.paint(Role::Current, "stopped"),
+                renderer.paint(Role::Metadata, address)
+            )
         }
         StopReason::Step { kind } => match kind {
-            StepKind::Instruction => "stopped after instruction step".to_owned(),
-            StepKind::IntoSource => "stopped after source step".to_owned(),
-            StepKind::OverSource => "stopped after source next".to_owned(),
-            StepKind::Out => "stopped after frame return".to_owned(),
+            StepKind::Instruction => format!(
+                "{} after instruction step",
+                renderer.paint(Role::Current, "stopped")
+            ),
+            StepKind::IntoSource => format!(
+                "{} after source step",
+                renderer.paint(Role::Current, "stopped")
+            ),
+            StepKind::OverSource => format!(
+                "{} after source next",
+                renderer.paint(Role::Current, "stopped")
+            ),
+            StepKind::Out => format!(
+                "{} after frame return",
+                renderer.paint(Role::Current, "stopped")
+            ),
         },
-        StopReason::Pause => "inferior paused".to_owned(),
+        StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
         StopReason::Exception(exception) => format!(
-            "stopped by {} ({:#x})",
-            exception.description, exception.code
+            "{} by {} ({:#x})",
+            renderer.paint(Role::Error, "stopped"),
+            renderer.paint(Role::Error, exception.description),
+            exception.code
         ),
-        StopReason::Exec => "inferior replaced its executable image".to_owned(),
+        StopReason::Exec => format!(
+            "inferior {} its executable image",
+            renderer.paint(Role::Warning, "replaced")
+        ),
         StopReason::ThreadExited { thread_id, status } => {
             format!(
-                "thread {} exited: {}",
-                thread_id,
-                format_exit_status(status)
+                "thread {} {}: {}",
+                renderer.paint(Role::Metadata, thread_id),
+                renderer.paint(Role::Warning, "exited"),
+                format_exit_status(status, renderer)
             )
         }
         StopReason::Unclassifiable { description } => {
-            format!("inferior stopped for an unclassifiable reason: {description}")
+            format!(
+                "inferior {} for an unclassifiable reason: {description}",
+                renderer.paint(Role::Error, "stopped")
+            )
         }
         StopReason::Exited(ExitStatus::Code(code)) => {
-            format!("inferior exited with status {code}")
+            let role = if code == 0 {
+                Role::Success
+            } else {
+                Role::Error
+            };
+            format!(
+                "inferior {} with status {}",
+                renderer.paint(role, "exited"),
+                renderer.paint(role, code)
+            )
         }
         StopReason::Exited(ExitStatus::Terminated(exception)) => format!(
-            "inferior terminated by {} ({:#x})",
-            exception.description, exception.code
+            "inferior {} by {} ({:#x})",
+            renderer.paint(Role::Error, "terminated"),
+            renderer.paint(Role::Error, exception.description),
+            exception.code
         ),
     }
 }
 
-fn format_exit_status(status: ExitStatus) -> String {
+fn format_exit_status(status: ExitStatus, renderer: Renderer) -> String {
     match status {
-        ExitStatus::Code(code) => format!("status {code}"),
+        ExitStatus::Code(code) => {
+            let role = if code == 0 {
+                Role::Success
+            } else {
+                Role::Error
+            };
+            format!("status {}", renderer.paint(role, code))
+        }
         ExitStatus::Terminated(exception) => {
-            format!("{} ({:#x})", exception.description, exception.code)
+            format!(
+                "{} ({:#x})",
+                renderer.paint(Role::Error, exception.description),
+                exception.code
+            )
         }
     }
 }
@@ -1177,11 +1481,11 @@ mod tests {
 
     #[test]
     fn generated_help_contains_every_registered_command() {
-        let help = format_help();
+        let help = format_help(Renderer::new(false));
         for command in COMMANDS {
             let label = format_command_label(command);
             assert!(help.contains(&label), "missing help label {label}");
-            let detail = format_command_help(command);
+            let detail = format_command_help(command, Renderer::new(false));
             assert!(detail.contains(command.usage));
             assert!(detail.contains(command.summary));
             for alias in command.aliases {
