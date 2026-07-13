@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicI32, Ordering};
+#![no_main]
+#![no_std]
+
+use core::sync::atomic::{AtomicI32, Ordering};
 
 static RUST_SINK: AtomicI32 = AtomicI32::new(0);
 
@@ -23,13 +26,23 @@ fn inspect_scalars(
         && local_double == -2.75
 }
 
-fn main() {
+#[unsafe(no_mangle)]
+pub extern "C" fn main() -> i32 {
     let succeeded = inspect_scalars(
-        std::hint::black_box(true),
-        std::hint::black_box(-42),
-        std::hint::black_box(42),
-        std::hint::black_box(1.25),
-        std::hint::black_box(-2.5),
+        core::hint::black_box(true),
+        core::hint::black_box(-42),
+        core::hint::black_box(42),
+        core::hint::black_box(1.25),
+        core::hint::black_box(-2.5),
     );
-    std::process::exit(if succeeded { 0 } else { 1 });
+    i32::from(!succeeded)
 }
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
+    loop {}
+}
+
+// libcore retains this symbol even with aborting panics; it is never called.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality() {}
