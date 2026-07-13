@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -581,8 +581,10 @@ pub enum CodeInstanceKind {
 pub enum EntryProvenance {
     /// The debug format supplied an explicit entry address.
     Explicit,
-    /// A recommended source statement supplied the entry address.
+    /// A recommended line-program boundary supplied the entry address.
     Statement,
+    /// Target-specific instruction analysis proved a post-prologue address.
+    AnalyzedPrologue,
     /// The first concrete address range supplied the entry address.
     RangeStart,
 }
@@ -821,8 +823,12 @@ pub struct StatementRow {
     pub address: ImageAddress,
     /// The operation index for architectures with multiple operations per instruction.
     pub operation_index: u64,
-    /// The corresponding source location.
-    pub location: SourceLocation,
+    /// The corresponding source location, when the producer supplied one that
+    /// can be resolved.
+    ///
+    /// Control-flow markers remain meaningful on rows without source
+    /// attribution, including rows whose line is zero.
+    pub location: Option<SourceLocation>,
     /// The producer-defined discriminator for this source position.
     pub discriminator: u64,
     /// Semantic flags associated with the row.
@@ -966,6 +972,15 @@ struct ModuleIndexes {
     symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
     statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
+    control_boundaries_by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
+    control_boundaries_by_instance: BTreeMap<CodeInstanceId, Arc<[u32]>>,
+    recommended_entries_by_instance: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
+}
+
+struct ControlBoundaryIndexes {
+    by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
+    by_instance: BTreeMap<CodeInstanceId, Arc<[u32]>>,
+    recommended_entries: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
 }
 
 fn grouped_index<K: Ord, V>(entries: impl IntoIterator<Item = (K, V)>) -> BTreeMap<K, Arc<[V]>> {
@@ -980,7 +995,10 @@ fn grouped_index<K: Ord, V>(entries: impl IntoIterator<Item = (K, V)>) -> BTreeM
         .collect()
 }
 
-fn build_module_indexes(metadata: &ModuleMetadata) -> ModuleIndexes {
+fn build_module_indexes(
+    metadata: &ModuleMetadata,
+    code_range_index: &RangeIndex<CodeInstanceId>,
+) -> ModuleIndexes {
     let functions_by_name = grouped_index(
         metadata
             .functions
@@ -1001,10 +1019,11 @@ fn build_module_indexes(metadata: &ModuleMetadata) -> ModuleIndexes {
     );
     let mut statements_by_source_line =
         grouped_index(metadata.statements.iter().filter_map(|statement| {
-            statement.flags.is_statement().then_some((
-                (statement.location.file, statement.location.line),
-                statement.address,
-            ))
+            let location = statement.location.as_ref()?;
+            statement
+                .flags
+                .is_statement()
+                .then_some(((location.file, location.line), statement.address))
         }));
     for addresses in statements_by_source_line.values_mut() {
         let mut unique = addresses.to_vec();
@@ -1013,11 +1032,98 @@ fn build_module_indexes(metadata: &ModuleMetadata) -> ModuleIndexes {
         *addresses = unique.into();
     }
 
+    let control_boundaries = build_control_boundary_indexes(metadata, code_range_index);
+
     ModuleIndexes {
         functions_by_name,
         symbols_by_name,
         instances_by_function,
         statements_by_source_line,
+        control_boundaries_by_address: control_boundaries.by_address,
+        control_boundaries_by_instance: control_boundaries.by_instance,
+        recommended_entries_by_instance: control_boundaries.recommended_entries,
+    }
+}
+
+fn build_control_boundary_indexes(
+    metadata: &ModuleMetadata,
+    code_range_index: &RangeIndex<CodeInstanceId>,
+) -> ControlBoundaryIndexes {
+    let by_address = grouped_index(
+        metadata
+            .statements
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.flags.prologue_end() || row.flags.epilogue_begin())
+            .map(|(index, row)| {
+                (
+                    row.address,
+                    u32::try_from(index).expect("line-program row count fits u32"),
+                )
+            }),
+    );
+    let mut by_instance = grouped_index(
+        metadata
+            .statements
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.flags.prologue_end() || row.flags.epilogue_begin())
+            .flat_map(|(index, row)| {
+                code_range_index
+                    .containing(row.address)
+                    .filter(|id| {
+                        usize::try_from(id.0)
+                            .ok()
+                            .and_then(|index| metadata.code_instances.get(index))
+                            .is_some_and(|instance| {
+                                matches!(instance.kind, CodeInstanceKind::OutOfLine)
+                            })
+                    })
+                    .map(move |id| {
+                        (
+                            id,
+                            u32::try_from(index).expect("line-program row count fits u32"),
+                        )
+                    })
+            }),
+    );
+    for rows in by_instance.values_mut() {
+        let mut unique = rows.to_vec();
+        let mut seen_rows = BTreeSet::new();
+        unique.retain(|row| seen_rows.insert(*row));
+        *rows = unique.into();
+    }
+    let recommended_entries_by_instance = metadata
+        .code_instances
+        .iter()
+        .filter_map(|instance| {
+            let mut entries = by_instance
+                .get(&instance.id)
+                .into_iter()
+                .flat_map(|rows| rows.iter())
+                .filter_map(|row| metadata.statements.get(*row as usize))
+                .filter(|row| row.flags.prologue_end())
+                .map(|row| BreakpointEntry {
+                    address: row.address,
+                    provenance: EntryProvenance::Statement,
+                })
+                .collect::<Vec<_>>();
+
+            let mut seen_addresses = BTreeSet::new();
+            entries.retain(|entry| seen_addresses.insert(entry.address));
+            if entries.is_empty()
+                && let Some(entry) = instance.breakpoint_entry
+            {
+                entries.push(entry);
+            }
+            (!entries.is_empty()).then_some((instance.id, Arc::from(entries)))
+        })
+        .collect();
+
+    ControlBoundaryIndexes {
+        by_address,
+        by_instance,
+        recommended_entries: recommended_entries_by_instance,
     }
 }
 
@@ -1062,6 +1168,9 @@ pub struct ModuleImage {
     symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
     statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
+    control_boundaries_by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
+    control_boundaries_by_instance: BTreeMap<CodeInstanceId, Arc<[u32]>>,
+    recommended_entries_by_instance: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
     code_range_index: RangeIndex<CodeInstanceId>,
     line_range_index: RangeIndex<u32>,
 }
@@ -1074,7 +1183,6 @@ impl ModuleImage {
         metadata: ModuleMetadata,
     ) -> Self {
         validate_dense_ids(&metadata);
-        let indexes = build_module_indexes(&metadata);
         let code_range_index =
             RangeIndex::new(metadata.code_instances.iter().flat_map(|instance| {
                 instance
@@ -1083,6 +1191,7 @@ impl ModuleImage {
                     .copied()
                     .map(|range| (range, instance.id))
             }));
+        let indexes = build_module_indexes(&metadata, &code_range_index);
         let line_range_index =
             RangeIndex::new(metadata.lines.iter().enumerate().map(|(index, line)| {
                 (
@@ -1106,6 +1215,9 @@ impl ModuleImage {
             symbols_by_name: indexes.symbols_by_name,
             instances_by_function: indexes.instances_by_function,
             statements_by_source_line: indexes.statements_by_source_line,
+            control_boundaries_by_address: indexes.control_boundaries_by_address,
+            control_boundaries_by_instance: indexes.control_boundaries_by_instance,
+            recommended_entries_by_instance: indexes.recommended_entries_by_instance,
             code_range_index,
             line_range_index,
         }
@@ -1189,6 +1301,55 @@ impl ModuleImage {
     #[must_use]
     pub fn statement_rows(&self) -> &[StatementRow] {
         &self.statements
+    }
+
+    /// Returns exact line-program control boundaries at an image address.
+    ///
+    /// Equal-address rows remain distinct and retain their sequence and
+    /// ordinal. This query does not infer an epilogue region after an
+    /// `epilogue_begin` marker.
+    pub fn control_boundaries_at(
+        &self,
+        address: ImageAddress,
+    ) -> impl Iterator<Item = &StatementRow> {
+        self.control_boundaries_by_address
+            .get(&address)
+            .into_iter()
+            .flat_map(|rows| rows.iter())
+            .filter_map(|row| self.statements.get(*row as usize))
+    }
+
+    /// Returns line-program control boundaries contained by one physical code
+    /// instance.
+    ///
+    /// Inline instances deliberately have no independently inferred physical
+    /// prologue or epilogue boundaries.
+    pub fn control_boundaries_for_instance(
+        &self,
+        instance: CodeInstanceId,
+    ) -> impl Iterator<Item = &StatementRow> {
+        self.control_boundaries_by_instance
+            .get(&instance)
+            .into_iter()
+            .flat_map(|rows| rows.iter())
+            .filter_map(|row| self.statements.get(*row as usize))
+    }
+
+    /// Returns the recommended physical locations for entering one concrete
+    /// function instance.
+    ///
+    /// Every applicable `prologue_end` row is returned for an out-of-line
+    /// instance. When no such row exists, or when the instance is inline, the
+    /// instance's existing singular entry semantics are retained.
+    pub fn recommended_entries_for_instance(
+        &self,
+        instance: CodeInstanceId,
+    ) -> impl Iterator<Item = BreakpointEntry> + '_ {
+        self.recommended_entries_by_instance
+            .get(&instance)
+            .into_iter()
+            .flat_map(|entries| entries.iter())
+            .copied()
     }
 
     pub(crate) fn line_entries(&self) -> &[LineEntry] {
@@ -1514,6 +1675,197 @@ mod tests {
                 lines: Vec::new(),
             },
         )
+    }
+
+    fn boundary_test_instances() -> Vec<CodeInstanceInfo> {
+        let physical = CodeInstanceInfo {
+            id: CodeInstanceId::new(0),
+            function: FunctionId::new(0),
+            parent: None,
+            kind: CodeInstanceKind::OutOfLine,
+            ranges: Arc::from([AddressRange {
+                start: ImageAddress::new(0x10),
+                end: ImageAddress::new(0x30),
+            }]),
+            breakpoint_entry: Some(BreakpointEntry {
+                address: ImageAddress::new(0x10),
+                provenance: EntryProvenance::Explicit,
+            }),
+        };
+        let inline = CodeInstanceInfo {
+            id: CodeInstanceId::new(1),
+            function: FunctionId::new(1),
+            parent: Some(physical.id),
+            kind: CodeInstanceKind::Inline {
+                call_site: Some(source(7)),
+            },
+            ranges: Arc::from([AddressRange {
+                start: ImageAddress::new(0x14),
+                end: ImageAddress::new(0x20),
+            }]),
+            breakpoint_entry: Some(BreakpointEntry {
+                address: ImageAddress::new(0x14),
+                provenance: EntryProvenance::RangeStart,
+            }),
+        };
+
+        vec![physical, inline]
+    }
+
+    fn boundary_test_row(
+        address: u64,
+        location: Option<SourceLocation>,
+        flags: StatementFlags,
+        sequence: u32,
+        ordinal: u32,
+    ) -> StatementRow {
+        StatementRow {
+            address: ImageAddress::new(address),
+            operation_index: 0,
+            location,
+            discriminator: 0,
+            flags,
+            isa: 0,
+            sequence: LineSequenceId::new(sequence),
+            ordinal,
+        }
+    }
+
+    fn boundary_test_rows() -> Vec<StatementRow> {
+        vec![
+            boundary_test_row(
+                0x14,
+                None,
+                StatementFlags::empty()
+                    .with_statement(true)
+                    .with_prologue_end(true),
+                0,
+                2,
+            ),
+            boundary_test_row(
+                0x14,
+                Some(source(8)),
+                StatementFlags::empty().with_epilogue_begin(true),
+                0,
+                3,
+            ),
+            boundary_test_row(
+                0x18,
+                Some(source(9)),
+                StatementFlags::empty().with_prologue_end(true),
+                1,
+                0,
+            ),
+            boundary_test_row(
+                0x20,
+                None,
+                StatementFlags::empty().with_epilogue_begin(true),
+                1,
+                1,
+            ),
+        ]
+    }
+
+    fn control_boundary_test_image() -> ModuleImage {
+        let functions = ["physical", "inline"]
+            .into_iter()
+            .enumerate()
+            .map(|(id, name)| FunctionInfo {
+                id: FunctionId::new(u32::try_from(id).expect("small function count")),
+                name: name.into(),
+                linkage_name: None,
+                declaration: None,
+            })
+            .collect();
+        ModuleImage::new(
+            PathBuf::from("/test/boundaries"),
+            TargetDescription {
+                architecture: Architecture::X86_64,
+                byte_order: ByteOrder::Little,
+                pointer_width: PointerWidth::Bits64,
+            },
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(0x40),
+            },
+            ModuleMetadata {
+                functions,
+                code_instances: boundary_test_instances(),
+                symbols: Vec::new(),
+                source_files: Vec::new(),
+                statements: boundary_test_rows(),
+                lines: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn control_boundary_indexes_preserve_exact_rows_and_physical_instance_ownership() {
+        let image = control_boundary_test_image();
+
+        let exact = image
+            .control_boundaries_at(ImageAddress::new(0x14))
+            .collect::<Vec<_>>();
+        assert_eq!(exact.len(), 2);
+        assert_eq!(
+            (exact[0].sequence, exact[0].ordinal),
+            (LineSequenceId::new(0), 2)
+        );
+        assert_eq!(
+            (exact[1].sequence, exact[1].ordinal),
+            (LineSequenceId::new(0), 3)
+        );
+        assert!(exact[0].location.is_none());
+        assert!(
+            image
+                .control_boundaries_at(ImageAddress::new(0x15))
+                .next()
+                .is_none()
+        );
+
+        assert_eq!(
+            image
+                .control_boundaries_for_instance(CodeInstanceId::new(0))
+                .map(|row| row.address)
+                .collect::<Vec<_>>(),
+            [0x14, 0x14, 0x18, 0x20].map(ImageAddress::new)
+        );
+        assert!(
+            image
+                .control_boundaries_for_instance(CodeInstanceId::new(1))
+                .next()
+                .is_none()
+        );
+        assert_eq!(
+            image
+                .recommended_entries_for_instance(CodeInstanceId::new(0))
+                .collect::<Vec<_>>(),
+            vec![
+                BreakpointEntry {
+                    address: ImageAddress::new(0x14),
+                    provenance: EntryProvenance::Statement,
+                },
+                BreakpointEntry {
+                    address: ImageAddress::new(0x18),
+                    provenance: EntryProvenance::Statement,
+                },
+            ]
+        );
+        assert_eq!(
+            image
+                .recommended_entries_for_instance(CodeInstanceId::new(1))
+                .collect::<Vec<_>>(),
+            vec![BreakpointEntry {
+                address: ImageAddress::new(0x14),
+                provenance: EntryProvenance::RangeStart,
+            }]
+        );
+        assert!(
+            image
+                .statement_addresses(SourceFileId::new(0), LineNumber::new(8).unwrap())
+                .next()
+                .is_none()
+        );
     }
 
     #[test]

@@ -286,6 +286,582 @@ async fn optimized_physical_parameters_materialize_supported_dwarf_locations() {
 }
 
 #[tokio::test]
+async fn physical_function_breakpoints_stop_after_the_prologue_with_readable_parameters() {
+    for case in entry_boundary_cases() {
+        let mut scenario = Scenario::new(
+            format!("function entry boundary {}", case.fixture),
+            Scenario::fixture(case.fixture),
+        );
+        let expected = expected_physical_entry(&scenario, &case);
+        let breakpoint = scenario.add_breakpoint(case.function).await;
+        assert_eq!(
+            single_image_breakpoint_address(&breakpoint),
+            expected,
+            "{} function breakpoint did not use its recommended physical entry",
+            case.fixture
+        );
+
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        assert_entry_stop(&scenario, &case, expected).await;
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn source_step_into_stops_after_the_physical_prologue_with_readable_parameters() {
+    for case in entry_boundary_cases() {
+        let mut scenario = Scenario::new(
+            format!("step entry boundary {}", case.fixture),
+            Scenario::fixture(case.fixture),
+        );
+        let expected = expected_physical_entry(&scenario, &case);
+        scenario
+            .add_source_breakpoint(case.source, case.call_line)
+            .await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let mut entered = false;
+        for _ in 0..32 {
+            assert_eq!(
+                scenario.step_to_stop(StepKind::IntoSource).await,
+                StopReason::Step {
+                    kind: StepKind::IntoSource
+                },
+                "{} step-in terminated before entering {}",
+                case.fixture,
+                case.function
+            );
+            let location = scenario
+                .operation("step-in location", scenario.handle().current_location())
+                .await;
+            if location
+                .image
+                .function
+                .as_ref()
+                .is_some_and(|function| function.name.as_ref() == case.function)
+            {
+                entered = true;
+                assert_entry_stop(&scenario, &case, expected).await;
+                break;
+            }
+        }
+        assert!(
+            entered,
+            "{} did not enter {} within the source-step budget",
+            case.fixture, case.function
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn boundary_fixture_preserves_inline_step_and_next_semantics() {
+    for fixture in ["stepping-boundaries-gcc-o2", "stepping-boundaries-clang-o2"] {
+        let mut step = Scenario::new(format!("inline step {fixture}"), Scenario::fixture(fixture));
+        step.add_breakpoint("main").await;
+        assert!(matches!(
+            step.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let call = advance_to_boundary_inline_call(&mut step, fixture).await;
+
+        assert_eq!(
+            step.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            },
+            "{fixture}"
+        );
+        let inlined = step
+            .operation("inline boundary location", step.handle().current_location())
+            .await;
+        assert_eq!(
+            inlined.image.physical_instance, call.image.physical_instance,
+            "{fixture} entered a physical callee instead of a logical inline frame"
+        );
+        assert_eq!(
+            inlined
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("inline_adjust"),
+            "{fixture}"
+        );
+        assert!(
+            inlined
+                .image
+                .source
+                .as_ref()
+                .is_some_and(|source| (24..=26).contains(&source.line.get())),
+            "{fixture}: {inlined:?}"
+        );
+        step.shutdown().await;
+
+        let mut next = Scenario::new(format!("inline next {fixture}"), Scenario::fixture(fixture));
+        next.add_breakpoint("main").await;
+        next.run_to_stop().await;
+        advance_to_boundary_inline_call(&mut next, fixture).await;
+
+        assert_eq!(
+            next.step_to_stop(StepKind::OverSource).await,
+            StopReason::Step {
+                kind: StepKind::OverSource
+            },
+            "{fixture}"
+        );
+        let after = next
+            .operation(
+                "after inline boundary next",
+                next.handle().current_location(),
+            )
+            .await;
+        assert_eq!(
+            after
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("main"),
+            "{fixture}"
+        );
+        assert_eq!(
+            after.image.source.as_ref().map(|source| source.line.get()),
+            Some(31),
+            "{fixture}"
+        );
+        next.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn gcc_o2_entry_policy_does_not_execute_a_real_first_statement() {
+    let fixture = "stepping-boundaries-gcc-o2";
+    let mut scenario = Scenario::new("GCC O2 zero-length prologue", Scenario::fixture(fixture));
+    let raw_entry = {
+        let image = scenario.handle().module_image();
+        let function = image.function_named("no_prologue").expect("no_prologue");
+        image
+            .instances_for_function(function.id)
+            .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+            .expect("physical no_prologue")
+            .ranges[0]
+            .start
+    };
+    let breakpoint = scenario.add_breakpoint("no_prologue").await;
+    assert_eq!(
+        single_image_breakpoint_address(&breakpoint),
+        raw_entry,
+        "the conservative GCC fallback skipped the first store"
+    );
+
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let location = scenario
+        .operation(
+            "zero-prologue location",
+            scenario.handle().current_location(),
+        )
+        .await;
+    assert_eq!(location.image.address, raw_entry);
+    let sink = scenario
+        .handle()
+        .module_image()
+        .symbol_named("boundary_sink")
+        .expect("boundary_sink symbol")
+        .address;
+    let sink = relocate_image_address(sink, &location);
+    let word = scenario
+        .operation(
+            "boundary sink before first instruction",
+            scenario.handle().read_word(sink),
+        )
+        .await;
+    assert_eq!(
+        u32::try_from(word).expect("boundary sink value fits u32"),
+        22,
+        "no_prologue's first store executed before its entry stop"
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn next_crosses_each_marked_epilogue_and_completes_in_the_caller() {
+    let fixture = "stepping-boundaries-clang-o2";
+    let mut scenario = Scenario::new("multiple marked epilogues", Scenario::fixture(fixture));
+    let markers = epilogue_markers(&scenario, "marked_returns");
+    assert_eq!(
+        markers.len(),
+        2,
+        "fixture must retain two distinct marked return paths"
+    );
+    scenario
+        .add_source_breakpoint("stepping-boundaries.c", 11)
+        .await;
+    scenario
+        .add_source_breakpoint("stepping-boundaries.c", 15)
+        .await;
+
+    for return_line in [11, 15] {
+        let reason = if return_line == 11 {
+            scenario.run_to_stop().await
+        } else {
+            scenario.resume_to_stop().await
+        };
+        assert!(
+            matches!(reason, StopReason::Breakpoint { .. }),
+            "did not stop on return line {return_line}: {reason:?}"
+        );
+        let before = scenario
+            .operation(
+                "return statement location",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(
+            before.image.source.as_ref().map(|source| source.line.get()),
+            Some(return_line)
+        );
+
+        assert_eq!(
+            scenario.step_to_stop(StepKind::OverSource).await,
+            StopReason::Step {
+                kind: StepKind::OverSource
+            },
+            "next did not complete across return line {return_line}"
+        );
+        let after = scenario
+            .operation("caller after return", scenario.handle().current_location())
+            .await;
+        assert_eq!(
+            after
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("main"),
+            "next exposed an epilogue stop for return line {return_line}: {after:?}"
+        );
+        assert!(
+            !markers.contains(&after.image.address),
+            "next published compiler epilogue marker {}",
+            after.image.address
+        );
+    }
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn step_uses_each_marked_epilogue_to_complete_in_the_caller() {
+    let fixture = "stepping-boundaries-clang-o2";
+    let mut scenario = Scenario::new("step through marked epilogues", Scenario::fixture(fixture));
+    let markers = epilogue_markers(&scenario, "marked_returns");
+    assert_eq!(markers.len(), 2, "fixture boundary contract changed");
+    scenario
+        .add_source_breakpoint("stepping-boundaries.c", 11)
+        .await;
+    scenario
+        .add_source_breakpoint("stepping-boundaries.c", 15)
+        .await;
+
+    for return_line in [11, 15] {
+        let reason = if return_line == 11 {
+            scenario.run_to_stop().await
+        } else {
+            scenario.resume_to_stop().await
+        };
+        assert!(matches!(reason, StopReason::Breakpoint { .. }));
+
+        assert_eq!(
+            scenario.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        );
+        let after = scenario
+            .operation(
+                "step caller after return",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(
+            after
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("main"),
+            "step exposed an epilogue stop for return line {return_line}: {after:?}"
+        );
+        assert!(!markers.contains(&after.image.address));
+    }
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_explicit_user_breakpoint_at_an_epilogue_marker_remains_visible() {
+    let fixture = "stepping-boundaries-clang-o2";
+    let mut scenario = Scenario::new("explicit epilogue breakpoint", Scenario::fixture(fixture));
+    let marker = *epilogue_markers(&scenario, "marked_returns")
+        .iter()
+        .max()
+        .expect("negative return path marker");
+    scenario.add_breakpoint("marked_returns").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let entry = scenario
+        .operation(
+            "marked function entry",
+            scenario.handle().current_location(),
+        )
+        .await;
+    let marker = relocate_image_address(marker, &entry);
+    scenario
+        .add_breakpoint_spec(uscope::BreakpointSpec::Address(marker))
+        .await;
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { address: marker },
+        "the internal exit policy hid an explicit user breakpoint"
+    );
+    scenario.shutdown().await;
+}
+
+async fn advance_to_boundary_inline_call(
+    scenario: &mut Scenario,
+    fixture: &str,
+) -> uscope::ExecutionLocation {
+    for _ in 0..2 {
+        let location = scenario
+            .operation("boundary inline call", scenario.handle().current_location())
+            .await;
+        let is_main_call = location
+            .image
+            .function
+            .as_ref()
+            .is_some_and(|function| function.name.as_ref() == "main")
+            && location
+                .image
+                .source
+                .as_ref()
+                .is_some_and(|source| source.line.get() == 30);
+        if is_main_call {
+            return location;
+        }
+        assert_eq!(
+            scenario.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            },
+            "{fixture}"
+        );
+    }
+    panic!("{fixture} did not reach the inline_adjust call in main");
+}
+
+#[derive(Clone, Copy)]
+struct EntryBoundaryCase {
+    fixture: &'static str,
+    function: &'static str,
+    source: &'static str,
+    call_line: u64,
+    parameter: &'static str,
+    expected_value: i64,
+    gcc_fallback_line: Option<u64>,
+}
+
+const fn entry_boundary_cases() -> [EntryBoundaryCase; 6] {
+    [
+        EntryBoundaryCase {
+            fixture: "variables-parameters-gcc-o0",
+            function: "all_parameters",
+            source: "variables-parameters.c",
+            call_line: 66,
+            parameter: "signed_int",
+            expected_value: -1_234_567,
+            gcc_fallback_line: Some(21),
+        },
+        EntryBoundaryCase {
+            fixture: "variables-parameters-gcc-o2",
+            function: "all_parameters",
+            source: "variables-parameters.c",
+            call_line: 66,
+            parameter: "signed_int",
+            expected_value: -1_234_567,
+            // This optimized leaf has no prologue. Its first instruction is
+            // the line-22 store, so advancing to the next distinct statement
+            // would silently execute real user work.
+            gcc_fallback_line: Some(20),
+        },
+        EntryBoundaryCase {
+            fixture: "variables-parameters-clang-o0",
+            function: "all_parameters",
+            source: "variables-parameters.c",
+            call_line: 66,
+            parameter: "signed_int",
+            expected_value: -1_234_567,
+            gcc_fallback_line: None,
+        },
+        EntryBoundaryCase {
+            fixture: "variables-parameters-clang-o2",
+            function: "all_parameters",
+            source: "variables-parameters.c",
+            call_line: 66,
+            parameter: "signed_int",
+            expected_value: -1_234_567,
+            gcc_fallback_line: None,
+        },
+        EntryBoundaryCase {
+            fixture: "variables-rust-o0",
+            function: "inspect_scalars",
+            source: "variables-rust.rs",
+            call_line: 31,
+            parameter: "signed_value",
+            expected_value: -42,
+            gcc_fallback_line: None,
+        },
+        EntryBoundaryCase {
+            fixture: "variables-rust-o2",
+            function: "inspect_scalars",
+            source: "variables-rust.rs",
+            call_line: 31,
+            parameter: "signed_value",
+            expected_value: -42,
+            gcc_fallback_line: None,
+        },
+    ]
+}
+
+fn expected_physical_entry(scenario: &Scenario, case: &EntryBoundaryCase) -> uscope::ImageAddress {
+    let image = scenario.handle().module_image();
+    let function = image
+        .function_named(case.function)
+        .unwrap_or_else(|error| panic!("{} missing {}: {error}", case.fixture, case.function));
+    let instance = image
+        .instances_for_function(function.id)
+        .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        .unwrap_or_else(|| panic!("{} missing physical {}", case.fixture, case.function));
+
+    if let Some(marker) = image
+        .statement_rows()
+        .iter()
+        .find(|row| row.flags.prologue_end() && instance.contains(row.address))
+    {
+        return marker.address;
+    }
+
+    let line = case
+        .gcc_fallback_line
+        .expect("markerless entry case has an explicit conservative expectation");
+    image
+        .statement_rows()
+        .iter()
+        .find(|row| {
+            instance.contains(row.address)
+                && row.flags.is_statement()
+                && row
+                    .location
+                    .as_ref()
+                    .is_some_and(|location| location.line.get() == line)
+        })
+        .map_or_else(
+            || {
+                panic!(
+                    "{} missing expected markerless entry line {line}",
+                    case.fixture
+                )
+            },
+            |row| row.address,
+        )
+}
+
+async fn assert_entry_stop(
+    scenario: &Scenario,
+    case: &EntryBoundaryCase,
+    expected: uscope::ImageAddress,
+) {
+    let location = scenario
+        .operation(
+            "physical entry location",
+            scenario.handle().current_location(),
+        )
+        .await;
+    assert_eq!(location.image.address, expected, "{}", case.fixture);
+    assert_eq!(
+        location
+            .image
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some(case.function),
+        "{}",
+        case.fixture
+    );
+    let parameter = scenario
+        .operation(
+            "entry parameter value",
+            scenario.handle().variable(case.parameter),
+        )
+        .await;
+    assert_variable_value(
+        &parameter,
+        ScalarValue::Signed(i128::from(case.expected_value)),
+    );
+}
+
+fn epilogue_markers(scenario: &Scenario, function: &str) -> BTreeSet<uscope::ImageAddress> {
+    let image = scenario.handle().module_image();
+    let function = image.function_named(function).expect("marked function");
+    let instance = image
+        .instances_for_function(function.id)
+        .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        .expect("physical marked function");
+    image
+        .statement_rows()
+        .iter()
+        .filter(|row| row.flags.epilogue_begin() && instance.contains(row.address))
+        .map(|row| row.address)
+        .collect()
+}
+
+const fn relocate_image_address(
+    address: uscope::ImageAddress,
+    location: &uscope::ExecutionLocation,
+) -> VirtualAddress {
+    let load_bias = location
+        .address
+        .get()
+        .checked_sub(location.image.address.get())
+        .expect("runtime address includes the image load bias");
+    VirtualAddress::new(
+        load_bias
+            .checked_add(address.get())
+            .expect("relocated test address fits u64"),
+    )
+}
+
+#[tokio::test]
 async fn static_locals_resolve_relocated_and_indexed_addresses() {
     for fixture in [
         "variables-static-gcc-o2",
@@ -1092,7 +1668,7 @@ async fn file_qualified_function_breakpoint_stops_at_the_selected_function() {
     let context = scenario
         .operation("source context", scenario.handle().source_context(0))
         .await;
-    assert_eq!(context.location.line.get(), 5);
+    assert_eq!(context.location.line.get(), 6);
     scenario.shutdown().await;
 }
 
@@ -1100,7 +1676,7 @@ async fn file_qualified_function_breakpoint_stops_at_the_selected_function() {
 async fn breakpoint_deletion_preserves_shared_sites_and_stopped_instruction_execution() {
     let mut scenario = Scenario::new("breakpoint deletion", Scenario::fixture("basic"));
     let function = scenario.add_breakpoint("breakpoint_target").await;
-    let source = scenario.add_source_breakpoint("basic.c", 5).await;
+    let source = scenario.add_source_breakpoint("basic.c", 6).await;
     assert_eq!(function.locations[0].location, source.locations[0].location);
 
     let revision = scenario.snapshot().await.revision;
@@ -1403,11 +1979,8 @@ fn assert_basic_source_context(
 
     assert_eq!(&context.file, source_file);
     assert_eq!(&context.location, source);
-    assert_eq!(context.location.line.get(), 5);
-    assert_eq!(
-        current.text.as_ref(),
-        "__attribute__((noinline)) uint64_t breakpoint_target(void) {"
-    );
+    assert_eq!(context.location.line.get(), 6);
+    assert_eq!(current.text.as_ref(), "    return uscope_value;");
     assert_eq!(
         context
             .lines
@@ -1415,11 +1988,11 @@ fn assert_basic_source_context(
             .expect("first source line")
             .number
             .get(),
-        2
+        3
     );
     assert_eq!(
         context.lines.last().expect("last source line").number.get(),
-        8
+        9
     );
 }
 
@@ -2662,13 +3235,6 @@ async fn source_next_steps_over_calls_but_preserves_user_breakpoints() {
     interrupted.add_breakpoint("deepest").await;
     interrupted.run_to_stop().await;
 
-    assert_eq!(
-        interrupted.step_to_stop(StepKind::OverSource).await,
-        StopReason::Step {
-            kind: StepKind::OverSource
-        }
-    );
-
     assert!(matches!(
         interrupted.step_to_stop(StepKind::OverSource).await,
         StopReason::Breakpoint { .. }
@@ -2808,44 +3374,43 @@ async fn source_steps_skip_non_statement_line_rows() {
 
 #[tokio::test]
 async fn step_into_crosses_library_calls_without_line_info() {
-    // Line 6 calls getpid() through the PLT, whose call-frame information
-    // uses a DWARF CFA expression and whose code has no line rows. A source
-    // step must cross the library call and stop at line 7 instead of
-    // stopping inside the PLT or failing the unwind.
+    // The function breakpoint lands post-prologue on line 6, which calls
+    // getpid() through the PLT. Its call-frame information uses a DWARF CFA
+    // expression and its code has no line rows. A source step must cross the
+    // library call and stop at line 7 instead of stopping inside the PLT or
+    // failing the unwind.
     let mut scenario = Scenario::new("step over libc", Scenario::fixture("step-over-libc"));
     scenario.add_breakpoint("call_libc").await;
     scenario.run_to_stop().await;
 
-    for expected_line in [6, 7] {
-        assert_eq!(
-            scenario.step_to_stop(StepKind::IntoSource).await,
-            StopReason::Step {
-                kind: StepKind::IntoSource
-            }
-        );
-        let location = scenario
-            .operation(
-                "location after library step",
-                scenario.handle().current_location(),
-            )
-            .await;
-        assert_eq!(
-            location
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
-            Some("call_libc")
-        );
-        assert_eq!(
-            location
-                .image
-                .source
-                .as_ref()
-                .map(|source| source.line.get()),
-            Some(expected_line)
-        );
-    }
+    assert_eq!(
+        scenario.step_to_stop(StepKind::IntoSource).await,
+        StopReason::Step {
+            kind: StepKind::IntoSource
+        }
+    );
+    let location = scenario
+        .operation(
+            "location after library step",
+            scenario.handle().current_location(),
+        )
+        .await;
+    assert_eq!(
+        location
+            .image
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some("call_libc")
+    );
+    assert_eq!(
+        location
+            .image
+            .source
+            .as_ref()
+            .map(|source| source.line.get()),
+        Some(7)
+    );
 
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -2900,6 +3465,10 @@ async fn pause_cancels_an_active_source_execution_plan() {
     let mut scenario = Scenario::new("pause source plan", Scenario::fixture("step"));
     scenario.add_breakpoint("step_forever").await;
     scenario.run_to_stop().await;
+    // The recommended post-prologue entry is the loop body itself, so leaving
+    // the function breakpoint installed would intentionally interrupt the
+    // finish plan on the next iteration instead of letting pause cancel it.
+    scenario.remove_all_breakpoints().await;
 
     let snapshot = scenario.snapshot().await;
     let (stop, thread) = match snapshot.inferior {

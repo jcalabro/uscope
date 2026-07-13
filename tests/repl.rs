@@ -290,26 +290,24 @@ fn interactive_empty_lines_repeat_the_last_session_command() {
         .expect("prompt after breakpoint");
 
     session.send_line("run").expect("run inferior");
-    session
-        .expect("=>  9 | int main(void) {")
-        .expect("main stop");
+    session.expect("=> 10 | ").expect("main stop");
     session.expect("(uscope) ").expect("prompt after run");
 
     session.send_line("next").expect("send next");
-    session.expect("=> 10 | ").expect("first source step");
+    session.expect("=> 11 | ").expect("first source step");
     session
         .expect("(uscope) ")
         .expect("prompt after first source step");
 
     session.send_line("").expect("repeat next once");
-    session.expect("=> 11 | ").expect("repeated source step");
+    session.expect("=> 12 | ").expect("repeated source step");
     session
         .expect("(uscope) ")
         .expect("prompt after repeated source step");
 
     session.send_line("").expect("repeat next twice");
     session
-        .expect("=> 12 | ")
+        .expect("=> 13 | ")
         .expect("second repeated source step");
     session
         .expect("(uscope) ")

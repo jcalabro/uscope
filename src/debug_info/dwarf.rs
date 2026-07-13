@@ -98,7 +98,7 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
         units.push(dwarf.unit(header)?);
     }
 
-    let function_metadata =
+    let mut function_metadata =
         load_function_metadata(&dwarf, &units, &mut source_files, &mut source_file_ids)?;
 
     for unit in &units {
@@ -112,6 +112,13 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
             &mut next_sequence,
         )?;
     }
+
+    refine_proved_prologue_entries(
+        &object,
+        target,
+        &statements,
+        &mut function_metadata.code_instances,
+    )?;
 
     let variables = variables::load_variable_info(
         &dwarf,
@@ -885,46 +892,56 @@ fn load_lines(
                 push_line_range(&mut previous, row.address(), lines);
                 continue;
             }
-            // Rows without a resolvable file or with line 0 mark compiler-
-            // generated code with no source attribution. They still terminate
-            // the previous entry's range; extending it would misattribute the
-            // gap to a neighboring source line.
-            let Some(file) = row.file(header) else {
-                push_line_range(&mut previous, row.address(), lines);
-                continue;
-            };
-            let path = source_path(dwarf, unit, header, file)?;
-            let file_id = source_file_id(path, source_files, source_file_ids);
-            let Some(line) = row.line().and_then(|line| LineNumber::new(line.get())) else {
-                push_line_range(&mut previous, row.address(), lines);
-                continue;
-            };
-            let location = SourceLocation {
-                file: file_id,
-                line,
-                column: match row.column() {
-                    ColumnType::LeftEdge => None,
-                    ColumnType::Column(column) => ColumnNumber::new(column.get()),
-                },
-            };
-
-            statements.push(StatementRow {
-                address: ImageAddress::new(row.address()),
-                operation_index: row.op_index(),
-                location: location.clone(),
-                discriminator: row.discriminator(),
-                flags: StatementFlags::empty()
-                    .with_statement(row.is_stmt())
-                    .with_basic_block(row.basic_block())
-                    .with_prologue_end(row.prologue_end())
-                    .with_epilogue_begin(row.epilogue_begin()),
-                isa: row.isa(),
-                sequence: sequence_id,
-                ordinal,
-            });
+            let flags = StatementFlags::empty()
+                .with_statement(row.is_stmt())
+                .with_basic_block(row.basic_block())
+                .with_prologue_end(row.prologue_end())
+                .with_epilogue_begin(row.epilogue_begin());
+            let row_ordinal = ordinal;
             ordinal = ordinal
                 .checked_add(1)
                 .ok_or(gimli::Error::UnsupportedOffset)?;
+
+            // Rows without a resolvable file or with line 0 mark compiler-
+            // generated code with no source attribution. They still terminate
+            // the previous entry's range; extending it would misattribute the
+            // gap to a neighboring source line. A prologue or epilogue marker
+            // remains actionable even when that source attribution is absent.
+            let location = match (
+                row.file(header),
+                row.line().and_then(|line| LineNumber::new(line.get())),
+            ) {
+                (Some(file), Some(line)) => {
+                    let path = source_path(dwarf, unit, header, file)?;
+                    Some(SourceLocation {
+                        file: source_file_id(path, source_files, source_file_ids),
+                        line,
+                        column: match row.column() {
+                            ColumnType::LeftEdge => None,
+                            ColumnType::Column(column) => ColumnNumber::new(column.get()),
+                        },
+                    })
+                }
+                _ => None,
+            };
+
+            if location.is_some() || flags.prologue_end() || flags.epilogue_begin() {
+                statements.push(StatementRow {
+                    address: ImageAddress::new(row.address()),
+                    operation_index: row.op_index(),
+                    location: location.clone(),
+                    discriminator: row.discriminator(),
+                    flags,
+                    isa: row.isa(),
+                    sequence: sequence_id,
+                    ordinal: row_ordinal,
+                });
+            }
+
+            let Some(location) = location else {
+                push_line_range(&mut previous, row.address(), lines);
+                continue;
+            };
 
             // Rows at one address collapse into a single entry: the last row
             // provides the location, and the address is a statement boundary
@@ -1018,6 +1035,116 @@ fn push_line_range(
     }
 }
 
+fn refine_proved_prologue_entries(
+    object: &object::File<'_>,
+    target: TargetDescription,
+    statements: &[StatementRow],
+    instances: &mut [CodeInstanceInfo],
+) -> std::result::Result<(), DwarfError> {
+    if target.architecture != Architecture::X86_64 {
+        return Ok(());
+    }
+
+    for instance in instances {
+        if !matches!(instance.kind, CodeInstanceKind::OutOfLine) {
+            continue;
+        }
+        if statements.iter().any(|row| {
+            row.flags.prologue_end()
+                && instance
+                    .ranges
+                    .iter()
+                    .any(|range| range.contains(row.address))
+        }) {
+            continue;
+        }
+        let Some(raw_entry) = instance.breakpoint_entry.map(|entry| entry.address) else {
+            continue;
+        };
+        let Some(entry_range) = instance
+            .ranges
+            .iter()
+            .find(|range| range.contains(raw_entry))
+        else {
+            continue;
+        };
+        let Some(candidate) = first_distinct_source_statement(statements, *entry_range, raw_entry)
+        else {
+            continue;
+        };
+        let Some(bytes) = object_bytes(object, raw_entry.get(), candidate.get())? else {
+            continue;
+        };
+
+        #[cfg(target_arch = "x86_64")]
+        if super::x86_64::prove_prologue_prefix(bytes, raw_entry.get()).is_ok() {
+            instance.breakpoint_entry = Some(BreakpointEntry {
+                address: candidate,
+                provenance: EntryProvenance::AnalyzedPrologue,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn first_distinct_source_statement(
+    statements: &[StatementRow],
+    range: AddressRange<ImageAddress>,
+    raw_entry: ImageAddress,
+) -> Option<ImageAddress> {
+    // Line programs collapse equal-address rows by taking the final source
+    // attribution. Mirror that rule here, and do not mistake a later row for
+    // the same signature line for proof that argument homing has completed.
+    let entry_location = statements
+        .iter()
+        .filter(|row| row.address == raw_entry)
+        .filter_map(|row| row.location.as_ref())
+        .next_back()?;
+    statements
+        .iter()
+        .filter(|row| row.flags.is_statement() && raw_entry < row.address)
+        .filter(|row| range.contains(row.address))
+        .filter(|row| {
+            row.location.as_ref().is_some_and(|location| {
+                location.file != entry_location.file || location.line != entry_location.line
+            })
+        })
+        .map(|row| row.address)
+        .min()
+}
+
+fn object_bytes<'data>(
+    object: &'data object::File<'data>,
+    start: u64,
+    end: u64,
+) -> std::result::Result<Option<&'data [u8]>, DwarfError> {
+    let Some(length) = end.checked_sub(start) else {
+        return Ok(None);
+    };
+    for section in object.sections() {
+        let section_start = section.address();
+        let Some(section_end) = section_start.checked_add(section.size()) else {
+            continue;
+        };
+        if start < section_start || section_end < end {
+            continue;
+        }
+        let data = section.data()?;
+        let offset =
+            usize::try_from(start - section_start).map_err(|_| gimli::Error::UnsupportedOffset)?;
+        let length = usize::try_from(length).map_err(|_| gimli::Error::UnsupportedOffset)?;
+        let end = offset
+            .checked_add(length)
+            .ok_or(gimli::Error::UnsupportedOffset)?;
+        let Some(bytes) = data.get(offset..end) else {
+            return Ok(None);
+        };
+        return Ok(Some(bytes));
+    }
+    Ok(None)
+}
+
 fn load_symbols(object: &object::File<'_>) -> Vec<SymbolInfo> {
     let mut symbols_by_name: HashMap<String, Vec<u64>> = HashMap::new();
 
@@ -1078,12 +1205,128 @@ fn target_description(
 mod tests {
     use std::collections::BTreeMap;
 
-    use gimli::{Format, Register};
+    use gimli::write::{
+        Address, Dwarf as WriteDwarf, EndianVec, LineProgram, LineString, Sections, Unit,
+    };
+    use gimli::{Encoding, Format, LineEncoding, LittleEndian, Register};
 
     use super::*;
 
     struct TestMemory {
         values: BTreeMap<VirtualAddress, u64>,
+    }
+
+    #[test]
+    fn line_loader_retains_unattributed_control_boundaries_and_equal_address_order() {
+        let encoding = Encoding {
+            format: Format::Dwarf32,
+            version: 4,
+            address_size: 8,
+        };
+        let mut program = LineProgram::new(
+            encoding,
+            LineEncoding::default(),
+            LineString::String(b"/test".to_vec()),
+            None,
+            LineString::String(b"boundary.c".to_vec()),
+            None,
+        );
+        let file = program.add_file(
+            LineString::String(b"boundary.c".to_vec()),
+            program.default_directory(),
+            None,
+        );
+        program.begin_sequence(Some(Address::Constant(0x100)));
+        program.row().file = file;
+        program.row().line = 0;
+        program.row().is_statement = false;
+        program.row().prologue_end = true;
+        program.generate_row();
+        program.row().file = file;
+        program.row().line = 10;
+        program.row().is_statement = true;
+        program.row().epilogue_begin = true;
+        program.generate_row();
+        program.end_sequence(4);
+
+        let mut written = WriteDwarf::new();
+        written.units.add(Unit::new(encoding, program));
+        let mut sections = Sections::new(EndianVec::new(LittleEndian));
+        written.write(&mut sections).expect("write test DWARF");
+        let dwarf = gimli::Dwarf::load(|id| {
+            let bytes = sections.get(id).map(EndianVec::slice).unwrap_or_default();
+            Ok::<_, gimli::Error>(EndianSlice::new(bytes, RunTimeEndian::Little))
+        })
+        .expect("read test DWARF");
+        let mut headers = dwarf.units();
+        let header = headers.next().unwrap().expect("one test unit");
+        let unit = dwarf.unit(header).expect("read test unit");
+        let mut source_files = Vec::new();
+        let mut source_file_ids = HashMap::new();
+        let mut statements = Vec::new();
+        let mut lines = Vec::new();
+        let mut next_sequence = 0;
+
+        load_lines(
+            &dwarf,
+            &unit,
+            &mut source_files,
+            &mut source_file_ids,
+            &mut statements,
+            &mut lines,
+            &mut next_sequence,
+        )
+        .expect("load test line program");
+
+        assert_eq!(statements.len(), 2);
+        assert_eq!(statements[0].address, ImageAddress::new(0x100));
+        assert_eq!(statements[0].ordinal, 0);
+        assert!(statements[0].location.is_none());
+        assert!(statements[0].flags.prologue_end());
+        assert_eq!(statements[1].address, ImageAddress::new(0x100));
+        assert_eq!(statements[1].ordinal, 1);
+        assert_eq!(
+            statements[1]
+                .location
+                .as_ref()
+                .map(|location| location.line),
+            LineNumber::new(10)
+        );
+        assert!(statements[1].flags.epilogue_begin());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].range.start, ImageAddress::new(0x100));
+        assert_eq!(lines[0].range.end, ImageAddress::new(0x104));
+    }
+
+    #[test]
+    fn analyzed_entry_ignores_later_rows_for_the_signature_line() {
+        let row = |address, line, ordinal| StatementRow {
+            address: ImageAddress::new(address),
+            operation_index: 0,
+            location: Some(SourceLocation {
+                file: SourceFileId::new(0),
+                line: LineNumber::new(line).expect("nonzero test line"),
+                column: None,
+            }),
+            discriminator: 0,
+            flags: StatementFlags::empty().with_statement(true),
+            isa: 0,
+            sequence: LineSequenceId::new(0),
+            ordinal,
+        };
+        let statements = [row(0x100, 10, 0), row(0x110, 10, 1), row(0x120, 11, 2)];
+
+        assert_eq!(
+            first_distinct_source_statement(
+                &statements,
+                AddressRange {
+                    start: ImageAddress::new(0x100),
+                    end: ImageAddress::new(0x130),
+                },
+                ImageAddress::new(0x100),
+            ),
+            Some(ImageAddress::new(0x120))
+        );
     }
 
     impl MemoryReader for TestMemory {

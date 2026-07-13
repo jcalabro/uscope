@@ -144,6 +144,14 @@ build_fixture gcc tests/fixtures/thread-stress.c "$output_dir/thread-stress" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc tests/fixtures/step.c "$output_dir/step" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc tests/fixtures/stepping-boundaries.c "$output_dir/stepping-boundaries-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture clang tests/fixtures/stepping-boundaries.c "$output_dir/stepping-boundaries-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc tests/fixtures/stepping-boundaries.c "$output_dir/stepping-boundaries-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture clang tests/fixtures/stepping-boundaries.c "$output_dir/stepping-boundaries-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -mno-red-zone -fPIE -pie
 build_fixture gcc tests/fixtures/step-over-libc.c "$output_dir/step-over-libc" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-o0" \

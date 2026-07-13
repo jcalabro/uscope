@@ -3,6 +3,8 @@ compile_error!("uscope currently supports debug information only on Linux");
 
 #[cfg(target_os = "linux")]
 mod dwarf;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod x86_64;
 
 use std::path::Path;
 use std::sync::Arc;
