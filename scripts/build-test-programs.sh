@@ -69,6 +69,23 @@ build_rust_fixture() {
         -C link-arg=-lc "$@"
 }
 
+# Fails the build when a fixture no longer emits a sibling-call jump a test
+# depends on, instead of letting the test pass through the regular-callee path.
+require_tail_jump() {
+    local output="$1"
+    local caller="$2"
+    local callee="$3"
+    # grep reads all input; grep -q would exit early and objdump's SIGPIPE
+    # would fail the pipeline under pipefail despite a successful match.
+    if ! objdump -d --no-show-raw-insn "$output" \
+        | sed -n "/<${caller}>:/,/^\$/p" \
+        | grep -E "[[:space:]]jmp[[:space:]]+[^<]*<${callee}>" >/dev/null; then
+        printf 'error: %s does not tail-jump from %s to %s\n' \
+            "$output" "$caller" "$callee" >&2
+        exit 1
+    fi
+}
+
 # Fails the build when a fixture's DWARF stops exercising the operation a test
 # depends on, instead of letting the test pass without its coverage.
 require_dwarf_operation() {
@@ -158,8 +175,14 @@ build_fixture clang tests/fixtures/stepping-boundaries.c "$output_dir/stepping-b
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -mno-red-zone -fPIE -pie
 build_fixture gcc tests/fixtures/tail-calls.c "$output_dir/tail-calls-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+require_tail_jump "$output_dir/tail-calls-gcc-o2" outer_tail add_one
+require_tail_jump "$output_dir/tail-calls-gcc-o2" outer_chain chain_helper
+require_tail_jump "$output_dir/tail-calls-gcc-o2" descend_tail mutual_tail
 build_fixture clang tests/fixtures/tail-calls.c "$output_dir/tail-calls-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+require_tail_jump "$output_dir/tail-calls-clang-o2" outer_tail add_one
+require_tail_jump "$output_dir/tail-calls-clang-o2" outer_chain chain_helper
+require_tail_jump "$output_dir/tail-calls-clang-o2" descend_tail mutual_tail
 build_fixture gcc tests/fixtures/step-over-libc.c "$output_dir/step-over-libc" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-o0" \

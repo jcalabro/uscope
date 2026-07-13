@@ -58,12 +58,12 @@ __attribute__((noinline)) int mutual_tail(int value) {
 }
 
 __attribute__((noinline)) int loop_helper(int trips) {
-    int total = 0;
+    uint32_t total = 0;
     for (int i = 0; i < trips; i++) {
         tail_counter += 1;
-        total += i | 1;
+        total += (uint32_t)i | 1u;
     }
-    return total;
+    return (int)(total & 0x7fffffffu);
 }
 
 static __attribute__((always_inline)) inline int inline_over_call(int value) {
