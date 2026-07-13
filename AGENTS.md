@@ -31,13 +31,18 @@
 
 ## Local Development
 
+Run all project commands inside the pinned Nix environment. Do not run `cargo`,
+`just`, compilers, linters, or tests directly from the host environment. For
+non-interactive use, wrap the command with `just dev --command`, for example
+`just dev --command just`.
+
 Enter the pinned Nix environment:
 
 ```sh
 just dev
 ```
 
-Run the complete local gate (default recipe):
+From that environment, run the complete local gate (default recipe):
 
 ```sh
 just

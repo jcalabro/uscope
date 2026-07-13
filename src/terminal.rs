@@ -70,6 +70,9 @@ fn term_supports_color(term: &OsStr) -> bool {
 #[derive(Clone, Copy, Debug)]
 pub enum Role {
     Prompt,
+    Command,
+    Alias,
+    Muted,
     Name,
     Type,
     Value,
@@ -118,18 +121,29 @@ impl<T: fmt::Display> fmt::Display for Painted<T> {
 }
 
 fn style(role: Role) -> Style {
-    if matches!(role, Role::Prompt) {
-        return Style::new().dimmed();
+    match role {
+        Role::Prompt | Role::Muted => return Style::new().dimmed(),
+        Role::Command => {
+            return Style::new()
+                .fg_color(Some(AnsiColor::BrightBlue.into()))
+                .bold();
+        }
+        _ => {}
     }
+
     let color = match role {
-        Role::Prompt => unreachable!("prompt style returned above"),
         Role::Name => AnsiColor::BrightCyan,
+        Role::Alias => AnsiColor::BrightBlue,
         Role::Type => AnsiColor::BrightMagenta,
         Role::Metadata => AnsiColor::Cyan,
         Role::Current | Role::Warning => AnsiColor::BrightYellow,
         Role::Value | Role::Success => AnsiColor::BrightGreen,
         Role::Error => AnsiColor::BrightRed,
+        Role::Prompt | Role::Command | Role::Muted => {
+            unreachable!("non-color style returned above")
+        }
     };
+
     let style = Style::new().fg_color(Some(color.into()));
     match role {
         Role::Current | Role::Error => style.bold(),

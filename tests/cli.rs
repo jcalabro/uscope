@@ -208,9 +208,9 @@ fn batch_mode_sets_lists_and_deletes_source_and_file_function_breakpoints() {
             "--eval",
             "breakpoints",
             "--eval",
-            "delete 1",
+            "del 1",
             "--eval",
-            "clear all",
+            "d all",
             "--eval",
             "info breakpoints",
         ])
@@ -230,7 +230,7 @@ fn batch_mode_sets_lists_and_deletes_source_and_file_function_breakpoints() {
 }
 
 #[test]
-fn help_and_cls_are_generated_without_changing_clear_semantics() {
+fn help_and_clear_are_generated_from_the_command_registry() {
     let executable = fixture("build/test-programs/basic");
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
         .args([
@@ -240,7 +240,17 @@ fn help_and_cls_are_generated_without_changing_clear_semantics() {
             "--eval",
             "help clear",
             "--eval",
+            "help del",
+            "--eval",
             "help fin",
+            "--eval",
+            "help break",
+            "--eval",
+            "help where",
+            "--eval",
+            "help continue",
+            "--eval",
+            "clear",
             "--eval",
             "cls",
         ])
@@ -249,20 +259,93 @@ fn help_and_cls_are_generated_without_changing_clear_semantics() {
         .expect("run uscope");
     let stdout = assert_success(output);
 
-    assert!(stdout.contains("help [command]"), "{stdout}");
     assert!(
-        stdout.contains("break <function|address|file:line|file:function> (b)"),
+        stdout.contains("  break        b       Set a breakpoint"),
         "{stdout}"
     );
-    assert!(stdout.contains("continue (c)"), "{stdout}");
-    assert!(stdout.contains("help [command] (?)"), "{stdout}");
+    assert!(
+        stdout.contains("  finish       fin, f  Run until the selected frame returns"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  continue     c       Continue execution"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  delete       del, d  Delete logical breakpoints"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  clear        cls     Clear and redraw the terminal"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  help         h, ?    Show command help"),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("break <function|address|file:line|file:function> (b)"),
+        "overview should omit detailed usage: {stdout}"
+    );
     assert!(stdout.contains("delete <id|all>"), "{stdout}");
-    assert!(stdout.contains("aliases: clear"), "{stdout}");
+    assert!(stdout.contains("aliases: del, d"), "{stdout}");
     assert!(
-        stdout.contains("finish\n  Run until the selected frame returns\n  aliases: fin, f"),
+        stdout.contains("  Clear and redraw the terminal\n  aliases: cls"),
         "{stdout}"
     );
+    assert!(
+        stdout.contains("  Run until the selected frame returns\n  aliases: fin, f"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "  Set a breakpoint\n  aliases: b\n  usage: break <function|address|file:line|file:function>"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("break\n  Set a breakpoint"), "{stdout}");
+    assert!(
+        !stdout.contains("finish\n  Run until the selected frame returns"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("  Show the current execution location"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("usage: where"), "{stdout}");
+    assert!(
+        stdout.contains("  Continue execution\n  aliases: c"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("usage: continue"), "{stdout}");
+    assert_eq!(stdout.matches("\x1b[2J\x1b[H").count(), 2, "{stdout:?}");
     assert!(stdout.ends_with("\x1b[2J\x1b[H"), "{stdout:?}");
+}
+
+#[test]
+fn colored_help_distinguishes_commands_aliases_and_descriptions() {
+    let executable = fixture("build/test-programs/basic");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["--batch", "--color", "always", "--eval", "help"])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+
+    assert!(stdout.contains("\x1b[1m\x1b[94mbreak\x1b[0m"), "{stdout:?}");
+    assert!(stdout.contains("\x1b[94mb\x1b[0m"), "{stdout:?}");
+    assert!(stdout.contains("commands:"), "{stdout:?}");
+    assert!(stdout.contains("Set a breakpoint"), "{stdout:?}");
+    assert!(
+        stdout.contains("Use `help <command>` for aliases and usage."),
+        "{stdout:?}"
+    );
+    assert!(!stdout.contains("\x1b[2mcommands"), "{stdout:?}");
+    assert!(!stdout.contains("\x1b[2mSet a breakpoint"), "{stdout:?}");
+    assert!(
+        !stdout.contains("\x1b[2mUse `help <command>`"),
+        "{stdout:?}"
+    );
 }
 
 #[test]
@@ -291,9 +374,12 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
 
     assert!(stdout.contains("print [variable]\n"), "{stdout}");
     assert!(stdout.contains("aliases: p"), "{stdout}");
-    assert!(stdout.contains("pause\n  Pause execution"), "{stdout}");
+    assert!(stdout.contains("  Pause execution"), "{stdout}");
+    assert!(!stdout.contains("usage: pause"), "{stdout}");
+    assert!(!stdout.contains("print\n  Print one"), "{stdout}");
+    assert!(!stdout.contains("pause\n  Pause execution"), "{stdout}");
     assert!(
-        !stdout.contains("pause\n  Pause execution\n  aliases:"),
+        !stdout.contains("  Pause execution\n  aliases:"),
         "{stdout}"
     );
     assert_eq!(stdout.matches("(int) signed_int = -1234567").count(), 2);
