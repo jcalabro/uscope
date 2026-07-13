@@ -2692,6 +2692,109 @@ async fn source_next_steps_over_calls_but_preserves_user_breakpoints() {
 }
 
 #[tokio::test]
+async fn source_steps_skip_non_statement_line_rows() {
+    // GCC at -O2 marks the trailing rows of middle (line 13) and deepest
+    // (line 8) as non-statement rows; source steps must not stop on them.
+    // Clang does not emit new-line non-statement rows for this fixture, so
+    // only the GCC binary exercises the defect.
+    let mut next = Scenario::new("next unwind-o2", Scenario::fixture("unwind-o2"));
+    next.add_breakpoint("middle").await;
+    next.run_to_stop().await;
+
+    assert_eq!(
+        next.step_to_stop(StepKind::OverSource).await,
+        StopReason::Step {
+            kind: StepKind::OverSource
+        }
+    );
+    let location = next
+        .operation(
+            "location after first next",
+            next.handle().current_location(),
+        )
+        .await;
+    assert_eq!(
+        location
+            .image
+            .source
+            .as_ref()
+            .map(|source| source.line.get()),
+        Some(12)
+    );
+
+    assert_eq!(
+        next.step_to_stop(StepKind::OverSource).await,
+        StopReason::Step {
+            kind: StepKind::OverSource
+        }
+    );
+    let location = next
+        .operation(
+            "location after second next",
+            next.handle().current_location(),
+        )
+        .await;
+    assert_eq!(
+        location
+            .image
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some("outer"),
+        "next stopped on a non-statement row instead of finishing middle"
+    );
+    next.shutdown().await;
+
+    let mut step = Scenario::new("step unwind-o2", Scenario::fixture("unwind-o2"));
+    step.add_breakpoint("deepest").await;
+    step.run_to_stop().await;
+
+    assert_eq!(
+        step.step_to_stop(StepKind::IntoSource).await,
+        StopReason::Step {
+            kind: StepKind::IntoSource
+        }
+    );
+    let location = step
+        .operation(
+            "location after first step",
+            step.handle().current_location(),
+        )
+        .await;
+    assert_eq!(
+        location
+            .image
+            .source
+            .as_ref()
+            .map(|source| source.line.get()),
+        Some(7)
+    );
+
+    assert_eq!(
+        step.step_to_stop(StepKind::IntoSource).await,
+        StopReason::Step {
+            kind: StepKind::IntoSource
+        }
+    );
+    let location = step
+        .operation(
+            "location after second step",
+            step.handle().current_location(),
+        )
+        .await;
+    assert_eq!(
+        location
+            .image
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some("middle"),
+        "step stopped on a non-statement row instead of returning to middle"
+    );
+    step.shutdown().await;
+}
+
+#[tokio::test]
 async fn stale_stop_tokens_allow_exactly_one_client_to_resume() {
     let mut scenario = Scenario::new("competing clients", Scenario::fixture("basic"));
     scenario.add_breakpoint("breakpoint_target").await;

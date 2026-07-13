@@ -781,7 +781,7 @@ fn load_lines(
             .checked_add(1)
             .ok_or(gimli::Error::UnsupportedOffset)?;
         let mut rows = program.resume_from(&sequence);
-        let mut previous: Option<(u64, SourceLocation)> = None;
+        let mut previous: Option<(u64, SourceLocation, bool)> = None;
         let mut ordinal = 0_u32;
 
         while let Some((header, row)) = rows.next_row()? {
@@ -830,8 +830,15 @@ fn load_lines(
                 .checked_add(1)
                 .ok_or(gimli::Error::UnsupportedOffset)?;
 
+            // Rows at one address collapse into a single entry: the last row
+            // provides the location, and the address is a statement boundary
+            // if any collapsed row recommends it.
+            let statement = row.is_stmt()
+                || previous
+                    .as_ref()
+                    .is_some_and(|(start, _, statement)| *start == row.address() && *statement);
             push_line_range(&mut previous, row.address(), lines);
-            previous = Some((row.address(), location));
+            previous = Some((row.address(), location, statement));
         }
     }
 
@@ -897,11 +904,11 @@ fn source_path(
 }
 
 fn push_line_range(
-    previous: &mut Option<(u64, SourceLocation)>,
+    previous: &mut Option<(u64, SourceLocation, bool)>,
     end: u64,
     lines: &mut Vec<LineEntry>,
 ) {
-    if let Some((start, location)) = previous.take()
+    if let Some((start, location, statement)) = previous.take()
         && start < end
     {
         lines.push(LineEntry {
@@ -910,6 +917,7 @@ fn push_line_range(
                 end: ImageAddress::new(end),
             },
             location,
+            statement,
         });
     }
 }
