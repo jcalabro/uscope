@@ -489,17 +489,18 @@ fn boundary_line(location: &uscope::ExecutionLocation) -> Option<u64> {
         .map(|source| source.line.get())
 }
 
-fn boundary_sink_address(
+fn fixture_symbol_address(
     scenario: &Scenario,
     location: &uscope::ExecutionLocation,
+    symbol: &str,
 ) -> VirtualAddress {
-    let sink = scenario
+    let address = scenario
         .handle()
         .module_image()
-        .symbol_named("boundary_sink")
-        .expect("boundary_sink symbol")
+        .symbol_named(symbol)
+        .unwrap_or_else(|error| panic!("missing fixture symbol {symbol}: {error}"))
         .address;
-    relocate_image_address(sink, location)
+    relocate_image_address(address, location)
 }
 
 async fn boundary_sink_value(scenario: &Scenario, sink: VirtualAddress) -> u64 {
@@ -523,7 +524,7 @@ async fn clang_o0_inline_steps_cover_entry_body_return_caller_and_exit() {
     assert_eq!(boundary_function(&inlined), Some("inline_adjust"));
     assert_eq!(boundary_line(&inlined), Some(24));
     let physical = inlined.image.physical_instance;
-    let sink = boundary_sink_address(&scenario, &inlined);
+    let sink = fixture_symbol_address(&scenario, &inlined, "boundary_sink");
     assert_eq!(boundary_sink_value(&scenario, sink).await, 0);
 
     for (expected_line, expected_sink) in [(25, 0), (26, 6)] {
@@ -577,7 +578,7 @@ async fn next_walks_the_entire_boundary_fixture_to_a_normal_exit() {
         let (mut scenario, _) =
             launch_boundary_scenario(format!("full next walk {fixture}"), fixture).await;
         let call = advance_to_boundary_inline_call(&mut scenario, fixture).await;
-        let sink = boundary_sink_address(&scenario, &call);
+        let sink = fixture_symbol_address(&scenario, &call, "boundary_sink");
 
         for (expected_line, expected_sink) in [(31, 6), (33, 11), (34, 22), (35, 4)] {
             let mut reached = false;
@@ -726,7 +727,7 @@ async fn finish_distinguishes_inline_and_physical_frames_across_the_boundary_fix
             "{fixture} finished inline_adjust at unexpected line {after_inline_line}"
         );
         advance_boundary_to_line(&mut scenario, fixture, 31).await;
-        let sink = boundary_sink_address(&scenario, &after_inline);
+        let sink = fixture_symbol_address(&scenario, &after_inline, "boundary_sink");
 
         for case in [
             (31, "marked_returns", 11, 33),
@@ -741,6 +742,199 @@ async fn finish_distinguishes_inline_and_physical_frames_across_the_boundary_fix
             scenario.step_to_stop(StepKind::Out).await,
             StopReason::Exited(ExitStatus::Code(0)),
             "{fixture} top-level finish did not preserve normal process exit"
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
+#[tokio::test]
+async fn rust_o0_inline_steps_cross_source_holes_and_return_to_the_caller() {
+    let fixture = "stepping-boundaries-rust-o0";
+    let (mut scenario, _) =
+        launch_boundary_scenario("Rust O0 inline lifecycle".into(), fixture).await;
+    advance_boundary_to_line(&mut scenario, fixture, 39).await;
+
+    let inlined = boundary_source_step(
+        &mut scenario,
+        StepKind::IntoSource,
+        "first Rust inline statement",
+    )
+    .await;
+    assert_eq!(boundary_function(&inlined), Some("inline_adjust"));
+    assert_eq!(boundary_line(&inlined), Some(31));
+    let physical = inlined.image.physical_instance;
+    let sink = fixture_symbol_address(&scenario, &inlined, "RUST_BOUNDARY_SINK");
+    assert_eq!(boundary_sink_value(&scenario, sink).await, 0);
+
+    for (expected_line, expected_sink) in [(32, 0), (33, 6)] {
+        let location = boundary_source_step(
+            &mut scenario,
+            StepKind::OverSource,
+            "next Rust inline statement",
+        )
+        .await;
+        assert_eq!(boundary_function(&location), Some("inline_adjust"));
+        assert_eq!(boundary_line(&location), Some(expected_line));
+        assert_eq!(location.image.physical_instance, physical);
+        assert_eq!(boundary_sink_value(&scenario, sink).await, expected_sink);
+    }
+
+    let caller = boundary_source_step(
+        &mut scenario,
+        StepKind::OverSource,
+        "Rust caller after inline return",
+    )
+    .await;
+    assert_eq!(boundary_function(&caller), Some("main"));
+    assert_eq!(boundary_line(&caller), Some(39));
+    assert_eq!(caller.image.physical_instance, physical);
+
+    let following_call = boundary_source_step(
+        &mut scenario,
+        StepKind::OverSource,
+        "Rust statement following inline call",
+    )
+    .await;
+    assert_eq!(boundary_function(&following_call), Some("main"));
+    assert_eq!(boundary_line(&following_call), Some(40));
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn rust_o2_inline_steps_follow_optimized_statements_and_return_to_the_caller() {
+    let fixture = "stepping-boundaries-rust-o2";
+    let (mut scenario, _) =
+        launch_boundary_scenario("Rust O2 inline lifecycle".into(), fixture).await;
+    advance_boundary_to_line(&mut scenario, fixture, 39).await;
+
+    let first = boundary_source_step(
+        &mut scenario,
+        StepKind::IntoSource,
+        "first optimized Rust inline statement",
+    )
+    .await;
+    assert_eq!(boundary_function(&first), Some("inline_adjust"));
+    assert_eq!(boundary_line(&first), Some(31));
+    let physical = first.image.physical_instance;
+    let sink = fixture_symbol_address(&scenario, &first, "RUST_BOUNDARY_SINK");
+    assert_eq!(boundary_sink_value(&scenario, sink).await, 0);
+
+    let second = boundary_source_step(
+        &mut scenario,
+        StepKind::OverSource,
+        "second optimized Rust inline statement",
+    )
+    .await;
+    assert_eq!(boundary_function(&second), Some("inline_adjust"));
+    assert_eq!(boundary_line(&second), Some(32));
+    assert_eq!(second.image.physical_instance, physical);
+    assert_eq!(boundary_sink_value(&scenario, sink).await, 0);
+
+    let caller = boundary_source_step(
+        &mut scenario,
+        StepKind::OverSource,
+        "optimized Rust caller after inline return",
+    )
+    .await;
+    assert_eq!(boundary_function(&caller), Some("main"));
+    assert_eq!(boundary_line(&caller), Some(40));
+    assert_eq!(caller.image.physical_instance, physical);
+    assert_eq!(boundary_sink_value(&scenario, sink).await, 6);
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn next_walks_the_entire_rust_boundary_fixture_to_a_normal_exit() {
+    for fixture in ["stepping-boundaries-rust-o0", "stepping-boundaries-rust-o2"] {
+        let (mut scenario, main) =
+            launch_boundary_scenario(format!("full Rust next walk {fixture}"), fixture).await;
+        let sink = fixture_symbol_address(&scenario, &main, "RUST_BOUNDARY_SINK");
+        let expected: &[(u64, u64)] = if fixture.ends_with("o0") {
+            &[
+                (39, 0),
+                (40, 6),
+                (41, 11),
+                (42, 11),
+                (43, 11),
+                (44, 22),
+                (45, 4),
+            ]
+        } else {
+            &[(39, 0), (40, 6), (41, 11), (43, 11), (44, 22), (45, 4)]
+        };
+
+        for &(expected_line, expected_sink) in expected {
+            let location = advance_boundary_to_line(&mut scenario, fixture, expected_line).await;
+            assert_eq!(boundary_function(&location), Some("main"));
+            assert_eq!(boundary_sink_value(&scenario, sink).await, expected_sink);
+        }
+
+        let mut exit = scenario.step_to_stop(StepKind::OverSource).await;
+        if matches!(exit, StopReason::Step { .. }) {
+            let closing = scenario
+                .operation(
+                    "optional Rust closing-brace stop",
+                    scenario.handle().current_location(),
+                )
+                .await;
+            assert_eq!(boundary_line(&closing), Some(46), "{fixture}");
+            exit = scenario.step_to_stop(StepKind::OverSource).await;
+        }
+        assert_eq!(exit, StopReason::Exited(ExitStatus::Code(0)), "{fixture}");
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
+#[tokio::test]
+async fn finish_distinguishes_rust_inline_and_physical_frames() {
+    for fixture in ["stepping-boundaries-rust-o0", "stepping-boundaries-rust-o2"] {
+        let (mut scenario, main) =
+            launch_boundary_scenario(format!("Rust finish lifecycle {fixture}"), fixture).await;
+        let main_physical = main.image.physical_instance;
+        advance_boundary_to_line(&mut scenario, fixture, 39).await;
+
+        let inlined = boundary_source_step(
+            &mut scenario,
+            StepKind::IntoSource,
+            "Rust inline activation",
+        )
+        .await;
+        assert_eq!(boundary_function(&inlined), Some("inline_adjust"));
+        assert_eq!(inlined.image.physical_instance, main_physical);
+        let returned = boundary_source_step(
+            &mut scenario,
+            StepKind::Out,
+            "caller after Rust inline finish",
+        )
+        .await;
+        assert_eq!(boundary_function(&returned), Some("main"));
+        assert_eq!(returned.image.physical_instance, main_physical);
+        assert!((39..=40).contains(&boundary_line(&returned).expect("Rust caller source")));
+
+        let sink = fixture_symbol_address(&scenario, &returned, "RUST_BOUNDARY_SINK");
+        for case in [
+            (40, "marked_returns", 11, 42),
+            (43, "marked_returns", 22, 44),
+            (44, "no_prologue", 4, 45),
+        ] {
+            finish_boundary_physical_call(&mut scenario, fixture, main_physical, sink, case).await;
+        }
+
+        advance_boundary_to_line(&mut scenario, fixture, 45).await;
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Exited(ExitStatus::Code(0)),
+            "{fixture}"
         );
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }

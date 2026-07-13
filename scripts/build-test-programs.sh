@@ -118,6 +118,10 @@ build_rust_fixture tests/fixtures/variables-rust.rs "$output_dir/variables-rust-
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture tests/fixtures/variables-rust.rs "$output_dir/variables-rust-o2" \
     -C opt-level=2 -C force-frame-pointers=no
+build_rust_fixture tests/fixtures/stepping-boundaries.rs "$output_dir/stepping-boundaries-rust-o0" \
+    -C opt-level=0 -C force-frame-pointers=yes
+build_rust_fixture tests/fixtures/stepping-boundaries.rs "$output_dir/stepping-boundaries-rust-o2" \
+    -C opt-level=2 -C force-frame-pointers=no
 build_fixture gcc tests/fixtures/variables-threads.c "$output_dir/variables-threads" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_fixture gcc tests/fixtures/variables-inline.c "$output_dir/variables-inline-gcc-o0" \
