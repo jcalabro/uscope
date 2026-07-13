@@ -1482,7 +1482,7 @@ const fn entry_boundary_cases() -> [EntryBoundaryCase; 6] {
         EntryBoundaryCase {
             fixture: "variables-rust-o0",
             function: "inspect_scalars",
-            source: "variables-rust.rs",
+            source: "variables.rs",
             call_line: 31,
             parameter: "signed_value",
             expected_value: -42,
@@ -1491,7 +1491,7 @@ const fn entry_boundary_cases() -> [EntryBoundaryCase; 6] {
         EntryBoundaryCase {
             fixture: "variables-rust-o2",
             function: "inspect_scalars",
-            source: "variables-rust.rs",
+            source: "variables.rs",
             call_line: 31,
             parameter: "signed_value",
             expected_value: -42,
@@ -1643,9 +1643,9 @@ async fn static_locals_resolve_relocated_and_indexed_addresses() {
 #[tokio::test]
 async fn cpp_and_rust_stack_scalars_use_the_public_variable_path() {
     for (fixture, source, line) in [
-        ("variables-cpp-gcc-o0", "variables-cpp.cpp", 14),
-        ("variables-cpp-clang-o0", "variables-cpp.cpp", 14),
-        ("variables-rust-o0", "variables-rust.rs", 21),
+        ("variables-cpp-gcc-o0", "variables.cpp", 14),
+        ("variables-cpp-clang-o0", "variables.cpp", 14),
+        ("variables-rust-o0", "variables.rs", 21),
     ] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
         scenario.add_source_breakpoint(source, line).await;
@@ -1687,9 +1687,9 @@ async fn cpp_and_rust_stack_scalars_use_the_public_variable_path() {
 #[tokio::test]
 async fn optimized_cpp_and_rust_scalars_materialize_supported_locations() {
     for (fixture, source, line) in [
-        ("variables-cpp-gcc-o2", "variables-cpp.cpp", 14),
-        ("variables-cpp-clang-o2", "variables-cpp.cpp", 14),
-        ("variables-rust-o2", "variables-rust.rs", 22),
+        ("variables-cpp-gcc-o2", "variables.cpp", 14),
+        ("variables-cpp-clang-o2", "variables.cpp", 14),
+        ("variables-rust-o2", "variables.rs", 22),
     ] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
         scenario.add_source_breakpoint(source, line).await;
@@ -1721,6 +1721,437 @@ async fn optimized_cpp_and_rust_scalars_materialize_supported_locations() {
         );
         scenario.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn go_scalars_are_printable_at_a_user_breakpoint_without_stepping() {
+    let fixture = "variables-go-o0";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario.add_source_breakpoint("main.go", 21).await;
+    run_go_to_breakpoint(&mut scenario, fixture).await;
+
+    let state = scenario.snapshot().await;
+    assert!(
+        state
+            .threads
+            .iter()
+            .all(|thread| matches!(thread.state, ThreadState::Stopped { .. }))
+    );
+
+    let snapshot = scenario
+        .operation("inspect Go scalars", scenario.handle().variables())
+        .await;
+    for (name, expected) in [
+        ("flag", ScalarValue::Boolean(true)),
+        ("signedValue", ScalarValue::Signed(-42)),
+        ("unsignedValue", ScalarValue::Unsigned(42)),
+        (
+            "single",
+            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+        ),
+        (
+            "doublePrecision",
+            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+        ),
+        ("localFlag", ScalarValue::Boolean(false)),
+        ("localSigned", ScalarValue::Signed(-41)),
+        ("localUnsigned", ScalarValue::Unsigned(44)),
+        (
+            "localSingle",
+            ScalarValue::Floating(uscope::FloatValue::Binary32(1.75_f32.to_bits())),
+        ),
+        (
+            "localDouble",
+            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.75_f64).to_bits())),
+        ),
+    ] {
+        let variable = snapshot
+            .variables
+            .iter()
+            .find(|variable| variable.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("{fixture} did not expose {name}: {snapshot:?}"));
+        assert_variable_value(variable, expected);
+    }
+
+    resume_go_to_exit(&mut scenario, fixture).await;
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn go_variable_lookup_respects_nested_lexical_shadowing() {
+    let fixture = "variables-go-o0";
+    let mut scenario = Scenario::new("Go lexical shadowing", Scenario::fixture(fixture));
+    scenario.add_source_breakpoint("main.go", 37).await;
+    run_go_to_breakpoint(&mut scenario, fixture).await;
+
+    let innermost = scenario
+        .operation(
+            "Go innermost shadow",
+            scenario.handle().variable("shadowed"),
+        )
+        .await;
+    assert_variable_value(&innermost, ScalarValue::Signed(200));
+    let snapshot = scenario
+        .operation("Go shadow catalog", scenario.handle().variables())
+        .await;
+    let shadows = snapshot
+        .variables
+        .iter()
+        .filter(|variable| variable.name.as_ref() == "shadowed")
+        .collect::<Vec<_>>();
+    assert_eq!(shadows.len(), 2, "{snapshot:?}");
+    assert_variable_value(shadows[0], ScalarValue::Signed(100));
+    assert_variable_value(shadows[1], ScalarValue::Signed(200));
+
+    resume_go_to_exit(&mut scenario, fixture).await;
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn optimized_go_debug_metadata_loads_without_advertising_runtime_control() {
+    let debugger = Debugger::new(Scenario::fixture("variables-go-o2"))
+        .expect("initialize optimized Go debugger");
+    let handle = debugger.handle();
+    let image = handle.module_image();
+    let function = image
+        .function_named("main.inspectScalars")
+        .expect("optimized Go function metadata");
+    assert!(
+        image
+            .instances_for_function(function.id)
+            .any(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+    );
+    assert!(
+        image
+            .source_files()
+            .iter()
+            .any(|source| source.path.ends_with("tests/fixtures/go/variables/main.go"))
+    );
+    drop(handle);
+    debugger.shutdown().await.expect("shut down Go debugger");
+}
+
+#[tokio::test]
+async fn zig_scalars_cover_pie_nonpie_and_optimized_partial_locations() {
+    for fixture in ["variables-zig-o0", "variables-zig-nopie"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint("variables.zig", 27).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let snapshot = scenario
+            .operation("inspect Zig scalars", scenario.handle().variables())
+            .await;
+        assert_language_scalar_values(&snapshot, fixture);
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+
+    let fixture = "variables-zig-o2";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario.add_breakpoint("inspectScalars").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let snapshot = scenario
+        .operation(
+            "inspect optimized Zig scalars",
+            scenario.handle().variables(),
+        )
+        .await;
+    for (name, expected) in [
+        ("flag", ScalarValue::Boolean(true)),
+        ("signed_value", ScalarValue::Signed(-42)),
+        ("unsigned_value", ScalarValue::Unsigned(42)),
+        (
+            "single",
+            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+        ),
+        (
+            "double_precision",
+            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+        ),
+        ("local_signed", ScalarValue::Signed(-41)),
+    ] {
+        let variable = snapshot
+            .variables
+            .iter()
+            .find(|variable| variable.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("{fixture} did not expose {name}: {snapshot:?}"));
+        assert_variable_value(variable, expected);
+    }
+    assert!(
+        snapshot
+            .variables
+            .iter()
+            .any(|variable| { matches!(variable.state, VariableState::Unavailable(_)) })
+    );
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn zig_variable_lookup_tracks_nested_lexical_scope() {
+    let fixture = "variables-zig-o0";
+    let mut scenario = Scenario::new("Zig lexical scope", Scenario::fixture(fixture));
+    scenario.add_source_breakpoint("variables.zig", 40).await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+
+    let snapshot = scenario
+        .operation("inspect Zig nested scope", scenario.handle().variables())
+        .await;
+    for (name, expected) in [
+        ("value", ScalarValue::Signed(-42)),
+        ("outer_value", ScalarValue::Signed(-41)),
+        ("nested_value", ScalarValue::Signed(-40)),
+    ] {
+        let variable = snapshot
+            .variables
+            .iter()
+            .find(|variable| variable.name.as_ref() == name)
+            .unwrap_or_else(|| panic!("{fixture} did not expose {name}: {snapshot:?}"));
+        assert_variable_value(variable, expected);
+    }
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+async fn run_go_to_breakpoint(scenario: &mut Scenario, fixture: &str) {
+    let mut reason = scenario.run_to_stop().await;
+    for _ in 0..32 {
+        match reason {
+            StopReason::Breakpoint { .. } => return,
+            StopReason::Exception(ref exception) if exception.code == 23 => {
+                reason = scenario.resume_to_stop().await;
+            }
+            _ => panic!("{fixture} stopped unexpectedly before its user breakpoint: {reason:?}"),
+        }
+    }
+    panic!("{fixture} did not reach its user breakpoint after 32 runtime signals");
+}
+
+async fn resume_go_to_exit(scenario: &mut Scenario, fixture: &str) {
+    let mut reason = scenario.resume_to_stop().await;
+    for _ in 0..32 {
+        match reason {
+            StopReason::Exited(ExitStatus::Code(0)) => return,
+            StopReason::Exception(ref exception) if exception.code == 23 => {
+                reason = scenario.resume_to_stop().await;
+            }
+            _ => panic!("{fixture} stopped unexpectedly while exiting: {reason:?}"),
+        }
+    }
+    panic!("{fixture} did not exit after 32 runtime signals");
+}
+
+#[tokio::test]
+async fn zig_o0_steps_through_inline_code_and_unwinds_logical_and_physical_frames() {
+    let fixture = "stepping-boundaries-zig-o0";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario
+        .add_source_breakpoint("stepping-boundaries.zig", 29)
+        .await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert_eq!(
+        scenario.step_to_stop(StepKind::OverSource).await,
+        StopReason::Step {
+            kind: StepKind::OverSource
+        }
+    );
+    assert_eq!(
+        scenario.step_to_stop(StepKind::IntoSource).await,
+        StopReason::Step {
+            kind: StepKind::IntoSource
+        }
+    );
+    let inline = scenario
+        .operation("Zig inline location", scenario.handle().current_location())
+        .await;
+    assert_eq!(boundary_function(&inline), Some("inlineAdjust"));
+    assert_eq!(boundary_line(&inline), Some(30));
+
+    let trace = scenario
+        .operation("Zig inline backtrace", scenario.handle().backtrace())
+        .await;
+    let names = trace
+        .frames
+        .iter()
+        .filter_map(|frame| frame.function.as_ref())
+        .map(|function| function.name.as_ref())
+        .collect::<Vec<_>>();
+    assert!(names.starts_with(&["inlineAdjust", "main"]), "{trace:?}");
+
+    assert_eq!(
+        scenario.step_to_stop(StepKind::Out).await,
+        StopReason::Step {
+            kind: StepKind::Out
+        }
+    );
+    let caller = scenario
+        .operation("Zig inline caller", scenario.handle().current_location())
+        .await;
+    assert_eq!(boundary_function(&caller), Some("main"));
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn optimized_zig_steps_into_and_finishes_a_physical_call() {
+    let fixture = "stepping-boundaries-zig-o2";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario
+        .add_source_breakpoint("stepping-boundaries.zig", 29)
+        .await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert_eq!(
+        scenario.step_to_stop(StepKind::OverSource).await,
+        StopReason::Step {
+            kind: StepKind::OverSource
+        }
+    );
+    assert_eq!(
+        scenario.step_to_stop(StepKind::IntoSource).await,
+        StopReason::Step {
+            kind: StepKind::IntoSource
+        }
+    );
+    let entered = scenario
+        .operation("optimized Zig callee", scenario.handle().current_location())
+        .await;
+    assert_eq!(boundary_function(&entered), Some("markedReturns"));
+
+    let trace = scenario
+        .operation("optimized Zig backtrace", scenario.handle().backtrace())
+        .await;
+    let names = trace
+        .frames
+        .iter()
+        .filter_map(|frame| frame.function.as_ref())
+        .map(|function| function.name.as_ref())
+        .collect::<Vec<_>>();
+    assert!(names.starts_with(&["markedReturns", "main"]), "{trace:?}");
+
+    assert_eq!(
+        scenario.step_to_stop(StepKind::Out).await,
+        StopReason::Step {
+            kind: StepKind::Out
+        }
+    );
+    let returned = scenario
+        .operation("optimized Zig caller", scenario.handle().current_location())
+        .await;
+    assert_eq!(boundary_function(&returned), Some("main"));
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
+    let fixture = "variables-threads-zig";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario
+        .add_source_breakpoint("variables-threads.zig", 8)
+        .await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+
+    let snapshot = scenario.snapshot().await;
+    assert_eq!(snapshot.threads.len(), 3, "{snapshot:?}");
+    assert!(
+        snapshot
+            .threads
+            .iter()
+            .all(|thread| matches!(thread.state, ThreadState::Stopped { .. }))
+    );
+    let mut values = BTreeSet::new();
+    for thread in snapshot.threads.iter() {
+        scenario
+            .operation(
+                "select Zig thread",
+                scenario.handle().select_thread(thread.id),
+            )
+            .await;
+        let trace = scenario
+            .operation("unwind Zig thread", scenario.handle().backtrace())
+            .await;
+        assert_eq!(trace.thread, thread.id);
+        assert!(!trace.frames.is_empty());
+        match scenario.handle().variable("value").await {
+            Ok(variable) => {
+                let VariableState::Available {
+                    value: ScalarValue::Unsigned(value),
+                    ..
+                } = variable.state
+                else {
+                    panic!("Zig worker value was not available: {variable:?}");
+                };
+                values.insert(value);
+            }
+            Err(Error::LocationUnavailable | Error::VariableNotFound(_)) => {}
+            Err(error) => panic!("unexpected Zig thread variable error: {error}"),
+        }
+    }
+    assert_eq!(values, BTreeSet::from([101, 202]));
+
+    for _ in 0..3 {
+        if matches!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        ) {
+            assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+            return;
+        }
+    }
+    panic!("Zig threads did not exit after repairing co-hit breakpoints");
+}
+
+#[tokio::test]
+async fn shutdown_reaps_a_stopped_zig_process_and_all_native_threads() {
+    let fixture = "variables-threads-zig";
+    let mut scenario = Scenario::new("shutdown Zig threads", Scenario::fixture(fixture));
+    scenario
+        .add_source_breakpoint("variables-threads.zig", 8)
+        .await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert_eq!(scenario.snapshot().await.threads.len(), 3);
+
+    let status = scenario.shutdown().await.expect("Zig inferior exit event");
+    assert!(matches!(
+        status,
+        ExitStatus::Terminated(exception) if exception.code == 9
+    ));
 }
 
 #[tokio::test]
@@ -2393,7 +2824,7 @@ async fn source_line_breakpoint_stops_through_the_public_scenario_path() {
         .operation("source context", scenario.handle().source_context(0))
         .await;
     assert_eq!(context.location.line.get(), 11);
-    assert!(context.file.path.ends_with("tests/fixtures/basic.c"));
+    assert!(context.file.path.ends_with("tests/fixtures/c/basic.c"));
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(uscope::ExitStatus::Code(0))
@@ -2405,7 +2836,7 @@ async fn source_line_breakpoint_stops_through_the_public_scenario_path() {
 async fn file_qualified_function_breakpoint_stops_at_the_selected_function() {
     let mut scenario = Scenario::new("file function breakpoint", Scenario::fixture("basic"));
     scenario
-        .add_file_function_breakpoint("tests/fixtures/basic.c", "breakpoint_target")
+        .add_file_function_breakpoint("tests/fixtures/c/basic.c", "breakpoint_target")
         .await;
 
     assert!(matches!(

@@ -23,7 +23,15 @@ just run build/test-programs/basic
 
 At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
 Use `print <name>` or `p <name>` to print one visible scalar, or `print` with no argument to list parameters followed by local variables in the selected logical frame, including an inline function frame.
-Initial scalar inspection supports C, C++, and Rust debug information, including one-piece values in memory, general-purpose and XMM registers, constants, and computed DWARF stack values. Entry values, composite locations, non-default address spaces, TLS, and cross-DIE evaluation remain explicitly unavailable.
+Scalar inspection supports one-piece values in memory, general-purpose and XMM registers, constants, and computed DWARF stack values. Entry values, composite locations, non-default address spaces, TLS, and cross-DIE evaluation remain explicitly unavailable.
+
+| Language/compiler | Variable inspection | Execution control |
+| --- | --- | --- |
+| C, C++, Rust | Scalar parameters and locals, including optimized partial availability | Breakpoints, stepping, inline frames, backtraces, and native threads |
+| Zig 0.16 LLVM backend | Scalar parameters and locals in Debug and ReleaseFast builds; PIE and non-PIE | Breakpoints, stepping, inline frames when emitted, backtraces, and native threads |
+| Go 1.26 `gc` | Scalar parameters and locals in a `-N -l` build at an explicit user breakpoint | Launch and continue only; source stepping, goroutine control, split-stack backtraces, and runtime-aware composite rendering are not supported |
+
+Package-level and file-level globals are not yet part of `print`; their implementation is the next planned phase.
 Breakpoint stops automatically print three surrounding source lines on each side when source is available.
 Use `list` or `l` to print that source context again for the current stop.
 Use `stepi`, `step`, `next`, and `finish` for instruction and source-level execution control.

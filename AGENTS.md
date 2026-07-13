@@ -24,7 +24,7 @@
 - Use `tests/support::Scenario` for real debugger workflows. It runs the public request/event path, records a transcript, applies deadlines, shuts down the debugger, and verifies the inferior was reaped.
 - Replace superseded integration tests instead of retaining duplicate coverage.
 - Keep CLI tests separate when they validate parsing, batch behavior, or rendered output rather than debugger semantics.
-- Native fixtures live in `tests/fixtures`. Rust tests may launch them but must not invoke compilers. `just build-test-programs` builds them incrementally.
+- Native fixture sources live in language directories under `tests/fixtures`; each Go executable has its own package subdirectory. Scenario filenames describe the program without repeating the language. Rust tests may launch fixtures but must not invoke compilers. `just build-test-programs` builds them incrementally.
 - Exercise a compact compiler/linker matrix where output can affect behavior: GCC and Clang, optimized and unoptimized, PIE and non-PIE, with and without frame pointers as relevant.
 - Any lifecycle or concurrency change must test cleanup, cancellation, event/state consistency, and the absence of surviving inferior processes.
 - Execution-control changes should cover the pure reducer/classifier where applicable, the public scenario harness, and synchronized native fixtures. Avoid scheduler-dependent sleeps.
