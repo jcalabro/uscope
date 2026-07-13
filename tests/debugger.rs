@@ -1522,6 +1522,43 @@ async fn dwarf_normalization_preserves_inline_instances_and_line_rows() {
     }
 }
 
+#[tokio::test]
+async fn line_zero_rows_do_not_extend_the_previous_source_line() {
+    let debugger =
+        Debugger::new(Scenario::fixture("variables-rust-o0")).expect("initialize debugger");
+    let image = debugger.handle().module_image().clone();
+    let function = image
+        .function_named("inspect_scalars")
+        .expect("inspect_scalars definition");
+    let instance = image
+        .instances_for_function(function.id)
+        .next()
+        .expect("inspect_scalars instance");
+
+    let mut attributed = 0_u64;
+    let mut unattributed = 0_u64;
+    for range in instance.ranges.iter() {
+        for address in range.start.get()..range.end.get() {
+            if image
+                .locate(uscope::ImageAddress::new(address))
+                .source
+                .is_some()
+            {
+                attributed += 1;
+            } else {
+                unattributed += 1;
+            }
+        }
+    }
+    assert!(attributed > 0, "function body lost source attribution");
+    assert!(
+        unattributed > 0,
+        "line-0 regions were attributed to a neighboring source line"
+    );
+
+    debugger.shutdown().await.expect("shutdown debugger");
+}
+
 fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
     let leaf = image.function_named("leaf").expect("leaf definition");
     let leaf_instances: Vec<_> = image

@@ -789,12 +789,18 @@ fn load_lines(
                 push_line_range(&mut previous, row.address(), lines);
                 continue;
             }
+            // Rows without a resolvable file or with line 0 mark compiler-
+            // generated code with no source attribution. They still terminate
+            // the previous entry's range; extending it would misattribute the
+            // gap to a neighboring source line.
             let Some(file) = row.file(header) else {
+                push_line_range(&mut previous, row.address(), lines);
                 continue;
             };
             let path = source_path(dwarf, unit, header, file)?;
             let file_id = source_file_id(path, source_files, source_file_ids);
             let Some(line) = row.line().and_then(|line| LineNumber::new(line.get())) else {
+                push_line_range(&mut previous, row.address(), lines);
                 continue;
             };
             let location = SourceLocation {
