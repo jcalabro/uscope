@@ -203,8 +203,19 @@ enum ClassifiedStop {
 struct StepStart {
     source: Option<SourceLocation>,
     code_instance: Option<CodeInstanceId>,
+    physical_instance: Option<CodeInstanceId>,
     activation: Option<VirtualAddress>,
     plan_addresses: BTreeSet<VirtualAddress>,
+    epilogue_traversal: Option<EpilogueTraversal>,
+}
+
+#[derive(Debug, Clone)]
+struct EpilogueTraversal {
+    /// The caller instruction is always a guard destination. It is only a
+    /// source-step destination when it is also present in `completion_addresses`.
+    return_address: VirtualAddress,
+    completion_addresses: BTreeSet<VirtualAddress>,
+    retire_return_after_repair: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -701,20 +712,27 @@ impl<P: LinuxTraceOps> Controller<P> {
             instances.extend(self.module_image.instances_for_function(function.id));
         }
         if instances.is_empty()
-            || instances
-                .iter()
-                .any(|instance| instance.breakpoint_entry.is_none())
+            || instances.iter().any(|instance| {
+                self.module_image
+                    .recommended_entries_for_instance(instance.id)
+                    .next()
+                    .is_none()
+            })
         {
             return Err(Error::LocationUnavailable);
         }
 
         let mut by_address = BTreeMap::<_, Vec<_>>::new();
         for instance in instances {
-            let entry = instance.breakpoint_entry.expect("entries were validated");
-            by_address
-                .entry(entry.address)
-                .or_default()
-                .push(instance.id);
+            for entry in self
+                .module_image
+                .recommended_entries_for_instance(instance.id)
+            {
+                by_address
+                    .entry(entry.address)
+                    .or_default()
+                    .push(instance.id);
+            }
         }
 
         Ok(by_address
@@ -1533,6 +1551,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .and_then(|inferior| inferior.threads.get_mut(&pid))
                     .ok_or(Error::NotRunning)?
                     .stopped_at_breakpoint = Some(address);
+                if kind != StepKind::Instruction {
+                    self.begin_epilogue_traversal(pid)?;
+                }
                 if self.step_is_complete(pid, kind)? {
                     self.cleanup_plan_breakpoints(execution)?;
                     self.inferior
@@ -1543,6 +1564,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     return self.begin_visible_stop(pid, StopReason::Step { kind });
                 }
 
+                self.mark_epilogue_return_for_retirement(address);
                 self.queue_repair(pid, address);
                 return self.start_next_repair();
             }
@@ -1770,10 +1792,215 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     fn complete_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
+        self.retire_epilogue_return_guard()?;
+        if kind != StepKind::Instruction && self.begin_epilogue_traversal(pid)? {
+            return self.start_user_step(pid, kind);
+        }
         if self.step_is_complete(pid, kind)? {
             self.begin_visible_stop(pid, StopReason::Step { kind })
         } else {
             self.start_user_step(pid, kind)
+        }
+    }
+
+    /// Turns an exact DWARF `epilogue_begin` row into an internal control site.
+    ///
+    /// The unwind is performed before the first teardown instruction executes.
+    /// Once teardown has begun, the controller relies only on the captured
+    /// caller address and caller-side statement breakpoints; it does not make
+    /// a convincing but unsafe attempt to unwind a partially destroyed frame.
+    fn begin_epilogue_traversal(&mut self, pid: Pid) -> Result<bool> {
+        let (execution, already_traversing, start_source) = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step { thread, start, .. } if *thread == pid => Some((
+                    active.id,
+                    start.epilogue_traversal.is_some(),
+                    start.source.clone(),
+                )),
+                _ => None,
+            })
+            .ok_or(Error::NotRunning)?;
+        if already_traversing {
+            return Ok(false);
+        }
+
+        let registers = self.ptrace.registers(pid)?;
+        let instruction = VirtualAddress::new(registers.rip);
+        let (loaded_module, image_address) = {
+            let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+            (
+                inferior.loaded_module,
+                inferior.loaded_module.image_address(instruction).ok(),
+            )
+        };
+        let Some(image_address) = image_address else {
+            return Ok(false);
+        };
+        let location = self.module_image.locate(image_address);
+        if location.physical_instance.is_none()
+            || !self
+                .module_image
+                .control_boundaries_at(image_address)
+                .any(|row| row.flags.epilogue_begin())
+        {
+            return Ok(false);
+        }
+
+        let return_address = self.caller_address(pid, &registers)?;
+        let caller_image = loaded_module.image_address(return_address)?;
+        let caller_location = self.module_image.locate(caller_image);
+        let mut completion_addresses = BTreeSet::new();
+        if let Some(caller_instance_id) = caller_location.physical_instance
+            && let Some(caller_instance) = self.module_image.code_instance(caller_instance_id)
+        {
+            for line in self.module_image.line_entries() {
+                if !line.statement || !caller_instance.contains(line.range.start) {
+                    continue;
+                }
+                if self
+                    .module_image
+                    .control_boundaries_at(line.range.start)
+                    .any(|row| row.flags.epilogue_begin())
+                {
+                    continue;
+                }
+                let candidate_location = self.module_image.locate(line.range.start);
+                if source_for_code_instance(
+                    &self.module_image,
+                    &candidate_location,
+                    caller_instance_id,
+                )
+                .is_some_and(|candidate| {
+                    source_line_changed(start_source.as_ref(), Some(&candidate))
+                }) {
+                    completion_addresses.insert(loaded_module.virtual_address(line.range.start)?);
+                }
+            }
+        }
+
+        let mut plan_addresses = completion_addresses.clone();
+        plan_addresses.insert(return_address);
+        self.install_additional_plan_breakpoints(execution, &plan_addresses)?;
+
+        let start = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .and_then(|active| match &mut active.kind {
+                ActiveKind::Step { start, .. } => Some(start),
+                _ => None,
+            })
+            .expect("source step remained active while installing its epilogue plan");
+        start.plan_addresses.extend(plan_addresses);
+        start.epilogue_traversal = Some(EpilogueTraversal {
+            return_address,
+            completion_addresses,
+            retire_return_after_repair: false,
+        });
+        Ok(true)
+    }
+
+    fn install_additional_plan_breakpoints(
+        &mut self,
+        execution: ExecutionId,
+        addresses: &BTreeSet<VirtualAddress>,
+    ) -> Result<()> {
+        let owner = BreakpointOwner::Plan(execution);
+        let new_addresses = {
+            let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+            addresses
+                .iter()
+                .copied()
+                .filter(|address| {
+                    inferior
+                        .breakpoints
+                        .get(address)
+                        .is_none_or(|site| !site.owners.contains(&owner))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut installed = Vec::new();
+        for address in new_addresses {
+            let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+            if let Err(error) = self.ptrace.install_breakpoint(
+                inferior.tgid,
+                &mut inferior.breakpoints,
+                address,
+                owner,
+            ) {
+                for address in installed.into_iter().rev() {
+                    if let Err(recovery) =
+                        remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)
+                    {
+                        let _ = self.ptrace.kill(inferior.tgid, NixSignal::SIGKILL);
+                        return Err(backend_error(LinuxError::ResumeRecovery {
+                            cause: error.to_string(),
+                            recovery: recovery.to_string(),
+                        }));
+                    }
+                }
+                return Err(error);
+            }
+            installed.push(address);
+        }
+        Ok(())
+    }
+
+    /// Removes the caller guard after its original instruction has been
+    /// repaired. If no caller statement breakpoint remains, source stepping
+    /// safely falls back to instruction stepping in the now-valid caller.
+    fn retire_epilogue_return_guard(&mut self) -> Result<()> {
+        let retirement = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step { start, .. } => start
+                    .epilogue_traversal
+                    .as_ref()
+                    .filter(|traversal| traversal.retire_return_after_repair)
+                    .map(|traversal| (active.id, traversal.return_address)),
+                _ => None,
+            });
+        let Some((execution, address)) = retirement else {
+            return Ok(());
+        };
+
+        self.remove_breakpoint_owner(address, BreakpointOwner::Plan(execution))?;
+        let start = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .and_then(|active| match &mut active.kind {
+                ActiveKind::Step { start, .. } => Some(start),
+                _ => None,
+            })
+            .expect("source step remained active while retiring its return guard");
+        start.plan_addresses.remove(&address);
+        start.epilogue_traversal = None;
+        Ok(())
+    }
+
+    fn mark_epilogue_return_for_retirement(&mut self, address: VirtualAddress) {
+        let Some(start) = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .and_then(|active| match &mut active.kind {
+                ActiveKind::Step { start, .. } => Some(start),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        if let Some(traversal) = start.epilogue_traversal.as_mut()
+            && traversal.return_address == address
+            && !traversal.completion_addresses.contains(&address)
+        {
+            traversal.retire_return_after_repair = true;
         }
     }
 
@@ -1792,46 +2019,38 @@ impl<P: LinuxTraceOps> Controller<P> {
             })
             .expect("source step has a starting state");
 
+        if let Some(traversal) = &start.epilogue_traversal {
+            let instruction = VirtualAddress::new(registers.rip);
+            let stopped_at_breakpoint = self
+                .inferior
+                .as_ref()
+                .and_then(|inferior| inferior.threads.get(&pid))
+                .and_then(|thread| thread.stopped_at_breakpoint);
+            return Ok(stopped_at_breakpoint == Some(instruction)
+                && traversal.completion_addresses.contains(&instruction));
+        }
+
+        let instruction = VirtualAddress::new(registers.rip);
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let classified_as_breakpoint = inferior
+            .threads
+            .get(&pid)
+            .is_some_and(|thread| thread.stopped_at_breakpoint == Some(instruction));
+        if !classified_as_breakpoint
+            && inferior
+                .breakpoints
+                .get(&instruction)
+                .is_some_and(|site| site.installed)
+        {
+            // A trace trap can land immediately before an installed `int3`.
+            // Resume once so breakpoint classification and user-over-plan
+            // precedence happen through the normal breakpoint path.
+            return Ok(false);
+        }
+
         match kind {
             StepKind::Instruction => Ok(true),
-            StepKind::IntoSource => {
-                let location = self.image_location(VirtualAddress::new(registers.rip));
-                // Code that no DWARF instance describes (PLT stubs, library
-                // code) is never a step destination; the step continues until
-                // execution returns to described code.
-                if location.as_ref().is_none_or(|location| {
-                    location.physical_instance.is_none() && location.source.is_none()
-                }) {
-                    return Ok(false);
-                }
-                let presentation = self.presentation_for_thread(
-                    pid,
-                    &StopReason::Step {
-                        kind: StepKind::IntoSource,
-                    },
-                )?;
-                let current_instance = location
-                    .as_ref()
-                    .map(|location| selected_code_instance(location, &presentation))
-                    .transpose()?
-                    .flatten();
-                let source = location.as_ref().and_then(|location| {
-                    current_instance.and_then(|instance| {
-                        source_for_code_instance(&self.module_image, location, instance)
-                    })
-                });
-                let activation = self.top_activation(pid, &registers)?;
-                let statement = location.as_ref().is_some_and(|location| {
-                    self.module_image
-                        .line_entry_containing(location.address)
-                        .is_some_and(|entry| entry.statement)
-                });
-
-                Ok(statement
-                    && (activation != start.activation.unwrap_or(activation)
-                        || current_instance != start.code_instance
-                        || source_line_changed(start.source.as_ref(), source.as_ref())))
-            }
+            StepKind::IntoSource => self.step_into_source_is_complete(pid, &registers, start),
             StepKind::OverSource | StepKind::Out => {
                 let Some(activation) = start.activation else {
                     return Err(Error::LocationUnavailable);
@@ -1850,6 +2069,71 @@ impl<P: LinuxTraceOps> Controller<P> {
                         && source_line_changed(start.source.as_ref(), source.as_ref())))
             }
         }
+    }
+
+    fn step_into_source_is_complete(
+        &self,
+        pid: Pid,
+        registers: &libc::user_regs_struct,
+        start: &StepStart,
+    ) -> Result<bool> {
+        let location = self.image_location(VirtualAddress::new(registers.rip));
+        // PLT stubs, library code, and other undescribed instructions are not
+        // source-step destinations.
+        if location.as_ref().is_none_or(|location| {
+            location.physical_instance.is_none() && location.source.is_none()
+        }) {
+            return Ok(false);
+        }
+        let presentation = self.presentation_for_thread(
+            pid,
+            &StopReason::Step {
+                kind: StepKind::IntoSource,
+            },
+        )?;
+        let current_instance = location
+            .as_ref()
+            .map(|location| selected_code_instance(location, &presentation))
+            .transpose()?
+            .flatten();
+        let source = location.as_ref().and_then(|location| {
+            current_instance.and_then(|instance| {
+                source_for_code_instance(&self.module_image, location, instance)
+            })
+        });
+        let activation = self.top_activation(pid, registers)?;
+        let statement = location.as_ref().is_some_and(|location| {
+            self.module_image
+                .line_entry_containing(location.address)
+                .is_some_and(|entry| entry.statement)
+        });
+        let current_physical = location
+            .as_ref()
+            .and_then(|location| location.physical_instance);
+        let entered_physical_activation = match start.activation {
+            Some(start_activation) if start_activation != activation => self
+                .location_for_activation(pid, registers, start_activation)?
+                .is_some(),
+            Some(_) => current_physical.is_some() && current_physical != start.physical_instance,
+            None => false,
+        };
+        let at_recommended_entry = location.as_ref().is_some_and(|location| {
+            location.physical_instance.is_some_and(|instance| {
+                self.module_image
+                    .recommended_entries_for_instance(instance)
+                    .any(|entry| entry.address == location.address)
+            })
+        });
+        if entered_physical_activation && !at_recommended_entry {
+            return Ok(false);
+        }
+
+        Ok(
+            (statement || entered_physical_activation && at_recommended_entry)
+                && (activation != start.activation.unwrap_or(activation)
+                    || current_instance != start.code_instance
+                    || source_line_changed(start.source.as_ref(), source.as_ref())),
+        )
     }
 
     fn step_start(&self, pid: Pid, kind: StepKind) -> Result<StepStart> {
@@ -1904,8 +2188,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(StepStart {
             source,
             code_instance,
+            physical_instance: location
+                .as_ref()
+                .and_then(|location| location.physical_instance),
             activation,
             plan_addresses,
+            epilogue_traversal: None,
         })
     }
 

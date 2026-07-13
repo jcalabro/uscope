@@ -613,8 +613,8 @@ fn breakpoint_stops_print_source_context_from_any_working_directory() {
         .expect("run uscope");
     let stdout = assert_success(output);
 
-    assert!(stdout.contains("tests/fixtures/basic.c:5"));
-    assert!(stdout.contains("=> 5 | __attribute__((noinline)) uint64_t breakpoint_target(void) {"));
+    assert!(stdout.contains("tests/fixtures/basic.c:6"));
+    assert!(stdout.contains("=> 6 |     return uscope_value;"));
     assert!(stdout.contains("   8 |"));
 }
 
@@ -641,13 +641,8 @@ fn list_command_prints_the_current_source_context() {
         .expect("run uscope");
     let stdout = assert_success(output);
 
-    assert_eq!(stdout.matches("tests/fixtures/basic.c:5").count(), 2);
-    assert_eq!(
-        stdout
-            .matches("=> 5 | __attribute__((noinline)) uint64_t breakpoint_target(void) {")
-            .count(),
-        2
-    );
+    assert_eq!(stdout.matches("tests/fixtures/basic.c:6").count(), 2);
+    assert_eq!(stdout.matches("=> 6 |     return uscope_value;").count(), 2);
 }
 
 #[test]
