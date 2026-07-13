@@ -1756,10 +1756,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                     })
                 });
                 let activation = self.top_activation(pid, &registers)?;
+                let statement = location.as_ref().is_some_and(|location| {
+                    self.module_image
+                        .line_entry_containing(location.address)
+                        .is_some_and(|entry| entry.statement)
+                });
 
                 Ok(activation != start.activation.unwrap_or(activation)
                     || current_instance != start.code_instance
-                    || source_line_changed(start.source.as_ref(), source.as_ref()))
+                    || (statement && source_line_changed(start.source.as_ref(), source.as_ref())))
             }
             StepKind::OverSource | StepKind::Out => {
                 let Some(activation) = start.activation else {
@@ -1816,7 +1821,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             let return_address = self.caller_address(pid, &registers)?;
             for line in self.module_image.line_entries() {
-                if !instance.contains(line.range.start) {
+                if !line.statement || !instance.contains(line.range.start) {
                     continue;
                 }
                 let location = self.module_image.locate(line.range.start);

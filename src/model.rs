@@ -809,6 +809,9 @@ pub struct Backtrace {
 pub struct LineEntry {
     pub range: AddressRange<ImageAddress>,
     pub location: SourceLocation,
+    /// Whether the row that opened this range is a recommended breakpoint
+    /// location (`is_stmt`). Source stepping stops only at statement rows.
+    pub statement: bool,
 }
 
 /// One ordered row emitted by a source line program.
@@ -1192,6 +1195,16 @@ impl ModuleImage {
         &self.lines
     }
 
+    pub(crate) fn line_entry_containing(&self, address: ImageAddress) -> Option<&LineEntry> {
+        self.line_range_index
+            .containing(address)
+            .min()
+            .and_then(|index| {
+                self.lines
+                    .get(usize::try_from(index).expect("u32 fits usize"))
+            })
+    }
+
     /// Looks up a concrete code instance by identifier.
     #[must_use]
     pub fn code_instance(&self, id: CodeInstanceId) -> Option<&CodeInstanceInfo> {
@@ -1280,13 +1293,7 @@ impl ModuleImage {
                 .cloned()
         });
         let source = self
-            .line_range_index
-            .containing(address)
-            .min()
-            .and_then(|index| {
-                self.lines
-                    .get(usize::try_from(index).expect("u32 fits usize"))
-            })
+            .line_entry_containing(address)
             .map(|entry| entry.location.clone());
 
         ImageLocation {
