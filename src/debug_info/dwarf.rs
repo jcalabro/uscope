@@ -1093,17 +1093,28 @@ fn first_distinct_source_statement(
     range: AddressRange<ImageAddress>,
     raw_entry: ImageAddress,
 ) -> Option<ImageAddress> {
+    // Overlapping line programs (COMDAT folding, duplicated metadata) can
+    // attribute the same image address from unrelated sequences. Prologue
+    // reasoning is only sound within the single sequence that describes the
+    // entry, so an ambiguous entry attribution keeps the raw entry.
+    let mut entry_rows = statements
+        .iter()
+        .filter(|row| row.address == raw_entry && row.location.is_some());
+    let entry_row = entry_rows.next_back()?;
+    if entry_rows.any(|row| row.sequence != entry_row.sequence) {
+        return None;
+    }
     // Line programs collapse equal-address rows by taking the final source
     // attribution. Mirror that rule here, and do not mistake a later row for
     // the same signature line for proof that argument homing has completed.
-    let entry_location = statements
-        .iter()
-        .filter(|row| row.address == raw_entry)
-        .filter_map(|row| row.location.as_ref())
-        .next_back()?;
+    let entry_location = entry_row.location.as_ref()?;
     statements
         .iter()
-        .filter(|row| row.flags.is_statement() && raw_entry < row.address)
+        .filter(|row| {
+            row.sequence == entry_row.sequence
+                && row.flags.is_statement()
+                && raw_entry < row.address
+        })
         .filter(|row| range.contains(row.address))
         .filter(|row| {
             row.location.as_ref().is_some_and(|location| {
@@ -1298,9 +1309,8 @@ mod tests {
         assert_eq!(lines[0].range.end, ImageAddress::new(0x104));
     }
 
-    #[test]
-    fn analyzed_entry_ignores_later_rows_for_the_signature_line() {
-        let row = |address, line, ordinal| StatementRow {
+    fn analyzed_entry_row(address: u64, line: u64, sequence: u32, ordinal: u32) -> StatementRow {
+        StatementRow {
             address: ImageAddress::new(address),
             operation_index: 0,
             location: Some(SourceLocation {
@@ -1311,14 +1321,63 @@ mod tests {
             discriminator: 0,
             flags: StatementFlags::empty().with_statement(true),
             isa: 0,
-            sequence: LineSequenceId::new(0),
+            sequence: LineSequenceId::new(sequence),
             ordinal,
-        };
-        let statements = [row(0x100, 10, 0), row(0x110, 10, 1), row(0x120, 11, 2)];
+        }
+    }
+
+    #[test]
+    fn analyzed_entry_ignores_later_rows_for_the_signature_line() {
+        let statements = [
+            analyzed_entry_row(0x100, 10, 0, 0),
+            analyzed_entry_row(0x110, 10, 0, 1),
+            analyzed_entry_row(0x120, 11, 0, 2),
+        ];
 
         assert_eq!(
             first_distinct_source_statement(
                 &statements,
+                AddressRange {
+                    start: ImageAddress::new(0x100),
+                    end: ImageAddress::new(0x130),
+                },
+                ImageAddress::new(0x100),
+            ),
+            Some(ImageAddress::new(0x120))
+        );
+    }
+
+    #[test]
+    fn analyzed_entry_stays_within_one_line_program_sequence() {
+        // A foreign sequence overlapping the entry address makes attribution
+        // ambiguous: no candidate may be derived from mixed sequences.
+        let ambiguous = [
+            analyzed_entry_row(0x100, 10, 0, 0),
+            analyzed_entry_row(0x100, 50, 1, 0),
+            analyzed_entry_row(0x120, 11, 0, 1),
+        ];
+        assert_eq!(
+            first_distinct_source_statement(
+                &ambiguous,
+                AddressRange {
+                    start: ImageAddress::new(0x100),
+                    end: ImageAddress::new(0x130),
+                },
+                ImageAddress::new(0x100),
+            ),
+            None
+        );
+
+        // A foreign sequence that only overlaps the body must not supply the
+        // candidate address for the entry's sequence.
+        let foreign_candidate = [
+            analyzed_entry_row(0x100, 10, 0, 0),
+            analyzed_entry_row(0x110, 50, 1, 0),
+            analyzed_entry_row(0x120, 11, 0, 1),
+        ];
+        assert_eq!(
+            first_distinct_source_statement(
+                &foreign_candidate,
                 AddressRange {
                     start: ImageAddress::new(0x100),
                     end: ImageAddress::new(0x130),

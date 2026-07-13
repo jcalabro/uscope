@@ -396,13 +396,20 @@ async fn boundary_fixture_preserves_inline_step_and_next_semantics() {
             Some("inline_adjust"),
             "{fixture}"
         );
-        assert!(
+        assert_eq!(
             inlined
                 .image
                 .source
                 .as_ref()
-                .is_some_and(|source| (24..=26).contains(&source.line.get())),
+                .map(|source| source.line.get()),
+            Some(24),
             "{fixture}: {inlined:?}"
+        );
+        let sink = fixture_symbol_address(&step, &inlined, "boundary_sink");
+        assert_eq!(
+            boundary_sink_value(&step, sink).await,
+            0,
+            "{fixture} executed inline user work before its entry stop"
         );
         step.shutdown().await;
 
@@ -4003,5 +4010,28 @@ async fn pause_cancels_an_active_source_execution_plan() {
             .all(|thread| matches!(thread.state, ThreadState::Stopped { .. }))
     );
 
-    scenario.shutdown().await;
+    // Cancellation must also retract the plan's internal breakpoints: after
+    // releasing the loop, a stale plan-owned site at the caller's return
+    // address would surface as an unexpected breakpoint stop instead of exit.
+    let release = scenario
+        .operation(
+            "resolve step release",
+            scenario.handle().runtime_address("step_release"),
+        )
+        .await;
+    scenario
+        .operation(
+            "release step loop",
+            scenario.handle().write_word(release, 1),
+        )
+        .await;
+    // The pause above was requested outside the scenario transcript loop, so
+    // its stop event is still queued and must not satisfy the resume below.
+    scenario.drain_pending_events();
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0)),
+        "a canceled source-step plan left state that interrupted execution"
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }
