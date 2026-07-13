@@ -2795,6 +2795,54 @@ async fn source_steps_skip_non_statement_line_rows() {
 }
 
 #[tokio::test]
+async fn step_into_crosses_library_calls_without_line_info() {
+    // Line 6 calls getpid() through the PLT, whose call-frame information
+    // uses a DWARF CFA expression and whose code has no line rows. A source
+    // step must cross the library call and stop at line 7 instead of
+    // stopping inside the PLT or failing the unwind.
+    let mut scenario = Scenario::new("step over libc", Scenario::fixture("step-over-libc"));
+    scenario.add_breakpoint("call_libc").await;
+    scenario.run_to_stop().await;
+
+    for expected_line in [6, 7] {
+        assert_eq!(
+            scenario.step_to_stop(StepKind::IntoSource).await,
+            StopReason::Step {
+                kind: StepKind::IntoSource
+            }
+        );
+        let location = scenario
+            .operation(
+                "location after library step",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(
+            location
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("call_libc")
+        );
+        assert_eq!(
+            location
+                .image
+                .source
+                .as_ref()
+                .map(|source| source.line.get()),
+            Some(expected_line)
+        );
+    }
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
 async fn stale_stop_tokens_allow_exactly_one_client_to_resume() {
     let mut scenario = Scenario::new("competing clients", Scenario::fixture("basic"));
     scenario.add_breakpoint("breakpoint_target").await;

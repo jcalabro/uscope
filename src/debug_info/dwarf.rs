@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gimli::{
-    BaseAddresses, CfaRule, ColumnType, DwarfSections, EhFrame, EndianSlice, RegisterRule,
-    RunTimeEndian, SectionId, UnwindContext, UnwindSection,
+    BaseAddresses, CfaRule, ColumnType, DwarfSections, EhFrame, Encoding, EndianSlice,
+    EvaluationResult, Location, RegisterRule, RunTimeEndian, SectionId, UnwindContext,
+    UnwindExpression, UnwindSection, Value,
 };
 use object::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 
@@ -217,11 +218,18 @@ impl UnwindInfo for DwarfUnwindInfo {
         let fde = section
             .fde_for_address(&self.bases, address.get(), EhFrame::cie_from_offset)
             .map_err(|error| cfi_error(error, address))?;
+        let encoding = fde.cie().encoding();
         let mut context = UnwindContext::new();
         let row = fde
             .unwind_info_for_address(&section, &self.bases, &mut context, address.get())
             .map_err(|error| cfi_error(error, address))?;
-        cfa_from_rule(row.cfa(), registers)
+        cfa_from_rule(
+            row.cfa(),
+            registers,
+            &section,
+            encoding,
+            &mut NoUnwindMemory,
+        )
     }
 
     fn unwind(
@@ -237,11 +245,12 @@ impl UnwindInfo for DwarfUnwindInfo {
             .map_err(|error| cfi_error(error, address))?;
         let return_register = fde.cie().return_address_register().0;
         let signal_frame = fde.cie().is_signal_trampoline();
+        let encoding = fde.cie().encoding();
         let mut context = UnwindContext::new();
         let row = fde
             .unwind_info_for_address(&section, &self.bases, &mut context, address.get())
             .map_err(|error| cfi_error(error, address))?;
-        let cfa = cfa_from_rule(row.cfa(), registers)?;
+        let cfa = cfa_from_rule(row.cfa(), registers, &section, encoding, memory)?;
         let mut caller = registers.clone();
 
         for &(register, ref rule) in row.registers() {
@@ -264,6 +273,9 @@ impl UnwindInfo for DwarfUnwindInfo {
 fn cfa_from_rule(
     rule: &CfaRule<usize>,
     registers: &RegisterFile,
+    section: &EhFrame<Reader<'_>>,
+    encoding: Encoding,
+    memory: &mut dyn MemoryReader,
 ) -> std::result::Result<VirtualAddress, UnwindTermination> {
     match rule {
         CfaRule::RegisterAndOffset { register, offset } => {
@@ -278,9 +290,90 @@ fn cfa_from_rule(
                 })?,
             ))
         }
-        CfaRule::Expression(_) => Err(UnwindTermination::UnsupportedUnwindInfo {
-            feature: "CFA expression".into(),
-        }),
+        CfaRule::Expression(expression) => {
+            evaluate_unwind_expression(expression, section, encoding, registers, memory)
+        }
+    }
+}
+
+// Bounds unwind-expression evaluation so a malformed expression with a
+// backward branch cannot hang the controller thread.
+const MAX_UNWIND_EXPRESSION_ITERATIONS: u32 = 10_000;
+
+/// A memory source for contexts where an unwind expression must not touch
+/// inferior memory (e.g. synchronous CFA queries without a stopped tracee).
+struct NoUnwindMemory;
+
+impl MemoryReader for NoUnwindMemory {
+    fn read_u64(&mut self, _address: VirtualAddress) -> std::result::Result<u64, ()> {
+        Err(())
+    }
+}
+
+fn evaluate_unwind_expression(
+    expression: &UnwindExpression<usize>,
+    section: &EhFrame<Reader<'_>>,
+    encoding: Encoding,
+    registers: &RegisterFile,
+    memory: &mut dyn MemoryReader,
+) -> std::result::Result<VirtualAddress, UnwindTermination> {
+    let unsupported = |feature: &str| UnwindTermination::UnsupportedUnwindInfo {
+        feature: format!("CFA expression: {feature}").into(),
+    };
+    let corrupt = |error: gimli::Error| UnwindTermination::CorruptUnwindInfo {
+        description: format!("CFA expression: {error}").into(),
+    };
+    let expression = expression.get(section).map_err(corrupt)?;
+    let mut evaluation = expression.evaluation(encoding);
+    evaluation.set_max_iterations(MAX_UNWIND_EXPRESSION_ITERATIONS);
+    let mut result = evaluation.evaluate().map_err(corrupt)?;
+    loop {
+        result = match result {
+            EvaluationResult::Complete => break,
+            EvaluationResult::RequiresRegister { register, .. } => {
+                let value = registers.get(register.0).ok_or_else(|| {
+                    UnwindTermination::RegisterUnavailable {
+                        register: format!("DWARF register {}", register.0).into(),
+                    }
+                })?;
+                evaluation
+                    .resume_with_register(Value::Generic(value))
+                    .map_err(corrupt)?
+            }
+            EvaluationResult::RequiresMemory { address, size, .. } => {
+                if size == 0 || u32::from(size) > 8 {
+                    return Err(unsupported("unsupported memory operand size"));
+                }
+                let address = VirtualAddress::new(address);
+                let word = memory
+                    .read_u64(address)
+                    .map_err(|()| UnwindTermination::MemoryReadFailed { address })?;
+                let bits = u32::from(size) * 8;
+                let value = if bits == 64 {
+                    word
+                } else {
+                    word & ((1 << bits) - 1)
+                };
+                evaluation
+                    .resume_with_memory(Value::Generic(value))
+                    .map_err(corrupt)?
+            }
+            EvaluationResult::RequiresFrameBase => return Err(unsupported("frame base")),
+            EvaluationResult::RequiresTls(_) => return Err(unsupported("TLS")),
+            EvaluationResult::RequiresCallFrameCfa => {
+                return Err(unsupported("recursive CFA"));
+            }
+            _ => return Err(unsupported("unsupported expression operation")),
+        };
+    }
+
+    let pieces = evaluation.result();
+    let [piece] = pieces.as_slice() else {
+        return Err(unsupported("compound location"));
+    };
+    match piece.location {
+        Location::Address { address } => Ok(VirtualAddress::new(address)),
+        _ => Err(unsupported("non-address result")),
     }
 }
 
