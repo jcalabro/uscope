@@ -240,6 +240,8 @@ fn help_and_cls_are_generated_without_changing_clear_semantics() {
             "--eval",
             "help clear",
             "--eval",
+            "help fin",
+            "--eval",
             "cls",
         ])
         .arg(executable)
@@ -256,6 +258,10 @@ fn help_and_cls_are_generated_without_changing_clear_semantics() {
     assert!(stdout.contains("help [command] (?)"), "{stdout}");
     assert!(stdout.contains("delete <id|all>"), "{stdout}");
     assert!(stdout.contains("aliases: clear"), "{stdout}");
+    assert!(
+        stdout.contains("finish\n  Run until the selected frame returns\n  aliases: fin, f"),
+        "{stdout}"
+    );
     assert!(stdout.ends_with("\x1b[2J\x1b[H"), "{stdout:?}");
 }
 
