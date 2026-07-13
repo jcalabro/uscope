@@ -149,7 +149,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         Finish,
         "finish",
-        [],
+        ["fin", "f"],
         "finish",
         "Run until the selected frame returns"
     ),
