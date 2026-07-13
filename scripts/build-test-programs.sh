@@ -3,6 +3,49 @@
 set -euo pipefail
 
 readonly output_dir="build/test-programs"
+readonly fixtures_dir="tests/fixtures"
+readonly c_fixtures_dir="${fixtures_dir}/c"
+readonly cpp_fixtures_dir="${fixtures_dir}/cpp"
+readonly go_fixtures_dir="${fixtures_dir}/go"
+readonly rust_fixtures_dir="${fixtures_dir}/rust"
+readonly zig_fixtures_dir="${fixtures_dir}/zig"
+
+source_changed_since_output() {
+    local source="$1"
+    local output="$2"
+    local changed
+    changed=$(find "$source" -newer "$output" -print -quit)
+    [[ -n "$changed" ]]
+}
+
+run_cached_build() {
+    local source="$1"
+    local output="$2"
+    local metadata="$3"
+    shift 3
+    local -a command=("$@")
+    local command_text
+    printf -v command_text '%q ' "${command[@]}"
+    local signature="${metadata}"$'\n'"command=${command_text}"
+    local stamp="${output}.command"
+    local previous=""
+
+    if [[ -f "$stamp" ]]; then
+        previous=$(<"$stamp")
+    fi
+
+    if [[ -x "$output" ]] \
+        && ! source_changed_since_output "$source" "$output" \
+        && [[ "$previous" == "$signature" ]]; then
+        printf '[cached] %s\n' "$output"
+        return
+    fi
+
+    printf '[build]  %s\n' "$output"
+    NIX_HARDENING_ENABLE= "${command[@]}"
+    printf '%s\n' "$signature" >"${stamp}.tmp"
+    mv "${stamp}.tmp" "$stamp"
+}
 
 build_program() {
     local tool="$1"
@@ -19,26 +62,9 @@ build_program() {
     local version
     version=$("$tool" --version)
     version=${version%%$'\n'*}
-
-    local command_text
-    printf -v command_text '%q ' "${command[@]}"
-    local signature="compiler=${version}"$'\n'"command=${command_text}"
-    local stamp="${output}.command"
-    local previous=""
-
-    if [[ -f "$stamp" ]]; then
-        previous=$(<"$stamp")
-    fi
-
-    if [[ -x "$output" && ! "$source" -nt "$output" && "$previous" == "$signature" ]]; then
-        printf '[cached] %s\n' "$output"
-        return
-    fi
-
-    printf '[build]  %s\n' "$output"
-    NIX_HARDENING_ENABLE= "${command[@]}"
-    printf '%s\n' "$signature" >"${stamp}.tmp"
-    mv "${stamp}.tmp" "$stamp"
+    run_cached_build "$source" "$output" \
+        "compiler=${version}"$'\n'"target=x86_64-linux"$'\n'"backend=${tool}" \
+        "${command[@]}"
 }
 
 build_fixture() {
@@ -67,6 +93,46 @@ build_rust_fixture() {
     build_program rustc "$source" "$output" \
         --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C panic=abort \
         -C link-arg=-lc "$@"
+}
+
+build_go_fixture() {
+    local package_dir="$1"
+    local output="$2"
+    shift 2
+    local -a sources=()
+    mapfile -d '' sources < <(
+        find "$package_dir" -maxdepth 1 -type f -name '*.go' -print0 | sort -z
+    )
+    if (( ${#sources[@]} == 0 )); then
+        printf 'error: Go fixture has no source files: %s\n' "$package_dir" >&2
+        exit 1
+    fi
+    local -a command=(
+        env CGO_ENABLED=0 go build -buildvcs=false "$@" -o "$output" "${sources[@]}"
+    )
+    local version
+    version=$(go version)
+    local target
+    target=$(go env GOOS GOARCH)
+    target=${target//$'\n'//}
+    run_cached_build "$package_dir" "$output" \
+        "compiler=${version}"$'\n'"target=${target}"$'\n'"backend=gc" \
+        "${command[@]}"
+}
+
+build_zig_fixture() {
+    local source="$1"
+    local output="$2"
+    shift 2
+    local -a command=(
+        zig build-exe "$source" -target x86_64-linux-gnu -fllvm -fno-strip
+        -funwind-tables "$@" "-femit-bin=${output}"
+    )
+    local version
+    version=$(zig version)
+    run_cached_build "$source" "$output" \
+        "compiler=zig ${version}"$'\n'"target=x86_64-linux-gnu"$'\n'"backend=llvm" \
+        "${command[@]}"
 }
 
 # Fails the build when a fixture no longer emits a sibling-call jump a test
@@ -101,107 +167,132 @@ require_dwarf_operation() {
 
 mkdir -p "$output_dir"
 
-build_fixture gcc tests/fixtures/basic.c "$output_dir/basic" \
+build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic" \
     -O0 -g3 -fPIE -pie
-build_fixture gcc tests/fixtures/variables.c "$output_dir/variables-gcc-o0" \
+build_fixture gcc "$c_fixtures_dir/variables.c" "$output_dir/variables-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/variables.c "$output_dir/variables-clang-o0" \
+build_fixture clang "$c_fixtures_dir/variables.c" "$output_dir/variables-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/variables-parameters.c "$output_dir/variables-parameters-gcc-o0" \
+build_fixture gcc "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/variables-parameters.c "$output_dir/variables-parameters-clang-o0" \
+build_fixture clang "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/variables-parameters.c "$output_dir/variables-parameters-gcc-o2" \
+build_fixture gcc "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/variables-parameters.c "$output_dir/variables-parameters-clang-o2" \
+build_fixture clang "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/variables-static.c "$output_dir/variables-static-gcc-o2" \
+build_fixture gcc "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/variables-static.c "$output_dir/variables-static-clang-o2" \
+build_fixture clang "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 require_dwarf_operation "$output_dir/variables-static-clang-o2" DW_OP_addrx
-build_fixture gcc tests/fixtures/variables-static.c "$output_dir/variables-static-gcc-nopie" \
+build_fixture gcc "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-gcc-nopie" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie
 require_dwarf_operation "$output_dir/variables-static-gcc-nopie" 'DW_OP_addr:'
-build_cpp_fixture g++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-gcc-o0" \
+build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_cpp_fixture clang++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-clang-o0" \
+build_cpp_fixture clang++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_cpp_fixture g++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-gcc-o2" \
+build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
-build_cpp_fixture clang++ tests/fixtures/variables-cpp.cpp "$output_dir/variables-cpp-clang-o2" \
+build_cpp_fixture clang++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
-build_rust_fixture tests/fixtures/variables-rust.rs "$output_dir/variables-rust-o0" \
+build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
-build_rust_fixture tests/fixtures/variables-rust.rs "$output_dir/variables-rust-o2" \
+build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o2" \
     -C opt-level=2 -C force-frame-pointers=no
-build_rust_fixture tests/fixtures/stepping-boundaries.rs "$output_dir/stepping-boundaries-rust-o0" \
+build_go_fixture "$go_fixtures_dir/variables" "$output_dir/variables-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/variables" "$output_dir/variables-go-o2" \
+    -buildmode=pie
+require_dwarf_operation "$output_dir/variables-go-o0" 'DW_AT_language.*Go'
+require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
+build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o2" \
+    -O ReleaseFast -fPIE -fomit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-nopie" \
+    -O Debug -fno-PIE -fno-omit-frame-pointer
+require_dwarf_operation "$output_dir/variables-zig-o0" 'DW_AT_producer.*zig 0.16.0'
+require_dwarf_operation "$output_dir/variables-zig-o0" variables.inspectScalars
+build_rust_fixture "$rust_fixtures_dir/stepping-boundaries.rs" "$output_dir/stepping-boundaries-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
-build_rust_fixture tests/fixtures/stepping-boundaries.rs "$output_dir/stepping-boundaries-rust-o2" \
+build_rust_fixture "$rust_fixtures_dir/stepping-boundaries.rs" "$output_dir/stepping-boundaries-rust-o2" \
     -C opt-level=2 -C force-frame-pointers=no
-build_fixture gcc tests/fixtures/variables-threads.c "$output_dir/variables-threads" \
+build_zig_fixture "$zig_fixtures_dir/stepping-boundaries.zig" \
+    "$output_dir/stepping-boundaries-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/stepping-boundaries.zig" \
+    "$output_dir/stepping-boundaries-zig-o2" \
+    -O ReleaseFast -fPIE -fomit-frame-pointer
+require_dwarf_operation "$output_dir/stepping-boundaries-zig-o0" \
+    'DW_TAG_inlined_subroutine'
+build_fixture gcc "$c_fixtures_dir/variables-threads.c" "$output_dir/variables-threads" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
-build_fixture gcc tests/fixtures/variables-inline.c "$output_dir/variables-inline-gcc-o0" \
+build_zig_fixture "$zig_fixtures_dir/variables-threads.zig" \
+    "$output_dir/variables-threads-zig" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_fixture gcc "$c_fixtures_dir/variables-inline.c" "$output_dir/variables-inline-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/variables-inline.c "$output_dir/variables-inline-clang-o0" \
+build_fixture clang "$c_fixtures_dir/variables-inline.c" "$output_dir/variables-inline-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/variables-inline.c "$output_dir/variables-inline-gcc-o1" \
+build_fixture gcc "$c_fixtures_dir/variables-inline.c" "$output_dir/variables-inline-gcc-o1" \
     -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/variables-inline.c "$output_dir/variables-inline-clang-o1" \
+build_fixture clang "$c_fixtures_dir/variables-inline.c" "$output_dir/variables-inline-clang-o1" \
     -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/spin.c "$output_dir/spin" \
+build_fixture gcc "$c_fixtures_dir/spin.c" "$output_dir/spin" \
     -O0 -g3 -fPIE -pie
-build_fixture gcc tests/fixtures/threads.c "$output_dir/threads" \
+build_fixture gcc "$c_fixtures_dir/threads.c" "$output_dir/threads" \
     -O0 -g3 -fPIE -pie -pthread
-build_fixture gcc tests/fixtures/signals.c "$output_dir/signals" \
+build_fixture gcc "$c_fixtures_dir/signals.c" "$output_dir/signals" \
     -O0 -g3 -fPIE -pie
-build_fixture gcc tests/fixtures/fatal-signal.c "$output_dir/fatal-signal" \
+build_fixture gcc "$c_fixtures_dir/fatal-signal.c" "$output_dir/fatal-signal" \
     -O0 -g3 -fPIE -pie
-build_fixture gcc tests/fixtures/job-control.c "$output_dir/job-control" \
+build_fixture gcc "$c_fixtures_dir/job-control.c" "$output_dir/job-control" \
     -O0 -g3 -fPIE -pie
-build_fixture gcc tests/fixtures/thread-exec.c "$output_dir/thread-exec" \
+build_fixture gcc "$c_fixtures_dir/thread-exec.c" "$output_dir/thread-exec" \
     -O0 -g3 -fPIE -pie -pthread
-build_fixture gcc tests/fixtures/thread-stress.c "$output_dir/thread-stress" \
+build_fixture gcc "$c_fixtures_dir/thread-stress.c" "$output_dir/thread-stress" \
     -O0 -g3 -fPIE -pie -pthread
-build_fixture gcc tests/fixtures/step.c "$output_dir/step" \
+build_fixture gcc "$c_fixtures_dir/step.c" "$output_dir/step" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/stepping-boundaries.c "$output_dir/stepping-boundaries-gcc-o0" \
+build_fixture gcc "$c_fixtures_dir/stepping-boundaries.c" "$output_dir/stepping-boundaries-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/stepping-boundaries.c "$output_dir/stepping-boundaries-clang-o0" \
+build_fixture clang "$c_fixtures_dir/stepping-boundaries.c" "$output_dir/stepping-boundaries-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/stepping-boundaries.c "$output_dir/stepping-boundaries-gcc-o2" \
+build_fixture gcc "$c_fixtures_dir/stepping-boundaries.c" "$output_dir/stepping-boundaries-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/stepping-boundaries.c "$output_dir/stepping-boundaries-clang-o2" \
+build_fixture clang "$c_fixtures_dir/stepping-boundaries.c" "$output_dir/stepping-boundaries-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -mno-red-zone -fPIE -pie
-build_fixture gcc tests/fixtures/tail-calls.c "$output_dir/tail-calls-gcc-o2" \
+build_fixture gcc "$c_fixtures_dir/tail-calls.c" "$output_dir/tail-calls-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 require_tail_jump "$output_dir/tail-calls-gcc-o2" outer_tail add_one
 require_tail_jump "$output_dir/tail-calls-gcc-o2" outer_chain chain_helper
 require_tail_jump "$output_dir/tail-calls-gcc-o2" descend_tail mutual_tail
-build_fixture clang tests/fixtures/tail-calls.c "$output_dir/tail-calls-clang-o2" \
+build_fixture clang "$c_fixtures_dir/tail-calls.c" "$output_dir/tail-calls-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 require_tail_jump "$output_dir/tail-calls-clang-o2" outer_tail add_one
 require_tail_jump "$output_dir/tail-calls-clang-o2" outer_chain chain_helper
 require_tail_jump "$output_dir/tail-calls-clang-o2" descend_tail mutual_tail
-build_fixture gcc tests/fixtures/step-over-libc.c "$output_dir/step-over-libc" \
+build_fixture gcc "$c_fixtures_dir/step-over-libc.c" "$output_dir/step-over-libc" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-o0" \
+build_fixture gcc "$c_fixtures_dir/unwind.c" "$output_dir/unwind-o0" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-o2" \
+build_fixture gcc "$c_fixtures_dir/unwind.c" "$output_dir/unwind-o2" \
     -O2 -g3 -fomit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-nopie" \
+build_fixture gcc "$c_fixtures_dir/unwind.c" "$output_dir/unwind-nopie" \
     -O2 -g3 -fomit-frame-pointer -no-pie
-build_fixture clang tests/fixtures/unwind.c "$output_dir/unwind-clang-o2" \
+build_fixture clang "$c_fixtures_dir/unwind.c" "$output_dir/unwind-clang-o2" \
     -O2 -g3 -fomit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/inline.c "$output_dir/inline-gcc-o1" \
+build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o1" \
     -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/inline.c "$output_dir/inline-gcc-o2" \
+build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/inline.c "$output_dir/inline-clang-o1" \
+build_fixture clang "$c_fixtures_dir/inline.c" "$output_dir/inline-clang-o1" \
     -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_fixture clang tests/fixtures/inline.c "$output_dir/inline-clang-o2" \
+build_fixture clang "$c_fixtures_dir/inline.c" "$output_dir/inline-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
-build_fixture gcc tests/fixtures/inline-threads.c "$output_dir/inline-threads-gcc-o2" \
+build_fixture gcc "$c_fixtures_dir/inline-threads.c" "$output_dir/inline-threads-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread
-build_fixture clang tests/fixtures/inline-threads.c "$output_dir/inline-threads-clang-o2" \
+build_fixture clang "$c_fixtures_dir/inline-threads.c" "$output_dir/inline-threads-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread

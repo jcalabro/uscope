@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gimli::{
-    BaseAddresses, CfaRule, ColumnType, DwarfSections, EhFrame, Encoding, EndianSlice,
+    BaseAddresses, CfaRule, ColumnType, DebugFrame, DwarfSections, EhFrame, Encoding, EndianSlice,
     EvaluationResult, Location, RegisterRule, RunTimeEndian, SectionId, UnwindContext,
     UnwindExpression, UnwindSection, Value,
 };
@@ -56,6 +56,7 @@ mod variables;
 
 struct DwarfUnwindInfo {
     eh_frame: Arc<[u8]>,
+    debug_frame: Arc<[u8]>,
     endian: RunTimeEndian,
     address_size: u8,
     bases: BaseAddresses,
@@ -188,6 +189,14 @@ fn load_unwind_info(
         .unwrap_or(Cow::Borrowed(&[]))
         .into_owned()
         .into();
+    let debug_frame = object
+        .section_by_name(".debug_frame")
+        .as_ref()
+        .map(ObjectSection::uncompressed_data)
+        .transpose()?
+        .unwrap_or(Cow::Borrowed(&[]))
+        .into_owned()
+        .into();
     let mut bases = BaseAddresses::default();
 
     if let Some(section) = section {
@@ -202,6 +211,7 @@ fn load_unwind_info(
 
     Ok(DwarfUnwindInfo {
         eh_frame,
+        debug_frame,
         endian: match target.byte_order {
             ByteOrder::Little => RunTimeEndian::Little,
             ByteOrder::Big => RunTimeEndian::Big,
@@ -220,21 +230,26 @@ impl UnwindInfo for DwarfUnwindInfo {
         address: ImageAddress,
         registers: &RegisterFile,
     ) -> std::result::Result<VirtualAddress, UnwindTermination> {
-        let mut section = EhFrame::new(&self.eh_frame, self.endian);
-        section.set_address_size(self.address_size);
-        let fde = section
-            .fde_for_address(&self.bases, address.get(), EhFrame::cie_from_offset)
-            .map_err(|error| cfi_error(error, address))?;
-        let encoding = fde.cie().encoding();
-        let mut context = UnwindContext::new();
-        let row = fde
-            .unwind_info_for_address(&section, &self.bases, &mut context, address.get())
-            .map_err(|error| cfi_error(error, address))?;
-        cfa_from_rule(
-            row.cfa(),
+        let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
+        eh_frame.set_address_size(self.address_size);
+        let result = cfa_from_section(
+            &eh_frame,
+            &self.bases,
+            address,
             registers,
-            &section,
-            encoding,
+            &mut NoUnwindMemory,
+        );
+        if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
+            return result;
+        }
+
+        let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
+        debug_frame.set_address_size(self.address_size);
+        cfa_from_section(
+            &debug_frame,
+            &self.bases,
+            address,
+            registers,
             &mut NoUnwindMemory,
         )
     }
@@ -245,45 +260,89 @@ impl UnwindInfo for DwarfUnwindInfo {
         registers: &RegisterFile,
         memory: &mut dyn MemoryReader,
     ) -> std::result::Result<UnwindStep, UnwindTermination> {
-        let mut section = EhFrame::new(&self.eh_frame, self.endian);
-        section.set_address_size(self.address_size);
-        let fde = section
-            .fde_for_address(&self.bases, address.get(), EhFrame::cie_from_offset)
-            .map_err(|error| cfi_error(error, address))?;
-        let return_register = fde.cie().return_address_register().0;
-        let signal_frame = fde.cie().is_signal_trampoline();
-        let encoding = fde.cie().encoding();
-        let mut context = UnwindContext::new();
-        let row = fde
-            .unwind_info_for_address(&section, &self.bases, &mut context, address.get())
-            .map_err(|error| cfi_error(error, address))?;
-        let cfa = cfa_from_rule(row.cfa(), registers, &section, encoding, memory)?;
-        let mut caller = registers.clone();
-
-        for &(register, ref rule) in row.registers() {
-            apply_register_rule(&mut caller, registers, memory, cfa, register.0, rule)?;
-        }
-        caller.set(7, cfa.get());
-
-        if caller.get(return_register).is_none() {
-            return Err(UnwindTermination::Complete);
+        let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
+        eh_frame.set_address_size(self.address_size);
+        let result = unwind_from_section(&eh_frame, &self.bases, address, registers, memory);
+        if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
+            return result;
         }
 
-        Ok(UnwindStep {
-            registers: caller,
-            cfa,
-            signal_frame,
-        })
+        let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
+        debug_frame.set_address_size(self.address_size);
+        unwind_from_section(&debug_frame, &self.bases, address, registers, memory)
     }
 }
 
-fn cfa_from_rule(
+fn cfa_from_section<'data, S>(
+    section: &S,
+    bases: &BaseAddresses,
+    address: ImageAddress,
+    registers: &RegisterFile,
+    memory: &mut dyn MemoryReader,
+) -> std::result::Result<VirtualAddress, UnwindTermination>
+where
+    S: UnwindSection<Reader<'data>>,
+{
+    let fde = section
+        .fde_for_address(bases, address.get(), S::cie_from_offset)
+        .map_err(|error| cfi_error(error, address))?;
+    let encoding = fde.cie().encoding();
+    let mut context = UnwindContext::new();
+    let row = fde
+        .unwind_info_for_address(section, bases, &mut context, address.get())
+        .map_err(|error| cfi_error(error, address))?;
+    cfa_from_rule(row.cfa(), registers, section, encoding, memory)
+}
+
+fn unwind_from_section<'data, S>(
+    section: &S,
+    bases: &BaseAddresses,
+    address: ImageAddress,
+    registers: &RegisterFile,
+    memory: &mut dyn MemoryReader,
+) -> std::result::Result<UnwindStep, UnwindTermination>
+where
+    S: UnwindSection<Reader<'data>>,
+{
+    let fde = section
+        .fde_for_address(bases, address.get(), S::cie_from_offset)
+        .map_err(|error| cfi_error(error, address))?;
+    let return_register = fde.cie().return_address_register().0;
+    let signal_frame = fde.cie().is_signal_trampoline();
+    let encoding = fde.cie().encoding();
+    let mut context = UnwindContext::new();
+    let row = fde
+        .unwind_info_for_address(section, bases, &mut context, address.get())
+        .map_err(|error| cfi_error(error, address))?;
+    let cfa = cfa_from_rule(row.cfa(), registers, section, encoding, memory)?;
+    let mut caller = registers.clone();
+
+    for &(register, ref rule) in row.registers() {
+        apply_register_rule(&mut caller, registers, memory, cfa, register.0, rule)?;
+    }
+    caller.set(7, cfa.get());
+
+    if caller.get(return_register).is_none() {
+        return Err(UnwindTermination::Complete);
+    }
+
+    Ok(UnwindStep {
+        registers: caller,
+        cfa,
+        signal_frame,
+    })
+}
+
+fn cfa_from_rule<'data, S>(
     rule: &CfaRule<usize>,
     registers: &RegisterFile,
-    section: &EhFrame<Reader<'_>>,
+    section: &S,
     encoding: Encoding,
     memory: &mut dyn MemoryReader,
-) -> std::result::Result<VirtualAddress, UnwindTermination> {
+) -> std::result::Result<VirtualAddress, UnwindTermination>
+where
+    S: UnwindSection<Reader<'data>>,
+{
     match rule {
         CfaRule::RegisterAndOffset { register, offset } => {
             let value = registers.get(register.0).ok_or_else(|| {
@@ -317,13 +376,16 @@ impl MemoryReader for NoUnwindMemory {
     }
 }
 
-fn evaluate_unwind_expression(
+fn evaluate_unwind_expression<'data, S>(
     expression: &UnwindExpression<usize>,
-    section: &EhFrame<Reader<'_>>,
+    section: &S,
     encoding: Encoding,
     registers: &RegisterFile,
     memory: &mut dyn MemoryReader,
-) -> std::result::Result<VirtualAddress, UnwindTermination> {
+) -> std::result::Result<VirtualAddress, UnwindTermination>
+where
+    S: UnwindSection<Reader<'data>>,
+{
     let unsupported = |feature: &str| UnwindTermination::UnsupportedUnwindInfo {
         feature: format!("CFA expression: {feature}").into(),
     };

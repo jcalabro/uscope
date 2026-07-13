@@ -2,7 +2,7 @@
   description = "uscope Linux debugger development environment";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     rust-overlay.url = "github:oxalica/rust-overlay";
   };
 
@@ -16,6 +16,13 @@
       rust = pkgs.rust-bin.nightly."2026-07-11".default.override {
         extensions = [ "clippy" "rust-src" "rustfmt" ];
       };
+      goStable = pkgs.go.overrideAttrs (_final: _previous: {
+        version = "1.26.5";
+        src = pkgs.fetchurl {
+          url = "https://go.dev/dl/go1.26.5.src.tar.gz";
+          hash = "sha256-SVvkvIcXasVnOS5bQRar2YRm0z17SdQedkzMaXay3EI=";
+        };
+      });
     in {
       devShells.${system}.default = pkgs.mkShell {
         NIX_HARDENING_ENABLE = "";
@@ -28,6 +35,8 @@
           clang
           gdb
           lldb
+          goStable
+          zig
           pkg-config
         ];
       };
