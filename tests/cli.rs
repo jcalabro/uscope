@@ -22,6 +22,107 @@ fn assert_success(output: std::process::Output) -> String {
     String::from_utf8(output.stdout).expect("UTF-8 output")
 }
 
+fn assert_no_sgr(output: &str) {
+    assert!(
+        !output.contains("\x1b["),
+        "unexpected terminal styling in {output:?}"
+    );
+}
+
+#[test]
+fn redirected_and_batch_output_is_plain_unless_color_is_forced() {
+    let executable = fixture("build/test-programs/basic");
+
+    let automatic = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["--batch", "--eval", "help"])
+        .arg(&executable)
+        .output()
+        .expect("run uscope with automatic color");
+    assert_no_sgr(&assert_success(automatic));
+
+    let forced = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["--batch", "--color", "always", "--eval", "help"])
+        .arg(&executable)
+        .output()
+        .expect("run uscope with forced color");
+    let stdout = assert_success(forced);
+    assert!(stdout.contains("\x1b["), "missing forced color: {stdout:?}");
+
+    let disabled = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .env("CLICOLOR_FORCE", "1")
+        .args(["--batch", "--color", "never", "--eval", "help"])
+        .arg(executable)
+        .output()
+        .expect("run uscope with color disabled");
+    assert_no_sgr(&assert_success(disabled));
+}
+
+#[test]
+fn forced_color_styles_both_stdout_and_stderr() {
+    let executable = fixture("build/test-programs/basic");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["--color", "always"])
+        .arg(executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run uscope");
+    child
+        .stdin
+        .take()
+        .expect("stdin pipe")
+        .write_all(b"invalid\nquit\n")
+        .expect("write commands");
+    let output = child.wait_with_output().expect("wait for uscope");
+    let stdout = String::from_utf8(output.stdout.clone()).expect("UTF-8 output");
+    let stderr = String::from_utf8(output.stderr.clone()).expect("UTF-8 error output");
+
+    assert_success(output);
+    assert!(
+        stdout.contains("\x1b["),
+        "stdout was not colored: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("\x1b["),
+        "stderr was not colored: {stderr:?}"
+    );
+    assert!(stderr.contains("error"), "{stderr:?}");
+}
+
+#[test]
+fn color_styles_source_metadata_but_never_source_text() {
+    let executable = fixture("build/test-programs/basic");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--color",
+            "always",
+            "--eval",
+            "break breakpoint_target",
+            "--eval",
+            "run",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+    let current = stdout
+        .lines()
+        .find(|line| line.contains("uint64_t breakpoint_target(void)"))
+        .expect("current source line");
+    let (_, source) = current.split_once("| ").expect("source separator");
+
+    assert!(
+        current.contains("\x1b["),
+        "metadata was not styled: {current:?}"
+    );
+    assert!(
+        !source.contains("\x1b["),
+        "source text was styled: {current:?}"
+    );
+}
+
 #[test]
 fn batch_mode_executes_a_command_file() {
     let executable = fixture("build/test-programs/basic");

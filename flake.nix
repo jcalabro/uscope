@@ -26,6 +26,7 @@
           just
           gcc
           clang
+          gdb
           lldb
           pkg-config
         ];
