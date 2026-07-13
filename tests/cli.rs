@@ -249,10 +249,6 @@ fn help_and_clear_are_generated_from_the_command_registry() {
             "help where",
             "--eval",
             "help continue",
-            "--eval",
-            "clear",
-            "--eval",
-            "cls",
         ])
         .arg(executable)
         .output()
@@ -318,8 +314,27 @@ fn help_and_clear_are_generated_from_the_command_registry() {
         "{stdout}"
     );
     assert!(!stdout.contains("usage: continue"), "{stdout}");
-    assert_eq!(stdout.matches("\x1b[2J\x1b[H").count(), 2, "{stdout:?}");
-    assert!(stdout.ends_with("\x1b[2J\x1b[H"), "{stdout:?}");
+    assert!(!stdout.contains("\x1b[2J\x1b[H"), "{stdout:?}");
+}
+
+#[test]
+fn clear_refuses_redirected_output_without_emitting_terminal_controls() {
+    for command in ["clear", "cls"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .args(["--batch", "--eval", command])
+            .arg(fixture("build/test-programs/basic"))
+            .output()
+            .expect("run uscope");
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 error output");
+
+        assert!(!output.status.success(), "{command} unexpectedly succeeded");
+        assert!(!stdout.contains("\x1b[2J\x1b[H"), "{stdout:?}");
+        assert!(
+            stderr.contains("cannot clear screen: stdout is not an ANSI terminal"),
+            "{stderr:?}"
+        );
+    }
 }
 
 #[test]
@@ -334,6 +349,10 @@ fn colored_help_distinguishes_commands_aliases_and_descriptions() {
 
     assert!(stdout.contains("\x1b[1m\x1b[94mbreak\x1b[0m"), "{stdout:?}");
     assert!(stdout.contains("\x1b[94mb\x1b[0m"), "{stdout:?}");
+    assert!(
+        !stdout.contains("\x1b[94m\x1b[0m"),
+        "empty aliases emitted styling: {stdout:?}"
+    );
     assert!(stdout.contains("commands:"), "{stdout:?}");
     assert!(stdout.contains("Set a breakpoint"), "{stdout:?}");
     assert!(
@@ -438,15 +457,42 @@ fn batch_mode_reports_command_context() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .args(["--batch", "--eval", "invalid"])
+        .args(["--batch", "--color", "always", "--eval", "invalid"])
         .arg(executable)
         .output()
         .expect("run uscope");
     let stderr = String::from_utf8(output.stderr).expect("UTF-8 error output");
 
     assert!(!output.status.success());
+    assert!(stderr.contains("\x1b[1m\x1b[91merror\x1b[0m"), "{stderr:?}");
     assert!(stderr.contains("--eval #1"));
     assert!(stderr.contains("invalid command: invalid"));
+}
+
+#[test]
+fn command_argument_errors_use_the_registered_canonical_usage() {
+    let executable = fixture("build/test-programs/basic");
+
+    let extra = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["--batch", "--eval", "run ignored"])
+        .arg(&executable)
+        .output()
+        .expect("run uscope");
+    let stderr = String::from_utf8(extra.stderr).expect("UTF-8 error output");
+    assert!(!extra.status.success());
+    assert!(stderr.contains("invalid command: run"), "{stderr}");
+
+    let missing = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["--batch", "--eval", "break"])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stderr = String::from_utf8(missing.stderr).expect("UTF-8 error output");
+    assert!(!missing.status.success());
+    assert!(
+        stderr.contains("invalid command: break <function|address|file:line|file:function>"),
+        "{stderr}"
+    );
 }
 
 #[test]

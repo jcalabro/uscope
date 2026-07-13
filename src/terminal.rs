@@ -66,6 +66,11 @@ fn term_supports_color(term: &OsStr) -> bool {
     !term.is_empty() && term != "dumb"
 }
 
+/// Determines whether cursor-control sequences are safe for the output stream.
+pub fn terminal_control_enabled(environment: &ColorEnvironment, is_terminal: bool) -> bool {
+    is_terminal && environment.term.as_deref().is_some_and(term_supports_color)
+}
+
 /// Semantic presentation roles shared by all terminal formatters.
 #[derive(Clone, Copy, Debug)]
 pub enum Role {
@@ -197,14 +202,38 @@ mod tests {
 
     #[test]
     fn renderer_preserves_plain_text_and_bounds_every_style() {
-        assert_eq!(
-            Renderer::new(false).paint(Role::Error, "error").to_string(),
-            "error"
-        );
+        for role in [
+            Role::Prompt,
+            Role::Command,
+            Role::Alias,
+            Role::Muted,
+            Role::Name,
+            Role::Type,
+            Role::Value,
+            Role::Metadata,
+            Role::Current,
+            Role::Success,
+            Role::Warning,
+            Role::Error,
+        ] {
+            assert_eq!(Renderer::new(false).paint(role, "text").to_string(), "text");
 
-        let rendered = Renderer::new(true).paint(Role::Error, "error").to_string();
-        assert!(rendered.starts_with("\x1b["), "{rendered:?}");
-        assert!(rendered.ends_with("\x1b[0m"), "{rendered:?}");
-        assert!(rendered.contains("error"), "{rendered:?}");
+            let rendered = Renderer::new(true).paint(role, "text").to_string();
+            assert!(rendered.starts_with("\x1b["), "{role:?}: {rendered:?}");
+            assert!(rendered.ends_with("\x1b[0m"), "{role:?}: {rendered:?}");
+            assert!(rendered.contains("text"), "{role:?}: {rendered:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_control_requires_an_ansi_terminal() {
+        let capable = environment(Some("xterm-256color"), false, None, false);
+        assert!(terminal_control_enabled(&capable, true));
+        assert!(!terminal_control_enabled(&capable, false));
+
+        let dumb = environment(Some("dumb"), false, None, false);
+        assert!(!terminal_control_enabled(&dumb, true));
+        let unknown = environment(None, false, None, false);
+        assert!(!terminal_control_enabled(&unknown, true));
     }
 }
