@@ -1830,10 +1830,23 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.cleanup_plan_breakpoints(execution)?;
             return self.continue_thread(pid);
         }
-        if matches!(kind, StepKind::OverSource | StepKind::Out)
-            && self.begin_return_traversal(pid)?
-        {
-            return self.start_user_step(pid, kind);
+        if matches!(kind, StepKind::OverSource | StepKind::Out) {
+            match self.begin_return_traversal(pid) {
+                Ok(true) => return self.start_user_step(pid, kind),
+                Ok(false) => {}
+                // An unavailable unwind (tail call into a shared library, PLT
+                // stub, or CFI-less code) is expected lack of evidence, not a
+                // controller failure. Stay on the instruction-stepping path.
+                Err(Error::Backend(error))
+                    if matches!(
+                        error.downcast_ref::<LinuxError>(),
+                        Some(LinuxError::CallerUnavailable(_))
+                    ) =>
+                {
+                    return self.start_user_step(pid, kind);
+                }
+                Err(error) => return Err(error),
+            }
         }
         if self.step_is_complete(pid, kind)? {
             self.begin_visible_stop(pid, StopReason::Step { kind })
@@ -1882,7 +1895,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|active| match &active.kind {
                 ActiveKind::Step { thread, start, .. } if *thread == pid => Some((
                     active.id,
-                    start.epilogue_traversal.is_some(),
+                    start.epilogue_traversal.is_some() || start.return_traversal.is_some(),
                     start.source.clone(),
                 )),
                 _ => None,
@@ -1984,7 +1997,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|active| match &active.kind {
                 ActiveKind::Step { thread, start, .. } if *thread == pid => Some((
                     active.id,
-                    start.return_traversal.is_some(),
+                    start.return_traversal.is_some() || start.epilogue_traversal.is_some(),
                     start.activation,
                     start.code_instance,
                     start.physical_instance,
@@ -2013,8 +2026,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Ok(current_activation) = self.top_activation(pid, &registers) else {
             return Ok(false);
         };
-        let tail_replacement =
-            starting_activation_location.physical_instance != Some(start_physical);
+        let tail_replacement = starting_activation_location
+            .physical_instance
+            .is_some_and(|current_physical| current_physical != start_physical);
         let selected_is_inline = self
             .module_image
             .code_instance(start_instance)
