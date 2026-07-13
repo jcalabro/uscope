@@ -2791,6 +2791,18 @@ async fn source_steps_skip_non_statement_line_rows() {
         Some("middle"),
         "step stopped on a non-statement row instead of returning to middle"
     );
+    // The return address in middle sits on a non-statement row for the
+    // already-executed call line (11); the step must continue to the next
+    // statement row even though the activation changed at the return.
+    assert_eq!(
+        location
+            .image
+            .source
+            .as_ref()
+            .map(|source| source.line.get()),
+        Some(12),
+        "step completed on a non-statement row after the activation changed"
+    );
     step.shutdown().await;
 }
 

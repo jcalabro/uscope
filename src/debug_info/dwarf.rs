@@ -340,6 +340,9 @@ fn evaluate_unwind_expression(
                     .resume_with_register(Value::Generic(value))
                     .map_err(corrupt)?
             }
+            EvaluationResult::RequiresMemory { space: Some(_), .. } => {
+                return Err(unsupported("non-default memory address space"));
+            }
             EvaluationResult::RequiresMemory { address, size, .. } => {
                 if size == 0 || u32::from(size) > 8 {
                     return Err(unsupported("unsupported memory operand size"));
@@ -1075,7 +1078,7 @@ fn target_description(
 mod tests {
     use std::collections::BTreeMap;
 
-    use gimli::Register;
+    use gimli::{Format, Register};
 
     use super::*;
 
@@ -1196,6 +1199,35 @@ mod tests {
             ),
             Err(UnwindTermination::RegisterUnavailable {
                 register: "DWARF register 9".into()
+            })
+        );
+    }
+
+    #[test]
+    fn unwind_expressions_reject_non_default_address_spaces() {
+        // DW_OP_lit0, DW_OP_lit1, DW_OP_xderef: dereference address 0 in
+        // address space 1. The evaluator must reject the non-default space
+        // instead of silently reading the default inferior address space.
+        let bytes = [0x30, 0x31, 0x18];
+        let section = EhFrame::new(&bytes, RunTimeEndian::Little);
+        let expression = UnwindExpression {
+            offset: 0usize,
+            length: bytes.len(),
+        };
+        let encoding = Encoding {
+            format: Format::Dwarf32,
+            version: 4,
+            address_size: 8,
+        };
+        let registers = RegisterFile::new([]);
+        let mut memory = TestMemory {
+            values: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            evaluate_unwind_expression(&expression, &section, encoding, &registers, &mut memory),
+            Err(UnwindTermination::UnsupportedUnwindInfo {
+                feature: "CFA expression: non-default memory address space".into()
             })
         );
     }
