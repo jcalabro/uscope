@@ -1827,9 +1827,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                         .is_some_and(|entry| entry.statement)
                 });
 
-                Ok(activation != start.activation.unwrap_or(activation)
-                    || current_instance != start.code_instance
-                    || (statement && source_line_changed(start.source.as_ref(), source.as_ref())))
+                Ok(statement
+                    && (activation != start.activation.unwrap_or(activation)
+                        || current_instance != start.code_instance
+                        || source_line_changed(start.source.as_ref(), source.as_ref())))
             }
             StepKind::OverSource | StepKind::Out => {
                 let Some(activation) = start.activation else {
