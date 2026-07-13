@@ -156,6 +156,10 @@ build_fixture gcc tests/fixtures/stepping-boundaries.c "$output_dir/stepping-bou
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang tests/fixtures/stepping-boundaries.c "$output_dir/stepping-boundaries-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -mno-red-zone -fPIE -pie
+build_fixture gcc tests/fixtures/tail-calls.c "$output_dir/tail-calls-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture clang tests/fixtures/tail-calls.c "$output_dir/tail-calls-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/step-over-libc.c "$output_dir/step-over-libc" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc tests/fixtures/unwind.c "$output_dir/unwind-o0" \

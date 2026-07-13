@@ -1155,6 +1155,166 @@ async fn an_explicit_user_breakpoint_at_an_epilogue_marker_remains_visible() {
     scenario.shutdown().await;
 }
 
+/// Steps into a fixture function until the selected frame is the named
+/// inline instance stopped at the requested source line.
+async fn enter_inline_frame(scenario: &mut Scenario, fixture: &str, function: &str, line: u64) {
+    for _ in 0..8 {
+        let location = scenario
+            .operation(
+                "inline frame location",
+                scenario.handle().current_location(),
+            )
+            .await;
+        if boundary_function(&location) == Some(function) && boundary_line(&location) == Some(line)
+        {
+            return;
+        }
+        boundary_source_step(scenario, StepKind::IntoSource, "enter inline frame").await;
+    }
+    panic!("{fixture} did not reach {function}:{line} within the step budget");
+}
+
+#[tokio::test]
+async fn next_from_an_inline_frame_crosses_a_tail_call_to_the_true_caller() {
+    for fixture in ["tail-calls-gcc-o2", "tail-calls-clang-o2"] {
+        for (function, inline_function, tail_line, caller_line, expected_sink) in [
+            ("outer_tail", "inline_tail", 22, 81, 20),
+            ("outer_chain", "inline_chain", 32, 82, 21),
+        ] {
+            let mut scenario = Scenario::new(
+                format!("tail-call next {fixture} {function}"),
+                Scenario::fixture(fixture),
+            );
+            scenario.add_breakpoint(function).await;
+            assert!(matches!(
+                scenario.run_to_stop().await,
+                StopReason::Breakpoint { .. }
+            ));
+            enter_inline_frame(&mut scenario, fixture, inline_function, tail_line).await;
+
+            let stop =
+                boundary_source_step(&mut scenario, StepKind::OverSource, "next across tail call")
+                    .await;
+            assert_eq!(
+                boundary_function(&stop),
+                Some("main"),
+                "{fixture} {function} next stopped inside the tail-called function: {stop:?}"
+            );
+            let line = boundary_line(&stop).expect("tail-call next stop has caller source");
+            assert!(
+                (caller_line..=caller_line + 1).contains(&line),
+                "{fixture} {function} completed at unexpected main line {line}"
+            );
+            let sink = fixture_symbol_address(&scenario, &stop, "tail_sink");
+            assert_eq!(
+                boundary_sink_value(&scenario, sink).await,
+                expected_sink,
+                "{fixture} {function} stopped before the tail-called work finished"
+            );
+
+            assert_eq!(
+                scenario.resume_to_stop().await,
+                StopReason::Exited(ExitStatus::Code(0)),
+                "{fixture} {function}"
+            );
+            assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn finish_from_an_inline_frame_crosses_its_parents_tail_call() {
+    for fixture in ["tail-calls-gcc-o2", "tail-calls-clang-o2"] {
+        let mut scenario = Scenario::new(
+            format!("tail-call finish {fixture}"),
+            Scenario::fixture(fixture),
+        );
+        scenario.add_breakpoint("outer_tail").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        enter_inline_frame(&mut scenario, fixture, "inline_tail", 21).await;
+
+        let stop =
+            boundary_source_step(&mut scenario, StepKind::Out, "finish across tail call").await;
+        assert_eq!(
+            boundary_function(&stop),
+            Some("main"),
+            "{fixture} finish stopped inside the tail-called function: {stop:?}"
+        );
+        let line = boundary_line(&stop).expect("tail-call finish stop has caller source");
+        assert!(
+            (81..=82).contains(&line),
+            "{fixture} finish completed at unexpected main line {line}"
+        );
+        let sink = fixture_symbol_address(&scenario, &stop, "tail_sink");
+        assert_eq!(
+            boundary_sink_value(&scenario, sink).await,
+            20,
+            "{fixture} finish stopped before the tail-called work finished"
+        );
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0)),
+            "{fixture}"
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
+#[tokio::test]
+async fn recursive_tail_call_completion_ignores_inner_frames_at_the_shared_return_site() {
+    for fixture in ["tail-calls-gcc-o2", "tail-calls-clang-o2"] {
+        let mut scenario = Scenario::new(
+            format!("recursive tail-call next {fixture}"),
+            Scenario::fixture(fixture),
+        );
+        // The first descend_tail activation (value == 2) tail-calls
+        // mutual_tail(1), whose inner recursion returns through the same
+        // code address as this step's own return site. Only the outer
+        // return, distinguished by the stack pointer, may complete the step.
+        scenario.add_breakpoint("descend_tail").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        scenario.remove_all_breakpoints().await;
+        enter_inline_frame(&mut scenario, fixture, "inline_descend", 44).await;
+
+        let stop = boundary_source_step(
+            &mut scenario,
+            StepKind::OverSource,
+            "next across recursive tail call",
+        )
+        .await;
+        assert_eq!(
+            boundary_function(&stop),
+            Some("mutual_tail"),
+            "{fixture}: {stop:?}"
+        );
+        let line = boundary_line(&stop).expect("recursive tail-call stop has caller source");
+        assert!(
+            (55..=57).contains(&line),
+            "{fixture} completed at unexpected mutual_tail line {line}"
+        );
+        let probe = fixture_symbol_address(&scenario, &stop, "tail_probe");
+        assert_eq!(
+            boundary_sink_value(&scenario, probe).await,
+            1,
+            "{fixture} completed in an inner recursive frame instead of the starting caller"
+        );
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0)),
+            "{fixture}"
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
 async fn advance_to_boundary_inline_call(
     scenario: &mut Scenario,
     fixture: &str,

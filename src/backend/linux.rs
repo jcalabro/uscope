@@ -207,6 +207,17 @@ struct StepStart {
     activation: Option<VirtualAddress>,
     plan_addresses: BTreeSet<VirtualAddress>,
     epilogue_traversal: Option<EpilogueTraversal>,
+    tail_call_traversal: Option<TailCallTraversal>,
+}
+
+#[derive(Debug, Clone)]
+struct TailCallTraversal {
+    /// The starting activation's return address, proven by agreeing CFI and
+    /// ABI stack-slot sources. Recursive callees may return through this
+    /// address with a deeper stack; only the starting activation's own
+    /// return, recognized by the stack pointer, retires or completes it.
+    return_address: VirtualAddress,
+    retire_return_after_repair: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1574,6 +1585,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
 
                 self.mark_epilogue_return_for_retirement(address);
+                self.mark_tail_call_return_for_retirement(pid, address)?;
                 self.queue_repair(pid, address);
                 return self.start_next_repair();
             }
@@ -1801,6 +1813,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     fn complete_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
+        self.retire_tail_call_return_guard()?;
         self.retire_epilogue_return_guard()?;
         if kind != StepKind::Instruction && self.begin_epilogue_traversal(pid)? {
             return self.start_user_step(pid, kind);
@@ -1814,6 +1827,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .ok_or(Error::NotRunning)?;
             self.cleanup_plan_breakpoints(execution)?;
             return self.continue_thread(pid);
+        }
+        if matches!(kind, StepKind::OverSource | StepKind::Out)
+            && self.begin_tail_call_traversal(pid)?
+        {
+            return self.start_user_step(pid, kind);
         }
         if self.step_is_complete(pid, kind)? {
             self.begin_visible_stop(pid, StopReason::Step { kind })
@@ -1948,6 +1966,83 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(true)
     }
 
+    /// Runs through a tail-called replacement for the starting physical frame.
+    ///
+    /// A sibling call preserves the starting activation's CFA while changing
+    /// the physical code instance found at that CFA. The return address is safe
+    /// to use as an internal breakpoint only when DWARF CFI and the x86-64
+    /// System V
+    /// ABI's `[CFA - 8]` return slot agree. Failure or disagreement leaves the
+    /// source operation on its instruction-stepping path.
+    fn begin_tail_call_traversal(&mut self, pid: Pid) -> Result<bool> {
+        let (execution, already_traversing, activation, start_physical) = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step { thread, start, .. } if *thread == pid => Some((
+                    active.id,
+                    start.tail_call_traversal.is_some(),
+                    start.activation,
+                    start.physical_instance,
+                )),
+                _ => None,
+            })
+            .ok_or(Error::NotRunning)?;
+        if already_traversing {
+            return Ok(false);
+        }
+        let (Some(activation), Some(start_physical)) = (activation, start_physical) else {
+            return Ok(false);
+        };
+
+        let registers = self.ptrace.registers(pid)?;
+        if x86_64_activation_has_returned(registers.rsp, activation) {
+            return Ok(false);
+        }
+        let Some(current_physical) = self
+            .location_for_activation(pid, &registers, activation)?
+            .and_then(|location| location.physical_instance)
+        else {
+            return Ok(false);
+        };
+        if current_physical == start_physical {
+            return Ok(false);
+        }
+
+        let Some(return_slot) = activation.get().checked_sub(8) else {
+            return Ok(false);
+        };
+        let (Ok(cfi_return), Ok(stack_return)) = (
+            self.caller_address(pid, &registers),
+            self.ptrace.read_word(pid, return_slot),
+        ) else {
+            return Ok(false);
+        };
+        let stack_return = VirtualAddress::new(stack_return);
+        if cfi_return != stack_return {
+            return Ok(false);
+        }
+
+        let plan_addresses = BTreeSet::from([cfi_return]);
+        self.install_additional_plan_breakpoints(execution, &plan_addresses)?;
+        let start = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .and_then(|active| match &mut active.kind {
+                ActiveKind::Step { start, .. } => Some(start),
+                _ => None,
+            })
+            .expect("source step remained active while installing its tail-call plan");
+        start.plan_addresses.extend(plan_addresses);
+        start.tail_call_traversal = Some(TailCallTraversal {
+            return_address: cfi_return,
+            retire_return_after_repair: false,
+        });
+        Ok(true)
+    }
+
     fn install_additional_plan_breakpoints(
         &mut self,
         execution: ExecutionId,
@@ -2029,6 +2124,41 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(())
     }
 
+    /// Removes a tail-call return guard after the starting activation reached
+    /// it without yet finding a valid source destination. Recursive callees
+    /// with a deeper stack leave the shared guard installed.
+    fn retire_tail_call_return_guard(&mut self) -> Result<()> {
+        let retirement = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step { start, .. } => start
+                    .tail_call_traversal
+                    .as_ref()
+                    .filter(|traversal| traversal.retire_return_after_repair)
+                    .map(|traversal| (active.id, traversal.return_address)),
+                _ => None,
+            });
+        let Some((execution, address)) = retirement else {
+            return Ok(());
+        };
+
+        self.remove_breakpoint_owner(address, BreakpointOwner::Plan(execution))?;
+        let start = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .and_then(|active| match &mut active.kind {
+                ActiveKind::Step { start, .. } => Some(start),
+                _ => None,
+            })
+            .expect("source step remained active while retiring its tail-call guard");
+        start.plan_addresses.remove(&address);
+        start.tail_call_traversal = None;
+        Ok(())
+    }
+
     fn mark_epilogue_return_for_retirement(&mut self, address: VirtualAddress) {
         let Some(start) = self
             .inferior
@@ -2049,6 +2179,33 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    fn mark_tail_call_return_for_retirement(
+        &mut self,
+        pid: Pid,
+        address: VirtualAddress,
+    ) -> Result<()> {
+        let registers = self.ptrace.registers(pid)?;
+        let Some(start) = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .and_then(|active| match &mut active.kind {
+                ActiveKind::Step { start, .. } => Some(start),
+                _ => None,
+            })
+        else {
+            return Ok(());
+        };
+        if let (Some(activation), Some(traversal)) =
+            (start.activation, start.tail_call_traversal.as_mut())
+            && traversal.return_address == address
+            && x86_64_activation_has_returned(registers.rsp, activation)
+        {
+            traversal.retire_return_after_repair = true;
+        }
+        Ok(())
+    }
+
     fn step_is_complete(&self, pid: Pid, kind: StepKind) -> Result<bool> {
         if kind == StepKind::Instruction {
             return Ok(true);
@@ -2063,6 +2220,32 @@ impl<P: LinuxTraceOps> Controller<P> {
                 _ => None,
             })
             .expect("source step has a starting state");
+
+        if let Some(traversal) = &start.tail_call_traversal {
+            let instruction = VirtualAddress::new(registers.rip);
+            let stopped_at_breakpoint = self
+                .inferior
+                .as_ref()
+                .and_then(|inferior| inferior.threads.get(&pid))
+                .and_then(|thread| thread.stopped_at_breakpoint);
+            if stopped_at_breakpoint != Some(instruction) || instruction != traversal.return_address
+            {
+                return Ok(false);
+            }
+            let Some(activation) = start.activation else {
+                return Err(Error::LocationUnavailable);
+            };
+            if !x86_64_activation_has_returned(registers.rsp, activation) {
+                return Ok(false);
+            }
+            if kind == StepKind::Out {
+                return Ok(true);
+            }
+            return Ok(self.image_location(instruction).is_some_and(|location| {
+                source_step_destination(&self.module_image, &location, kind)
+                    && source_line_changed(start.source.as_ref(), location.source.as_ref())
+            }));
+        }
 
         if let Some(traversal) = &start.epilogue_traversal {
             let instruction = VirtualAddress::new(registers.rip);
@@ -2110,6 +2293,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                     }));
                 };
                 if !code_instance_is_active(&location, code_instance) {
+                    // A different physical frame at the same live CFA is a
+                    // tail-called replacement, not the caller. Keep stepping
+                    // when its return address could not be independently
+                    // proven for accelerated traversal.
+                    if location.physical_instance != start.physical_instance
+                        && !x86_64_activation_has_returned(registers.rsp, activation)
+                    {
+                        return Ok(false);
+                    }
                     return Ok(source_step_destination(&self.module_image, &location, kind));
                 }
                 let source = source_for_code_instance(&self.module_image, &location, code_instance);
@@ -2254,6 +2446,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             activation,
             plan_addresses,
             epilogue_traversal: None,
+            tail_call_traversal: None,
         })
     }
 
