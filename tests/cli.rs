@@ -703,7 +703,6 @@ fn plain_repl_reports_errors_and_continues() {
     let stderr = String::from_utf8(output.stderr.clone()).expect("UTF-8 error output");
 
     assert_success(output);
-    assert!(stderr.contains("repl:1"));
     assert!(stderr.contains("invalid command: invalid"));
 }
 

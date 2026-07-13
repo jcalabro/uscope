@@ -327,7 +327,7 @@ async fn run(debugger: &DebuggerHandle, args: &Args, renderers: Renderers) -> Re
         if !run_line(
             debugger,
             command,
-            &format!("--eval #{}", index + 1),
+            Some(&format!("--eval #{}", index + 1)),
             renderers.stdout,
             renderers.stdout_control,
         )
@@ -348,7 +348,7 @@ async fn run(debugger: &DebuggerHandle, args: &Args, renderers: Renderers) -> Re
                 if !run_line(
                     debugger,
                     &line,
-                    &format!("stdin:{number}"),
+                    Some(&format!("stdin:{number}")),
                     renderers.stdout,
                     renderers.stdout_control,
                 )
@@ -376,7 +376,7 @@ async fn run_lines<'a>(
         if !run_line(
             debugger,
             line,
-            &format!("{source}:{}", index + 1),
+            Some(&format!("{source}:{}", index + 1)),
             renderer,
             terminal_control,
         )
@@ -392,7 +392,7 @@ async fn run_lines<'a>(
 async fn run_line(
     debugger: &DebuggerHandle,
     line: &str,
-    source: &str,
+    source: Option<&str>,
     renderer: Renderer,
     terminal_control: bool,
 ) -> Result<bool> {
@@ -401,10 +401,12 @@ async fn run_line(
         return Ok(true);
     }
 
-    match execute(debugger, line, renderer)
-        .await
-        .with_context(|| source.to_owned())?
-    {
+    let control = execute(debugger, line, renderer).await;
+    let control = match source {
+        Some(source) => control.with_context(|| source.to_owned())?,
+        None => control?,
+    };
+    match control {
         Control::Continue(message) => {
             if !message.is_empty() {
                 println!("{message}");
@@ -458,7 +460,7 @@ async fn stream_repl(
         match run_line(
             debugger,
             &line,
-            &format!("repl:{number}"),
+            Some(&format!("stdin:{number}")),
             renderers.stdout,
             renderers.stdout_control,
         )
@@ -475,7 +477,7 @@ async fn stream_repl(
 }
 
 enum ReplInput {
-    Line { number: u64, text: String },
+    Line(String),
     Eof,
     Failed(String),
 }
@@ -496,7 +498,7 @@ async fn interactive_repl(debugger: &DebuggerHandle, renderers: Renderers) -> Re
     let mut last_command = None;
     while let Some(input) = input_receiver.recv().await {
         let keep_running = match input {
-            ReplInput::Line { number, text } => {
+            ReplInput::Line(text) => {
                 let trimmed = text.trim();
                 let command = if trimmed.is_empty() {
                     last_command.as_deref().unwrap_or(trimmed)
@@ -509,7 +511,7 @@ async fn interactive_repl(debugger: &DebuggerHandle, renderers: Renderers) -> Re
                 match run_line(
                     debugger,
                     command,
-                    &format!("repl:{number}"),
+                    None,
                     renderers.stdout,
                     renderers.stdout_control,
                 )
@@ -586,7 +588,6 @@ fn line_editor(
             history.display()
         );
     }
-    let mut number = 0_u64;
     loop {
         let styled_prompt = renderers
             .stdout
@@ -594,7 +595,6 @@ fn line_editor(
             .to_string();
         match editor.readline(&(REPL_PROMPT, &styled_prompt)) {
             Ok(line) => {
-                number = number.checked_add(1).expect("REPL line number overflow");
                 if !line.trim().is_empty()
                     && let Err(error) = editor.add_history_entry(line.as_str())
                 {
@@ -603,9 +603,7 @@ fn line_editor(
                         renderers.stderr.paint(Role::Warning, "warning")
                     );
                 }
-                if input
-                    .blocking_send(ReplInput::Line { number, text: line })
-                    .is_err()
+                if input.blocking_send(ReplInput::Line(line)).is_err()
                     || matches!(acknowledgements.recv(), Ok(ReplAck::Quit) | Err(_))
                 {
                     break;

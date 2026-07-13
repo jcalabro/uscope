@@ -240,6 +240,23 @@ fn interactive_control_c_cancels_the_line_and_control_l_redraws() {
 }
 
 #[test]
+fn interactive_errors_omit_repl_context() {
+    let state = TestStateDir::new("errors");
+    let mut session = repl(&fixture("basic"), &state.0);
+
+    session
+        .send_line("break asdf")
+        .expect("send invalid breakpoint");
+    session
+        .expect("error: no function named 'asdf' was found")
+        .expect("concise interactive error");
+    session.expect("(uscope) ").expect("prompt after error");
+
+    session.send_line("quit").expect("quit repl");
+    session.expect(Eof).expect("repl exited");
+}
+
+#[test]
 fn interactive_clear_command_and_cls_alias_clear_the_terminal() {
     let state = TestStateDir::new("clear");
     let mut session = repl(&fixture("basic"), &state.0);
