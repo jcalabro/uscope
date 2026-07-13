@@ -1315,6 +1315,86 @@ async fn recursive_tail_call_completion_ignores_inner_frames_at_the_shared_retur
     }
 }
 
+#[tokio::test]
+async fn next_from_an_inline_frame_runs_regular_callees_at_full_speed() {
+    for fixture in ["tail-calls-gcc-o2", "tail-calls-clang-o2"] {
+        let mut scenario = Scenario::new(
+            format!("inline regular-call next {fixture}"),
+            Scenario::fixture(fixture),
+        );
+        scenario.add_breakpoint("outer_over_call").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        enter_inline_frame(&mut scenario, fixture, "inline_over_call", 70).await;
+
+        let stop = boundary_source_step(
+            &mut scenario,
+            StepKind::OverSource,
+            "next over long-running regular call",
+        )
+        .await;
+        assert_eq!(boundary_function(&stop), Some("inline_over_call"));
+        assert_eq!(boundary_line(&stop), Some(71));
+        let counter = fixture_symbol_address(&scenario, &stop, "tail_counter");
+        assert_eq!(
+            boundary_sink_value(&scenario, counter).await,
+            200_000,
+            "{fixture} stopped before the regular callee completed"
+        );
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0)),
+            "{fixture}"
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
+#[tokio::test]
+async fn finish_from_an_inline_frame_runs_regular_callees_at_full_speed() {
+    for fixture in ["tail-calls-gcc-o2", "tail-calls-clang-o2"] {
+        let mut scenario = Scenario::new(
+            format!("inline regular-call finish {fixture}"),
+            Scenario::fixture(fixture),
+        );
+        scenario.add_breakpoint("outer_over_call").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        enter_inline_frame(&mut scenario, fixture, "inline_over_call", 70).await;
+
+        let stop = boundary_source_step(
+            &mut scenario,
+            StepKind::Out,
+            "finish through long-running regular call",
+        )
+        .await;
+        assert_eq!(boundary_function(&stop), Some("outer_over_call"));
+        let line = boundary_line(&stop).expect("regular-call finish stop has parent source");
+        assert!(
+            (77..=78).contains(&line),
+            "{fixture} finish completed at unexpected outer_over_call line {line}"
+        );
+        let counter = fixture_symbol_address(&scenario, &stop, "tail_counter");
+        assert_eq!(
+            boundary_sink_value(&scenario, counter).await,
+            200_000,
+            "{fixture} stopped before the regular callee completed"
+        );
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0)),
+            "{fixture}"
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
 async fn advance_to_boundary_inline_call(
     scenario: &mut Scenario,
     fixture: &str,
