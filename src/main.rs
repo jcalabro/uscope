@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::mpsc;
 use std::{env, thread};
 
@@ -22,7 +23,9 @@ use uscope::{
 
 mod terminal;
 
-use terminal::{ColorChoice, ColorEnvironment, Renderer, Role, color_enabled};
+use terminal::{
+    ColorChoice, ColorEnvironment, Renderer, Role, color_enabled, terminal_control_enabled,
+};
 
 const REPL_PROMPT: &str = "(uscope) ";
 
@@ -54,6 +57,7 @@ struct Args {
 struct Renderers {
     stdout: Renderer,
     stderr: Renderer,
+    stdout_control: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -215,14 +219,15 @@ const COMMANDS: &[CommandSpec] = &[
 ];
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
     let args = Args::parse();
     let environment = ColorEnvironment::current();
+    let stdout_is_terminal = io::stdout().is_terminal();
     let renderers = Renderers {
         stdout: Renderer::new(color_enabled(
             args.color,
             &environment,
-            io::stdout().is_terminal(),
+            stdout_is_terminal,
             args.batch,
         )),
         stderr: Renderer::new(color_enabled(
@@ -231,7 +236,22 @@ async fn main() -> Result<()> {
             io::stderr().is_terminal(),
             args.batch,
         )),
+        stdout_control: terminal_control_enabled(&environment, stdout_is_terminal),
     };
+
+    match run_debugger(&args, renderers).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!(
+                "{}: {error:#}",
+                renderers.stderr.paint(Role::Error, "error")
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run_debugger(args: &Args, renderers: Renderers) -> Result<()> {
     let debugger = Debugger::new(&args.executable).with_context(|| {
         format!(
             "failed to initialize debugger for {}",
@@ -240,7 +260,7 @@ async fn main() -> Result<()> {
     })?;
 
     let handle = debugger.handle();
-    let result = run_with_interrupts(&handle, &args, renderers).await;
+    let result = run_with_interrupts(&handle, args, renderers).await;
     let shutdown = debugger
         .shutdown()
         .await
@@ -295,6 +315,7 @@ async fn run(debugger: &DebuggerHandle, args: &Args, renderers: Renderers) -> Re
             contents.lines(),
             &path.display().to_string(),
             renderers.stdout,
+            renderers.stdout_control,
         )
         .await?
         {
@@ -308,6 +329,7 @@ async fn run(debugger: &DebuggerHandle, args: &Args, renderers: Renderers) -> Re
             command,
             &format!("--eval #{}", index + 1),
             renderers.stdout,
+            renderers.stdout_control,
         )
         .await?
         {
@@ -328,6 +350,7 @@ async fn run(debugger: &DebuggerHandle, args: &Args, renderers: Renderers) -> Re
                     &line,
                     &format!("stdin:{number}"),
                     renderers.stdout,
+                    renderers.stdout_control,
                 )
                 .await?
                 {
@@ -347,9 +370,18 @@ async fn run_lines<'a>(
     lines: impl Iterator<Item = &'a str>,
     source: &str,
     renderer: Renderer,
+    terminal_control: bool,
 ) -> Result<bool> {
     for (index, line) in lines.enumerate() {
-        if !run_line(debugger, line, &format!("{source}:{}", index + 1), renderer).await? {
+        if !run_line(
+            debugger,
+            line,
+            &format!("{source}:{}", index + 1),
+            renderer,
+            terminal_control,
+        )
+        .await?
+        {
             return Ok(false);
         }
     }
@@ -362,6 +394,7 @@ async fn run_line(
     line: &str,
     source: &str,
     renderer: Renderer,
+    terminal_control: bool,
 ) -> Result<bool> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
@@ -381,6 +414,9 @@ async fn run_line(
             Ok(true)
         }
         Control::ClearScreen => {
+            if !terminal_control {
+                anyhow::bail!("cannot clear screen: stdout is not an ANSI terminal");
+            }
             print!("\x1b[2J\x1b[H");
             io::stdout().flush()?;
             Ok(true)
@@ -419,7 +455,15 @@ async fn stream_repl(
         };
         number = number.checked_add(1).expect("REPL line number overflow");
 
-        match run_line(debugger, &line, &format!("repl:{number}"), renderers.stdout).await {
+        match run_line(
+            debugger,
+            &line,
+            &format!("repl:{number}"),
+            renderers.stdout,
+            renderers.stdout_control,
+        )
+        .await
+        {
             Ok(true) => {}
             Ok(false) => return Ok(()),
             Err(error) => eprintln!(
@@ -467,6 +511,7 @@ async fn interactive_repl(debugger: &DebuggerHandle, renderers: Renderers) -> Re
                     command,
                     &format!("repl:{number}"),
                     renderers.stdout,
+                    renderers.stdout_control,
                 )
                 .await
                 {
@@ -645,27 +690,26 @@ async fn execute(
         return Ok(Control::Continue(String::new()));
     }
     let spec = command_named(entered).ok_or_else(|| Error::InvalidCommand(entered.to_owned()))?;
+    if spec.usage == spec.name {
+        no_arguments(&mut words, spec.usage)?;
+    }
 
     match spec.command {
         Command::Break => {
-            let argument = one_argument(&mut words, "break <function|address>")?;
+            let argument = one_argument(&mut words, spec.usage)?;
             execute_break(debugger, argument, renderer).await
         }
-        Command::Breakpoints => {
-            no_arguments(&mut words, "breakpoints")?;
-            execute_list_breakpoints(debugger, renderer).await
-        }
+        Command::Breakpoints => execute_list_breakpoints(debugger, renderer).await,
         Command::Info => {
-            let argument = one_argument(&mut words, "info breakpoints")?;
+            let argument = one_argument(&mut words, spec.usage)?;
             if argument != "breakpoints" && argument != "break" {
-                return Err(Error::InvalidCommand(format!("info {argument}")));
+                return Err(Error::InvalidCommand(spec.usage.to_owned()));
             }
             execute_list_breakpoints(debugger, renderer).await
         }
         Command::Delete => {
-            let usage = format!("{entered} <id|all>");
-            let argument = one_argument(&mut words, &usage)?;
-            execute_delete_breakpoint(debugger, argument, &usage, renderer).await
+            let argument = one_argument(&mut words, spec.usage)?;
+            execute_delete_breakpoint(debugger, argument, spec.usage, renderer).await
         }
         Command::Run => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.run().await?, renderer).await,
@@ -676,13 +720,13 @@ async fn execute(
         Command::Pause => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.pause().await?, renderer).await,
         )),
-        Command::Print => execute_print(debugger, &mut words, renderer).await,
+        Command::Print => execute_print(debugger, &mut words, spec.usage, renderer).await,
         Command::Stepi => execute_step(debugger, StepKind::Instruction, renderer).await,
         Command::Step => execute_step(debugger, StepKind::IntoSource, renderer).await,
         Command::Next => execute_step(debugger, StepKind::OverSource, renderer).await,
         Command::Finish => execute_step(debugger, StepKind::Out, renderer).await,
-        Command::Examine => execute_examine(debugger, &mut words, renderer).await,
-        Command::Address => execute_address(debugger, &mut words, renderer).await,
+        Command::Examine => execute_examine(debugger, &mut words, spec.usage, renderer).await,
+        Command::Address => execute_address(debugger, &mut words, spec.usage, renderer).await,
         Command::Where => execute_where(debugger, renderer).await,
         Command::List => Ok(Control::Continue(format_source_context(
             &debugger.source_context(3).await?,
@@ -702,12 +746,9 @@ async fn execute(
             let snapshot = debugger.snapshot().await?;
             Ok(Control::Continue(format_threads(&snapshot, renderer)))
         }
-        Command::Thread => select_thread(debugger, &mut words, renderer).await,
-        Command::Clear => {
-            no_arguments(&mut words, "clear")?;
-            Ok(Control::ClearScreen)
-        }
-        Command::Help => execute_help(&mut words, renderer),
+        Command::Thread => select_thread(debugger, &mut words, spec.usage, renderer).await,
+        Command::Clear => Ok(Control::ClearScreen),
+        Command::Help => execute_help(&mut words, spec.usage, renderer),
         Command::Quit => Ok(Control::Quit),
     }
 }
@@ -721,9 +762,10 @@ fn command_named(name: &str) -> Option<&'static CommandSpec> {
 async fn execute_examine<'a>(
     debugger: &DebuggerHandle,
     words: &mut impl Iterator<Item = &'a str>,
+    usage: &str,
     renderer: Renderer,
 ) -> uscope::Result<Control> {
-    let address = parse_address(one_argument(words, "x <runtime-address>")?)?;
+    let address = parse_address(one_argument(words, usage)?)?;
     let value = debugger.read_word(VirtualAddress::new(address)).await?;
     Ok(Control::Continue(format!(
         "{}: {}",
@@ -735,9 +777,10 @@ async fn execute_examine<'a>(
 async fn execute_address<'a>(
     debugger: &DebuggerHandle,
     words: &mut impl Iterator<Item = &'a str>,
+    usage: &str,
     renderer: Renderer,
 ) -> uscope::Result<Control> {
-    let name = one_argument(words, "address <symbol>")?;
+    let name = one_argument(words, usage)?;
     Ok(Control::Continue(format!(
         "{}: {}",
         renderer.paint(Role::Name, name),
@@ -777,13 +820,14 @@ async fn execute_where(debugger: &DebuggerHandle, renderer: Renderer) -> uscope:
 async fn execute_print<'a>(
     debugger: &DebuggerHandle,
     words: &mut impl Iterator<Item = &'a str>,
+    usage: &str,
     renderer: Renderer,
 ) -> uscope::Result<Control> {
-    let argument = optional_argument(words, "print [variable]")?;
+    let argument = optional_argument(words, usage)?;
     match argument {
         Some(name) => {
             if !is_identifier(name) {
-                return Err(Error::InvalidCommand("print [variable]".to_owned()));
+                return Err(Error::InvalidCommand(usage.to_owned()));
             }
             Ok(Control::Continue(format_variable(
                 &debugger.variable(name).await?,
@@ -816,11 +860,12 @@ fn is_identifier(value: &str) -> bool {
 
 fn execute_help<'a>(
     words: &mut impl Iterator<Item = &'a str>,
+    usage: &str,
     renderer: Renderer,
 ) -> uscope::Result<Control> {
     let command = words.next();
     if words.next().is_some() {
-        return Err(Error::InvalidCommand("help [command]".to_owned()));
+        return Err(Error::InvalidCommand(usage.to_owned()));
     }
     Ok(Control::Continue(match command {
         Some(name) => {
@@ -846,12 +891,17 @@ fn format_help(renderer: Renderer) -> String {
     let mut output = "commands:".to_owned();
     for command in COMMANDS {
         let aliases = command.aliases.join(", ");
+        let rendered_aliases = if aliases.is_empty() {
+            String::new()
+        } else {
+            renderer.paint(Role::Alias, &aliases).to_string()
+        };
         write!(
             output,
             "\n  {}{}  {}{}  {}",
             renderer.paint(Role::Command, command.name),
             " ".repeat(name_width - command.name.len()),
-            renderer.paint(Role::Alias, &aliases),
+            rendered_aliases,
             " ".repeat(alias_width - aliases.len()),
             command.summary
         )
@@ -1017,9 +1067,10 @@ async fn format_backtrace(
 async fn select_thread<'a>(
     debugger: &DebuggerHandle,
     words: &mut impl Iterator<Item = &'a str>,
+    usage: &str,
     renderer: Renderer,
 ) -> uscope::Result<Control> {
-    let value = one_argument(words, "thread <id>")?;
+    let value = one_argument(words, usage)?;
     let id = value
         .parse::<u64>()
         .map_err(|_| Error::InvalidCommand(format!("invalid thread ID: {value}")))?;

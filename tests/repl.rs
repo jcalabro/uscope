@@ -240,6 +240,23 @@ fn interactive_control_c_cancels_the_line_and_control_l_redraws() {
 }
 
 #[test]
+fn interactive_clear_command_and_cls_alias_clear_the_terminal() {
+    let state = TestStateDir::new("clear");
+    let mut session = repl(&fixture("basic"), &state.0);
+
+    for command in ["clear", "cls"] {
+        session.send_line(command).expect("send clear command");
+        session
+            .expect("\x1b[2J\x1b[H")
+            .expect("terminal clear sequence");
+        session.expect("(uscope) ").expect("prompt after clear");
+    }
+
+    session.send_line("quit").expect("quit repl");
+    session.expect(Eof).expect("repl exited");
+}
+
+#[test]
 fn interactive_empty_lines_repeat_the_last_session_command() {
     let state = TestStateDir::new("repeat");
     let mut session = repl(&fixture("basic"), &state.0);
