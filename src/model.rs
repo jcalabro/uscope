@@ -306,6 +306,13 @@ pub enum TypeKind {
         /// The target-specific DWARF address class; zero is the default class.
         address_class: u64,
     },
+    /// A statically bounded array with one or more dimensions.
+    Array {
+        /// The element type.
+        element: TypeReference,
+        /// Dimensions in source order.
+        dimensions: Arc<[ArrayDimension]>,
+    },
     /// An ordered qualifier around another type.
     Qualified {
         /// The qualifier at this graph node.
@@ -325,6 +332,15 @@ pub enum TypeKind {
         /// A stable description of the unsupported DWARF type tag.
         description: Arc<str>,
     },
+}
+
+/// One statically known array dimension.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayDimension {
+    /// The source lower bound.
+    pub lower_bound: i128,
+    /// The number of elements in this dimension.
+    pub count: u64,
 }
 
 /// Immutable, normalized metadata for one type-graph node.
@@ -388,6 +404,13 @@ pub enum VariableValue {
     Address(AddressValue),
     /// An optimized pointer with no concrete address representation.
     ImplicitPointer,
+    /// A bounded aggregate, represented in row-major/source order.
+    Array {
+        /// The array dimensions.
+        dimensions: Arc<[ArrayDimension]>,
+        /// Decoded elements (nested arrays are represented recursively).
+        elements: Arc<[Self]>,
+    },
 }
 
 /// How a variable's current value was obtained.

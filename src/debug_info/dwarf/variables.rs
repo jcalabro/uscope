@@ -7,6 +7,7 @@ use gimli::{EvaluationResult, Location, Reader as _, RunTimeEndian, Value};
 
 use super::{DieKey, DwarfError, Reader, die_reference, source_file_id, source_path};
 use crate::debug_info::{VariableContext, VariableInfo, VariableRuntime};
+use crate::model::ArrayDimension;
 use crate::{
     AddressRange, AddressValue, Architecture, BaseType, BaseTypeEncoding, ByteOrder,
     CodeInstanceId, ColumnNumber, DereferenceReference, DereferenceState,
@@ -199,6 +200,11 @@ struct TypeArenaBuilder<'a, 'data> {
 #[derive(Clone, Debug)]
 enum ValueShape {
     Scalar(BaseType),
+    Array {
+        element: Box<Self>,
+        dimensions: Arc<[ArrayDimension]>,
+        byte_size: u64,
+    },
     Indirection {
         target: Option<TypeId>,
         byte_size: u64,
@@ -1502,6 +1508,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     pointer_size,
                     address_class,
                 ),
+            gimli::DW_TAG_array_type => {
+                self.build_array_type(&entry, key.unit, reference, explicit_name, explicit_size)
+            }
             gimli::DW_TAG_typedef
             | gimli::DW_TAG_const_type
             | gimli::DW_TAG_volatile_type
@@ -1799,6 +1808,91 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             name,
             byte_size,
             kind: TypeKind::Qualified { qualifier, target },
+        })
+    }
+
+    fn build_array_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> TypeEntry {
+        let element = match self.target(entry, unit_index) {
+            Ok(Some(target)) => target,
+            Ok(None) => return TypeEntry::Malformed("array type has no element type".into()),
+            Err(reason) => return TypeEntry::Malformed(reason),
+        };
+        let Some(unit) = self.units.get(unit_index) else {
+            return TypeEntry::Malformed("array type unit is unavailable".into());
+        };
+        let mut tree = match unit.entries_tree(Some(entry.offset())) {
+            Ok(tree) => tree,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let root = match tree.root() {
+            Ok(root) => root,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let mut dimensions = Vec::new();
+        let mut children = root.children();
+        while let Ok(Some(child)) = children.next() {
+            if child.entry().tag() != gimli::DW_TAG_subrange_type {
+                continue;
+            }
+            let child = child.entry();
+            let lower = child
+                .attr(gimli::DW_AT_lower_bound)
+                .and_then(|a| {
+                    a.sdata_value()
+                        .map(i128::from)
+                        .or_else(|| a.udata_value().map(i128::from))
+                })
+                .unwrap_or(0);
+            let count = child
+                .attr(gimli::DW_AT_count)
+                .and_then(gimli::Attribute::udata_value)
+                .or_else(|| {
+                    child
+                        .attr(gimli::DW_AT_upper_bound)
+                        .and_then(|a| {
+                            a.sdata_value()
+                                .map(i128::from)
+                                .or_else(|| a.udata_value().map(i128::from))
+                        })
+                        .and_then(|upper| {
+                            u64::try_from(upper.checked_sub(lower)?.checked_add(1)?).ok()
+                        })
+                });
+            let Some(count) = count else {
+                return TypeEntry::Resolved(TypeInfo {
+                    reference,
+                    name: explicit_name.unwrap_or_else(|| Arc::from("<dynamic array>")),
+                    byte_size: explicit_size,
+                    kind: TypeKind::Opaque {
+                        description: "array bounds are dynamic or missing".into(),
+                    },
+                });
+            };
+            dimensions.push(ArrayDimension {
+                lower_bound: lower,
+                count,
+            });
+        }
+        if dimensions.is_empty() {
+            return TypeEntry::Malformed("array type has no subrange dimensions".into());
+        }
+        let name =
+            explicit_name.unwrap_or_else(|| Arc::from(format!("{}[]", self.target_name(element))));
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size: explicit_size,
+            kind: TypeKind::Array {
+                element,
+                dimensions: dimensions.into(),
+            },
         })
     }
 }
@@ -2221,6 +2315,32 @@ fn value_shape_from(
                         .name,
                 );
                 return Ok(ValueShape::Scalar(base));
+            }
+            TypeKind::Array {
+                element,
+                dimensions,
+            } => {
+                let element_shape = value_shape_from(types, element.id)?;
+                let mut count = 1_u64;
+                for dimension in dimensions.iter() {
+                    count = count.checked_mul(dimension.count).ok_or_else(|| {
+                        ValueShapeError::Unsupported("array element count overflows".into())
+                    })?;
+                }
+                let element_size = element_shape.byte_size();
+                let byte_size = count.checked_mul(element_size).ok_or_else(|| {
+                    ValueShapeError::Unsupported("array byte size overflows".into())
+                })?;
+                if count > 100_000 || byte_size > 1_024 * 1_024 {
+                    return Err(ValueShapeError::Unsupported(
+                        "array exceeds inspection limits".into(),
+                    ));
+                }
+                return Ok(ValueShape::Array {
+                    element: Box::new(element_shape),
+                    dimensions: Arc::clone(dimensions),
+                    byte_size,
+                });
             }
             TypeKind::Pointer {
                 target,
@@ -2701,7 +2821,7 @@ fn available_implicit_pointer(
                 dereference,
             }
         }
-        ValueShape::Indirection { .. } => {
+        ValueShape::Array { .. } | ValueShape::Indirection { .. } => {
             VariableState::Unavailable(crate::UnsupportedVariableFeature::CompositeLocation.into())
         }
         ValueShape::Scalar(_) => VariableState::Malformed(VariableMalformedReason {
@@ -2722,14 +2842,14 @@ impl ValueShape {
     const fn byte_size(&self) -> u64 {
         match self {
             Self::Scalar(base) => base.byte_size,
-            Self::Indirection { byte_size, .. } => *byte_size,
+            Self::Indirection { byte_size, .. } | Self::Array { byte_size, .. } => *byte_size,
         }
     }
 
     const fn scalar(&self) -> Option<&BaseType> {
         match self {
             Self::Scalar(base) => Some(base),
-            Self::Indirection { .. } => None,
+            Self::Indirection { .. } | Self::Array { .. } => None,
         }
     }
 }
@@ -2767,6 +2887,19 @@ fn decode_value_state(
                 source,
                 raw: Some(raw),
                 value: VariableValue::Scalar(value),
+                dereference: DereferenceState::NotApplicable,
+            },
+            Err(reason) => VariableState::Unavailable(reason),
+        },
+        ValueShape::Array {
+            element,
+            dimensions,
+            ..
+        } => match decode_array_value(element, dimensions, &raw, target) {
+            Ok(value) => VariableState::Available {
+                source,
+                raw: Some(raw),
+                value,
                 dereference: DereferenceState::NotApplicable,
             },
             Err(reason) => VariableState::Unavailable(reason),
@@ -2812,6 +2945,69 @@ fn decode_value_state(
             }
             Err(reason) => VariableState::Unavailable(reason),
         },
+    }
+}
+
+fn decode_array_value(
+    element: &ValueShape,
+    dimensions: &[ArrayDimension],
+    raw: &[u8],
+    target: TargetDescription,
+) -> std::result::Result<VariableValue, VariableUnavailableReason> {
+    let count = dimensions.first().map_or(1, |d| d.count);
+    let element_size = dimensions
+        .iter()
+        .skip(1)
+        .try_fold(element.byte_size(), |size, dimension| {
+            size.checked_mul(dimension.count)
+        })
+        .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+    let mut values = Vec::with_capacity(
+        usize::try_from(count).map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+    );
+    for index in 0..count {
+        let start = usize::try_from(
+            index
+                .checked_mul(element_size)
+                .ok_or(VariableUnavailableReason::EvaluationLimit)?,
+        )
+        .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let end = start
+            .checked_add(
+                usize::try_from(element_size)
+                    .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+            )
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        let bytes = raw.get(start..end).ok_or_else(|| {
+            VariableUnavailableReason::Other("array storage is shorter than its type".into())
+        })?;
+        let value = if dimensions.len() == 1 {
+            decode_leaf_value(element, bytes, target)?
+        } else {
+            decode_array_value(element, &dimensions[1..], bytes, target)?
+        };
+        values.push(value);
+    }
+    Ok(VariableValue::Array {
+        dimensions: dimensions.into(),
+        elements: values.into(),
+    })
+}
+
+fn decode_leaf_value(
+    shape: &ValueShape,
+    raw: &[u8],
+    target: TargetDescription,
+) -> std::result::Result<VariableValue, VariableUnavailableReason> {
+    match shape {
+        ValueShape::Scalar(base) => decode_scalar(base, raw, target).map(VariableValue::Scalar),
+        ValueShape::Array {
+            dimensions,
+            element,
+            ..
+        } => decode_array_value(element, dimensions, raw, target),
+        ValueShape::Indirection { byte_size, .. } => decode_address(raw, *byte_size, target)
+            .map(|address| VariableValue::Address(AddressValue { address })),
     }
 }
 

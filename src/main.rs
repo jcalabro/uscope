@@ -1333,6 +1333,14 @@ fn format_variable_value(type_info: &uscope::TypeInfo, value: &uscope::VariableV
             format!("0x{:0width$x}", value.address.get())
         }
         uscope::VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
+        uscope::VariableValue::Array { elements, .. } => {
+            let rendered = elements
+                .iter()
+                .map(|element| format_variable_value(type_info, element))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{rendered}]")
+        }
         _ => "<unsupported value>".to_owned(),
     }
 }
