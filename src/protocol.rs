@@ -3,8 +3,9 @@ use std::{fmt, path::PathBuf, sync::Arc};
 use tokio::sync::oneshot;
 
 use crate::{
-    Backtrace, BreakpointLocation, CodeInstanceId, ExecutionLocation, LineNumber, LoadedModule,
-    RegisterSnapshot, Result, ThreadId, VariableSnapshot, VirtualAddress,
+    Backtrace, BreakpointLocation, CodeInstanceId, ExecutionLocation, GlobalVariablePage,
+    GlobalVariableReference, LineNumber, LoadedModule, LoadedModuleSnapshot, RegisterSnapshot,
+    Result, ThreadId, VariableSnapshot, VirtualAddress,
 };
 
 /// Selects data objects to inspect in the stopped thread's selected logical frame.
@@ -14,6 +15,29 @@ pub enum VariableQuery {
     All,
     /// Inspect the innermost visible data object with this name.
     Name(String),
+    /// Inspect one exact global catalog entry.
+    Global(GlobalVariableReference),
+}
+
+/// Selects one bounded page from the immutable global catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalVariableQuery {
+    /// Case-sensitive substring matched against source and linkage names.
+    pub filter: Option<String>,
+    /// Zero-based offset within the deterministic match ordering.
+    pub offset: u64,
+    /// Maximum entries to return; must be between 1 and 256.
+    pub limit: u32,
+}
+
+impl Default for GlobalVariableQuery {
+    fn default() -> Self {
+        Self {
+            filter: None,
+            offset: 0,
+            limit: 100,
+        }
+    }
 }
 
 /// A user-facing request for a logical breakpoint.
@@ -359,6 +383,14 @@ pub enum DebuggerEvent {
         thread_id: ThreadId,
         status: ExitStatus,
     },
+    ModuleLoaded {
+        revision: u64,
+        module: crate::LoadedModuleRecord,
+    },
+    ModuleUnloaded {
+        revision: u64,
+        module: crate::LoadedModuleRecord,
+    },
     InferiorExited {
         revision: u64,
         process_id: ProcessId,
@@ -422,6 +454,9 @@ pub enum Request {
     LoadedModule {
         reply: Reply<LoadedModule>,
     },
+    LoadedModules {
+        reply: Reply<LoadedModuleSnapshot>,
+    },
     StoppedLocation {
         stop_id: StopId,
         thread_id: ThreadId,
@@ -445,6 +480,10 @@ pub enum Request {
         stop_id: StopId,
         thread_id: ThreadId,
         reply: Reply<VariableSnapshot>,
+    },
+    Globals {
+        query: GlobalVariableQuery,
+        reply: Reply<GlobalVariablePage>,
     },
     SelectThread {
         stop_id: StopId,

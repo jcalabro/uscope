@@ -246,6 +246,8 @@ impl Scenario {
             | DebuggerEvent::InferiorStopped { revision, .. }
             | DebuggerEvent::ThreadStarted { revision, .. }
             | DebuggerEvent::ThreadExited { revision, .. }
+            | DebuggerEvent::ModuleLoaded { revision, .. }
+            | DebuggerEvent::ModuleUnloaded { revision, .. }
             | DebuggerEvent::InferiorExited { revision, .. } => *revision,
         };
         if revision < self.last_revision {

@@ -117,6 +117,18 @@ id_type!(
     "Identifies a linker symbol within a module image."
 );
 id_type!(
+    GlobalVariableId,
+    "Identifies a global variable within a module image."
+);
+
+impl GlobalVariableId {
+    /// Returns the dense index within the containing module image.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+id_type!(
     StackFrameId,
     "Identifies a stack frame within one stop revision."
 );
@@ -390,6 +402,97 @@ pub enum VariableKind {
     Parameter,
     /// A local variable declared within the selected function.
     Local,
+    /// A data object with static storage described by a module image.
+    Global,
+}
+
+/// The source visibility of a global data object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GlobalVariableVisibility {
+    /// The producer marks the object as externally visible.
+    External,
+    /// The object is local to one compilation unit.
+    CompilationUnit,
+}
+
+/// The static type state retained for a global catalog entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GlobalVariableType {
+    /// A supported scalar type.
+    Scalar(BaseType),
+    /// A valid type outside the scalar inspection contract.
+    Unsupported(Arc<str>),
+    /// Defective type metadata isolated to this entry.
+    Malformed(VariableMalformedReason),
+}
+
+/// Immutable source metadata for one global data object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalVariableInfo {
+    /// The identifier within the containing module image.
+    pub id: GlobalVariableId,
+    /// The unqualified source name.
+    pub name: Arc<str>,
+    /// The producer-normalized source qualification.
+    pub qualified_name: Arc<str>,
+    /// The linker identity, when supplied by debug metadata.
+    pub linkage_name: Option<Arc<str>>,
+    /// The declaration location, when supplied by debug metadata.
+    pub declaration: Option<SourceLocation>,
+    /// The resolved scalar type or an explicit unsupported/malformed state.
+    pub type_info: GlobalVariableType,
+    /// Whether the object is external or compilation-unit local.
+    pub visibility: GlobalVariableVisibility,
+}
+
+/// One structured candidate returned for an ambiguous global selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalVariableCandidate {
+    /// The candidate within its module image.
+    pub id: GlobalVariableId,
+    /// The canonical source qualification.
+    pub qualified_name: Arc<str>,
+    /// The resolved declaration path, when known.
+    pub declaration_path: Option<Arc<PathBuf>>,
+    /// The declaration location, when known.
+    pub declaration: Option<SourceLocation>,
+}
+
+/// Stable identity of an evaluated global in a loaded module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GlobalVariableReference {
+    /// The runtime module mapping used for evaluation.
+    pub module: ModuleId,
+    /// The immutable image containing the catalog entry.
+    pub image: ModuleImageId,
+    /// The entry within that image.
+    pub variable: GlobalVariableId,
+}
+
+/// One immutable global entry associated with its runtime module mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedGlobalVariableInfo {
+    /// The module mapping when the image is currently loaded.
+    pub module: Option<LoadedModule>,
+    /// The immutable module image that owns this entry.
+    pub image: ModuleImageId,
+    /// The image-level global metadata.
+    pub variable: GlobalVariableInfo,
+}
+
+/// One bounded page of global catalog metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalVariablePage {
+    /// The debugger revision at which loaded modules were enumerated.
+    pub revision: u64,
+    /// The zero-based offset represented by this page.
+    pub offset: u64,
+    /// The total number of entries matching the filter.
+    pub total: u64,
+    /// Deterministically ordered entries in this page.
+    pub variables: Arc<[LoadedGlobalVariableInfo]>,
 }
 
 /// One variable or parameter visible in the selected stopped frame.
@@ -397,6 +500,8 @@ pub enum VariableKind {
 pub struct Variable {
     /// Whether this data object is a parameter or local variable.
     pub kind: VariableKind,
+    /// Stable module identity for a global; absent for parameters and locals.
+    pub global: Option<GlobalVariableReference>,
     /// The source-level variable name.
     pub name: Arc<str>,
     /// Its declaration location, when supplied by debug metadata.
@@ -904,6 +1009,7 @@ pub struct ModuleMetadata {
     pub functions: Vec<FunctionInfo>,
     pub code_instances: Vec<CodeInstanceInfo>,
     pub symbols: Vec<SymbolInfo>,
+    pub globals: Vec<GlobalVariableInfo>,
     pub source_files: Vec<SourceFile>,
     pub statements: Vec<StatementRow>,
     pub lines: Vec<LineEntry>,
@@ -970,6 +1076,7 @@ impl<T: Copy + Ord> RangeIndex<T> {
 struct ModuleIndexes {
     functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
     symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
+    globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
     statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
     control_boundaries_by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
@@ -1011,6 +1118,44 @@ fn build_module_indexes(
             .iter()
             .map(|symbol| (Arc::clone(&symbol.name), symbol.id)),
     );
+    let mut global_selectors = Vec::new();
+    for global in &metadata.globals {
+        global_selectors.push((Arc::clone(&global.name), global.id));
+        if global.qualified_name != global.name {
+            global_selectors.push((Arc::clone(&global.qualified_name), global.id));
+        }
+        if let Some(linkage_name) = &global.linkage_name {
+            global_selectors.push((Arc::clone(linkage_name), global.id));
+        }
+        if let Some(declaration) = &global.declaration
+            && let Some(source) = metadata
+                .source_files
+                .get(usize::try_from(declaration.file.0).expect("source file ID fits usize"))
+        {
+            let path = source.path.to_string_lossy();
+            global_selectors.push((
+                Arc::from(format!("{path}::{}", global.qualified_name)),
+                global.id,
+            ));
+            if let Some(file_name) = source.path.file_name() {
+                global_selectors.push((
+                    Arc::from(format!(
+                        "{}::{}",
+                        file_name.to_string_lossy(),
+                        global.qualified_name
+                    )),
+                    global.id,
+                ));
+            }
+        }
+    }
+    let mut globals_by_selector = grouped_index(global_selectors);
+    for ids in globals_by_selector.values_mut() {
+        let mut unique = ids.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        *ids = unique.into();
+    }
     let instances_by_function = grouped_index(
         metadata
             .code_instances
@@ -1037,6 +1182,7 @@ fn build_module_indexes(
     ModuleIndexes {
         functions_by_name,
         symbols_by_name,
+        globals_by_selector,
         instances_by_function,
         statements_by_source_line,
         control_boundaries_by_address: control_boundaries.by_address,
@@ -1149,9 +1295,16 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             "source file IDs are dense and ordered"
         );
     }
+    for (index, global) in metadata.globals.iter().enumerate() {
+        assert_eq!(
+            usize::try_from(global.id.0).expect("global ID fits usize"),
+            index,
+            "global IDs are dense and ordered"
+        );
+    }
 }
 
-/// Immutable, normalized debug metadata for one executable module.
+/// Immutable, normalized debug metadata for one ELF module image.
 #[derive(Debug)]
 pub struct ModuleImage {
     id: ModuleImageId,
@@ -1161,11 +1314,13 @@ pub struct ModuleImage {
     functions: Arc<[FunctionInfo]>,
     code_instances: Arc<[CodeInstanceInfo]>,
     symbols: Arc<[SymbolInfo]>,
+    globals: Arc<[GlobalVariableInfo]>,
     source_files: Arc<[SourceFile]>,
     statements: Arc<[StatementRow]>,
     lines: Arc<[LineEntry]>,
     functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
     symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
+    globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
     statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
     control_boundaries_by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
@@ -1208,11 +1363,13 @@ impl ModuleImage {
             functions: metadata.functions.into(),
             code_instances: metadata.code_instances.into(),
             symbols: metadata.symbols.into(),
+            globals: metadata.globals.into(),
             source_files: metadata.source_files.into(),
             statements: metadata.statements.into(),
             lines: metadata.lines.into(),
             functions_by_name: indexes.functions_by_name,
             symbols_by_name: indexes.symbols_by_name,
+            globals_by_selector: indexes.globals_by_selector,
             instances_by_function: indexes.instances_by_function,
             statements_by_source_line: indexes.statements_by_source_line,
             control_boundaries_by_address: indexes.control_boundaries_by_address,
@@ -1221,6 +1378,11 @@ impl ModuleImage {
             code_range_index,
             line_range_index,
         }
+    }
+
+    pub(crate) const fn with_id(mut self, id: ModuleImageId) -> Self {
+        self.id = id;
+        self
     }
 
     /// Returns this image's session-scoped identifier.
@@ -1269,6 +1431,49 @@ impl ModuleImage {
     #[must_use]
     pub fn symbols(&self) -> &[SymbolInfo] {
         &self.symbols
+    }
+
+    /// Returns every global catalog entry in deterministic source order.
+    #[must_use]
+    pub fn globals(&self) -> &[GlobalVariableInfo] {
+        &self.globals
+    }
+
+    /// Looks up a global catalog entry by identifier.
+    #[must_use]
+    pub fn global(&self, id: GlobalVariableId) -> Option<&GlobalVariableInfo> {
+        self.globals.get(usize::try_from(id.0).ok()?)
+    }
+
+    /// Resolves a basename, canonical qualification, source qualification, or
+    /// linkage identity to exactly one catalog entry.
+    pub fn global_named(&self, selector: &str) -> Result<&GlobalVariableInfo> {
+        let matches = self
+            .globals_by_selector
+            .get(selector)
+            .ok_or_else(|| Error::VariableNotFound(selector.to_owned()))?;
+        let [id] = matches.as_ref() else {
+            return Err(Error::AmbiguousGlobalVariable {
+                selector: selector.to_owned(),
+                candidates: matches
+                    .iter()
+                    .filter_map(|id| self.global(*id))
+                    .map(|global| crate::GlobalVariableCandidate {
+                        id: global.id,
+                        qualified_name: Arc::clone(&global.qualified_name),
+                        declaration_path: global
+                            .declaration
+                            .as_ref()
+                            .and_then(|declaration| self.source_file(declaration.file))
+                            .map(|source| Arc::clone(&source.path)),
+                        declaration: global.declaration.clone(),
+                    })
+                    .collect(),
+            });
+        };
+        Ok(self
+            .global(*id)
+            .expect("global index references a catalog entry"))
     }
 
     /// Returns all source files referenced by this image.
@@ -1570,6 +1775,24 @@ pub struct LoadedModule {
     pub load_bias: u64,
 }
 
+/// Public identity and path for one runtime module mapping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedModuleRecord {
+    /// The checked runtime mapping.
+    pub module: LoadedModule,
+    /// The canonical ELF image path.
+    pub path: Arc<PathBuf>,
+}
+
+/// Immutable process-wide loaded-module registry snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedModuleSnapshot {
+    /// The debugger revision represented by this snapshot.
+    pub revision: u64,
+    /// Loaded modules ordered by module identifier.
+    pub modules: Arc<[LoadedModuleRecord]>,
+}
+
 impl LoadedModule {
     pub(crate) const fn main(image: ModuleImageId, load_bias: u64) -> Self {
         Self {
@@ -1600,6 +1823,116 @@ impl LoadedModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn global_test_image() -> ModuleImage {
+        let scalar = || {
+            GlobalVariableType::Scalar(BaseType {
+                name: "int".into(),
+                base_name: "int".into(),
+                encoding: BaseTypeEncoding::Signed,
+                byte_size: 4,
+            })
+        };
+        let globals = [
+            ("left::shared", "_ZL11left_shared", 0),
+            ("right::shared", "_ZL12right_shared", 1),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(
+            |(id, (qualified_name, linkage_name, file))| GlobalVariableInfo {
+                id: GlobalVariableId::new(u32::try_from(id).expect("small global count")),
+                name: "shared".into(),
+                qualified_name: qualified_name.into(),
+                linkage_name: Some(linkage_name.into()),
+                declaration: Some(SourceLocation {
+                    file: SourceFileId::new(file),
+                    line: LineNumber::new(7).expect("nonzero line"),
+                    column: None,
+                }),
+                type_info: scalar(),
+                visibility: GlobalVariableVisibility::CompilationUnit,
+            },
+        )
+        .collect();
+        ModuleImage::new(
+            PathBuf::from("/test/globals"),
+            TargetDescription {
+                architecture: Architecture::X86_64,
+                byte_order: ByteOrder::Little,
+                pointer_width: PointerWidth::Bits64,
+            },
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(1),
+            },
+            ModuleMetadata {
+                functions: Vec::new(),
+                code_instances: Vec::new(),
+                symbols: Vec::new(),
+                globals,
+                source_files: vec![
+                    SourceFile {
+                        id: SourceFileId::new(0),
+                        path: Arc::new(PathBuf::from("/build/src/left.c")),
+                    },
+                    SourceFile {
+                        id: SourceFileId::new(1),
+                        path: Arc::new(PathBuf::from("/build/src/right.c")),
+                    },
+                ],
+                statements: Vec::new(),
+                lines: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn global_indexes_support_exact_qualification_and_structured_ambiguity() {
+        let image = global_test_image();
+
+        assert_eq!(
+            image
+                .global_named("left::shared")
+                .expect("qualified global")
+                .id,
+            GlobalVariableId::new(0)
+        );
+        assert_eq!(
+            image
+                .global_named("right.c::right::shared")
+                .expect("source-qualified global")
+                .id,
+            GlobalVariableId::new(1)
+        );
+        assert_eq!(
+            image
+                .global_named("_ZL11left_shared")
+                .expect("linkage-qualified global")
+                .id,
+            GlobalVariableId::new(0)
+        );
+        let Error::AmbiguousGlobalVariable {
+            selector,
+            candidates,
+        } = image
+            .global_named("shared")
+            .expect_err("ambiguous basename")
+        else {
+            panic!("unexpected ambiguity error");
+        };
+        assert_eq!(selector, "shared");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.id, candidate.qualified_name.as_ref()))
+                .collect::<Vec<_>>(),
+            [
+                (GlobalVariableId::new(0), "left::shared"),
+                (GlobalVariableId::new(1), "right::shared"),
+            ]
+        );
+    }
 
     #[test]
     fn source_path_matching_uses_whole_trailing_components() {
@@ -1670,6 +2003,7 @@ mod tests {
                 functions,
                 code_instances,
                 symbols: Vec::new(),
+                globals: Vec::new(),
                 source_files: Vec::new(),
                 statements: Vec::new(),
                 lines: Vec::new(),
@@ -1792,6 +2126,7 @@ mod tests {
                 functions,
                 code_instances: boundary_test_instances(),
                 symbols: Vec::new(),
+                globals: Vec::new(),
                 source_files: Vec::new(),
                 statements: boundary_test_rows(),
                 lines: Vec::new(),

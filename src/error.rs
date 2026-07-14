@@ -33,8 +33,24 @@ pub enum Error {
     VariableNotFound(String),
     #[error("multiple equally visible variables or parameters named '{0}' were found")]
     AmbiguousVariable(String),
+    #[error("global variable selector '{selector}' is ambiguous: {candidates:?}")]
+    AmbiguousGlobalVariable {
+        selector: String,
+        candidates: Vec<crate::GlobalVariableCandidate>,
+    },
     #[error("variable inspection is unavailable for the selected logical frame")]
     VariableContextUnsupported,
+    #[error("global catalog page limit {0} is outside 1..=256")]
+    InvalidGlobalPageLimit(u32),
+    #[error("loaded global selector '{selector}' is ambiguous: {candidates:?}")]
+    AmbiguousLoadedGlobalVariable {
+        selector: String,
+        candidates: Vec<crate::GlobalVariableReference>,
+    },
+    #[error("loaded module {0} is unavailable")]
+    ModuleNotLoaded(crate::ModuleId),
+    #[error("loaded module identity refers to a stale image")]
+    StaleModuleImage,
 
     #[error("the inferior is already running")]
     AlreadyRunning,

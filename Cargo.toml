@@ -41,7 +41,7 @@ tokio = { version = "1.52", features = ["fs", "io-std", "io-util", "macros", "rt
 [target.'cfg(target_os = "linux")'.dependencies]
 gimli = "0.34"
 iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "instr_info", "std"] }
-nix = { version = "0.31", features = ["ptrace", "process", "signal"] }
+nix = { version = "0.31", features = ["ptrace", "process", "signal", "uio"] }
 object = { version = "0.39", features = ["read"] }
 
 [dev-dependencies]

@@ -76,6 +76,30 @@ build_fixture() {
         -std=c17 -Wall -Wextra -Werror "$@"
 }
 
+build_c_fixture_directory() {
+    local compiler="$1"
+    local source_dir="$2"
+    local output="$3"
+    shift 3
+    local -a sources=()
+    mapfile -d '' sources < <(
+        find "$source_dir" -maxdepth 1 -type f -name '*.c' -print0 | sort -z
+    )
+    if (( ${#sources[@]} == 0 )); then
+        printf 'error: C fixture has no source files: %s\n' "$source_dir" >&2
+        exit 1
+    fi
+    local -a command=(
+        "$compiler" -std=c17 -Wall -Wextra -Werror "$@" "${sources[@]}" -o "$output"
+    )
+    local version
+    version=$("$compiler" --version)
+    version=${version%%$'\n'*}
+    run_cached_build "$source_dir" "$output" \
+        "compiler=${version}"$'\n'"target=x86_64-linux"$'\n'"backend=${compiler}" \
+        "${command[@]}"
+}
+
 build_cpp_fixture() {
     local compiler="$1"
     local source="$2"
@@ -83,6 +107,15 @@ build_cpp_fixture() {
     shift 3
     build_program "$compiler" "$source" "$output" \
         -std=c++20 -Wall -Wextra -Werror "$@"
+}
+
+build_shared_fixture() {
+    local compiler="$1"
+    local source="$2"
+    local output="$3"
+    shift 3
+    build_program "$compiler" "$source" "$output" \
+        -std=c17 -Wall -Wextra -Werror -shared -fPIC "$@"
 }
 
 build_rust_fixture() {
@@ -189,6 +222,24 @@ require_dwarf_operation "$output_dir/variables-static-clang-o2" DW_OP_addrx
 build_fixture gcc "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-gcc-nopie" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie
 require_dwarf_operation "$output_dir/variables-static-gcc-nopie" 'DW_OP_addr:'
+build_c_fixture_directory gcc "$c_fixtures_dir/globals" "$output_dir/globals-c-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_c_fixture_directory clang "$c_fixtures_dir/globals" "$output_dir/globals-c-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_c_fixture_directory gcc "$c_fixtures_dir/globals" "$output_dir/globals-c-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_c_fixture_directory clang "$c_fixtures_dir/globals" "$output_dir/globals-c-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_c_fixture_directory gcc "$c_fixtures_dir/globals" "$output_dir/globals-c-gcc-nopie" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -no-pie
+build_shared_fixture gcc "$c_fixtures_dir/shared/library.c" "$output_dir/libglobals.so" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
+build_fixture gcc "$c_fixtures_dir/shared/main.c" "$output_dir/globals-shared" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -ldl
+build_fixture gcc "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-gcc" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
+build_fixture clang "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-clang" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture clang++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-clang-o0" \
@@ -197,13 +248,29 @@ build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-c
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_cpp_fixture clang++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_cpp_fixture g++ "$cpp_fixtures_dir/globals.cpp" "$output_dir/globals-cpp-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_cpp_fixture clang++ "$cpp_fixtures_dir/globals.cpp" "$output_dir/globals-cpp-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_cpp_fixture g++ "$cpp_fixtures_dir/globals.cpp" "$output_dir/globals-cpp-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_cpp_fixture clang++ "$cpp_fixtures_dir/globals.cpp" "$output_dir/globals-cpp-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o2" \
     -C opt-level=2 -C force-frame-pointers=no
+build_rust_fixture "$rust_fixtures_dir/globals.rs" "$output_dir/globals-rust-o0" \
+    -C opt-level=0 -C force-frame-pointers=yes
+build_rust_fixture "$rust_fixtures_dir/globals.rs" "$output_dir/globals-rust-o2" \
+    -C opt-level=2 -C force-frame-pointers=no
 build_go_fixture "$go_fixtures_dir/variables" "$output_dir/variables-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/variables" "$output_dir/variables-go-o2" \
+    -buildmode=pie
+build_go_fixture "$go_fixtures_dir/globals" "$output_dir/globals-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/globals" "$output_dir/globals-go-o2" \
     -buildmode=pie
 require_dwarf_operation "$output_dir/variables-go-o0" 'DW_AT_language.*Go'
 require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
@@ -212,6 +279,12 @@ build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o
 build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o2" \
     -O ReleaseFast -fPIE -fomit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-nopie" \
+    -O Debug -fno-PIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/globals.zig" "$output_dir/globals-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/globals.zig" "$output_dir/globals-zig-o2" \
+    -O ReleaseFast -fPIE -fomit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/globals.zig" "$output_dir/globals-zig-nopie" \
     -O Debug -fno-PIE -fno-omit-frame-pointer
 require_dwarf_operation "$output_dir/variables-zig-o0" 'DW_AT_producer.*zig 0.16.0'
 require_dwarf_operation "$output_dir/variables-zig-o0" variables.inspectScalars

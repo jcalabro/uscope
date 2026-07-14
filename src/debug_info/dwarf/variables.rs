@@ -9,7 +9,8 @@ use super::{DieKey, DwarfError, Reader, die_reference, source_file_id, source_pa
 use crate::debug_info::{VariableInfo, VariableRuntime};
 use crate::{
     AddressRange, Architecture, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
-    ColumnNumber, Error, FloatValue, ImageAddress, LineNumber, Result, ScalarValue, SourceFile,
+    ColumnNumber, Error, FloatValue, GlobalVariableId, GlobalVariableInfo, GlobalVariableType,
+    GlobalVariableVisibility, ImageAddress, LineNumber, Result, ScalarValue, SourceFile,
     SourceFileId, SourceLocation, TargetDescription, Variable, VariableKind,
     VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
     VariableValueSource, VirtualAddress,
@@ -168,11 +169,8 @@ enum Metadata<T> {
 enum ConstantValue {
     Unsigned(u128),
     Signed(i128),
-    /// A fixed-width form whose signedness comes from the variable's type.
-    Fixed {
-        value: u128,
-        bits: u32,
-    },
+    /// A fixed-width form with implicit zero high bits.
+    Fixed(u128),
     Bytes(Arc<[u8]>),
 }
 
@@ -223,9 +221,326 @@ pub(super) struct DwarfVariableInfo {
     objects: Arc<[CatalogDataObject]>,
     functions: Arc<[CatalogFunction]>,
     address_index: BTreeMap<ImageAddress, Arc<[usize]>>,
+    globals: Arc<[usize]>,
     evaluation_units: Arc<[EvaluationUnit]>,
     target: TargetDescription,
     endian: RunTimeEndian,
+}
+
+pub(super) struct LoadedVariables {
+    pub info: Arc<dyn VariableInfo>,
+    pub globals: Vec<GlobalVariableInfo>,
+}
+
+#[derive(Clone, Default)]
+struct GlobalScope {
+    path: Arc<[Arc<str>]>,
+    routine: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DefinitionResolution {
+    New,
+    Existing(usize),
+    Conflict,
+}
+
+#[derive(Default)]
+struct DefinitionIndex {
+    by_identity: HashMap<Arc<str>, usize>,
+}
+
+impl DefinitionIndex {
+    fn resolve(&mut self, identities: &[Arc<str>], candidate: usize) -> DefinitionResolution {
+        let mut existing = identities
+            .iter()
+            .filter_map(|identity| self.by_identity.get(identity).copied())
+            .collect::<Vec<_>>();
+        existing.sort_unstable();
+        existing.dedup();
+        match existing.as_slice() {
+            [] => {
+                for identity in identities {
+                    self.by_identity.insert(Arc::clone(identity), candidate);
+                }
+                DefinitionResolution::New
+            }
+            [definition] => {
+                for identity in identities {
+                    self.by_identity.insert(Arc::clone(identity), *definition);
+                }
+                DefinitionResolution::Existing(*definition)
+            }
+            _ => {
+                // Contradictory producer identities must remain separate and
+                // therefore ambiguous; never select one convincing value.
+                for identity in identities {
+                    self.by_identity
+                        .entry(Arc::clone(identity))
+                        .or_insert(candidate);
+                }
+                DefinitionResolution::Conflict
+            }
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "global collection deliberately resolves producer variants in one auditable pass"
+)]
+fn load_globals(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    units: &[gimli::Unit<Reader<'_>>],
+    objects: &mut Vec<CatalogDataObject>,
+    order: &mut u64,
+    source_files: &mut Vec<SourceFile>,
+    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+) -> std::result::Result<(Vec<GlobalVariableInfo>, Vec<usize>), DwarfError> {
+    let mut scopes_by_die = HashMap::<DieKey, GlobalScope>::new();
+
+    // Pass one records lexical ownership for every DIE. A later definition
+    // may point backward to a declaration nested in a namespace or class.
+    for (unit_index, unit) in units.iter().enumerate() {
+        let mut entries = unit.entries();
+        let mut scopes = Vec::<GlobalScope>::new();
+        while let Some(entry) = entries.next_dfs()? {
+            let depth =
+                usize::try_from(entry.depth()).map_err(|_| DwarfError::InvalidEntryDepth)?;
+            scopes.truncate(depth);
+            let parent = scopes.last().cloned().unwrap_or_default();
+            let mut scope = parent.clone();
+            match entry.tag() {
+                gimli::DW_TAG_subprogram | gimli::DW_TAG_inlined_subroutine => {
+                    scope.routine = true;
+                }
+                gimli::DW_TAG_namespace
+                | gimli::DW_TAG_module
+                | gimli::DW_TAG_class_type
+                | gimli::DW_TAG_structure_type
+                | gimli::DW_TAG_union_type => {
+                    let component = match copy_name(dwarf, unit, entry) {
+                        Ok(Some(name)) => name,
+                        Ok(None) if entry.tag() == gimli::DW_TAG_namespace => {
+                            Arc::from("{anonymous}")
+                        }
+                        Ok(None) => Arc::from("{anonymous type}"),
+                        Err(error) => Arc::from(format!("{{malformed scope: {error}}}")),
+                    };
+                    let mut path = parent.path.to_vec();
+                    path.push(component);
+                    scope.path = path.into();
+                }
+                _ => {}
+            }
+            scopes_by_die.insert(
+                DieKey {
+                    unit: unit_index,
+                    offset: entry.offset().0,
+                },
+                scope.clone(),
+            );
+            scopes.push(scope);
+        }
+    }
+
+    let mut globals = Vec::<GlobalVariableInfo>::new();
+    let mut global_objects = Vec::<usize>::new();
+    let mut definitions = DefinitionIndex::default();
+
+    // Pass two resolves every non-routine data object independently.
+    for (unit_index, unit) in units.iter().enumerate() {
+        let mut entries = unit.entries();
+        while let Some(entry) = entries.next_dfs()? {
+            if entry.tag() != gimli::DW_TAG_variable {
+                continue;
+            }
+            let key = DieKey {
+                unit: unit_index,
+                offset: entry.offset().0,
+            };
+            let current_scope = scopes_by_die.get(&key).cloned().unwrap_or_default();
+            if current_scope.routine {
+                continue;
+            }
+
+            let (chain, chain_error) = match origin_chain(units, unit_index, entry) {
+                Ok(chain) => (chain, None),
+                Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
+            };
+            let name = match copy_name_with_origins(dwarf, units, unit, entry, &chain) {
+                Ok(Some(name)) => name,
+                Ok(None) => format!("<anonymous global at {:#x}>", entry.offset().0).into(),
+                Err(error) => {
+                    format!("<malformed global at {:#x}: {error}>", entry.offset().0).into()
+                }
+            };
+            let linkage_name = copy_string_attribute_with_origins(
+                dwarf,
+                units,
+                unit,
+                entry,
+                &chain,
+                gimli::DW_AT_linkage_name,
+            )?
+            .or(copy_string_attribute_with_origins(
+                dwarf,
+                units,
+                unit,
+                entry,
+                &chain,
+                gimli::DW_AT_MIPS_linkage_name,
+            )?);
+            let scope = chain
+                .iter()
+                .filter_map(|(origin_unit, origin)| {
+                    scopes_by_die.get(&DieKey {
+                        unit: *origin_unit,
+                        offset: origin.offset().0,
+                    })
+                })
+                .chain(std::iter::once(&current_scope))
+                .max_by_key(|scope| scope.path.len())
+                .cloned()
+                .unwrap_or_default();
+            let qualified_name = if scope.path.is_empty() {
+                linkage_name
+                    .as_ref()
+                    .filter(|linkage| !linkage.starts_with('_') && linkage.contains('.'))
+                    .cloned()
+                    .unwrap_or_else(|| Arc::clone(&name))
+            } else {
+                Arc::from(format!(
+                    "{}::{name}",
+                    scope
+                        .path
+                        .iter()
+                        .map(AsRef::as_ref)
+                        .collect::<Vec<_>>()
+                        .join("::")
+                ))
+            };
+            let declaration = declaration_with_origins(
+                dwarf,
+                units,
+                unit,
+                entry,
+                &chain,
+                source_files,
+                source_file_ids,
+            );
+            let (type_unit, type_value) = entry
+                .attr_value(gimli::DW_AT_type)
+                .map(|value| (unit_index, Some(value)))
+                .or_else(|| {
+                    chain.iter().find_map(|(origin_unit, origin)| {
+                        origin
+                            .attr_value(gimli::DW_AT_type)
+                            .map(|value| (*origin_unit, Some(value)))
+                    })
+                })
+                .unwrap_or((unit_index, None));
+            let type_info = resolve_variable_type(dwarf, units, type_unit, type_value);
+            let value =
+                copy_data_object_value_with_origins(dwarf, units, unit_index, unit, entry, &chain);
+            let declaration_only =
+                flag_attribute_with_origins(unit, entry, units, &chain, gimli::DW_AT_declaration)
+                    .unwrap_or(false)
+                    && matches!(value, Metadata::Unavailable(_));
+            if declaration_only {
+                continue;
+            }
+            let visibility =
+                if flag_attribute_with_origins(unit, entry, units, &chain, gimli::DW_AT_external)
+                    .unwrap_or(false)
+                {
+                    GlobalVariableVisibility::External
+                } else {
+                    GlobalVariableVisibility::CompilationUnit
+                };
+            *order = order
+                .checked_add(1)
+                .expect("data-object DIE order overflow");
+            let malformed = declaration
+                .as_ref()
+                .err()
+                .map(|error| Arc::from(error.to_string()))
+                .or(chain_error);
+            let object = CatalogDataObject {
+                kind: VariableKind::Global,
+                name: Arc::clone(&name),
+                declaration: declaration.as_ref().ok().cloned().flatten(),
+                ranges: Vec::new().into(),
+                instance: None,
+                lexical_depth: 0,
+                order: *order,
+                type_info: type_info.clone(),
+                value,
+                frame_base: Metadata::Unavailable("globals have no frame base".into()),
+                malformed,
+            };
+            let public_type = match &type_info {
+                TypeResolution::Scalar(value) => GlobalVariableType::Scalar(value.clone()),
+                TypeResolution::Unsupported(reason) => {
+                    GlobalVariableType::Unsupported(Arc::clone(reason))
+                }
+                TypeResolution::Malformed(description) => {
+                    GlobalVariableType::Malformed(VariableMalformedReason {
+                        description: Arc::clone(description),
+                    })
+                }
+            };
+            let info = GlobalVariableInfo {
+                id: GlobalVariableId::new(
+                    u32::try_from(globals.len()).expect("global count fits u32"),
+                ),
+                name,
+                qualified_name,
+                linkage_name: linkage_name.clone(),
+                declaration: declaration.ok().flatten(),
+                type_info: public_type,
+                visibility,
+            };
+            let canonical_die = chain.first().map_or(key, |(origin_unit, origin)| DieKey {
+                unit: *origin_unit,
+                offset: origin.offset().0,
+            });
+            let mut identities = vec![Arc::from(format!(
+                "die:{}:{:#x}",
+                canonical_die.unit, canonical_die.offset
+            ))];
+            if let Some(linkage_name) = &linkage_name {
+                identities.push(Arc::from(format!("linkage:{linkage_name}")));
+            }
+            if let DefinitionResolution::Existing(existing_global) =
+                definitions.resolve(&identities, globals.len())
+            {
+                let existing_object = global_objects[existing_global];
+                if value_rank(&object.value) > value_rank(&objects[existing_object].value) {
+                    objects[existing_object] = object;
+                    globals[existing_global] = GlobalVariableInfo {
+                        id: globals[existing_global].id,
+                        ..info
+                    };
+                }
+                continue;
+            }
+            global_objects.push(objects.len());
+            objects.push(object);
+            globals.push(info);
+        }
+    }
+
+    Ok((globals, global_objects))
+}
+
+const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {
+    match value {
+        Metadata::Value(ValueDescription::Location(_)) => 3,
+        Metadata::Value(ValueDescription::Constant(_)) => 2,
+        Metadata::Unavailable(_) => 1,
+        Metadata::Malformed(_) => 0,
+    }
 }
 
 #[expect(
@@ -239,11 +554,19 @@ pub(super) fn load_variable_info(
     instance_ids: &HashMap<DieKey, CodeInstanceId>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
-) -> std::result::Result<Arc<dyn VariableInfo>, DwarfError> {
+) -> std::result::Result<LoadedVariables, DwarfError> {
     let mut objects = Vec::new();
     let mut functions = Vec::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
+    let (globals, global_objects) = load_globals(
+        dwarf,
+        units,
+        &mut objects,
+        &mut order,
+        source_files,
+        source_file_ids,
+    )?;
 
     for (unit_index, unit) in units.iter().enumerate() {
         let mut entries = unit.entries();
@@ -369,6 +692,7 @@ pub(super) fn load_variable_info(
                     let object_name = match kind {
                         VariableKind::Parameter => "parameter",
                         VariableKind::Local => "variable",
+                        VariableKind::Global => "global",
                     };
                     let (name, name_error) =
                         match copy_name_with_origins(dwarf, units, unit, entry, &chain) {
@@ -441,20 +765,24 @@ pub(super) fn load_variable_info(
             address_index.entry(range.start).or_default().push(function);
         }
     }
-    Ok(Arc::new(DwarfVariableInfo {
-        objects: objects.into(),
-        functions: functions.into(),
-        address_index: address_index
-            .into_iter()
-            .map(|(address, functions)| (address, functions.into()))
-            .collect(),
-        evaluation_units: evaluation_units.into(),
-        target,
-        endian: match target.byte_order {
-            ByteOrder::Little => RunTimeEndian::Little,
-            ByteOrder::Big => RunTimeEndian::Big,
-        },
-    }))
+    Ok(LoadedVariables {
+        info: Arc::new(DwarfVariableInfo {
+            objects: objects.into(),
+            functions: functions.into(),
+            address_index: address_index
+                .into_iter()
+                .map(|(address, functions)| (address, functions.into()))
+                .collect(),
+            globals: global_objects.into(),
+            evaluation_units: evaluation_units.into(),
+            target,
+            endian: match target.byte_order {
+                ByteOrder::Little => RunTimeEndian::Little,
+                ByteOrder::Big => RunTimeEndian::Big,
+            },
+        }),
+        globals,
+    })
 }
 
 fn data_object_scope_ranges(
@@ -522,6 +850,53 @@ fn copy_name(
         .map(|value| value.map(|value| Arc::from(value.to_string_lossy().into_owned())))
 }
 
+fn copy_string_attribute_with_origins(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    units: &[gimli::Unit<Reader<'_>>],
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
+    attribute: gimli::DwAt,
+) -> std::result::Result<Option<Arc<str>>, DwarfError> {
+    if let Some(value) = entry.attr_value(attribute) {
+        return Ok(Some(Arc::from(
+            dwarf
+                .attr_string(unit, value)?
+                .to_string_lossy()
+                .into_owned(),
+        )));
+    }
+    for (origin_unit, origin) in chain {
+        if let Some(value) = origin.attr_value(attribute) {
+            return Ok(Some(Arc::from(
+                dwarf
+                    .attr_string(&units[*origin_unit], value)?
+                    .to_string_lossy()
+                    .into_owned(),
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn flag_attribute_with_origins(
+    _unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    _units: &[gimli::Unit<Reader<'_>>],
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
+    attribute: gimli::DwAt,
+) -> Option<bool> {
+    let flag = |attribute: &gimli::Attribute<Reader<'_>>| match attribute.value() {
+        gimli::AttributeValue::Flag(value) => Some(value),
+        _ => None,
+    };
+    entry.attr(attribute).and_then(flag).or_else(|| {
+        chain
+            .iter()
+            .find_map(|(_, origin)| origin.attr(attribute).and_then(flag))
+    })
+}
+
 /// Follows `DW_AT_abstract_origin`/`DW_AT_specification` references
 /// transitively, rejecting cycles, so concrete inline-instance DIEs can
 /// inherit name, type, and declaration metadata from their origins.
@@ -531,19 +906,35 @@ fn origin_chain<'data>(
     entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
 ) -> std::result::Result<Vec<(usize, gimli::DebuggingInformationEntry<Reader<'data>>)>, DwarfError>
 {
-    let mut chain = Vec::new();
-    let mut visited = HashSet::new();
-    let mut current = origin_reference(entry, unit_index, units)?;
-    while let Some(key) = current {
-        if !visited.insert(key) {
-            return Err(DwarfError::ReferenceCycle);
-        }
+    let keys = checked_reference_chain(origin_reference(entry, unit_index, units)?, |key| {
         let unit = units
             .get(key.unit)
             .ok_or(DwarfError::ReferenceOutsideUnits(key.offset))?;
         let origin = unit.entry(gimli::UnitOffset(key.offset))?;
-        current = origin_reference(&origin, key.unit, units)?;
-        chain.push((key.unit, origin));
+        origin_reference(&origin, key.unit, units)
+    })?;
+    let mut chain = Vec::with_capacity(keys.len());
+    for key in keys {
+        let unit = units
+            .get(key.unit)
+            .ok_or(DwarfError::ReferenceOutsideUnits(key.offset))?;
+        chain.push((key.unit, unit.entry(gimli::UnitOffset(key.offset))?));
+    }
+    Ok(chain)
+}
+
+fn checked_reference_chain(
+    mut current: Option<DieKey>,
+    mut next: impl FnMut(DieKey) -> std::result::Result<Option<DieKey>, DwarfError>,
+) -> std::result::Result<Vec<DieKey>, DwarfError> {
+    let mut chain = Vec::new();
+    let mut visited = HashSet::new();
+    while let Some(key) = current {
+        if !visited.insert(key) {
+            return Err(DwarfError::ReferenceCycle);
+        }
+        current = next(key)?;
+        chain.push(key);
     }
     Ok(chain)
 }
@@ -691,28 +1082,37 @@ fn copy_data_object_value(
     Metadata::Unavailable("no location was supplied".into())
 }
 
+fn copy_data_object_value_with_origins(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    units: &[gimli::Unit<Reader<'_>>],
+    unit_index: usize,
+    unit: &gimli::Unit<Reader<'_>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
+) -> Metadata<ValueDescription> {
+    let direct = copy_data_object_value(dwarf, unit_index, unit, entry);
+    if !matches!(direct, Metadata::Unavailable(_)) {
+        return direct;
+    }
+    for (origin_unit, origin) in chain {
+        let inherited = copy_data_object_value(dwarf, *origin_unit, &units[*origin_unit], origin);
+        if !matches!(inherited, Metadata::Unavailable(_)) {
+            return inherited;
+        }
+    }
+    direct
+}
+
 fn copy_constant(
     value: gimli::AttributeValue<Reader<'_>>,
 ) -> std::result::Result<ConstantValue, Arc<str>> {
     Ok(match value {
         // Fixed-width forms carry raw bits; signedness comes from the type.
-        gimli::AttributeValue::Data1(value) => ConstantValue::Fixed {
-            value: u128::from(value),
-            bits: 8,
-        },
-        gimli::AttributeValue::Data2(value) => ConstantValue::Fixed {
-            value: u128::from(value),
-            bits: 16,
-        },
-        gimli::AttributeValue::Data4(value) => ConstantValue::Fixed {
-            value: u128::from(value),
-            bits: 32,
-        },
-        gimli::AttributeValue::Data8(value) => ConstantValue::Fixed {
-            value: u128::from(value),
-            bits: 64,
-        },
-        gimli::AttributeValue::Data16(value) => ConstantValue::Fixed { value, bits: 128 },
+        gimli::AttributeValue::Data1(value) => ConstantValue::Fixed(u128::from(value)),
+        gimli::AttributeValue::Data2(value) => ConstantValue::Fixed(u128::from(value)),
+        gimli::AttributeValue::Data4(value) => ConstantValue::Fixed(u128::from(value)),
+        gimli::AttributeValue::Data8(value) => ConstantValue::Fixed(u128::from(value)),
+        gimli::AttributeValue::Data16(value) => ConstantValue::Fixed(value),
         gimli::AttributeValue::Udata(value) => ConstantValue::Unsigned(u128::from(value)),
         gimli::AttributeValue::Sdata(value) => ConstantValue::Signed(i128::from(value)),
         gimli::AttributeValue::Block(value) => ConstantValue::Bytes(Arc::from(
@@ -977,6 +1377,9 @@ impl VariableInfo for DwarfVariableInfo {
             return match query {
                 VariableQuery::All => Ok(Vec::new()),
                 VariableQuery::Name(name) => Err(Error::VariableNotFound(name.clone())),
+                VariableQuery::Global(global) => {
+                    Err(Error::VariableNotFound(global.variable.to_string()))
+                }
             };
         };
         // Source-level visibility is per logical frame: only data objects owned
@@ -1004,6 +1407,9 @@ impl VariableInfo for DwarfVariableInfo {
                     return Err(Error::AmbiguousVariable(name.clone()));
                 }
                 named
+            }
+            VariableQuery::Global(global) => {
+                return Err(Error::VariableNotFound(global.variable.to_string()));
             }
         };
         let mut selected = selected_objects;
@@ -1037,6 +1443,22 @@ impl VariableInfo for DwarfVariableInfo {
             .into_iter()
             .map(|object| self.inspect_data_object(object, address, runtime, &mut frame_base))
             .collect())
+    }
+
+    fn inspect_global(
+        &self,
+        id: GlobalVariableId,
+        address: ImageAddress,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<Variable> {
+        let global_index = usize::try_from(id.get()).expect("u32 fits usize");
+        let object_index = *self
+            .globals
+            .get(global_index)
+            .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
+        let object = &self.objects[object_index];
+        let mut frame_base = FrameBaseCache::Empty;
+        Ok(self.inspect_data_object(object, address, runtime, &mut frame_base))
     }
 }
 
@@ -1078,7 +1500,12 @@ impl DwarfVariableInfo {
         let description = match &variable.value {
             Metadata::Value(location) => location,
             Metadata::Unavailable(description) => {
-                return unavailable(variable, Some(type_info), Arc::clone(description).into());
+                let reason = if description.as_ref() == "no location was supplied" {
+                    VariableUnavailableReason::OptimizedOut
+                } else {
+                    Arc::clone(description).into()
+                };
+                return unavailable(variable, Some(type_info), reason);
             }
             Metadata::Malformed(description) => {
                 return malformed(variable, Some(type_info), Arc::clone(description));
@@ -1163,6 +1590,7 @@ fn available(
     };
     Variable {
         kind: variable.kind,
+        global: None,
         name: Arc::clone(&variable.name),
         declaration: variable.declaration.clone(),
         type_info: Some(type_info),
@@ -1177,6 +1605,7 @@ fn unavailable(
 ) -> Variable {
     Variable {
         kind: variable.kind,
+        global: None,
         name: Arc::clone(&variable.name),
         declaration: variable.declaration.clone(),
         type_info,
@@ -1191,6 +1620,7 @@ fn malformed(
 ) -> Variable {
     Variable {
         kind: variable.kind,
+        global: None,
         name: Arc::clone(&variable.name),
         declaration: variable.declaration.clone(),
         type_info,
@@ -1375,9 +1805,9 @@ fn evaluate<'expression>(
             EvaluationResult::RequiresAtLocation(_) => {
                 return Err(crate::UnsupportedVariableFeature::CrossDieEvaluation.into());
             }
-            EvaluationResult::RequiresTls(_) => {
-                return Err(crate::UnsupportedVariableFeature::Tls.into());
-            }
+            EvaluationResult::RequiresTls(offset) => evaluation
+                .resume_with_tls(runtime.tls_address(offset)?.get())
+                .map_err(evaluation_error)?,
             EvaluationResult::RequiresWasmLocal { .. }
             | EvaluationResult::RequiresWasmGlobal { .. }
             | EvaluationResult::RequiresWasmStack { .. } => {
@@ -1551,20 +1981,13 @@ fn materialize_constant(
 ) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
     let size = usize::try_from(type_info.byte_size).expect("scalar size fits usize");
     match value {
-        ConstantValue::Unsigned(value) => integer_bytes(*value, size, target),
-        ConstantValue::Signed(value) => signed_integer_bytes(*value, size, target),
-        ConstantValue::Fixed { value, bits } => {
-            // DW_FORM_dataN carries raw bits; DWARF 5 section 5.1 defers their
-            // interpretation to the referenced type's signedness.
-            if matches!(
-                type_info.encoding,
-                BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
-            ) {
-                signed_integer_bytes(sign_extend(*value, *bits), size, target)
-            } else {
-                integer_bytes(*value, size, target)
-            }
+        // Producers use DW_FORM_sdata when the implicit high bits are signed.
+        // A fixed data form supplies zero high bits; the target type then
+        // interprets the materialized byte pattern.
+        ConstantValue::Unsigned(value) | ConstantValue::Fixed(value) => {
+            integer_bytes(*value, size, target)
         }
+        ConstantValue::Signed(value) => signed_integer_bytes(*value, size, target),
         ConstantValue::Bytes(bytes) if bytes.len() == size => Ok(Arc::clone(bytes)),
         ConstantValue::Bytes(_) => Err("constant value size does not match its scalar type".into()),
     }
@@ -1602,15 +2025,6 @@ fn signed_integer_bytes(
         }
     }
     integer_bytes(value.cast_unsigned() & low_bits_mask(bits), size, target)
-}
-
-const fn sign_extend(value: u128, bits: u32) -> i128 {
-    if bits == 128 {
-        value.cast_signed()
-    } else {
-        let shift = 128 - bits;
-        (value << shift).cast_signed() >> shift
-    }
 }
 
 const fn low_bits_mask(bits: usize) -> u128 {
@@ -1736,6 +2150,47 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn specification_chains_reject_cycles() {
+        let first = DieKey {
+            unit: 0,
+            offset: 0x10,
+        };
+        let second = DieKey {
+            unit: 0,
+            offset: 0x20,
+        };
+        let references = HashMap::from([(first, second), (second, first)]);
+
+        assert!(matches!(
+            checked_reference_chain(Some(first), |key| Ok(references.get(&key).copied())),
+            Err(DwarfError::ReferenceCycle)
+        ));
+    }
+
+    #[test]
+    fn definition_index_collapses_aliases_but_never_conflicting_identities() {
+        let identities = |die: &str, linkage: &str| [Arc::from(die), Arc::from(linkage)];
+        let mut definitions = DefinitionIndex::default();
+
+        assert_eq!(
+            definitions.resolve(&identities("die:one", "linkage:same"), 0),
+            DefinitionResolution::New
+        );
+        assert_eq!(
+            definitions.resolve(&identities("die:two", "linkage:same"), 1),
+            DefinitionResolution::Existing(0)
+        );
+        assert_eq!(
+            definitions.resolve(&identities("die:three", "linkage:other"), 1),
+            DefinitionResolution::New
+        );
+        assert_eq!(
+            definitions.resolve(&identities("die:three", "linkage:same"), 2),
+            DefinitionResolution::Conflict
+        );
+    }
+
     struct Runtime {
         registers: BTreeMap<u16, u64>,
         cfa: std::result::Result<VirtualAddress, VariableUnavailableReason>,
@@ -1765,6 +2220,13 @@ mod tests {
 
         fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
             self.cfa.clone()
+        }
+
+        fn tls_address(
+            &mut self,
+            _offset: u64,
+        ) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
+            Err(crate::UnsupportedVariableFeature::Tls.into())
         }
 
         fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
@@ -2086,32 +2548,21 @@ mod tests {
     fn fixed_width_constants_take_signedness_from_the_variable_type() {
         let little = target(ByteOrder::Little);
         // DW_FORM_data1 0xff for a signed 4-byte type is -1, not 255.
-        let negative = ConstantValue::Fixed {
-            value: 0xff,
-            bits: 8,
-        };
+        let fixed = ConstantValue::Fixed(0xff);
         assert_eq!(
-            materialize_constant(&negative, &scalar_type(BaseTypeEncoding::Signed, 4), little)
-                .expect("sign-extended constant")
+            materialize_constant(&fixed, &scalar_type(BaseTypeEncoding::Signed, 4), little)
+                .expect("zero-extended fixed-form constant")
                 .as_ref(),
-            &[0xff, 0xff, 0xff, 0xff]
+            &[0xff, 0x00, 0x00, 0x00]
         );
-        // The same bits for an unsigned type stay zero-extended.
         assert_eq!(
-            materialize_constant(
-                &negative,
-                &scalar_type(BaseTypeEncoding::Unsigned, 4),
-                little
-            )
-            .expect("zero-extended constant")
-            .as_ref(),
+            materialize_constant(&fixed, &scalar_type(BaseTypeEncoding::Unsigned, 4), little)
+                .expect("zero-extended constant")
+                .as_ref(),
             &[0xff, 0x00, 0x00, 0x00]
         );
         // A non-negative fixed-width value is unchanged by sign extension.
-        let positive = ConstantValue::Fixed {
-            value: 0x7f,
-            bits: 8,
-        };
+        let positive = ConstantValue::Fixed(0x7f);
         assert_eq!(
             materialize_constant(&positive, &scalar_type(BaseTypeEncoding::Signed, 2), little)
                 .expect("positive constant")

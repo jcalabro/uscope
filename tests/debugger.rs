@@ -1608,6 +1608,622 @@ const fn relocate_image_address(
     )
 }
 
+fn catalog_global<'a>(
+    image: &'a ModuleImage,
+    qualified_name: &str,
+) -> &'a uscope::GlobalVariableInfo {
+    image
+        .globals()
+        .iter()
+        .find(|global| global.qualified_name.as_ref() == qualified_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "missing global {qualified_name}; catalog: {:?}",
+                image
+                    .globals()
+                    .iter()
+                    .map(|global| global.qualified_name.as_ref())
+                    .collect::<Vec<_>>()
+            )
+        })
+}
+
+#[tokio::test]
+async fn global_catalog_normalizes_compiler_qualification_and_optimized_storage() {
+    for (fixture, expected) in [
+        ("globals-c-gcc-o0", &["external_value", "duplicate"][..]),
+        (
+            "globals-cpp-gcc-o0",
+            &[
+                "fixture::alpha::duplicate",
+                "fixture::Holder::member",
+                "fixture::Holder::constexpr_member",
+            ][..],
+        ),
+        (
+            "globals-cpp-clang-o0",
+            &[
+                "fixture::alpha::duplicate",
+                "fixture::Holder::member",
+                "fixture::Holder::constexpr_member",
+            ][..],
+        ),
+        (
+            "globals-rust-o0",
+            &[
+                "globals::ROOT_IMMUTABLE",
+                "globals::alpha::DUPLICATE",
+                "globals::beta::DUPLICATE",
+            ][..],
+        ),
+        (
+            "globals-go-o0",
+            &["main.packageValue", "main.packageMutable"][..],
+        ),
+        (
+            "globals-zig-o0",
+            &[
+                "globals.root_value",
+                "globals.Alpha.duplicate",
+                "globals.Beta.duplicate",
+            ][..],
+        ),
+    ] {
+        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load global catalog");
+        for qualified in expected {
+            catalog_global(debugger.handle().module_image(), qualified);
+        }
+        debugger
+            .shutdown()
+            .await
+            .expect("shut down catalog debugger");
+    }
+
+    for fixture in ["globals-rust-o2", "globals-zig-o2"] {
+        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load optimized catalog");
+        let handle = debugger.handle();
+        let global = handle
+            .module_image()
+            .globals()
+            .iter()
+            .find(|global| matches!(global.name.as_ref(), "OPTIMIZED_AWAY" | "root_constant"))
+            .unwrap_or_else(|| panic!("{fixture} missing optimized global"));
+        assert!(matches!(
+            global.type_info,
+            uscope::GlobalVariableType::Scalar(_)
+        ));
+        debugger
+            .shutdown()
+            .await
+            .expect("shut down catalog debugger");
+    }
+}
+
+#[tokio::test]
+async fn global_catalog_listing_is_filtered_bounded_and_deterministic() {
+    let debugger = Debugger::new(Scenario::fixture("globals-go-o0")).expect("load Go catalog");
+    let handle = debugger.handle();
+    let first = handle
+        .globals(uscope::GlobalVariableQuery {
+            filter: Some("main.package".to_owned()),
+            offset: 0,
+            limit: 1,
+        })
+        .await
+        .expect("first global page");
+    assert_eq!(first.offset, 0);
+    assert_eq!(first.total, 2);
+    assert_eq!(first.variables.len(), 1);
+    assert!(first.variables[0].module.is_none());
+    let second = handle
+        .globals(uscope::GlobalVariableQuery {
+            filter: Some("main.package".to_owned()),
+            offset: 1,
+            limit: 1,
+        })
+        .await
+        .expect("second global page");
+    assert_eq!(second.total, first.total);
+    assert_eq!(second.variables.len(), 1);
+    assert!(
+        first.variables[0].variable.qualified_name < second.variables[0].variable.qualified_name
+    );
+    assert!(matches!(
+        handle
+            .globals(uscope::GlobalVariableQuery {
+                filter: None,
+                offset: 0,
+                limit: 0,
+            })
+            .await,
+        Err(Error::InvalidGlobalPageLimit(0))
+    ));
+    drop(handle);
+    debugger
+        .shutdown()
+        .await
+        .expect("shut down catalog debugger");
+}
+
+#[tokio::test]
+async fn c_globals_cover_local_shadowing_collisions_relocation_and_optimization() {
+    for fixture in [
+        "globals-c-gcc-o0",
+        "globals-c-clang-o0",
+        "globals-c-gcc-o2",
+        "globals-c-clang-o2",
+        "globals-c-gcc-nopie",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint("main.c", 9).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let shadow = scenario
+            .operation(
+                "inspect local shadow",
+                scenario.handle().variable("external_value"),
+            )
+            .await;
+        assert_eq!(shadow.kind, VariableKind::Local);
+        assert_variable_value(&shadow, ScalarValue::Signed(999));
+
+        let external = catalog_global(scenario.handle().module_image(), "external_value");
+        let external = scenario
+            .operation(
+                "inspect exact external global",
+                scenario.handle().global(external.id),
+            )
+            .await;
+        assert_eq!(external.kind, VariableKind::Global);
+        assert!(external.global.is_some());
+        assert_variable_value(&external, ScalarValue::Signed(101));
+
+        let one = scenario
+            .operation(
+                "inspect first file static",
+                scenario.handle().variable("one.c::duplicate"),
+            )
+            .await;
+        let two = scenario
+            .operation(
+                "inspect second file static",
+                scenario.handle().variable("two.c::duplicate"),
+            )
+            .await;
+        assert_variable_value(&one, ScalarValue::Signed(201));
+        assert_variable_value(&two, ScalarValue::Signed(202));
+        assert!(matches!(
+            scenario.handle().variable("duplicate").await,
+            Err(Error::AmbiguousGlobalVariable { .. })
+        ));
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn cpp_globals_resolve_namespaces_static_members_specifications_and_constants() {
+    for fixture in [
+        "globals-cpp-gcc-o0",
+        "globals-cpp-clang-o0",
+        "globals-cpp-gcc-o2",
+        "globals-cpp-clang-o2",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspect_globals").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        for (name, expected) in [
+            ("fixture::alpha::duplicate", 121),
+            ("fixture::beta::duplicate", 122),
+            ("fixture::Holder::member", 131),
+            ("fixture::Holder::inline_member", 132),
+            ("fixture::Holder::constexpr_member", 133),
+            ("fixture::Holder::negative_constexpr_member", -123),
+            ("fixture::{anonymous}::anonymous_value", 123),
+        ] {
+            let variable = scenario
+                .operation(
+                    "inspect qualified C++ global",
+                    scenario.handle().variable(name),
+                )
+                .await;
+            assert_variable_value(&variable, ScalarValue::Signed(expected));
+        }
+        assert!(matches!(
+            scenario.handle().variable("duplicate").await,
+            Err(Error::AmbiguousGlobalVariable { .. })
+        ));
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn rust_globals_preserve_module_qualification_and_honest_optimized_unavailability() {
+    let mut scenario = Scenario::new("Rust globals O0", Scenario::fixture("globals-rust-o0"));
+    scenario.add_breakpoint("inspect_globals").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    for (name, expected) in [
+        ("globals::ROOT_IMMUTABLE", 141),
+        ("globals::ROOT_MUTABLE", 142),
+        ("globals::alpha::DUPLICATE", 151),
+        ("globals::beta::DUPLICATE", 152),
+    ] {
+        let variable = scenario
+            .operation("inspect Rust global", scenario.handle().variable(name))
+            .await;
+        assert_variable_value(&variable, ScalarValue::Signed(expected));
+    }
+    assert!(matches!(
+        scenario.handle().variable("DUPLICATE").await,
+        Err(Error::AmbiguousGlobalVariable { .. })
+    ));
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+
+    let mut optimized = Scenario::new("Rust globals O2", Scenario::fixture("globals-rust-o2"));
+    optimized.add_breakpoint("inspect_globals").await;
+    assert!(matches!(
+        optimized.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let root = optimized
+        .operation(
+            "inspect optimized Rust global",
+            optimized.handle().variable("globals::ROOT_IMMUTABLE"),
+        )
+        .await;
+    assert!(matches!(
+        root.state,
+        VariableState::Unavailable(
+            uscope::VariableUnavailableReason::OptimizedOut
+                | uscope::VariableUnavailableReason::Other(_),
+        )
+    ));
+    assert_eq!(
+        optimized.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    optimized.shutdown().await;
+}
+
+#[tokio::test]
+async fn go_package_globals_are_printable_without_source_stepping() {
+    let fixture = "globals-go-o0";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario.add_breakpoint("main.inspectGlobals").await;
+    run_go_to_breakpoint(&mut scenario, fixture).await;
+    for (name, expected) in [
+        ("main.packageValue", ScalarValue::Signed(161)),
+        ("main.packageMutable", ScalarValue::Signed(162)),
+    ] {
+        let variable = scenario
+            .operation(
+                "inspect Go package global",
+                scenario.handle().variable(name),
+            )
+            .await;
+        assert_variable_value(&variable, expected);
+    }
+    resume_go_to_exit(&mut scenario, fixture).await;
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+
+    let debugger =
+        Debugger::new(Scenario::fixture("globals-go-o2")).expect("load optimized Go globals");
+    catalog_global(debugger.handle().module_image(), "main.packageValue");
+    debugger
+        .shutdown()
+        .await
+        .expect("shut down optimized Go debugger");
+}
+
+#[tokio::test]
+async fn zig_globals_cover_containers_constants_pie_and_optimized_storage() {
+    for fixture in ["globals-zig-o0", "globals-zig-nopie"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspectGlobals").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        for (name, expected) in [
+            ("globals.root_value", 171),
+            ("globals.root_constant", 172),
+            ("globals.Alpha.duplicate", 181),
+            ("globals.Alpha.constant", 182),
+            ("globals.Beta.duplicate", 183),
+        ] {
+            let variable = scenario
+                .operation("inspect Zig global", scenario.handle().variable(name))
+                .await;
+            assert_variable_value(&variable, ScalarValue::Signed(expected));
+        }
+        assert!(matches!(
+            scenario.handle().variable("duplicate").await,
+            Err(Error::AmbiguousGlobalVariable { .. })
+        ));
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+
+    let mut optimized = Scenario::new("Zig globals O2", Scenario::fixture("globals-zig-o2"));
+    optimized.add_breakpoint("inspectGlobals").await;
+    assert!(matches!(
+        optimized.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let constant = optimized
+        .operation(
+            "inspect optimized Zig global",
+            optimized.handle().variable("globals.root_constant"),
+        )
+        .await;
+    assert!(matches!(constant.state, VariableState::Unavailable(_)));
+    assert_eq!(
+        optimized.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    optimized.shutdown().await;
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one lifecycle scenario must retain identities across load, unload, and reload"
+)]
+async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
+    let mut scenario = Scenario::new("shared globals", Scenario::fixture("globals-shared"));
+    assert!(matches!(
+        scenario.handle().loaded_modules().await,
+        Err(Error::NotRunning)
+    ));
+    scenario.add_breakpoint("after_load").await;
+    scenario.add_breakpoint("after_unload").await;
+    scenario.add_breakpoint("after_reload").await;
+    let mut events = scenario.handle().subscribe();
+
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let Err(Error::AmbiguousLoadedGlobalVariable {
+        selector,
+        candidates,
+    }) = scenario.handle().variable("module_collision").await
+    else {
+        panic!("same-name globals across modules must be ambiguous");
+    };
+    assert_eq!(selector, "module_collision");
+    assert_eq!(candidates.len(), 2);
+    let loaded = scenario
+        .operation(
+            "list loaded DSO globals",
+            scenario.handle().globals(uscope::GlobalVariableQuery {
+                filter: Some("dso_".to_owned()),
+                ..uscope::GlobalVariableQuery::default()
+            }),
+        )
+        .await;
+    let external = loaded
+        .variables
+        .iter()
+        .find(|entry| entry.variable.name.as_ref() == "dso_external")
+        .expect("DSO external global");
+    let first_module = external.module.expect("DSO is loaded");
+    let first_reference = uscope::GlobalVariableReference {
+        module: first_module.id,
+        image: external.image,
+        variable: external.variable.id,
+    };
+    let value = scenario
+        .operation(
+            "inspect DSO external global",
+            scenario.handle().loaded_global(first_reference),
+        )
+        .await;
+    assert_variable_value(&value, ScalarValue::Signed(211));
+    let dso_tls = loaded
+        .variables
+        .iter()
+        .find(|entry| entry.variable.name.as_ref() == "dso_tls")
+        .expect("DSO TLS global");
+    let dso_tls_module = dso_tls.module.expect("TLS DSO is loaded");
+    let tls_value = scenario
+        .operation(
+            "inspect dynamically loaded TLS global",
+            scenario
+                .handle()
+                .loaded_global(uscope::GlobalVariableReference {
+                    module: dso_tls_module.id,
+                    image: dso_tls.image,
+                    variable: dso_tls.variable.id,
+                }),
+        )
+        .await;
+    assert_variable_value(&tls_value, ScalarValue::Signed(213));
+    let mut saw_load = false;
+    while let Ok(event) = events.try_recv() {
+        saw_load |= matches!(
+            event,
+            uscope::DebuggerEvent::ModuleLoaded { module, .. }
+                if module.path.ends_with("libglobals.so")
+        );
+    }
+    assert!(saw_load);
+
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert!(matches!(
+        scenario.handle().loaded_global(first_reference).await,
+        Err(Error::ModuleNotLoaded(id)) if id == first_module.id
+    ));
+    let mut saw_unload = false;
+    while let Ok(event) = events.try_recv() {
+        saw_unload |= matches!(
+            event,
+            uscope::DebuggerEvent::ModuleUnloaded { module, .. }
+                if module.module.id == first_module.id
+        );
+    }
+    assert!(saw_unload);
+
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let reloaded = scenario
+        .operation(
+            "list reloaded DSO globals",
+            scenario.handle().globals(uscope::GlobalVariableQuery {
+                filter: Some("dso_external".to_owned()),
+                ..uscope::GlobalVariableQuery::default()
+            }),
+        )
+        .await;
+    let reloaded = reloaded.variables.first().expect("reloaded DSO global");
+    let reloaded_module = reloaded.module.expect("DSO was reloaded");
+    assert_ne!(reloaded_module.id, first_module.id);
+    assert_ne!(reloaded.image, first_reference.image);
+    let reloaded_value = scenario
+        .operation(
+            "inspect reloaded DSO global",
+            scenario
+                .handle()
+                .loaded_global(uscope::GlobalVariableReference {
+                    module: reloaded_module.id,
+                    image: reloaded.image,
+                    variable: reloaded.variable.id,
+                }),
+        )
+        .await;
+    assert_variable_value(&reloaded_value, ScalarValue::Signed(211));
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert!(matches!(
+        scenario.handle().loaded_modules().await,
+        Err(Error::NotRunning)
+    ));
+
+    scenario.remove_all_breakpoints().await;
+    scenario.add_breakpoint("after_load").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let second_run = scenario
+        .operation(
+            "list second-run modules",
+            scenario.handle().loaded_modules(),
+        )
+        .await;
+    let second_run_dso = second_run
+        .modules
+        .iter()
+        .filter(|module| {
+            module
+                .path
+                .file_name()
+                .is_some_and(|name| name == "libglobals.so")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(second_run_dso.len(), 1, "{second_run:?}");
+    assert_ne!(second_run_dso[0].module.id, reloaded_module.id);
+    scenario.remove_all_breakpoints().await;
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
+    for fixture in ["globals-tls-gcc", "globals-tls-clang"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("tls_stop").await;
+        scenario.add_breakpoint("tls_after_join").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let global = catalog_global(scenario.handle().module_image(), "tls_value").id;
+        let snapshot = scenario.snapshot().await;
+        assert_eq!(snapshot.threads.len(), 3, "{fixture}: {snapshot:?}");
+        let mut values = Vec::new();
+        for thread in snapshot.threads.iter() {
+            scenario
+                .operation(
+                    "select TLS thread",
+                    scenario.handle().select_thread(thread.id),
+                )
+                .await;
+            let variable = scenario
+                .operation(
+                    "inspect selected thread TLS",
+                    scenario.handle().global(global),
+                )
+                .await;
+            let VariableState::Available {
+                value: ScalarValue::Signed(value),
+                ..
+            } = variable.state
+            else {
+                panic!("{fixture}: unavailable TLS variable {variable:?}");
+            };
+            values.push(value);
+        }
+        values.sort_unstable();
+        assert_eq!(values, [300, 301, 302], "{fixture}");
+        assert!(matches!(
+            scenario.resume_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let after_exit = scenario.snapshot().await;
+        assert_eq!(after_exit.threads.len(), 1, "{fixture}: {after_exit:?}");
+        let surviving = scenario
+            .operation(
+                "inspect TLS after worker exit",
+                scenario.handle().global(global),
+            )
+            .await;
+        assert_variable_value(&surviving, ScalarValue::Signed(300));
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
 #[tokio::test]
 async fn static_locals_resolve_relocated_and_indexed_addresses() {
     for fixture in [
