@@ -3,9 +3,9 @@ use std::{fmt, path::PathBuf, sync::Arc};
 use tokio::sync::oneshot;
 
 use crate::{
-    Backtrace, BreakpointLocation, CodeInstanceId, ExecutionLocation, GlobalVariablePage,
-    GlobalVariableReference, LineNumber, LoadedModule, LoadedModuleSnapshot, RegisterSnapshot,
-    Result, ThreadId, VariableSnapshot, VirtualAddress,
+    Backtrace, BreakpointLocation, CodeInstanceId, DereferenceReference, DereferencedValue,
+    ExecutionLocation, GlobalVariablePage, GlobalVariableReference, LineNumber, LoadedModule,
+    LoadedModuleSnapshot, RegisterSnapshot, Result, ThreadId, VariableSnapshot, VirtualAddress,
 };
 
 /// Selects data objects to inspect in the stopped thread's selected logical frame.
@@ -480,6 +480,10 @@ pub enum Request {
         stop_id: StopId,
         thread_id: ThreadId,
         reply: Reply<VariableSnapshot>,
+    },
+    Dereference {
+        reference: DereferenceReference,
+        reply: Reply<DereferencedValue>,
     },
     Globals {
         query: GlobalVariableQuery,

@@ -11,9 +11,19 @@ use std::sync::Arc;
 
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
-    CodeInstanceId, GlobalVariableId, ImageAddress, ModuleImage, RegisterDescriptor, Result,
+    CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
+    ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StopId, ThreadId,
     UnwindTermination, Variable, VariableQuery, VariableUnavailableReason, VirtualAddress,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub struct VariableContext {
+    pub stop_id: StopId,
+    pub thread: ThreadId,
+    pub module: ModuleId,
+    pub image: ModuleImageId,
+    pub address: Option<ImageAddress>,
+}
 
 pub struct VariableRegister {
     pub descriptor: RegisterDescriptor,
@@ -54,6 +64,7 @@ pub trait VariableInfo: Send + Sync {
         address: ImageAddress,
         selected: Option<CodeInstanceId>,
         query: &VariableQuery,
+        context: VariableContext,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Vec<Variable>>;
 
@@ -67,8 +78,16 @@ pub trait VariableInfo: Send + Sync {
         &self,
         id: GlobalVariableId,
         address: Option<ImageAddress>,
+        context: VariableContext,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Variable>;
+
+    /// Dereferences one stop-scoped capability produced by this image.
+    fn dereference(
+        &self,
+        reference: &DereferenceReference,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<DereferencedValue>;
 }
 
 pub trait UnwindInfo: Send + Sync {

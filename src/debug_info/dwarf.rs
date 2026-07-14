@@ -46,6 +46,8 @@ enum DwarfError {
     ReferencedFunctionMissing { unit: usize, offset: usize },
     #[error("DWARF reference cycle")]
     ReferenceCycle,
+    #[error("malformed variable type metadata: {0}")]
+    MalformedVariable(Arc<str>),
     #[error("concrete function has no source-level name")]
     MissingFunctionName,
 }
@@ -128,6 +130,7 @@ fn load_debug_info(
         &dwarf,
         &units,
         target,
+        image_id,
         &function_metadata.instance_ids,
         &mut source_files,
         &mut source_file_ids,

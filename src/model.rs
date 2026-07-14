@@ -120,11 +120,21 @@ id_type!(
     GlobalVariableId,
     "Identifies a global variable within a module image."
 );
+id_type!(
+    TypeId,
+    "Identifies a normalized type within a module image."
+);
 
 impl GlobalVariableId {
     /// Returns the dense index within the containing module image.
     #[must_use]
     pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl TypeId {
+    pub(crate) const fn get(self) -> u32 {
         self.0
     }
 }
@@ -239,6 +249,97 @@ pub struct BaseType {
     pub byte_size: u64,
 }
 
+/// Stable identity of one normalized type in a module image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeReference {
+    /// The immutable image that owns the type.
+    pub image: ModuleImageId,
+    /// The type's dense identifier within that image.
+    pub id: TypeId,
+}
+
+/// A source qualifier retained as an ordered type-graph node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TypeQualifier {
+    /// C-family `const` qualification.
+    Const,
+    /// C-family `volatile` qualification.
+    Volatile,
+    /// C-family `restrict` qualification.
+    Restrict,
+    /// Atomic qualification.
+    Atomic,
+    /// Producer-defined immutable qualification.
+    Immutable,
+}
+
+/// The source-level category represented by a DWARF reference type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReferenceKind {
+    /// An lvalue reference.
+    Lvalue,
+    /// An rvalue reference.
+    Rvalue,
+}
+
+/// The normalized shape of a debug type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TypeKind {
+    /// A directly encoded scalar base type.
+    Base(BaseType),
+    /// A thin pointer. A missing target represents an unspecified pointee such as `void`.
+    Pointer {
+        /// The pointed-to type, when supplied by the producer.
+        target: Option<TypeReference>,
+        /// The target-specific DWARF address class; zero is the default class.
+        address_class: u64,
+    },
+    /// A language reference represented by an address-like value.
+    Reference {
+        /// Whether this is an lvalue or rvalue reference.
+        kind: ReferenceKind,
+        /// The referred-to type.
+        target: TypeReference,
+        /// The target-specific DWARF address class; zero is the default class.
+        address_class: u64,
+    },
+    /// An ordered qualifier around another type.
+    Qualified {
+        /// The qualifier at this graph node.
+        qualifier: TypeQualifier,
+        /// The qualified type.
+        target: TypeReference,
+    },
+    /// A source alias around another type.
+    Alias {
+        /// The aliased type.
+        target: TypeReference,
+    },
+    /// A deliberately unspecified type such as C `void`.
+    Unspecified,
+    /// A valid type whose value shape is not implemented yet.
+    Opaque {
+        /// A stable description of the unsupported DWARF type tag.
+        description: Arc<str>,
+    },
+}
+
+/// Immutable, normalized metadata for one type-graph node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeInfo {
+    /// Stable identity within the owning module image.
+    pub reference: TypeReference,
+    /// Producer name or a deterministic structural presentation.
+    pub name: Arc<str>,
+    /// Storage size in bytes, when known.
+    pub byte_size: Option<u64>,
+    /// The node's normalized shape.
+    pub kind: TypeKind,
+}
+
 /// Exact target bits for a supported floating-point value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -270,6 +371,25 @@ pub enum ScalarValue {
     Floating(FloatValue),
 }
 
+/// A decoded thin pointer or reference representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddressValue {
+    /// The target virtual address represented by the value.
+    pub address: VirtualAddress,
+}
+
+/// A decoded variable or dereferenced value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariableValue {
+    /// A supported scalar value.
+    Scalar(ScalarValue),
+    /// A concrete thin pointer or reference address.
+    Address(AddressValue),
+    /// An optimized pointer with no concrete address representation.
+    ImplicitPointer,
+}
+
 /// How a variable's current value was obtained.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -282,6 +402,89 @@ pub enum VariableValueSource {
     Constant,
     /// A DWARF expression computes a value that has no storage location.
     Computed,
+    /// Optimization retained a referent value but eliminated the pointer's address.
+    ImplicitPointer,
+}
+
+/// Why an otherwise available pointer or reference cannot be dereferenced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DereferenceUnavailableReason {
+    /// The pointer contains the null address.
+    Null,
+    /// The producer did not supply a concrete pointee type.
+    UnspecifiedPointee,
+    /// The pointee is a valid type whose value shape is not implemented.
+    UnsupportedPointee(Arc<str>),
+    /// The pointer uses a target address class the backend cannot interpret.
+    AddressClass(u64),
+    /// The referent could not be read or reconstructed at this stop.
+    Unavailable(VariableUnavailableReason),
+    /// The type metadata needed to dereference the value is defective.
+    Malformed(VariableMalformedReason),
+}
+
+impl fmt::Display for DereferenceUnavailableReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => formatter.write_str("cannot dereference a null pointer"),
+            Self::UnspecifiedPointee => {
+                formatter.write_str("the pointer has no concrete pointee type")
+            }
+            Self::UnsupportedPointee(description) => formatter.write_str(description),
+            Self::AddressClass(class) => {
+                write!(formatter, "address class {class} is unsupported")
+            }
+            Self::Unavailable(reason) => reason.fmt(formatter),
+            Self::Malformed(reason) => write!(formatter, "malformed: {}", reason.description),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DereferenceTarget {
+    Address(VirtualAddress),
+    ImplicitPointer {
+        debug_info_offset: u64,
+        byte_offset: i64,
+    },
+}
+
+/// Opaque capability for dereferencing one value from one exact stopped state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DereferenceReference {
+    pub(crate) stop_id: crate::StopId,
+    pub(crate) thread: ThreadId,
+    pub(crate) module: ModuleId,
+    pub(crate) image: ModuleImageId,
+    pub(crate) context_address: Option<ImageAddress>,
+    pub(crate) target_type: TypeId,
+    pub(crate) target: DereferenceTarget,
+}
+
+impl DereferenceReference {
+    /// Returns the stopped snapshot that owns this capability.
+    #[must_use]
+    pub const fn stop_id(&self) -> crate::StopId {
+        self.stop_id
+    }
+
+    /// Returns the thread whose frame context produced this capability.
+    #[must_use]
+    pub const fn thread(&self) -> ThreadId {
+        self.thread
+    }
+}
+
+/// Whether an inspected value can be explicitly dereferenced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DereferenceState {
+    /// The value is not a pointer or reference.
+    NotApplicable,
+    /// Dereference is valid at the capability's exact stopped state.
+    Available(DereferenceReference),
+    /// The value is an indirection, but dereference is unavailable for a typed reason.
+    Unavailable(DereferenceUnavailableReason),
 }
 
 /// A valid DWARF feature that variable inspection does not yet implement.
@@ -383,10 +586,13 @@ pub enum VariableState {
     Available {
         /// How the bytes were obtained.
         source: VariableValueSource,
-        /// Exact bytes in target byte order, including ABI padding.
-        raw: Arc<[u8]>,
-        /// The decoded scalar value.
-        value: ScalarValue,
+        /// Exact bytes in target byte order, including ABI padding. An optimized
+        /// implicit pointer has no concrete byte representation.
+        raw: Option<Arc<[u8]>>,
+        /// The decoded value.
+        value: VariableValue,
+        /// Explicit lazy dereference state.
+        dereference: DereferenceState,
     },
     /// Valid metadata does not provide a supported readable value here.
     Unavailable(VariableUnavailableReason),
@@ -420,9 +626,9 @@ pub enum GlobalVariableVisibility {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GlobalVariableType {
-    /// A supported scalar type.
-    Scalar(BaseType),
-    /// A valid type outside the scalar inspection contract.
+    /// A normalized type whose top-level node is available.
+    Resolved(TypeInfo),
+    /// A valid type outside the current inspection contract.
     Unsupported(Arc<str>),
     /// Defective type metadata isolated to this entry.
     Malformed(VariableMalformedReason),
@@ -506,8 +712,17 @@ pub struct Variable {
     pub name: Arc<str>,
     /// Its declaration location, when supplied by debug metadata.
     pub declaration: Option<SourceLocation>,
-    /// Its resolved scalar type, when valid and supported.
-    pub type_info: Option<BaseType>,
+    /// Its resolved type, when valid and supported.
+    pub type_info: Option<TypeInfo>,
+    /// Its current availability and value.
+    pub state: VariableState,
+}
+
+/// One value produced by explicitly dereferencing a pointer or reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DereferencedValue {
+    /// The pointee type.
+    pub type_info: TypeInfo,
     /// Its current availability and value.
     pub state: VariableState,
 }
@@ -1826,11 +2041,20 @@ mod tests {
 
     fn global_test_image() -> ModuleImage {
         let scalar = || {
-            GlobalVariableType::Scalar(BaseType {
+            let base = BaseType {
                 name: "int".into(),
                 base_name: "int".into(),
                 encoding: BaseTypeEncoding::Signed,
                 byte_size: 4,
+            };
+            GlobalVariableType::Resolved(TypeInfo {
+                reference: TypeReference {
+                    image: ModuleImageId::new(0),
+                    id: TypeId::new(0),
+                },
+                name: "int".into(),
+                byte_size: Some(4),
+                kind: TypeKind::Base(base),
             })
         };
         let globals = [
