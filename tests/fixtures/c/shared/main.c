@@ -10,6 +10,7 @@
 typedef int32_t (*touch_fn)(void);
 
 volatile int32_t shared_sink;
+volatile int32_t *cross_module_pointer;
 static volatile int32_t module_collision;
 
 __attribute__((noinline)) static void after_load(void) {
@@ -44,9 +45,11 @@ static int use_library(const char *path, int reload) {
         return -1;
     }
     touch_fn touch = (touch_fn)dlsym(library, "dso_touch");
-    if (touch == NULL || touch() != 636) {
+    int32_t *external = (int32_t *)dlsym(library, "dso_external");
+    if (touch == NULL || external == NULL || touch() != 636) {
         return -1;
     }
+    cross_module_pointer = external;
     if (reload != 0) {
         after_reload();
     } else {

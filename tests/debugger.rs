@@ -26,7 +26,7 @@ fn single_image_breakpoint_address(breakpoint: &uscope::Breakpoint) -> uscope::I
 async fn stack_scalar_variables_are_read_through_the_public_scenario_path() {
     for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
-        scenario.add_source_breakpoint("variables.c", 52).await;
+        scenario.add_source_breakpoint("variables.c", 108).await;
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
@@ -93,7 +93,7 @@ async fn stack_scalar_variables_are_read_through_the_public_scenario_path() {
                     .as_ref()
                     .expect("available scalar type")
                     .byte_size,
-                expected_size
+                Some(expected_size)
             );
             let VariableState::Available { source, raw, .. } = &variable.state else {
                 unreachable!("value assertion checked availability")
@@ -101,7 +101,10 @@ async fn stack_scalar_variables_are_read_through_the_public_scenario_path() {
             assert!(
                 matches!(source, uscope::VariableValueSource::Memory(address) if address.get() != 0)
             );
-            assert_eq!(raw.len(), usize::try_from(expected_size).unwrap());
+            assert_eq!(
+                raw.as_ref().expect("available scalar bytes").len(),
+                usize::try_from(expected_size).unwrap()
+            );
         }
         assert_eq!(
             scenario
@@ -129,7 +132,7 @@ async fn variable_inspection_uses_live_values_and_lexical_scope() {
         "changing stack variable",
         Scenario::fixture("variables-gcc-o0"),
     );
-    changing.add_source_breakpoint("variables.c", 11).await;
+    changing.add_source_breakpoint("variables.c", 30).await;
     assert!(matches!(
         changing.run_to_stop().await,
         StopReason::Breakpoint { .. }
@@ -158,7 +161,7 @@ async fn variable_inspection_uses_live_values_and_lexical_scope() {
         "shadowed stack variables",
         Scenario::fixture("variables-gcc-o0"),
     );
-    shadow.add_source_breakpoint("variables.c", 20).await;
+    shadow.add_source_breakpoint("variables.c", 39).await;
     assert!(matches!(
         shadow.run_to_stop().await,
         StopReason::Breakpoint { .. }
@@ -177,26 +180,663 @@ async fn variable_inspection_uses_live_values_and_lexical_scope() {
 }
 
 #[tokio::test]
-async fn variable_inspection_reports_partial_support() {
-    let mut partial = Scenario::new(
-        "partial variable support",
-        Scenario::fixture("variables-gcc-o0"),
+async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
+    for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
+        let mut partial = Scenario::new(fixture, Scenario::fixture(fixture));
+        partial.add_source_breakpoint("variables.c", 48).await;
+        assert!(matches!(
+            partial.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let variables = partial
+            .operation("partial variables", partial.handle().variables())
+            .await;
+        assert_eq!(variables.variables.len(), 2);
+        assert_variable_value(&variables.variables[0], ScalarValue::Signed(42));
+        let pointer = &variables.variables[1];
+        assert!(matches!(
+            pointer.type_info.as_ref().map(|info| &info.kind),
+            Some(uscope::TypeKind::Pointer { .. })
+        ));
+        let reference = match &pointer.state {
+            VariableState::Available {
+                value: uscope::VariableValue::Address(value),
+                dereference: uscope::DereferenceState::Available(reference),
+                ..
+            } => {
+                assert_ne!(value.address.get(), 0);
+                reference.clone()
+            }
+            state => panic!("pointer was not available for dereference: {state:?}"),
+        };
+        let dereferenced = partial
+            .operation(
+                "dereference pointer",
+                partial.handle().dereference(reference),
+            )
+            .await;
+        assert!(matches!(
+            dereferenced.state,
+            VariableState::Available {
+                value: uscope::VariableValue::Scalar(ScalarValue::Signed(42)),
+                dereference: uscope::DereferenceState::NotApplicable,
+                ..
+            }
+        ));
+        partial.shutdown().await;
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one table-driven scenario keeps the cross-language pointer contract identical"
+)]
+async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
+    for (fixture, source, line, pointer, nested, null) in [
+        (
+            "variables-gcc-o0",
+            "variables.c",
+            68,
+            "pointer",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-clang-o0",
+            "variables.c",
+            68,
+            "pointer",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-gcc-o2",
+            "variables.c",
+            68,
+            "pointer",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-clang-o2",
+            "variables.c",
+            68,
+            "pointer",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-gcc-nopie",
+            "variables.c",
+            68,
+            "pointer",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-cpp-gcc-o0",
+            "variables.cpp",
+            50,
+            "lvalue_reference",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-cpp-clang-o0",
+            "variables.cpp",
+            50,
+            "lvalue_reference",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-cpp-gcc-o2",
+            "variables.cpp",
+            50,
+            "lvalue_reference",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-cpp-clang-o2",
+            "variables.cpp",
+            50,
+            "lvalue_reference",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-rust-o0",
+            "variables.rs",
+            67,
+            "shared",
+            "raw_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-rust-o2",
+            "variables.rs",
+            80,
+            "shared",
+            "raw_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-zig-o0",
+            "variables.zig",
+            73,
+            "pointer",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-zig-o2",
+            "variables.zig",
+            85,
+            "pointer",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+        (
+            "variables-zig-nopie",
+            "variables.zig",
+            73,
+            "pointer",
+            "pointer_pointer",
+            "null_pointer",
+        ),
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint(source, line).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let pointee = dereference_named(&scenario, pointer, 1).await;
+        assert_dereferenced_scalar(&pointee, 42, fixture);
+        let nested_pointee = dereference_named(&scenario, nested, 2).await;
+        assert_dereferenced_scalar(&nested_pointee, 42, fixture);
+
+        let null = scenario
+            .operation("inspect null pointer", scenario.handle().variable(null))
+            .await;
+        assert!(
+            matches!(
+                null.state,
+                VariableState::Available {
+                    value: uscope::VariableValue::Address(uscope::AddressValue { address }),
+                    dereference: uscope::DereferenceState::Unavailable(
+                        uscope::DereferenceUnavailableReason::Null
+                    ),
+                    ..
+                } if address.get() == 0
+            ),
+            "{fixture}: {null:?}"
+        );
+        if source == "variables.c" {
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "pointer_parameter", 1).await,
+                42,
+                fixture,
+            );
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "alias_pointer", 1).await,
+                42,
+                fixture,
+            );
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "const_pointee", 1).await,
+                42,
+                fixture,
+            );
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "const_pointer", 1).await,
+                42,
+                fixture,
+            );
+            let void_pointer = scenario
+                .operation(
+                    "inspect void pointer",
+                    scenario.handle().variable("void_pointer"),
+                )
+                .await;
+            assert!(
+                matches!(
+                    void_pointer.state,
+                    VariableState::Available {
+                        dereference: uscope::DereferenceState::Unavailable(
+                            uscope::DereferenceUnavailableReason::UnspecifiedPointee
+                        ),
+                        ..
+                    }
+                ),
+                "{fixture}: {void_pointer:?}"
+            );
+            let invalid = dereference_named(&scenario, "invalid_pointer", 1).await;
+            assert!(matches!(invalid.state, VariableState::Unavailable(_)));
+        }
+        if source == "variables.cpp" {
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "pointer_parameter", 1).await,
+                42,
+                fixture,
+            );
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "reference_parameter", 1).await,
+                42,
+                fixture,
+            );
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "const_reference", 1).await,
+                42,
+                fixture,
+            );
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "alias_pointer", 1).await,
+                42,
+                fixture,
+            );
+            for (name, kind) in [
+                ("lvalue_reference", uscope::ReferenceKind::Lvalue),
+                ("rvalue_reference", uscope::ReferenceKind::Rvalue),
+            ] {
+                let variable = scenario
+                    .operation(
+                        "inspect C++ reference kind",
+                        scenario.handle().variable(name),
+                    )
+                    .await;
+                assert!(
+                    matches!(
+                        variable.type_info.as_ref().map(|info| &info.kind),
+                        Some(uscope::TypeKind::Reference { kind: actual, .. }) if *actual == kind
+                    ),
+                    "{fixture}: {variable:?}"
+                );
+            }
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "rvalue_reference", 1).await,
+                42,
+                fixture,
+            );
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "reference_to_pointer", 2).await,
+                42,
+                fixture,
+            );
+        }
+        if source == "variables.rs" {
+            for name in [
+                "shared_parameter",
+                "raw_parameter",
+                "raw_const",
+                "alias_pointer",
+            ] {
+                assert_dereferenced_scalar(
+                    &dereference_named(&scenario, name, 1).await,
+                    42,
+                    fixture,
+                );
+            }
+        }
+        if source == "variables.zig" {
+            if fixture != "variables-zig-o2" {
+                assert_dereferenced_scalar(
+                    &dereference_named(&scenario, "pointer_parameter", 1).await,
+                    42,
+                    fixture,
+                );
+            }
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "const_pointer", 1).await,
+                42,
+                fixture,
+            );
+            if fixture != "variables-zig-o2" {
+                assert_dereferenced_scalar(
+                    &dereference_named(&scenario, "alias_pointer", 1).await,
+                    42,
+                    fixture,
+                );
+            }
+            assert_dereferenced_scalar(
+                &dereference_named(&scenario, "many_pointer", 1).await,
+                42,
+                fixture,
+            );
+        }
+        scenario.shutdown().await;
+    }
+
+    let fixture = "variables-zig-o2";
+    let mut parameter = Scenario::new(
+        "optimized Zig pointer parameter",
+        Scenario::fixture(fixture),
     );
-    partial.add_source_breakpoint("variables.c", 29).await;
+    parameter.add_source_breakpoint("variables.zig", 58).await;
     assert!(matches!(
-        partial.run_to_stop().await,
+        parameter.run_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
-    let variables = partial
-        .operation("partial variables", partial.handle().variables())
-        .await;
-    assert_eq!(variables.variables.len(), 2);
-    assert_variable_value(&variables.variables[0], ScalarValue::Signed(42));
+    assert_dereferenced_scalar(
+        &dereference_named(&parameter, "pointer_parameter", 1).await,
+        42,
+        fixture,
+    );
+    parameter.shutdown().await;
+}
+
+#[tokio::test]
+async fn unsupported_pointee_shapes_remain_printable_without_unsafe_reads() {
+    for (fixture, source, line, pointers, opaque_values) in [
+        (
+            "variables-gcc-o0",
+            "variables.c",
+            68,
+            &[
+                "structure_pointer",
+                "recursive_pointer",
+                "array_pointer",
+                "function_pointer",
+            ][..],
+            &[][..],
+        ),
+        (
+            "variables-cpp-gcc-o0",
+            "variables.cpp",
+            50,
+            &["structure_pointer", "recursive_pointer", "array_pointer"][..],
+            &[][..],
+        ),
+        (
+            "variables-rust-o0",
+            "variables.rs",
+            67,
+            &["structure_pointer", "recursive_pointer", "array_pointer"][..],
+            &["slice"][..],
+        ),
+        (
+            "variables-zig-o0",
+            "variables.zig",
+            73,
+            &["structure_pointer", "recursive_pointer", "array_pointer"][..],
+            &["slice"][..],
+        ),
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint(source, line).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        for name in pointers {
+            let variable = scenario
+                .operation(
+                    "inspect unsupported pointee",
+                    scenario.handle().variable(*name),
+                )
+                .await;
+            assert!(
+                matches!(
+                    variable.state,
+                    VariableState::Available {
+                        value: uscope::VariableValue::Address(_),
+                        dereference: uscope::DereferenceState::Unavailable(
+                            uscope::DereferenceUnavailableReason::UnsupportedPointee(_)
+                        ),
+                        ..
+                    }
+                ),
+                "{fixture} {name}: {variable:?}"
+            );
+        }
+        for name in opaque_values {
+            let variable = scenario
+                .operation("inspect opaque value", scenario.handle().variable(*name))
+                .await;
+            assert!(
+                matches!(
+                    variable.type_info.as_ref().map(|info| &info.kind),
+                    Some(uscope::TypeKind::Opaque { .. })
+                ) && matches!(variable.state, VariableState::Unavailable(_)),
+                "{fixture} {name}: {variable:?}"
+            );
+        }
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() {
+    let fixture = "pointer-memory-gcc-o0";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario.add_breakpoint("inspect_boundaries").await;
     assert!(matches!(
-        variables.variables[1].state,
-        VariableState::Unavailable(_)
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
     ));
-    partial.shutdown().await;
+
+    let valid = dereference_named(&scenario, "valid_pointer", 1).await;
+    assert_dereferenced_scalar(&valid, 42, fixture);
+    let boundary = dereference_named(&scenario, "boundary_pointer", 1).await;
+    assert!(
+        matches!(boundary.state, VariableState::Unavailable(_)),
+        "{boundary:?}"
+    );
+    let valid_after_failure = dereference_named(&scenario, "valid_pointer", 1).await;
+    assert_dereferenced_scalar(&valid_after_failure, 42, fixture);
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn dereference_capabilities_are_invalidated_by_the_next_stop() {
+    let mut scenario = Scenario::new(
+        "stale pointer capability",
+        Scenario::fixture("variables-gcc-o0"),
+    );
+    scenario.add_source_breakpoint("variables.c", 68).await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let pointer = scenario
+        .operation(
+            "inspect first pointer",
+            scenario.handle().variable("pointer"),
+        )
+        .await;
+    let reference = match pointer.state {
+        VariableState::Available {
+            dereference: uscope::DereferenceState::Available(reference),
+            ..
+        } => reference,
+        state => panic!("pointer was not dereferenceable: {state:?}"),
+    };
+    let first = scenario
+        .operation(
+            "first repeated dereference",
+            scenario.handle().dereference(reference.clone()),
+        )
+        .await;
+    let repeated = scenario
+        .operation(
+            "second repeated dereference",
+            scenario.handle().dereference(reference.clone()),
+        )
+        .await;
+    assert_eq!(repeated, first);
+    assert_dereferenced_scalar(&first, 42, "repeated capability");
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert!(matches!(
+        scenario.handle().dereference(reference).await,
+        Err(Error::StaleStop)
+    ));
+    let fresh = dereference_named(&scenario, "pointer", 1).await;
+    assert_dereferenced_scalar(&fresh, 42, "fresh capability");
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn dereference_capabilities_reject_running_state_before_becoming_stale() {
+    let mut scenario = Scenario::new("running pointer capability", Scenario::fixture("spin"));
+    scenario.add_breakpoint("main").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let pointer = scenario
+        .operation(
+            "inspect spin pointer",
+            scenario.handle().variable("spin_pointer"),
+        )
+        .await;
+    let reference = match pointer.state {
+        VariableState::Available {
+            dereference: uscope::DereferenceState::Available(reference),
+            ..
+        } => reference,
+        state => panic!("spin pointer was not dereferenceable: {state:?}"),
+    };
+    scenario.remove_all_breakpoints().await;
+    let running = scenario.start_resuming().await;
+    assert!(matches!(
+        scenario.handle().dereference(reference.clone()).await,
+        Err(Error::NotStopped)
+    ));
+    assert_eq!(scenario.handle().pause().await.unwrap(), StopReason::Pause);
+    assert_eq!(running.await.unwrap().unwrap(), StopReason::Pause);
+    assert!(matches!(
+        scenario.handle().dereference(reference).await,
+        Err(Error::StaleStop)
+    ));
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_address() {
+    let fixture = "variables-gcc-o2";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario.add_source_breakpoint("variables.c", 80).await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+
+    let pointer_pointer = scenario
+        .operation(
+            "inspect implicit pointer",
+            scenario.handle().variable("pointer_pointer"),
+        )
+        .await;
+    assert!(
+        matches!(
+            pointer_pointer.state,
+            VariableState::Available {
+                source: uscope::VariableValueSource::ImplicitPointer,
+                raw: None,
+                value: uscope::VariableValue::ImplicitPointer,
+                dereference: uscope::DereferenceState::Available(_),
+            }
+        ),
+        "{pointer_pointer:?}"
+    );
+
+    let pointee = dereference_named(&scenario, "pointer_pointer", 2).await;
+    assert_dereferenced_scalar(&pointee, 42, fixture);
+    scenario.shutdown().await;
+
+    let mut offset = Scenario::new(
+        "nonzero implicit pointer offset",
+        Scenario::fixture(fixture),
+    );
+    offset.add_source_breakpoint("variables.c", 87).await;
+    assert!(matches!(
+        offset.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let byte_pointer = offset
+        .operation(
+            "inspect offset implicit pointer",
+            offset.handle().variable("byte_pointer"),
+        )
+        .await;
+    assert!(
+        matches!(
+            byte_pointer.state,
+            VariableState::Available {
+                source: uscope::VariableValueSource::ImplicitPointer,
+                raw: None,
+                value: uscope::VariableValue::ImplicitPointer,
+                dereference: uscope::DereferenceState::Available(_),
+            }
+        ),
+        "{byte_pointer:?}"
+    );
+    let byte = dereference_named(&offset, "byte_pointer", 1).await;
+    assert!(
+        matches!(
+            byte.state,
+            VariableState::Available {
+                value: uscope::VariableValue::Scalar(ScalarValue::Unsigned(42)),
+                ..
+            }
+        ),
+        "{byte:?}"
+    );
+    offset.shutdown().await;
+}
+
+async fn dereference_named(
+    scenario: &Scenario,
+    name: &str,
+    depth: usize,
+) -> uscope::DereferencedValue {
+    let variable = scenario
+        .operation("inspect pointer", scenario.handle().variable(name))
+        .await;
+    let mut state = variable.state;
+    let mut result = None;
+    for _ in 0..depth {
+        let reference = match state {
+            VariableState::Available {
+                dereference: uscope::DereferenceState::Available(reference),
+                ..
+            } => reference,
+            other => panic!("{name} is not dereferenceable: {other:?}"),
+        };
+        let value = scenario
+            .operation(
+                "dereference pointer",
+                scenario.handle().dereference(reference),
+            )
+            .await;
+        state = value.state.clone();
+        result = Some(value);
+    }
+    result.expect("positive dereference depth")
+}
+
+fn assert_dereferenced_scalar(value: &uscope::DereferencedValue, expected: i128, fixture: &str) {
+    assert!(
+        matches!(
+            value.state,
+            VariableState::Available {
+                value: uscope::VariableValue::Scalar(ScalarValue::Signed(actual)),
+                ..
+            } if actual == expected
+        ),
+        "{fixture}: {value:?}"
+    );
 }
 
 #[tokio::test]
@@ -1483,7 +2123,7 @@ const fn entry_boundary_cases() -> [EntryBoundaryCase; 6] {
             fixture: "variables-rust-o0",
             function: "inspect_scalars",
             source: "variables.rs",
-            call_line: 31,
+            call_line: 93,
             parameter: "signed_value",
             expected_value: -42,
             gcc_fallback_line: None,
@@ -1492,7 +2132,7 @@ const fn entry_boundary_cases() -> [EntryBoundaryCase; 6] {
             fixture: "variables-rust-o2",
             function: "inspect_scalars",
             source: "variables.rs",
-            call_line: 31,
+            call_line: 93,
             parameter: "signed_value",
             expected_value: -42,
             gcc_fallback_line: None,
@@ -1690,7 +2330,7 @@ async fn global_catalog_normalizes_compiler_qualification_and_optimized_storage(
             .unwrap_or_else(|| panic!("{fixture} missing optimized global"));
         assert!(matches!(
             global.type_info,
-            uscope::GlobalVariableType::Scalar(_)
+            uscope::GlobalVariableType::Resolved(_)
         ));
         debugger
             .shutdown()
@@ -1712,7 +2352,7 @@ async fn global_catalog_listing_is_filtered_bounded_and_deterministic() {
         .await
         .expect("first global page");
     assert_eq!(first.offset, 0);
-    assert_eq!(first.total, 2);
+    assert_eq!(first.total, 7);
     assert_eq!(first.variables.len(), 1);
     assert!(first.variables[0].module.is_none());
     let second = handle
@@ -1780,6 +2420,27 @@ async fn c_globals_cover_local_shadowing_collisions_relocation_and_optimization(
         assert_eq!(external.kind, VariableKind::Global);
         assert!(external.global.is_some());
         assert_variable_value(&external, ScalarValue::Signed(101));
+
+        let pointer = scenario
+            .operation(
+                "inspect global pointer",
+                scenario.handle().variable("external_pointer"),
+            )
+            .await;
+        let reference = match pointer.state {
+            VariableState::Available {
+                dereference: uscope::DereferenceState::Available(reference),
+                ..
+            } => reference,
+            state => panic!("{fixture} global pointer was unavailable: {state:?}"),
+        };
+        let dereferenced = scenario
+            .operation(
+                "dereference global pointer",
+                scenario.handle().dereference(reference),
+            )
+            .await;
+        assert_dereferenced_scalar(&dereferenced, 101, fixture);
 
         let one = scenario
             .operation(
@@ -1876,6 +2537,11 @@ async fn rust_globals_preserve_module_qualification_and_honest_optimized_unavail
         scenario.handle().variable("DUPLICATE").await,
         Err(Error::AmbiguousGlobalVariable { .. })
     ));
+    assert_dereferenced_scalar(
+        &dereference_named(&scenario, "globals::ROOT_POINTER", 1).await,
+        157,
+        "globals-rust-o0",
+    );
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -1901,6 +2567,11 @@ async fn rust_globals_preserve_module_qualification_and_honest_optimized_unavail
                 | uscope::VariableUnavailableReason::Other(_),
         )
     ));
+    assert_dereferenced_scalar(
+        &dereference_named(&optimized, "globals::ROOT_POINTER", 1).await,
+        157,
+        "globals-rust-o2",
+    );
     assert_eq!(
         optimized.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -1926,12 +2597,61 @@ async fn go_package_globals_are_printable_without_source_stepping() {
             .await;
         assert_variable_value(&variable, expected);
     }
+    assert_dereferenced_scalar(
+        &dereference_named(&scenario, "main.packagePointer", 1).await,
+        162,
+        fixture,
+    );
+    assert_dereferenced_scalar(
+        &dereference_named(&scenario, "main.packagePointerPointer", 2).await,
+        162,
+        fixture,
+    );
+    let nil = scenario
+        .operation(
+            "inspect Go package nil pointer",
+            scenario.handle().variable("main.packageNil"),
+        )
+        .await;
+    assert!(matches!(
+        nil.state,
+        VariableState::Available {
+            dereference: uscope::DereferenceState::Unavailable(
+                uscope::DereferenceUnavailableReason::Null
+            ),
+            ..
+        }
+    ));
+    let pair = scenario
+        .operation(
+            "inspect Go package structure pointer",
+            scenario.handle().variable("main.packagePairPointer"),
+        )
+        .await;
+    assert!(matches!(
+        pair.state,
+        VariableState::Available {
+            dereference: uscope::DereferenceState::Unavailable(
+                uscope::DereferenceUnavailableReason::UnsupportedPointee(_)
+            ),
+            ..
+        }
+    ));
     resume_go_to_exit(&mut scenario, fixture).await;
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 
     let debugger =
         Debugger::new(Scenario::fixture("globals-go-o2")).expect("load optimized Go globals");
-    catalog_global(debugger.handle().module_image(), "main.packageValue");
+    let handle = debugger.handle();
+    catalog_global(handle.module_image(), "main.packageValue");
+    let pointer = catalog_global(handle.module_image(), "main.packagePointer");
+    assert!(matches!(
+        &pointer.type_info,
+        uscope::GlobalVariableType::Resolved(uscope::TypeInfo {
+            kind: uscope::TypeKind::Pointer { .. },
+            ..
+        })
+    ));
     debugger
         .shutdown()
         .await
@@ -1963,6 +2683,11 @@ async fn zig_globals_cover_containers_constants_pie_and_optimized_storage() {
             scenario.handle().variable("duplicate").await,
             Err(Error::AmbiguousGlobalVariable { .. })
         ));
+        assert_dereferenced_scalar(
+            &dereference_named(&scenario, "globals.root_pointer", 1).await,
+            184,
+            fixture,
+        );
         assert_eq!(
             scenario.resume_to_stop().await,
             StopReason::Exited(ExitStatus::Code(0))
@@ -1983,6 +2708,13 @@ async fn zig_globals_cover_containers_constants_pie_and_optimized_storage() {
         )
         .await;
     assert!(matches!(constant.state, VariableState::Unavailable(_)));
+    let pointer = optimized
+        .operation(
+            "inspect optimized Zig pointer global",
+            optimized.handle().variable("globals.root_pointer"),
+        )
+        .await;
+    assert!(matches!(pointer.state, VariableState::Unavailable(_)));
     assert_eq!(
         optimized.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -2046,6 +2778,60 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         )
         .await;
     assert_variable_value(&value, ScalarValue::Signed(211));
+    let cross_module_pointer =
+        catalog_global(scenario.handle().module_image(), "cross_module_pointer");
+    let cross_module_pointer = scenario
+        .operation(
+            "inspect main-image pointer into DSO",
+            scenario.handle().main_global(cross_module_pointer.id),
+        )
+        .await;
+    let cross_module_reference = match cross_module_pointer.state {
+        VariableState::Available {
+            dereference: uscope::DereferenceState::Available(reference),
+            ..
+        } => reference,
+        state => panic!("cross-module pointer was unavailable: {state:?}"),
+    };
+    let cross_module_referent = scenario
+        .operation(
+            "dereference main-image pointer into DSO",
+            scenario.handle().dereference(cross_module_reference),
+        )
+        .await;
+    assert_dereferenced_scalar(&cross_module_referent, 211, "globals-shared");
+    let dso_pointer = loaded
+        .variables
+        .iter()
+        .find(|entry| entry.variable.name.as_ref() == "dso_pointer")
+        .expect("DSO pointer global");
+    let dso_pointer_module = dso_pointer.module.expect("pointer DSO is loaded");
+    let dso_pointer = scenario
+        .operation(
+            "inspect DSO pointer global",
+            scenario
+                .handle()
+                .loaded_global(uscope::GlobalVariableReference {
+                    module: dso_pointer_module.id,
+                    image: dso_pointer.image,
+                    variable: dso_pointer.variable.id,
+                }),
+        )
+        .await;
+    let reference = match dso_pointer.state {
+        VariableState::Available {
+            dereference: uscope::DereferenceState::Available(reference),
+            ..
+        } => reference,
+        state => panic!("DSO pointer global was unavailable: {state:?}"),
+    };
+    let dso_referent = scenario
+        .operation(
+            "dereference DSO pointer global",
+            scenario.handle().dereference(reference),
+        )
+        .await;
+    assert_dereferenced_scalar(&dso_referent, 211, "globals-shared");
     let dso_tls = loaded
         .variables
         .iter()
@@ -2176,9 +2962,11 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
             StopReason::Breakpoint { .. }
         ));
         let global = catalog_global(scenario.handle().module_image(), "tls_value").id;
+        let pointer = catalog_global(scenario.handle().module_image(), "tls_pointer").id;
         let snapshot = scenario.snapshot().await;
         assert_eq!(snapshot.threads.len(), 3, "{fixture}: {snapshot:?}");
         let mut values = Vec::new();
+        let mut thread_references = Vec::new();
         for thread in snapshot.threads.iter() {
             scenario
                 .operation(
@@ -2193,13 +2981,51 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
                 )
                 .await;
             let VariableState::Available {
-                value: ScalarValue::Signed(value),
+                value: uscope::VariableValue::Scalar(ScalarValue::Signed(value)),
                 ..
             } = variable.state
             else {
                 panic!("{fixture}: unavailable TLS variable {variable:?}");
             };
             values.push(value);
+            let pointer = scenario
+                .operation(
+                    "inspect selected thread TLS pointer",
+                    scenario.handle().main_global(pointer),
+                )
+                .await;
+            let reference = match pointer.state {
+                VariableState::Available {
+                    dereference: uscope::DereferenceState::Available(reference),
+                    ..
+                } => reference,
+                state => panic!("{fixture}: unavailable TLS pointer {state:?}"),
+            };
+            thread_references.push((thread.id, value, reference.clone()));
+            let tls_referent = scenario
+                .operation(
+                    "dereference selected thread TLS pointer",
+                    scenario.handle().dereference(reference),
+                )
+                .await;
+            assert_dereferenced_scalar(&tls_referent, value, fixture);
+        }
+        let selected = snapshot.threads.last().expect("TLS thread").id;
+        scenario
+            .operation(
+                "change selection before reusing TLS capabilities",
+                scenario.handle().select_thread(selected),
+            )
+            .await;
+        for (origin, value, reference) in thread_references {
+            assert_eq!(reference.thread(), origin);
+            let tls_referent = scenario
+                .operation(
+                    "dereference TLS capability after changing selection",
+                    scenario.handle().dereference(reference),
+                )
+                .await;
+            assert_dereferenced_scalar(&tls_referent, value, fixture);
         }
         values.sort_unstable();
         assert_eq!(values, [300, 301, 302], "{fixture}");
@@ -2259,9 +3085,9 @@ async fn static_locals_resolve_relocated_and_indexed_addresses() {
 #[tokio::test]
 async fn cpp_and_rust_stack_scalars_use_the_public_variable_path() {
     for (fixture, source, line) in [
-        ("variables-cpp-gcc-o0", "variables.cpp", 14),
-        ("variables-cpp-clang-o0", "variables.cpp", 14),
-        ("variables-rust-o0", "variables.rs", 21),
+        ("variables-cpp-gcc-o0", "variables.cpp", 27),
+        ("variables-cpp-clang-o0", "variables.cpp", 27),
+        ("variables-rust-o0", "variables.rs", 33),
     ] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
         scenario.add_source_breakpoint(source, line).await;
@@ -2303,9 +3129,9 @@ async fn cpp_and_rust_stack_scalars_use_the_public_variable_path() {
 #[tokio::test]
 async fn optimized_cpp_and_rust_scalars_materialize_supported_locations() {
     for (fixture, source, line) in [
-        ("variables-cpp-gcc-o2", "variables.cpp", 14),
-        ("variables-cpp-clang-o2", "variables.cpp", 14),
-        ("variables-rust-o2", "variables.rs", 22),
+        ("variables-cpp-gcc-o2", "variables.cpp", 27),
+        ("variables-cpp-clang-o2", "variables.cpp", 27),
+        ("variables-rust-o2", "variables.rs", 34),
     ] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
         scenario.add_source_breakpoint(source, line).await;
@@ -2343,7 +3169,7 @@ async fn optimized_cpp_and_rust_scalars_materialize_supported_locations() {
 async fn go_scalars_are_printable_at_a_user_breakpoint_without_stepping() {
     let fixture = "variables-go-o0";
     let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
-    scenario.add_source_breakpoint("main.go", 21).await;
+    scenario.add_source_breakpoint("main.go", 37).await;
     run_go_to_breakpoint(&mut scenario, fixture).await;
 
     let state = scenario.snapshot().await;
@@ -2389,15 +3215,87 @@ async fn go_scalars_are_printable_at_a_user_breakpoint_without_stepping() {
         assert_variable_value(variable, expected);
     }
 
+    assert_go_pointer_values(&scenario, fixture).await;
+
     resume_go_to_exit(&mut scenario, fixture).await;
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
+    for (name, depth) in [("pointerParameter", 1), ("pointerPointer", 2)] {
+        assert_dereferenced_scalar(&dereference_named(scenario, name, depth).await, 42, fixture);
+    }
+    let nil_pointer = scenario
+        .operation(
+            "inspect Go nil pointer",
+            scenario.handle().variable("nilPointer"),
+        )
+        .await;
+    assert!(
+        matches!(
+            nil_pointer.state,
+            VariableState::Available {
+                dereference: uscope::DereferenceState::Unavailable(
+                    uscope::DereferenceUnavailableReason::Null
+                ),
+                ..
+            }
+        ),
+        "{nil_pointer:?}"
+    );
+    let structure_pointer = scenario
+        .operation(
+            "inspect Go structure pointer",
+            scenario.handle().variable("structurePointer"),
+        )
+        .await;
+    assert!(
+        matches!(
+            structure_pointer.state,
+            VariableState::Available {
+                dereference: uscope::DereferenceState::Unavailable(
+                    uscope::DereferenceUnavailableReason::UnsupportedPointee(_)
+                ),
+                ..
+            }
+        ),
+        "{structure_pointer:?}"
+    );
+    let recursive_pointer = scenario
+        .operation(
+            "inspect Go recursive pointer",
+            scenario.handle().variable("recursivePointer"),
+        )
+        .await;
+    assert!(
+        matches!(
+            recursive_pointer.state,
+            VariableState::Available {
+                dereference: uscope::DereferenceState::Unavailable(
+                    uscope::DereferenceUnavailableReason::UnsupportedPointee(_)
+                ),
+                ..
+            }
+        ),
+        "{recursive_pointer:?}"
+    );
+    let slice = scenario
+        .operation("inspect Go slice", scenario.handle().variable("sliceValue"))
+        .await;
+    assert!(
+        matches!(
+            slice.type_info.as_ref().map(|info| &info.kind),
+            Some(uscope::TypeKind::Opaque { .. })
+        ) && matches!(slice.state, VariableState::Unavailable(_)),
+        "{slice:?}"
+    );
 }
 
 #[tokio::test]
 async fn go_variable_lookup_respects_nested_lexical_shadowing() {
     let fixture = "variables-go-o0";
     let mut scenario = Scenario::new("Go lexical shadowing", Scenario::fixture(fixture));
-    scenario.add_source_breakpoint("main.go", 37).await;
+    scenario.add_source_breakpoint("main.go", 62).await;
     run_go_to_breakpoint(&mut scenario, fixture).await;
 
     let innermost = scenario
@@ -2451,7 +3349,7 @@ async fn optimized_go_debug_metadata_loads_without_advertising_runtime_control()
 async fn zig_scalars_cover_pie_nonpie_and_optimized_partial_locations() {
     for fixture in ["variables-zig-o0", "variables-zig-nopie"] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
-        scenario.add_source_breakpoint("variables.zig", 27).await;
+        scenario.add_source_breakpoint("variables.zig", 37).await;
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
@@ -2518,7 +3416,7 @@ async fn zig_scalars_cover_pie_nonpie_and_optimized_partial_locations() {
 async fn zig_variable_lookup_tracks_nested_lexical_scope() {
     let fixture = "variables-zig-o0";
     let mut scenario = Scenario::new("Zig lexical scope", Scenario::fixture(fixture));
-    scenario.add_source_breakpoint("variables.zig", 40).await;
+    scenario.add_source_breakpoint("variables.zig", 50).await;
     assert!(matches!(
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
@@ -2724,7 +3622,7 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
         match scenario.handle().variable("value").await {
             Ok(variable) => {
                 let VariableState::Available {
-                    value: ScalarValue::Unsigned(value),
+                    value: uscope::VariableValue::Scalar(ScalarValue::Unsigned(value)),
                     ..
                 } = variable.state
                 else {
@@ -3085,7 +3983,7 @@ async fn variable_inspection_uses_the_selected_threads_stack() {
         match scenario.handle().variable("thread_value").await {
             Ok(variable) => {
                 let VariableState::Available {
-                    value: ScalarValue::Signed(value),
+                    value: uscope::VariableValue::Scalar(ScalarValue::Signed(value)),
                     ..
                 } = variable.state
                 else {
@@ -3105,7 +4003,7 @@ fn assert_variable_value(variable: &uscope::Variable, expected: impl Into<Scalar
     let VariableState::Available { value, .. } = &variable.state else {
         panic!("{} was not available: {:?}", variable.name, variable.state);
     };
-    assert_eq!(*value, expected.into());
+    assert_eq!(*value, uscope::VariableValue::Scalar(expected.into()));
 }
 
 fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
@@ -3142,7 +4040,7 @@ fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &st
                 .as_ref()
                 .expect("available scalar type")
                 .byte_size,
-            expected_size
+            Some(expected_size)
         );
         let VariableState::Available { source, raw, .. } = &variable.state else {
             unreachable!("value assertion checked availability")
@@ -3151,7 +4049,10 @@ fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &st
             source,
             uscope::VariableValueSource::Memory(address) if address.get() != 0
         ));
-        assert_eq!(raw.len(), usize::try_from(expected_size).unwrap());
+        assert_eq!(
+            raw.as_ref().expect("available scalar bytes").len(),
+            usize::try_from(expected_size).unwrap()
+        );
     }
 }
 
@@ -3336,14 +4237,17 @@ fn assert_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &
                 .as_ref()
                 .expect("available language scalar type")
                 .byte_size,
-            size,
+            Some(size),
             "{fixture}: {variable:?}"
         );
         let VariableState::Available { source, raw, .. } = &variable.state else {
             unreachable!("value assertion checked availability")
         };
         assert!(matches!(source, uscope::VariableValueSource::Memory(_)));
-        assert_eq!(raw.len(), usize::try_from(size).unwrap());
+        assert_eq!(
+            raw.as_ref().expect("available scalar bytes").len(),
+            usize::try_from(size).unwrap()
+        );
     }
 }
 

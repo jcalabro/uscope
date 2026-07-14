@@ -20,7 +20,9 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::ControllerMessage;
 mod thread_db;
-use crate::debug_info::{UnwindInfo, VariableInfo, VariableRegister, VariableRuntime};
+use crate::debug_info::{
+    UnwindInfo, VariableContext, VariableInfo, VariableRegister, VariableRuntime,
+};
 use crate::model::FrameMetadata;
 use crate::protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
@@ -562,6 +564,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.variables(stop_id, debug_pid(thread_id), &query));
+            }
+            Request::Dereference { reference, reply } => {
+                let _ = reply.send(self.dereference(&reference));
             }
             Request::Globals { query, reply } => {
                 let _ = reply.send(self.globals(&query));
@@ -3492,6 +3497,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .get(&inferior.loaded_module.id)
                 .and_then(|module| module.link_map),
         };
+        let context = VariableContext {
+            stop_id,
+            thread: debug_thread_id(pid),
+            module: inferior.loaded_module.id,
+            image: inferior.loaded_module.image,
+            address: image_address,
+        };
         let variables = match query {
             VariableQuery::Global(global) => vec![self.inspect_loaded_global(
                 inferior,
@@ -3505,14 +3517,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let image_address = image_address.ok_or(Error::VariableContextUnsupported)?;
                 let selected = selected_instance.ok_or(Error::VariableContextUnsupported)?;
                 self.variable_info
-                    .inspect(image_address, selected, query, &mut runtime)?
+                    .inspect(image_address, selected, query, context, &mut runtime)?
             }
             VariableQuery::Name(name) => {
                 let local = image_address.zip(selected_instance).map_or_else(
                     || Err(Error::VariableNotFound(name.clone())),
                     |(address, selected)| {
                         self.variable_info
-                            .inspect(address, selected, query, &mut runtime)
+                            .inspect(address, selected, query, context, &mut runtime)
                     },
                 );
                 match local {
@@ -3597,12 +3609,78 @@ impl<P: LinuxTraceOps> Controller<P> {
             cfa: cfa.clone(),
             link_map: module.link_map,
         };
-        let mut variable =
-            module
-                .variables
-                .inspect_global(global.variable, context_address, &mut runtime)?;
+        let mut variable = module.variables.inspect_global(
+            global.variable,
+            context_address,
+            VariableContext {
+                stop_id: inferior
+                    .public_stop
+                    .as_ref()
+                    .expect("variable inspection validated a public stop")
+                    .id,
+                thread: debug_thread_id(pid),
+                module: module.loaded.id,
+                image: module.loaded.image,
+                address: context_address,
+            },
+            &mut runtime,
+        )?;
         variable.global = Some(global);
         Ok(variable)
+    }
+
+    fn dereference(
+        &self,
+        reference: &crate::DereferenceReference,
+    ) -> Result<crate::DereferencedValue> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        // Validate the stop before consulting modules, registers, or memory.
+        validate_public_stop(inferior, Some(reference.stop_id))?;
+        let pid = debug_pid(reference.thread);
+        validate_stopped_thread(inferior, pid)?;
+        if inferior.exec_unsupported {
+            return Err(backend_error(LinuxError::UnsupportedExec));
+        }
+        let module = self
+            .modules
+            .get(&reference.module)
+            .ok_or(Error::ModuleNotLoaded(reference.module))?;
+        if module.loaded.image != reference.image {
+            return Err(Error::StaleModuleImage);
+        }
+        let native = self.ptrace.registers(pid)?;
+        let registers = x86_64_registers(&native);
+        let instruction = VirtualAddress::new(native.rip);
+        let cfa = inferior
+            .loaded_module
+            .image_address(instruction)
+            .ok()
+            .filter(|address| self.module_image.contains_address(*address))
+            .map_or_else(
+                || {
+                    Err(VariableUnavailableReason::Other(
+                        "instruction is outside the main image".into(),
+                    ))
+                },
+                |address| {
+                    self.unwind_info
+                        .cfa(address, &registers)
+                        .map_err(|termination| {
+                            VariableUnavailableReason::Other(format!("{termination:?}").into())
+                        })
+                },
+            );
+        let mut runtime = LinuxVariableRuntime {
+            ptrace: &self.ptrace,
+            pid,
+            loaded_module: module.loaded,
+            breakpoints: &inferior.breakpoints,
+            native: &native,
+            floating: None,
+            cfa,
+            link_map: module.link_map,
+        };
+        module.variables.dereference(reference, &mut runtime)
     }
 
     fn globals(&self, query: &GlobalVariableQuery) -> Result<GlobalVariablePage> {
@@ -5576,6 +5654,7 @@ mod tests {
             _address: ImageAddress,
             _selected: Option<crate::CodeInstanceId>,
             _query: &VariableQuery,
+            _context: VariableContext,
             _runtime: &mut dyn VariableRuntime,
         ) -> Result<Vec<crate::Variable>> {
             panic!("unexpected variable lookup")
@@ -5585,9 +5664,18 @@ mod tests {
             &self,
             _id: crate::GlobalVariableId,
             _address: Option<ImageAddress>,
+            _context: VariableContext,
             _runtime: &mut dyn VariableRuntime,
         ) -> Result<crate::Variable> {
             panic!("unexpected global variable lookup")
+        }
+
+        fn dereference(
+            &self,
+            _reference: &crate::DereferenceReference,
+            _runtime: &mut dyn VariableRuntime,
+        ) -> Result<crate::DereferencedValue> {
+            panic!("unexpected dereference")
         }
     }
 

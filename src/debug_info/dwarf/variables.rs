@@ -6,14 +6,16 @@ use std::sync::Arc;
 use gimli::{EvaluationResult, Location, Reader as _, RunTimeEndian, Value};
 
 use super::{DieKey, DwarfError, Reader, die_reference, source_file_id, source_path};
-use crate::debug_info::{VariableInfo, VariableRuntime};
+use crate::debug_info::{VariableContext, VariableInfo, VariableRuntime};
 use crate::{
-    AddressRange, Architecture, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
-    ColumnNumber, Error, FloatValue, GlobalVariableId, GlobalVariableInfo, GlobalVariableType,
-    GlobalVariableVisibility, ImageAddress, LineNumber, Result, ScalarValue, SourceFile,
-    SourceFileId, SourceLocation, TargetDescription, Variable, VariableKind,
-    VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
-    VariableValueSource, VirtualAddress,
+    AddressRange, AddressValue, Architecture, BaseType, BaseTypeEncoding, ByteOrder,
+    CodeInstanceId, ColumnNumber, DereferenceReference, DereferenceState,
+    DereferenceUnavailableReason, DereferencedValue, Error, FloatValue, GlobalVariableId,
+    GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility, ImageAddress, LineNumber,
+    ModuleImageId, ReferenceKind, Result, ScalarValue, SourceFile, SourceFileId, SourceLocation,
+    TargetDescription, TypeId, TypeInfo, TypeKind, TypeQualifier, TypeReference, Variable,
+    VariableKind, VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
+    VariableValue, VariableValueSource, VirtualAddress,
 };
 
 const MAX_SCALAR_BYTES: u64 = 16;
@@ -114,6 +116,14 @@ struct EvaluationUnit {
     base_types: HashMap<usize, gimli::ValueType>,
 }
 
+#[derive(Clone, Copy)]
+struct ImplicitPointerLocation {
+    debug_info_offset: u64,
+    byte_offset: i64,
+    size_in_bits: Option<u64>,
+    bit_offset: Option<u64>,
+}
+
 #[derive(Clone)]
 struct LocationEntry {
     range: Option<AddressRange<ImageAddress>>,
@@ -163,9 +173,33 @@ impl LocationDescription {
 
 #[derive(Clone)]
 enum TypeResolution {
-    Scalar(BaseType),
-    Unsupported(Arc<str>),
+    Resolved(TypeId),
     Malformed(Arc<str>),
+}
+
+#[derive(Clone)]
+enum TypeEntry {
+    Building,
+    Resolved(TypeInfo),
+    Malformed(Arc<str>),
+}
+
+struct TypeArenaBuilder<'a, 'data> {
+    dwarf: &'a gimli::Dwarf<Reader<'data>>,
+    units: &'a [gimli::Unit<Reader<'data>>],
+    image: ModuleImageId,
+    by_die: HashMap<DieKey, TypeId>,
+    entries: Vec<TypeEntry>,
+}
+
+#[derive(Clone, Debug)]
+enum ValueShape {
+    Scalar(BaseType),
+    Indirection {
+        target: Option<TypeId>,
+        byte_size: u64,
+        address_class: u64,
+    },
 }
 
 #[derive(Clone)]
@@ -192,6 +226,7 @@ enum ValueDescription {
 
 #[derive(Clone)]
 struct CatalogDataObject {
+    debug_info_offset: Option<u64>,
     kind: VariableKind,
     name: Arc<str>,
     declaration: Option<SourceLocation>,
@@ -233,6 +268,8 @@ pub(super) struct DwarfVariableInfo {
     address_index: BTreeMap<ImageAddress, Arc<[usize]>>,
     globals: Arc<[usize]>,
     evaluation_units: Arc<[EvaluationUnit]>,
+    types: Arc<[TypeEntry]>,
+    objects_by_debug_offset: HashMap<u64, usize>,
     target: TargetDescription,
     endian: RunTimeEndian,
 }
@@ -299,13 +336,14 @@ impl DefinitionIndex {
     clippy::too_many_lines,
     reason = "global collection deliberately resolves producer variants in one auditable pass"
 )]
-fn load_globals(
-    dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+fn load_globals<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &[gimli::Unit<Reader<'data>>],
     objects: &mut Vec<CatalogDataObject>,
     order: &mut u64,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    types: &mut TypeArenaBuilder<'_, 'data>,
 ) -> std::result::Result<(Vec<GlobalVariableInfo>, Vec<usize>), DwarfError> {
     let mut scopes_by_die = HashMap::<DieKey, GlobalScope>::new();
 
@@ -464,7 +502,7 @@ fn load_globals(
                     })
                 })
                 .unwrap_or((unit_index, None));
-            let type_info = resolve_variable_type(dwarf, units, type_unit, type_value);
+            let type_info = types.variable_type(type_unit, type_value);
             let value =
                 copy_data_object_value_with_origins(dwarf, units, unit_index, unit, entry, &chain);
             let declaration_only =
@@ -492,6 +530,10 @@ fn load_globals(
                 .or(chain_error)
                 .or(linkage_error);
             let object = CatalogDataObject {
+                debug_info_offset: entry
+                    .offset()
+                    .to_debug_info_offset(&unit.header)
+                    .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
                 kind: VariableKind::Global,
                 name: Arc::clone(&name),
                 declaration: declaration.as_ref().ok().cloned().flatten(),
@@ -505,10 +547,22 @@ fn load_globals(
                 malformed,
             };
             let public_type = match &type_info {
-                TypeResolution::Scalar(value) => GlobalVariableType::Scalar(value.clone()),
-                TypeResolution::Unsupported(reason) => {
-                    GlobalVariableType::Unsupported(Arc::clone(reason))
-                }
+                TypeResolution::Resolved(id) => match types
+                    .entries
+                    .get(usize::try_from(id.get()).expect("type ID fits usize"))
+                {
+                    Some(TypeEntry::Resolved(value)) => GlobalVariableType::Resolved(value.clone()),
+                    Some(TypeEntry::Malformed(description)) => {
+                        GlobalVariableType::Malformed(VariableMalformedReason {
+                            description: Arc::clone(description),
+                        })
+                    }
+                    Some(TypeEntry::Building) | None => {
+                        GlobalVariableType::Malformed(VariableMalformedReason {
+                            description: "type graph did not finish building".into(),
+                        })
+                    }
+                },
                 TypeResolution::Malformed(description) => {
                     GlobalVariableType::Malformed(VariableMalformedReason {
                         description: Arc::clone(description),
@@ -572,10 +626,11 @@ const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {
     clippy::too_many_lines,
     reason = "one depth-first DIE walk must keep scope, variable, and parameter state synchronized"
 )]
-pub(super) fn load_variable_info(
-    dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+pub(super) fn load_variable_info<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    units: &[gimli::Unit<Reader<'data>>],
     target: TargetDescription,
+    image_id: ModuleImageId,
     instance_ids: &HashMap<DieKey, CodeInstanceId>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
@@ -584,6 +639,7 @@ pub(super) fn load_variable_info(
     let mut functions = Vec::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
+    let mut types = TypeArenaBuilder::new(dwarf, units, image_id);
     let (globals, global_objects) = load_globals(
         dwarf,
         units,
@@ -591,6 +647,7 @@ pub(super) fn load_variable_info(
         &mut order,
         source_files,
         source_file_ids,
+        &mut types,
     )?;
 
     for (unit_index, unit) in units.iter().enumerate() {
@@ -759,6 +816,10 @@ pub(super) fn load_variable_info(
                         .unwrap_or((unit_index, None));
                     functions[scope.function].objects.push(objects.len());
                     objects.push(CatalogDataObject {
+                        debug_info_offset: entry
+                            .offset()
+                            .to_debug_info_offset(&unit.header)
+                            .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
                         kind,
                         name,
                         declaration: declaration.as_ref().ok().cloned().flatten(),
@@ -766,7 +827,7 @@ pub(super) fn load_variable_info(
                         instance: scope.instance,
                         lexical_depth: scope.lexical_depth,
                         order,
-                        type_info: resolve_variable_type(dwarf, units, type_unit, type_value),
+                        type_info: types.variable_type(type_unit, type_value),
                         value: copy_data_object_value(dwarf, unit_index, unit, entry),
                         frame_base: scope.frame_base.clone(),
                         malformed: declaration
@@ -790,6 +851,11 @@ pub(super) fn load_variable_info(
             address_index.entry(range.start).or_default().push(function);
         }
     }
+    let objects_by_debug_offset = objects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, object)| object.debug_info_offset.map(|offset| (offset, index)))
+        .collect();
     Ok(LoadedVariables {
         info: Arc::new(DwarfVariableInfo {
             objects: objects.into(),
@@ -800,6 +866,8 @@ pub(super) fn load_variable_info(
                 .collect(),
             globals: global_objects.into(),
             evaluation_units: evaluation_units.into(),
+            types: types.entries.into(),
+            objects_by_debug_offset,
             target,
             endian: match target.byte_order {
                 ByteOrder::Little => RunTimeEndian::Little,
@@ -1290,103 +1358,315 @@ const fn dwarf_value_type(encoding: gimli::DwAte, byte_size: u64) -> Option<giml
     }
 }
 
-fn resolve_variable_type(
-    dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
-    unit_index: usize,
-    value: Option<gimli::AttributeValue<Reader<'_>>>,
-) -> TypeResolution {
-    let key = match die_reference(value, unit_index, units) {
-        Ok(Some(key)) => key,
-        Ok(None) => return TypeResolution::Malformed("variable has no type".into()),
-        Err(error) => return TypeResolution::Malformed(error.to_string().into()),
-    };
-    resolve_type(dwarf, units, key, &mut HashSet::new())
-}
-
-fn resolve_type(
-    dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
-    key: DieKey,
-    visited: &mut HashSet<DieKey>,
-) -> TypeResolution {
-    if !visited.insert(key) {
-        return TypeResolution::Malformed("type reference cycle".into());
+impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
+    fn new(
+        dwarf: &'a gimli::Dwarf<Reader<'data>>,
+        units: &'a [gimli::Unit<Reader<'data>>],
+        image: ModuleImageId,
+    ) -> Self {
+        Self {
+            dwarf,
+            units,
+            image,
+            by_die: HashMap::new(),
+            entries: Vec::new(),
+        }
     }
-    let Some(unit) = units.get(key.unit) else {
-        return TypeResolution::Malformed("type reference is outside loaded units".into());
-    };
-    let offset = gimli::UnitOffset(key.offset);
-    let entry = match unit.entry(offset) {
-        Ok(entry) => entry,
-        Err(error) => return TypeResolution::Malformed(error.to_string().into()),
-    };
-    match entry.tag() {
-        gimli::DW_TAG_base_type => {
-            let name = match copy_name(dwarf, unit, &entry) {
-                Ok(Some(name)) => name,
-                Ok(None) => Arc::from("<unnamed base type>"),
-                Err(error) => return TypeResolution::Malformed(error.to_string().into()),
-            };
-            let Some(byte_size) = entry
-                .attr(gimli::DW_AT_byte_size)
-                .and_then(gimli::Attribute::udata_value)
-            else {
-                return TypeResolution::Malformed("base type has no byte size".into());
-            };
-            if byte_size > MAX_SCALAR_BYTES {
-                return TypeResolution::Unsupported(
-                    format!("scalar type occupies {byte_size} bytes").into(),
-                );
+
+    fn variable_type(
+        &mut self,
+        unit_index: usize,
+        value: Option<gimli::AttributeValue<Reader<'data>>>,
+    ) -> TypeResolution {
+        let key = match die_reference(value, unit_index, self.units) {
+            Ok(Some(key)) => key,
+            Ok(None) => return TypeResolution::Malformed("variable has no type".into()),
+            Err(error) => return TypeResolution::Malformed(error.to_string().into()),
+        };
+        let id = self.resolve(key);
+        match self
+            .entries
+            .get(usize::try_from(id.get()).expect("type ID fits usize"))
+        {
+            Some(TypeEntry::Malformed(reason)) => TypeResolution::Malformed(Arc::clone(reason)),
+            Some(TypeEntry::Building) => {
+                TypeResolution::Malformed("type graph did not finish building".into())
             }
-            let Some(raw_encoding) = entry
-                .attr(gimli::DW_AT_encoding)
-                .and_then(gimli::Attribute::udata_value)
-            else {
-                return TypeResolution::Malformed("base type has no encoding".into());
-            };
-            let encoding = match gimli::DwAte(u8::try_from(raw_encoding).unwrap_or(u8::MAX)) {
-                gimli::DW_ATE_boolean => BaseTypeEncoding::Boolean,
-                gimli::DW_ATE_signed => BaseTypeEncoding::Signed,
-                gimli::DW_ATE_signed_char => BaseTypeEncoding::SignedCharacter,
-                gimli::DW_ATE_unsigned => BaseTypeEncoding::Unsigned,
-                gimli::DW_ATE_unsigned_char => BaseTypeEncoding::UnsignedCharacter,
-                gimli::DW_ATE_float => BaseTypeEncoding::Floating,
-                other => {
-                    return TypeResolution::Unsupported(
-                        format!("base type encoding {other:?} is unsupported").into(),
-                    );
-                }
-            };
-            TypeResolution::Scalar(BaseType {
-                name: Arc::clone(&name),
-                base_name: name,
-                encoding,
-                byte_size,
+            Some(TypeEntry::Resolved(_)) => TypeResolution::Resolved(id),
+            None => TypeResolution::Malformed("type ID is outside the arena".into()),
+        }
+    }
+
+    fn resolve(&mut self, key: DieKey) -> TypeId {
+        if let Some(id) = self.by_die.get(&key) {
+            return *id;
+        }
+        let id = TypeId::new(u32::try_from(self.entries.len()).expect("type count fits u32"));
+        self.by_die.insert(key, id);
+        self.entries.push(TypeEntry::Building);
+        let entry = self.build(key, id);
+        self.entries[usize::try_from(id.get()).expect("type ID fits usize")] = entry;
+        id
+    }
+
+    fn build(&mut self, key: DieKey, id: TypeId) -> TypeEntry {
+        let Some(unit) = self.units.get(key.unit) else {
+            return TypeEntry::Malformed("type reference is outside loaded units".into());
+        };
+        let entry = match unit.entry(gimli::UnitOffset(key.offset)) {
+            Ok(entry) => entry,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let reference = TypeReference {
+            image: self.image,
+            id,
+        };
+        let explicit_name = match copy_name(self.dwarf, unit, &entry) {
+            Ok(name) => name,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let explicit_size = entry
+            .attr(gimli::DW_AT_byte_size)
+            .and_then(gimli::Attribute::udata_value);
+        let address_class = entry
+            .attr(gimli::DW_AT_address_class)
+            .and_then(gimli::Attribute::udata_value)
+            .unwrap_or(0);
+        let pointer_size = explicit_size
+            .or_else(|| (address_class == 0).then_some(u64::from(unit.encoding().address_size)));
+
+        match entry.tag() {
+            gimli::DW_TAG_base_type => {
+                Self::build_base_type(&entry, reference, explicit_name, explicit_size)
+            }
+            gimli::DW_TAG_pointer_type => self.build_pointer_type(
+                &entry,
+                key.unit,
+                reference,
+                explicit_name,
+                pointer_size,
+                address_class,
+            ),
+            gimli::DW_TAG_reference_type | gimli::DW_TAG_rvalue_reference_type => self
+                .build_reference_type(
+                    &entry,
+                    key.unit,
+                    reference,
+                    explicit_name,
+                    pointer_size,
+                    address_class,
+                ),
+            gimli::DW_TAG_typedef
+            | gimli::DW_TAG_const_type
+            | gimli::DW_TAG_volatile_type
+            | gimli::DW_TAG_restrict_type
+            | gimli::DW_TAG_atomic_type
+            | gimli::DW_TAG_immutable_type => {
+                self.build_wrapper_type(&entry, key.unit, reference, explicit_name, explicit_size)
+            }
+            gimli::DW_TAG_unspecified_type => TypeEntry::Resolved(TypeInfo {
+                reference,
+                name: explicit_name.unwrap_or_else(|| Arc::from("void")),
+                byte_size: explicit_size,
+                kind: TypeKind::Unspecified,
+            }),
+            tag => TypeEntry::Resolved(TypeInfo {
+                reference,
+                name: explicit_name.unwrap_or_else(|| Arc::from(format!("{tag:?}"))),
+                byte_size: explicit_size,
+                kind: TypeKind::Opaque {
+                    description: format!("type tag {tag:?} is unsupported").into(),
+                },
+            }),
+        }
+    }
+
+    fn build_base_type(
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> TypeEntry {
+        let name = explicit_name.unwrap_or_else(|| Arc::from("<unnamed base type>"));
+        let Some(byte_size) = explicit_size else {
+            return TypeEntry::Malformed("base type has no byte size".into());
+        };
+        let Some(raw_encoding) = entry
+            .attr(gimli::DW_AT_encoding)
+            .and_then(gimli::Attribute::udata_value)
+        else {
+            return TypeEntry::Malformed("base type has no encoding".into());
+        };
+        let encoding = match gimli::DwAte(u8::try_from(raw_encoding).unwrap_or(u8::MAX)) {
+            gimli::DW_ATE_boolean => BaseTypeEncoding::Boolean,
+            gimli::DW_ATE_signed => BaseTypeEncoding::Signed,
+            gimli::DW_ATE_signed_char => BaseTypeEncoding::SignedCharacter,
+            gimli::DW_ATE_unsigned => BaseTypeEncoding::Unsigned,
+            gimli::DW_ATE_unsigned_char => BaseTypeEncoding::UnsignedCharacter,
+            gimli::DW_ATE_float => BaseTypeEncoding::Floating,
+            other => {
+                return TypeEntry::Resolved(TypeInfo {
+                    reference,
+                    name,
+                    byte_size: Some(byte_size),
+                    kind: TypeKind::Opaque {
+                        description: format!("base type encoding {other:?} is unsupported").into(),
+                    },
+                });
+            }
+        };
+        let base = BaseType {
+            name: Arc::clone(&name),
+            base_name: Arc::clone(&name),
+            encoding,
+            byte_size,
+        };
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size: Some(byte_size),
+            kind: TypeKind::Base(base),
+        })
+    }
+
+    fn target(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> std::result::Result<Option<TypeReference>, Arc<str>> {
+        die_reference(entry.attr_value(gimli::DW_AT_type), unit_index, self.units)
+            .map(|key| {
+                key.map(|key| TypeReference {
+                    image: self.image,
+                    id: self.resolve(key),
+                })
             })
+            .map_err(|error| error.to_string().into())
+    }
+
+    fn target_name(&self, target: TypeReference) -> Arc<str> {
+        self.entries
+            .get(usize::try_from(target.id.get()).expect("type ID fits usize"))
+            .and_then(|entry| match entry {
+                TypeEntry::Resolved(info) => Some(Arc::clone(&info.name)),
+                TypeEntry::Building | TypeEntry::Malformed(_) => None,
+            })
+            .unwrap_or_else(|| Arc::from("<recursive type>"))
+    }
+
+    fn build_pointer_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        byte_size: Option<u64>,
+        address_class: u64,
+    ) -> TypeEntry {
+        let target = match self.target(entry, unit_index) {
+            Ok(target) => target,
+            Err(reason) => return TypeEntry::Malformed(reason),
+        };
+        let name = explicit_name.unwrap_or_else(|| {
+            target.map_or_else(
+                || Arc::from("void *"),
+                |target| Arc::from(format!("{} *", self.target_name(target))),
+            )
+        });
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size,
+            kind: TypeKind::Pointer {
+                target,
+                address_class,
+            },
+        })
+    }
+
+    fn build_reference_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        byte_size: Option<u64>,
+        address_class: u64,
+    ) -> TypeEntry {
+        let target = match self.target(entry, unit_index) {
+            Ok(Some(target)) => target,
+            Ok(None) => return TypeEntry::Malformed("reference type has no target".into()),
+            Err(reason) => return TypeEntry::Malformed(reason),
+        };
+        let kind = if entry.tag() == gimli::DW_TAG_reference_type {
+            ReferenceKind::Lvalue
+        } else {
+            ReferenceKind::Rvalue
+        };
+        let suffix = if kind == ReferenceKind::Lvalue {
+            "&"
+        } else {
+            "&&"
+        };
+        let name = explicit_name
+            .unwrap_or_else(|| Arc::from(format!("{} {suffix}", self.target_name(target))));
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size,
+            kind: TypeKind::Reference {
+                kind,
+                target,
+                address_class,
+            },
+        })
+    }
+
+    fn build_wrapper_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> TypeEntry {
+        let target = match self.target(entry, unit_index) {
+            Ok(Some(target)) => target,
+            Ok(None) => return TypeEntry::Malformed("type wrapper has no target".into()),
+            Err(reason) => return TypeEntry::Malformed(reason),
+        };
+        let inherited_size = self
+            .entries
+            .get(usize::try_from(target.id.get()).expect("type ID fits usize"))
+            .and_then(|entry| match entry {
+                TypeEntry::Resolved(info) => info.byte_size,
+                TypeEntry::Building | TypeEntry::Malformed(_) => None,
+            });
+        let byte_size = explicit_size.or(inherited_size);
+        if entry.tag() == gimli::DW_TAG_typedef {
+            return TypeEntry::Resolved(TypeInfo {
+                reference,
+                name: explicit_name.unwrap_or_else(|| self.target_name(target)),
+                byte_size,
+                kind: TypeKind::Alias { target },
+            });
         }
-        gimli::DW_TAG_typedef
-        | gimli::DW_TAG_const_type
-        | gimli::DW_TAG_volatile_type
-        | gimli::DW_TAG_restrict_type => {
-            let referenced =
-                match die_reference(entry.attr_value(gimli::DW_AT_type), key.unit, units) {
-                    Ok(Some(key)) => key,
-                    Ok(None) => {
-                        return TypeResolution::Malformed("type wrapper has no type".into());
-                    }
-                    Err(error) => return TypeResolution::Malformed(error.to_string().into()),
-                };
-            let mut resolved = resolve_type(dwarf, units, referenced, visited);
-            if entry.tag() == gimli::DW_TAG_typedef
-                && let TypeResolution::Scalar(type_info) = &mut resolved
-                && let Ok(Some(name)) = copy_name(dwarf, unit, &entry)
-            {
-                type_info.name = name;
-            }
-            resolved
-        }
-        tag => TypeResolution::Unsupported(format!("type tag {tag:?} is unsupported").into()),
+        let qualifier = match entry.tag() {
+            gimli::DW_TAG_const_type => TypeQualifier::Const,
+            gimli::DW_TAG_volatile_type => TypeQualifier::Volatile,
+            gimli::DW_TAG_restrict_type => TypeQualifier::Restrict,
+            gimli::DW_TAG_atomic_type => TypeQualifier::Atomic,
+            gimli::DW_TAG_immutable_type => TypeQualifier::Immutable,
+            _ => unreachable!("wrapper tags matched by caller"),
+        };
+        let name = explicit_name
+            .unwrap_or_else(|| Arc::from(format!("{qualifier:?} {}", self.target_name(target))));
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size,
+            kind: TypeKind::Qualified { qualifier, target },
+        })
     }
 }
 
@@ -1396,6 +1676,7 @@ impl VariableInfo for DwarfVariableInfo {
         address: ImageAddress,
         selected: Option<CodeInstanceId>,
         query: &VariableQuery,
+        context: VariableContext,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Vec<Variable>> {
         let Some(function) = self.function_at(address) else {
@@ -1466,7 +1747,9 @@ impl VariableInfo for DwarfVariableInfo {
         let mut frame_base = FrameBaseCache::Empty;
         Ok(selected
             .into_iter()
-            .map(|object| self.inspect_data_object(object, Some(address), runtime, &mut frame_base))
+            .map(|object| {
+                self.inspect_data_object(object, Some(address), context, runtime, &mut frame_base)
+            })
             .collect())
     }
 
@@ -1474,6 +1757,7 @@ impl VariableInfo for DwarfVariableInfo {
         &self,
         id: GlobalVariableId,
         address: Option<ImageAddress>,
+        context: VariableContext,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Variable> {
         let global_index = usize::try_from(id.get()).expect("u32 fits usize");
@@ -1483,11 +1767,89 @@ impl VariableInfo for DwarfVariableInfo {
             .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
         let object = &self.objects[object_index];
         let mut frame_base = FrameBaseCache::Empty;
-        Ok(self.inspect_data_object(object, address, runtime, &mut frame_base))
+        Ok(self.inspect_data_object(object, address, context, runtime, &mut frame_base))
+    }
+
+    fn dereference(
+        &self,
+        reference: &DereferenceReference,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<DereferencedValue> {
+        self.dereference_value(reference, runtime)
+    }
+}
+
+fn type_info_from(types: &[TypeEntry], id: TypeId) -> std::result::Result<&TypeInfo, Arc<str>> {
+    match types.get(usize::try_from(id.get()).expect("type ID fits usize")) {
+        Some(TypeEntry::Resolved(info)) => Ok(info),
+        Some(TypeEntry::Malformed(reason)) => Err(Arc::clone(reason)),
+        Some(TypeEntry::Building) => Err("type graph did not finish building".into()),
+        None => Err("type ID is outside the module arena".into()),
+    }
+}
+
+fn value_shape_from(types: &[TypeEntry], id: TypeId) -> std::result::Result<ValueShape, Arc<str>> {
+    let mut current = id;
+    let mut visited = HashSet::new();
+    loop {
+        if !visited.insert(current) {
+            return Err("type wrapper cycle".into());
+        }
+        let info = type_info_from(types, current)?;
+        match &info.kind {
+            TypeKind::Base(base) => {
+                if base.byte_size > MAX_SCALAR_BYTES {
+                    return Err(format!("scalar type occupies {} bytes", base.byte_size).into());
+                }
+                let mut base = base.clone();
+                base.name = Arc::clone(&type_info_from(types, id)?.name);
+                return Ok(ValueShape::Scalar(base));
+            }
+            TypeKind::Pointer {
+                target,
+                address_class,
+            } => {
+                let byte_size = info
+                    .byte_size
+                    .ok_or_else(|| Arc::<str>::from("pointer type has no byte size"))?;
+                return Ok(ValueShape::Indirection {
+                    target: target.map(|target| target.id),
+                    byte_size,
+                    address_class: *address_class,
+                });
+            }
+            TypeKind::Reference {
+                target,
+                address_class,
+                ..
+            } => {
+                let byte_size = info
+                    .byte_size
+                    .ok_or_else(|| Arc::<str>::from("reference type has no byte size"))?;
+                return Ok(ValueShape::Indirection {
+                    target: Some(target.id),
+                    byte_size,
+                    address_class: *address_class,
+                });
+            }
+            TypeKind::Qualified { target, .. } | TypeKind::Alias { target } => {
+                current = target.id;
+            }
+            TypeKind::Unspecified => return Err("unspecified values are unsupported".into()),
+            TypeKind::Opaque { description } => return Err(Arc::clone(description)),
+        }
     }
 }
 
 impl DwarfVariableInfo {
+    fn type_info(&self, id: TypeId) -> std::result::Result<&TypeInfo, Arc<str>> {
+        type_info_from(&self.types, id)
+    }
+
+    fn value_shape(&self, id: TypeId) -> std::result::Result<ValueShape, Arc<str>> {
+        value_shape_from(&self.types, id)
+    }
+
     fn function_at(&self, address: ImageAddress) -> Option<&CatalogFunction> {
         self.address_index
             .range(..=address)
@@ -1503,23 +1865,35 @@ impl DwarfVariableInfo {
             })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the object inspection pipeline keeps every typed failure at its originating boundary"
+    )]
     fn inspect_data_object(
         &self,
         variable: &CatalogDataObject,
         address: Option<ImageAddress>,
+        context: VariableContext,
         runtime: &mut dyn VariableRuntime,
         frame_base_cache: &mut FrameBaseCache,
     ) -> Variable {
         if let Some(description) = &variable.malformed {
             return malformed(variable, None, Arc::clone(description));
         }
-        let type_info = match &variable.type_info {
-            TypeResolution::Scalar(type_info) => type_info.clone(),
-            TypeResolution::Unsupported(description) => {
-                return unavailable(variable, None, Arc::clone(description).into());
-            }
+        let type_id = match &variable.type_info {
+            TypeResolution::Resolved(id) => *id,
             TypeResolution::Malformed(description) => {
                 return malformed(variable, None, Arc::clone(description));
+            }
+        };
+        let type_info = match self.type_info(type_id) {
+            Ok(info) => info.clone(),
+            Err(description) => return malformed(variable, None, description),
+        };
+        let shape = match self.value_shape(type_id) {
+            Ok(shape) => shape,
+            Err(description) => {
+                return unavailable(variable, Some(type_info), description.into());
             }
         };
         let description = match &variable.value {
@@ -1537,16 +1911,21 @@ impl DwarfVariableInfo {
             }
         };
         if let ValueDescription::Constant(constant) = description {
-            let raw = match materialize_constant(constant, &type_info, self.target) {
+            let raw = match materialize_constant(
+                constant,
+                usize::try_from(shape.byte_size()).expect("supported value size fits usize"),
+                self.target,
+            ) {
                 Ok(raw) => raw,
                 Err(reason) => return unavailable(variable, Some(type_info), reason),
             };
-            return available(
+            return self.available_variable(
                 variable,
                 type_info,
+                &shape,
+                context,
                 VariableValueSource::Constant,
                 raw,
-                self.target,
             );
         }
         let ValueDescription::Location(location) = description else {
@@ -1587,9 +1966,28 @@ impl DwarfVariableInfo {
                 return malformed(variable, Some(type_info), description);
             }
         };
+        if let [piece] = pieces.as_slice()
+            && let Location::ImplicitPointer { value, byte_offset } = piece.location
+        {
+            let mut value = available_implicit_pointer(
+                variable,
+                type_info,
+                &shape,
+                context,
+                ImplicitPointerLocation {
+                    debug_info_offset: u64::try_from(value.0).expect("DWARF offset fits u64"),
+                    byte_offset,
+                    size_in_bits: piece.size_in_bits,
+                    bit_offset: piece.bit_offset,
+                },
+            );
+            self.constrain_dereference(&mut value.state, &shape);
+            return value;
+        }
         let (source, raw) = match materialize_pieces(
             &pieces,
-            &type_info,
+            shape.byte_size(),
+            shape.scalar(),
             self.endian,
             self.target,
             runtime,
@@ -1598,20 +1996,269 @@ impl DwarfVariableInfo {
             Ok(value) => value,
             Err(reason) => return unavailable(variable, Some(type_info), reason),
         };
-        available(variable, type_info, source, raw, self.target)
+        self.available_variable(variable, type_info, &shape, context, source, raw)
+    }
+
+    fn available_variable(
+        &self,
+        variable: &CatalogDataObject,
+        type_info: TypeInfo,
+        shape: &ValueShape,
+        context: VariableContext,
+        source: VariableValueSource,
+        raw: Arc<[u8]>,
+    ) -> Variable {
+        let mut value = available(
+            variable,
+            type_info,
+            shape,
+            context,
+            source,
+            raw,
+            self.target,
+        );
+        self.constrain_dereference(&mut value.state, shape);
+        value
+    }
+
+    fn constrain_dereference(&self, state: &mut VariableState, shape: &ValueShape) {
+        let ValueShape::Indirection {
+            target: Some(target),
+            ..
+        } = shape
+        else {
+            return;
+        };
+        if !matches!(
+            state,
+            VariableState::Available {
+                dereference: DereferenceState::Available(_),
+                ..
+            }
+        ) {
+            return;
+        }
+        let unavailable = match self.type_info(*target) {
+            Err(description) => Some(DereferenceUnavailableReason::Malformed(
+                VariableMalformedReason { description },
+            )),
+            Ok(TypeInfo {
+                kind: TypeKind::Unspecified,
+                ..
+            }) => Some(DereferenceUnavailableReason::UnspecifiedPointee),
+            Ok(_) => self
+                .value_shape(*target)
+                .err()
+                .map(DereferenceUnavailableReason::UnsupportedPointee),
+        };
+        if let Some(reason) = unavailable
+            && let VariableState::Available { dereference, .. } = state
+        {
+            *dereference = DereferenceState::Unavailable(reason);
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dereference preserves distinct address, implicit-pointer, unavailable, and malformed outcomes"
+    )]
+    fn dereference_value(
+        &self,
+        reference: &DereferenceReference,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<DereferencedValue> {
+        let type_info = self
+            .type_info(reference.target_type)
+            .map_err(|reason| Error::debug_info(DwarfError::MalformedVariable(reason)))?
+            .clone();
+        let shape = match self.value_shape(reference.target_type) {
+            Ok(shape) => shape,
+            Err(reason) => {
+                return Ok(DereferencedValue {
+                    type_info,
+                    state: VariableState::Unavailable(reason.into()),
+                });
+            }
+        };
+        let context = VariableContext {
+            stop_id: reference.stop_id,
+            thread: reference.thread,
+            module: reference.module,
+            image: reference.image,
+            address: reference.context_address,
+        };
+        let raw = match reference.target {
+            crate::model::DereferenceTarget::Address(address) => {
+                let size = usize::try_from(shape.byte_size())
+                    .map_err(|_| Error::debug_info(DwarfError::InvalidRange))?;
+                if size > MAX_EVALUATION_MEMORY_BYTES {
+                    return Ok(DereferencedValue {
+                        type_info,
+                        state: VariableState::Unavailable(
+                            VariableUnavailableReason::EvaluationLimit,
+                        ),
+                    });
+                }
+                match runtime.read_memory(address, size) {
+                    Ok(raw) => (VariableValueSource::Memory(address), raw),
+                    Err(reason) => {
+                        return Ok(DereferencedValue {
+                            type_info,
+                            state: VariableState::Unavailable(VariableUnavailableReason::Other(
+                                reason,
+                            )),
+                        });
+                    }
+                }
+            }
+            crate::model::DereferenceTarget::ImplicitPointer {
+                debug_info_offset,
+                byte_offset,
+            } => {
+                let Some(object_index) = self
+                    .objects_by_debug_offset
+                    .get(&debug_info_offset)
+                    .copied()
+                else {
+                    return Ok(DereferencedValue {
+                        type_info,
+                        state: VariableState::Unavailable(
+                            crate::UnsupportedVariableFeature::CrossDieEvaluation.into(),
+                        ),
+                    });
+                };
+                let object = &self.objects[object_index];
+                let mut frame_base = FrameBaseCache::Empty;
+                let referenced = self.inspect_data_object(
+                    object,
+                    reference.context_address,
+                    context,
+                    runtime,
+                    &mut frame_base,
+                );
+                if byte_offset == 0
+                    && matches!(object.type_info, TypeResolution::Resolved(id) if id == reference.target_type)
+                {
+                    return Ok(DereferencedValue {
+                        type_info,
+                        state: referenced.state,
+                    });
+                }
+                let raw = match referenced.state {
+                    VariableState::Available { raw: Some(raw), .. } => raw,
+                    VariableState::Available { raw: None, .. } => {
+                        return Ok(DereferencedValue {
+                            type_info,
+                            state: VariableState::Unavailable(
+                                crate::UnsupportedVariableFeature::CompositeLocation.into(),
+                            ),
+                        });
+                    }
+                    VariableState::Unavailable(reason) => {
+                        return Ok(DereferencedValue {
+                            type_info,
+                            state: VariableState::Unavailable(reason),
+                        });
+                    }
+                    VariableState::Malformed(reason) => {
+                        return Ok(DereferencedValue {
+                            type_info,
+                            state: VariableState::Malformed(reason),
+                        });
+                    }
+                };
+                let size = usize::try_from(shape.byte_size())
+                    .map_err(|_| Error::debug_info(DwarfError::InvalidRange))?;
+                let bytes = match implicit_pointer_bytes(&raw, byte_offset, size) {
+                    Ok(bytes) => bytes,
+                    Err(reason) => {
+                        return Ok(DereferencedValue {
+                            type_info,
+                            state: VariableState::Unavailable(reason),
+                        });
+                    }
+                };
+                (VariableValueSource::Computed, bytes)
+            }
+        };
+        let mut state = decode_value_state(&shape, context, raw.0, raw.1, self.target);
+        self.constrain_dereference(&mut state, &shape);
+        Ok(DereferencedValue { type_info, state })
     }
 }
 
-fn available(
+fn implicit_pointer_bytes(
+    raw: &[u8],
+    byte_offset: i64,
+    size: usize,
+) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+    let start = usize::try_from(byte_offset).map_err(|_| {
+        VariableUnavailableReason::Other(
+            "negative implicit-pointer offsets outside the referenced object are unsupported"
+                .into(),
+        )
+    })?;
+    let end = start
+        .checked_add(size)
+        .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+    let bytes = raw.get(start..end).ok_or_else(|| {
+        VariableUnavailableReason::Other(
+            "implicit-pointer offset is outside the referenced value".into(),
+        )
+    })?;
+    Ok(Arc::from(bytes))
+}
+
+fn available_implicit_pointer(
     variable: &CatalogDataObject,
-    type_info: BaseType,
-    source: VariableValueSource,
-    raw: Arc<[u8]>,
-    target: TargetDescription,
+    type_info: TypeInfo,
+    shape: &ValueShape,
+    context: VariableContext,
+    location: ImplicitPointerLocation,
 ) -> Variable {
-    let state = match decode_scalar(&type_info, &raw, target) {
-        Ok(value) => VariableState::Available { source, raw, value },
-        Err(reason) => VariableState::Unavailable(reason),
+    let state = match shape {
+        ValueShape::Indirection {
+            target,
+            byte_size,
+            address_class,
+        } if location
+            .size_in_bits
+            .is_none_or(|bits| bits == byte_size.saturating_mul(8))
+            && location.bit_offset.is_none() =>
+        {
+            let dereference = if *address_class != 0 {
+                DereferenceState::Unavailable(DereferenceUnavailableReason::AddressClass(
+                    *address_class,
+                ))
+            } else if let Some(target_type) = target {
+                DereferenceState::Available(DereferenceReference {
+                    stop_id: context.stop_id,
+                    thread: context.thread,
+                    module: context.module,
+                    image: context.image,
+                    context_address: context.address,
+                    target_type: *target_type,
+                    target: crate::model::DereferenceTarget::ImplicitPointer {
+                        debug_info_offset: location.debug_info_offset,
+                        byte_offset: location.byte_offset,
+                    },
+                })
+            } else {
+                DereferenceState::Unavailable(DereferenceUnavailableReason::UnspecifiedPointee)
+            };
+            VariableState::Available {
+                source: VariableValueSource::ImplicitPointer,
+                raw: None,
+                value: VariableValue::ImplicitPointer,
+                dereference,
+            }
+        }
+        ValueShape::Indirection { .. } => {
+            VariableState::Unavailable(crate::UnsupportedVariableFeature::CompositeLocation.into())
+        }
+        ValueShape::Scalar(_) => VariableState::Malformed(VariableMalformedReason {
+            description: "DW_OP_implicit_pointer described a non-pointer value".into(),
+        }),
     };
     Variable {
         kind: variable.kind,
@@ -1623,9 +2270,99 @@ fn available(
     }
 }
 
+impl ValueShape {
+    const fn byte_size(&self) -> u64 {
+        match self {
+            Self::Scalar(base) => base.byte_size,
+            Self::Indirection { byte_size, .. } => *byte_size,
+        }
+    }
+
+    const fn scalar(&self) -> Option<&BaseType> {
+        match self {
+            Self::Scalar(base) => Some(base),
+            Self::Indirection { .. } => None,
+        }
+    }
+}
+
+fn available(
+    variable: &CatalogDataObject,
+    type_info: TypeInfo,
+    shape: &ValueShape,
+    context: VariableContext,
+    source: VariableValueSource,
+    raw: Arc<[u8]>,
+    target: TargetDescription,
+) -> Variable {
+    let state = decode_value_state(shape, context, source, raw, target);
+    Variable {
+        kind: variable.kind,
+        global: None,
+        name: Arc::clone(&variable.name),
+        declaration: variable.declaration.clone(),
+        type_info: Some(type_info),
+        state,
+    }
+}
+
+fn decode_value_state(
+    shape: &ValueShape,
+    context: VariableContext,
+    source: VariableValueSource,
+    raw: Arc<[u8]>,
+    target: TargetDescription,
+) -> VariableState {
+    match shape {
+        ValueShape::Scalar(base) => match decode_scalar(base, &raw, target) {
+            Ok(value) => VariableState::Available {
+                source,
+                raw: Some(raw),
+                value: VariableValue::Scalar(value),
+                dereference: DereferenceState::NotApplicable,
+            },
+            Err(reason) => VariableState::Unavailable(reason),
+        },
+        ValueShape::Indirection {
+            target: target_type,
+            byte_size,
+            address_class,
+        } => match decode_address(&raw, *byte_size, target) {
+            Ok(address) => {
+                let dereference = if *address_class != 0 {
+                    DereferenceState::Unavailable(DereferenceUnavailableReason::AddressClass(
+                        *address_class,
+                    ))
+                } else if address.get() == 0 {
+                    DereferenceState::Unavailable(DereferenceUnavailableReason::Null)
+                } else if let Some(target_type) = target_type {
+                    DereferenceState::Available(DereferenceReference {
+                        stop_id: context.stop_id,
+                        thread: context.thread,
+                        module: context.module,
+                        image: context.image,
+                        context_address: context.address,
+                        target_type: *target_type,
+                        target: crate::model::DereferenceTarget::Address(address),
+                    })
+                } else {
+                    DereferenceState::Unavailable(DereferenceUnavailableReason::UnspecifiedPointee)
+                };
+                VariableState::Available {
+                    source,
+                    raw: Some(raw),
+                    value: VariableValue::Address(AddressValue { address }),
+                    dereference,
+                }
+            }
+            Err(reason) => VariableState::Unavailable(reason),
+        },
+    }
+}
+
 fn unavailable(
     variable: &CatalogDataObject,
-    type_info: Option<BaseType>,
+    type_info: Option<TypeInfo>,
     reason: VariableUnavailableReason,
 ) -> Variable {
     Variable {
@@ -1640,7 +2377,7 @@ fn unavailable(
 
 fn malformed(
     variable: &CatalogDataObject,
-    type_info: Option<BaseType>,
+    type_info: Option<TypeInfo>,
     description: Arc<str>,
 ) -> Variable {
     Variable {
@@ -1878,7 +2615,8 @@ fn evaluation_value(
 
 fn materialize_pieces(
     pieces: &[gimli::Piece<Reader<'_>>],
-    type_info: &BaseType,
+    byte_size: u64,
+    scalar_type: Option<&BaseType>,
     endian: RunTimeEndian,
     target: TargetDescription,
     runtime: &mut dyn VariableRuntime,
@@ -1890,14 +2628,13 @@ fn materialize_pieces(
     let [piece] = pieces else {
         return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
     };
-    let expected_bits = type_info
-        .byte_size
+    let expected_bits = byte_size
         .checked_mul(8)
         .ok_or_else(|| Arc::<str>::from("scalar bit size overflow"))?;
     if piece.size_in_bits.is_some_and(|size| size != expected_bits) || piece.bit_offset.is_some() {
         return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
     }
-    let size = usize::try_from(type_info.byte_size).expect("scalar size fits usize");
+    let size = usize::try_from(byte_size).expect("supported value size fits usize");
     match piece.location {
         Location::Empty => Err(VariableUnavailableReason::OptimizedOut),
         Location::Address { address } => {
@@ -1919,7 +2656,11 @@ fn materialize_pieces(
         }
         Location::Value { value } => Ok((
             VariableValueSource::Computed,
-            dwarf_value_bytes(value, type_info, target)?,
+            if let Some(type_info) = scalar_type {
+                dwarf_value_bytes(value, type_info, target)?
+            } else {
+                dwarf_address_bytes(value, size, target)?
+            },
         )),
         Location::Bytes { ref value } => {
             let bytes = value.to_slice().map_err(evaluation_error)?.into_owned();
@@ -2001,10 +2742,9 @@ fn wrapping_integer_bytes(
 
 fn materialize_constant(
     value: &ConstantValue,
-    type_info: &BaseType,
+    size: usize,
     target: TargetDescription,
 ) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
-    let size = usize::try_from(type_info.byte_size).expect("scalar size fits usize");
     match value {
         // Producers use DW_FORM_sdata when the implicit high bits are signed.
         // A fixed data form supplies zero high bits; the target type then
@@ -2016,6 +2756,50 @@ fn materialize_constant(
         ConstantValue::Bytes(bytes) if bytes.len() == size => Ok(Arc::clone(bytes)),
         ConstantValue::Bytes(_) => Err("constant value size does not match its scalar type".into()),
     }
+}
+
+fn dwarf_address_bytes(
+    value: Value,
+    size: usize,
+    target: TargetDescription,
+) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+    let address = match value {
+        Value::Generic(value) | Value::U64(value) => value,
+        Value::U8(value) => u64::from(value),
+        Value::U16(value) => u64::from(value),
+        Value::U32(value) => u64::from(value),
+        Value::I8(value) => i64::from(value).cast_unsigned(),
+        Value::I16(value) => i64::from(value).cast_unsigned(),
+        Value::I32(value) => i64::from(value).cast_unsigned(),
+        Value::I64(value) => value.cast_unsigned(),
+        Value::F32(_) | Value::F64(_) => {
+            return Err("floating-point value cannot represent an address".into());
+        }
+    };
+    wrapping_integer_bytes(u128::from(address), size, target)
+}
+
+fn decode_address(
+    raw: &[u8],
+    byte_size: u64,
+    target: TargetDescription,
+) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
+    let size = usize::try_from(byte_size).map_err(|_| {
+        VariableUnavailableReason::Other("pointer size does not fit host usize".into())
+    })?;
+    if size == 0 || size > 8 || raw.len() != size {
+        return Err("pointer representation is not a supported virtual address size".into());
+    }
+    let mut bytes = [0_u8; 8];
+    match target.byte_order {
+        ByteOrder::Little => bytes[..size].copy_from_slice(raw),
+        ByteOrder::Big => bytes[8 - size..].copy_from_slice(raw),
+    }
+    let value = match target.byte_order {
+        ByteOrder::Little => u64::from_le_bytes(bytes),
+        ByteOrder::Big => u64::from_be_bytes(bytes),
+    };
+    Ok(VirtualAddress::new(value))
 }
 
 fn integer_bytes(
@@ -2475,7 +3259,8 @@ mod tests {
         .expect("implicit scalar expression");
         let materialized = materialize_pieces(
             &pieces,
-            &scalar_type(BaseTypeEncoding::Signed, 4),
+            4,
+            Some(&scalar_type(BaseTypeEncoding::Signed, 4)),
             RunTimeEndian::Little,
             target(ByteOrder::Little),
             &mut runtime,
@@ -2575,13 +3360,13 @@ mod tests {
         // DW_FORM_data1 0xff for a signed 4-byte type is -1, not 255.
         let fixed = ConstantValue::Fixed(0xff);
         assert_eq!(
-            materialize_constant(&fixed, &scalar_type(BaseTypeEncoding::Signed, 4), little)
+            materialize_constant(&fixed, 4, little)
                 .expect("zero-extended fixed-form constant")
                 .as_ref(),
             &[0xff, 0x00, 0x00, 0x00]
         );
         assert_eq!(
-            materialize_constant(&fixed, &scalar_type(BaseTypeEncoding::Unsigned, 4), little)
+            materialize_constant(&fixed, 4, little)
                 .expect("zero-extended constant")
                 .as_ref(),
             &[0xff, 0x00, 0x00, 0x00]
@@ -2589,7 +3374,7 @@ mod tests {
         // A non-negative fixed-width value is unchanged by sign extension.
         let positive = ConstantValue::Fixed(0x7f);
         assert_eq!(
-            materialize_constant(&positive, &scalar_type(BaseTypeEncoding::Signed, 2), little)
+            materialize_constant(&positive, 2, little)
                 .expect("positive constant")
                 .as_ref(),
             &[0x7f, 0x00]
@@ -2767,6 +3552,149 @@ mod tests {
                 ScalarValue::Unsigned(unsigned)
             );
         }
+    }
+
+    #[test]
+    fn pointer_decoding_obeys_target_width_and_byte_order_without_truncation() {
+        assert_eq!(
+            decode_address(&[0x78, 0x56, 0x34, 0x12], 4, target(ByteOrder::Little),)
+                .expect("little-endian 32-bit address"),
+            VirtualAddress::new(0x1234_5678),
+        );
+        assert_eq!(
+            decode_address(&[0x12, 0x34, 0x56, 0x78], 4, target(ByteOrder::Big),)
+                .expect("big-endian 32-bit address"),
+            VirtualAddress::new(0x1234_5678),
+        );
+        assert_eq!(
+            decode_address(
+                &0x0123_4567_89ab_cdef_u64.to_le_bytes(),
+                8,
+                target(ByteOrder::Little),
+            )
+            .expect("64-bit address"),
+            VirtualAddress::new(0x0123_4567_89ab_cdef),
+        );
+        assert!(decode_address(&[0; 9], 9, target(ByteOrder::Little)).is_err());
+        assert!(decode_address(&[0; 4], 8, target(ByteOrder::Little)).is_err());
+    }
+
+    #[test]
+    fn implicit_pointer_offsets_are_bounded_and_never_return_partial_values() {
+        assert_eq!(
+            implicit_pointer_bytes(&[1, 2, 3, 4, 5, 6, 7, 8], 4, 4)
+                .expect("in-bounds subobject")
+                .as_ref(),
+            &[5, 6, 7, 8]
+        );
+        assert!(matches!(
+            implicit_pointer_bytes(&[0; 8], -1, 4),
+            Err(VariableUnavailableReason::Other(_))
+        ));
+        assert!(matches!(
+            implicit_pointer_bytes(&[0; 8], 6, 4),
+            Err(VariableUnavailableReason::Other(_))
+        ));
+        assert_eq!(
+            implicit_pointer_bytes(&[0; 8], i64::MAX, usize::MAX),
+            Err(VariableUnavailableReason::EvaluationLimit)
+        );
+    }
+
+    #[test]
+    fn type_graph_rejects_wrapper_cycles_but_permits_recursive_pointer_edges() {
+        let image = ModuleImageId::new(7);
+        let reference = |id| TypeReference {
+            image,
+            id: TypeId::new(id),
+        };
+        let cycle = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "left".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Alias {
+                    target: reference(1),
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "right".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Qualified {
+                    qualifier: TypeQualifier::Const,
+                    target: reference(0),
+                },
+            }),
+        ];
+        assert_eq!(
+            value_shape_from(&cycle, TypeId::new(0))
+                .unwrap_err()
+                .as_ref(),
+            "type wrapper cycle",
+        );
+
+        let recursive_pointer = [TypeEntry::Resolved(TypeInfo {
+            reference: reference(0),
+            name: "node *".into(),
+            byte_size: Some(8),
+            kind: TypeKind::Pointer {
+                target: Some(reference(0)),
+                address_class: 0,
+            },
+        })];
+        assert!(matches!(
+            value_shape_from(&recursive_pointer, TypeId::new(0)),
+            Ok(ValueShape::Indirection {
+                target: Some(id),
+                byte_size: 8,
+                address_class: 0,
+            }) if id == TypeId::new(0)
+        ));
+    }
+
+    #[test]
+    fn null_and_non_default_address_classes_never_create_read_capabilities() {
+        let context = VariableContext {
+            stop_id: crate::StopId::new(9),
+            thread: crate::ThreadId::new(10),
+            module: crate::ModuleId::new(11),
+            image: ModuleImageId::new(12),
+            address: None,
+        };
+        let shape = |address_class| ValueShape::Indirection {
+            target: Some(TypeId::new(1)),
+            byte_size: 8,
+            address_class,
+        };
+        assert!(matches!(
+            decode_value_state(
+                &shape(0),
+                context,
+                VariableValueSource::Computed,
+                Arc::from([0_u8; 8]),
+                target(ByteOrder::Little),
+            ),
+            VariableState::Available {
+                dereference: DereferenceState::Unavailable(DereferenceUnavailableReason::Null),
+                ..
+            }
+        ));
+        assert!(matches!(
+            decode_value_state(
+                &shape(17),
+                context,
+                VariableValueSource::Computed,
+                Arc::from(1_u64.to_le_bytes()),
+                target(ByteOrder::Little),
+            ),
+            VariableState::Available {
+                dereference: DereferenceState::Unavailable(
+                    DereferenceUnavailableReason::AddressClass(17)
+                ),
+                ..
+            }
+        ));
     }
 
     #[test]

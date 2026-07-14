@@ -2,7 +2,7 @@
 
 volatile int32_t external_value = 101;
 const int32_t external_constant = 303;
-volatile int32_t global_sink;
+volatile int32_t global_sink, *external_pointer = &external_value;
 
 __attribute__((noinline)) static int32_t inspect_globals(void) {
     int32_t external_value = 999;

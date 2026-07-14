@@ -192,7 +192,7 @@ require_dwarf_operation() {
     local operation="$2"
     # grep reads all input; grep -q would exit early and objdump's SIGPIPE
     # would fail the pipeline under pipefail despite a successful match.
-    if ! objdump --dwarf=info "$output" | grep "$operation" >/dev/null; then
+    if ! objdump --dwarf=info,loc "$output" | grep "$operation" >/dev/null; then
         printf 'error: %s does not exercise %s\n' "$output" "$operation" >&2
         exit 1
     fi
@@ -202,10 +202,21 @@ mkdir -p "$output_dir"
 
 build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic" \
     -O0 -g3 -fPIE -pie
+build_c_fixture_directory gcc "$c_fixtures_dir/pointer-memory" \
+    "$output_dir/pointer-memory-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/variables.c" "$output_dir/variables-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables.c" "$output_dir/variables-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/variables.c" "$output_dir/variables-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+require_dwarf_operation "$output_dir/variables-gcc-o2" DW_OP_implicit_pointer
+require_dwarf_operation "$output_dir/variables-gcc-o2" 'DW_OP_implicit_pointer:.* 4'
+build_fixture clang "$c_fixtures_dir/variables.c" "$output_dir/variables-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/variables.c" "$output_dir/variables-gcc-nopie" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fno-pie -no-pie
 build_fixture gcc "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-clang-o0" \

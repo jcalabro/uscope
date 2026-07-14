@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 _Thread_local volatile int32_t tls_value;
+_Thread_local volatile int32_t *tls_pointer;
 volatile int32_t tls_sink;
 static pthread_barrier_t ready;
 static pthread_barrier_t release;
@@ -18,6 +19,7 @@ __attribute__((noinline)) static void tls_after_join(void) {
 
 static void *worker(void *argument) {
     tls_value = (int32_t)(intptr_t)argument;
+    tls_pointer = &tls_value;
     pthread_barrier_wait(&ready);
     pthread_barrier_wait(&release);
     return NULL;
@@ -33,6 +35,7 @@ int main(void) {
         return 1;
     }
     tls_value = 300;
+    tls_pointer = &tls_value;
     pthread_barrier_wait(&ready);
     tls_stop();
     pthread_barrier_wait(&release);

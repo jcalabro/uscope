@@ -145,8 +145,8 @@ const COMMANDS: &[CommandSpec] = &[
         Print,
         "print",
         ["p"],
-        "print [variable]",
-        "Print one or all visible variables"
+        "print [*...variable]",
+        "Print one or all visible variables, with explicit pointer dereference"
     ),
     command!(
         Globals,
@@ -832,10 +832,69 @@ async fn execute_print<'a>(
 ) -> uscope::Result<Control> {
     let argument = optional_argument(words, usage)?;
     match argument {
-        Some(name) => Ok(Control::Continue(format_variable(
-            &debugger.variable(name).await?,
-            renderer,
-        ))),
+        Some(expression) => {
+            let depth = expression.bytes().take_while(|byte| *byte == b'*').count();
+            let name = &expression[depth..];
+            if name.is_empty() {
+                return Err(Error::InvalidCommand(usage.to_owned()));
+            }
+            let variable = debugger.variable(name).await?;
+            if depth == 0 {
+                return Ok(Control::Continue(format_variable(&variable, renderer)));
+            }
+            let Some(mut type_info) = variable.type_info.clone() else {
+                return Ok(Control::Continue(format_variable(&variable, renderer)));
+            };
+            let mut state = variable.state.clone();
+            for level in 0..depth {
+                let reference = match &state {
+                    VariableState::Available {
+                        dereference: uscope::DereferenceState::Available(reference),
+                        ..
+                    } => reference.clone(),
+                    VariableState::Available {
+                        dereference: uscope::DereferenceState::Unavailable(reason),
+                        ..
+                    } => {
+                        return Ok(Control::Continue(format_typed_state(
+                            &type_info,
+                            &format!("{}{}", "*".repeat(level + 1), name),
+                            &VariableState::Unavailable(uscope::VariableUnavailableReason::Other(
+                                reason.to_string().into(),
+                            )),
+                            renderer,
+                        )));
+                    }
+                    VariableState::Available {
+                        dereference: uscope::DereferenceState::NotApplicable,
+                        ..
+                    } => {
+                        return Ok(Control::Continue(format_typed_state(
+                            &type_info,
+                            &format!("{}{}", "*".repeat(level + 1), name),
+                            &VariableState::Unavailable(
+                                "the value is not a pointer or reference".into(),
+                            ),
+                            renderer,
+                        )));
+                    }
+                    VariableState::Unavailable(_) | VariableState::Malformed(_) => {
+                        return Ok(Control::Continue(format_typed_state(
+                            &type_info,
+                            &format!("{}{}", "*".repeat(level), name),
+                            &state,
+                            renderer,
+                        )));
+                    }
+                };
+                let value = debugger.dereference(reference).await?;
+                type_info = value.type_info;
+                state = value.state;
+            }
+            Ok(Control::Continue(format_typed_state(
+                &type_info, expression, &state, renderer,
+            )))
+        }
         None => Ok(Control::Continue(format_variables(
             &debugger.variables().await?,
             renderer,
@@ -872,7 +931,7 @@ async fn execute_globals<'a>(
         .iter()
         .map(|entry| {
             let type_name = match &entry.variable.type_info {
-                uscope::GlobalVariableType::Scalar(type_info) => type_info.name.as_ref(),
+                uscope::GlobalVariableType::Resolved(type_info) => type_info.name.as_ref(),
                 uscope::GlobalVariableType::Unsupported(_) => "<unsupported type>",
                 uscope::GlobalVariableType::Malformed(_) => "<malformed type>",
                 _ => "<unknown type>",
@@ -1199,13 +1258,31 @@ fn format_variables(snapshot: &VariableSnapshot, renderer: Renderer) -> String {
 }
 
 fn format_variable(variable: &Variable, renderer: Renderer) -> String {
-    let type_name = variable
-        .type_info
-        .as_ref()
-        .map_or("<unknown type>", |type_info| type_info.name.as_ref());
-    let value = match &variable.state {
+    let Some(type_info) = variable.type_info.as_ref() else {
+        let value = match &variable.state {
+            VariableState::Unavailable(reason) => format!("<unavailable: {reason}>"),
+            VariableState::Malformed(reason) => format!("<malformed: {}>", reason.description),
+            VariableState::Available { .. } => "<unknown value>".to_owned(),
+        };
+        return format!(
+            "({}) {} = {}",
+            renderer.paint(Role::Type, "<unknown type>"),
+            renderer.paint(Role::Name, &variable.name),
+            renderer.paint(Role::Warning, value)
+        );
+    };
+    format_typed_state(type_info, &variable.name, &variable.state, renderer)
+}
+
+fn format_typed_state(
+    type_info: &uscope::TypeInfo,
+    name: &str,
+    state: &VariableState,
+    renderer: Renderer,
+) -> String {
+    let value = match state {
         VariableState::Available { value, .. } => renderer
-            .paint(Role::Value, format_scalar(variable, value))
+            .paint(Role::Value, format_variable_value(type_info, value))
             .to_string(),
         VariableState::Unavailable(reason) => renderer
             .paint(Role::Warning, format!("<unavailable: {reason}>"))
@@ -1216,19 +1293,39 @@ fn format_variable(variable: &Variable, renderer: Renderer) -> String {
     };
     format!(
         "({}) {} = {value}",
-        renderer.paint(Role::Type, type_name),
-        renderer.paint(Role::Name, &variable.name)
+        renderer.paint(Role::Type, &type_info.name),
+        renderer.paint(Role::Name, name)
     )
 }
 
-fn format_scalar(variable: &Variable, value: &ScalarValue) -> String {
+fn format_variable_value(type_info: &uscope::TypeInfo, value: &uscope::VariableValue) -> String {
+    match value {
+        uscope::VariableValue::Scalar(value) => format_scalar(type_info, value),
+        uscope::VariableValue::Address(value) => {
+            let width = type_info
+                .byte_size
+                .and_then(|size| usize::try_from(size.checked_mul(2)?).ok())
+                .unwrap_or(16);
+            format!("0x{:0width$x}", value.address.get())
+        }
+        uscope::VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
+        _ => "<unsupported value>".to_owned(),
+    }
+}
+
+fn format_scalar(type_info: &uscope::TypeInfo, value: &ScalarValue) -> String {
+    let character = matches!(
+        &type_info.kind,
+        uscope::TypeKind::Base(base) if base.base_name.as_ref() == "char"
+    );
+    format_scalar_value(value, character)
+}
+
+fn format_scalar_value(value: &ScalarValue, character: bool) -> String {
     match value {
         ScalarValue::Boolean(value) => value.to_string(),
         ScalarValue::Signed(value) => {
-            if variable
-                .type_info
-                .as_ref()
-                .is_some_and(|type_info| type_info.base_name.as_ref() == "char")
+            if character
                 && let Ok(character) = u8::try_from(*value)
                 && character.is_ascii_graphic()
             {
@@ -1663,30 +1760,7 @@ mod tests {
 
     #[test]
     fn char_rendering_escapes_quote_and_backslash() {
-        let variable = |value: i128| uscope::Variable {
-            kind: uscope::VariableKind::Local,
-            global: None,
-            name: "c".into(),
-            declaration: None,
-            type_info: Some(uscope::BaseType {
-                name: "char".into(),
-                base_name: "char".into(),
-                encoding: uscope::BaseTypeEncoding::Signed,
-                byte_size: 1,
-            }),
-            state: uscope::VariableState::Available {
-                source: uscope::VariableValueSource::Memory(uscope::VirtualAddress::new(0x1000)),
-                raw: std::sync::Arc::from([u8::try_from(value).expect("test char fits in u8")]),
-                value: uscope::ScalarValue::Signed(value),
-            },
-        };
-        let render = |value: i128| {
-            let variable = variable(value);
-            match &variable.state {
-                uscope::VariableState::Available { value, .. } => format_scalar(&variable, value),
-                _ => unreachable!(),
-            }
-        };
+        let render = |value: i128| format_scalar_value(&ScalarValue::Signed(value), true);
         assert_eq!(render(65), "65 'A'");
         assert_eq!(render(39), r"39 '\''");
         assert_eq!(render(92), r"92 '\\'");

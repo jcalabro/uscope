@@ -378,7 +378,7 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
             "--eval",
             "help pause",
             "--eval",
-            "break variables.c:52",
+            "break variables.c:108",
             "--eval",
             "run",
             "--eval",
@@ -391,7 +391,7 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
         .expect("run uscope");
     let stdout = assert_success(output);
 
-    assert!(stdout.contains("print [variable]\n"), "{stdout}");
+    assert!(stdout.contains("print [*...variable]\n"), "{stdout}");
     assert!(stdout.contains("aliases: p"), "{stdout}");
     assert!(stdout.contains("  Pause execution"), "{stdout}");
     assert!(!stdout.contains("usage: pause"), "{stdout}");
@@ -446,6 +446,58 @@ fn print_and_p_render_parameters_and_locals() {
         "{stdout}"
     );
     assert!(stdout.contains("(int) local = 99"), "{stdout}");
+}
+
+#[test]
+fn print_explicitly_dereferences_pointer_chains_and_reports_typed_failures() {
+    let executable = fixture("build/test-programs/variables-gcc-o0");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break variables.c:68",
+            "--eval",
+            "run",
+            "--eval",
+            "p pointer",
+            "--eval",
+            "p *pointer",
+            "--eval",
+            "p **pointer_pointer",
+            "--eval",
+            "p *null_pointer",
+            "--eval",
+            "p *void_pointer",
+            "--eval",
+            "p *pointee",
+            "--eval",
+            "p **pointer",
+            "--eval",
+            "p *invalid_pointer",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run pointer print commands");
+    let stdout = assert_success(output);
+    assert!(stdout.contains("(int *) pointer = 0x"), "{stdout}");
+    assert!(stdout.contains("(int) *pointer = 42"), "{stdout}");
+    assert!(stdout.contains("(int) **pointer_pointer = 42"), "{stdout}");
+    assert!(
+        stdout.contains("cannot dereference a null pointer"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("no concrete pointee type"), "{stdout}");
+    assert!(
+        stdout
+            .matches("the value is not a pointer or reference")
+            .count()
+            >= 2,
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("*invalid_pointer = <unavailable:"),
+        "{stdout}"
+    );
 }
 
 #[test]

@@ -7,19 +7,21 @@ mod unwind;
 
 pub use error::{Error, Result};
 pub use model::{
-    AddressRange, Architecture, Backtrace, BaseType, BaseTypeEncoding, BreakpointEntry,
-    BreakpointLocation, ByteOrder, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
-    ColumnNumber, EntryProvenance, ExecutionLocation, FloatValue, FrameKind, FunctionId,
-    FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
-    GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
-    ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, LineNumber, LineSequenceId,
-    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, ModuleId,
-    ModuleImage, ModuleImageId, PointerWidth, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, ScalarValue, SourceContext, SourceFile, SourceFileId,
-    SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolId,
-    SymbolInfo, TargetDescription, ThreadId, UnsupportedVariableFeature, UnwindTermination,
-    Variable, VariableKind, VariableMalformedReason, VariableSnapshot, VariableState,
-    VariableUnavailableReason, VariableValueSource, VirtualAddress,
+    AddressRange, AddressValue, Architecture, Backtrace, BaseType, BaseTypeEncoding,
+    BreakpointEntry, BreakpointLocation, ByteOrder, CodeInstanceId, CodeInstanceInfo,
+    CodeInstanceKind, ColumnNumber, DereferenceReference, DereferenceState,
+    DereferenceUnavailableReason, DereferencedValue, EntryProvenance, ExecutionLocation,
+    FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId,
+    GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference, GlobalVariableType,
+    GlobalVariableVisibility, ImageAddress, ImageLocation, InlineChain, InlineFrameLookup,
+    LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
+    LoadedModuleSnapshot, ModuleId, ModuleImage, ModuleImageId, PointerWidth, ReferenceKind,
+    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, ScalarValue,
+    SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId,
+    StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId, TypeId,
+    TypeInfo, TypeKind, TypeQualifier, TypeReference, UnsupportedVariableFeature,
+    UnwindTermination, Variable, VariableKind, VariableMalformedReason, VariableSnapshot,
+    VariableState, VariableUnavailableReason, VariableValue, VariableValueSource, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
@@ -453,6 +455,13 @@ impl DebuggerHandle {
             .first()
             .cloned()
             .ok_or_else(|| Error::VariableNotFound(global.variable.to_string()))
+    }
+
+    /// Explicitly dereferences a pointer or reference value produced at the
+    /// current stopped snapshot.
+    pub async fn dereference(&self, reference: DereferenceReference) -> Result<DereferencedValue> {
+        self.request(|reply| Request::Dereference { reference, reply })
+            .await
     }
 
     /// Lists one filtered, bounded page of immutable global metadata.

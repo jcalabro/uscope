@@ -187,6 +187,15 @@ impl Scenario {
         task
     }
 
+    pub async fn start_resuming(&mut self) -> JoinHandle<Result<StopReason>> {
+        self.transcript.push("request: continue".to_owned());
+        let handle = self.handle.clone();
+        let task = tokio::spawn(async move { handle.resume().await });
+        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
+            .await;
+        task
+    }
+
     pub async fn snapshot(&mut self) -> StateSnapshot {
         let snapshot = within(self.handle.snapshot())
             .await
