@@ -843,7 +843,15 @@ async fn execute_print<'a>(
                 return Ok(Control::Continue(format_variable(&variable, renderer)));
             }
             let Some(mut type_info) = variable.type_info.clone() else {
-                return Ok(Control::Continue(format_variable(&variable, renderer)));
+                // A dereference was requested (depth > 0) but the operand has no
+                // resolved type. Preserve the requested `*` operators instead of
+                // rendering the bare operand as though it were the expression.
+                let mut expression_variable = variable;
+                expression_variable.name = expression.into();
+                return Ok(Control::Continue(format_variable(
+                    &expression_variable,
+                    renderer,
+                )));
             };
             let mut state = variable.state.clone();
             for level in 0..depth {
@@ -853,16 +861,32 @@ async fn execute_print<'a>(
                         ..
                     } => reference.clone(),
                     VariableState::Available {
-                        dereference: uscope::DereferenceState::Unavailable(reason),
+                        dereference: uscope::DereferenceState::Unavailable { pointee, reason },
                         ..
                     } => {
-                        return Ok(Control::Continue(format_typed_state(
-                            &type_info,
-                            &format!("{}{}", "*".repeat(level + 1), name),
-                            &VariableState::Unavailable(uscope::VariableUnavailableReason::Other(
-                                reason.to_string().into(),
-                            )),
-                            renderer,
+                        let expression = format!("{}{}", "*".repeat(level + 1), name);
+                        return Ok(Control::Continue(pointee.as_ref().map_or_else(
+                            || {
+                                format!(
+                                    "({}) {} = {}",
+                                    renderer.paint(Role::Type, "<unknown type>"),
+                                    renderer.paint(Role::Name, &expression),
+                                    renderer
+                                        .paint(Role::Warning, format!("<unavailable: {reason}>")),
+                                )
+                            },
+                            |pointee| {
+                                format_typed_state(
+                                    pointee,
+                                    &expression,
+                                    &VariableState::Unavailable(
+                                        uscope::VariableUnavailableReason::Other(
+                                            reason.to_string().into(),
+                                        ),
+                                    ),
+                                    renderer,
+                                )
+                            },
                         )));
                     }
                     VariableState::Available {
