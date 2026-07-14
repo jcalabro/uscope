@@ -1774,7 +1774,7 @@ async fn c_globals_cover_local_shadowing_collisions_relocation_and_optimization(
         let external = scenario
             .operation(
                 "inspect exact external global",
-                scenario.handle().global(external.id),
+                scenario.handle().main_global(external.id),
             )
             .await;
         assert_eq!(external.kind, VariableKind::Global);
@@ -2189,7 +2189,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
             let variable = scenario
                 .operation(
                     "inspect selected thread TLS",
-                    scenario.handle().global(global),
+                    scenario.handle().main_global(global),
                 )
                 .await;
             let VariableState::Available {
@@ -2212,7 +2212,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
         let surviving = scenario
             .operation(
                 "inspect TLS after worker exit",
-                scenario.handle().global(global),
+                scenario.handle().main_global(global),
             )
             .await;
         assert_variable_value(&surviving, ScalarValue::Signed(300));
@@ -4874,6 +4874,14 @@ async fn nonleader_exec_rewrites_the_thread_registry_and_invalidates_the_image()
     assert_eq!(snapshot.threads.len(), 1);
     assert!(matches!(
         scenario.handle().resume().await,
+        Err(Error::Backend(_))
+    ));
+
+    // The retained catalog describes the pre-exec program while the thread now
+    // runs the replaced image; variable inspection must refuse rather than
+    // resolve stale metadata against the new address space.
+    assert!(matches!(
+        scenario.handle().variables().await,
         Err(Error::Backend(_))
     ));
 

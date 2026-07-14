@@ -428,8 +428,14 @@ impl DebuggerHandle {
             .ok_or(Error::VariableNotFound(name))
     }
 
-    /// Inspects one exact global catalog entry in the selected stopped thread.
-    pub async fn global(&self, id: GlobalVariableId) -> Result<Variable> {
+    /// Inspects one exact global catalog entry owned by the main executable
+    /// image in the selected stopped thread.
+    ///
+    /// A [`GlobalVariableId`] is only unique within its owning [`ModuleImage`],
+    /// so this convenience method is restricted to the main image. To inspect a
+    /// global belonging to a shared library, resolve its owning module and pass
+    /// the full [`GlobalVariableReference`] to [`Self::loaded_global`].
+    pub async fn main_global(&self, id: GlobalVariableId) -> Result<Variable> {
         let module = self.loaded_module().await?;
         self.loaded_global(GlobalVariableReference {
             module: module.id,

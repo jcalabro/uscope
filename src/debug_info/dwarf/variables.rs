@@ -66,7 +66,7 @@ enum FrameBase<'a> {
 
 struct FrameBaseContext<'a> {
     location: &'a Metadata<LocationDescription>,
-    address: ImageAddress,
+    address: Option<ImageAddress>,
     cache: &'a mut FrameBaseCache,
 }
 
@@ -128,24 +128,34 @@ struct LocationDescription {
 impl LocationDescription {
     fn expression(
         &self,
-        address: ImageAddress,
+        address: Option<ImageAddress>,
     ) -> std::result::Result<Option<&Expression>, VariableUnavailableReason> {
         // Specific ranged entries override default (range-less) entries per
-        // DWARF 5 default-location semantics.
-        let mut specific = self
-            .entries
-            .iter()
-            .filter(|entry| entry.range.is_some_and(|range| range.contains(address)));
-        if let Some(entry) = specific.next() {
-            if specific.next().is_some() {
-                return Err("multiple locations are active at the current instruction".into());
+        // DWARF 5 default-location semantics. Without an instruction context we
+        // cannot select a ranged entry; a range-less default still resolves, but
+        // an entry that only exists behind a range must fail explicitly rather
+        // than silently resolve against a guessed address.
+        if let Some(address) = address {
+            let mut specific = self
+                .entries
+                .iter()
+                .filter(|entry| entry.range.is_some_and(|range| range.contains(address)));
+            if let Some(entry) = specific.next() {
+                if specific.next().is_some() {
+                    return Err("multiple locations are active at the current instruction".into());
+                }
+                return Ok(Some(&entry.expression));
             }
-            return Ok(Some(&entry.expression));
         }
         let mut defaults = self.entries.iter().filter(|entry| entry.range.is_none());
         let expression = defaults.next().map(|entry| &entry.expression);
         if defaults.next().is_some() {
             return Err("multiple default locations were supplied".into());
+        }
+        if address.is_none() && expression.is_none() && !self.entries.is_empty() {
+            // A global was requested without a valid module-relative instruction,
+            // yet every location entry is range-gated. Refuse to guess.
+            return Err("no instruction context to select this object's location".into());
         }
         Ok(expression)
     }
@@ -375,22 +385,36 @@ fn load_globals(
                     format!("<malformed global at {:#x}: {error}>", entry.offset().0).into()
                 }
             };
-            let linkage_name = copy_string_attribute_with_origins(
+            // A malformed linkage name is an entry-local defect, not a reason to
+            // discard the whole module's debug info. Fold any error into the
+            // per-entry `malformed` state alongside declaration and chain errors.
+            let linkage_result = copy_string_attribute_with_origins(
                 dwarf,
                 units,
                 unit,
                 entry,
                 &chain,
                 gimli::DW_AT_linkage_name,
-            )?
-            .or(copy_string_attribute_with_origins(
-                dwarf,
-                units,
-                unit,
-                entry,
-                &chain,
-                gimli::DW_AT_MIPS_linkage_name,
-            )?);
+            )
+            .and_then(|primary| {
+                primary.map_or_else(
+                    || {
+                        copy_string_attribute_with_origins(
+                            dwarf,
+                            units,
+                            unit,
+                            entry,
+                            &chain,
+                            gimli::DW_AT_MIPS_linkage_name,
+                        )
+                    },
+                    |name| Ok(Some(name)),
+                )
+            });
+            let (linkage_name, linkage_error) = match linkage_result {
+                Ok(name) => (name, None),
+                Err(error) => (None, Some(Arc::<str>::from(error.to_string()))),
+            };
             let scope = chain
                 .iter()
                 .filter_map(|(origin_unit, origin)| {
@@ -465,7 +489,8 @@ fn load_globals(
                 .as_ref()
                 .err()
                 .map(|error| Arc::from(error.to_string()))
-                .or(chain_error);
+                .or(chain_error)
+                .or(linkage_error);
             let object = CatalogDataObject {
                 kind: VariableKind::Global,
                 name: Arc::clone(&name),
@@ -1441,14 +1466,14 @@ impl VariableInfo for DwarfVariableInfo {
         let mut frame_base = FrameBaseCache::Empty;
         Ok(selected
             .into_iter()
-            .map(|object| self.inspect_data_object(object, address, runtime, &mut frame_base))
+            .map(|object| self.inspect_data_object(object, Some(address), runtime, &mut frame_base))
             .collect())
     }
 
     fn inspect_global(
         &self,
         id: GlobalVariableId,
-        address: ImageAddress,
+        address: Option<ImageAddress>,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Variable> {
         let global_index = usize::try_from(id.get()).expect("u32 fits usize");
@@ -1481,7 +1506,7 @@ impl DwarfVariableInfo {
     fn inspect_data_object(
         &self,
         variable: &CatalogDataObject,
-        address: ImageAddress,
+        address: Option<ImageAddress>,
         runtime: &mut dyn VariableRuntime,
         frame_base_cache: &mut FrameBaseCache,
     ) -> Variable {
@@ -2316,7 +2341,7 @@ mod tests {
             RunTimeEndian::Little,
             &mut FrameBase::Lazy(FrameBaseContext {
                 location: &location,
-                address: ImageAddress::new(0),
+                address: Some(ImageAddress::new(0)),
                 cache: &mut cache,
             }),
             &units([]),
@@ -2598,7 +2623,7 @@ mod tests {
             RunTimeEndian::Little,
             &mut FrameBase::Lazy(FrameBaseContext {
                 location: &location,
-                address: ImageAddress::new(0),
+                address: Some(ImageAddress::new(0)),
                 cache: &mut cache,
             }),
             &units([]),
@@ -2628,7 +2653,7 @@ mod tests {
             RunTimeEndian::Little,
             &mut FrameBase::Lazy(FrameBaseContext {
                 location: &location,
-                address: ImageAddress::new(0),
+                address: Some(ImageAddress::new(0)),
                 cache: &mut cache,
             }),
             &units([]),
@@ -2661,16 +2686,34 @@ mod tests {
         };
 
         let specific = description
-            .expression(ImageAddress::new(0x150))
+            .expression(Some(ImageAddress::new(0x150)))
             .expect("specific entry wins inside its range")
             .expect("an expression is active");
         assert_eq!(specific.bytes.as_ref(), &[gimli::DW_OP_reg1.0]);
 
         let fallback = description
-            .expression(ImageAddress::new(0x300))
+            .expression(Some(ImageAddress::new(0x300)))
             .expect("default entry applies outside all ranges")
             .expect("an expression is active");
         assert_eq!(fallback.bytes.as_ref(), &[gimli::DW_OP_reg0.0]);
+
+        // A range-less default still resolves without an instruction context.
+        let without_context = description
+            .expression(None)
+            .expect("default entry applies without a context")
+            .expect("an expression is active");
+        assert_eq!(without_context.bytes.as_ref(), &[gimli::DW_OP_reg0.0]);
+
+        // A location with only range-gated entries must refuse to guess when no
+        // instruction context is available rather than silently resolving.
+        let ranged_only = LocationDescription {
+            entries: vec![LocationEntry {
+                range: range(0x100, 0x200),
+                expression: expression(&[gimli::DW_OP_reg1.0]),
+            }]
+            .into(),
+        };
+        assert!(ranged_only.expression(None).is_err());
 
         let overlapping = LocationDescription {
             entries: vec![
@@ -2685,7 +2728,11 @@ mod tests {
             ]
             .into(),
         };
-        assert!(overlapping.expression(ImageAddress::new(0x190)).is_err());
+        assert!(
+            overlapping
+                .expression(Some(ImageAddress::new(0x190)))
+                .is_err()
+        );
     }
 
     #[test]
