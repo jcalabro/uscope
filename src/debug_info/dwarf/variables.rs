@@ -9,13 +9,15 @@ use super::{DieKey, DwarfError, Reader, die_reference, source_file_id, source_pa
 use crate::debug_info::{VariableContext, VariableInfo, VariableRuntime};
 use crate::model::ArrayDimension;
 use crate::{
-    AddressRange, AddressValue, Architecture, BaseType, BaseTypeEncoding, ByteOrder,
-    CodeInstanceId, ColumnNumber, DereferenceReference, DereferenceState,
-    DereferenceUnavailableReason, DereferencedValue, Error, FloatValue, GlobalVariableId,
-    GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility, ImageAddress, LineNumber,
-    ModuleImageId, ReferenceKind, Result, ScalarValue, SourceFile, SourceFileId, SourceLocation,
-    TargetDescription, TypeId, TypeInfo, TypeKind, TypeQualifier, TypeReference, Variable,
-    VariableKind, VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
+    Accessibility, AddressRange, AddressValue, Architecture, BaseClass, BaseClassValue,
+    BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId, ColumnNumber,
+    DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue, Error,
+    FloatValue, GlobalVariableId, GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility,
+    ImageAddress, InspectionLimit, LineNumber, ModuleImageId, RecordKind, RecordMember,
+    RecordMemberLayout, RecordMemberValue, ReferenceKind, Result, ScalarValue, SourceFile,
+    SourceFileId, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeKind, TypeQualifier,
+    TypeReference, ValueGraph, ValueNode, ValueNodeId, ValueNodeState, Variable, VariableKind,
+    VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
     VariableValue, VariableValueSource, VirtualAddress,
 };
 
@@ -24,6 +26,11 @@ const MAX_EVALUATION_ITERATIONS: u32 = 10_000;
 const MAX_EVALUATION_MEMORY_READS: u32 = 64;
 const MAX_EVALUATION_MEMORY_BYTES: usize = 1_024;
 const MAX_LOCATION_PIECES: usize = 64;
+const MAX_VALUE_NODES: usize = 4_096;
+const MAX_TYPES: usize = 65_536;
+const MAX_TYPE_RESOLUTION_DEPTH: usize = 256;
+const MAX_RECORD_CHILDREN: usize = 4_096;
+const MAX_AGGREGATE_DEPTH: usize = 64;
 
 #[derive(Default)]
 struct EvaluationBudget {
@@ -195,20 +202,45 @@ struct TypeArenaBuilder<'a, 'data> {
     /// offset that is not in its unit's set points into the middle of a DIE and
     /// is defective. Built once so target validation stays O(1) per reference.
     die_offsets: Vec<HashSet<usize>>,
+    resolution_depth: usize,
+    byte_order: ByteOrder,
+    limit_type: Option<TypeId>,
+    dynamic_record_layouts: HashMap<DynamicRecordLayoutKey, Expression>,
+    record_member_declarations: Vec<(TypeId, usize, DieKey)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct DynamicRecordLayoutKey {
+    record: TypeId,
+    child: usize,
+    base: bool,
 }
 
 #[derive(Clone, Debug)]
-enum ValueShape {
+struct ValueShape {
+    type_info: TypeInfo,
+    kind: ValueShapeKind,
+}
+
+#[derive(Clone, Debug)]
+enum ValueShapeKind {
     Scalar(BaseType),
     Array {
-        element: Box<Self>,
+        element: TypeId,
         dimensions: Arc<[ArrayDimension]>,
         byte_size: u64,
     },
     Slice {
-        element: Box<Self>,
+        element: TypeId,
         byte_size: u64,
         has_capacity: bool,
+    },
+    Record {
+        /// The canonical record DIE after aliases and qualifiers are removed.
+        record: TypeId,
+        members: Arc<[RecordMember]>,
+        bases: Arc<[BaseClass]>,
+        byte_size: u64,
     },
     Indirection {
         target: Option<TypeId>,
@@ -284,6 +316,7 @@ pub(super) struct DwarfVariableInfo {
     globals: Arc<[usize]>,
     evaluation_units: Arc<[EvaluationUnit]>,
     types: Arc<[TypeEntry]>,
+    dynamic_record_layouts: HashMap<DynamicRecordLayoutKey, Expression>,
     objects_by_debug_offset: HashMap<u64, usize>,
     target: TargetDescription,
     endian: RunTimeEndian,
@@ -654,7 +687,7 @@ pub(super) fn load_variable_info<'data>(
     let mut functions = Vec::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
-    let mut types = TypeArenaBuilder::new(dwarf, units, image_id);
+    let mut types = TypeArenaBuilder::new(dwarf, units, image_id, target.byte_order);
     let (globals, global_objects) = load_globals(
         dwarf,
         units,
@@ -871,6 +904,7 @@ pub(super) fn load_variable_info<'data>(
         .enumerate()
         .filter_map(|(index, object)| object.debug_info_offset.map(|offset| (offset, index)))
         .collect();
+    types.populate_record_member_declarations(source_files, source_file_ids);
     Ok(LoadedVariables {
         info: Arc::new(DwarfVariableInfo {
             objects: objects.into(),
@@ -882,6 +916,7 @@ pub(super) fn load_variable_info<'data>(
             globals: global_objects.into(),
             evaluation_units: evaluation_units.into(),
             types: types.entries.into(),
+            dynamic_record_layouts: types.dynamic_record_layouts,
             objects_by_debug_offset,
             target,
             endian: match target.byte_order {
@@ -1056,6 +1091,17 @@ fn origin_reference(
         .attr_value(gimli::DW_AT_abstract_origin)
         .or_else(|| entry.attr_value(gimli::DW_AT_specification));
     die_reference(value, unit_index, units)
+}
+
+fn strict_flag(
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    attribute: gimli::DwAt,
+) -> std::result::Result<bool, Arc<str>> {
+    match entry.attr_value(attribute) {
+        None => Ok(false),
+        Some(gimli::AttributeValue::Flag(value)) => Ok(value),
+        Some(_) => Err(format!("{attribute:?} has an invalid flag encoding").into()),
+    }
 }
 
 fn copy_name_with_origins(
@@ -1375,6 +1421,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         dwarf: &'a gimli::Dwarf<Reader<'data>>,
         units: &'a [gimli::Unit<Reader<'data>>],
         image: ModuleImageId,
+        byte_order: ByteOrder,
     ) -> Self {
         let die_offsets: Vec<HashSet<usize>> = units
             .iter()
@@ -1394,6 +1441,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             by_die: HashMap::new(),
             entries: Vec::new(),
             die_offsets,
+            resolution_depth: 0,
+            byte_order,
+            limit_type: None,
+            dynamic_record_layouts: HashMap::new(),
+            record_member_declarations: Vec::new(),
         }
     }
 
@@ -1425,10 +1477,34 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if let Some(id) = self.by_die.get(&key) {
             return *id;
         }
-        let id = TypeId::new(u32::try_from(self.entries.len()).expect("type count fits u32"));
+        if self.entries.len() >= MAX_TYPES {
+            let id = if let Some(id) = self.limit_type {
+                id
+            } else {
+                let id = TypeId::new(
+                    u32::try_from(self.entries.len()).expect("bounded type count fits u32"),
+                );
+                self.entries.push(TypeEntry::Malformed(
+                    "type graph exceeds its work limit".into(),
+                ));
+                self.limit_type = Some(id);
+                id
+            };
+            self.by_die.insert(key, id);
+            return id;
+        }
+        let id =
+            TypeId::new(u32::try_from(self.entries.len()).expect("bounded type count fits u32"));
         self.by_die.insert(key, id);
         self.entries.push(TypeEntry::Building);
+        if self.resolution_depth >= MAX_TYPE_RESOLUTION_DEPTH {
+            self.entries[usize::try_from(id.get()).expect("type ID fits usize")] =
+                TypeEntry::Malformed("type wrapper depth exceeds its limit".into());
+            return id;
+        }
+        self.resolution_depth += 1;
         let entry = self.build(key, id);
+        self.resolution_depth -= 1;
         self.entries[usize::try_from(id.get()).expect("type ID fits usize")] = entry;
         id
     }
@@ -1521,6 +1597,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             {
                 self.build_slice_type(&entry, key.unit, reference, explicit_name, explicit_size)
             }
+            gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => {
+                self.build_record_type(&entry, key.unit, reference, explicit_name, explicit_size)
+            }
             gimli::DW_TAG_typedef
             | gimli::DW_TAG_const_type
             | gimli::DW_TAG_volatile_type
@@ -1547,6 +1626,52 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 },
             }),
         }
+    }
+
+    fn record_accessibility(
+        entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+        record_kind: RecordKind,
+    ) -> std::result::Result<Accessibility, Arc<str>> {
+        match entry.attr_value(gimli::DW_AT_accessibility) {
+            Some(gimli::AttributeValue::Accessibility(value))
+                if value == gimli::DW_ACCESS_public =>
+            {
+                Ok(Accessibility::Public)
+            }
+            Some(gimli::AttributeValue::Accessibility(value))
+                if value == gimli::DW_ACCESS_protected =>
+            {
+                Ok(Accessibility::Protected)
+            }
+            Some(gimli::AttributeValue::Accessibility(value))
+                if value == gimli::DW_ACCESS_private =>
+            {
+                Ok(Accessibility::Private)
+            }
+            None if record_kind == RecordKind::Class => Ok(Accessibility::Private),
+            None => Ok(Accessibility::Public),
+            Some(_) => Err("record accessibility has an invalid encoding".into()),
+        }
+    }
+
+    fn record_constant_offset(
+        entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    ) -> std::result::Result<u64, Arc<str>> {
+        entry
+            .attr(gimli::DW_AT_data_member_location)
+            .and_then(gimli::Attribute::udata_value)
+            .ok_or_else(|| Arc::from("record member location is not a constant"))
+    }
+
+    fn record_byte_layout(
+        entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    ) -> RecordMemberLayout {
+        let Some(attribute) = entry.attr(gimli::DW_AT_data_member_location) else {
+            return RecordMemberLayout::Runtime;
+        };
+        attribute
+            .udata_value()
+            .map_or(RecordMemberLayout::Runtime, RecordMemberLayout::ByteOffset)
     }
 
     /// Reports a defect in a tag's mandatory attributes, independent of the byte
@@ -1696,6 +1821,85 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .map_err(|error| error.to_string().into())
     }
 
+    fn target_with_origins(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
+    ) -> std::result::Result<Option<TypeReference>, Arc<str>> {
+        let (owner, value) = entry
+            .attr_value(gimli::DW_AT_type)
+            .map(|value| (unit_index, value))
+            .or_else(|| {
+                chain.iter().find_map(|(origin_unit, origin)| {
+                    origin
+                        .attr_value(gimli::DW_AT_type)
+                        .map(|value| (*origin_unit, value))
+                })
+            })
+            .map_or((unit_index, None), |(owner, value)| (owner, Some(value)));
+        die_reference(value, owner, self.units)
+            .map(|key| {
+                key.map(|key| TypeReference {
+                    image: self.image,
+                    id: self.resolve(key),
+                })
+            })
+            .map_err(|error| error.to_string().into())
+    }
+
+    fn populate_record_member_declarations(
+        &mut self,
+        source_files: &mut Vec<SourceFile>,
+        source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+    ) {
+        for (record, member, key) in self.record_member_declarations.clone() {
+            let declaration = (|| -> std::result::Result<Option<SourceLocation>, Arc<str>> {
+                let unit = self
+                    .units
+                    .get(key.unit)
+                    .ok_or_else(|| Arc::from("record member unit is unavailable"))?;
+                let entry = unit
+                    .entry(gimli::UnitOffset(key.offset))
+                    .map_err(|error| Arc::from(error.to_string()))?;
+                let chain = origin_chain(self.units, key.unit, &entry)
+                    .map_err(|error| Arc::from(error.to_string()))?;
+                declaration_with_origins(
+                    self.dwarf,
+                    self.units,
+                    unit,
+                    &entry,
+                    &chain,
+                    source_files,
+                    source_file_ids,
+                )
+                .map_err(|error| Arc::from(error.to_string()))
+            })();
+            let declaration = match declaration {
+                Ok(declaration) => declaration,
+                Err(reason) => {
+                    self.entries[usize::try_from(record.get()).expect("type ID fits usize")] =
+                        TypeEntry::Malformed(reason);
+                    continue;
+                }
+            };
+            let Some(TypeEntry::Resolved(info)) = self
+                .entries
+                .get_mut(usize::try_from(record.get()).expect("type ID fits usize"))
+            else {
+                continue;
+            };
+            let TypeKind::Record { members, .. } = &mut info.kind else {
+                continue;
+            };
+            let mut updated = members.to_vec();
+            if let Some(member) = updated.get_mut(member) {
+                member.declaration = declaration;
+                *members = updated.into();
+            }
+        }
+    }
+
     fn target_name(&self, target: TypeReference) -> Arc<str> {
         self.entries
             .get(usize::try_from(target.id.get()).expect("type ID fits usize"))
@@ -1821,6 +2025,282 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        clippy::match_same_arms,
+        reason = "record normalization keeps all storage and scope child tags in one auditable dispatch"
+    )]
+    fn build_record_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> TypeEntry {
+        let kind = if entry.tag() == gimli::DW_TAG_class_type {
+            RecordKind::Class
+        } else {
+            RecordKind::Struct
+        };
+        let incomplete = match strict_flag(entry, gimli::DW_AT_declaration) {
+            Ok(value) => value,
+            Err(reason) => return TypeEntry::Malformed(reason),
+        };
+        if !incomplete && explicit_size.is_none() {
+            return TypeEntry::Malformed("complete record type has no byte size".into());
+        }
+        let Some(unit) = self.units.get(unit_index) else {
+            return TypeEntry::Malformed("record type unit is unavailable".into());
+        };
+        let mut tree = match unit.entries_tree(Some(entry.offset())) {
+            Ok(tree) => tree,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let root = match tree.root() {
+            Ok(root) => root,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let mut members = Vec::new();
+        let mut bases = Vec::new();
+        let mut children = root.children();
+        while let Ok(Some(child)) = children.next() {
+            let child = child.entry();
+            match child.tag() {
+                gimli::DW_TAG_member => {
+                    if members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN {
+                        return TypeEntry::Malformed("record child count exceeds its limit".into());
+                    }
+                    let chain = match origin_chain(self.units, unit_index, child) {
+                        Ok(chain) => chain,
+                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                    };
+                    let target = match self.target_with_origins(child, unit_index, &chain) {
+                        Ok(Some(target)) => target,
+                        Ok(None) => {
+                            return TypeEntry::Malformed("record member has no type".into());
+                        }
+                        Err(reason) => return TypeEntry::Malformed(reason),
+                    };
+                    let name =
+                        match copy_name_with_origins(self.dwarf, self.units, unit, child, &chain) {
+                            Ok(name) => name,
+                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                        };
+                    let layout = match self.record_member_layout(child, target) {
+                        Ok(layout) => layout,
+                        Err(reason) => return TypeEntry::Malformed(reason),
+                    };
+                    if layout == RecordMemberLayout::Runtime {
+                        match self.copy_dynamic_record_layout(child, unit_index) {
+                            Ok(Some(expression)) => {
+                                self.dynamic_record_layouts.insert(
+                                    DynamicRecordLayoutKey {
+                                        record: reference.id,
+                                        child: members.len(),
+                                        base: false,
+                                    },
+                                    expression,
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                        }
+                    }
+                    let member_index = members.len();
+                    members.push(RecordMember {
+                        name,
+                        type_ref: target,
+                        layout,
+                        accessibility: match Self::record_accessibility(child, kind) {
+                            Ok(accessibility) => accessibility,
+                            Err(reason) => return TypeEntry::Malformed(reason),
+                        },
+                        artificial: match strict_flag(child, gimli::DW_AT_artificial) {
+                            Ok(value) => value,
+                            Err(reason) => return TypeEntry::Malformed(reason),
+                        },
+                        embedded: child.attr(gimli::DwAt(0x2903)).is_some_and(|attribute| {
+                            match attribute.value() {
+                                gimli::AttributeValue::Flag(value) => value,
+                                _ => attribute.udata_value().is_some_and(|value| value != 0),
+                            }
+                        }),
+                        declaration: None,
+                    });
+                    self.record_member_declarations.push((
+                        reference.id,
+                        member_index,
+                        DieKey {
+                            unit: unit_index,
+                            offset: child.offset().0,
+                        },
+                    ));
+                }
+                gimli::DW_TAG_inheritance => {
+                    if members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN {
+                        return TypeEntry::Malformed("record child count exceeds its limit".into());
+                    }
+                    let target = match self.target(child, unit_index) {
+                        Ok(Some(target)) => target,
+                        Ok(None) => return TypeEntry::Malformed("base class has no type".into()),
+                        Err(reason) => return TypeEntry::Malformed(reason),
+                    };
+                    let layout = Self::record_byte_layout(child);
+                    if layout == RecordMemberLayout::Runtime {
+                        match self.copy_dynamic_record_layout(child, unit_index) {
+                            Ok(Some(expression)) => {
+                                self.dynamic_record_layouts.insert(
+                                    DynamicRecordLayoutKey {
+                                        record: reference.id,
+                                        child: bases.len(),
+                                        base: true,
+                                    },
+                                    expression,
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                        }
+                    }
+                    let virtuality = match child.attr_value(gimli::DW_AT_virtuality) {
+                        None
+                        | Some(gimli::AttributeValue::Virtuality(gimli::DW_VIRTUALITY_none)) => {
+                            BaseClassVirtuality::None
+                        }
+                        Some(gimli::AttributeValue::Virtuality(value))
+                            if value == gimli::DW_VIRTUALITY_virtual
+                                || value == gimli::DW_VIRTUALITY_pure_virtual =>
+                        {
+                            BaseClassVirtuality::Virtual
+                        }
+                        _ => {
+                            return TypeEntry::Malformed(
+                                "base-class virtuality has an invalid encoding".into(),
+                            );
+                        }
+                    };
+                    bases.push(BaseClass {
+                        type_ref: target,
+                        layout,
+                        accessibility: match Self::record_accessibility(child, kind) {
+                            Ok(accessibility) => accessibility,
+                            Err(reason) => return TypeEntry::Malformed(reason),
+                        },
+                        virtuality,
+                    });
+                }
+                // These DIEs describe class scope, not bytes in an instance.
+                gimli::DW_TAG_subprogram
+                | gimli::DW_TAG_variable
+                | gimli::DW_TAG_typedef
+                | gimli::DW_TAG_structure_type
+                | gimli::DW_TAG_class_type
+                | gimli::DW_TAG_union_type
+                | gimli::DW_TAG_enumeration_type
+                | gimli::DW_TAG_template_type_parameter
+                | gimli::DW_TAG_template_value_parameter => {}
+                _ => {}
+            }
+        }
+        let name = explicit_name.unwrap_or_else(|| {
+            Arc::from(format!("<anonymous {:?}@0x{:x}>", kind, entry.offset().0))
+        });
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size: explicit_size,
+            kind: TypeKind::Record {
+                kind,
+                members: members.into(),
+                bases: bases.into(),
+                incomplete,
+            },
+        })
+    }
+
+    fn record_member_layout(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        target: TypeReference,
+    ) -> std::result::Result<RecordMemberLayout, Arc<str>> {
+        let bit_size = entry
+            .attr(gimli::DW_AT_bit_size)
+            .and_then(gimli::Attribute::udata_value);
+        if let Some(bit_size) = bit_size {
+            if bit_size == 0 {
+                return Err("record bit-field has zero width".into());
+            }
+            if let Some(bit_offset) = entry
+                .attr(gimli::DW_AT_data_bit_offset)
+                .and_then(gimli::Attribute::udata_value)
+            {
+                bit_offset
+                    .checked_add(bit_size)
+                    .ok_or_else(|| Arc::from("record bit-field range overflows"))?;
+                return Ok(RecordMemberLayout::BitRange {
+                    bit_offset,
+                    bit_size,
+                });
+            }
+            if let Some(legacy_offset) = entry
+                .attr(gimli::DW_AT_bit_offset)
+                .and_then(gimli::Attribute::udata_value)
+            {
+                let byte_offset = Self::record_constant_offset(entry)?;
+                let storage_bytes = entry
+                    .attr(gimli::DW_AT_byte_size)
+                    .and_then(gimli::Attribute::udata_value)
+                    .or_else(|| {
+                        self.entries
+                            .get(usize::try_from(target.id.get()).ok()?)
+                            .and_then(|entry| match entry {
+                                TypeEntry::Resolved(info) => info.byte_size,
+                                TypeEntry::Building | TypeEntry::Malformed(_) => None,
+                            })
+                    })
+                    .ok_or_else(|| Arc::from("legacy bit-field has no storage size"))?;
+                let storage_bits = storage_bytes
+                    .checked_mul(8)
+                    .ok_or_else(|| Arc::from("legacy bit-field storage size overflows"))?;
+                let within = match self.byte_order {
+                    ByteOrder::Big => legacy_offset,
+                    ByteOrder::Little => storage_bits
+                        .checked_sub(legacy_offset)
+                        .and_then(|value| value.checked_sub(bit_size))
+                        .ok_or_else(|| Arc::from("legacy bit-field range exceeds storage"))?,
+                };
+                let bit_offset = byte_offset
+                    .checked_mul(8)
+                    .and_then(|value| value.checked_add(within))
+                    .ok_or_else(|| Arc::from("legacy bit-field range overflows"))?;
+                return Ok(RecordMemberLayout::BitRange {
+                    bit_offset,
+                    bit_size,
+                });
+            }
+            return Err("bit-field has no bit offset".into());
+        }
+        Ok(Self::record_byte_layout(entry))
+    }
+
+    fn copy_dynamic_record_layout(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> std::result::Result<Option<Expression>, DwarfError> {
+        let Some(gimli::AttributeValue::Exprloc(expression)) =
+            entry.attr_value(gimli::DW_AT_data_member_location)
+        else {
+            return Ok(None);
+        };
+        let unit = self
+            .units
+            .get(unit_index)
+            .ok_or(DwarfError::ReferenceOutsideUnits(unit_index))?;
+        copy_expression(self.dwarf, unit_index, unit, expression, unit.encoding()).map(Some)
+    }
+
     fn build_array_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -1934,8 +2414,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             Err(error) => return TypeEntry::Malformed(error.to_string().into()),
         };
         let rust = name.starts_with("&[");
+        let address_size = u64::from(unit.encoding().address_size);
+        let zig = name.starts_with("[]") && byte_size == address_size.saturating_mul(2);
         let field_names = if rust {
             &["data_ptr", "length"][..]
+        } else if zig {
+            &["ptr", "len"][..]
         } else {
             &["array", "len", "cap"][..]
         };
@@ -1943,9 +2427,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let Some(word_size) = byte_size.checked_div(field_count) else {
             return TypeEntry::Malformed("slice descriptor size is invalid".into());
         };
-        if byte_size != word_size * field_count
-            || word_size != u64::from(unit.encoding().address_size)
-        {
+        if byte_size != word_size * field_count || word_size != address_size {
             return TypeEntry::Resolved(TypeInfo {
                 reference,
                 name,
@@ -2045,7 +2527,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             byte_size: Some(byte_size),
             kind: TypeKind::Slice {
                 element,
-                has_capacity: !rust,
+                has_capacity: !rust && !zig,
             },
         })
     }
@@ -2476,7 +2958,12 @@ fn value_shape_from(
                         .map_err(ValueShapeError::Malformed)?
                         .name,
                 );
-                return Ok(ValueShape::Scalar(base));
+                return Ok(ValueShape {
+                    type_info: type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .clone(),
+                    kind: ValueShapeKind::Scalar(base),
+                });
             }
             TypeKind::Array {
                 element,
@@ -2498,24 +2985,59 @@ fn value_shape_from(
                         "array exceeds inspection limits".into(),
                     ));
                 }
-                return Ok(ValueShape::Array {
-                    element: Box::new(element_shape),
-                    dimensions: Arc::clone(dimensions),
-                    byte_size,
+                return Ok(ValueShape {
+                    type_info: type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .clone(),
+                    kind: ValueShapeKind::Array {
+                        element: element.id,
+                        dimensions: Arc::clone(dimensions),
+                        byte_size,
+                    },
                 });
             }
             TypeKind::Slice {
                 element,
                 has_capacity,
             } => {
-                let element = value_shape_from(types, element.id)?;
                 let byte_size = info.byte_size.ok_or_else(|| {
                     ValueShapeError::Malformed("slice descriptor has no byte size".into())
                 })?;
-                return Ok(ValueShape::Slice {
-                    element: Box::new(element),
-                    byte_size,
-                    has_capacity: *has_capacity,
+                return Ok(ValueShape {
+                    type_info: type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .clone(),
+                    kind: ValueShapeKind::Slice {
+                        element: element.id,
+                        byte_size,
+                        has_capacity: *has_capacity,
+                    },
+                });
+            }
+            TypeKind::Record {
+                members,
+                bases,
+                incomplete,
+                ..
+            } => {
+                if *incomplete {
+                    return Err(ValueShapeError::Unsupported(
+                        "incomplete record values are unsupported".into(),
+                    ));
+                }
+                let byte_size = info.byte_size.ok_or_else(|| {
+                    ValueShapeError::Malformed("complete record type has no byte size".into())
+                })?;
+                return Ok(ValueShape {
+                    type_info: type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .clone(),
+                    kind: ValueShapeKind::Record {
+                        record: current,
+                        members: Arc::clone(members),
+                        bases: Arc::clone(bases),
+                        byte_size,
+                    },
                 });
             }
             TypeKind::Pointer {
@@ -2523,10 +3045,15 @@ fn value_shape_from(
                 address_class,
             } => {
                 let byte_size = indirection_byte_size(info.byte_size, *address_class, "pointer")?;
-                return Ok(ValueShape::Indirection {
-                    target: target.map(|target| target.id),
-                    byte_size,
-                    address_class: *address_class,
+                return Ok(ValueShape {
+                    type_info: type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .clone(),
+                    kind: ValueShapeKind::Indirection {
+                        target: target.map(|target| target.id),
+                        byte_size,
+                        address_class: *address_class,
+                    },
                 });
             }
             TypeKind::Reference {
@@ -2535,10 +3062,15 @@ fn value_shape_from(
                 ..
             } => {
                 let byte_size = indirection_byte_size(info.byte_size, *address_class, "reference")?;
-                return Ok(ValueShape::Indirection {
-                    target: Some(target.id),
-                    byte_size,
-                    address_class: *address_class,
+                return Ok(ValueShape {
+                    type_info: type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .clone(),
+                    kind: ValueShapeKind::Indirection {
+                        target: Some(target.id),
+                        byte_size,
+                        address_class: *address_class,
+                    },
                 });
             }
             TypeKind::Qualified { target, .. } | TypeKind::Alias { target } => {
@@ -2645,6 +3177,7 @@ impl DwarfVariableInfo {
                 VariableValueSource::Constant,
                 raw,
                 runtime,
+                EvaluationBudget::default(),
             );
         }
         let ValueDescription::Location(location) = description else {
@@ -2715,7 +3248,9 @@ impl DwarfVariableInfo {
             Ok(value) => value,
             Err(reason) => return unavailable(variable, Some(type_info), reason),
         };
-        self.available_variable(variable, type_info, &shape, context, source, raw, runtime)
+        self.available_variable(
+            variable, type_info, &shape, context, source, raw, runtime, budget,
+        )
     }
 
     #[expect(
@@ -2731,13 +3266,9 @@ impl DwarfVariableInfo {
         source: VariableValueSource,
         raw: Arc<[u8]>,
         runtime: &mut dyn VariableRuntime,
+        budget: EvaluationBudget,
     ) -> Variable {
-        let mut value = if let ValueShape::Slice {
-            element,
-            has_capacity,
-            ..
-        } = shape
-        {
+        let mut value = if matches!(&shape.kind, ValueShapeKind::Slice { .. }) {
             Variable {
                 kind: variable.kind,
                 global: None,
@@ -2745,16 +3276,24 @@ impl DwarfVariableInfo {
                 declaration: variable.declaration.clone(),
                 type_info: Some(type_info),
                 state: decode_slice_state(
-                    element,
-                    *has_capacity,
+                    &self.types,
+                    &self.dynamic_record_layouts,
+                    &self.evaluation_units,
+                    self.endian,
+                    shape,
                     source,
                     raw,
                     self.target,
                     runtime,
+                    budget,
                 ),
             }
         } else {
             available(
+                &self.types,
+                &self.dynamic_record_layouts,
+                &self.evaluation_units,
+                self.endian,
                 variable,
                 type_info,
                 shape,
@@ -2762,6 +3301,8 @@ impl DwarfVariableInfo {
                 source,
                 raw,
                 self.target,
+                runtime,
+                budget,
             )
         };
         self.constrain_dereference(&mut value.state, shape);
@@ -2769,10 +3310,10 @@ impl DwarfVariableInfo {
     }
 
     fn constrain_dereference(&self, state: &mut VariableState, shape: &ValueShape) {
-        let ValueShape::Indirection {
+        let ValueShapeKind::Indirection {
             target: Some(target),
             ..
-        } = shape
+        } = &shape.kind
         else {
             return;
         };
@@ -2856,11 +3397,20 @@ impl DwarfVariableInfo {
             image: reference.image,
             address: reference.context_address,
         };
+        let mut budget = EvaluationBudget::default();
         let raw = match reference.target {
             crate::model::DereferenceTarget::Address(address) => {
                 let size = usize::try_from(shape.byte_size())
                     .map_err(|_| Error::debug_info(DwarfError::InvalidRange))?;
                 if size > MAX_EVALUATION_MEMORY_BYTES {
+                    return Ok(DereferencedValue {
+                        type_info,
+                        state: VariableState::Unavailable(
+                            VariableUnavailableReason::EvaluationLimit,
+                        ),
+                    });
+                }
+                if budget.consume_memory(size).is_err() {
                     return Ok(DereferencedValue {
                         type_info,
                         state: VariableState::Unavailable(
@@ -2950,7 +3500,19 @@ impl DwarfVariableInfo {
                 (VariableValueSource::Computed, bytes)
             }
         };
-        let mut state = decode_value_state(&shape, context, raw.0, raw.1, self.target);
+        let mut state = decode_value_state(
+            &self.types,
+            &self.dynamic_record_layouts,
+            &self.evaluation_units,
+            self.endian,
+            &shape,
+            context,
+            raw.0,
+            raw.1,
+            self.target,
+            runtime,
+            budget,
+        );
         self.constrain_dereference(&mut state, &shape);
         Ok(DereferencedValue { type_info, state })
     }
@@ -2985,8 +3547,8 @@ fn available_implicit_pointer(
     context: VariableContext,
     location: ImplicitPointerLocation,
 ) -> Variable {
-    let state = match shape {
-        ValueShape::Indirection {
+    let state = match &shape.kind {
+        ValueShapeKind::Indirection {
             target,
             byte_size,
             address_class,
@@ -3022,14 +3584,20 @@ fn available_implicit_pointer(
             VariableState::Available {
                 source: VariableValueSource::ImplicitPointer,
                 raw: None,
-                value: VariableValue::ImplicitPointer,
+                value: singleton_value_graph(
+                    shape.type_info.clone(),
+                    VariableValue::ImplicitPointer,
+                ),
                 dereference,
             }
         }
-        ValueShape::Array { .. } | ValueShape::Slice { .. } | ValueShape::Indirection { .. } => {
+        ValueShapeKind::Array { .. }
+        | ValueShapeKind::Slice { .. }
+        | ValueShapeKind::Record { .. }
+        | ValueShapeKind::Indirection { .. } => {
             VariableState::Unavailable(crate::UnsupportedVariableFeature::CompositeLocation.into())
         }
-        ValueShape::Scalar(_) => VariableState::Malformed(VariableMalformedReason {
+        ValueShapeKind::Scalar(_) => VariableState::Malformed(VariableMalformedReason {
             description: "DW_OP_implicit_pointer described a non-pointer value".into(),
         }),
     };
@@ -3045,23 +3613,52 @@ fn available_implicit_pointer(
 
 impl ValueShape {
     const fn byte_size(&self) -> u64 {
-        match self {
-            Self::Scalar(base) => base.byte_size,
-            Self::Indirection { byte_size, .. }
-            | Self::Array { byte_size, .. }
-            | Self::Slice { byte_size, .. } => *byte_size,
+        match &self.kind {
+            ValueShapeKind::Scalar(base) => base.byte_size,
+            ValueShapeKind::Indirection { byte_size, .. }
+            | ValueShapeKind::Array { byte_size, .. }
+            | ValueShapeKind::Slice { byte_size, .. }
+            | ValueShapeKind::Record { byte_size, .. } => *byte_size,
         }
     }
 
     const fn scalar(&self) -> Option<&BaseType> {
-        match self {
-            Self::Scalar(base) => Some(base),
-            Self::Indirection { .. } | Self::Array { .. } | Self::Slice { .. } => None,
+        match &self.kind {
+            ValueShapeKind::Scalar(base) => Some(base),
+            ValueShapeKind::Indirection { .. }
+            | ValueShapeKind::Array { .. }
+            | ValueShapeKind::Slice { .. }
+            | ValueShapeKind::Record { .. } => None,
+        }
+    }
+
+    const fn record_id(&self) -> Option<TypeId> {
+        match self.kind {
+            ValueShapeKind::Record { record, .. } => Some(record),
+            ValueShapeKind::Scalar(_)
+            | ValueShapeKind::Indirection { .. }
+            | ValueShapeKind::Array { .. }
+            | ValueShapeKind::Slice { .. } => None,
+        }
+    }
+
+    const fn storage_type_id(&self) -> TypeId {
+        match self.record_id() {
+            Some(record) => record,
+            None => self.type_info.reference.id,
         }
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "materialization keeps provider state, stop context, source, target, and runtime explicit"
+)]
 fn available(
+    types: &[TypeEntry],
+    dynamic_record_layouts: &HashMap<DynamicRecordLayoutKey, Expression>,
+    evaluation_units: &[EvaluationUnit],
+    endian: RunTimeEndian,
     variable: &CatalogDataObject,
     type_info: TypeInfo,
     shape: &ValueShape,
@@ -3069,8 +3666,22 @@ fn available(
     source: VariableValueSource,
     raw: Arc<[u8]>,
     target: TargetDescription,
+    runtime: &mut dyn VariableRuntime,
+    budget: EvaluationBudget,
 ) -> Variable {
-    let state = decode_value_state(shape, context, source, raw, target);
+    let state = decode_value_state(
+        types,
+        dynamic_record_layouts,
+        evaluation_units,
+        endian,
+        shape,
+        context,
+        source,
+        raw,
+        target,
+        runtime,
+        budget,
+    );
     Variable {
         kind: variable.kind,
         global: None,
@@ -3081,40 +3692,52 @@ fn available(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "decoding keeps immutable provider inputs and the live runtime explicit"
+)]
 fn decode_value_state(
+    types: &[TypeEntry],
+    dynamic_record_layouts: &HashMap<DynamicRecordLayoutKey, Expression>,
+    evaluation_units: &[EvaluationUnit],
+    endian: RunTimeEndian,
     shape: &ValueShape,
     context: VariableContext,
     source: VariableValueSource,
     raw: Arc<[u8]>,
     target: TargetDescription,
+    runtime: &mut dyn VariableRuntime,
+    budget: EvaluationBudget,
 ) -> VariableState {
-    match shape {
-        ValueShape::Scalar(base) => match decode_scalar(base, &raw, target) {
-            Ok(value) => VariableState::Available {
-                source,
-                raw: Some(raw),
-                value: VariableValue::Scalar(value),
-                dereference: DereferenceState::NotApplicable,
-            },
-            Err(reason) => VariableState::Unavailable(reason),
-        },
-        ValueShape::Array {
-            element,
-            dimensions,
-            ..
-        } => match decode_array_value(element, dimensions, &raw, target) {
-            Ok(value) => VariableState::Available {
-                source,
-                raw: Some(raw),
-                value,
-                dereference: DereferenceState::NotApplicable,
-            },
-            Err(reason) => VariableState::Unavailable(reason),
-        },
-        ValueShape::Slice { .. } => VariableState::Malformed(VariableMalformedReason {
+    match &shape.kind {
+        ValueShapeKind::Scalar(_)
+        | ValueShapeKind::Array { .. }
+        | ValueShapeKind::Record { .. } => {
+            match decode_value_graph_live(
+                types,
+                dynamic_record_layouts,
+                evaluation_units,
+                endian,
+                shape,
+                Arc::clone(&raw),
+                &source,
+                target,
+                runtime,
+                budget,
+            ) {
+                Ok(value) => VariableState::Available {
+                    source,
+                    raw: Some(raw),
+                    value,
+                    dereference: DereferenceState::NotApplicable,
+                },
+                Err(reason) => VariableState::Unavailable(reason),
+            }
+        }
+        ValueShapeKind::Slice { .. } => VariableState::Malformed(VariableMalformedReason {
             description: "slice decoding requires a runtime read context".into(),
         }),
-        ValueShape::Indirection {
+        ValueShapeKind::Indirection {
             target: target_type,
             byte_size,
             address_class,
@@ -3146,10 +3769,14 @@ fn decode_value_state(
                         reason: DereferenceUnavailableReason::UnspecifiedPointee,
                     }
                 };
+                let value = match decode_value_graph(types, shape, Arc::clone(&raw), target) {
+                    Ok(value) => value,
+                    Err(reason) => return VariableState::Unavailable(reason),
+                };
                 VariableState::Available {
                     source,
                     raw: Some(raw),
-                    value: VariableValue::Address(AddressValue { address }),
+                    value,
                     dereference,
                 }
             }
@@ -3158,19 +3785,38 @@ fn decode_value_state(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "slice decoding keeps provider state, budget, descriptor, backing read, graph, and provenance explicit"
+)]
 fn decode_slice_state(
-    element: &ValueShape,
-    has_capacity: bool,
+    types: &[TypeEntry],
+    dynamic_record_layouts: &HashMap<DynamicRecordLayoutKey, Expression>,
+    evaluation_units: &[EvaluationUnit],
+    endian: RunTimeEndian,
+    shape: &ValueShape,
     source: VariableValueSource,
     raw: Arc<[u8]>,
     target: TargetDescription,
     runtime: &mut dyn VariableRuntime,
+    mut budget: EvaluationBudget,
 ) -> VariableState {
+    let ValueShapeKind::Slice {
+        element,
+        has_capacity,
+        ..
+    } = &shape.kind
+    else {
+        return VariableState::Malformed(VariableMalformedReason {
+            description: "slice decoder received a non-slice type".into(),
+        });
+    };
     let pointer_bytes = match target.pointer_width {
         crate::PointerWidth::Bits32 => 4,
         crate::PointerWidth::Bits64 => 8,
     };
-    let words = if has_capacity { 3 } else { 2 };
+    let words = if *has_capacity { 3 } else { 2 };
     if raw.len() != pointer_bytes * words {
         return VariableState::Malformed(VariableMalformedReason {
             description: "slice descriptor size does not match its target layout".into(),
@@ -3193,7 +3839,7 @@ fn decode_slice_state(
         Ok(value) => value,
         Err(reason) => return VariableState::Unavailable(reason),
     };
-    let capacity = if has_capacity {
+    let capacity = if *has_capacity {
         match word(2) {
             Ok(value) if value >= length => Some(value),
             Ok(_) => {
@@ -3205,6 +3851,12 @@ fn decode_slice_state(
         }
     } else {
         None
+    };
+    let element = match value_shape_from(types, *element) {
+        Ok(element) => element,
+        Err(ValueShapeError::Malformed(reason) | ValueShapeError::Unsupported(reason)) => {
+            return VariableState::Unavailable(VariableUnavailableReason::Other(reason));
+        }
     };
     let Some(byte_size) = length.checked_mul(element.byte_size()) else {
         return VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit);
@@ -3221,98 +3873,792 @@ fn decode_slice_state(
     let backing = if size == 0 {
         Arc::from([])
     } else {
+        if let Err(reason) = budget.consume_memory(size) {
+            return VariableState::Unavailable(reason);
+        }
         match runtime.read_memory(address, size) {
             Ok(bytes) => bytes,
             Err(reason) => return VariableState::Unavailable(reason.into()),
         }
     };
-    let mut elements = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
     let stride = match usize::try_from(element.byte_size()) {
         Ok(stride) if stride != 0 => stride,
         _ => return VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
     };
-    for bytes in backing.chunks_exact(stride) {
-        match decode_leaf_value(element, bytes, target) {
-            Ok(value) => elements.push(value),
+    let mut builder = ValueGraphBuilder::new(types, shape.type_info.clone());
+    let available_nodes = MAX_VALUE_NODES.saturating_sub(builder.nodes.len());
+    let materialized = backing.chunks_exact(stride).len().min(available_nodes);
+    let mut elements = Vec::with_capacity(materialized);
+    for (index, _) in backing.chunks_exact(stride).take(materialized).enumerate() {
+        let Some(start) = index.checked_mul(stride) else {
+            return VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit);
+        };
+        let Some(end) = start.checked_add(stride) else {
+            return VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit);
+        };
+        let id = match builder.allocate(element.type_info.clone()) {
+            Ok(id) => id,
             Err(reason) => return VariableState::Unavailable(reason),
-        }
+        };
+        elements.push(id);
+        builder.schedule(
+            id,
+            element.clone(),
+            Arc::clone(&backing),
+            start,
+            end,
+            1,
+            address
+                .get()
+                .checked_add(u64::try_from(start).unwrap_or(u64::MAX))
+                .map(VirtualAddress::new),
+            Arc::from([]),
+        );
     }
-    VariableState::Available {
-        source,
-        raw: Some(raw),
-        value: VariableValue::Slice {
+    builder.set(
+        ValueNodeId::new(0),
+        ValueNodeState::Available(VariableValue::Slice {
             length,
             capacity,
             elements: elements.into(),
-        },
+            omitted: length.saturating_sub(u64::try_from(materialized).unwrap_or(u64::MAX)),
+        }),
+    );
+    let mut dynamic = DynamicDecodeContext {
+        layouts: dynamic_record_layouts,
+        units: evaluation_units,
+        endian,
+        runtime,
+        budget,
+    };
+    if let Err(reason) = builder.run(target, Some(&mut dynamic)) {
+        return VariableState::Unavailable(reason);
+    }
+    let value = match builder.finish() {
+        Ok(value) => value,
+        Err(reason) => return VariableState::Unavailable(reason),
+    };
+    VariableState::Available {
+        source,
+        raw: Some(raw),
+        value,
         dereference: DereferenceState::NotApplicable,
     }
 }
 
-fn decode_array_value(
-    element: &ValueShape,
-    dimensions: &[ArrayDimension],
-    raw: &[u8],
-    target: TargetDescription,
-) -> std::result::Result<VariableValue, VariableUnavailableReason> {
-    let count = dimensions.first().map_or(1, |d| d.count);
-    let element_size = dimensions
-        .iter()
-        .skip(1)
-        .try_fold(element.byte_size(), |size, dimension| {
-            size.checked_mul(dimension.count)
-        })
-        .ok_or(VariableUnavailableReason::EvaluationLimit)?;
-    let mut values = Vec::with_capacity(
-        usize::try_from(count).map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
-    );
-    for index in 0..count {
-        let start = usize::try_from(
-            index
-                .checked_mul(element_size)
-                .ok_or(VariableUnavailableReason::EvaluationLimit)?,
-        )
-        .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
-        let end = start
-            .checked_add(
-                usize::try_from(element_size)
-                    .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
-            )
-            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
-        let bytes = raw.get(start..end).ok_or_else(|| {
-            VariableUnavailableReason::Other("array storage is shorter than its type".into())
-        })?;
-        let value = if dimensions.len() == 1 {
-            decode_leaf_value(element, bytes, target)?
-        } else {
-            decode_array_value(element, &dimensions[1..], bytes, target)?
-        };
-        values.push(value);
-    }
-    Ok(VariableValue::Array {
-        dimensions: dimensions.into(),
-        elements: values.into(),
-    })
+struct PendingValueNode {
+    id: ValueNodeId,
+    shape: ValueShape,
+    raw: Arc<[u8]>,
+    start: usize,
+    end: usize,
+    depth: usize,
+    address: Option<VirtualAddress>,
+    record_ancestors: Arc<[TypeId]>,
 }
 
-fn decode_leaf_value(
-    shape: &ValueShape,
-    raw: &[u8],
-    target: TargetDescription,
-) -> std::result::Result<VariableValue, VariableUnavailableReason> {
-    match shape {
-        ValueShape::Scalar(base) => decode_scalar(base, raw, target).map(VariableValue::Scalar),
-        ValueShape::Array {
-            dimensions,
-            element,
-            ..
-        } => decode_array_value(element, dimensions, raw, target),
-        ValueShape::Indirection { byte_size, .. } => decode_address(raw, *byte_size, target)
-            .map(|address| VariableValue::Address(AddressValue { address })),
-        ValueShape::Slice { .. } => {
-            Err(crate::UnsupportedVariableFeature::CompositeLocation.into())
+struct DynamicDecodeContext<'a> {
+    layouts: &'a HashMap<DynamicRecordLayoutKey, Expression>,
+    units: &'a [EvaluationUnit],
+    endian: RunTimeEndian,
+    runtime: &'a mut dyn VariableRuntime,
+    budget: EvaluationBudget,
+}
+
+struct ValueGraphBuilder<'a> {
+    types: &'a [TypeEntry],
+    nodes: Vec<ValueNode>,
+    pending: Vec<PendingValueNode>,
+    expanded_storage: HashMap<(TypeId, u64, u64), ValueNodeId>,
+}
+
+impl<'a> ValueGraphBuilder<'a> {
+    fn new(types: &'a [TypeEntry], root_type: TypeInfo) -> Self {
+        Self {
+            types,
+            nodes: vec![ValueNode {
+                type_info: root_type,
+                state: ValueNodeState::Truncated(InspectionLimit::ValueNodes),
+            }],
+            pending: Vec::new(),
+            expanded_storage: HashMap::new(),
         }
     }
+
+    fn allocate(
+        &mut self,
+        type_info: TypeInfo,
+    ) -> std::result::Result<ValueNodeId, VariableUnavailableReason> {
+        if self.nodes.len() >= MAX_VALUE_NODES {
+            return Err(VariableUnavailableReason::EvaluationLimit);
+        }
+        let id = ValueNodeId::new(
+            u32::try_from(self.nodes.len())
+                .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+        );
+        self.nodes.push(ValueNode {
+            type_info,
+            state: ValueNodeState::Truncated(InspectionLimit::ValueNodes),
+        });
+        Ok(id)
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "pending nodes keep typed storage bounds, depth, and address explicit"
+    )]
+    fn schedule(
+        &mut self,
+        id: ValueNodeId,
+        shape: ValueShape,
+        raw: Arc<[u8]>,
+        start: usize,
+        end: usize,
+        depth: usize,
+        address: Option<VirtualAddress>,
+        record_ancestors: Arc<[TypeId]>,
+    ) {
+        let record_ancestors = if let Some(record) = shape.record_id() {
+            if record_ancestors.contains(&record) {
+                self.set(
+                    id,
+                    ValueNodeState::Malformed(VariableMalformedReason {
+                        description: "record type graph contains a positive by-value cycle".into(),
+                    }),
+                );
+                return;
+            }
+            let mut ancestors = record_ancestors.to_vec();
+            ancestors.push(record);
+            ancestors.into()
+        } else {
+            record_ancestors
+        };
+        self.pending.push(PendingValueNode {
+            id,
+            shape,
+            raw,
+            start,
+            end,
+            depth,
+            address,
+            record_ancestors,
+        });
+    }
+
+    fn set(&mut self, id: ValueNodeId, state: ValueNodeState) {
+        self.nodes[usize::try_from(id.get()).expect("value node ID fits usize")].state = state;
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the iterative graph reducer handles each normalized value shape in one work loop"
+    )]
+    fn run(
+        &mut self,
+        target: TargetDescription,
+        mut dynamic: Option<&mut DynamicDecodeContext<'_>>,
+    ) -> std::result::Result<(), VariableUnavailableReason> {
+        while let Some(pending) = self.pending.pop() {
+            let Some(raw) = pending.raw.get(pending.start..pending.end) else {
+                self.set(
+                    pending.id,
+                    ValueNodeState::Unavailable(VariableUnavailableReason::Other(
+                        "aggregate storage is shorter than its type".into(),
+                    )),
+                );
+                continue;
+            };
+            match &pending.shape.kind {
+                ValueShapeKind::Scalar(base) => {
+                    self.set(
+                        pending.id,
+                        match decode_scalar(base, raw, target) {
+                            Ok(value) => ValueNodeState::Available(VariableValue::Scalar(value)),
+                            Err(reason) => ValueNodeState::Unavailable(reason),
+                        },
+                    );
+                }
+                ValueShapeKind::Indirection { byte_size, .. } => {
+                    self.set(
+                        pending.id,
+                        match decode_address(raw, *byte_size, target) {
+                            Ok(address) => {
+                                ValueNodeState::Available(VariableValue::Address(AddressValue {
+                                    address,
+                                }))
+                            }
+                            Err(reason) => ValueNodeState::Unavailable(reason),
+                        },
+                    );
+                }
+                ValueShapeKind::Array {
+                    element,
+                    dimensions,
+                    ..
+                } => {
+                    let element =
+                        value_shape_from(self.types, *element).map_err(|error| match error {
+                            ValueShapeError::Malformed(reason)
+                            | ValueShapeError::Unsupported(reason) => {
+                                VariableUnavailableReason::Other(reason)
+                            }
+                        })?;
+                    let count = dimensions
+                        .iter()
+                        .try_fold(1_u64, |count, dimension| count.checked_mul(dimension.count))
+                        .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+                    let stride = usize::try_from(element.byte_size())
+                        .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+                    let count = usize::try_from(count)
+                        .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+                    let materialized = count.min(MAX_VALUE_NODES.saturating_sub(self.nodes.len()));
+                    let mut elements = Vec::with_capacity(materialized);
+                    for index in 0..materialized {
+                        let start = pending
+                            .start
+                            .checked_add(
+                                index
+                                    .checked_mul(stride)
+                                    .ok_or(VariableUnavailableReason::EvaluationLimit)?,
+                            )
+                            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+                        let end = start
+                            .checked_add(stride)
+                            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+                        let id = self.allocate(element.type_info.clone())?;
+                        elements.push(id);
+                        self.schedule(
+                            id,
+                            element.clone(),
+                            Arc::clone(&pending.raw),
+                            start,
+                            end,
+                            pending.depth.saturating_add(1),
+                            pending.address.and_then(|address| {
+                                u64::try_from(index.checked_mul(stride)?)
+                                    .ok()
+                                    .and_then(|offset| address.get().checked_add(offset))
+                                    .map(VirtualAddress::new)
+                            }),
+                            Arc::clone(&pending.record_ancestors),
+                        );
+                    }
+                    self.set(
+                        pending.id,
+                        ValueNodeState::Available(VariableValue::Array {
+                            dimensions: Arc::clone(dimensions),
+                            elements: elements.into(),
+                            omitted: u64::try_from(count.saturating_sub(materialized))
+                                .unwrap_or(u64::MAX),
+                        }),
+                    );
+                }
+                ValueShapeKind::Slice { .. } => self.set(
+                    pending.id,
+                    ValueNodeState::Unavailable(
+                        crate::UnsupportedVariableFeature::CompositeLocation.into(),
+                    ),
+                ),
+                ValueShapeKind::Record {
+                    record,
+                    members,
+                    bases,
+                    ..
+                } => {
+                    let mut member_values = Vec::with_capacity(members.len());
+                    for (index, member) in members.iter().enumerate() {
+                        if self.nodes.len() >= MAX_VALUE_NODES {
+                            continue;
+                        }
+                        let child = self.record_child(
+                            &pending,
+                            member.type_ref.id,
+                            member.layout,
+                            target,
+                            DynamicRecordLayoutKey {
+                                record: *record,
+                                child: index,
+                                base: false,
+                            },
+                            dynamic.as_deref_mut(),
+                        )?;
+                        member_values.push(RecordMemberValue {
+                            member: member.clone(),
+                            value: child,
+                        });
+                    }
+                    let mut base_values = Vec::with_capacity(bases.len());
+                    for (index, base) in bases.iter().enumerate() {
+                        if self.nodes.len() >= MAX_VALUE_NODES {
+                            continue;
+                        }
+                        let child = self.record_child(
+                            &pending,
+                            base.type_ref.id,
+                            base.layout,
+                            target,
+                            DynamicRecordLayoutKey {
+                                record: *record,
+                                child: index,
+                                base: true,
+                            },
+                            dynamic.as_deref_mut(),
+                        )?;
+                        base_values.push(BaseClassValue {
+                            base: base.clone(),
+                            value: child,
+                        });
+                    }
+                    let omitted = u64::try_from(
+                        members
+                            .len()
+                            .saturating_add(bases.len())
+                            .saturating_sub(member_values.len().saturating_add(base_values.len())),
+                    )
+                    .unwrap_or(u64::MAX);
+                    self.set(
+                        pending.id,
+                        ValueNodeState::Available(VariableValue::Record {
+                            members: member_values.into(),
+                            bases: base_values.into(),
+                            omitted,
+                        }),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn record_child(
+        &mut self,
+        parent: &PendingValueNode,
+        type_id: TypeId,
+        layout: RecordMemberLayout,
+        target: TargetDescription,
+        dynamic_key: DynamicRecordLayoutKey,
+        dynamic: Option<&mut DynamicDecodeContext<'_>>,
+    ) -> std::result::Result<ValueNodeId, VariableUnavailableReason> {
+        let type_info = type_info_from(self.types, type_id)
+            .map_err(VariableUnavailableReason::Other)?
+            .clone();
+        let id = self.allocate(type_info)?;
+        if parent.depth >= MAX_AGGREGATE_DEPTH {
+            self.set(
+                id,
+                ValueNodeState::Truncated(InspectionLimit::AggregateDepth),
+            );
+            return Ok(id);
+        }
+        if let RecordMemberLayout::BitRange {
+            bit_offset,
+            bit_size,
+        } = layout
+        {
+            self.decode_bit_field(id, parent, type_id, bit_offset, bit_size, target)?;
+            return Ok(id);
+        }
+        let RecordMemberLayout::ByteOffset(offset) = layout else {
+            self.decode_dynamic_record_child(id, parent, type_id, dynamic_key, dynamic, target)?;
+            return Ok(id);
+        };
+        let shape = match value_shape_from(self.types, type_id) {
+            Ok(shape) => shape,
+            Err(ValueShapeError::Unsupported(reason)) => {
+                self.set(
+                    id,
+                    ValueNodeState::Unavailable(VariableUnavailableReason::Other(reason)),
+                );
+                return Ok(id);
+            }
+            Err(ValueShapeError::Malformed(description)) => {
+                self.set(
+                    id,
+                    ValueNodeState::Malformed(VariableMalformedReason { description }),
+                );
+                return Ok(id);
+            }
+        };
+        let offset =
+            usize::try_from(offset).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let size = usize::try_from(shape.byte_size())
+            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let start = parent
+            .start
+            .checked_add(offset)
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        let end = start
+            .checked_add(size)
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        if end > parent.end {
+            self.set(
+                id,
+                ValueNodeState::Malformed(VariableMalformedReason {
+                    description: "record member extends beyond its containing object".into(),
+                }),
+            );
+        } else {
+            self.schedule(
+                id,
+                shape,
+                Arc::clone(&parent.raw),
+                start,
+                end,
+                parent.depth.saturating_add(1),
+                parent.address.and_then(|address| {
+                    address
+                        .get()
+                        .checked_add(u64::try_from(offset).ok()?)
+                        .map(VirtualAddress::new)
+                }),
+                Arc::clone(&parent.record_ancestors),
+            );
+        }
+        Ok(id)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dynamic children preserve every evaluator, address, read, and child-state failure distinctly"
+    )]
+    fn decode_dynamic_record_child(
+        &mut self,
+        id: ValueNodeId,
+        parent: &PendingValueNode,
+        type_id: TypeId,
+        key: DynamicRecordLayoutKey,
+        dynamic: Option<&mut DynamicDecodeContext<'_>>,
+        target: TargetDescription,
+    ) -> std::result::Result<(), VariableUnavailableReason> {
+        let Some(dynamic) = dynamic else {
+            self.set(
+                id,
+                ValueNodeState::Unavailable(VariableUnavailableReason::Other(
+                    "runtime member location requires a live object address".into(),
+                )),
+            );
+            return Ok(());
+        };
+        let Some(object_address) = parent.address else {
+            self.set(
+                id,
+                ValueNodeState::Unavailable(VariableUnavailableReason::Other(
+                    "runtime member location has no concrete containing-object address".into(),
+                )),
+            );
+            return Ok(());
+        };
+        let Some(expression) = dynamic.layouts.get(&key) else {
+            self.set(
+                id,
+                ValueNodeState::Unavailable(VariableUnavailableReason::Other(
+                    "runtime member location form is unsupported".into(),
+                )),
+            );
+            return Ok(());
+        };
+        let pieces = match evaluate_with_object(
+            expression,
+            dynamic.endian,
+            &mut FrameBase::Unsupported,
+            dynamic.units,
+            dynamic.runtime,
+            &mut dynamic.budget,
+            Some(object_address),
+        ) {
+            Ok(pieces) => pieces,
+            Err(EvaluateError::Unavailable(reason)) => {
+                self.set(id, ValueNodeState::Unavailable(reason));
+                return Ok(());
+            }
+            Err(EvaluateError::Malformed(description)) => {
+                self.set(
+                    id,
+                    ValueNodeState::Malformed(VariableMalformedReason { description }),
+                );
+                return Ok(());
+            }
+        };
+        let [piece] = pieces.as_slice() else {
+            self.set(
+                id,
+                ValueNodeState::Malformed(VariableMalformedReason {
+                    description: "runtime member location produced multiple pieces".into(),
+                }),
+            );
+            return Ok(());
+        };
+        if piece.size_in_bits.is_some() || piece.bit_offset.is_some() {
+            self.set(
+                id,
+                ValueNodeState::Unavailable(
+                    crate::UnsupportedVariableFeature::CompositeLocation.into(),
+                ),
+            );
+            return Ok(());
+        }
+        let Location::Address { address } = piece.location else {
+            self.set(
+                id,
+                ValueNodeState::Malformed(VariableMalformedReason {
+                    description: "runtime member location did not produce an address".into(),
+                }),
+            );
+            return Ok(());
+        };
+        let shape = match value_shape_from(self.types, type_id) {
+            Ok(shape) => shape,
+            Err(ValueShapeError::Unsupported(reason)) => {
+                self.set(id, ValueNodeState::Unavailable(reason.into()));
+                return Ok(());
+            }
+            Err(ValueShapeError::Malformed(description)) => {
+                self.set(
+                    id,
+                    ValueNodeState::Malformed(VariableMalformedReason { description }),
+                );
+                return Ok(());
+            }
+        };
+        let size = usize::try_from(shape.byte_size())
+            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let storage_key = (
+            shape.storage_type_id(),
+            address,
+            u64::try_from(size).map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+        );
+        if let Some(original) = self.expanded_storage.get(&storage_key).copied() {
+            self.set(id, ValueNodeState::Cycle { original });
+            return Ok(());
+        }
+        self.expanded_storage.insert(storage_key, id);
+        dynamic.budget.consume_memory(size)?;
+        let address = VirtualAddress::new(address);
+        let raw = dynamic
+            .runtime
+            .read_memory(address, size)
+            .map_err(VariableUnavailableReason::Other)?;
+        self.schedule(
+            id,
+            shape,
+            raw,
+            0,
+            size,
+            parent.depth.saturating_add(1),
+            Some(address),
+            Arc::clone(&parent.record_ancestors),
+        );
+        let _ = target;
+        Ok(())
+    }
+
+    fn decode_bit_field(
+        &mut self,
+        id: ValueNodeId,
+        parent: &PendingValueNode,
+        type_id: TypeId,
+        bit_offset: u64,
+        bit_size: u64,
+        target: TargetDescription,
+    ) -> std::result::Result<(), VariableUnavailableReason> {
+        let shape = match value_shape_from(self.types, type_id) {
+            Ok(shape) => shape,
+            Err(ValueShapeError::Unsupported(reason)) => {
+                self.set(id, ValueNodeState::Unavailable(reason.into()));
+                return Ok(());
+            }
+            Err(ValueShapeError::Malformed(description)) => {
+                self.set(
+                    id,
+                    ValueNodeState::Malformed(VariableMalformedReason { description }),
+                );
+                return Ok(());
+            }
+        };
+        let ValueShapeKind::Scalar(base) = &shape.kind else {
+            self.set(
+                id,
+                ValueNodeState::Unavailable(VariableUnavailableReason::Other(
+                    "non-scalar bit-fields are unsupported".into(),
+                )),
+            );
+            return Ok(());
+        };
+        let storage_bits = base
+            .byte_size
+            .checked_mul(8)
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        if bit_size == 0 || bit_size > storage_bits || bit_size > 128 {
+            self.set(
+                id,
+                ValueNodeState::Malformed(VariableMalformedReason {
+                    description: "bit-field width exceeds its declared scalar storage".into(),
+                }),
+            );
+            return Ok(());
+        }
+        let object = &parent.raw[parent.start..parent.end];
+        let mut value = extract_bit_field(object, bit_offset, bit_size, target.byte_order)
+            .map_err(VariableUnavailableReason::Other)?;
+        if matches!(
+            base.encoding,
+            BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
+        ) && bit_size < 128
+            && value & (1_u128 << (bit_size - 1)) != 0
+        {
+            value |= u128::MAX << bit_size;
+        }
+        let byte_size = usize::try_from(base.byte_size)
+            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let full = value.to_le_bytes();
+        let mut bytes = full[..byte_size].to_vec();
+        if target.byte_order == ByteOrder::Big {
+            bytes.reverse();
+        }
+        self.set(
+            id,
+            match decode_scalar(base, &bytes, target) {
+                Ok(value) => ValueNodeState::Available(VariableValue::Scalar(value)),
+                Err(reason) => ValueNodeState::Unavailable(reason),
+            },
+        );
+        Ok(())
+    }
+
+    fn finish(self) -> std::result::Result<ValueGraph, VariableUnavailableReason> {
+        ValueGraph::new(ValueNodeId::new(0), self.nodes.into())
+            .ok_or_else(|| VariableUnavailableReason::Other("invalid value graph".into()))
+    }
+}
+
+fn decode_value_graph(
+    types: &[TypeEntry],
+    shape: &ValueShape,
+    raw: Arc<[u8]>,
+    target: TargetDescription,
+) -> std::result::Result<ValueGraph, VariableUnavailableReason> {
+    let mut builder = ValueGraphBuilder::new(types, shape.type_info.clone());
+    let raw_len = raw.len();
+    builder.schedule(
+        ValueNodeId::new(0),
+        shape.clone(),
+        raw,
+        0,
+        raw_len,
+        0,
+        None,
+        Arc::from([]),
+    );
+    builder.run(target, None)?;
+    match &builder.nodes[0].state {
+        ValueNodeState::Unavailable(reason) => return Err(reason.clone()),
+        ValueNodeState::Malformed(reason) => {
+            return Err(VariableUnavailableReason::Other(Arc::clone(
+                &reason.description,
+            )));
+        }
+        ValueNodeState::Available(_) | ValueNodeState::Truncated(_) => {}
+        ValueNodeState::Cycle { .. } => {
+            return Err(VariableUnavailableReason::Other(
+                "value graph root cannot be a cycle".into(),
+            ));
+        }
+    }
+    builder.finish()
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "record materialization keeps target, provider metadata, and live runtime explicit"
+)]
+fn decode_value_graph_live(
+    types: &[TypeEntry],
+    dynamic_record_layouts: &HashMap<DynamicRecordLayoutKey, Expression>,
+    evaluation_units: &[EvaluationUnit],
+    endian: RunTimeEndian,
+    shape: &ValueShape,
+    raw: Arc<[u8]>,
+    source: &VariableValueSource,
+    target: TargetDescription,
+    runtime: &mut dyn VariableRuntime,
+    budget: EvaluationBudget,
+) -> std::result::Result<ValueGraph, VariableUnavailableReason> {
+    let address = match source {
+        VariableValueSource::Memory(address) => Some(*address),
+        _ => None,
+    };
+    let mut builder = ValueGraphBuilder::new(types, shape.type_info.clone());
+    if let Some(address) = address {
+        builder.expanded_storage.insert(
+            (shape.storage_type_id(), address.get(), shape.byte_size()),
+            ValueNodeId::new(0),
+        );
+    }
+    let raw_len = raw.len();
+    builder.schedule(
+        ValueNodeId::new(0),
+        shape.clone(),
+        raw,
+        0,
+        raw_len,
+        0,
+        address,
+        Arc::from([]),
+    );
+    let mut dynamic = DynamicDecodeContext {
+        layouts: dynamic_record_layouts,
+        units: evaluation_units,
+        endian,
+        runtime,
+        budget,
+    };
+    builder.run(target, Some(&mut dynamic))?;
+    builder.finish()
+}
+
+fn extract_bit_field(
+    bytes: &[u8],
+    bit_offset: u64,
+    bit_size: u64,
+    byte_order: ByteOrder,
+) -> std::result::Result<u128, Arc<str>> {
+    let end = bit_offset
+        .checked_add(bit_size)
+        .ok_or_else(|| Arc::from("bit-field range overflows"))?;
+    let available = u64::try_from(bytes.len())
+        .ok()
+        .and_then(|length| length.checked_mul(8))
+        .ok_or_else(|| Arc::from("record storage size overflows"))?;
+    if bit_size == 0 || bit_size > 128 || end > available {
+        return Err("bit-field range is outside its containing object".into());
+    }
+    let mut value = 0_u128;
+    for field_bit in 0..bit_size {
+        let source = bit_offset + field_bit;
+        let byte = bytes[usize::try_from(source / 8).expect("validated bit index fits usize")];
+        let within = u32::try_from(source % 8).expect("bit index is below eight");
+        let bit = match byte_order {
+            ByteOrder::Little => (byte >> within) & 1,
+            ByteOrder::Big => (byte >> (7 - within)) & 1,
+        };
+        match byte_order {
+            ByteOrder::Little => value |= u128::from(bit) << field_bit,
+            ByteOrder::Big => value = (value << 1) | u128::from(bit),
+        }
+    }
+    Ok(value)
+}
+
+fn singleton_value_graph(type_info: TypeInfo, value: VariableValue) -> ValueGraph {
+    ValueGraph::new(
+        ValueNodeId::new(0),
+        Arc::from([ValueNode {
+            type_info,
+            state: ValueNodeState::Available(value),
+        }]),
+    )
+    .expect("a singleton value graph is valid")
 }
 
 fn unavailable(
@@ -3433,8 +4779,28 @@ fn evaluate<'expression>(
     runtime: &mut dyn VariableRuntime,
     budget: &mut EvaluationBudget,
 ) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, EvaluateError> {
+    evaluate_with_object(expression, endian, frame_base, units, runtime, budget, None)
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "gimli evaluation requirements are exhaustively and explicitly resumed in one loop"
+)]
+fn evaluate_with_object<'expression>(
+    expression: &'expression Expression,
+    endian: RunTimeEndian,
+    frame_base: &mut FrameBase<'_>,
+    units: &[EvaluationUnit],
+    runtime: &mut dyn VariableRuntime,
+    budget: &mut EvaluationBudget,
+    object_address: Option<VirtualAddress>,
+) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, EvaluateError> {
     let reader = gimli::EndianSlice::new(&expression.bytes, endian);
     let mut evaluation = gimli::Expression(reader).evaluation(expression.encoding);
+    if let Some(address) = object_address {
+        evaluation.set_initial_value(address.get());
+        evaluation.set_object_address(address.get());
+    }
     // Bound evaluation so a malformed expression with a backward branch cannot
     // hang the controller thread.
     evaluation.set_max_iterations(MAX_EVALUATION_ITERATIONS);
@@ -4032,6 +5398,61 @@ mod tests {
         }
     }
 
+    fn indirection_shape(address_class: u64) -> ValueShape {
+        let reference = TypeReference {
+            image: ModuleImageId::new(1),
+            id: TypeId::new(0),
+        };
+        ValueShape {
+            type_info: TypeInfo {
+                reference,
+                name: "test *".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Pointer {
+                    target: Some(TypeReference {
+                        image: reference.image,
+                        id: TypeId::new(1),
+                    }),
+                    address_class,
+                },
+            },
+            kind: ValueShapeKind::Indirection {
+                target: Some(TypeId::new(1)),
+                byte_size: 8,
+                address_class,
+            },
+        }
+    }
+
+    fn slice_types(has_capacity: bool) -> Vec<TypeEntry> {
+        let byte_size = if has_capacity { 24 } else { 16 };
+        let image = ModuleImageId::new(1);
+        let element = TypeReference {
+            image,
+            id: TypeId::new(0),
+        };
+        vec![
+            TypeEntry::Resolved(TypeInfo {
+                reference: element,
+                name: "test".into(),
+                byte_size: Some(4),
+                kind: TypeKind::Base(scalar_type(BaseTypeEncoding::Signed, 4)),
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: TypeReference {
+                    image,
+                    id: TypeId::new(1),
+                },
+                name: "test slice".into(),
+                byte_size: Some(byte_size),
+                kind: TypeKind::Slice {
+                    element,
+                    has_capacity,
+                },
+            }),
+        ]
+    }
+
     fn target(byte_order: ByteOrder) -> TargetDescription {
         TargetDescription {
             architecture: Architecture::X86_64,
@@ -4599,11 +6020,11 @@ mod tests {
         })];
         assert!(matches!(
             value_shape_from(&recursive_pointer, TypeId::new(0)),
-            Ok(ValueShape::Indirection {
+            Ok(ValueShape { kind: ValueShapeKind::Indirection {
                 target: Some(id),
                 byte_size: 8,
                 address_class: 0,
-            }) if id == TypeId::new(0)
+            }, .. }) if id == TypeId::new(0)
         ));
     }
 
@@ -4704,18 +6125,26 @@ mod tests {
             image: ModuleImageId::new(12),
             address: None,
         };
-        let shape = |address_class| ValueShape::Indirection {
-            target: Some(TypeId::new(1)),
-            byte_size: 8,
-            address_class,
+        let shape = indirection_shape;
+        let mut runtime = Runtime {
+            registers: BTreeMap::new(),
+            cfa: Err(VariableUnavailableReason::CfaExpression),
+            memory: None,
+            memory_reads: 0,
         };
         assert!(matches!(
             decode_value_state(
+                &[],
+                &HashMap::new(),
+                &[],
+                RunTimeEndian::Little,
                 &shape(0),
                 context,
                 VariableValueSource::Computed,
                 Arc::from([0_u8; 8]),
                 target(ByteOrder::Little),
+                &mut runtime,
+                EvaluationBudget::default(),
             ),
             VariableState::Available {
                 dereference: DereferenceState::Unavailable {
@@ -4727,11 +6156,17 @@ mod tests {
         ));
         assert!(matches!(
             decode_value_state(
+                &[],
+                &HashMap::new(),
+                &[],
+                RunTimeEndian::Little,
                 &shape(17),
                 context,
                 VariableValueSource::Computed,
                 Arc::from(1_u64.to_le_bytes()),
                 target(ByteOrder::Little),
+                &mut runtime,
+                EvaluationBudget::default(),
             ),
             VariableState::Available {
                 dereference: DereferenceState::Unavailable {
@@ -4789,9 +6224,12 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one table-like test exercises every slice descriptor and shared-budget boundary"
+    )]
     fn slice_decoding_bounds_secondary_reads_and_validates_descriptors() {
         let target = target(ByteOrder::Little);
-        let element = ValueShape::Scalar(scalar_type(BaseTypeEncoding::Signed, 4));
         let descriptor = |address: u64, length: u64, capacity: Option<u64>| {
             let mut bytes = Vec::new();
             bytes.extend_from_slice(&address.to_le_bytes());
@@ -4811,44 +6249,64 @@ mod tests {
         let mut rust = runtime(Some(Arc::from(
             [20_i32.to_le_bytes(), 22_i32.to_le_bytes()].concat(),
         )));
+        let rust_types = slice_types(false);
+        let rust_shape = value_shape_from(&rust_types, TypeId::new(1)).expect("slice shape");
         let state = decode_slice_state(
-            &element,
-            false,
+            &rust_types,
+            &HashMap::new(),
+            &[],
+            RunTimeEndian::Little,
+            &rust_shape,
             VariableValueSource::Computed,
             descriptor(0x1000, 2, None),
             target,
             &mut rust,
+            EvaluationBudget::default(),
         );
-        assert!(matches!(state, VariableState::Available {
-            value: VariableValue::Slice { length: 2, capacity: None, ref elements }, ..
-        } if elements.len() == 2));
+        assert!(matches!(state, VariableState::Available { ref value, .. }
+            if matches!(&value.root().state,
+                ValueNodeState::Available(VariableValue::Slice {
+                    length: 2, capacity: None, elements, ..
+                }) if elements.len() == 2)));
         assert_eq!(rust.memory_reads, 1);
 
         let mut empty = runtime(None);
+        let go_types = slice_types(true);
+        let go_shape = value_shape_from(&go_types, TypeId::new(1)).expect("slice shape");
         assert!(matches!(
             decode_slice_state(
-                &element,
-                true,
+                &go_types,
+                &HashMap::new(),
+                &[],
+                RunTimeEndian::Little,
+                &go_shape,
                 VariableValueSource::Computed,
                 descriptor(0, 0, Some(0)),
                 target,
                 &mut empty,
+                EvaluationBudget::default(),
             ),
-            VariableState::Available {
-                value: VariableValue::Slice { length: 0, capacity: Some(0), ref elements }, ..
-            } if elements.is_empty()
+            VariableState::Available { ref value, .. }
+                if matches!(&value.root().state,
+                    ValueNodeState::Available(VariableValue::Slice {
+                        length: 0, capacity: Some(0), elements, ..
+                    }) if elements.is_empty())
         ));
         assert_eq!(empty.memory_reads, 0);
 
         let mut invalid = runtime(None);
         assert!(matches!(
             decode_slice_state(
-                &element,
-                true,
+                &go_types,
+                &HashMap::new(),
+                &[],
+                RunTimeEndian::Little,
+                &go_shape,
                 VariableValueSource::Computed,
                 descriptor(0x1000, 3, Some(2)),
                 target,
                 &mut invalid,
+                EvaluationBudget::default(),
             ),
             VariableState::Malformed(_)
         ));
@@ -4857,15 +6315,355 @@ mod tests {
         let mut oversized = runtime(None);
         assert!(matches!(
             decode_slice_state(
-                &element,
-                false,
+                &rust_types,
+                &HashMap::new(),
+                &[],
+                RunTimeEndian::Little,
+                &rust_shape,
                 VariableValueSource::Computed,
                 descriptor(0x1000, 257, None),
                 target,
                 &mut oversized,
+                EvaluationBudget::default(),
             ),
             VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit)
         ));
         assert_eq!(oversized.memory_reads, 0);
+
+        let mut exhausted = runtime(Some(Arc::from([0_u8; 8])));
+        assert!(matches!(
+            decode_slice_state(
+                &rust_types,
+                &HashMap::new(),
+                &[],
+                RunTimeEndian::Little,
+                &rust_shape,
+                VariableValueSource::Computed,
+                descriptor(0x1000, 2, None),
+                target,
+                &mut exhausted,
+                EvaluationBudget {
+                    memory_reads: 1,
+                    memory_bytes: MAX_EVALUATION_MEMORY_BYTES - 4,
+                },
+            ),
+            VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit)
+        ));
+        assert_eq!(exhausted.memory_reads, 0);
+    }
+
+    #[test]
+    fn bit_field_extraction_is_endian_aware_and_bounded() {
+        assert_eq!(
+            extract_bit_field(&[0b1010_1101], 0, 3, ByteOrder::Little).expect("little field"),
+            0b101
+        );
+        assert_eq!(
+            extract_bit_field(&[0b1010_1101], 0, 3, ByteOrder::Big).expect("big field"),
+            0b101
+        );
+        assert_eq!(
+            extract_bit_field(&[0b1010_1101], 3, 5, ByteOrder::Little).expect("little tail"),
+            0b10101
+        );
+        assert_eq!(
+            extract_bit_field(&[0b1010_1101], 3, 5, ByteOrder::Big).expect("big tail"),
+            0b01101
+        );
+        assert!(extract_bit_field(&[0], 7, 2, ByteOrder::Little).is_err());
+        assert!(extract_bit_field(&[0], 0, 0, ByteOrder::Little).is_err());
+    }
+
+    #[test]
+    fn record_graphs_decode_nested_values_and_preserve_partial_failures() {
+        let image = ModuleImageId::new(1);
+        let reference = |id| TypeReference {
+            image,
+            id: TypeId::new(id),
+        };
+        let member = |name: &'static str, offset| RecordMember {
+            name: Some(name.into()),
+            type_ref: reference(0),
+            layout: RecordMemberLayout::ByteOffset(offset),
+            accessibility: Accessibility::Public,
+            artificial: false,
+            embedded: false,
+            declaration: None,
+        };
+        let types = vec![
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "i32".into(),
+                byte_size: Some(4),
+                kind: TypeKind::Base(scalar_type(BaseTypeEncoding::Signed, 4)),
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "Pair".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Record {
+                    kind: RecordKind::Struct,
+                    members: Arc::from([member("first", 0), member("second", 4)]),
+                    bases: Arc::from([]),
+                    incomplete: false,
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(2),
+                name: "Broken".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Record {
+                    kind: RecordKind::Struct,
+                    members: Arc::from([member("valid", 0), member("outside", 8)]),
+                    bases: Arc::from([]),
+                    incomplete: false,
+                },
+            }),
+        ];
+        let pair = value_shape_from(&types, TypeId::new(1)).expect("pair shape");
+        let graph = decode_value_graph(
+            &types,
+            &pair,
+            Arc::from([20_i32.to_le_bytes(), 22_i32.to_le_bytes()].concat()),
+            target(ByteOrder::Little),
+        )
+        .expect("pair graph");
+        let ValueNodeState::Available(VariableValue::Record { members, .. }) = &graph.root().state
+        else {
+            panic!("pair root was not a record: {graph:?}");
+        };
+        assert_eq!(members.len(), 2);
+        assert!(matches!(
+            graph.node(members[0].value).map(|node| &node.state),
+            Some(ValueNodeState::Available(VariableValue::Scalar(
+                ScalarValue::Signed(20)
+            )))
+        ));
+        assert!(matches!(
+            graph.node(members[1].value).map(|node| &node.state),
+            Some(ValueNodeState::Available(VariableValue::Scalar(
+                ScalarValue::Signed(22)
+            )))
+        ));
+
+        let broken = value_shape_from(&types, TypeId::new(2)).expect("broken shape");
+        let graph = decode_value_graph(
+            &types,
+            &broken,
+            Arc::from([42_u8; 8]),
+            target(ByteOrder::Little),
+        )
+        .expect("partial graph");
+        let ValueNodeState::Available(VariableValue::Record { members, .. }) = &graph.root().state
+        else {
+            panic!("broken root was not a record: {graph:?}");
+        };
+        assert!(matches!(
+            graph.node(members[0].value).map(|node| &node.state),
+            Some(ValueNodeState::Available(_))
+        ));
+        assert!(matches!(
+            graph.node(members[1].value).map(|node| &node.state),
+            Some(ValueNodeState::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn aggregate_node_limit_reports_exact_omissions_without_partial_ids() {
+        let image = ModuleImageId::new(1);
+        let reference = |id| TypeReference {
+            image,
+            id: TypeId::new(id),
+        };
+        let count = u64::try_from(MAX_VALUE_NODES + 5).expect("test count fits u64");
+        let types = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "u8".into(),
+                byte_size: Some(1),
+                kind: TypeKind::Base(scalar_type(BaseTypeEncoding::Unsigned, 1)),
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "bounded".into(),
+                byte_size: Some(count),
+                kind: TypeKind::Array {
+                    element: reference(0),
+                    dimensions: Arc::from([ArrayDimension {
+                        lower_bound: 0,
+                        count,
+                    }]),
+                },
+            }),
+        ];
+        let shape = value_shape_from(&types, TypeId::new(1)).expect("array shape");
+        let graph = decode_value_graph(
+            &types,
+            &shape,
+            Arc::from(vec![
+                7_u8;
+                usize::try_from(count).expect("test count fits usize")
+            ]),
+            target(ByteOrder::Little),
+        )
+        .expect("bounded graph");
+        assert_eq!(graph.nodes().len(), MAX_VALUE_NODES);
+        assert!(matches!(
+            &graph.root().state,
+            ValueNodeState::Available(VariableValue::Array { elements, omitted, .. })
+                if elements.len() == MAX_VALUE_NODES - 1 && *omitted == 6
+        ));
+    }
+
+    #[test]
+    fn direct_by_value_record_cycles_are_malformed_without_recursing() {
+        let reference = TypeReference {
+            image: ModuleImageId::new(1),
+            id: TypeId::new(0),
+        };
+        let types = [TypeEntry::Resolved(TypeInfo {
+            reference,
+            name: "Impossible".into(),
+            byte_size: Some(1),
+            kind: TypeKind::Record {
+                kind: RecordKind::Struct,
+                members: Arc::from([RecordMember {
+                    name: Some("self".into()),
+                    type_ref: reference,
+                    layout: RecordMemberLayout::ByteOffset(0),
+                    accessibility: Accessibility::Public,
+                    artificial: false,
+                    embedded: false,
+                    declaration: None,
+                }]),
+                bases: Arc::from([]),
+                incomplete: false,
+            },
+        })];
+        let shape = value_shape_from(&types, TypeId::new(0)).expect("record shape");
+        let graph =
+            decode_value_graph(&types, &shape, Arc::from([0_u8]), target(ByteOrder::Little))
+                .expect("bounded malformed graph");
+        let ValueNodeState::Available(VariableValue::Record { members, .. }) = &graph.root().state
+        else {
+            panic!("root was not a partial record: {graph:?}");
+        };
+        assert!(matches!(
+            graph.node(members[0].value).map(|node| &node.state),
+            Some(ValueNodeState::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn indirect_by_value_record_cycles_are_malformed_without_reaching_depth_limit() {
+        let image = ModuleImageId::new(1);
+        let reference = |id| TypeReference {
+            image,
+            id: TypeId::new(id),
+        };
+        let member = |name: &'static str, target| RecordMember {
+            name: Some(name.into()),
+            type_ref: reference(target),
+            layout: RecordMemberLayout::ByteOffset(0),
+            accessibility: Accessibility::Public,
+            artificial: false,
+            embedded: false,
+            declaration: None,
+        };
+        let types = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "A".into(),
+                byte_size: Some(1),
+                kind: TypeKind::Record {
+                    kind: RecordKind::Struct,
+                    members: Arc::from([member("b", 1)]),
+                    bases: Arc::from([]),
+                    incomplete: false,
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "B".into(),
+                byte_size: Some(1),
+                kind: TypeKind::Record {
+                    kind: RecordKind::Struct,
+                    members: Arc::from([member("a", 0)]),
+                    bases: Arc::from([]),
+                    incomplete: false,
+                },
+            }),
+        ];
+        let shape = value_shape_from(&types, TypeId::new(0)).expect("record shape");
+        let graph =
+            decode_value_graph(&types, &shape, Arc::from([0_u8]), target(ByteOrder::Little))
+                .expect("bounded malformed graph");
+        assert_eq!(graph.nodes().len(), 3);
+        let ValueNodeState::Available(VariableValue::Record { members, .. }) = &graph.root().state
+        else {
+            panic!("root was not a record: {graph:?}");
+        };
+        let b = graph.node(members[0].value).expect("B node");
+        let ValueNodeState::Available(VariableValue::Record { members, .. }) = &b.state else {
+            panic!("B was not a record: {b:?}");
+        };
+        assert!(matches!(
+            graph.node(members[0].value).map(|node| &node.state),
+            Some(ValueNodeState::Malformed(reason))
+                if reason.description.contains("by-value cycle")
+        ));
+    }
+
+    #[test]
+    fn zero_sized_records_and_arrays_remain_bounded_without_reading_storage() {
+        let image = ModuleImageId::new(1);
+        let reference = |id| TypeReference {
+            image,
+            id: TypeId::new(id),
+        };
+        let count = u64::try_from(MAX_VALUE_NODES + 7).expect("test count fits u64");
+        let types = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "Empty".into(),
+                byte_size: Some(0),
+                kind: TypeKind::Record {
+                    kind: RecordKind::Struct,
+                    members: Arc::from([]),
+                    bases: Arc::from([]),
+                    incomplete: false,
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "ManyEmpty".into(),
+                byte_size: Some(0),
+                kind: TypeKind::Array {
+                    element: reference(0),
+                    dimensions: Arc::from([ArrayDimension {
+                        lower_bound: 0,
+                        count,
+                    }]),
+                },
+            }),
+        ];
+        let empty = value_shape_from(&types, TypeId::new(0)).expect("empty record shape");
+        let graph = decode_value_graph(&types, &empty, Arc::from([]), target(ByteOrder::Little))
+            .expect("empty record graph");
+        assert!(matches!(
+            &graph.root().state,
+            ValueNodeState::Available(VariableValue::Record { members, bases, .. })
+                if members.is_empty() && bases.is_empty()
+        ));
+
+        let array = value_shape_from(&types, TypeId::new(1)).expect("zero-sized array shape");
+        let graph = decode_value_graph(&types, &array, Arc::from([]), target(ByteOrder::Little))
+            .expect("bounded zero-sized array graph");
+        assert_eq!(graph.nodes().len(), MAX_VALUE_NODES);
+        assert!(matches!(
+            &graph.root().state,
+            ValueNodeState::Available(VariableValue::Array { elements, omitted, .. })
+                if elements.len() == MAX_VALUE_NODES - 1 && *omitted == 8
+        ));
     }
 }

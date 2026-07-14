@@ -531,6 +531,40 @@ fn print_renders_rust_slice_elements() {
 }
 
 #[test]
+fn print_renders_nested_records_arrays_and_bit_fields() {
+    let executable = fixture("build/test-programs/records-c-gcc-o0");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break inspect_records",
+            "--eval",
+            "run",
+            "--eval",
+            "print global_record",
+            "--eval",
+            "print *bits",
+            "--eval",
+            "print *records",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run record print commands");
+    let stdout = assert_success(output);
+    assert!(
+        stdout.contains(
+            "global_record = {inner = {signed_value = -7, unsigned_value = 9}, values = [20, 22]}"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("*bits = {negative = -3, first = 5, second = 42}"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("values = [43, 44]"), "{stdout}");
+}
+
+#[test]
 fn globals_lists_metadata_and_print_accepts_exact_qualification() {
     let executable = fixture("build/test-programs/globals-c-gcc-o0");
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))

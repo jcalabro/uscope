@@ -1306,7 +1306,7 @@ fn format_typed_state(
 ) -> String {
     let value = match state {
         VariableState::Available { value, .. } => renderer
-            .paint(Role::Value, format_variable_value(type_info, value))
+            .paint(Role::Value, format_value_graph(value))
             .to_string(),
         VariableState::Unavailable(reason) => renderer
             .paint(Role::Warning, format!("<unavailable: {reason}>"))
@@ -1322,35 +1322,145 @@ fn format_typed_state(
     )
 }
 
-fn format_variable_value(type_info: &uscope::TypeInfo, value: &uscope::VariableValue) -> String {
-    match value {
-        uscope::VariableValue::Scalar(value) => format_scalar(type_info, value),
-        uscope::VariableValue::Address(value) => {
-            let width = type_info
-                .byte_size
-                .and_then(|size| usize::try_from(size.checked_mul(2)?).ok())
-                .unwrap_or(16);
-            format!("0x{:0width$x}", value.address.get())
-        }
-        uscope::VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
-        uscope::VariableValue::Array { elements, .. } => {
-            let rendered = elements
-                .iter()
-                .map(|element| format_variable_value(type_info, element))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("[{rendered}]")
-        }
-        uscope::VariableValue::Slice { elements, .. } => {
-            let rendered = elements
-                .iter()
-                .map(|element| format_variable_value(type_info, element))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("[{rendered}]")
-        }
-        _ => "<unsupported value>".to_owned(),
+#[expect(
+    clippy::too_many_lines,
+    reason = "the iterative renderer handles every node and aggregate state without recursive calls"
+)]
+fn format_value_graph(graph: &uscope::ValueGraph) -> String {
+    const MAX_RENDER_DEPTH: usize = 64;
+    const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+    enum Work {
+        Node(uscope::ValueNodeId, usize),
+        Text(String),
     }
+    let mut output = String::new();
+    let mut work = vec![Work::Node(graph.root_id(), 0)];
+    while let Some(item) = work.pop() {
+        if output.len() >= MAX_OUTPUT_BYTES {
+            output.truncate(MAX_OUTPUT_BYTES);
+            while !output.is_char_boundary(output.len()) {
+                output.pop();
+            }
+            output.push_str("<truncated: OutputBytes>");
+            break;
+        }
+        let Work::Node(id, depth) = item else {
+            let Work::Text(text) = item else {
+                unreachable!()
+            };
+            output.push_str(&text);
+            continue;
+        };
+        if depth > MAX_RENDER_DEPTH {
+            output.push_str("<truncated: AggregateDepth>");
+            continue;
+        }
+        let Some(node) = graph.node(id) else {
+            output.push_str("<malformed: invalid value node>");
+            continue;
+        };
+        let value = match &node.state {
+            uscope::ValueNodeState::Available(value) => value,
+            uscope::ValueNodeState::Unavailable(reason) => {
+                write!(output, "<unavailable: {reason}>").expect("String writes cannot fail");
+                continue;
+            }
+            uscope::ValueNodeState::Malformed(reason) => {
+                write!(output, "<malformed: {}>", reason.description)
+                    .expect("String writes cannot fail");
+                continue;
+            }
+            uscope::ValueNodeState::Truncated(limit) => {
+                write!(output, "<truncated: {limit:?}>").expect("String writes cannot fail");
+                continue;
+            }
+            uscope::ValueNodeState::Cycle { original } => {
+                write!(output, "<cycle to #{}>", original.get())
+                    .expect("String writes cannot fail");
+                continue;
+            }
+            _ => {
+                output.push_str("<unsupported value state>");
+                continue;
+            }
+        };
+        match value {
+            uscope::VariableValue::Scalar(value) => {
+                output.push_str(&format_scalar(&node.type_info, value));
+            }
+            uscope::VariableValue::Address(value) => {
+                let width = node
+                    .type_info
+                    .byte_size
+                    .and_then(|size| usize::try_from(size.checked_mul(2)?).ok())
+                    .unwrap_or(16);
+                write!(output, "0x{:0width$x}", value.address.get())
+                    .expect("String writes cannot fail");
+            }
+            uscope::VariableValue::ImplicitPointer => output.push_str("<implicit pointer>"),
+            uscope::VariableValue::Array {
+                elements, omitted, ..
+            }
+            | uscope::VariableValue::Slice {
+                elements, omitted, ..
+            } => {
+                work.push(Work::Text("]".to_owned()));
+                if *omitted != 0 {
+                    work.push(Work::Text(format!("<{omitted} omitted>")));
+                    if !elements.is_empty() {
+                        work.push(Work::Text(", ".to_owned()));
+                    }
+                }
+                for (index, element) in elements.iter().enumerate().rev() {
+                    if index + 1 != elements.len() {
+                        work.push(Work::Text(", ".to_owned()));
+                    }
+                    work.push(Work::Node(*element, depth + 1));
+                }
+                output.push('[');
+            }
+            uscope::VariableValue::Record {
+                members,
+                bases,
+                omitted,
+            } => {
+                let mut children = Vec::with_capacity(bases.len() + members.len());
+                for base in bases.iter() {
+                    let name = graph
+                        .node(base.value)
+                        .map_or("<unknown base>", |node| node.type_info.name.as_ref());
+                    children.push((format!("<base {name}> = "), base.value));
+                }
+                for member in members.iter().filter(|member| !member.member.artificial) {
+                    children.push((
+                        format!(
+                            "{} = ",
+                            member.member.name.as_deref().unwrap_or("<anonymous>")
+                        ),
+                        member.value,
+                    ));
+                }
+                let child_count = children.len();
+                work.push(Work::Text("}".to_owned()));
+                if *omitted != 0 {
+                    work.push(Work::Text(format!("<{omitted} omitted>")));
+                    if child_count != 0 {
+                        work.push(Work::Text(", ".to_owned()));
+                    }
+                }
+                for (index, (label, child)) in children.into_iter().enumerate().rev() {
+                    if index + 1 != child_count {
+                        work.push(Work::Text(", ".to_owned()));
+                    }
+                    work.push(Work::Node(child, depth + 1));
+                    work.push(Work::Text(label));
+                }
+                output.push('{');
+            }
+            _ => output.push_str("<unsupported value>"),
+        }
+    }
+    output
 }
 
 fn format_scalar(type_info: &uscope::TypeInfo, value: &ScalarValue) -> String {

@@ -124,6 +124,10 @@ id_type!(
     TypeId,
     "Identifies a normalized type within a module image."
 );
+id_type!(
+    ValueNodeId,
+    "Identifies one node in an immutable stopped-value graph."
+);
 
 impl GlobalVariableId {
     /// Returns the dense index within the containing module image.
@@ -135,6 +139,14 @@ impl GlobalVariableId {
 
 impl TypeId {
     pub(crate) const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl ValueNodeId {
+    /// Returns the dense index within the containing value graph.
+    #[must_use]
+    pub const fn get(self) -> u32 {
         self.0
     }
 }
@@ -284,6 +296,87 @@ pub enum ReferenceKind {
     Rvalue,
 }
 
+/// The source-level aggregate category represented by a record type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordKind {
+    /// A structure value.
+    Struct,
+    /// A class value.
+    Class,
+}
+
+/// Source visibility attached to a record member or base class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Accessibility {
+    /// Public access.
+    Public,
+    /// Protected access.
+    Protected,
+    /// Private access.
+    Private,
+}
+
+/// A normalized instance-member location within its containing record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordMemberLayout {
+    /// A byte-aligned constant offset from the containing object.
+    ByteOffset(u64),
+    /// An exact bit range from the beginning of the containing object.
+    BitRange {
+        /// The first bit in the field.
+        bit_offset: u64,
+        /// The field width in bits.
+        bit_size: u64,
+    },
+    /// A provider-owned computation requiring a concrete containing-object address.
+    Runtime,
+}
+
+/// One instance member in a normalized record type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordMember {
+    /// The source member name; anonymous members have no name.
+    pub name: Option<Arc<str>>,
+    /// The member's type.
+    pub type_ref: TypeReference,
+    /// Its location within a containing instance.
+    pub layout: RecordMemberLayout,
+    /// Its normalized source accessibility.
+    pub accessibility: Accessibility,
+    /// Whether the producer marked this member as compiler-generated.
+    pub artificial: bool,
+    /// Whether a producer such as Go marked this as an embedded field.
+    pub embedded: bool,
+    /// Its declaration location, when supplied by debug metadata.
+    pub declaration: Option<SourceLocation>,
+}
+
+/// Whether a base-class subobject is virtual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BaseClassVirtuality {
+    /// An ordinary non-virtual base.
+    None,
+    /// A virtual base subobject.
+    Virtual,
+}
+
+/// One base-class subobject in a normalized class type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseClass {
+    /// The base type.
+    pub type_ref: TypeReference,
+    /// Its location within the derived object.
+    pub layout: RecordMemberLayout,
+    /// Its normalized source accessibility.
+    pub accessibility: Accessibility,
+    /// Whether this is a virtual base.
+    pub virtuality: BaseClassVirtuality,
+}
+
 /// The normalized shape of a debug type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -319,6 +412,17 @@ pub enum TypeKind {
         element: TypeReference,
         /// Whether the descriptor includes a capacity field.
         has_capacity: bool,
+    },
+    /// A structure or class with ordered instance members and base subobjects.
+    Record {
+        /// The source aggregate category.
+        kind: RecordKind,
+        /// Direct instance members in producer/source order.
+        members: Arc<[RecordMember]>,
+        /// Base-class subobjects in producer/source order.
+        bases: Arc<[BaseClass]>,
+        /// Whether this is a declaration without a complete layout.
+        incomplete: bool,
     },
     /// An ordered qualifier around another type.
     Qualified {
@@ -415,8 +519,10 @@ pub enum VariableValue {
     Array {
         /// The array dimensions.
         dimensions: Arc<[ArrayDimension]>,
-        /// Decoded elements (nested arrays are represented recursively).
-        elements: Arc<[Self]>,
+        /// Decoded element nodes in row-major/source order.
+        elements: Arc<[ValueNodeId]>,
+        /// Elements omitted by the inspection budget.
+        omitted: u64,
     },
     /// A decoded language slice and its bounded element values.
     Slice {
@@ -424,9 +530,176 @@ pub enum VariableValue {
         length: u64,
         /// Runtime capacity when present in the descriptor.
         capacity: Option<u64>,
-        /// Elements decoded from the backing storage.
-        elements: Arc<[Self]>,
+        /// Element nodes decoded from the backing storage.
+        elements: Arc<[ValueNodeId]>,
+        /// Elements omitted by the inspection budget.
+        omitted: u64,
     },
+    /// A decoded structure or class value.
+    Record {
+        /// Direct instance-member values in source order.
+        members: Arc<[RecordMemberValue]>,
+        /// Base-subobject values in source order.
+        bases: Arc<[BaseClassValue]>,
+        /// Members or bases omitted by the inspection budget.
+        omitted: u64,
+    },
+}
+
+/// One member edge in a stopped record value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordMemberValue {
+    /// The immutable member metadata.
+    pub member: RecordMember,
+    /// The typed child node.
+    pub value: ValueNodeId,
+}
+
+/// One base-subobject edge in a stopped class value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseClassValue {
+    /// The immutable base metadata.
+    pub base: BaseClass,
+    /// The typed child node.
+    pub value: ValueNodeId,
+}
+
+/// Which bounded resource prevented complete value materialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InspectionLimit {
+    /// Maximum target bytes read or retained.
+    MemoryBytes,
+    /// Maximum number of target-memory reads.
+    MemoryReads,
+    /// Maximum number of value nodes.
+    ValueNodes,
+    /// Maximum aggregate nesting depth.
+    AggregateDepth,
+    /// Maximum array or slice elements.
+    Elements,
+    /// Maximum record members or bases.
+    Members,
+    /// Maximum debug-expression work.
+    ExpressionWork,
+    /// Maximum rendered output bytes.
+    OutputBytes,
+}
+
+/// The state of one typed node in a stopped-value graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValueNodeState {
+    /// The node was decoded exactly.
+    Available(VariableValue),
+    /// Valid metadata cannot produce a supported readable value here.
+    Unavailable(VariableUnavailableReason),
+    /// The node's metadata is defective.
+    Malformed(VariableMalformedReason),
+    /// Materialization stopped at an explicit resource boundary.
+    Truncated(InspectionLimit),
+    /// Automatic expansion reached storage already represented by another node.
+    Cycle {
+        /// The first node representing the same typed storage extent.
+        original: ValueNodeId,
+    },
+}
+
+/// One typed node in an immutable stopped-value graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueNode {
+    /// The node's source-facing normalized type.
+    pub type_info: TypeInfo,
+    /// Its current decoded or partial state.
+    pub state: ValueNodeState,
+}
+
+/// One immutable, bounded value graph produced from a stopped state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueGraph {
+    root: ValueNodeId,
+    nodes: Arc<[ValueNode]>,
+}
+
+impl ValueGraph {
+    pub(crate) fn new(root: ValueNodeId, nodes: Arc<[ValueNode]>) -> Option<Self> {
+        let valid =
+            |id: ValueNodeId| usize::try_from(id.get()).is_ok_and(|index| index < nodes.len());
+        if !valid(root)
+            || nodes.iter().any(|node| match &node.state {
+                ValueNodeState::Available(
+                    VariableValue::Array { elements, .. } | VariableValue::Slice { elements, .. },
+                ) => elements.iter().copied().any(|id| !valid(id)),
+                ValueNodeState::Available(VariableValue::Record { members, bases, .. }) => {
+                    members.iter().any(|member| !valid(member.value))
+                        || bases.iter().any(|base| !valid(base.value))
+                }
+                ValueNodeState::Cycle { original } => !valid(*original),
+                _ => false,
+            })
+        {
+            return None;
+        }
+        // Aggregate edges must form one complete tree/DAG rooted at `root`.
+        // Repeated storage is represented only by `ValueNodeState::Cycle`, whose
+        // `original` is metadata rather than a traversable child edge.
+        let mut colors = vec![0_u8; nodes.len()];
+        let mut work = vec![(root, false)];
+        while let Some((id, exiting)) = work.pop() {
+            let index = usize::try_from(id.get()).ok()?;
+            if exiting {
+                colors[index] = 2;
+                continue;
+            }
+            match colors[index] {
+                1 => return None,
+                2 => continue,
+                _ => {}
+            }
+            colors[index] = 1;
+            work.push((id, true));
+            match &nodes[index].state {
+                ValueNodeState::Available(
+                    VariableValue::Array { elements, .. } | VariableValue::Slice { elements, .. },
+                ) => {
+                    work.extend(elements.iter().rev().map(|child| (*child, false)));
+                }
+                ValueNodeState::Available(VariableValue::Record { members, bases, .. }) => {
+                    work.extend(bases.iter().rev().map(|base| (base.value, false)));
+                    work.extend(members.iter().rev().map(|member| (member.value, false)));
+                }
+                _ => {}
+            }
+        }
+        if colors.contains(&0) {
+            return None;
+        }
+        Some(Self { root, nodes })
+    }
+
+    /// Returns the graph's root identifier.
+    #[must_use]
+    pub const fn root_id(&self) -> ValueNodeId {
+        self.root
+    }
+
+    /// Returns the graph's root node.
+    #[must_use]
+    pub fn root(&self) -> &ValueNode {
+        &self.nodes[usize::try_from(self.root.get()).expect("value node ID fits usize")]
+    }
+
+    /// Returns a node when the identifier belongs to this graph.
+    #[must_use]
+    pub fn node(&self, id: ValueNodeId) -> Option<&ValueNode> {
+        self.nodes.get(usize::try_from(id.get()).ok()?)
+    }
+
+    /// Returns all nodes in dense identifier order.
+    #[must_use]
+    pub fn nodes(&self) -> &[ValueNode] {
+        &self.nodes
+    }
 }
 
 /// How a variable's current value was obtained.
@@ -634,8 +907,8 @@ pub enum VariableState {
         /// Exact bytes in target byte order, including ABI padding. An optimized
         /// implicit pointer has no concrete byte representation.
         raw: Option<Arc<[u8]>>,
-        /// The decoded value.
-        value: VariableValue,
+        /// The decoded value graph.
+        value: ValueGraph,
         /// Explicit lazy dereference state.
         dereference: DereferenceState,
     },
@@ -2083,6 +2356,81 @@ impl LoadedModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn value_test_type(id: u32) -> TypeInfo {
+        let base = BaseType {
+            name: "int".into(),
+            base_name: "int".into(),
+            encoding: BaseTypeEncoding::Signed,
+            byte_size: 4,
+        };
+        TypeInfo {
+            reference: TypeReference {
+                image: ModuleImageId::new(0),
+                id: TypeId::new(id),
+            },
+            name: "int".into(),
+            byte_size: Some(4),
+            kind: TypeKind::Base(base),
+        }
+    }
+
+    #[test]
+    fn value_graph_rejects_invalid_roots_and_every_aggregate_child_edge() {
+        let scalar = ValueNode {
+            type_info: value_test_type(0),
+            state: ValueNodeState::Available(VariableValue::Scalar(ScalarValue::Signed(42))),
+        };
+        assert!(ValueGraph::new(ValueNodeId::new(1), Arc::from([scalar.clone()])).is_none());
+
+        let array = ValueNode {
+            type_info: value_test_type(1),
+            state: ValueNodeState::Available(VariableValue::Array {
+                dimensions: Arc::from([ArrayDimension {
+                    lower_bound: 0,
+                    count: 1,
+                }]),
+                elements: Arc::from([ValueNodeId::new(1)]),
+                omitted: 0,
+            }),
+        };
+        assert!(ValueGraph::new(ValueNodeId::new(0), Arc::from([array.clone()])).is_none());
+        assert!(ValueGraph::new(ValueNodeId::new(0), Arc::from([array, scalar.clone()])).is_some());
+
+        let record = ValueNode {
+            type_info: value_test_type(2),
+            state: ValueNodeState::Available(VariableValue::Record {
+                members: Arc::from([RecordMemberValue {
+                    member: RecordMember {
+                        name: Some("field".into()),
+                        type_ref: scalar.type_info.reference,
+                        layout: RecordMemberLayout::ByteOffset(0),
+                        accessibility: Accessibility::Public,
+                        artificial: false,
+                        embedded: false,
+                        declaration: None,
+                    },
+                    value: ValueNodeId::new(9),
+                }]),
+                bases: Arc::from([]),
+                omitted: 0,
+            }),
+        };
+        assert!(ValueGraph::new(ValueNodeId::new(0), Arc::from([record])).is_none());
+
+        let self_cycle = ValueNode {
+            type_info: value_test_type(3),
+            state: ValueNodeState::Available(VariableValue::Array {
+                dimensions: Arc::from([]),
+                elements: Arc::from([ValueNodeId::new(0)]),
+                omitted: 0,
+            }),
+        };
+        assert!(ValueGraph::new(ValueNodeId::new(0), Arc::from([self_cycle])).is_none());
+        assert!(
+            ValueGraph::new(ValueNodeId::new(0), Arc::from([scalar.clone(), scalar])).is_none()
+        );
+    }
 
     fn global_test_image() -> ModuleImage {
         let scalar = || {
