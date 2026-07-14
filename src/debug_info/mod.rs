@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
-    CodeInstanceId, ImageAddress, ModuleImage, RegisterDescriptor, Result, UnwindTermination,
-    Variable, VariableQuery, VariableUnavailableReason, VirtualAddress,
+    CodeInstanceId, GlobalVariableId, ImageAddress, ModuleImage, RegisterDescriptor, Result,
+    UnwindTermination, Variable, VariableQuery, VariableUnavailableReason, VirtualAddress,
 };
 
 pub struct VariableRegister {
@@ -32,6 +32,10 @@ pub trait VariableRuntime {
         register: u16,
     ) -> std::result::Result<VariableRegister, VariableUnavailableReason>;
     fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason>;
+    fn tls_address(
+        &mut self,
+        offset: u64,
+    ) -> std::result::Result<VirtualAddress, VariableUnavailableReason>;
     fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>>;
     fn read_memory(
         &mut self,
@@ -52,6 +56,14 @@ pub trait VariableInfo: Send + Sync {
         query: &VariableQuery,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Vec<Variable>>;
+
+    /// Evaluates one cataloged global at the selected thread's current stop.
+    fn inspect_global(
+        &self,
+        id: GlobalVariableId,
+        address: ImageAddress,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<Variable>;
 }
 
 pub trait UnwindInfo: Send + Sync {
@@ -70,5 +82,13 @@ pub trait UnwindInfo: Send + Sync {
 }
 
 pub fn load(path: &Path) -> Result<DebugInfo> {
-    dwarf::load(path)
+    dwarf::load(path, crate::ModuleImageId::new(0))
+}
+
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the private debug-info edge is shared by sibling backend modules"
+)]
+pub(crate) fn load_module(path: &Path, id: crate::ModuleImageId) -> Result<DebugInfo> {
+    dwarf::load(path, id)
 }

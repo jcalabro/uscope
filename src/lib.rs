@@ -10,20 +10,22 @@ pub use model::{
     AddressRange, Architecture, Backtrace, BaseType, BaseTypeEncoding, BreakpointEntry,
     BreakpointLocation, ByteOrder, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
     ColumnNumber, EntryProvenance, ExecutionLocation, FloatValue, FrameKind, FunctionId,
-    FunctionInfo, ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, LineNumber,
-    LineSequenceId, LoadedModule, ModuleId, ModuleImage, ModuleImageId, PointerWidth,
-    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, ScalarValue,
-    SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId,
-    StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId,
-    UnsupportedVariableFeature, UnwindTermination, Variable, VariableKind, VariableMalformedReason,
-    VariableSnapshot, VariableState, VariableUnavailableReason, VariableValueSource,
-    VirtualAddress,
+    FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
+    GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
+    ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, LineNumber, LineSequenceId,
+    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, ModuleId,
+    ModuleImage, ModuleImageId, PointerWidth, RegisterDescriptor, RegisterId, RegisterRole,
+    RegisterSnapshot, RegisterValue, ScalarValue, SourceContext, SourceFile, SourceFileId,
+    SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolId,
+    SymbolInfo, TargetDescription, ThreadId, UnsupportedVariableFeature, UnwindTermination,
+    Variable, VariableKind, VariableMalformedReason, VariableSnapshot, VariableState,
+    VariableUnavailableReason, VariableValueSource, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
-    ExecutionId, ExitStatus, FramePresentation, InferiorState, PresentedFrame, ProcessId,
-    ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
-    ThreadSnapshot, ThreadState, VariableQuery,
+    ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, InferiorState, PresentedFrame,
+    ProcessId, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId,
+    StopReason, ThreadSnapshot, ThreadState, VariableQuery,
 };
 
 use std::path::{Path, PathBuf};
@@ -424,6 +426,38 @@ impl DebuggerHandle {
             .first()
             .cloned()
             .ok_or(Error::VariableNotFound(name))
+    }
+
+    /// Inspects one exact global catalog entry in the selected stopped thread.
+    pub async fn global(&self, id: GlobalVariableId) -> Result<Variable> {
+        let module = self.loaded_module().await?;
+        self.loaded_global(GlobalVariableReference {
+            module: module.id,
+            image: module.image,
+            variable: id,
+        })
+        .await
+    }
+
+    /// Inspects one exact global in a specific loaded module.
+    pub async fn loaded_global(&self, global: GlobalVariableReference) -> Result<Variable> {
+        let snapshot = self.variable_query(VariableQuery::Global(global)).await?;
+        snapshot
+            .variables
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::VariableNotFound(global.variable.to_string()))
+    }
+
+    /// Lists one filtered, bounded page of immutable global metadata.
+    pub async fn globals(&self, query: GlobalVariableQuery) -> Result<GlobalVariablePage> {
+        self.request(|reply| Request::Globals { query, reply })
+            .await
+    }
+
+    /// Returns the process-wide loaded-module registry.
+    pub async fn loaded_modules(&self) -> Result<LoadedModuleSnapshot> {
+        self.request(|reply| Request::LoadedModules { reply }).await
     }
 
     async fn variable_query(&self, query: VariableQuery) -> Result<VariableSnapshot> {

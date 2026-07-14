@@ -449,6 +449,53 @@ fn print_and_p_render_parameters_and_locals() {
 }
 
 #[test]
+fn globals_lists_metadata_and_print_accepts_exact_qualification() {
+    let executable = fixture("build/test-programs/globals-c-gcc-o0");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "help globals",
+            "--eval",
+            "globals duplicate",
+            "--eval",
+            "break main.c:9",
+            "--eval",
+            "run",
+            "--eval",
+            "print one.c::duplicate",
+            "--eval",
+            "continue",
+        ])
+        .arg(&executable)
+        .output()
+        .expect("run uscope global commands");
+    let stdout = assert_success(output);
+    assert!(stdout.contains("globals [filter]"), "{stdout}");
+    assert!(stdout.contains("duplicate ("), "{stdout}");
+    assert!(stdout.contains("duplicate = 201"), "{stdout}");
+
+    let ambiguous = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break main.c:9",
+            "--eval",
+            "run",
+            "--eval",
+            "print duplicate",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run ambiguous global command");
+    assert!(!ambiguous.status.success());
+    let stderr = String::from_utf8(ambiguous.stderr).expect("UTF-8 stderr");
+    assert!(stderr.contains("global variable selector 'duplicate' is ambiguous"));
+    assert!(stderr.contains("one.c"), "{stderr}");
+    assert!(stderr.contains("two.c"), "{stderr}");
+}
+
+#[test]
 fn batch_mode_reports_command_context() {
     let executable = fixture("build/test-programs/basic");
     assert!(

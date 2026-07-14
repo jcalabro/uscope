@@ -79,6 +79,7 @@ enum Command {
     Continue,
     Pause,
     Print,
+    Globals,
     Stepi,
     Step,
     Next,
@@ -146,6 +147,13 @@ const COMMANDS: &[CommandSpec] = &[
         ["p"],
         "print [variable]",
         "Print one or all visible variables"
+    ),
+    command!(
+        Globals,
+        "globals",
+        [],
+        "globals [filter]",
+        "List global variable metadata"
     ),
     command!(Stepi, "stepi", ["si"], "stepi", "Step one instruction"),
     command!(Step, "step", ["s"], "step", "Step into at source level"),
@@ -719,6 +727,7 @@ async fn execute(
             format_stop_with_source(debugger, debugger.pause().await?, renderer).await,
         )),
         Command::Print => execute_print(debugger, &mut words, spec.usage, renderer).await,
+        Command::Globals => execute_globals(debugger, &mut words, spec.usage, renderer).await,
         Command::Stepi => execute_step(debugger, StepKind::Instruction, renderer).await,
         Command::Step => execute_step(debugger, StepKind::IntoSource, renderer).await,
         Command::Next => execute_step(debugger, StepKind::OverSource, renderer).await,
@@ -823,15 +832,10 @@ async fn execute_print<'a>(
 ) -> uscope::Result<Control> {
     let argument = optional_argument(words, usage)?;
     match argument {
-        Some(name) => {
-            if !is_identifier(name) {
-                return Err(Error::InvalidCommand(usage.to_owned()));
-            }
-            Ok(Control::Continue(format_variable(
-                &debugger.variable(name).await?,
-                renderer,
-            )))
-        }
+        Some(name) => Ok(Control::Continue(format_variable(
+            &debugger.variable(name).await?,
+            renderer,
+        ))),
         None => Ok(Control::Continue(format_variables(
             &debugger.variables().await?,
             renderer,
@@ -850,10 +854,53 @@ fn optional_argument<'a>(
     Ok(argument)
 }
 
-fn is_identifier(value: &str) -> bool {
-    let mut characters = value.chars();
-    matches!(characters.next(), Some('_' | 'a'..='z' | 'A'..='Z'))
-        && characters.all(|character| matches!(character, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'))
+async fn execute_globals<'a>(
+    debugger: &DebuggerHandle,
+    words: &mut impl Iterator<Item = &'a str>,
+    usage: &str,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
+    let filter = optional_argument(words, usage)?.map(str::to_owned);
+    let page = debugger
+        .globals(uscope::GlobalVariableQuery {
+            filter,
+            ..uscope::GlobalVariableQuery::default()
+        })
+        .await?;
+    let mut lines = page
+        .variables
+        .iter()
+        .map(|entry| {
+            let type_name = match &entry.variable.type_info {
+                uscope::GlobalVariableType::Scalar(type_info) => type_info.name.as_ref(),
+                uscope::GlobalVariableType::Unsupported(_) => "<unsupported type>",
+                uscope::GlobalVariableType::Malformed(_) => "<malformed type>",
+                _ => "<unknown type>",
+            };
+            format!(
+                "{} ({})",
+                renderer.paint(Role::Name, &entry.variable.qualified_name),
+                renderer.paint(Role::Type, type_name)
+            )
+        })
+        .collect::<Vec<_>>();
+    let shown = u64::try_from(page.variables.len()).expect("page length fits u64");
+    if page.offset.saturating_add(shown) < page.total {
+        lines.push(
+            renderer
+                .paint(
+                    Role::Warning,
+                    format!(
+                        "showing {}..{} of {}; use the API pagination fields for more",
+                        page.offset,
+                        page.offset.saturating_add(shown),
+                        page.total
+                    ),
+                )
+                .to_string(),
+        );
+    }
+    Ok(Control::Continue(lines.join("\n")))
 }
 
 fn execute_help<'a>(
@@ -1615,19 +1662,10 @@ mod tests {
     }
 
     #[test]
-    fn variable_identifier_grammar_reserves_expressions_for_later() {
-        for valid in ["value", "_value", "value2"] {
-            assert!(is_identifier(valid));
-        }
-        for invalid in ["", "2value", "value.member", "*value", "left + right"] {
-            assert!(!is_identifier(invalid));
-        }
-    }
-
-    #[test]
     fn char_rendering_escapes_quote_and_backslash() {
         let variable = |value: i128| uscope::Variable {
             kind: uscope::VariableKind::Local,
+            global: None,
             name: "c".into(),
             declaration: None,
             type_info: Some(uscope::BaseType {

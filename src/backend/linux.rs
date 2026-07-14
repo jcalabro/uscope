@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fs;
 use std::marker::PhantomData;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -14,17 +15,18 @@ use nix::sys::ptrace::{self, Options};
 use nix::sys::signal::{self, Signal as NixSignal};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
-use object::{Object, ObjectSegment};
+use object::{Object, ObjectSection, ObjectSegment};
 use tokio::sync::{broadcast, mpsc};
 
 use super::ControllerMessage;
+mod thread_db;
 use crate::debug_info::{UnwindInfo, VariableInfo, VariableRegister, VariableRuntime};
 use crate::model::FrameMetadata;
 use crate::protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
-    ExecutionId, ExitStatus, FramePresentation, InferiorState, PresentedFrame, ProcessId, Reply,
-    Request, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
-    ThreadSnapshot, ThreadState as ObservableThreadState, VariableQuery,
+    ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, InferiorState, PresentedFrame,
+    ProcessId, Reply, Request, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind,
+    StopId, StopReason, ThreadSnapshot, ThreadState as ObservableThreadState, VariableQuery,
 };
 use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, MemoryReader, RegisterFile,
@@ -32,10 +34,11 @@ use crate::unwind::{
 };
 use crate::{
     Backtrace, BreakpointLocation, CodeInstanceId, CodeInstanceKind, Error, ExecutionLocation,
-    FrameKind, ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, ModuleImage,
-    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, Result,
-    SourceLocation, StackFrame, ThreadId as DebugThreadId, UnwindTermination, VariableSnapshot,
-    VariableUnavailableReason, VirtualAddress,
+    FrameKind, GlobalVariablePage, GlobalVariableReference, ImageAddress, ImageLocation,
+    InlineFrameLookup, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
+    LoadedModuleSnapshot, ModuleImage, RegisterDescriptor, RegisterId, RegisterRole,
+    RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame, ThreadId as DebugThreadId,
+    UnwindTermination, VariableSnapshot, VariableUnavailableReason, VirtualAddress,
 };
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
@@ -288,6 +291,20 @@ struct Inferior {
     exec_unsupported: bool,
 }
 
+struct RuntimeModule {
+    loaded: LoadedModule,
+    image: Arc<ModuleImage>,
+    variables: Arc<dyn VariableInfo>,
+    link_map: Option<VirtualAddress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModuleMapping {
+    path: PathBuf,
+    start: u64,
+    file_offset: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum LinuxError {
     #[error("system tracing operation failed: {0}")]
@@ -298,6 +315,10 @@ enum LinuxError {
     UnexpectedWait(String),
     #[error("could not determine load bias for {0}")]
     LoadBias(PathBuf),
+    #[error("invalid process mapping: {0}")]
+    InvalidMapping(String),
+    #[error("dynamic-loader rendezvous is malformed: {0}")]
+    LoaderRendezvous(String),
     #[error("another Linux tracing session is already active in this process")]
     SessionActive,
     #[error("unsupported clone created a different thread group {0}")]
@@ -314,6 +335,10 @@ enum LinuxError {
     BreakpointOwnerMissing(VirtualAddress),
     #[error("logical breakpoint identifiers were exhausted")]
     BreakpointIdExhausted,
+    #[error("loaded module identifiers were exhausted")]
+    ModuleIdExhausted,
+    #[error("module image identifiers were exhausted")]
+    ModuleImageIdExhausted,
     #[error("breakpoint installation failed ({cause}) and rollback also failed ({recovery})")]
     BreakpointInstallRecovery { cause: String, recovery: String },
     #[error("breakpoint removal failed ({cause}) and rollback also failed ({recovery})")]
@@ -330,6 +355,9 @@ struct Controller<P: LinuxTraceOps> {
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
     variable_info: Arc<dyn VariableInfo>,
+    modules: BTreeMap<crate::ModuleId, RuntimeModule>,
+    next_module_id: u32,
+    next_image_id: u32,
     messages: mpsc::Receiver<ControllerMessage>,
     message_sender: mpsc::Sender<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
@@ -389,12 +417,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         channels: ControllerChannels,
         ptrace: P,
     ) -> Self {
+        let main = RuntimeModule {
+            loaded: LoadedModule::main(module_image.id(), 0),
+            image: Arc::clone(&module_image),
+            variables: Arc::clone(&variable_info),
+            link_map: None,
+        };
         Self {
             _lease: lease,
             executable,
             module_image,
             unwind_info,
             variable_info,
+            modules: BTreeMap::from([(main.loaded.id, main)]),
+            next_module_id: 1,
+            next_image_id: 1,
             messages: channels.messages,
             message_sender: channels.message_sender,
             events: channels.events,
@@ -491,6 +528,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::LoadedModule { reply } => {
                 let _ = reply.send(self.loaded_module());
             }
+            Request::LoadedModules { reply } => {
+                let _ = reply.send(self.loaded_modules());
+            }
             Request::StoppedLocation {
                 stop_id,
                 thread_id,
@@ -522,6 +562,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.variables(stop_id, debug_pid(thread_id), &query));
+            }
+            Request::Globals { query, reply } => {
+                let _ = reply.send(self.globals(&query));
             }
             Request::SelectThread {
                 stop_id,
@@ -886,6 +929,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         let load_bias = self.ptrace.load_bias(pid, &self.executable)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
+        self.modules
+            .get_mut(&crate::ModuleId::new(0))
+            .expect("main module is registered")
+            .loaded = inferior.loaded_module;
 
         for breakpoint in &self.breakpoints {
             install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
@@ -2741,6 +2788,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             self.cleanup_plan_breakpoints(execution)?;
         }
+        self.refresh_modules()?;
         let (triggering_thread, reason) = self
             .inferior
             .as_ref()
@@ -2932,6 +2980,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if let Some(waiter) = inferior.waiter.take() {
                 waiter.join().map_err(|_| Error::BackendThreadPanicked)?;
             }
+            self.reset_runtime_modules();
             self.bump_revision();
             let _ = self.events.send(DebuggerEvent::InferiorExited {
                 revision: self.revision,
@@ -3182,6 +3231,52 @@ impl<P: LinuxTraceOps> Controller<P> {
             .ok_or(Error::NotRunning)
     }
 
+    fn loaded_modules(&self) -> Result<LoadedModuleSnapshot> {
+        self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        Ok(LoadedModuleSnapshot {
+            revision: self.revision,
+            modules: self
+                .modules
+                .values()
+                .map(|module| LoadedModuleRecord {
+                    module: module.loaded,
+                    path: Arc::new(module.image.path().to_owned()),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        })
+    }
+
+    fn unregister_module(&mut self, id: crate::ModuleId) {
+        let module = self.modules.remove(&id).expect("registered module exists");
+        self.bump_revision();
+        let _ = self.events.send(DebuggerEvent::ModuleUnloaded {
+            revision: self.revision,
+            module: crate::LoadedModuleRecord {
+                module: module.loaded,
+                path: Arc::new(module.image.path().to_owned()),
+            },
+        });
+    }
+
+    fn reset_runtime_modules(&mut self) {
+        let dynamic = self
+            .modules
+            .keys()
+            .copied()
+            .filter(|id| *id != crate::ModuleId::new(0))
+            .collect::<Vec<_>>();
+        for id in dynamic {
+            self.unregister_module(id);
+        }
+        let main = self
+            .modules
+            .get_mut(&crate::ModuleId::new(0))
+            .expect("main module is registered");
+        main.loaded = LoadedModule::main(main.image.id(), 0);
+        main.link_map = None;
+    }
+
     fn snapshot(&self) -> StateSnapshot {
         let Some(inferior) = self.inferior.as_ref() else {
             return StateSnapshot {
@@ -3314,6 +3409,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         ))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "local-first lookup keeps one stopped-state validation and runtime context"
+    )]
     fn variables(
         &self,
         stop_id: StopId,
@@ -3330,28 +3429,37 @@ impl<P: LinuxTraceOps> Controller<P> {
         let presentation = self.presentation_for_stopped_thread(pid)?;
         let frame = presentation.frame;
         let selected_instance = match &frame {
-            PresentedFrame::Physical => None,
-            PresentedFrame::Inline(instance) => Some(*instance),
-            PresentedFrame::Ambiguous(_) => return Err(Error::VariableContextUnsupported),
+            PresentedFrame::Physical => Some(None),
+            PresentedFrame::Inline(instance) => Some(Some(*instance)),
+            PresentedFrame::Ambiguous(_) => None,
         };
         let native = self.ptrace.registers(pid)?;
         let registers = x86_64_registers(&native);
         let instruction = VirtualAddress::new(native.rip);
-        let image_address = inferior.loaded_module.image_address(instruction)?;
-        if !self.module_image.contains_address(image_address) {
-            return Err(Error::LocationUnavailable);
-        }
-        let cfa = self
-            .unwind_info
-            .cfa(image_address, &registers)
-            .map_err(|termination| match termination {
-                UnwindTermination::UnsupportedUnwindInfo { feature }
-                    if feature.as_ref() == "CFA expression" =>
-                {
-                    VariableUnavailableReason::CfaExpression
-                }
-                other => VariableUnavailableReason::Other(format!("{other:?}").into()),
-            });
+        let image_address = inferior
+            .loaded_module
+            .image_address(instruction)
+            .ok()
+            .filter(|address| self.module_image.contains_address(*address));
+        let cfa = image_address.map_or_else(
+            || {
+                Err(VariableUnavailableReason::Other(
+                    "instruction is outside the main image".into(),
+                ))
+            },
+            |address| {
+                self.unwind_info
+                    .cfa(address, &registers)
+                    .map_err(|termination| match termination {
+                        UnwindTermination::UnsupportedUnwindInfo { feature }
+                            if feature.as_ref() == "CFA expression" =>
+                        {
+                            VariableUnavailableReason::CfaExpression
+                        }
+                        other => VariableUnavailableReason::Other(format!("{other:?}").into()),
+                    })
+            },
+        );
         let mut runtime = LinuxVariableRuntime {
             ptrace: &self.ptrace,
             pid,
@@ -3359,11 +3467,72 @@ impl<P: LinuxTraceOps> Controller<P> {
             breakpoints: &inferior.breakpoints,
             native: &native,
             floating: None,
-            cfa,
+            cfa: cfa.clone(),
+            link_map: self
+                .modules
+                .get(&inferior.loaded_module.id)
+                .and_then(|module| module.link_map),
         };
-        let variables =
-            self.variable_info
-                .inspect(image_address, selected_instance, query, &mut runtime)?;
+        let variables = match query {
+            VariableQuery::Global(global) => vec![self.inspect_loaded_global(
+                inferior,
+                pid,
+                &native,
+                instruction,
+                &cfa,
+                *global,
+            )?],
+            VariableQuery::All => {
+                let image_address = image_address.ok_or(Error::VariableContextUnsupported)?;
+                let selected = selected_instance.ok_or(Error::VariableContextUnsupported)?;
+                self.variable_info
+                    .inspect(image_address, selected, query, &mut runtime)?
+            }
+            VariableQuery::Name(name) => {
+                let local = image_address.zip(selected_instance).map_or_else(
+                    || Err(Error::VariableNotFound(name.clone())),
+                    |(address, selected)| {
+                        self.variable_info
+                            .inspect(address, selected, query, &mut runtime)
+                    },
+                );
+                match local {
+                    Ok(variables) => variables,
+                    Err(Error::VariableNotFound(_)) => {
+                        let mut matches = Vec::new();
+                        for module in self.modules.values() {
+                            match module.image.global_named(name) {
+                                Ok(global) => matches.push(GlobalVariableReference {
+                                    module: module.loaded.id,
+                                    image: module.loaded.image,
+                                    variable: global.id,
+                                }),
+                                Err(Error::VariableNotFound(_)) => {}
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        let [global] = matches.as_slice() else {
+                            if matches.is_empty() {
+                                return Err(Error::VariableNotFound(name.clone()));
+                            }
+                            return Err(Error::AmbiguousLoadedGlobalVariable {
+                                selector: name.clone(),
+                                candidates: matches,
+                            });
+                        };
+                        vec![self.inspect_loaded_global(
+                            inferior,
+                            pid,
+                            &native,
+                            instruction,
+                            &cfa,
+                            *global,
+                        )?]
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
         Ok(VariableSnapshot {
             revision: self.revision,
             stop_id,
@@ -3372,6 +3541,190 @@ impl<P: LinuxTraceOps> Controller<P> {
             target: self.module_image.target(),
             variables: variables.into(),
         })
+    }
+
+    fn inspect_loaded_global(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+        native: &libc::user_regs_struct,
+        instruction: VirtualAddress,
+        cfa: &std::result::Result<VirtualAddress, VariableUnavailableReason>,
+        global: GlobalVariableReference,
+    ) -> Result<crate::Variable> {
+        let module = self
+            .modules
+            .get(&global.module)
+            .ok_or(Error::ModuleNotLoaded(global.module))?;
+        if module.loaded.image != global.image {
+            return Err(Error::StaleModuleImage);
+        }
+        let context_address = module
+            .loaded
+            .image_address(instruction)
+            .ok()
+            .filter(|address| module.image.contains_address(*address))
+            .unwrap_or(ImageAddress::new(0));
+        let mut runtime = LinuxVariableRuntime {
+            ptrace: &self.ptrace,
+            pid,
+            loaded_module: module.loaded,
+            breakpoints: &inferior.breakpoints,
+            native,
+            floating: None,
+            cfa: cfa.clone(),
+            link_map: module.link_map,
+        };
+        let mut variable =
+            module
+                .variables
+                .inspect_global(global.variable, context_address, &mut runtime)?;
+        variable.global = Some(global);
+        Ok(variable)
+    }
+
+    fn globals(&self, query: &GlobalVariableQuery) -> Result<GlobalVariablePage> {
+        if !(1..=256).contains(&query.limit) {
+            return Err(Error::InvalidGlobalPageLimit(query.limit));
+        }
+        let running = self.inferior.is_some();
+        let mut matches = self
+            .modules
+            .values()
+            .flat_map(|module| {
+                module
+                    .image
+                    .globals()
+                    .iter()
+                    .filter(|global| {
+                        query.filter.as_ref().is_none_or(|filter| {
+                            global.name.contains(filter)
+                                || global.qualified_name.contains(filter)
+                                || global
+                                    .linkage_name
+                                    .as_ref()
+                                    .is_some_and(|linkage| linkage.contains(filter))
+                        })
+                    })
+                    .map(|global| LoadedGlobalVariableInfo {
+                        module: running.then_some(module.loaded),
+                        image: module.image.id(),
+                        variable: global.clone(),
+                    })
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| {
+            left.variable
+                .qualified_name
+                .cmp(&right.variable.qualified_name)
+                .then_with(|| left.image.cmp(&right.image))
+                .then_with(|| left.variable.id.cmp(&right.variable.id))
+        });
+        let total = u64::try_from(matches.len()).expect("global count fits u64");
+        let start = usize::try_from(query.offset)
+            .unwrap_or(usize::MAX)
+            .min(matches.len());
+        let end = start
+            .saturating_add(usize::try_from(query.limit).expect("u32 fits usize"))
+            .min(matches.len());
+        let variables = matches[start..end].to_vec().into();
+        Ok(GlobalVariablePage {
+            revision: self.revision,
+            offset: query.offset,
+            total,
+            variables,
+        })
+    }
+
+    fn refresh_modules(&mut self) -> Result<()> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let pid = inferior.tgid;
+        let main_loaded = inferior.loaded_module;
+        let mut observed = Vec::<(PathBuf, u64)>::new();
+        for mapping in self.ptrace.module_mappings(pid)? {
+            let path = fs::canonicalize(&mapping.path)?;
+            if path == *self.executable {
+                continue;
+            }
+            let bias = mapped_module_load_bias(&ModuleMapping {
+                path: path.clone(),
+                ..mapping
+            })?;
+            observed.push((path, bias));
+        }
+        observed.sort();
+        observed.dedup();
+        let link_maps = loader_link_maps(&self.ptrace, pid, &self.executable, main_loaded)?;
+
+        let observed_modules = observed.iter().cloned().collect::<BTreeSet<_>>();
+        let unloaded = self
+            .modules
+            .iter()
+            .filter(|(id, module)| {
+                **id != crate::ModuleId::new(0)
+                    && !observed_modules
+                        .contains(&(module.image.path().to_owned(), module.loaded.load_bias))
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in unloaded {
+            self.unregister_module(id);
+        }
+
+        for (path, load_bias) in observed {
+            let existing = self.modules.iter().find_map(|(id, module)| {
+                (module.image.path() == path && module.loaded.load_bias == load_bias).then_some(*id)
+            });
+            if let Some(id) = existing {
+                self.modules
+                    .get_mut(&id)
+                    .expect("observed module exists")
+                    .link_map = link_maps.get(&load_bias).copied();
+                continue;
+            }
+            let module_id = crate::ModuleId::new(self.next_module_id);
+            self.next_module_id = self
+                .next_module_id
+                .checked_add(1)
+                .ok_or_else(|| backend_error(LinuxError::ModuleIdExhausted))?;
+            let image_id = crate::ModuleImageId::new(self.next_image_id);
+            self.next_image_id = self
+                .next_image_id
+                .checked_add(1)
+                .ok_or_else(|| backend_error(LinuxError::ModuleImageIdExhausted))?;
+            let debug = crate::debug_info::load_module(&path, image_id)?;
+            let loaded = LoadedModule {
+                id: module_id,
+                image: image_id,
+                load_bias,
+            };
+            self.modules.insert(
+                module_id,
+                RuntimeModule {
+                    loaded,
+                    image: debug.image,
+                    variables: debug.variables,
+                    link_map: link_maps.get(&load_bias).copied(),
+                },
+            );
+            self.bump_revision();
+            let _ = self.events.send(DebuggerEvent::ModuleLoaded {
+                revision: self.revision,
+                module: crate::LoadedModuleRecord {
+                    module: loaded,
+                    path: Arc::new(path),
+                },
+            });
+        }
+        self.modules
+            .get_mut(&main_loaded.id)
+            .expect("main module is registered")
+            .loaded = main_loaded;
+        self.modules
+            .get_mut(&main_loaded.id)
+            .expect("main module is registered")
+            .link_map = link_maps.get(&main_loaded.load_bias).copied();
+        Ok(())
     }
 
     fn select_thread(&mut self, stop_id: StopId, pid: Pid) -> Result<()> {
@@ -3782,6 +4135,7 @@ struct LinuxVariableRuntime<'a, P> {
     native: &'a libc::user_regs_struct,
     floating: Option<std::result::Result<libc::user_fpregs_struct, Arc<str>>>,
     cfa: std::result::Result<VirtualAddress, VariableUnavailableReason>,
+    link_map: Option<VirtualAddress>,
 }
 
 impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
@@ -3812,6 +4166,17 @@ impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
 
     fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
         self.cfa.clone()
+    }
+
+    fn tls_address(
+        &mut self,
+        offset: u64,
+    ) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
+        let link_map = self.link_map.ok_or_else(|| {
+            VariableUnavailableReason::Other("module has no loader link_map".into())
+        })?;
+        thread_db::tls_address(self.pid, self.pid, link_map, offset)
+            .map_err(VariableUnavailableReason::Other)
     }
 
     fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
@@ -4136,6 +4501,11 @@ trait LinuxTraceOps {
     fn reap(&self, pid: Pid) -> Result<()>;
     fn thread_group_id(&self, pid: Pid) -> Result<Pid>;
     fn load_bias(&self, pid: Pid, executable: &Path) -> Result<u64>;
+    fn module_mappings(&self, _pid: Pid) -> Result<Vec<ModuleMapping>> {
+        // Deterministic effect fakes opt out of host /proc inspection. The
+        // production ptrace edge overrides this method.
+        Ok(Vec::new())
+    }
     fn read_word(&self, pid: Pid, address: u64) -> Result<u64>;
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()>;
     fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
@@ -4218,6 +4588,11 @@ impl LinuxTraceOps for LinuxPtrace {
     fn load_bias(&self, pid: Pid, executable: &Path) -> Result<u64> {
         self.assert_owner_thread();
         load_bias(pid, executable)
+    }
+
+    fn module_mappings(&self, pid: Pid) -> Result<Vec<ModuleMapping>> {
+        self.assert_owner_thread();
+        module_mappings(pid)
     }
 
     fn spawn(&self, executable: &Path) -> Result<Pid> {
@@ -4812,6 +5187,134 @@ fn load_bias(pid: Pid, executable: &Path) -> Result<u64> {
     )))
 }
 
+fn module_mappings(pid: Pid) -> Result<Vec<ModuleMapping>> {
+    let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    parse_module_mappings(&maps)
+}
+
+fn loader_link_maps(
+    ptrace: &impl LinuxTraceOps,
+    pid: Pid,
+    executable: &Path,
+    main: LoadedModule,
+) -> Result<BTreeMap<u64, VirtualAddress>> {
+    const DYNAMIC_ENTRY_SIZE: u64 = 16;
+    const DT_NULL: u64 = 0;
+    const DT_DEBUG: u64 = 21;
+    const MAX_LINK_MAPS: usize = 1_024;
+
+    let data = fs::read(executable)?;
+    let object = object::File::parse(data.as_slice())
+        .map_err(|error| Error::backend(LinuxError::Object(error)))?;
+    let Some(dynamic) = object.section_by_name(".dynamic") else {
+        return Ok(BTreeMap::new());
+    };
+    let dynamic_start = main.virtual_address(ImageAddress::new(dynamic.address()))?;
+    let entries = dynamic.size() / DYNAMIC_ENTRY_SIZE;
+    let mut rendezvous = None;
+    for index in 0..entries {
+        let address = dynamic_start
+            .get()
+            .checked_add(index.saturating_mul(DYNAMIC_ENTRY_SIZE))
+            .ok_or(Error::AddressOverflow)?;
+        let tag = ptrace.read_word(pid, address)?;
+        if tag == DT_NULL {
+            break;
+        }
+        if tag == DT_DEBUG {
+            rendezvous = Some(VirtualAddress::new(read_word_offset(
+                ptrace, pid, address, 8,
+            )?));
+            break;
+        }
+    }
+    let Some(rendezvous) = rendezvous.filter(|address| address.get() != 0) else {
+        return Ok(BTreeMap::new());
+    };
+    // The public ELF loader rendezvous begins with r_version followed by the
+    // aligned r_map pointer. Each public link_map begins with l_addr and ends
+    // its debugger-visible prefix with l_next/l_prev.
+    let mut current = VirtualAddress::new(read_word_offset(ptrace, pid, rendezvous.get(), 8)?);
+    let mut visited = BTreeSet::new();
+    let mut result = BTreeMap::new();
+    while current.get() != 0 {
+        if result.len() == MAX_LINK_MAPS || !visited.insert(current) {
+            return Err(backend_error(LinuxError::LoaderRendezvous(
+                "link_map traversal exceeded its bound or formed a cycle".to_owned(),
+            )));
+        }
+        let load_bias = ptrace.read_word(pid, current.get())?;
+        result.insert(load_bias, current);
+        current = VirtualAddress::new(read_word_offset(ptrace, pid, current.get(), 24)?);
+    }
+    Ok(result)
+}
+
+fn read_word_offset(ptrace: &impl LinuxTraceOps, pid: Pid, base: u64, offset: u64) -> Result<u64> {
+    ptrace.read_word(pid, base.checked_add(offset).ok_or(Error::AddressOverflow)?)
+}
+
+fn parse_module_mappings(maps: &str) -> Result<Vec<ModuleMapping>> {
+    let mut mappings = Vec::new();
+    for line in maps.lines() {
+        let mut fields = line.split_whitespace();
+        let range = fields
+            .next()
+            .ok_or_else(|| backend_error(LinuxError::InvalidMapping(line.to_owned())))?;
+        let permissions = fields
+            .next()
+            .ok_or_else(|| backend_error(LinuxError::InvalidMapping(line.to_owned())))?;
+        let offset = fields
+            .next()
+            .ok_or_else(|| backend_error(LinuxError::InvalidMapping(line.to_owned())))?;
+        let _device = fields.next();
+        let inode = fields.next().unwrap_or("0");
+        let Some(path) = fields.next() else { continue };
+        if !permissions.contains('x') || inode == "0" || !path.starts_with('/') {
+            continue;
+        }
+        let path = path.strip_suffix(" (deleted)").unwrap_or(path);
+        let start = range
+            .split_once('-')
+            .and_then(|(start, _)| u64::from_str_radix(start, 16).ok())
+            .ok_or_else(|| backend_error(LinuxError::InvalidMapping(line.to_owned())))?;
+        let file_offset = u64::from_str_radix(offset, 16)
+            .map_err(|_| backend_error(LinuxError::InvalidMapping(line.to_owned())))?;
+        mappings.push(ModuleMapping {
+            path: PathBuf::from(path),
+            start,
+            file_offset,
+        });
+    }
+    mappings.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.start.cmp(&right.start))
+            .then_with(|| left.file_offset.cmp(&right.file_offset))
+    });
+    mappings.dedup();
+    Ok(mappings)
+}
+
+fn mapped_module_load_bias(mapping: &ModuleMapping) -> Result<u64> {
+    const PAGE_MASK: u64 = !0xfff;
+    let data = fs::read(&mapping.path)?;
+    let object = object::File::parse(data.as_slice())
+        .map_err(|error| Error::backend(LinuxError::Object(error)))?;
+    for segment in object.segments() {
+        let (file_offset, _) = segment.file_range();
+        if file_offset & PAGE_MASK != mapping.file_offset {
+            continue;
+        }
+        let image_start = segment.address() & PAGE_MASK;
+        return mapping
+            .start
+            .checked_sub(image_start)
+            .ok_or_else(|| backend_error(LinuxError::LoadBias(mapping.path.clone())));
+    }
+    Err(backend_error(LinuxError::LoadBias(mapping.path.clone())))
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -4819,6 +5322,39 @@ mod tests {
 
     use super::*;
     use crate::{AddressRange, ImageAddress};
+
+    #[test]
+    fn module_mapping_parser_preserves_distinct_loads_and_rejects_corruption() {
+        let maps = concat!(
+            "1000-2000 r--p 00000000 00:01 7 /opt/lib/libsame.so\n",
+            "2000-3000 r-xp 00001000 00:01 7 /opt/lib/libsame.so\n",
+            "5000-6000 r-xp 00001000 00:01 7 /opt/lib/libsame.so\n",
+            "7000-8000 r-xp 00000000 00:01 8 /opt/bin/app (deleted)\n",
+            "8000-9000 r-xp 00000000 00:00 0 [vdso]\n",
+        );
+
+        assert_eq!(
+            parse_module_mappings(maps).expect("valid maps"),
+            vec![
+                ModuleMapping {
+                    path: PathBuf::from("/opt/bin/app"),
+                    start: 0x7000,
+                    file_offset: 0,
+                },
+                ModuleMapping {
+                    path: PathBuf::from("/opt/lib/libsame.so"),
+                    start: 0x2000,
+                    file_offset: 0x1000,
+                },
+                ModuleMapping {
+                    path: PathBuf::from("/opt/lib/libsame.so"),
+                    start: 0x5000,
+                    file_offset: 0x1000,
+                },
+            ]
+        );
+        assert!(parse_module_mappings("not-a-mapping").is_err());
+    }
 
     #[test]
     fn logical_memory_reads_unaligned_cross_word_ranges_and_hides_traps() {
@@ -5008,6 +5544,15 @@ mod tests {
         ) -> Result<Vec<crate::Variable>> {
             panic!("unexpected variable lookup")
         }
+
+        fn inspect_global(
+            &self,
+            _id: crate::GlobalVariableId,
+            _address: ImageAddress,
+            _runtime: &mut dyn VariableRuntime,
+        ) -> Result<crate::Variable> {
+            panic!("unexpected global variable lookup")
+        }
     }
 
     #[test]
@@ -5033,6 +5578,7 @@ mod tests {
                 functions: Vec::new(),
                 code_instances: Vec::new(),
                 symbols: Vec::new(),
+                globals: Vec::new(),
                 source_files: Vec::new(),
                 statements: Vec::new(),
                 lines: Vec::new(),
@@ -5250,6 +5796,7 @@ mod tests {
                     },
                 ],
                 symbols: Vec::new(),
+                globals: Vec::new(),
                 source_files: Vec::new(),
                 statements: Vec::new(),
                 lines: Vec::new(),

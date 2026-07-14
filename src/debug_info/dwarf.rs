@@ -62,11 +62,14 @@ struct DwarfUnwindInfo {
     bases: BaseAddresses,
 }
 
-pub fn load(path: &Path) -> Result<DebugInfo> {
-    load_debug_info(path).map_err(Error::debug_info)
+pub fn load(path: &Path, image_id: crate::ModuleImageId) -> Result<DebugInfo> {
+    load_debug_info(path, image_id).map_err(Error::debug_info)
 }
 
-fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
+fn load_debug_info(
+    path: &Path,
+    image_id: crate::ModuleImageId,
+) -> std::result::Result<DebugInfo, DwarfError> {
     let data = fs::read(path)?;
     let object = object::File::parse(data.as_slice())?;
     let target = target_description(&object)?;
@@ -129,25 +132,29 @@ fn load_debug_info(path: &Path) -> std::result::Result<DebugInfo, DwarfError> {
         &mut source_files,
         &mut source_file_ids,
     )?;
-    let image = Arc::new(ModuleImage::new(
-        path.to_owned(),
-        target,
-        image_address_range(&object)?,
-        ModuleMetadata {
-            functions: function_metadata.functions,
-            code_instances: function_metadata.code_instances,
-            symbols: load_symbols(&object),
-            source_files,
-            statements,
-            lines,
-        },
-    ));
+    let image = Arc::new(
+        ModuleImage::new(
+            path.to_owned(),
+            target,
+            image_address_range(&object)?,
+            ModuleMetadata {
+                functions: function_metadata.functions,
+                code_instances: function_metadata.code_instances,
+                symbols: load_symbols(&object),
+                globals: variables.globals,
+                source_files,
+                statements,
+                lines,
+            },
+        )
+        .with_id(image_id),
+    );
     let unwind = Arc::new(load_unwind_info(&object, target)?);
 
     Ok(DebugInfo {
         image,
         unwind,
-        variables,
+        variables: variables.info,
     })
 }
 
