@@ -2788,7 +2788,18 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             self.cleanup_plan_breakpoints(execution)?;
         }
-        self.refresh_modules()?;
+        // Once the inferior has replaced its image via exec(2), the loaded
+        // modules and loader rendezvous no longer correspond to `self.executable`.
+        // Refreshing against the stale executable would read the new address
+        // space through the old image and can fail the whole stop, killing the
+        // inferior instead of surfacing the exec stop.
+        let exec_replaced = self
+            .inferior
+            .as_ref()
+            .is_some_and(|inferior| inferior.exec_unsupported);
+        if !exec_replaced {
+            self.refresh_modules()?;
+        }
         let (triggering_thread, reason) = self
             .inferior
             .as_ref()
@@ -3422,6 +3433,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
+        // After exec(2) the retained module catalog and image metadata describe
+        // the previous program, but the stopped thread now executes the new
+        // image. Resolving a variable against stale metadata would silently
+        // produce a convincing but incorrect value, so refuse inspection in the
+        // exec-replaced state exactly as run control does.
+        if inferior.exec_unsupported {
+            return Err(backend_error(LinuxError::UnsupportedExec));
+        }
         // Source-level visibility follows the selected logical frame: an
         // inline presentation scopes lookup to that instance's variables, a
         // physical presentation to the containing function's own variables.
@@ -3559,12 +3578,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         if module.loaded.image != global.image {
             return Err(Error::StaleModuleImage);
         }
+        // The instruction context selects range-gated location entries. When the
+        // stopped thread's PC does not fall within this module (common for a DSO
+        // global while stopped in the main executable), pass `None` so the debug
+        // provider refuses to guess rather than resolving against address zero.
         let context_address = module
             .loaded
             .image_address(instruction)
             .ok()
-            .filter(|address| module.image.contains_address(*address))
-            .unwrap_or(ImageAddress::new(0));
+            .filter(|address| module.image.contains_address(*address));
         let mut runtime = LinuxVariableRuntime {
             ptrace: &self.ptrace,
             pid,
@@ -5257,7 +5279,11 @@ fn read_word_offset(ptrace: &impl LinuxTraceOps, pid: Pid, base: u64, offset: u6
 fn parse_module_mappings(maps: &str) -> Result<Vec<ModuleMapping>> {
     let mut mappings = Vec::new();
     for line in maps.lines() {
-        let mut fields = line.split_whitespace();
+        // The pathname is the sixth field and may itself contain spaces, so it
+        // must be taken as the untouched remainder of the line rather than one
+        // whitespace-delimited token. The kernel escapes control characters but
+        // not spaces in this field.
+        let mut fields = line.splitn(6, char::is_whitespace);
         let range = fields
             .next()
             .ok_or_else(|| backend_error(LinuxError::InvalidMapping(line.to_owned())))?;
@@ -5269,7 +5295,9 @@ fn parse_module_mappings(maps: &str) -> Result<Vec<ModuleMapping>> {
             .ok_or_else(|| backend_error(LinuxError::InvalidMapping(line.to_owned())))?;
         let _device = fields.next();
         let inode = fields.next().unwrap_or("0");
-        let Some(path) = fields.next() else { continue };
+        let Some(path) = fields.next().map(str::trim_start) else {
+            continue;
+        };
         if !permissions.contains('x') || inode == "0" || !path.starts_with('/') {
             continue;
         }
@@ -5330,6 +5358,9 @@ mod tests {
             "2000-3000 r-xp 00001000 00:01 7 /opt/lib/libsame.so\n",
             "5000-6000 r-xp 00001000 00:01 7 /opt/lib/libsame.so\n",
             "7000-8000 r-xp 00000000 00:01 8 /opt/bin/app (deleted)\n",
+            // The kernel pads the pathname column and does not escape spaces
+            // within the path itself; both must survive parsing intact.
+            "9000-a000 r-xp 00000000 00:01 9     /opt/my libs/libspace.so\n",
             "8000-9000 r-xp 00000000 00:00 0 [vdso]\n",
         );
 
@@ -5350,6 +5381,11 @@ mod tests {
                     path: PathBuf::from("/opt/lib/libsame.so"),
                     start: 0x5000,
                     file_offset: 0x1000,
+                },
+                ModuleMapping {
+                    path: PathBuf::from("/opt/my libs/libspace.so"),
+                    start: 0x9000,
+                    file_offset: 0,
                 },
             ]
         );
@@ -5548,7 +5584,7 @@ mod tests {
         fn inspect_global(
             &self,
             _id: crate::GlobalVariableId,
-            _address: ImageAddress,
+            _address: Option<ImageAddress>,
             _runtime: &mut dyn VariableRuntime,
         ) -> Result<crate::Variable> {
             panic!("unexpected global variable lookup")
