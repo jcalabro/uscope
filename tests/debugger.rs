@@ -367,9 +367,10 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 null.state,
                 VariableState::Available {
                     value: uscope::VariableValue::Address(uscope::AddressValue { address }),
-                    dereference: uscope::DereferenceState::Unavailable(
-                        uscope::DereferenceUnavailableReason::Null
-                    ),
+                    dereference: uscope::DereferenceState::Unavailable {
+                        reason: uscope::DereferenceUnavailableReason::Null,
+                        ..
+                    },
                     ..
                 } if address.get() == 0
             ),
@@ -406,9 +407,10 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 matches!(
                     void_pointer.state,
                     VariableState::Available {
-                        dereference: uscope::DereferenceState::Unavailable(
-                            uscope::DereferenceUnavailableReason::UnspecifiedPointee
-                        ),
+                        dereference: uscope::DereferenceState::Unavailable {
+                            reason: uscope::DereferenceUnavailableReason::UnspecifiedPointee,
+                            ..
+                        },
                         ..
                     }
                 ),
@@ -583,9 +585,10 @@ async fn unsupported_pointee_shapes_remain_printable_without_unsafe_reads() {
                     variable.state,
                     VariableState::Available {
                         value: uscope::VariableValue::Address(_),
-                        dereference: uscope::DereferenceState::Unavailable(
-                            uscope::DereferenceUnavailableReason::UnsupportedPointee(_)
-                        ),
+                        dereference: uscope::DereferenceState::Unavailable {
+                            reason: uscope::DereferenceUnavailableReason::UnsupportedPointee(_),
+                            ..
+                        },
                         ..
                     }
                 ),
@@ -2616,9 +2619,10 @@ async fn go_package_globals_are_printable_without_source_stepping() {
     assert!(matches!(
         nil.state,
         VariableState::Available {
-            dereference: uscope::DereferenceState::Unavailable(
-                uscope::DereferenceUnavailableReason::Null
-            ),
+            dereference: uscope::DereferenceState::Unavailable {
+                reason: uscope::DereferenceUnavailableReason::Null,
+                ..
+            },
             ..
         }
     ));
@@ -2631,9 +2635,10 @@ async fn go_package_globals_are_printable_without_source_stepping() {
     assert!(matches!(
         pair.state,
         VariableState::Available {
-            dereference: uscope::DereferenceState::Unavailable(
-                uscope::DereferenceUnavailableReason::UnsupportedPointee(_)
-            ),
+            dereference: uscope::DereferenceState::Unavailable {
+                reason: uscope::DereferenceUnavailableReason::UnsupportedPointee(_),
+                ..
+            },
             ..
         }
     ));
@@ -3235,9 +3240,10 @@ async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
         matches!(
             nil_pointer.state,
             VariableState::Available {
-                dereference: uscope::DereferenceState::Unavailable(
-                    uscope::DereferenceUnavailableReason::Null
-                ),
+                dereference: uscope::DereferenceState::Unavailable {
+                    reason: uscope::DereferenceUnavailableReason::Null,
+                    ..
+                },
                 ..
             }
         ),
@@ -3253,9 +3259,10 @@ async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
         matches!(
             structure_pointer.state,
             VariableState::Available {
-                dereference: uscope::DereferenceState::Unavailable(
-                    uscope::DereferenceUnavailableReason::UnsupportedPointee(_)
-                ),
+                dereference: uscope::DereferenceState::Unavailable {
+                    reason: uscope::DereferenceUnavailableReason::UnsupportedPointee(_),
+                    ..
+                },
                 ..
             }
         ),
@@ -3271,9 +3278,10 @@ async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
         matches!(
             recursive_pointer.state,
             VariableState::Available {
-                dereference: uscope::DereferenceState::Unavailable(
-                    uscope::DereferenceUnavailableReason::UnsupportedPointee(_)
-                ),
+                dereference: uscope::DereferenceState::Unavailable {
+                    reason: uscope::DereferenceUnavailableReason::UnsupportedPointee(_),
+                    ..
+                },
                 ..
             }
         ),

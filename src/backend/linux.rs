@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle, ThreadId};
 
 use nix::errno::Errno;
@@ -274,6 +274,35 @@ struct PublicStop {
     presentations: BTreeMap<Pid, FramePresentation>,
 }
 
+/// Allocates stop identifiers that are unique for the whole process lifetime.
+///
+/// A `DereferenceReference` (or any stopped-state capability) is a public value
+/// that can outlive the `Controller` that minted it. A per-controller counter
+/// would restart at the same value in a sequentially-created controller, so a
+/// stale capability whose thread and module identities happened to recur could
+/// authenticate against a newer inferior. Allocating process-wide guarantees no
+/// two stops ever share an id, closing that ABA reuse gap at its source.
+static NEXT_STOP_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_stop_id() -> StopId {
+    // `fetch_update` leaves the counter unchanged when the closure returns
+    // `None`, so exhaustion cannot wrap the atomic to zero and reissue low ids.
+    #[allow(
+        deprecated,
+        reason = "try_update is not yet stable on the pinned toolchain"
+    )]
+    let previous = NEXT_STOP_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("stop identifiers exhausted");
+    StopId::new(
+        previous
+            .checked_add(1)
+            .expect("successful atomic update proved the increment fits"),
+    )
+}
+
 struct Inferior {
     tgid: Pid,
     loaded_module: LoadedModule,
@@ -288,7 +317,6 @@ struct Inferior {
     public_stop: Option<PublicStop>,
     selected_thread: Option<Pid>,
     next_execution: u64,
-    next_stop: u64,
     next_barrier: u64,
     exec_unsupported: bool,
 }
@@ -911,7 +939,6 @@ impl<P: LinuxTraceOps> Controller<P> {
                     public_stop: None,
                     selected_thread: None,
                     next_execution: 1,
-                    next_stop: 0,
                     next_barrier: 0,
                     exec_unsupported: false,
                 });
@@ -1056,14 +1083,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             (
                 process_id(inferior.tgid),
                 ExecutionId::new(inferior.next_execution.wrapping_add(1)),
-                StopId::new(inferior.next_stop.wrapping_add(1)),
+                allocate_stop_id(),
                 presentation,
             )
         };
 
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.next_execution = execution_id.get();
-        inferior.next_stop = next_stop_id.get();
         let stop = inferior
             .public_stop
             .as_mut()
@@ -2812,13 +2838,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             .map(|barrier| (barrier.triggering_thread, barrier.reason.clone()))
             .expect("ready barrier exists");
         let presentation = self.presentation_for_thread(triggering_thread, &reason)?;
+        let stop_id = allocate_stop_id();
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         for thread in inferior.threads.values_mut() {
             thread.expected = ExpectedStop::None;
         }
         let barrier = inferior.barrier.take().expect("barrier exists");
-        inferior.next_stop = inferior.next_stop.wrapping_add(1);
-        let stop_id = StopId::new(inferior.next_stop);
         inferior.public_stop = Some(PublicStop {
             id: stop_id,
             triggering_thread: barrier.triggering_thread,
@@ -5797,7 +5822,14 @@ mod tests {
             .as_ref()
             .and_then(|inferior| inferior.public_stop.as_ref())
             .expect("new public stop");
-        assert_eq!(stop.id, StopId::new(2));
+        // Stop ids are allocated from a process-global counter, so the exact
+        // value depends on concurrent test order. Assert only the invariant: the
+        // virtual step minted a fresh id distinct from the launch stop (1).
+        assert!(
+            stop.id.get() > StopId::new(1).get(),
+            "virtual step must mint a fresh stop id past the launch stop: {:?}",
+            stop.id
+        );
         assert_eq!(
             stop.presentations.get(&pid),
             Some(&FramePresentation {
@@ -5958,12 +5990,23 @@ mod tests {
             },
             trace,
         );
+        controller.inferior = Some(virtual_step_inferior(pid, &image, StopId::new(1)));
+
+        VirtualStepHarness {
+            controller,
+            events: event_receiver,
+            actions,
+            pid,
+        }
+    }
+
+    fn virtual_step_inferior(pid: Pid, image: &ModuleImage, stop_id: StopId) -> Inferior {
         let presentation = FramePresentation {
             instruction: VirtualAddress::new(0x10),
             frame: PresentedFrame::Physical,
             hidden_inline_frames: 2,
         };
-        controller.inferior = Some(Inferior {
+        Inferior {
             tgid: pid,
             loaded_module: LoadedModule::main(image.id(), 0),
             breakpoints: BTreeMap::new(),
@@ -5986,24 +6029,83 @@ mod tests {
             repairs: VecDeque::new(),
             barrier: None,
             public_stop: Some(PublicStop {
-                id: StopId::new(1),
+                id: stop_id,
                 triggering_thread: pid,
                 reason: StopReason::Pause,
                 presentations: BTreeMap::from([(pid, presentation)]),
             }),
             selected_thread: Some(pid),
             next_execution: 1,
-            next_stop: 1,
             next_barrier: 0,
             exec_unsupported: false,
-        });
-
-        VirtualStepHarness {
-            controller,
-            events: event_receiver,
-            actions,
-            pid,
         }
+    }
+
+    /// A stop identifier minted for one inferior must never be reissued to a
+    /// later inferior, so a capability or request that echoes the earlier id is
+    /// rejected instead of silently authenticating against the new process.
+    #[test]
+    fn stop_identifiers_do_not_reset_across_controllers() {
+        // The first controller advances beyond its launch stop via a virtual
+        // step, capturing the stop id a stale capability would carry.
+        let VirtualStepHarness {
+            mut controller,
+            events: _events,
+            pid,
+            ..
+        } = virtual_step_controller();
+        let first_stop = controller
+            .try_virtual_step(process_id(pid), StopId::new(1), pid, StepKind::IntoSource)
+            .expect("virtual step")
+            .expect("hidden child exists");
+        assert_eq!(first_stop, ExecutionId::new(2));
+        let first_stop_id = controller
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.public_stop.as_ref())
+            .expect("first public stop")
+            .id;
+
+        // Tear the first controller down entirely and build a fresh one, as a
+        // sequential debugger session would. A controller-local counter would
+        // restart here and reissue `first_stop_id`; the process-wide allocator
+        // must not. The reused pid/module/image identities mirror OS reuse.
+        drop(controller);
+        let VirtualStepHarness {
+            mut controller,
+            events: _events,
+            pid,
+            ..
+        } = virtual_step_controller();
+
+        // A capability that captured the first controller's stop id must be
+        // rejected against the new controller's inferior, not authenticated.
+        let stale = validate_public_stop(
+            controller.inferior.as_ref().expect("relaunched inferior"),
+            Some(first_stop_id),
+        );
+        assert!(
+            matches!(stale, Err(Error::StaleStop)),
+            "stale stop id must not authenticate against a new controller: {stale:?}"
+        );
+
+        // The new controller's first synthesized stop keeps climbing past every
+        // id the process has ever issued, so ids are never reused.
+        let second_stop = controller
+            .try_virtual_step(process_id(pid), StopId::new(1), pid, StepKind::IntoSource)
+            .expect("virtual step")
+            .expect("hidden child exists");
+        assert_eq!(second_stop, ExecutionId::new(2));
+        let second_stop_id = controller
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.public_stop.as_ref())
+            .expect("second public stop")
+            .id;
+        assert!(
+            second_stop_id.get() > first_stop_id.get(),
+            "new controller stop id {second_stop_id:?} must exceed the prior {first_stop_id:?}"
+        );
     }
 
     #[test]

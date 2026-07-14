@@ -190,6 +190,10 @@ struct TypeArenaBuilder<'a, 'data> {
     image: ModuleImageId,
     by_die: HashMap<DieKey, TypeId>,
     entries: Vec<TypeEntry>,
+    /// DIE-boundary offsets per unit, indexed by unit position. A `DW_AT_type`
+    /// offset that is not in its unit's set points into the middle of a DIE and
+    /// is defective. Built once so target validation stays O(1) per reference.
+    die_offsets: Vec<HashSet<usize>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1310,19 +1314,16 @@ fn load_evaluation_units(
                 if entry.tag() != gimli::DW_TAG_base_type {
                     continue;
                 }
-                let Some(byte_size) = entry
-                    .attr(gimli::DW_AT_byte_size)
-                    .and_then(gimli::Attribute::udata_value)
-                else {
+                // Use the shared constant/encoding classifiers so a base type
+                // encoded with `DW_FORM_data16` is recognized here too. Any form
+                // this backend cannot use is simply skipped for typed evaluation.
+                let ByteSize::Constant(byte_size) = byte_size_attribute(entry) else {
                     continue;
                 };
-                let Some(raw_encoding) = entry
-                    .attr(gimli::DW_AT_encoding)
-                    .and_then(gimli::Attribute::udata_value)
-                else {
+                let Ok(raw_encoding) = base_type_encoding(entry) else {
                     continue;
                 };
-                let encoding = gimli::DwAte(u8::try_from(raw_encoding).unwrap_or(u8::MAX));
+                let encoding = gimli::DwAte(raw_encoding);
                 if let Some(value_type) = dwarf_value_type(encoding, byte_size) {
                     base_types.insert(entry.offset().0, value_type);
                 }
@@ -1364,12 +1365,24 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         units: &'a [gimli::Unit<Reader<'data>>],
         image: ModuleImageId,
     ) -> Self {
+        let die_offsets: Vec<HashSet<usize>> = units
+            .iter()
+            .map(|unit| {
+                let mut offsets = HashSet::new();
+                let mut entries = unit.entries();
+                while let Ok(Some(entry)) = entries.next_dfs() {
+                    offsets.insert(entry.offset().0);
+                }
+                offsets
+            })
+            .collect();
         Self {
             dwarf,
             units,
             image,
             by_die: HashMap::new(),
             entries: Vec::new(),
+            die_offsets,
         }
     }
 
@@ -1413,10 +1426,30 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let Some(unit) = self.units.get(key.unit) else {
             return TypeEntry::Malformed("type reference is outside loaded units".into());
         };
+        // The offset must be a DIE boundary, not merely a byte offset that
+        // happens to decode; otherwise a dangling reference could construct
+        // convincing metadata from unrelated bytes. Every type resolution funnels
+        // through here, so validating once covers direct references, pointer
+        // targets, and wrapper chains alike.
+        if !self
+            .die_offsets
+            .get(key.unit)
+            .is_some_and(|offsets| offsets.contains(&key.offset))
+        {
+            return TypeEntry::Malformed("type reference does not identify a DIE".into());
+        }
         let entry = match unit.entry(gimli::UnitOffset(key.offset)) {
             Ok(entry) => entry,
             Err(error) => return TypeEntry::Malformed(error.to_string().into()),
         };
+        // A `DW_AT_type` edge must name a type DIE. Reject a non-type target
+        // before any attribute classification, so an oversized/dynamic size does
+        // not mask the defect as a convincing unsupported type.
+        if !is_type_die_tag(entry.tag()) {
+            return TypeEntry::Malformed(
+                format!("DW_AT_type target has non-type tag {:?}", entry.tag()).into(),
+            );
+        }
         let reference = TypeReference {
             image: self.image,
             id,
@@ -1425,13 +1458,26 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             Ok(name) => name,
             Err(error) => return TypeEntry::Malformed(error.to_string().into()),
         };
-        let explicit_size = entry
-            .attr(gimli::DW_AT_byte_size)
-            .and_then(gimli::Attribute::udata_value);
-        let address_class = entry
-            .attr(gimli::DW_AT_address_class)
-            .and_then(gimli::Attribute::udata_value)
-            .unwrap_or(0);
+        // Validate the tag's mandatory attributes before classifying the byte
+        // size. A dynamic or oversized size returns a terminal entry early, so
+        // without this a defective encoding or missing target would be masked as
+        // a convincing resolved type.
+        if let Some(defect) = self.mandatory_attribute_defect(&entry, key.unit) {
+            return TypeEntry::Malformed(defect);
+        }
+        // An absent address class defaults to zero. A present attribute that is
+        // an oversized constant is valid but uninterpretable here; any other
+        // non-constant form is defective. Silently treating either as the
+        // default class could produce a convincing read using semantics the
+        // producer never specified.
+        let address_class = match resolve_address_class(&entry, reference, explicit_name.clone()) {
+            Ok(address_class) => address_class,
+            Err(resolved) => return resolved,
+        };
+        let explicit_size = match resolve_explicit_size(&entry, reference, explicit_name.clone()) {
+            Ok(size) => size,
+            Err(resolved) => return resolved,
+        };
         let pointer_size = explicit_size
             .or_else(|| (address_class == 0).then_some(u64::from(unit.encoding().address_size)));
 
@@ -1470,6 +1516,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 byte_size: explicit_size,
                 kind: TypeKind::Unspecified,
             }),
+            // A non-type tag was already rejected at the top of `build`, so any
+            // remaining tag is a type this backend does not model; surface it as
+            // opaque rather than defective.
             tag => TypeEntry::Resolved(TypeInfo {
                 reference,
                 name: explicit_name.unwrap_or_else(|| Arc::from(format!("{tag:?}"))),
@@ -1478,6 +1527,86 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     description: format!("type tag {tag:?} is unsupported").into(),
                 },
             }),
+        }
+    }
+
+    /// Reports a defect in a tag's mandatory attributes, independent of the byte
+    /// size. Validating these before the size classification ensures a dynamic
+    /// or oversized size cannot mask a missing encoding or target. Returns `None`
+    /// when the tag's required attributes are present and well-formed.
+    fn mandatory_attribute_defect(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> Option<Arc<str>> {
+        match entry.tag() {
+            gimli::DW_TAG_base_type => base_type_encoding(entry).err(),
+            gimli::DW_TAG_reference_type | gimli::DW_TAG_rvalue_reference_type => self
+                .target_defect(
+                    entry,
+                    unit_index,
+                    "reference type",
+                    TargetRequirement::Required,
+                ),
+            gimli::DW_TAG_typedef
+            | gimli::DW_TAG_const_type
+            | gimli::DW_TAG_volatile_type
+            | gimli::DW_TAG_restrict_type
+            | gimli::DW_TAG_atomic_type
+            | gimli::DW_TAG_immutable_type
+            | gimli::DW_TAG_array_type
+            | gimli::DW_TAG_coarray_type
+            | gimli::DW_TAG_set_type
+            | gimli::DW_TAG_file_type
+            | gimli::DW_TAG_dynamic_type
+            | gimli::DW_TAG_ptr_to_member_type
+            | gimli::DW_TAG_packed_type
+            | gimli::DW_TAG_shared_type => {
+                self.target_defect(entry, unit_index, "type", TargetRequirement::Required)
+            }
+            // A pointer or other type DIE may carry an optional `DW_AT_type`
+            // (e.g. `void *`). If present, it must still name a real type DIE; a
+            // dangling or non-type target is a defect even though absence is fine.
+            _ => self.target_defect(entry, unit_index, "type", TargetRequirement::Optional),
+        }
+    }
+
+    /// Reports a defect in a `DW_AT_type` target. Verifying the target here,
+    /// before size classification can early-return an opaque entry, prevents a
+    /// dangling or non-type edge from being masked as a convincing unsupported
+    /// type. A `Required` target must be present; an `Optional` one may be absent
+    /// but, when present, must still name a real type DIE.
+    fn target_defect(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        kind: &str,
+        requirement: TargetRequirement,
+    ) -> Option<Arc<str>> {
+        match die_reference(entry.attr_value(gimli::DW_AT_type), unit_index, self.units) {
+            Ok(Some(key)) => {
+                // The offset must be a DIE boundary, not merely a byte offset
+                // that happens to decode; otherwise a dangling reference could
+                // construct convincing metadata from unrelated bytes.
+                let target = self
+                    .die_offsets
+                    .get(key.unit)
+                    .filter(|offsets| offsets.contains(&key.offset))
+                    .and_then(|_| self.units.get(key.unit))
+                    .and_then(|unit| unit.entry(gimli::UnitOffset(key.offset)).ok());
+                match target {
+                    None => Some(format!("{kind} target does not identify a DIE").into()),
+                    Some(target) if !is_type_die_tag(target.tag()) => {
+                        Some(format!("{kind} target has non-type tag {:?}", target.tag()).into())
+                    }
+                    Some(_) => None,
+                }
+            }
+            Ok(None) => match requirement {
+                TargetRequirement::Required => Some(format!("{kind} has no target").into()),
+                TargetRequirement::Optional => None,
+            },
+            Err(error) => Some(error.to_string().into()),
         }
     }
 
@@ -1491,13 +1620,17 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let Some(byte_size) = explicit_size else {
             return TypeEntry::Malformed("base type has no byte size".into());
         };
-        let Some(raw_encoding) = entry
-            .attr(gimli::DW_AT_encoding)
-            .and_then(gimli::Attribute::udata_value)
-        else {
-            return TypeEntry::Malformed("base type has no encoding".into());
+        if byte_size == 0 {
+            // A zero-width scalar is defective regardless of its encoding; reject
+            // it before the encoding branch so an unsupported encoding cannot
+            // mask the malformed size.
+            return TypeEntry::Malformed("base type has a zero byte size".into());
+        }
+        let raw_encoding = match base_type_encoding(entry) {
+            Ok(raw_encoding) => raw_encoding,
+            Err(reason) => return TypeEntry::Malformed(reason),
         };
-        let encoding = match gimli::DwAte(u8::try_from(raw_encoding).unwrap_or(u8::MAX)) {
+        let encoding = match gimli::DwAte(raw_encoding) {
             gimli::DW_ATE_boolean => BaseTypeEncoding::Boolean,
             gimli::DW_ATE_signed => BaseTypeEncoding::Signed,
             gimli::DW_ATE_signed_char => BaseTypeEncoding::SignedCharacter,
@@ -1779,6 +1912,218 @@ impl VariableInfo for DwarfVariableInfo {
     }
 }
 
+/// The classified form of a `DW_AT_byte_size` attribute.
+enum ByteSize {
+    /// The attribute is not present; a default size may apply.
+    Absent,
+    /// A constant unsigned size in bytes.
+    Constant(u64),
+    /// A valid constant size the backend cannot represent (a `u128` above
+    /// `u64::MAX`). Valid metadata, but not usable here.
+    Unsupported(Arc<str>),
+    /// A valid dynamic size (a location expression or DIE reference) that this
+    /// backend cannot evaluate to a static width.
+    Dynamic,
+    /// A present attribute whose form is neither a constant nor a supported
+    /// dynamic size, i.e. defective metadata.
+    Malformed,
+}
+
+/// The classified form of an attribute expected to hold an unsigned integer
+/// constant.
+enum UnsignedConstant {
+    /// A representable constant value.
+    Value(u64),
+    /// A valid constant that exceeds the representable `u64` range (a
+    /// `DW_FORM_data16` value above `u64::MAX`). Valid metadata, unusable here.
+    Oversized,
+    /// A present attribute whose form is not an integer constant, i.e. defective.
+    NonConstant,
+}
+
+/// Classifies an attribute expected to be an unsigned integer constant.
+///
+/// `udata_value` decodes the small constant forms but not the DWARF 5
+/// `DW_FORM_data16`, so that form is handled explicitly. Every attribute that
+/// must be an integer (byte size, address class, encoding) shares this so the
+/// constant-versus-oversized-versus-defective distinction is made once.
+fn unsigned_constant(attribute: &gimli::Attribute<Reader<'_>>) -> UnsignedConstant {
+    if let Some(value) = attribute.udata_value() {
+        return UnsignedConstant::Value(value);
+    }
+    match attribute.value() {
+        gimli::AttributeValue::Data16(value) => {
+            u64::try_from(value).map_or(UnsignedConstant::Oversized, UnsignedConstant::Value)
+        }
+        _ => UnsignedConstant::NonConstant,
+    }
+}
+
+/// Resolves a type DIE's `DW_AT_address_class`.
+///
+/// An absent attribute defaults to zero. A present oversized constant is valid
+/// but uninterpretable here (opaque); any other non-constant form is defective.
+/// Silently treating either as the default class could produce a convincing read
+/// using semantics the producer never specified.
+fn resolve_address_class(
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    reference: TypeReference,
+    explicit_name: Option<Arc<str>>,
+) -> std::result::Result<u64, TypeEntry> {
+    let Some(attribute) = entry.attr(gimli::DW_AT_address_class) else {
+        return Ok(0);
+    };
+    match unsigned_constant(attribute) {
+        UnsignedConstant::Value(value) => Ok(value),
+        UnsignedConstant::Oversized => Err(TypeEntry::Resolved(TypeInfo {
+            reference,
+            name: explicit_name.unwrap_or_else(|| Arc::from("<unsupported type>")),
+            byte_size: None,
+            kind: TypeKind::Opaque {
+                description: "DW_AT_address_class exceeds the supported u64 range".into(),
+            },
+        })),
+        UnsignedConstant::NonConstant => Err(TypeEntry::Malformed(
+            "DW_AT_address_class is not an unsigned integer constant".into(),
+        )),
+    }
+}
+
+/// Resolves the explicit `DW_AT_byte_size` for a type DIE.
+///
+/// Returns `Ok(Some(size))` for a usable constant, `Ok(None)` when the attribute
+/// is absent (a default size may apply), or `Err(entry)` with the terminal
+/// `TypeEntry` for a size that is valid-but-unusable or defective. Only a
+/// genuinely absent attribute may fall back to a default; collapsing dynamic,
+/// oversized, or malformed forms to "absent" would silently decode the wrong
+/// width using semantics the producer never specified.
+fn resolve_explicit_size(
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    reference: TypeReference,
+    explicit_name: Option<Arc<str>>,
+) -> std::result::Result<Option<u64>, TypeEntry> {
+    match byte_size_attribute(entry) {
+        ByteSize::Absent => Ok(None),
+        ByteSize::Constant(size) => Ok(Some(size)),
+        ByteSize::Unsupported(description) => Err(TypeEntry::Resolved(TypeInfo {
+            reference,
+            name: explicit_name.unwrap_or_else(|| Arc::from("<oversized type>")),
+            byte_size: None,
+            kind: TypeKind::Opaque { description },
+        })),
+        // A dynamic size is valid metadata this backend cannot statically size.
+        // Mandatory tag attributes were already validated by the caller, so a
+        // defect cannot be masked here.
+        ByteSize::Dynamic => Err(TypeEntry::Resolved(TypeInfo {
+            reference,
+            name: explicit_name.unwrap_or_else(|| Arc::from("<dynamically sized type>")),
+            byte_size: None,
+            kind: TypeKind::Opaque {
+                description: "dynamic DW_AT_byte_size is unsupported".into(),
+            },
+        })),
+        ByteSize::Malformed => Err(TypeEntry::Malformed(
+            "DW_AT_byte_size is neither a constant nor a supported dynamic form".into(),
+        )),
+    }
+}
+
+/// Whether a type DIE's `DW_AT_type` edge must be present.
+#[derive(Clone, Copy)]
+enum TargetRequirement {
+    /// The tag mandates a target (e.g. a reference or qualifier).
+    Required,
+    /// The target is optional (e.g. a `void` pointer), but if present it must
+    /// still name a real type DIE.
+    Optional,
+}
+
+/// Whether a DIE tag denotes a type. A `DW_AT_type` edge must name one of
+/// these; a reference to any other tag is defective metadata. Tags this backend
+/// does not model still count as types and are surfaced as opaque.
+const fn is_type_die_tag(tag: gimli::DwTag) -> bool {
+    matches!(
+        tag,
+        gimli::DW_TAG_base_type
+            | gimli::DW_TAG_pointer_type
+            | gimli::DW_TAG_reference_type
+            | gimli::DW_TAG_rvalue_reference_type
+            | gimli::DW_TAG_ptr_to_member_type
+            | gimli::DW_TAG_array_type
+            | gimli::DW_TAG_structure_type
+            | gimli::DW_TAG_class_type
+            | gimli::DW_TAG_union_type
+            | gimli::DW_TAG_enumeration_type
+            | gimli::DW_TAG_typedef
+            | gimli::DW_TAG_template_alias
+            | gimli::DW_TAG_const_type
+            | gimli::DW_TAG_volatile_type
+            | gimli::DW_TAG_restrict_type
+            | gimli::DW_TAG_atomic_type
+            | gimli::DW_TAG_immutable_type
+            | gimli::DW_TAG_packed_type
+            | gimli::DW_TAG_shared_type
+            | gimli::DW_TAG_subroutine_type
+            | gimli::DW_TAG_string_type
+            | gimli::DW_TAG_set_type
+            | gimli::DW_TAG_subrange_type
+            | gimli::DW_TAG_file_type
+            | gimli::DW_TAG_interface_type
+            | gimli::DW_TAG_unspecified_type
+            | gimli::DW_TAG_coarray_type
+            | gimli::DW_TAG_dynamic_type
+    )
+}
+
+/// Extracts a base type's `DW_AT_encoding` as a one-byte `DW_ATE_*` value.
+///
+/// The encoding domain is a single byte, so a present value outside `0..=255`
+/// (or a non-constant form) is defective metadata rather than a vendor encoding
+/// this backend merely does not implement.
+fn base_type_encoding(
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+) -> std::result::Result<u8, Arc<str>> {
+    let Some(attribute) = entry.attr(gimli::DW_AT_encoding) else {
+        return Err("base type has no encoding".into());
+    };
+    match unsigned_constant(attribute) {
+        UnsignedConstant::Value(value) => u8::try_from(value)
+            .map_err(|_| Arc::from("DW_AT_encoding exceeds the one-byte DW_ATE domain")),
+        UnsignedConstant::Oversized => {
+            Err("DW_AT_encoding exceeds the one-byte DW_ATE domain".into())
+        }
+        UnsignedConstant::NonConstant => {
+            Err("DW_AT_encoding is not an unsigned integer constant".into())
+        }
+    }
+}
+
+fn byte_size_attribute(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) -> ByteSize {
+    let Some(attribute) = entry.attr(gimli::DW_AT_byte_size) else {
+        return ByteSize::Absent;
+    };
+    match unsigned_constant(attribute) {
+        UnsignedConstant::Value(size) => ByteSize::Constant(size),
+        UnsignedConstant::Oversized => {
+            ByteSize::Unsupported("constant DW_AT_byte_size exceeds the supported u64 range".into())
+        }
+        // Not an integer constant. Per DWARF a byte size may instead be a
+        // location expression or a reference to another DIE (class exprloc or
+        // reference); those are valid but not statically sizable here. Every
+        // other form is defective. `DW_FORM_sec_offset` (loclist/rnglist class)
+        // is deliberately excluded: it is not a permitted `DW_AT_byte_size` form.
+        UnsignedConstant::NonConstant => match attribute.value() {
+            gimli::AttributeValue::Exprloc(_)
+            | gimli::AttributeValue::Block(_)
+            | gimli::AttributeValue::UnitRef(_)
+            | gimli::AttributeValue::DebugInfoRef(_)
+            | gimli::AttributeValue::DebugInfoRefSup(_)
+            | gimli::AttributeValue::DebugTypesRef(_) => ByteSize::Dynamic,
+            _ => ByteSize::Malformed,
+        },
+    }
+}
+
 fn type_info_from(types: &[TypeEntry], id: TypeId) -> std::result::Result<&TypeInfo, Arc<str>> {
     match types.get(usize::try_from(id.get()).expect("type ID fits usize")) {
         Some(TypeEntry::Resolved(info)) => Ok(info),
@@ -1788,30 +2133,100 @@ fn type_info_from(types: &[TypeEntry], id: TypeId) -> std::result::Result<&TypeI
     }
 }
 
-fn value_shape_from(types: &[TypeEntry], id: TypeId) -> std::result::Result<ValueShape, Arc<str>> {
+/// Why a value shape could not be resolved from a type graph.
+///
+/// The variant distinguishes defective metadata (`Malformed`) from valid
+/// metadata whose shape the debugger does not yet implement (`Unsupported`)
+/// so callers can map each to the correct public state.
+#[derive(Debug)]
+enum ValueShapeError {
+    /// The type graph is defective: a wrapper cycle, an indirection with no
+    /// byte size, or an underlying malformed/incomplete type entry.
+    Malformed(Arc<str>),
+    /// The type is valid but its value shape is not implemented.
+    Unsupported(Arc<str>),
+}
+
+/// The widest indirection representation `decode_address` can turn into a
+/// `VirtualAddress`.
+const MAX_ADDRESS_BYTES: u64 = 8;
+
+/// Resolves the storage size of a pointer or reference value.
+///
+/// The type builder only leaves `byte_size` unset for a non-default address
+/// class with no explicit `DW_AT_byte_size`, which is valid target-specific
+/// metadata this backend cannot size rather than defective metadata. A missing
+/// size under the default address class would be an internal inconsistency, so
+/// the two cases are classified distinctly. A zero-byte indirection cannot hold
+/// an address, so it is rejected as defective at this boundary rather than
+/// permitting a zero-length read that would only fail later. A width wider than
+/// a decodable address is valid-but-unsupported metadata and is rejected here so
+/// inspection never performs a doomed inferior read.
+fn indirection_byte_size(
+    byte_size: Option<u64>,
+    address_class: u64,
+    kind: &str,
+) -> std::result::Result<u64, ValueShapeError> {
+    match byte_size {
+        Some(0) => Err(ValueShapeError::Malformed(
+            format!("{kind} type has a zero byte size").into(),
+        )),
+        Some(byte_size) if byte_size > MAX_ADDRESS_BYTES => Err(ValueShapeError::Unsupported(
+            format!(
+                "{kind} type occupies {byte_size} bytes; addresses wider than \
+                 {MAX_ADDRESS_BYTES} bytes are unsupported"
+            )
+            .into(),
+        )),
+        Some(byte_size) => Ok(byte_size),
+        None if address_class != 0 => Err(ValueShapeError::Unsupported(
+            format!("{kind} representation for address class {address_class} is unsupported")
+                .into(),
+        )),
+        None => Err(ValueShapeError::Malformed(
+            format!("{kind} type has no byte size").into(),
+        )),
+    }
+}
+
+fn value_shape_from(
+    types: &[TypeEntry],
+    id: TypeId,
+) -> std::result::Result<ValueShape, ValueShapeError> {
     let mut current = id;
     let mut visited = HashSet::new();
     loop {
         if !visited.insert(current) {
-            return Err("type wrapper cycle".into());
+            return Err(ValueShapeError::Malformed("type wrapper cycle".into()));
         }
-        let info = type_info_from(types, current)?;
+        let info = type_info_from(types, current).map_err(ValueShapeError::Malformed)?;
         match &info.kind {
             TypeKind::Base(base) => {
+                if base.byte_size == 0 {
+                    // A scalar encoding cannot occupy zero bytes; treat it as
+                    // defective rather than decoding empty storage.
+                    return Err(ValueShapeError::Malformed(
+                        "base type has a zero byte size".into(),
+                    ));
+                }
                 if base.byte_size > MAX_SCALAR_BYTES {
-                    return Err(format!("scalar type occupies {} bytes", base.byte_size).into());
+                    return Err(ValueShapeError::Unsupported(
+                        format!("scalar type occupies {} bytes", base.byte_size).into(),
+                    ));
                 }
                 let mut base = base.clone();
-                base.name = Arc::clone(&type_info_from(types, id)?.name);
+                base.name = Arc::clone(
+                    &type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .name,
+                );
                 return Ok(ValueShape::Scalar(base));
             }
             TypeKind::Pointer {
                 target,
                 address_class,
             } => {
-                let byte_size = info
-                    .byte_size
-                    .ok_or_else(|| Arc::<str>::from("pointer type has no byte size"))?;
+                let byte_size = indirection_byte_size(info.byte_size, *address_class, "pointer")?;
                 return Ok(ValueShape::Indirection {
                     target: target.map(|target| target.id),
                     byte_size,
@@ -1823,9 +2238,7 @@ fn value_shape_from(types: &[TypeEntry], id: TypeId) -> std::result::Result<Valu
                 address_class,
                 ..
             } => {
-                let byte_size = info
-                    .byte_size
-                    .ok_or_else(|| Arc::<str>::from("reference type has no byte size"))?;
+                let byte_size = indirection_byte_size(info.byte_size, *address_class, "reference")?;
                 return Ok(ValueShape::Indirection {
                     target: Some(target.id),
                     byte_size,
@@ -1835,8 +2248,14 @@ fn value_shape_from(types: &[TypeEntry], id: TypeId) -> std::result::Result<Valu
             TypeKind::Qualified { target, .. } | TypeKind::Alias { target } => {
                 current = target.id;
             }
-            TypeKind::Unspecified => return Err("unspecified values are unsupported".into()),
-            TypeKind::Opaque { description } => return Err(Arc::clone(description)),
+            TypeKind::Unspecified => {
+                return Err(ValueShapeError::Unsupported(
+                    "unspecified values are unsupported".into(),
+                ));
+            }
+            TypeKind::Opaque { description } => {
+                return Err(ValueShapeError::Unsupported(Arc::clone(description)));
+            }
         }
     }
 }
@@ -1846,7 +2265,7 @@ impl DwarfVariableInfo {
         type_info_from(&self.types, id)
     }
 
-    fn value_shape(&self, id: TypeId) -> std::result::Result<ValueShape, Arc<str>> {
+    fn value_shape(&self, id: TypeId) -> std::result::Result<ValueShape, ValueShapeError> {
         value_shape_from(&self.types, id)
     }
 
@@ -1892,7 +2311,10 @@ impl DwarfVariableInfo {
         };
         let shape = match self.value_shape(type_id) {
             Ok(shape) => shape,
-            Err(description) => {
+            Err(ValueShapeError::Malformed(description)) => {
+                return malformed(variable, Some(type_info), description);
+            }
+            Err(ValueShapeError::Unsupported(description)) => {
                 return unavailable(variable, Some(type_info), description.into());
             }
         };
@@ -2029,32 +2451,48 @@ impl DwarfVariableInfo {
         else {
             return;
         };
-        if !matches!(
-            state,
-            VariableState::Available {
-                dereference: DereferenceState::Available(_),
-                ..
-            }
-        ) {
+        let VariableState::Available { dereference, .. } = state else {
             return;
-        }
-        let unavailable = match self.type_info(*target) {
-            Err(description) => Some(DereferenceUnavailableReason::Malformed(
-                VariableMalformedReason { description },
-            )),
-            Ok(TypeInfo {
-                kind: TypeKind::Unspecified,
-                ..
-            }) => Some(DereferenceUnavailableReason::UnspecifiedPointee),
-            Ok(_) => self
-                .value_shape(*target)
-                .err()
-                .map(DereferenceUnavailableReason::UnsupportedPointee),
         };
-        if let Some(reason) = unavailable
-            && let VariableState::Available { dereference, .. } = state
-        {
-            *dereference = DereferenceState::Unavailable(reason);
+        // The pointee type describes the dereferenced expression, so it is
+        // rendered against `*expr`. Resolve it once for both the downgrade of an
+        // available dereference and the backfill of an already-unavailable one.
+        let pointee = self.type_info(*target).ok().cloned();
+        match dereference {
+            DereferenceState::Available(_) => {
+                let reason = match self.type_info(*target) {
+                    Err(description) => Some(DereferenceUnavailableReason::Malformed(
+                        VariableMalformedReason { description },
+                    )),
+                    Ok(TypeInfo {
+                        kind: TypeKind::Unspecified,
+                        ..
+                    }) => Some(DereferenceUnavailableReason::UnspecifiedPointee),
+                    Ok(_) => match self.value_shape(*target) {
+                        Ok(_) => None,
+                        Err(ValueShapeError::Malformed(description)) => {
+                            Some(DereferenceUnavailableReason::Malformed(
+                                VariableMalformedReason { description },
+                            ))
+                        }
+                        Err(ValueShapeError::Unsupported(description)) => Some(
+                            DereferenceUnavailableReason::UnsupportedPointee(description),
+                        ),
+                    },
+                };
+                if let Some(reason) = reason {
+                    *dereference = DereferenceState::Unavailable { pointee, reason };
+                }
+            }
+            DereferenceState::Unavailable { pointee: slot, .. } => {
+                // Backfill the pointee metadata for reasons produced upstream
+                // (a null pointer or an unsupported address class) that knew the
+                // target type but did not resolve it.
+                if slot.is_none() {
+                    *slot = pointee;
+                }
+            }
+            DereferenceState::NotApplicable => {}
         }
     }
 
@@ -2073,10 +2511,16 @@ impl DwarfVariableInfo {
             .clone();
         let shape = match self.value_shape(reference.target_type) {
             Ok(shape) => shape,
-            Err(reason) => {
+            Err(ValueShapeError::Malformed(description)) => {
                 return Ok(DereferencedValue {
                     type_info,
-                    state: VariableState::Unavailable(reason.into()),
+                    state: VariableState::Malformed(VariableMalformedReason { description }),
+                });
+            }
+            Err(ValueShapeError::Unsupported(description)) => {
+                return Ok(DereferencedValue {
+                    type_info,
+                    state: VariableState::Unavailable(description.into()),
                 });
             }
         };
@@ -2227,9 +2671,10 @@ fn available_implicit_pointer(
             && location.bit_offset.is_none() =>
         {
             let dereference = if *address_class != 0 {
-                DereferenceState::Unavailable(DereferenceUnavailableReason::AddressClass(
-                    *address_class,
-                ))
+                DereferenceState::Unavailable {
+                    pointee: None,
+                    reason: DereferenceUnavailableReason::AddressClass(*address_class),
+                }
             } else if let Some(target_type) = target {
                 DereferenceState::Available(DereferenceReference {
                     stop_id: context.stop_id,
@@ -2244,7 +2689,10 @@ fn available_implicit_pointer(
                     },
                 })
             } else {
-                DereferenceState::Unavailable(DereferenceUnavailableReason::UnspecifiedPointee)
+                DereferenceState::Unavailable {
+                    pointee: None,
+                    reason: DereferenceUnavailableReason::UnspecifiedPointee,
+                }
             };
             VariableState::Available {
                 source: VariableValueSource::ImplicitPointer,
@@ -2330,11 +2778,15 @@ fn decode_value_state(
         } => match decode_address(&raw, *byte_size, target) {
             Ok(address) => {
                 let dereference = if *address_class != 0 {
-                    DereferenceState::Unavailable(DereferenceUnavailableReason::AddressClass(
-                        *address_class,
-                    ))
+                    DereferenceState::Unavailable {
+                        pointee: None,
+                        reason: DereferenceUnavailableReason::AddressClass(*address_class),
+                    }
                 } else if address.get() == 0 {
-                    DereferenceState::Unavailable(DereferenceUnavailableReason::Null)
+                    DereferenceState::Unavailable {
+                        pointee: None,
+                        reason: DereferenceUnavailableReason::Null,
+                    }
                 } else if let Some(target_type) = target_type {
                     DereferenceState::Available(DereferenceReference {
                         stop_id: context.stop_id,
@@ -2346,7 +2798,10 @@ fn decode_value_state(
                         target: crate::model::DereferenceTarget::Address(address),
                     })
                 } else {
-                    DereferenceState::Unavailable(DereferenceUnavailableReason::UnspecifiedPointee)
+                    DereferenceState::Unavailable {
+                        pointee: None,
+                        reason: DereferenceUnavailableReason::UnspecifiedPointee,
+                    }
                 };
                 VariableState::Available {
                     source,
@@ -3627,11 +4082,10 @@ mod tests {
                 },
             }),
         ];
-        assert_eq!(
-            value_shape_from(&cycle, TypeId::new(0))
-                .unwrap_err()
-                .as_ref(),
-            "type wrapper cycle",
+        let cycle_error = value_shape_from(&cycle, TypeId::new(0)).unwrap_err();
+        assert!(
+            matches!(&cycle_error, ValueShapeError::Malformed(description) if description.as_ref() == "type wrapper cycle"),
+            "wrapper cycle must classify as malformed metadata",
         );
 
         let recursive_pointer = [TypeEntry::Resolved(TypeInfo {
@@ -3651,6 +4105,94 @@ mod tests {
                 address_class: 0,
             }) if id == TypeId::new(0)
         ));
+    }
+
+    #[test]
+    fn sizeless_pointers_separate_unsupported_address_classes_from_defective_metadata() {
+        let reference = |id| TypeReference {
+            image: ModuleImageId::new(7),
+            id: TypeId::new(id),
+        };
+        let sizeless = |address_class| {
+            [TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "opaque *".into(),
+                byte_size: None,
+                kind: TypeKind::Pointer {
+                    target: Some(reference(0)),
+                    address_class,
+                },
+            })]
+        };
+
+        // A non-default address class the backend cannot size is valid but
+        // unsupported metadata, not a defect.
+        let unsupported = value_shape_from(&sizeless(2), TypeId::new(0)).unwrap_err();
+        assert!(
+            matches!(&unsupported, ValueShapeError::Unsupported(description)
+                if description.contains("address class 2")),
+            "non-default address class without a size must be unsupported: {unsupported:?}",
+        );
+
+        // A missing size under the default address class is an internal
+        // inconsistency the builder never emits, so it stays malformed.
+        let malformed = value_shape_from(&sizeless(0), TypeId::new(0)).unwrap_err();
+        assert!(
+            matches!(&malformed, ValueShapeError::Malformed(description)
+                if description.as_ref() == "pointer type has no byte size"),
+            "default address class without a size must be malformed: {malformed:?}",
+        );
+
+        // A zero-byte indirection cannot hold an address, so it is defective
+        // rather than a usable shape that would later read zero bytes.
+        let zero_sized = [TypeEntry::Resolved(TypeInfo {
+            reference: reference(0),
+            name: "opaque *".into(),
+            byte_size: Some(0),
+            kind: TypeKind::Pointer {
+                target: Some(reference(0)),
+                address_class: 0,
+            },
+        })];
+        let zero_error = value_shape_from(&zero_sized, TypeId::new(0)).unwrap_err();
+        assert!(
+            matches!(&zero_error, ValueShapeError::Malformed(description)
+                if description.as_ref() == "pointer type has a zero byte size"),
+            "zero-sized pointer must be malformed: {zero_error:?}",
+        );
+
+        // A scalar encoding likewise cannot occupy zero bytes.
+        let zero_scalar = [TypeEntry::Resolved(TypeInfo {
+            reference: reference(0),
+            name: "empty".into(),
+            byte_size: Some(0),
+            kind: TypeKind::Base(scalar_type(BaseTypeEncoding::Unsigned, 0)),
+        })];
+        let zero_scalar_error = value_shape_from(&zero_scalar, TypeId::new(0)).unwrap_err();
+        assert!(
+            matches!(&zero_scalar_error, ValueShapeError::Malformed(description)
+                if description.as_ref() == "base type has a zero byte size"),
+            "zero-sized base type must be malformed: {zero_scalar_error:?}",
+        );
+
+        // A width wider than a decodable address is valid metadata this backend
+        // cannot use, so it is unsupported rather than a usable shape that would
+        // drive a doomed inferior read.
+        let oversized = [TypeEntry::Resolved(TypeInfo {
+            reference: reference(0),
+            name: "wide *".into(),
+            byte_size: Some(16),
+            kind: TypeKind::Pointer {
+                target: Some(reference(0)),
+                address_class: 0,
+            },
+        })];
+        let oversized_error = value_shape_from(&oversized, TypeId::new(0)).unwrap_err();
+        assert!(
+            matches!(&oversized_error, ValueShapeError::Unsupported(description)
+                if description.contains("wider than")),
+            "over-wide pointer must be unsupported: {oversized_error:?}",
+        );
     }
 
     #[test]
@@ -3676,7 +4218,10 @@ mod tests {
                 target(ByteOrder::Little),
             ),
             VariableState::Available {
-                dereference: DereferenceState::Unavailable(DereferenceUnavailableReason::Null),
+                dereference: DereferenceState::Unavailable {
+                    reason: DereferenceUnavailableReason::Null,
+                    ..
+                },
                 ..
             }
         ));
@@ -3689,9 +4234,10 @@ mod tests {
                 target(ByteOrder::Little),
             ),
             VariableState::Available {
-                dereference: DereferenceState::Unavailable(
-                    DereferenceUnavailableReason::AddressClass(17)
-                ),
+                dereference: DereferenceState::Unavailable {
+                    reason: DereferenceUnavailableReason::AddressClass(17),
+                    ..
+                },
                 ..
             }
         ));

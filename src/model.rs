@@ -484,7 +484,13 @@ pub enum DereferenceState {
     /// Dereference is valid at the capability's exact stopped state.
     Available(DereferenceReference),
     /// The value is an indirection, but dereference is unavailable for a typed reason.
-    Unavailable(DereferenceUnavailableReason),
+    Unavailable {
+        /// The dereferenced expression's type (the pointee), when it resolves.
+        /// `None` when the producer supplied no concrete pointee type.
+        pointee: Option<TypeInfo>,
+        /// Why the dereference cannot be performed.
+        reason: DereferenceUnavailableReason,
+    },
 }
 
 /// A valid DWARF feature that variable inspection does not yet implement.

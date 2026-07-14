@@ -482,9 +482,15 @@ fn print_explicitly_dereferences_pointer_chains_and_reports_typed_failures() {
     assert!(stdout.contains("(int *) pointer = 0x"), "{stdout}");
     assert!(stdout.contains("(int) *pointer = 42"), "{stdout}");
     assert!(stdout.contains("(int) **pointer_pointer = 42"), "{stdout}");
+    // A failed dereference is labeled with the pointee type (int), not the
+    // operand's pointer type (int *).
     assert!(
-        stdout.contains("cannot dereference a null pointer"),
+        stdout.contains("(int) *null_pointer = <unavailable: cannot dereference a null pointer>"),
         "{stdout}"
+    );
+    assert!(
+        !stdout.contains("(int *) *null_pointer"),
+        "failed dereference must not render the pointer's own type: {stdout}"
     );
     assert!(stdout.contains("no concrete pointee type"), "{stdout}");
     assert!(
