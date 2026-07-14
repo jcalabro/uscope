@@ -313,6 +313,13 @@ pub enum TypeKind {
         /// Dimensions in source order.
         dimensions: Arc<[ArrayDimension]>,
     },
+    /// A language slice descriptor with a runtime element count.
+    Slice {
+        /// The slice element type.
+        element: TypeReference,
+        /// Whether the descriptor includes a capacity field.
+        has_capacity: bool,
+    },
     /// An ordered qualifier around another type.
     Qualified {
         /// The qualifier at this graph node.
@@ -409,6 +416,15 @@ pub enum VariableValue {
         /// The array dimensions.
         dimensions: Arc<[ArrayDimension]>,
         /// Decoded elements (nested arrays are represented recursively).
+        elements: Arc<[Self]>,
+    },
+    /// A decoded language slice and its bounded element values.
+    Slice {
+        /// Runtime length from the descriptor.
+        length: u64,
+        /// Runtime capacity when present in the descriptor.
+        capacity: Option<u64>,
+        /// Elements decoded from the backing storage.
         elements: Arc<[Self]>,
     },
 }

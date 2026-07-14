@@ -507,6 +507,30 @@ fn print_explicitly_dereferences_pointer_chains_and_reports_typed_failures() {
 }
 
 #[test]
+fn print_renders_rust_slice_elements() {
+    let executable = fixture("build/test-programs/variables-rust-o0");
+    assert!(
+        executable.exists(),
+        "missing test fixture; run `just build-test-programs`"
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break variables.rs:67",
+            "--eval",
+            "run",
+            "--eval",
+            "print slice",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run uscope");
+    let stdout = assert_success(output);
+    assert!(stdout.contains("(&[i32]) slice = [20, 22]"), "{stdout}");
+}
+
+#[test]
 fn globals_lists_metadata_and_print_accepts_exact_qualification() {
     let executable = fixture("build/test-programs/globals-c-gcc-o0");
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
