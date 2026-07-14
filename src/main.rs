@@ -1341,6 +1341,14 @@ fn format_variable_value(type_info: &uscope::TypeInfo, value: &uscope::VariableV
                 .join(", ");
             format!("[{rendered}]")
         }
+        uscope::VariableValue::Slice { elements, .. } => {
+            let rendered = elements
+                .iter()
+                .map(|element| format_variable_value(type_info, element))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{rendered}]")
+        }
         _ => "<unsupported value>".to_owned(),
     }
 }

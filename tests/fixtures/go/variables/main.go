@@ -65,16 +65,26 @@ func inspectShadow() {
 	runtime.KeepAlive(shadowed)
 }
 
+//go:noinline
+func inspectSlices(values []int32, empty []int32, nilSlice []int32) bool {
+	runtime.KeepAlive(values)
+	runtime.KeepAlive(empty)
+	runtime.KeepAlive(nilSlice)
+	return len(values) == 2 && cap(values) == 3 && len(empty) == 0 && cap(empty) == 4 && nilSlice == nil
+}
+
 func main() {
 	pointerValue := int32(42)
 	pointer := &pointerValue
 	pair := pointerPair{first: 20, second: 22}
 	node := pointerNode{value: 42}
 	slice := []int32{20, 22}
+	backing := []int32{10, 20, 22, 40}
 	succeeded := inspectScalars(
 		true, -42, 42, 1.25, -2.5,
 		pointer, &pointer, nil, &pair, &node, slice,
 	)
+	succeeded = succeeded && inspectSlices(backing[1:3], backing[:0], nil)
 	inspectShadow()
 	if !succeeded {
 		goSink = goGlobal

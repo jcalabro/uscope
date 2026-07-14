@@ -205,6 +205,11 @@ enum ValueShape {
         dimensions: Arc<[ArrayDimension]>,
         byte_size: u64,
     },
+    Slice {
+        element: Box<Self>,
+        byte_size: u64,
+        has_capacity: bool,
+    },
     Indirection {
         target: Option<TypeId>,
         byte_size: u64,
@@ -1511,6 +1516,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             gimli::DW_TAG_array_type => {
                 self.build_array_type(&entry, key.unit, reference, explicit_name, explicit_size)
             }
+            gimli::DW_TAG_structure_type
+                if explicit_name.as_deref().is_some_and(is_slice_type_name) =>
+            {
+                self.build_slice_type(&entry, key.unit, reference, explicit_name, explicit_size)
+            }
             gimli::DW_TAG_typedef
             | gimli::DW_TAG_const_type
             | gimli::DW_TAG_volatile_type
@@ -1895,6 +1905,154 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             },
         })
     }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "slice normalization validates both compiler layouts and every field invariant"
+    )]
+    fn build_slice_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> TypeEntry {
+        let name = explicit_name.expect("slice recognition requires a name");
+        let Some(byte_size) = explicit_size else {
+            return TypeEntry::Malformed("slice descriptor has no byte size".into());
+        };
+        let Some(unit) = self.units.get(unit_index) else {
+            return TypeEntry::Malformed("slice type unit is unavailable".into());
+        };
+        let mut tree = match unit.entries_tree(Some(entry.offset())) {
+            Ok(tree) => tree,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let root = match tree.root() {
+            Ok(root) => root,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let rust = name.starts_with("&[");
+        let field_names = if rust {
+            &["data_ptr", "length"][..]
+        } else {
+            &["array", "len", "cap"][..]
+        };
+        let field_count = u64::try_from(field_names.len()).expect("slice field count fits u64");
+        let Some(word_size) = byte_size.checked_div(field_count) else {
+            return TypeEntry::Malformed("slice descriptor size is invalid".into());
+        };
+        if byte_size != word_size * field_count
+            || word_size != u64::from(unit.encoding().address_size)
+        {
+            return TypeEntry::Resolved(TypeInfo {
+                reference,
+                name,
+                byte_size: Some(byte_size),
+                kind: TypeKind::Opaque {
+                    description: "slice descriptor does not use target-sized words".into(),
+                },
+            });
+        }
+        let mut fields = Vec::new();
+        let mut children = root.children();
+        loop {
+            let child = match children.next() {
+                Ok(Some(child)) => child,
+                Ok(None) => break,
+                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+            };
+            if child.entry().tag() != gimli::DW_TAG_member {
+                continue;
+            }
+            let child = child.entry();
+            let field_name = match copy_name(self.dwarf, unit, child) {
+                Ok(Some(name)) => name,
+                Ok(None) => return TypeEntry::Malformed("slice member has no name".into()),
+                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+            };
+            let Some(offset) = child
+                .attr(gimli::DW_AT_data_member_location)
+                .and_then(gimli::Attribute::udata_value)
+            else {
+                return TypeEntry::Malformed("slice member has no constant offset".into());
+            };
+            let field_type = match self.target(child, unit_index) {
+                Ok(Some(target)) => target,
+                Ok(None) => return TypeEntry::Malformed("slice member has no type".into()),
+                Err(reason) => return TypeEntry::Malformed(reason),
+            };
+            fields.push((field_name, offset, field_type));
+        }
+        if fields.len() != field_names.len()
+            || fields.iter().zip(field_names).enumerate().any(
+                |(index, ((name, offset, _), expected_name))| {
+                    name.as_ref() != *expected_name
+                        || *offset
+                            != u64::try_from(index).expect("field index fits u64") * word_size
+                },
+            )
+        {
+            return TypeEntry::Resolved(TypeInfo {
+                reference,
+                name,
+                byte_size: Some(byte_size),
+                kind: TypeKind::Opaque {
+                    description: "unrecognized slice descriptor layout".into(),
+                },
+            });
+        }
+        let pointer = fields[0].2;
+        let element = match self
+            .entries
+            .get(usize::try_from(pointer.id.get()).expect("type ID fits usize"))
+        {
+            Some(TypeEntry::Resolved(TypeInfo {
+                kind:
+                    TypeKind::Pointer {
+                        target: Some(target),
+                        ..
+                    },
+                ..
+            })) => *target,
+            _ => return TypeEntry::Malformed("slice data member is not a typed pointer".into()),
+        };
+        for (_, _, field_type) in &fields[1..] {
+            let valid = self
+                .entries
+                .get(usize::try_from(field_type.id.get()).expect("type ID fits usize"))
+                .is_some_and(|entry| {
+                    matches!(entry, TypeEntry::Resolved(TypeInfo {
+                        kind: TypeKind::Base(BaseType {
+                            encoding: BaseTypeEncoding::Unsigned | BaseTypeEncoding::Signed,
+                            byte_size: size,
+                            ..
+                        }),
+                        ..
+                    }) if *size == word_size)
+                });
+            if !valid {
+                return TypeEntry::Malformed(
+                    "slice length and capacity members must be target-sized unsigned integers"
+                        .into(),
+                );
+            }
+        }
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size: Some(byte_size),
+            kind: TypeKind::Slice {
+                element,
+                has_capacity: !rust,
+            },
+        })
+    }
+}
+
+fn is_slice_type_name(name: &str) -> bool {
+    name.starts_with("&[") || name.starts_with("[]")
 }
 
 impl VariableInfo for DwarfVariableInfo {
@@ -2283,6 +2441,10 @@ fn indirection_byte_size(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "each normalized type shape has distinct validation"
+)]
 fn value_shape_from(
     types: &[TypeEntry],
     id: TypeId,
@@ -2340,6 +2502,20 @@ fn value_shape_from(
                     element: Box::new(element_shape),
                     dimensions: Arc::clone(dimensions),
                     byte_size,
+                });
+            }
+            TypeKind::Slice {
+                element,
+                has_capacity,
+            } => {
+                let element = value_shape_from(types, element.id)?;
+                let byte_size = info.byte_size.ok_or_else(|| {
+                    ValueShapeError::Malformed("slice descriptor has no byte size".into())
+                })?;
+                return Ok(ValueShape::Slice {
+                    element: Box::new(element),
+                    byte_size,
+                    has_capacity: *has_capacity,
                 });
             }
             TypeKind::Pointer {
@@ -2468,6 +2644,7 @@ impl DwarfVariableInfo {
                 context,
                 VariableValueSource::Constant,
                 raw,
+                runtime,
             );
         }
         let ValueDescription::Location(location) = description else {
@@ -2538,9 +2715,13 @@ impl DwarfVariableInfo {
             Ok(value) => value,
             Err(reason) => return unavailable(variable, Some(type_info), reason),
         };
-        self.available_variable(variable, type_info, &shape, context, source, raw)
+        self.available_variable(variable, type_info, &shape, context, source, raw, runtime)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "value materialization keeps source, context, and runtime explicit"
+    )]
     fn available_variable(
         &self,
         variable: &CatalogDataObject,
@@ -2549,16 +2730,40 @@ impl DwarfVariableInfo {
         context: VariableContext,
         source: VariableValueSource,
         raw: Arc<[u8]>,
+        runtime: &mut dyn VariableRuntime,
     ) -> Variable {
-        let mut value = available(
-            variable,
-            type_info,
-            shape,
-            context,
-            source,
-            raw,
-            self.target,
-        );
+        let mut value = if let ValueShape::Slice {
+            element,
+            has_capacity,
+            ..
+        } = shape
+        {
+            Variable {
+                kind: variable.kind,
+                global: None,
+                name: Arc::clone(&variable.name),
+                declaration: variable.declaration.clone(),
+                type_info: Some(type_info),
+                state: decode_slice_state(
+                    element,
+                    *has_capacity,
+                    source,
+                    raw,
+                    self.target,
+                    runtime,
+                ),
+            }
+        } else {
+            available(
+                variable,
+                type_info,
+                shape,
+                context,
+                source,
+                raw,
+                self.target,
+            )
+        };
         self.constrain_dereference(&mut value.state, shape);
         value
     }
@@ -2821,7 +3026,7 @@ fn available_implicit_pointer(
                 dereference,
             }
         }
-        ValueShape::Array { .. } | ValueShape::Indirection { .. } => {
+        ValueShape::Array { .. } | ValueShape::Slice { .. } | ValueShape::Indirection { .. } => {
             VariableState::Unavailable(crate::UnsupportedVariableFeature::CompositeLocation.into())
         }
         ValueShape::Scalar(_) => VariableState::Malformed(VariableMalformedReason {
@@ -2842,14 +3047,16 @@ impl ValueShape {
     const fn byte_size(&self) -> u64 {
         match self {
             Self::Scalar(base) => base.byte_size,
-            Self::Indirection { byte_size, .. } | Self::Array { byte_size, .. } => *byte_size,
+            Self::Indirection { byte_size, .. }
+            | Self::Array { byte_size, .. }
+            | Self::Slice { byte_size, .. } => *byte_size,
         }
     }
 
     const fn scalar(&self) -> Option<&BaseType> {
         match self {
             Self::Scalar(base) => Some(base),
-            Self::Indirection { .. } | Self::Array { .. } => None,
+            Self::Indirection { .. } | Self::Array { .. } | Self::Slice { .. } => None,
         }
     }
 }
@@ -2904,6 +3111,9 @@ fn decode_value_state(
             },
             Err(reason) => VariableState::Unavailable(reason),
         },
+        ValueShape::Slice { .. } => VariableState::Malformed(VariableMalformedReason {
+            description: "slice decoding requires a runtime read context".into(),
+        }),
         ValueShape::Indirection {
             target: target_type,
             byte_size,
@@ -2945,6 +3155,97 @@ fn decode_value_state(
             }
             Err(reason) => VariableState::Unavailable(reason),
         },
+    }
+}
+
+fn decode_slice_state(
+    element: &ValueShape,
+    has_capacity: bool,
+    source: VariableValueSource,
+    raw: Arc<[u8]>,
+    target: TargetDescription,
+    runtime: &mut dyn VariableRuntime,
+) -> VariableState {
+    let pointer_bytes = match target.pointer_width {
+        crate::PointerWidth::Bits32 => 4,
+        crate::PointerWidth::Bits64 => 8,
+    };
+    let words = if has_capacity { 3 } else { 2 };
+    if raw.len() != pointer_bytes * words {
+        return VariableState::Malformed(VariableMalformedReason {
+            description: "slice descriptor size does not match its target layout".into(),
+        });
+    }
+    let word = |index: usize| {
+        unsigned_value(
+            &raw[index * pointer_bytes..(index + 1) * pointer_bytes],
+            target.byte_order,
+        )
+        .and_then(|value| {
+            u64::try_from(value).map_err(|_| VariableUnavailableReason::EvaluationLimit)
+        })
+    };
+    let address = match word(0) {
+        Ok(value) => VirtualAddress::new(value),
+        Err(reason) => return VariableState::Unavailable(reason),
+    };
+    let length = match word(1) {
+        Ok(value) => value,
+        Err(reason) => return VariableState::Unavailable(reason),
+    };
+    let capacity = if has_capacity {
+        match word(2) {
+            Ok(value) if value >= length => Some(value),
+            Ok(_) => {
+                return VariableState::Malformed(VariableMalformedReason {
+                    description: "slice length exceeds its capacity".into(),
+                });
+            }
+            Err(reason) => return VariableState::Unavailable(reason),
+        }
+    } else {
+        None
+    };
+    let Some(byte_size) = length.checked_mul(element.byte_size()) else {
+        return VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit);
+    };
+    let size = match usize::try_from(byte_size) {
+        Ok(size) if size <= MAX_EVALUATION_MEMORY_BYTES => size,
+        _ => return VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
+    };
+    if address.get() == 0 && size != 0 {
+        return VariableState::Malformed(VariableMalformedReason {
+            description: "non-empty slice has a null data pointer".into(),
+        });
+    }
+    let backing = if size == 0 {
+        Arc::from([])
+    } else {
+        match runtime.read_memory(address, size) {
+            Ok(bytes) => bytes,
+            Err(reason) => return VariableState::Unavailable(reason.into()),
+        }
+    };
+    let mut elements = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+    let stride = match usize::try_from(element.byte_size()) {
+        Ok(stride) if stride != 0 => stride,
+        _ => return VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
+    };
+    for bytes in backing.chunks_exact(stride) {
+        match decode_leaf_value(element, bytes, target) {
+            Ok(value) => elements.push(value),
+            Err(reason) => return VariableState::Unavailable(reason),
+        }
+    }
+    VariableState::Available {
+        source,
+        raw: Some(raw),
+        value: VariableValue::Slice {
+            length,
+            capacity,
+            elements: elements.into(),
+        },
+        dereference: DereferenceState::NotApplicable,
     }
 }
 
@@ -3008,6 +3309,9 @@ fn decode_leaf_value(
         } => decode_array_value(element, dimensions, raw, target),
         ValueShape::Indirection { byte_size, .. } => decode_address(raw, *byte_size, target)
             .map(|address| VariableValue::Address(AddressValue { address })),
+        ValueShape::Slice { .. } => {
+            Err(crate::UnsupportedVariableFeature::CompositeLocation.into())
+        }
     }
 }
 
@@ -4482,5 +4786,86 @@ mod tests {
                 sign_exponent: 0x4000,
             })
         );
+    }
+
+    #[test]
+    fn slice_decoding_bounds_secondary_reads_and_validates_descriptors() {
+        let target = target(ByteOrder::Little);
+        let element = ValueShape::Scalar(scalar_type(BaseTypeEncoding::Signed, 4));
+        let descriptor = |address: u64, length: u64, capacity: Option<u64>| {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&address.to_le_bytes());
+            bytes.extend_from_slice(&length.to_le_bytes());
+            if let Some(capacity) = capacity {
+                bytes.extend_from_slice(&capacity.to_le_bytes());
+            }
+            Arc::from(bytes)
+        };
+        let runtime = |memory: Option<Arc<[u8]>>| Runtime {
+            registers: BTreeMap::new(),
+            cfa: Err(VariableUnavailableReason::CfaExpression),
+            memory,
+            memory_reads: 0,
+        };
+
+        let mut rust = runtime(Some(Arc::from(
+            [20_i32.to_le_bytes(), 22_i32.to_le_bytes()].concat(),
+        )));
+        let state = decode_slice_state(
+            &element,
+            false,
+            VariableValueSource::Computed,
+            descriptor(0x1000, 2, None),
+            target,
+            &mut rust,
+        );
+        assert!(matches!(state, VariableState::Available {
+            value: VariableValue::Slice { length: 2, capacity: None, ref elements }, ..
+        } if elements.len() == 2));
+        assert_eq!(rust.memory_reads, 1);
+
+        let mut empty = runtime(None);
+        assert!(matches!(
+            decode_slice_state(
+                &element,
+                true,
+                VariableValueSource::Computed,
+                descriptor(0, 0, Some(0)),
+                target,
+                &mut empty,
+            ),
+            VariableState::Available {
+                value: VariableValue::Slice { length: 0, capacity: Some(0), ref elements }, ..
+            } if elements.is_empty()
+        ));
+        assert_eq!(empty.memory_reads, 0);
+
+        let mut invalid = runtime(None);
+        assert!(matches!(
+            decode_slice_state(
+                &element,
+                true,
+                VariableValueSource::Computed,
+                descriptor(0x1000, 3, Some(2)),
+                target,
+                &mut invalid,
+            ),
+            VariableState::Malformed(_)
+        ));
+        assert_eq!(invalid.memory_reads, 0);
+
+        let mut oversized = runtime(None);
+        assert!(matches!(
+            decode_slice_state(
+                &element,
+                false,
+                VariableValueSource::Computed,
+                descriptor(0x1000, 257, None),
+                target,
+                &mut oversized,
+            ),
+            VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit)
+        ));
+        assert_eq!(oversized.memory_reads, 0);
     }
 }

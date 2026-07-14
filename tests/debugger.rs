@@ -482,6 +482,25 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     fixture,
                 );
             }
+            let slice = scenario
+                .operation("inspect Rust slice", scenario.handle().variable("slice"))
+                .await;
+            if fixture == "variables-rust-o0" {
+                assert_slice_values(&slice, None, &[20, 22], fixture);
+            } else {
+                assert!(
+                    matches!(
+                        slice.type_info.as_ref().map(|info| &info.kind),
+                        Some(uscope::TypeKind::Slice { .. })
+                    ) && matches!(
+                        slice.state,
+                        VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(
+                            uscope::UnsupportedVariableFeature::CompositeLocation
+                        ))
+                    ),
+                    "{fixture}: {slice:?}"
+                );
+            }
         }
         if source == "variables.zig" {
             if fixture != "variables-zig-o2" {
@@ -552,7 +571,7 @@ async fn unsupported_pointee_shapes_remain_printable_without_unsafe_reads() {
             "variables.rs",
             67,
             &["structure_pointer", "recursive_pointer"][..],
-            &["slice"][..],
+            &[][..],
         ),
         (
             "variables-zig-o0",
@@ -873,6 +892,36 @@ fn assert_array_values(value: &uscope::DereferencedValue, fixture: &str) {
         })
         .collect();
     assert_eq!(values, [20, 22], "{fixture}");
+}
+
+fn assert_slice_values(
+    variable: &uscope::Variable,
+    capacity: Option<u64>,
+    expected: &[i128],
+    fixture: &str,
+) {
+    let VariableState::Available {
+        value:
+            uscope::VariableValue::Slice {
+                length,
+                capacity: actual_capacity,
+                elements,
+            },
+        ..
+    } = &variable.state
+    else {
+        panic!("{fixture}: expected decoded slice, got {variable:?}");
+    };
+    assert_eq!(*length, u64::try_from(expected.len()).unwrap(), "{fixture}");
+    assert_eq!(*actual_capacity, capacity, "{fixture}");
+    let values: Vec<i128> = elements
+        .iter()
+        .map(|element| match element {
+            uscope::VariableValue::Scalar(uscope::ScalarValue::Signed(value)) => *value,
+            other => panic!("{fixture}: expected scalar slice element, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(values, expected, "{fixture}");
 }
 
 #[tokio::test]
@@ -3323,13 +3372,43 @@ async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
     let slice = scenario
         .operation("inspect Go slice", scenario.handle().variable("sliceValue"))
         .await;
-    assert!(
-        matches!(
-            slice.type_info.as_ref().map(|info| &info.kind),
-            Some(uscope::TypeKind::Opaque { .. })
-        ) && matches!(slice.state, VariableState::Unavailable(_)),
-        "{slice:?}"
-    );
+    assert_slice_values(&slice, Some(2), &[20, 22], fixture);
+}
+
+#[tokio::test]
+async fn go_slices_decode_subranges_empty_and_nil_descriptors() {
+    let fixture = "variables-go-o0";
+    let mut scenario = Scenario::new("Go slice descriptors", Scenario::fixture(fixture));
+    scenario.add_source_breakpoint("main.go", 73).await;
+    run_go_to_breakpoint(&mut scenario, fixture).await;
+
+    for (name, capacity, expected) in [
+        ("values", Some(3), &[20_i128, 22][..]),
+        ("empty", Some(4), &[][..]),
+        ("nilSlice", Some(0), &[][..]),
+    ] {
+        let variable = scenario
+            .operation(
+                "inspect Go slice descriptor",
+                scenario.handle().variable(name),
+            )
+            .await;
+        assert_slice_values(&variable, capacity, expected, fixture);
+    }
+
+    let mut reason = scenario.resume_to_stop().await;
+    for _ in 0..32 {
+        match reason {
+            StopReason::Exited(ExitStatus::Code(0)) => break,
+            StopReason::Breakpoint { .. } => reason = scenario.resume_to_stop().await,
+            StopReason::Exception(ref exception) if exception.code == 23 => {
+                reason = scenario.resume_to_stop().await;
+            }
+            _ => panic!("{fixture} stopped unexpectedly while exiting: {reason:?}"),
+        }
+    }
+    assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)));
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }
 
 #[tokio::test]
