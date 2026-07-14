@@ -11,9 +11,7 @@ noinline fn workerBreakpoint(value: u16) void {
 fn worker(value: u16) void {
     const thread_value = value;
     _ = workers_ready.fetchAdd(1, .release);
-    while (!release_workers.load(.acquire)) {
-        std.Thread.yield() catch {};
-    }
+    while (!release_workers.load(.acquire)) {}
     workerBreakpoint(thread_value);
 }
 
