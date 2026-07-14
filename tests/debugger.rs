@@ -537,33 +537,28 @@ async fn unsupported_pointee_shapes_remain_printable_without_unsafe_reads() {
             "variables-gcc-o0",
             "variables.c",
             68,
-            &[
-                "structure_pointer",
-                "recursive_pointer",
-                "array_pointer",
-                "function_pointer",
-            ][..],
+            &["structure_pointer", "recursive_pointer", "function_pointer"][..],
             &[][..],
         ),
         (
             "variables-cpp-gcc-o0",
             "variables.cpp",
             50,
-            &["structure_pointer", "recursive_pointer", "array_pointer"][..],
+            &["structure_pointer", "recursive_pointer"][..],
             &[][..],
         ),
         (
             "variables-rust-o0",
             "variables.rs",
             67,
-            &["structure_pointer", "recursive_pointer", "array_pointer"][..],
+            &["structure_pointer", "recursive_pointer"][..],
             &["slice"][..],
         ),
         (
             "variables-zig-o0",
             "variables.zig",
             73,
-            &["structure_pointer", "recursive_pointer", "array_pointer"][..],
+            &["structure_pointer", "recursive_pointer"][..],
             &["slice"][..],
         ),
     ] {
@@ -595,6 +590,26 @@ async fn unsupported_pointee_shapes_remain_printable_without_unsafe_reads() {
                 "{fixture} {name}: {variable:?}"
             );
         }
+        let array = scenario
+            .operation(
+                "dereference bounded array",
+                scenario.handle().variable("array_pointer"),
+            )
+            .await;
+        let uscope::VariableState::Available {
+            dereference: uscope::DereferenceState::Available(reference),
+            ..
+        } = array.state
+        else {
+            panic!("{fixture} array pointer did not expose a dereference: {array:?}");
+        };
+        let value = scenario
+            .operation(
+                "read bounded array",
+                scenario.handle().dereference(reference),
+            )
+            .await;
+        assert_array_values(&value, fixture);
         for name in opaque_values {
             let variable = scenario
                 .operation("inspect opaque value", scenario.handle().variable(*name))
@@ -840,6 +855,24 @@ fn assert_dereferenced_scalar(value: &uscope::DereferencedValue, expected: i128,
         ),
         "{fixture}: {value:?}"
     );
+}
+
+fn assert_array_values(value: &uscope::DereferencedValue, fixture: &str) {
+    let uscope::VariableState::Available {
+        value: uscope::VariableValue::Array { elements, .. },
+        ..
+    } = &value.state
+    else {
+        panic!("{fixture}: expected decoded array, got {value:?}");
+    };
+    let values: Vec<i128> = elements
+        .iter()
+        .map(|element| match element {
+            uscope::VariableValue::Scalar(uscope::ScalarValue::Signed(value)) => *value,
+            other => panic!("{fixture}: expected scalar array element, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(values, [20, 22], "{fixture}");
 }
 
 #[tokio::test]
