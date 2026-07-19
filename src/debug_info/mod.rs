@@ -12,8 +12,9 @@ use std::sync::Arc;
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
-    ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StopId, ThreadId,
-    UnwindTermination, Variable, VariableQuery, VariableUnavailableReason, VirtualAddress,
+    InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StopId,
+    ThreadId, UnwindTermination, Variable, VariableQuery, VariableUnavailableReason,
+    VirtualAddress,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +69,23 @@ pub trait VariableInfo: Send + Sync {
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Vec<Variable>>;
 
+    /// Inspects one visible local or parameter and follows a structural member
+    /// path atomically within one stopped-state validation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "structural inspection requires explicit frame, path, stop context, and runtime inputs"
+    )]
+    fn inspect_path(
+        &self,
+        address: ImageAddress,
+        selected: Option<CodeInstanceId>,
+        root: &str,
+        members: &[String],
+        explicit_dereferences: u32,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<InspectedValue>;
+
     /// Evaluates one cataloged global at the selected thread's current stop.
     ///
     /// `address` is the module-relative instruction context, or `None` when the
@@ -81,6 +99,18 @@ pub trait VariableInfo: Send + Sync {
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<Variable>;
+
+    /// Evaluates one cataloged global and follows a structural member path
+    /// atomically within one stopped-state validation.
+    fn inspect_global_path(
+        &self,
+        id: GlobalVariableId,
+        address: Option<ImageAddress>,
+        members: &[String],
+        explicit_dereferences: u32,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<InspectedValue>;
 
     /// Dereferences one stop-scoped capability produced by this image.
     fn dereference(

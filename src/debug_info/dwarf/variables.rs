@@ -13,11 +13,11 @@ use crate::{
     BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId, ColumnNumber,
     DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue, Error,
     FloatValue, GlobalVariableId, GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility,
-    ImageAddress, InspectionLimit, LineNumber, ModuleImageId, RecordKind, RecordMember,
-    RecordMemberLayout, RecordMemberValue, ReferenceKind, Result, ScalarValue, SourceFile,
-    SourceFileId, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeKind, TypeQualifier,
-    TypeReference, ValueGraph, ValueNode, ValueNodeId, ValueNodeState, Variable, VariableKind,
-    VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
+    ImageAddress, InspectedValue, InspectionLimit, LineNumber, ModuleImageId, RecordKind,
+    RecordMember, RecordMemberLayout, RecordMemberValue, ReferenceKind, Result, ScalarValue,
+    SourceFile, SourceFileId, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeKind,
+    TypeQualifier, TypeReference, ValueGraph, ValueNode, ValueNodeId, ValueNodeState, Variable,
+    VariableKind, VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
     VariableValue, VariableValueSource, VirtualAddress,
 };
 
@@ -247,6 +247,89 @@ enum ValueShapeKind {
         byte_size: u64,
         address_class: u64,
     },
+}
+
+#[derive(Clone)]
+enum PathStep {
+    Dereference {
+        target: TypeId,
+        byte_size: u64,
+        address_class: u64,
+    },
+    Member {
+        record: TypeId,
+        index: usize,
+        member: RecordMember,
+    },
+    Unavailable(VariableUnavailableReason),
+}
+
+struct PlannedPath {
+    steps: Vec<PathStep>,
+    terminal: Option<TypeId>,
+}
+
+enum LocatedStorage {
+    Memory(VirtualAddress),
+    Bytes {
+        source: VariableValueSource,
+        raw: Arc<[u8]>,
+        start: usize,
+        end: usize,
+        address: Option<VirtualAddress>,
+    },
+    ImplicitPointer {
+        debug_info_offset: u64,
+        byte_offset: i64,
+    },
+}
+
+enum PathEvaluationError {
+    Unavailable(VariableUnavailableReason),
+    Malformed(Arc<str>),
+}
+
+fn static_member_layout_is_valid(
+    record_size: Option<u64>,
+    member_size: Option<u64>,
+    layout: RecordMemberLayout,
+) -> bool {
+    match layout {
+        RecordMemberLayout::ByteOffset(offset) => {
+            let Some(record_size) = record_size else {
+                return false;
+            };
+            offset <= record_size
+                && member_size.is_none_or(|size| {
+                    offset
+                        .checked_add(size)
+                        .is_some_and(|end| end <= record_size)
+                })
+        }
+        RecordMemberLayout::BitRange {
+            bit_offset,
+            bit_size,
+        } => record_size.is_some_and(|record_size| {
+            record_size.checked_mul(8).is_some_and(|record_bits| {
+                bit_offset
+                    .checked_add(bit_size)
+                    .is_some_and(|end| end <= record_bits)
+            })
+        }),
+        RecordMemberLayout::Runtime => true,
+    }
+}
+
+impl From<VariableUnavailableReason> for PathEvaluationError {
+    fn from(reason: VariableUnavailableReason) -> Self {
+        Self::Unavailable(reason)
+    }
+}
+
+impl From<crate::UnsupportedVariableFeature> for PathEvaluationError {
+    fn from(feature: crate::UnsupportedVariableFeature) -> Self {
+        Self::Unavailable(feature.into())
+    }
 }
 
 #[derive(Clone)]
@@ -2620,6 +2703,41 @@ impl VariableInfo for DwarfVariableInfo {
             .collect())
     }
 
+    fn inspect_path(
+        &self,
+        address: ImageAddress,
+        selected: Option<CodeInstanceId>,
+        root: &str,
+        members: &[String],
+        explicit_dereferences: u32,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<InspectedValue> {
+        let object = self.visible_object(address, selected, root)?;
+        if members.is_empty() && explicit_dereferences == 0 {
+            let mut frame_base = FrameBaseCache::Empty;
+            let variable =
+                self.inspect_data_object(object, Some(address), context, runtime, &mut frame_base);
+            return Ok(InspectedValue {
+                type_info: variable.type_info,
+                state: variable.state,
+            });
+        }
+        let root_type = match &object.type_info {
+            TypeResolution::Resolved(id) => *id,
+            TypeResolution::Malformed(description) => {
+                return Ok(InspectedValue {
+                    type_info: None,
+                    state: VariableState::Malformed(VariableMalformedReason {
+                        description: Arc::clone(description),
+                    }),
+                });
+            }
+        };
+        let plan = self.plan_path(root_type, members, explicit_dereferences)?;
+        Ok(self.evaluate_path(object, plan, Some(address), context, runtime))
+    }
+
     fn inspect_global(
         &self,
         id: GlobalVariableId,
@@ -2635,6 +2753,45 @@ impl VariableInfo for DwarfVariableInfo {
         let object = &self.objects[object_index];
         let mut frame_base = FrameBaseCache::Empty;
         Ok(self.inspect_data_object(object, address, context, runtime, &mut frame_base))
+    }
+
+    fn inspect_global_path(
+        &self,
+        id: GlobalVariableId,
+        address: Option<ImageAddress>,
+        members: &[String],
+        explicit_dereferences: u32,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<InspectedValue> {
+        let global_index = usize::try_from(id.get()).expect("u32 fits usize");
+        let object_index = *self
+            .globals
+            .get(global_index)
+            .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
+        let object = &self.objects[object_index];
+        if members.is_empty() && explicit_dereferences == 0 {
+            let mut frame_base = FrameBaseCache::Empty;
+            let variable =
+                self.inspect_data_object(object, address, context, runtime, &mut frame_base);
+            return Ok(InspectedValue {
+                type_info: variable.type_info,
+                state: variable.state,
+            });
+        }
+        let root_type = match &object.type_info {
+            TypeResolution::Resolved(id) => *id,
+            TypeResolution::Malformed(description) => {
+                return Ok(InspectedValue {
+                    type_info: None,
+                    state: VariableState::Malformed(VariableMalformedReason {
+                        description: Arc::clone(description),
+                    }),
+                });
+            }
+        };
+        let plan = self.plan_path(root_type, members, explicit_dereferences)?;
+        Ok(self.evaluate_path(object, plan, address, context, runtime))
     }
 
     fn dereference(
@@ -3112,6 +3269,911 @@ impl DwarfVariableInfo {
             })
     }
 
+    fn transparent_type(&self, id: TypeId) -> std::result::Result<(TypeId, &TypeInfo), Arc<str>> {
+        let mut current = id;
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                return Err("type wrapper cycle".into());
+            }
+            let info = self.type_info(current)?;
+            match info.kind {
+                TypeKind::Qualified { target, .. } | TypeKind::Alias { target } => {
+                    current = target.id;
+                }
+                _ => return Ok((current, info)),
+            }
+        }
+    }
+
+    fn validate_static_member_layout(&self, record: TypeId, member: &RecordMember) -> Result<()> {
+        let record_size = self.type_info(record).ok().and_then(|info| info.byte_size);
+        let member_size = self
+            .type_info(member.type_ref.id)
+            .ok()
+            .and_then(|info| info.byte_size);
+        if !static_member_layout_is_valid(record_size, member_size, member.layout) {
+            return Err(Error::debug_info(DwarfError::MalformedVariable(
+                "record member extends beyond its containing object".into(),
+            )));
+        }
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "path planning keeps type traversal and its typed failures in one auditable state machine"
+    )]
+    fn plan_path(
+        &self,
+        root: TypeId,
+        members: &[String],
+        explicit_dereferences: u32,
+    ) -> Result<PlannedPath> {
+        let mut current = root;
+        let mut steps = Vec::new();
+        for member_name in members {
+            let mut indirections = HashSet::new();
+            let (record, members) = loop {
+                let source_info = self.type_info(current).map_err(|description| {
+                    Error::debug_info(DwarfError::MalformedVariable(description))
+                })?;
+                let (canonical, info) = self.transparent_type(current).map_err(|description| {
+                    Error::debug_info(DwarfError::MalformedVariable(description))
+                })?;
+                match &info.kind {
+                    TypeKind::Pointer {
+                        target: Some(target),
+                        address_class,
+                    }
+                    | TypeKind::Reference {
+                        target,
+                        address_class,
+                        ..
+                    } => {
+                        if !indirections.insert(canonical) || steps.len() >= MAX_AGGREGATE_DEPTH {
+                            return Err(Error::InvalidValueExpression(
+                                "pointer traversal exceeds its limit or contains a cycle"
+                                    .to_owned(),
+                            ));
+                        }
+                        let byte_size = match indirection_byte_size(
+                            info.byte_size,
+                            *address_class,
+                            "pointer or reference",
+                        ) {
+                            Ok(byte_size) => byte_size,
+                            Err(ValueShapeError::Malformed(description)) => {
+                                return Err(Error::debug_info(DwarfError::MalformedVariable(
+                                    description,
+                                )));
+                            }
+                            Err(ValueShapeError::Unsupported(description)) => {
+                                steps.push(PathStep::Unavailable(
+                                    VariableUnavailableReason::Other(description),
+                                ));
+                                current = target.id;
+                                continue;
+                            }
+                        };
+                        steps.push(PathStep::Dereference {
+                            target: target.id,
+                            byte_size,
+                            address_class: *address_class,
+                        });
+                        current = target.id;
+                    }
+                    TypeKind::Record { members, .. } => break (canonical, members),
+                    _ => {
+                        return Err(Error::MemberAccessOnNonRecord {
+                            member: member_name.clone(),
+                            type_name: Arc::clone(&source_info.name),
+                        });
+                    }
+                }
+            };
+            let matching = members
+                .iter()
+                .filter(|member| {
+                    !member.artificial && member.name.as_deref() == Some(member_name.as_str())
+                })
+                .collect::<Vec<_>>();
+            let [member] = matching.as_slice() else {
+                let type_name =
+                    Arc::clone(&self.type_info(record).expect("record type resolved").name);
+                if matching.is_empty() {
+                    return Err(Error::MemberNotFound {
+                        member: member_name.clone(),
+                        type_name,
+                    });
+                }
+                return Err(Error::AmbiguousMember {
+                    member: member_name.clone(),
+                    type_name,
+                });
+            };
+            let index = members
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, *member))
+                .expect("matched member belongs to the record");
+            self.validate_static_member_layout(record, member)?;
+            steps.push(PathStep::Member {
+                record,
+                index,
+                member: (*member).clone(),
+            });
+            current = member.type_ref.id;
+        }
+        for _ in 0..explicit_dereferences {
+            let (_canonical, info) = self.transparent_type(current).map_err(|description| {
+                Error::debug_info(DwarfError::MalformedVariable(description))
+            })?;
+            let (target, address_class) = match &info.kind {
+                TypeKind::Pointer {
+                    target: Some(target),
+                    address_class,
+                }
+                | TypeKind::Reference {
+                    target,
+                    address_class,
+                    ..
+                } => (target.id, *address_class),
+                TypeKind::Pointer { target: None, .. } => {
+                    steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                        DereferenceUnavailableReason::UnspecifiedPointee
+                            .to_string()
+                            .into(),
+                    )));
+                    return Ok(PlannedPath {
+                        steps,
+                        terminal: None,
+                    });
+                }
+                _ => {
+                    steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                        "the value is not a pointer or reference".into(),
+                    )));
+                    return Ok(PlannedPath {
+                        steps,
+                        terminal: Some(current),
+                    });
+                }
+            };
+            let byte_size = match indirection_byte_size(
+                info.byte_size,
+                address_class,
+                "pointer or reference",
+            ) {
+                Ok(byte_size) => byte_size,
+                Err(ValueShapeError::Malformed(description)) => {
+                    return Err(Error::debug_info(DwarfError::MalformedVariable(
+                        description,
+                    )));
+                }
+                Err(ValueShapeError::Unsupported(description)) => {
+                    steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                        description,
+                    )));
+                    current = target;
+                    continue;
+                }
+            };
+            steps.push(PathStep::Dereference {
+                target,
+                byte_size,
+                address_class,
+            });
+            current = target;
+        }
+        Ok(PlannedPath {
+            steps,
+            terminal: Some(current),
+        })
+    }
+
+    fn visible_object(
+        &self,
+        address: ImageAddress,
+        selected: Option<CodeInstanceId>,
+        name: &str,
+    ) -> Result<&CatalogDataObject> {
+        let function = self
+            .function_at(address)
+            .ok_or_else(|| Error::VariableNotFound(name.to_owned()))?;
+        let mut named = function
+            .objects
+            .iter()
+            .map(|&index| &self.objects[index])
+            .filter(|object| object.instance == selected)
+            .filter(|object| object.ranges.iter().any(|range| range.contains(address)))
+            .filter(|object| object.name.as_ref() == name)
+            .collect::<Vec<_>>();
+        let depth = named
+            .iter()
+            .map(|object| object.lexical_depth)
+            .max()
+            .ok_or_else(|| Error::VariableNotFound(name.to_owned()))?;
+        named.retain(|object| object.lexical_depth == depth);
+        let [object] = named.as_slice() else {
+            return Err(Error::AmbiguousVariable(name.to_owned()));
+        };
+        Ok(*object)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "location selection preserves each DWARF storage form and its typed failure"
+    )]
+    fn located_data_object(
+        &self,
+        variable: &CatalogDataObject,
+        address: Option<ImageAddress>,
+        runtime: &mut dyn VariableRuntime,
+        frame_base_cache: &mut FrameBaseCache,
+        budget: &mut EvaluationBudget,
+    ) -> std::result::Result<LocatedStorage, PathEvaluationError> {
+        if let Some(description) = &variable.malformed {
+            return Err(PathEvaluationError::Malformed(Arc::clone(description)));
+        }
+        let type_id = match &variable.type_info {
+            TypeResolution::Resolved(id) => *id,
+            TypeResolution::Malformed(description) => {
+                return Err(PathEvaluationError::Malformed(Arc::clone(description)));
+            }
+        };
+        let shape = self.value_shape(type_id).map_err(|error| match error {
+            ValueShapeError::Malformed(description) => PathEvaluationError::Malformed(description),
+            ValueShapeError::Unsupported(description) => {
+                PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
+            }
+        })?;
+        let description = match &variable.value {
+            Metadata::Value(description) => description,
+            Metadata::Unavailable(description) => {
+                let reason = if description.as_ref() == "no location was supplied" {
+                    VariableUnavailableReason::OptimizedOut
+                } else {
+                    Arc::clone(description).into()
+                };
+                return Err(PathEvaluationError::Unavailable(reason));
+            }
+            Metadata::Malformed(description) => {
+                return Err(PathEvaluationError::Malformed(Arc::clone(description)));
+            }
+        };
+        if let ValueDescription::Constant(constant) = description {
+            let raw = materialize_constant(
+                constant,
+                usize::try_from(shape.byte_size())
+                    .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+                self.target,
+            )?;
+            let end = raw.len();
+            return Ok(LocatedStorage::Bytes {
+                source: VariableValueSource::Constant,
+                raw,
+                start: 0,
+                end,
+                address: None,
+            });
+        }
+        let ValueDescription::Location(location) = description else {
+            unreachable!("constant values returned above")
+        };
+        let expression = location.expression(address)?.ok_or_else(|| {
+            VariableUnavailableReason::Other("no location at the current instruction".into())
+        })?;
+        let mut frame_base = FrameBase::Lazy(FrameBaseContext {
+            location: &variable.frame_base,
+            address,
+            cache: frame_base_cache,
+        });
+        let pieces = evaluate(
+            expression,
+            self.endian,
+            &mut frame_base,
+            &self.evaluation_units,
+            runtime,
+            budget,
+        )
+        .map_err(|error| match error {
+            EvaluateError::Unavailable(reason) => PathEvaluationError::Unavailable(reason),
+            EvaluateError::Malformed(description) => PathEvaluationError::Malformed(description),
+        })?;
+        if pieces.len() > MAX_LOCATION_PIECES {
+            return Err(VariableUnavailableReason::EvaluationLimit.into());
+        }
+        let [piece] = pieces.as_slice() else {
+            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
+        };
+        let expected_bits = shape
+            .byte_size()
+            .checked_mul(8)
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        if piece.size_in_bits.is_some_and(|size| size != expected_bits)
+            || piece.bit_offset.is_some()
+        {
+            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
+        }
+        match piece.location {
+            Location::Address { address } => {
+                Ok(LocatedStorage::Memory(VirtualAddress::new(address)))
+            }
+            Location::ImplicitPointer { value, byte_offset } => {
+                Ok(LocatedStorage::ImplicitPointer {
+                    debug_info_offset: u64::try_from(value.0)
+                        .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+                    byte_offset,
+                })
+            }
+            _ => {
+                let (source, raw) = materialize_pieces(
+                    &pieces,
+                    shape.byte_size(),
+                    shape.scalar(),
+                    self.endian,
+                    self.target,
+                    runtime,
+                    budget,
+                )?;
+                let end = raw.len();
+                Ok(LocatedStorage::Bytes {
+                    source,
+                    raw,
+                    start: 0,
+                    end,
+                    address: None,
+                })
+            }
+        }
+    }
+
+    fn storage_with_offset(
+        storage: LocatedStorage,
+        offset: i64,
+    ) -> std::result::Result<LocatedStorage, PathEvaluationError> {
+        match storage {
+            LocatedStorage::Memory(address) => {
+                let value = if offset >= 0 {
+                    address.get().checked_add(offset.unsigned_abs())
+                } else {
+                    address.get().checked_sub(offset.unsigned_abs())
+                }
+                .ok_or_else(|| {
+                    PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
+                        "member address overflows".into(),
+                    ))
+                })?;
+                Ok(LocatedStorage::Memory(VirtualAddress::new(value)))
+            }
+            LocatedStorage::Bytes {
+                source,
+                raw,
+                start,
+                end,
+                address,
+            } => {
+                let adjusted = if offset >= 0 {
+                    start.checked_add(
+                        usize::try_from(offset.unsigned_abs())
+                            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+                    )
+                } else {
+                    start.checked_sub(
+                        usize::try_from(offset.unsigned_abs())
+                            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+                    )
+                }
+                .filter(|adjusted| *adjusted <= end)
+                .ok_or_else(|| {
+                    PathEvaluationError::Malformed(
+                        "member offset is outside its containing value".into(),
+                    )
+                })?;
+                let address = address.and_then(|address| {
+                    if offset >= 0 {
+                        address.get().checked_add(offset.unsigned_abs())
+                    } else {
+                        address.get().checked_sub(offset.unsigned_abs())
+                    }
+                    .map(VirtualAddress::new)
+                });
+                Ok(LocatedStorage::Bytes {
+                    source,
+                    raw,
+                    start: adjusted,
+                    end,
+                    address,
+                })
+            }
+            LocatedStorage::ImplicitPointer { .. } => Err(PathEvaluationError::Malformed(
+                "an unresolved implicit pointer cannot be offset".into(),
+            )),
+        }
+    }
+
+    fn read_storage(
+        storage: &LocatedStorage,
+        size: usize,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut EvaluationBudget,
+    ) -> std::result::Result<(VariableValueSource, Arc<[u8]>), PathEvaluationError> {
+        match storage {
+            LocatedStorage::Memory(address) => {
+                budget.consume_memory(size)?;
+                let raw = runtime
+                    .read_memory(*address, size)
+                    .map_err(VariableUnavailableReason::Other)?;
+                Ok((VariableValueSource::Memory(*address), raw))
+            }
+            LocatedStorage::Bytes {
+                source,
+                raw,
+                start,
+                end,
+                ..
+            } => {
+                let selected_end = start
+                    .checked_add(size)
+                    .filter(|selected_end| *selected_end <= *end)
+                    .ok_or_else(|| {
+                        PathEvaluationError::Malformed(
+                            "selected value extends beyond its containing storage".into(),
+                        )
+                    })?;
+                Ok((source.clone(), Arc::from(&raw[*start..selected_end])))
+            }
+            LocatedStorage::ImplicitPointer { .. } => Err(PathEvaluationError::Malformed(
+                "an unresolved implicit pointer cannot be read".into(),
+            )),
+        }
+    }
+
+    const fn concrete_storage_address(storage: &LocatedStorage) -> Option<VirtualAddress> {
+        match storage {
+            LocatedStorage::Memory(address) => Some(*address),
+            LocatedStorage::Bytes { address, .. } => *address,
+            LocatedStorage::ImplicitPointer { .. } => None,
+        }
+    }
+
+    fn bit_field_storage(
+        &self,
+        storage: LocatedStorage,
+        type_id: TypeId,
+        bit_offset: u64,
+        bit_size: u64,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut EvaluationBudget,
+    ) -> std::result::Result<LocatedStorage, PathEvaluationError> {
+        let shape = self.value_shape(type_id).map_err(|error| match error {
+            ValueShapeError::Malformed(description) => PathEvaluationError::Malformed(description),
+            ValueShapeError::Unsupported(description) => {
+                PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
+            }
+        })?;
+        let ValueShapeKind::Scalar(base) = &shape.kind else {
+            return Err(PathEvaluationError::Unavailable(
+                VariableUnavailableReason::Other("non-scalar bit-fields are unsupported".into()),
+            ));
+        };
+        let storage_bits = base
+            .byte_size
+            .checked_mul(8)
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        if bit_size == 0 || bit_size > storage_bits || bit_size > 128 {
+            return Err(PathEvaluationError::Malformed(
+                "bit-field width exceeds its declared scalar storage".into(),
+            ));
+        }
+        let first_byte = bit_offset / 8;
+        let last_bit = bit_offset
+            .checked_add(bit_size)
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        let last_byte = last_bit
+            .checked_add(7)
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?
+            / 8;
+        let span = last_byte
+            .checked_sub(first_byte)
+            .and_then(|size| usize::try_from(size).ok())
+            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        let selected = Self::storage_with_offset(
+            storage,
+            i64::try_from(first_byte).map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+        )?;
+        let (_, bytes) = Self::read_storage(&selected, span, runtime, budget)?;
+        let relative_offset = bit_offset % 8;
+        let mut value =
+            extract_bit_field(&bytes, relative_offset, bit_size, self.target.byte_order)
+                .map_err(PathEvaluationError::Malformed)?;
+        if matches!(
+            base.encoding,
+            BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
+        ) && bit_size < 128
+            && value & (1_u128 << (bit_size - 1)) != 0
+        {
+            value |= u128::MAX << bit_size;
+        }
+        let byte_size = usize::try_from(base.byte_size)
+            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let full = value.to_le_bytes();
+        let mut raw = full[..byte_size].to_vec();
+        if self.target.byte_order == ByteOrder::Big {
+            raw.reverse();
+        }
+        let raw: Arc<[u8]> = raw.into();
+        let end = raw.len();
+        Ok(LocatedStorage::Bytes {
+            source: VariableValueSource::Computed,
+            raw,
+            start: 0,
+            end,
+            address: None,
+        })
+    }
+
+    fn runtime_member_storage(
+        &self,
+        storage: &LocatedStorage,
+        record: TypeId,
+        index: usize,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut EvaluationBudget,
+    ) -> std::result::Result<LocatedStorage, PathEvaluationError> {
+        let object_address = Self::concrete_storage_address(storage).ok_or_else(|| {
+            PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
+                "runtime member location has no concrete containing-object address".into(),
+            ))
+        })?;
+        let key = DynamicRecordLayoutKey {
+            record,
+            child: index,
+            base: false,
+        };
+        let expression = self.dynamic_record_layouts.get(&key).ok_or_else(|| {
+            PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
+                "runtime member location form is unsupported".into(),
+            ))
+        })?;
+        let pieces = evaluate_with_object(
+            expression,
+            self.endian,
+            &mut FrameBase::Unsupported,
+            &self.evaluation_units,
+            runtime,
+            budget,
+            Some(object_address),
+        )
+        .map_err(|error| match error {
+            EvaluateError::Unavailable(reason) => PathEvaluationError::Unavailable(reason),
+            EvaluateError::Malformed(description) => PathEvaluationError::Malformed(description),
+        })?;
+        let [piece] = pieces.as_slice() else {
+            return Err(PathEvaluationError::Malformed(
+                "runtime member location produced multiple pieces".into(),
+            ));
+        };
+        if piece.size_in_bits.is_some() || piece.bit_offset.is_some() {
+            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
+        }
+        let Location::Address { address } = piece.location else {
+            return Err(PathEvaluationError::Malformed(
+                "runtime member location did not produce an address".into(),
+            ));
+        };
+        Ok(LocatedStorage::Memory(VirtualAddress::new(address)))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "implicit-pointer resolution requires target bounds and the shared evaluation context"
+    )]
+    fn resolve_implicit_pointer(
+        &self,
+        debug_info_offset: u64,
+        byte_offset: i64,
+        target: TypeId,
+        address: Option<ImageAddress>,
+        runtime: &mut dyn VariableRuntime,
+        frame_base_cache: &mut FrameBaseCache,
+        budget: &mut EvaluationBudget,
+    ) -> std::result::Result<LocatedStorage, PathEvaluationError> {
+        let object_index = self
+            .objects_by_debug_offset
+            .get(&debug_info_offset)
+            .copied()
+            .ok_or_else(|| {
+                PathEvaluationError::Unavailable(
+                    crate::UnsupportedVariableFeature::CrossDieEvaluation.into(),
+                )
+            })?;
+        let object = &self.objects[object_index];
+        let referenced_type = match &object.type_info {
+            TypeResolution::Resolved(id) => *id,
+            TypeResolution::Malformed(description) => {
+                return Err(PathEvaluationError::Malformed(Arc::clone(description)));
+            }
+        };
+        let referenced_size = self
+            .value_shape(referenced_type)
+            .map_err(|error| match error {
+                ValueShapeError::Malformed(description) => {
+                    PathEvaluationError::Malformed(description)
+                }
+                ValueShapeError::Unsupported(description) => {
+                    PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
+                }
+            })?
+            .byte_size();
+        let target_size = self
+            .value_shape(target)
+            .map_err(|error| match error {
+                ValueShapeError::Malformed(description) => {
+                    PathEvaluationError::Malformed(description)
+                }
+                ValueShapeError::Unsupported(description) => {
+                    PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
+                }
+            })?
+            .byte_size();
+        implicit_pointer_range(byte_offset, target_size, referenced_size)
+            .map_err(PathEvaluationError::Unavailable)?;
+        let referenced =
+            self.located_data_object(object, address, runtime, frame_base_cache, budget)?;
+        if matches!(referenced, LocatedStorage::ImplicitPointer { .. }) {
+            return Err(PathEvaluationError::Unavailable(
+                crate::UnsupportedVariableFeature::CrossDieEvaluation.into(),
+            ));
+        }
+        Self::storage_with_offset(referenced, byte_offset)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "path evaluation keeps ordered storage transitions and typed failures in one auditable state machine"
+    )]
+    fn evaluate_path(
+        &self,
+        variable: &CatalogDataObject,
+        plan: PlannedPath,
+        address: Option<ImageAddress>,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+    ) -> InspectedValue {
+        let terminal_type = match plan.terminal {
+            Some(terminal) => match self.type_info(terminal) {
+                Ok(info) => Some(info.clone()),
+                Err(description) => {
+                    return InspectedValue {
+                        type_info: None,
+                        state: VariableState::Malformed(VariableMalformedReason { description }),
+                    };
+                }
+            },
+            None => None,
+        };
+        let failure = |error: PathEvaluationError| InspectedValue {
+            type_info: terminal_type.clone(),
+            state: match error {
+                PathEvaluationError::Unavailable(reason) => VariableState::Unavailable(reason),
+                PathEvaluationError::Malformed(description) => {
+                    VariableState::Malformed(VariableMalformedReason { description })
+                }
+            },
+        };
+        let mut budget = EvaluationBudget::default();
+        let mut frame_base = FrameBaseCache::Empty;
+        let mut storage = match self.located_data_object(
+            variable,
+            address,
+            runtime,
+            &mut frame_base,
+            &mut budget,
+        ) {
+            Ok(storage) => storage,
+            Err(error) => return failure(error),
+        };
+        for step in plan.steps {
+            storage = match step {
+                PathStep::Dereference {
+                    target,
+                    byte_size,
+                    address_class,
+                } => {
+                    if let LocatedStorage::ImplicitPointer {
+                        debug_info_offset,
+                        byte_offset,
+                    } = storage
+                    {
+                        match self.resolve_implicit_pointer(
+                            debug_info_offset,
+                            byte_offset,
+                            target,
+                            address,
+                            runtime,
+                            &mut frame_base,
+                            &mut budget,
+                        ) {
+                            Ok(storage) => storage,
+                            Err(error) => return failure(error),
+                        }
+                    } else {
+                        if address_class != 0 {
+                            return failure(PathEvaluationError::Unavailable(
+                                VariableUnavailableReason::Other(
+                                    DereferenceUnavailableReason::AddressClass(address_class)
+                                        .to_string()
+                                        .into(),
+                                ),
+                            ));
+                        }
+                        let Ok(size) = usize::try_from(byte_size) else {
+                            return failure(VariableUnavailableReason::EvaluationLimit.into());
+                        };
+                        let (_, raw) =
+                            match Self::read_storage(&storage, size, runtime, &mut budget) {
+                                Ok(value) => value,
+                                Err(error) => return failure(error),
+                            };
+                        let pointer = match decode_address(&raw, byte_size, self.target) {
+                            Ok(pointer) => pointer,
+                            Err(reason) => return failure(reason.into()),
+                        };
+                        if pointer.get() == 0 {
+                            return failure(PathEvaluationError::Unavailable(
+                                VariableUnavailableReason::Other(
+                                    DereferenceUnavailableReason::Null.to_string().into(),
+                                ),
+                            ));
+                        }
+                        LocatedStorage::Memory(pointer)
+                    }
+                }
+                PathStep::Member {
+                    record,
+                    index,
+                    member,
+                } => match member.layout {
+                    RecordMemberLayout::ByteOffset(offset) => {
+                        match i64::try_from(offset)
+                            .map_err(|_| VariableUnavailableReason::EvaluationLimit.into())
+                            .and_then(|offset| Self::storage_with_offset(storage, offset))
+                        {
+                            Ok(storage) => storage,
+                            Err(error) => return failure(error),
+                        }
+                    }
+                    RecordMemberLayout::BitRange {
+                        bit_offset,
+                        bit_size,
+                    } => match self.bit_field_storage(
+                        storage,
+                        member.type_ref.id,
+                        bit_offset,
+                        bit_size,
+                        runtime,
+                        &mut budget,
+                    ) {
+                        Ok(storage) => storage,
+                        Err(error) => return failure(error),
+                    },
+                    RecordMemberLayout::Runtime => match self.runtime_member_storage(
+                        &storage,
+                        record,
+                        index,
+                        runtime,
+                        &mut budget,
+                    ) {
+                        Ok(storage) => storage,
+                        Err(error) => return failure(error),
+                    },
+                },
+                PathStep::Unavailable(reason) => {
+                    return failure(PathEvaluationError::Unavailable(reason));
+                }
+            };
+        }
+        let Some(terminal) = plan.terminal else {
+            return failure(PathEvaluationError::Malformed(
+                "an untyped expression unexpectedly reached materialization".into(),
+            ));
+        };
+        let Some(terminal_type) = terminal_type else {
+            return failure(PathEvaluationError::Malformed(
+                "a typed expression unexpectedly lost its terminal type".into(),
+            ));
+        };
+        self.materialize_inspected_value(
+            terminal,
+            terminal_type,
+            &storage,
+            context,
+            runtime,
+            budget,
+        )
+    }
+
+    fn materialize_inspected_value(
+        &self,
+        type_id: TypeId,
+        type_info: TypeInfo,
+        storage: &LocatedStorage,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        mut budget: EvaluationBudget,
+    ) -> InspectedValue {
+        let shape = match self.value_shape(type_id) {
+            Ok(shape) => shape,
+            Err(ValueShapeError::Malformed(description)) => {
+                return InspectedValue {
+                    type_info: Some(type_info),
+                    state: VariableState::Malformed(VariableMalformedReason { description }),
+                };
+            }
+            Err(ValueShapeError::Unsupported(description)) => {
+                return InspectedValue {
+                    type_info: Some(type_info),
+                    state: VariableState::Unavailable(description.into()),
+                };
+            }
+        };
+        let Ok(size) = usize::try_from(shape.byte_size()) else {
+            return InspectedValue {
+                type_info: Some(type_info),
+                state: VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
+            };
+        };
+        let (source, raw) = match Self::read_storage(storage, size, runtime, &mut budget) {
+            Ok(value) => value,
+            Err(PathEvaluationError::Unavailable(reason)) => {
+                return InspectedValue {
+                    type_info: Some(type_info),
+                    state: VariableState::Unavailable(reason),
+                };
+            }
+            Err(PathEvaluationError::Malformed(description)) => {
+                return InspectedValue {
+                    type_info: Some(type_info),
+                    state: VariableState::Malformed(VariableMalformedReason { description }),
+                };
+            }
+        };
+        let mut state = if matches!(shape.kind, ValueShapeKind::Slice { .. }) {
+            decode_slice_state(
+                &self.types,
+                &self.dynamic_record_layouts,
+                &self.evaluation_units,
+                self.endian,
+                &shape,
+                source,
+                raw,
+                self.target,
+                runtime,
+                budget,
+            )
+        } else {
+            decode_value_state(
+                &self.types,
+                &self.dynamic_record_layouts,
+                &self.evaluation_units,
+                self.endian,
+                &shape,
+                context,
+                source,
+                raw,
+                self.target,
+                runtime,
+                budget,
+            )
+        };
+        self.constrain_dereference(&mut state, &shape);
+        InspectedValue {
+            type_info: Some(type_info),
+            state,
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "the object inspection pipeline keeps every typed failure at its originating boundary"
@@ -3523,7 +4585,21 @@ fn implicit_pointer_bytes(
     byte_offset: i64,
     size: usize,
 ) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
-    let start = usize::try_from(byte_offset).map_err(|_| {
+    let containing_size =
+        u64::try_from(raw.len()).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+    let size = u64::try_from(size).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+    let (start, end) = implicit_pointer_range(byte_offset, size, containing_size)?;
+    let start = usize::try_from(start).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+    let end = usize::try_from(end).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+    Ok(Arc::from(&raw[start..end]))
+}
+
+fn implicit_pointer_range(
+    byte_offset: i64,
+    size: u64,
+    containing_size: u64,
+) -> std::result::Result<(u64, u64), VariableUnavailableReason> {
+    let start = u64::try_from(byte_offset).map_err(|_| {
         VariableUnavailableReason::Other(
             "negative implicit-pointer offsets outside the referenced object are unsupported"
                 .into(),
@@ -3532,12 +4608,12 @@ fn implicit_pointer_bytes(
     let end = start
         .checked_add(size)
         .ok_or(VariableUnavailableReason::EvaluationLimit)?;
-    let bytes = raw.get(start..end).ok_or_else(|| {
-        VariableUnavailableReason::Other(
+    if end > containing_size {
+        return Err(VariableUnavailableReason::Other(
             "implicit-pointer offset is outside the referenced value".into(),
-        )
-    })?;
-    Ok(Arc::from(bytes))
+        ));
+    }
+    Ok((start, end))
 }
 
 fn available_implicit_pointer(
@@ -5975,6 +7051,51 @@ mod tests {
             implicit_pointer_bytes(&[0; 8], i64::MAX, usize::MAX),
             Err(VariableUnavailableReason::EvaluationLimit)
         );
+    }
+
+    #[test]
+    fn static_member_layouts_cannot_escape_their_containing_record() {
+        assert!(static_member_layout_is_valid(
+            Some(8),
+            Some(4),
+            RecordMemberLayout::ByteOffset(4)
+        ));
+        assert!(!static_member_layout_is_valid(
+            Some(8),
+            Some(4),
+            RecordMemberLayout::ByteOffset(5)
+        ));
+        assert!(!static_member_layout_is_valid(
+            Some(u64::MAX),
+            Some(2),
+            RecordMemberLayout::ByteOffset(u64::MAX)
+        ));
+        assert!(static_member_layout_is_valid(
+            Some(8),
+            Some(1),
+            RecordMemberLayout::BitRange {
+                bit_offset: 63,
+                bit_size: 1,
+            }
+        ));
+        assert!(!static_member_layout_is_valid(
+            Some(8),
+            Some(1),
+            RecordMemberLayout::BitRange {
+                bit_offset: 63,
+                bit_size: 2,
+            }
+        ));
+        assert!(!static_member_layout_is_valid(
+            None,
+            Some(1),
+            RecordMemberLayout::ByteOffset(0)
+        ));
+        assert!(static_member_layout_is_valid(
+            None,
+            Some(1),
+            RecordMemberLayout::Runtime
+        ));
     }
 
     #[test]

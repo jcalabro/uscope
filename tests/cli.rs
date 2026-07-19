@@ -391,7 +391,10 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
         .expect("run uscope");
     let stdout = assert_success(output);
 
-    assert!(stdout.contains("print [*...variable]\n"), "{stdout}");
+    assert!(
+        stdout.contains("print [*...variable[.member...]]\n"),
+        "{stdout}"
+    );
     assert!(stdout.contains("aliases: p"), "{stdout}");
     assert!(stdout.contains("  Pause execution"), "{stdout}");
     assert!(!stdout.contains("usage: pause"), "{stdout}");
@@ -502,6 +505,56 @@ fn print_explicitly_dereferences_pointer_chains_and_reports_typed_failures() {
     );
     assert!(
         stdout.contains("*invalid_pointer = <unavailable:"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn print_selects_members_and_implicitly_dereferences_only_intermediate_pointers() {
+    let executable = fixture("build/test-programs/variables-gcc-o0");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break variables.c:68",
+            "--eval",
+            "run",
+            "--eval",
+            "p pair.first",
+            "--eval",
+            "p pair.second",
+            "--eval",
+            "p structure_pointer.first",
+            "--eval",
+            "p recursive_pointer.next",
+            "--eval",
+            "p recursive_pointer.next.next.value",
+            "--eval",
+            "p recursive_pointer.next.next.next.value",
+        ])
+        .arg(executable)
+        .output()
+        .expect("run structural print commands");
+    let stdout = assert_success(output);
+
+    assert!(stdout.contains("(int) pair.first = 20"), "{stdout}");
+    assert!(stdout.contains("(int) pair.second = 22"), "{stdout}");
+    assert!(
+        stdout.contains("(int) structure_pointer.first = 20"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("recursive_pointer.next = 0x"),
+        "terminal pointer must render its address: {stdout}"
+    );
+    assert!(
+        stdout.contains("(int) recursive_pointer.next.next.value = 42"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "(int) recursive_pointer.next.next.next.value = <unavailable: cannot dereference a null pointer>"
+        ),
         "{stdout}"
     );
 }

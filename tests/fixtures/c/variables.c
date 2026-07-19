@@ -60,7 +60,7 @@ __attribute__((noinline)) int pointer_target(int parameter, int *pointer_paramet
     aliased_int *alias_pointer = &alias_pointee;
     struct pointer_pair pair = {20, 22};
     struct pointer_pair *structure_pointer = &pair;
-    struct pointer_node node = {0, 42};
+    struct pointer_node third = {0, 42}, second = {&third, 41}, node = {&second, 40};
     struct pointer_node *recursive_pointer = &node;
     int array[2] = {20, 22};
     int (*array_pointer)[2] = &array;

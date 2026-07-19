@@ -37,10 +37,11 @@ use crate::unwind::{
 use crate::{
     Backtrace, BreakpointLocation, CodeInstanceId, CodeInstanceKind, Error, ExecutionLocation,
     FrameKind, GlobalVariablePage, GlobalVariableReference, ImageAddress, ImageLocation,
-    InlineFrameLookup, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
+    InlineFrameLookup, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
     LoadedModuleSnapshot, ModuleImage, RegisterDescriptor, RegisterId, RegisterRole,
     RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame, ThreadId as DebugThreadId,
-    UnwindTermination, VariableSnapshot, VariableUnavailableReason, VirtualAddress,
+    UnwindTermination, ValueExpression, VariableSnapshot, VariableUnavailableReason,
+    VirtualAddress,
 };
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
@@ -48,6 +49,8 @@ const WAITER_THREAD_NAME: &str = "uscope-waitpid";
 const BREAKPOINT_OPCODE: u8 = 0xcc;
 const TRAP_UNKNOWN: i32 = 5;
 const MAX_LOGICAL_MEMORY_READ: usize = 1024 * 1024;
+const MAX_VALUE_EXPRESSION_COMPONENTS: usize = 64;
+const MAX_VALUE_EXPRESSION_DEREFERENCES: u32 = 64;
 
 static LINUX_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -592,6 +595,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.variables(stop_id, debug_pid(thread_id), &query));
+            }
+            Request::Inspect {
+                expression,
+                stop_id,
+                thread_id,
+                reply,
+            } => {
+                let _ = reply.send(self.inspect(stop_id, debug_pid(thread_id), &expression));
             }
             Request::Dereference { reference, reply } => {
                 let _ = reply.send(self.dereference(&reference));
@@ -3654,6 +3665,196 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(variable)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "longest-prefix local/global lookup shares one validated stopped runtime"
+    )]
+    fn inspect(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        expression: &ValueExpression,
+    ) -> Result<InspectedValue> {
+        validate_value_expression(expression)?;
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_stopped_thread(inferior, pid)?;
+        if inferior.exec_unsupported {
+            return Err(backend_error(LinuxError::UnsupportedExec));
+        }
+
+        let presentation = self.presentation_for_stopped_thread(pid)?;
+        let selected_instance = match presentation.frame {
+            PresentedFrame::Physical => Some(None),
+            PresentedFrame::Inline(instance) => Some(Some(instance)),
+            PresentedFrame::Ambiguous(_) => None,
+        };
+        let native = self.ptrace.registers(pid)?;
+        let registers = x86_64_registers(&native);
+        let instruction = VirtualAddress::new(native.rip);
+        let image_address = inferior
+            .loaded_module
+            .image_address(instruction)
+            .ok()
+            .filter(|address| self.module_image.contains_address(*address));
+        let cfa = image_address.map_or_else(
+            || {
+                Err(VariableUnavailableReason::Other(
+                    "instruction is outside the main image".into(),
+                ))
+            },
+            |address| {
+                self.unwind_info
+                    .cfa(address, &registers)
+                    .map_err(|termination| match termination {
+                        UnwindTermination::UnsupportedUnwindInfo { feature }
+                            if feature.as_ref() == "CFA expression" =>
+                        {
+                            VariableUnavailableReason::CfaExpression
+                        }
+                        other => VariableUnavailableReason::Other(format!("{other:?}").into()),
+                    })
+            },
+        );
+        let context = VariableContext {
+            stop_id,
+            thread: debug_thread_id(pid),
+            module: inferior.loaded_module.id,
+            image: inferior.loaded_module.image,
+            address: image_address,
+        };
+        let mut runtime = LinuxVariableRuntime {
+            ptrace: &self.ptrace,
+            pid,
+            loaded_module: inferior.loaded_module,
+            breakpoints: &inferior.breakpoints,
+            native: &native,
+            floating: None,
+            cfa: cfa.clone(),
+            link_map: self
+                .modules
+                .get(&inferior.loaded_module.id)
+                .and_then(|module| module.link_map),
+        };
+
+        for root_components in (1..=expression.components.len()).rev() {
+            let root = expression.components[..root_components].join(".");
+            let members = &expression.components[root_components..];
+            let local = image_address.zip(selected_instance).map_or_else(
+                || Err(Error::VariableNotFound(root.clone())),
+                |(address, selected)| {
+                    self.variable_info.inspect_path(
+                        address,
+                        selected,
+                        &root,
+                        members,
+                        expression.explicit_dereferences,
+                        context,
+                        &mut runtime,
+                    )
+                },
+            );
+            match local {
+                Ok(value) => return Ok(value),
+                Err(Error::VariableNotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+
+            let mut matches = Vec::new();
+            for module in self.modules.values() {
+                match module.image.global_named(&root) {
+                    Ok(global) => matches.push(GlobalVariableReference {
+                        module: module.loaded.id,
+                        image: module.loaded.image,
+                        variable: global.id,
+                    }),
+                    Err(Error::VariableNotFound(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            match matches.as_slice() {
+                [] => {}
+                [global] => {
+                    return self.inspect_loaded_global_path(
+                        inferior,
+                        pid,
+                        &native,
+                        instruction,
+                        &cfa,
+                        *global,
+                        members,
+                        expression.explicit_dereferences,
+                    );
+                }
+                _ => {
+                    return Err(Error::AmbiguousLoadedGlobalVariable {
+                        selector: root,
+                        candidates: matches,
+                    });
+                }
+            }
+        }
+
+        Err(Error::VariableNotFound(expression.components.join(".")))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "global evaluation reuses the validated stop's native runtime context"
+    )]
+    fn inspect_loaded_global_path(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+        native: &libc::user_regs_struct,
+        instruction: VirtualAddress,
+        cfa: &std::result::Result<VirtualAddress, VariableUnavailableReason>,
+        global: GlobalVariableReference,
+        members: &[String],
+        explicit_dereferences: u32,
+    ) -> Result<InspectedValue> {
+        let module = self
+            .modules
+            .get(&global.module)
+            .ok_or(Error::ModuleNotLoaded(global.module))?;
+        if module.loaded.image != global.image {
+            return Err(Error::StaleModuleImage);
+        }
+        let context_address = module
+            .loaded
+            .image_address(instruction)
+            .ok()
+            .filter(|address| module.image.contains_address(*address));
+        let mut runtime = LinuxVariableRuntime {
+            ptrace: &self.ptrace,
+            pid,
+            loaded_module: module.loaded,
+            breakpoints: &inferior.breakpoints,
+            native,
+            floating: None,
+            cfa: cfa.clone(),
+            link_map: module.link_map,
+        };
+        module.variables.inspect_global_path(
+            global.variable,
+            context_address,
+            members,
+            explicit_dereferences,
+            VariableContext {
+                stop_id: inferior
+                    .public_stop
+                    .as_ref()
+                    .expect("expression inspection validated a public stop")
+                    .id,
+                thread: debug_thread_id(pid),
+                module: module.loaded.id,
+                image: module.loaded.image,
+                address: context_address,
+            },
+            &mut runtime,
+        )
+    }
+
     fn dereference(
         &self,
         reference: &crate::DereferenceReference,
@@ -5118,6 +5319,30 @@ fn validate_stopped_thread(inferior: &Inferior, pid: Pid) -> Result<()> {
     }
 }
 
+fn validate_value_expression(expression: &ValueExpression) -> Result<()> {
+    if expression.components.is_empty() {
+        return Err(Error::InvalidValueExpression(
+            "an expression must name a data object".to_owned(),
+        ));
+    }
+    if expression.components.len() > MAX_VALUE_EXPRESSION_COMPONENTS {
+        return Err(Error::InvalidValueExpression(format!(
+            "an expression may contain at most {MAX_VALUE_EXPRESSION_COMPONENTS} components"
+        )));
+    }
+    if expression.components.iter().any(String::is_empty) {
+        return Err(Error::InvalidValueExpression(
+            "expression components must not be empty".to_owned(),
+        ));
+    }
+    if expression.explicit_dereferences > MAX_VALUE_EXPRESSION_DEREFERENCES {
+        return Err(Error::InvalidValueExpression(format!(
+            "an expression may contain at most {MAX_VALUE_EXPRESSION_DEREFERENCES} explicit dereferences"
+        )));
+    }
+    Ok(())
+}
+
 fn scoped_threads(inferior: &Inferior, scope: ResumeScope) -> Result<BTreeSet<Pid>> {
     match scope {
         ResumeScope::Process(requested) => {
@@ -5455,6 +5680,42 @@ mod tests {
     use crate::{AddressRange, ImageAddress};
 
     #[test]
+    fn value_expression_validation_bounds_untrusted_request_structure() {
+        let valid = ValueExpression {
+            components: vec!["root".to_owned(), "member".to_owned()].into(),
+            explicit_dereferences: MAX_VALUE_EXPRESSION_DEREFERENCES,
+        };
+        validate_value_expression(&valid).expect("bounded expression");
+
+        for expression in [
+            ValueExpression {
+                components: Arc::new([]),
+                explicit_dereferences: 0,
+            },
+            ValueExpression {
+                components: vec!["root".to_owned(), String::new()].into(),
+                explicit_dereferences: 0,
+            },
+            ValueExpression {
+                components: (0..=MAX_VALUE_EXPRESSION_COMPONENTS)
+                    .map(|index| format!("member{index}"))
+                    .collect::<Vec<_>>()
+                    .into(),
+                explicit_dereferences: 0,
+            },
+            ValueExpression {
+                components: Arc::new(["root".to_owned()]),
+                explicit_dereferences: MAX_VALUE_EXPRESSION_DEREFERENCES + 1,
+            },
+        ] {
+            assert!(matches!(
+                validate_value_expression(&expression),
+                Err(Error::InvalidValueExpression(_))
+            ));
+        }
+    }
+
+    #[test]
     fn module_mapping_parser_preserves_distinct_loads_and_rejects_corruption() {
         let maps = concat!(
             "1000-2000 r--p 00000000 00:01 7 /opt/lib/libsame.so\n",
@@ -5685,6 +5946,19 @@ mod tests {
             panic!("unexpected variable lookup")
         }
 
+        fn inspect_path(
+            &self,
+            _address: ImageAddress,
+            _selected: Option<crate::CodeInstanceId>,
+            _root: &str,
+            _members: &[String],
+            _explicit_dereferences: u32,
+            _context: VariableContext,
+            _runtime: &mut dyn VariableRuntime,
+        ) -> Result<crate::InspectedValue> {
+            panic!("unexpected variable path lookup")
+        }
+
         fn inspect_global(
             &self,
             _id: crate::GlobalVariableId,
@@ -5693,6 +5967,18 @@ mod tests {
             _runtime: &mut dyn VariableRuntime,
         ) -> Result<crate::Variable> {
             panic!("unexpected global variable lookup")
+        }
+
+        fn inspect_global_path(
+            &self,
+            _id: crate::GlobalVariableId,
+            _address: Option<ImageAddress>,
+            _members: &[String],
+            _explicit_dereferences: u32,
+            _context: VariableContext,
+            _runtime: &mut dyn VariableRuntime,
+        ) -> Result<crate::InspectedValue> {
+            panic!("unexpected global variable path lookup")
         }
 
         fn dereference(

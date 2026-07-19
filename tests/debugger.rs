@@ -28,6 +28,27 @@ fn available_graph(state: &VariableState) -> &uscope::ValueGraph {
     }
 }
 
+fn value_expression(components: &[&str]) -> uscope::ValueExpression {
+    uscope::ValueExpression {
+        components: components
+            .iter()
+            .map(|component| (*component).to_owned())
+            .collect::<Vec<_>>()
+            .into(),
+        explicit_dereferences: 0,
+    }
+}
+
+fn assert_inspected_signed(value: &uscope::InspectedValue, expected: i128, context: &str) {
+    assert!(
+        matches!(
+            root_value(available_graph(&value.state)),
+            uscope::VariableValue::Scalar(ScalarValue::Signed(actual)) if *actual == expected
+        ),
+        "{context}: {value:?}"
+    );
+}
+
 fn assert_dereferenced_record(
     value: &uscope::DereferencedValue,
     minimum_members: usize,
@@ -305,6 +326,132 @@ async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
             &uscope::VariableValue::Scalar(ScalarValue::Signed(42))
         );
         partial.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn structural_inspection_selects_direct_and_pointer_record_members() {
+    for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint("variables.c", 68).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        for (components, expected) in [
+            (&["pair", "first"][..], 20),
+            (&["pair", "second"][..], 22),
+            (&["structure_pointer", "first"][..], 20),
+            (&["structure_pointer", "second"][..], 22),
+        ] {
+            let value = scenario
+                .operation(
+                    "inspect record member",
+                    scenario.handle().inspect(value_expression(components)),
+                )
+                .await;
+            assert_inspected_signed(&value, expected, fixture);
+        }
+
+        scenario.shutdown().await;
+    }
+
+    for fixture in ["variables-cpp-gcc-o0", "variables-cpp-clang-o0"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint("variables.cpp", 50).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let value = scenario
+            .operation(
+                "inspect member through C++ reference",
+                scenario
+                    .handle()
+                    .inspect(value_expression(&["structure_reference", "second"])),
+            )
+            .await;
+        assert_inspected_signed(&value, 22, fixture);
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_needed() {
+    for fixture in [
+        "variables-gcc-o0",
+        "variables-clang-o0",
+        "variables-gcc-o2",
+        "variables-clang-o2",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_source_breakpoint("variables.c", 68).await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let terminal_pointer = scenario
+            .operation(
+                "inspect terminal pointer member",
+                scenario
+                    .handle()
+                    .inspect(value_expression(&["recursive_pointer", "next"])),
+            )
+            .await;
+        assert!(
+            matches!(
+                terminal_pointer.type_info.as_ref().map(|info| &info.kind),
+                Some(uscope::TypeKind::Pointer { .. })
+            ) && matches!(
+                root_value(available_graph(&terminal_pointer.state)),
+                uscope::VariableValue::Address(uscope::AddressValue { address })
+                    if address.get() != 0
+            ),
+            "{fixture}: terminal pointer was implicitly dereferenced: {terminal_pointer:?}"
+        );
+
+        for (components, expected) in [
+            (&["recursive_pointer", "value"][..], 40),
+            (&["recursive_pointer", "next", "value"][..], 41),
+            (&["recursive_pointer", "next", "next", "value"][..], 42),
+        ] {
+            let value = scenario
+                .operation(
+                    "inspect pointer member chain",
+                    scenario.handle().inspect(value_expression(components)),
+                )
+                .await;
+            assert_inspected_signed(&value, expected, fixture);
+        }
+
+        let unavailable = scenario
+            .operation(
+                "inspect through null intermediate pointer",
+                scenario.handle().inspect(value_expression(&[
+                    "recursive_pointer",
+                    "next",
+                    "next",
+                    "next",
+                    "value",
+                ])),
+            )
+            .await;
+        assert_eq!(
+            unavailable
+                .type_info
+                .as_ref()
+                .map(|type_info| type_info.name.as_ref()),
+            Some("int"),
+            "{fixture}: terminal type was lost after the null hop: {unavailable:?}"
+        );
+        assert!(
+            matches!(unavailable.state, VariableState::Unavailable(_)),
+            "{fixture}: {unavailable:?}"
+        );
+
+        scenario.shutdown().await;
     }
 }
 
@@ -838,6 +985,98 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
 }
 
 #[tokio::test]
+async fn structural_inspection_reads_a_small_field_without_materializing_a_large_record() {
+    for fixture in ["records-c-gcc-o0", "records-c-clang-o0"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspect_records").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let whole_record = dereference_named(&scenario, "large", 1).await;
+        assert!(
+            matches!(whole_record.state, VariableState::Unavailable(_)),
+            "{fixture}: fixture no longer proves the aggregate inspection limit: {whole_record:?}"
+        );
+
+        for (components, expected) in [
+            (&["record", "inner", "signed_value"][..], -7),
+            (&["bits", "negative"][..], -3),
+        ] {
+            let value = scenario
+                .operation(
+                    "inspect nested or bit-field member",
+                    scenario.handle().inspect(value_expression(components)),
+                )
+                .await;
+            assert_inspected_signed(&value, expected, fixture);
+        }
+        let unsigned_bit_field = scenario
+            .operation(
+                "inspect unsigned bit-field member",
+                scenario
+                    .handle()
+                    .inspect(value_expression(&["bits", "second"])),
+            )
+            .await;
+        assert!(
+            matches!(
+                root_value(available_graph(&unsigned_bit_field.state)),
+                uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+            ),
+            "{fixture}: {unsigned_bit_field:?}"
+        );
+
+        let selected = scenario
+            .operation(
+                "inspect small field in large record",
+                scenario
+                    .handle()
+                    .inspect(value_expression(&["large", "small"])),
+            )
+            .await;
+        assert_inspected_signed(&selected, 73, fixture);
+
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn structural_inspection_preserves_dots_in_global_roots_before_selecting_members() {
+    let fixture = "records-go-o0";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario.add_source_breakpoint("main.go", 22).await;
+    run_go_to_breakpoint(&mut scenario, fixture).await;
+
+    let root = scenario
+        .operation(
+            "inspect dotted global root",
+            scenario
+                .handle()
+                .inspect(value_expression(&["main", "globalRecord"])),
+        )
+        .await;
+    assert_record_graph(available_graph(&root.state), 2, fixture);
+
+    let member = scenario
+        .operation(
+            "inspect member below dotted global root",
+            scenario.handle().inspect(value_expression(&[
+                "main",
+                "globalRecord",
+                "inner",
+                "signedValue",
+            ])),
+        )
+        .await;
+    assert_inspected_signed(&member, -7, fixture);
+
+    resume_go_to_exit(&mut scenario, fixture).await;
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
 async fn cpp_records_cover_multiple_and_virtual_base_metadata() {
     for fixture in [
         "records-cpp-gcc-o0",
@@ -1211,6 +1450,16 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
 
     let pointee = dereference_named(&scenario, "pointer_pointer", 2).await;
     assert_dereferenced_scalar(&pointee, 42, fixture);
+    let atomic_pointee = scenario
+        .operation(
+            "inspect through implicit pointer chain atomically",
+            scenario.handle().inspect(uscope::ValueExpression {
+                components: vec!["pointer_pointer".to_owned()].into(),
+                explicit_dereferences: 2,
+            }),
+        )
+        .await;
+    assert_inspected_signed(&atomic_pointee, 42, fixture);
     scenario.shutdown().await;
 
     let mut offset = Scenario::new(
@@ -1248,6 +1497,22 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
         root_value(available_graph(&byte.state)),
         &uscope::VariableValue::Scalar(ScalarValue::Unsigned(42)),
         "{byte:?}"
+    );
+    let atomic_byte = offset
+        .operation(
+            "inspect through offset implicit pointer atomically",
+            offset.handle().inspect(uscope::ValueExpression {
+                components: vec!["byte_pointer".to_owned()].into(),
+                explicit_dereferences: 1,
+            }),
+        )
+        .await;
+    assert!(
+        matches!(
+            root_value(available_graph(&atomic_byte.state)),
+            uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+        ),
+        "{atomic_byte:?}"
     );
     offset.shutdown().await;
 }
