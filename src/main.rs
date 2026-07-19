@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::{env, thread};
 
 use anyhow::{Context, Result};
@@ -17,8 +17,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
     Breakpoint, BreakpointId, BreakpointLocation, BreakpointSpec, ByteOrder, Debugger,
     DebuggerHandle, Error, ExitStatus, FloatValue, LineNumber, RegisterSnapshot, ScalarValue,
-    SourceContext, StateSnapshot, StepKind, StopReason, ThreadId, ThreadState, Variable,
-    VariableSnapshot, VariableState, VirtualAddress,
+    SourceContext, StateSnapshot, StepKind, StopReason, ThreadId, ThreadState, ValueExpression,
+    Variable, VariableSnapshot, VariableState, VirtualAddress,
 };
 
 mod terminal;
@@ -145,8 +145,8 @@ const COMMANDS: &[CommandSpec] = &[
         Print,
         "print",
         ["p"],
-        "print [*...variable]",
-        "Print one or all visible variables, with explicit pointer dereference"
+        "print [*...variable[.member...]]",
+        "Print one or all visible variables, selecting members through pointers"
     ),
     command!(
         Globals,
@@ -833,97 +833,41 @@ async fn execute_print<'a>(
     let argument = optional_argument(words, usage)?;
     match argument {
         Some(expression) => {
-            let depth = expression.bytes().take_while(|byte| *byte == b'*').count();
-            let name = &expression[depth..];
-            if name.is_empty() {
-                return Err(Error::InvalidCommand(usage.to_owned()));
-            }
-            let variable = debugger.variable(name).await?;
-            if depth == 0 {
-                return Ok(Control::Continue(format_variable(&variable, renderer)));
-            }
-            let Some(mut type_info) = variable.type_info.clone() else {
-                // A dereference was requested (depth > 0) but the operand has no
-                // resolved type. Preserve the requested `*` operators instead of
-                // rendering the bare operand as though it were the expression.
-                let mut expression_variable = variable;
-                expression_variable.name = expression.into();
-                return Ok(Control::Continue(format_variable(
-                    &expression_variable,
-                    renderer,
-                )));
-            };
-            let mut state = variable.state.clone();
-            for level in 0..depth {
-                let reference = match &state {
-                    VariableState::Available {
-                        dereference: uscope::DereferenceState::Available(reference),
-                        ..
-                    } => reference.clone(),
-                    VariableState::Available {
-                        dereference: uscope::DereferenceState::Unavailable { pointee, reason },
-                        ..
-                    } => {
-                        let expression = format!("{}{}", "*".repeat(level + 1), name);
-                        return Ok(Control::Continue(pointee.as_ref().map_or_else(
-                            || {
-                                format!(
-                                    "({}) {} = {}",
-                                    renderer.paint(Role::Type, "<unknown type>"),
-                                    renderer.paint(Role::Name, &expression),
-                                    renderer
-                                        .paint(Role::Warning, format!("<unavailable: {reason}>")),
-                                )
-                            },
-                            |pointee| {
-                                format_typed_state(
-                                    pointee,
-                                    &expression,
-                                    &VariableState::Unavailable(
-                                        uscope::VariableUnavailableReason::Other(
-                                            reason.to_string().into(),
-                                        ),
-                                    ),
-                                    renderer,
-                                )
-                            },
-                        )));
-                    }
-                    VariableState::Available {
-                        dereference: uscope::DereferenceState::NotApplicable,
-                        ..
-                    } => {
-                        return Ok(Control::Continue(format_typed_state(
-                            &type_info,
-                            &format!("{}{}", "*".repeat(level + 1), name),
-                            &VariableState::Unavailable(
-                                "the value is not a pointer or reference".into(),
-                            ),
-                            renderer,
-                        )));
-                    }
-                    VariableState::Unavailable(_) | VariableState::Malformed(_) => {
-                        return Ok(Control::Continue(format_typed_state(
-                            &type_info,
-                            &format!("{}{}", "*".repeat(level), name),
-                            &state,
-                            renderer,
-                        )));
-                    }
-                };
-                let value = debugger.dereference(reference).await?;
-                type_info = value.type_info;
-                state = value.state;
-            }
-            Ok(Control::Continue(format_typed_state(
-                &type_info, expression, &state, renderer,
-            )))
+            let value = debugger
+                .inspect(parse_value_expression(expression, usage)?)
+                .await?;
+            let output = value.type_info.as_ref().map_or_else(
+                || format_untyped_state(expression, &value.state, renderer),
+                |type_info| format_typed_state(type_info, expression, &value.state, renderer),
+            );
+            Ok(Control::Continue(output))
         }
         None => Ok(Control::Continue(format_variables(
             &debugger.variables().await?,
             renderer,
         ))),
     }
+}
+
+fn parse_value_expression(expression: &str, usage: &str) -> uscope::Result<ValueExpression> {
+    let explicit_dereferences = expression.bytes().take_while(|byte| *byte == b'*').count();
+    let path = &expression[explicit_dereferences..];
+    // Components are opaque names, not code. Keeping their spelling broad
+    // preserves source-path and linkage selectors without adding evaluation.
+    let components = path.split('.').map(str::to_owned).collect::<Vec<_>>();
+    if path.contains("->")
+        || path.starts_with('&')
+        || components.iter().any(String::is_empty)
+        || path.chars().all(|character| character.is_ascii_digit())
+    {
+        return Err(Error::InvalidCommand(usage.to_owned()));
+    }
+
+    Ok(ValueExpression {
+        components: Arc::from(components),
+        explicit_dereferences: u32::try_from(explicit_dereferences)
+            .map_err(|_| Error::InvalidCommand(usage.to_owned()))?,
+    })
 }
 
 fn optional_argument<'a>(
@@ -1283,19 +1227,25 @@ fn format_variables(snapshot: &VariableSnapshot, renderer: Renderer) -> String {
 
 fn format_variable(variable: &Variable, renderer: Renderer) -> String {
     let Some(type_info) = variable.type_info.as_ref() else {
-        let value = match &variable.state {
-            VariableState::Unavailable(reason) => format!("<unavailable: {reason}>"),
-            VariableState::Malformed(reason) => format!("<malformed: {}>", reason.description),
-            VariableState::Available { .. } => "<unknown value>".to_owned(),
-        };
-        return format!(
-            "({}) {} = {}",
-            renderer.paint(Role::Type, "<unknown type>"),
-            renderer.paint(Role::Name, &variable.name),
-            renderer.paint(Role::Warning, value)
-        );
+        return format_untyped_state(&variable.name, &variable.state, renderer);
     };
     format_typed_state(type_info, &variable.name, &variable.state, renderer)
+}
+
+fn format_untyped_state(name: &str, state: &VariableState, renderer: Renderer) -> String {
+    let (role, value) = match state {
+        VariableState::Unavailable(reason) => (Role::Warning, format!("<unavailable: {reason}>")),
+        VariableState::Malformed(reason) => {
+            (Role::Error, format!("<malformed: {}>", reason.description))
+        }
+        VariableState::Available { .. } => (Role::Warning, "<unknown value>".to_owned()),
+    };
+    format!(
+        "({}) {} = {}",
+        renderer.paint(Role::Type, "<unknown type>"),
+        renderer.paint(Role::Name, name),
+        renderer.paint(role, value)
+    )
 }
 
 fn format_typed_state(
@@ -1874,6 +1824,63 @@ mod tests {
                     "detailed help omitted alias {alias}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn print_paths_preserve_components_and_apply_leading_dereferences_last() {
+        let expression = parse_value_expression("**my_value.first.second.third", "usage")
+            .expect("valid structural path");
+        assert_eq!(
+            expression.components.as_ref(),
+            ["my_value", "first", "second", "third"]
+        );
+        assert_eq!(expression.explicit_dereferences, 2);
+
+        let qualified = parse_value_expression("one.c::duplicate", "usage")
+            .expect("qualified dotted global remains available to root resolution");
+        assert_eq!(qualified.components.as_ref(), ["one", "c::duplicate"]);
+        assert_eq!(qualified.explicit_dereferences, 0);
+
+        let package = parse_value_expression("github.com/acme/my-pkg.global", "usage")
+            .expect("language-qualified global remains available to root resolution");
+        assert_eq!(
+            package.components.as_ref(),
+            ["github", "com/acme/my-pkg", "global"]
+        );
+
+        let template = parse_value_expression("Wrapper<int>::value", "usage")
+            .expect("C++-qualified global remains available to root resolution");
+        assert_eq!(template.components.as_ref(), ["Wrapper<int>::value"]);
+
+        let source_qualified =
+            parse_value_expression("/build/src/9-right.c::right::shared", "usage")
+                .expect("source-qualified global remains available to root resolution");
+        assert_eq!(
+            source_qualified.components.as_ref(),
+            ["/build/src/9-right", "c::right::shared"]
+        );
+    }
+
+    #[test]
+    fn print_paths_reject_reserved_and_malformed_structural_syntax() {
+        for expression in [
+            "",
+            "*",
+            ".pair",
+            "pair.",
+            "pair..first",
+            "&pair.first",
+            "pair->first",
+            "42",
+        ] {
+            assert!(
+                matches!(
+                    parse_value_expression(expression, "print usage"),
+                    Err(Error::InvalidCommand(message)) if message == "print usage"
+                ),
+                "accepted unsupported print expression {expression:?}"
+            );
         }
     }
 

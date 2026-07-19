@@ -42,7 +42,7 @@ __attribute__((noinline)) bool inspect_pointers(int parameter, int* pointer_para
     aliased_int alias_pointee = 42;
     aliased_int* alias_pointer = &alias_pointee;
     PointerPair pair{20, 22};
-    PointerPair* structure_pointer = &pair;
+    PointerPair* structure_pointer = &pair; PointerPair& structure_reference = pair;
     PointerNode node{nullptr, 42};
     PointerNode* recursive_pointer = &node;
     int array[2]{20, 22};
@@ -51,7 +51,7 @@ __attribute__((noinline)) bool inspect_pointers(int parameter, int* pointer_para
                  "g"(&const_reference), "g"(&rvalue_reference),
                  "g"(&reference_to_pointer), "g"(null_pointer), "g"(pointer_parameter),
                  "g"(&reference_parameter), "g"(alias_pointer), "g"(structure_pointer),
-                 "g"(recursive_pointer), "g"(array_pointer) : "memory");
+                 "g"(&structure_reference), "g"(recursive_pointer), "g"(array_pointer) : "memory");
     cpp_sink = **pointer_pointer;
     return lvalue_reference == 42 && const_reference == 42 &&
            rvalue_reference == 42 && *reference_to_pointer == 42;

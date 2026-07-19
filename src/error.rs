@@ -1,5 +1,6 @@
 use std::error::Error as StdError;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -33,6 +34,14 @@ pub enum Error {
     VariableNotFound(String),
     #[error("multiple equally visible variables or parameters named '{0}' were found")]
     AmbiguousVariable(String),
+    #[error("invalid value expression: {0}")]
+    InvalidValueExpression(String),
+    #[error("record type '{type_name}' has no member named '{member}'")]
+    MemberNotFound { member: String, type_name: Arc<str> },
+    #[error("member '{member}' is ambiguous in record type '{type_name}'")]
+    AmbiguousMember { member: String, type_name: Arc<str> },
+    #[error("cannot select member '{member}' from non-record type '{type_name}'")]
+    MemberAccessOnNonRecord { member: String, type_name: Arc<str> },
     #[error("global variable selector '{selector}' is ambiguous: {candidates:?}")]
     AmbiguousGlobalVariable {
         selector: String,

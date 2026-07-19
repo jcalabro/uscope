@@ -918,6 +918,28 @@ pub enum VariableState {
     Malformed(VariableMalformedReason),
 }
 
+/// One bounded, structural value expression evaluated at a stopped snapshot.
+///
+/// The first component names a visible data object. Remaining components name
+/// record members. Dots embedded in source-level object names are preserved by
+/// the controller's longest-prefix root lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueExpression {
+    /// Dot-separated syntactic components, before source-level root resolution.
+    pub components: Arc<[String]>,
+    /// Explicit dereference operations applied after member selection.
+    pub explicit_dereferences: u32,
+}
+
+/// The terminal value produced by structural expression inspection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectedValue {
+    /// The resolved terminal type, when valid and supported.
+    pub type_info: Option<TypeInfo>,
+    /// The terminal value's current availability and decoded representation.
+    pub state: VariableState,
+}
+
 /// The source-level role of a visible data object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

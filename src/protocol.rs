@@ -481,6 +481,12 @@ pub enum Request {
         thread_id: ThreadId,
         reply: Reply<VariableSnapshot>,
     },
+    Inspect {
+        expression: crate::ValueExpression,
+        stop_id: StopId,
+        thread_id: ThreadId,
+        reply: Reply<crate::InspectedValue>,
+    },
     Dereference {
         reference: DereferenceReference,
         reply: Reply<DereferencedValue>,

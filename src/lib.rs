@@ -14,16 +14,17 @@ pub use model::{
     EntryProvenance, ExecutionLocation, FloatValue, FrameKind, FunctionId, FunctionInfo,
     GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo, GlobalVariablePage,
     GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility, ImageAddress,
-    ImageLocation, InlineChain, InlineFrameLookup, InspectionLimit, LineNumber, LineSequenceId,
-    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, ModuleId,
-    ModuleImage, ModuleImageId, PointerWidth, RecordKind, RecordMember, RecordMemberLayout,
-    RecordMemberValue, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, ScalarValue, SourceContext, SourceFile, SourceFileId,
-    SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolId,
-    SymbolInfo, TargetDescription, ThreadId, TypeId, TypeInfo, TypeKind, TypeQualifier,
-    TypeReference, UnsupportedVariableFeature, UnwindTermination, ValueGraph, ValueNode,
-    ValueNodeId, ValueNodeState, Variable, VariableKind, VariableMalformedReason, VariableSnapshot,
-    VariableState, VariableUnavailableReason, VariableValue, VariableValueSource, VirtualAddress,
+    ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionLimit, LineNumber,
+    LineSequenceId, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
+    LoadedModuleSnapshot, ModuleId, ModuleImage, ModuleImageId, PointerWidth, RecordKind,
+    RecordMember, RecordMemberLayout, RecordMemberValue, ReferenceKind, RegisterDescriptor,
+    RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, ScalarValue, SourceContext,
+    SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags,
+    StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId, TypeId, TypeInfo, TypeKind,
+    TypeQualifier, TypeReference, UnsupportedVariableFeature, UnwindTermination, ValueExpression,
+    ValueGraph, ValueNode, ValueNodeId, ValueNodeState, Variable, VariableKind,
+    VariableMalformedReason, VariableSnapshot, VariableState, VariableUnavailableReason,
+    VariableValue, VariableValueSource, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
@@ -430,6 +431,19 @@ impl DebuggerHandle {
             .first()
             .cloned()
             .ok_or(Error::VariableNotFound(name))
+    }
+
+    /// Atomically inspects one structural value expression in the selected
+    /// logical frame of the current stopped thread.
+    pub async fn inspect(&self, expression: ValueExpression) -> Result<InspectedValue> {
+        let selection = self.stopped_selection().await?;
+        self.request(|reply| Request::Inspect {
+            expression,
+            stop_id: selection.stop,
+            thread_id: selection.thread,
+            reply,
+        })
+        .await
     }
 
     /// Inspects one exact global catalog entry owned by the main executable
