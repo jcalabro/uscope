@@ -1,6 +1,10 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set positional-arguments := true
 
+# Process-isolated debugger tests also create controller, waiter, and inferior
+# threads. More concurrency adds contention without improving wall time.
+max_test_threads := "16"
+
 # Lints the Rust code and runs the complete test suite.
 default: check
 
@@ -22,12 +26,12 @@ run *ARGS="": build
 
 # Builds the native test fixtures and runs the Rust test suite.
 test: build-test-programs
-    cargo nextest run --all-targets
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; cargo nextest run --all-targets --test-threads "$test_threads"
     cargo test --doc
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
 check: build-test-programs
     cargo fmt --check
     cargo clippy --all-targets --all-features -- -D warnings
-    cargo nextest run --all-targets
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; cargo nextest run --all-targets --test-threads "$test_threads"
     cargo test --doc
