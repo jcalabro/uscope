@@ -46,3 +46,10 @@ object = { version = "0.39", features = ["read"] }
 
 [dev-dependencies]
 expectrl = "0.9"
+
+# Debug-info normalization is deliberately CPU-heavy. A small amount of
+# optimization keeps the full behavioral matrix fast without the compile cost
+# or disabled safety checks of the release profile.
+[profile.test]
+opt-level = 1
+debug = 1

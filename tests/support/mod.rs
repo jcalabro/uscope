@@ -11,7 +11,9 @@ use uscope::{
     StopReason,
 };
 
-const OPERATION_TIMEOUT: Duration = Duration::from_secs(2);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+// Event delivery depends on waiter and controller OS threads being scheduled.
+const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Scenario {
     name: String,
@@ -226,7 +228,7 @@ impl Scenario {
 
     async fn wait_for(&mut self, predicate: impl Fn(&DebuggerEvent) -> bool) -> DebuggerEvent {
         loop {
-            let event = timeout(OPERATION_TIMEOUT, self.events.recv())
+            let event = timeout(EVENT_TIMEOUT, self.events.recv())
                 .await
                 .unwrap_or_else(|_| self.fail("event timeout"))
                 .unwrap_or_else(|error| self.fail(&format!("event stream failed: {error}")));
@@ -307,13 +309,13 @@ impl Scenario {
 }
 
 async fn within<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
-    timeout(OPERATION_TIMEOUT, future)
+    timeout(REQUEST_TIMEOUT, future)
         .await
         .expect("debugger operation timed out")
 }
 
 async fn join_request(task: JoinHandle<Result<StopReason>>) -> Result<StopReason> {
-    timeout(OPERATION_TIMEOUT, task)
+    timeout(REQUEST_TIMEOUT, task)
         .await
         .expect("debugger task timed out")
         .expect("debugger task panicked")

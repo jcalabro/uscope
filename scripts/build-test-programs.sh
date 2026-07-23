@@ -10,6 +10,23 @@ readonly go_fixtures_dir="${fixtures_dir}/go"
 readonly rust_fixtures_dir="${fixtures_dir}/rust"
 readonly zig_fixtures_dir="${fixtures_dir}/zig"
 
+declare -A dash_version_by_tool=()
+declare -A rebuilt_outputs=()
+dash_version=""
+go_version=""
+go_target=""
+zig_version=""
+
+read_dash_version() {
+    local tool="$1"
+    if [[ ! -v "dash_version_by_tool[$tool]" ]]; then
+        local version
+        version=$("$tool" --version)
+        dash_version_by_tool["$tool"]=${version%%$'\n'*}
+    fi
+    dash_version=${dash_version_by_tool["$tool"]}
+}
+
 source_changed_since_output() {
     local source="$1"
     local output="$2"
@@ -37,12 +54,14 @@ run_cached_build() {
     if [[ -x "$output" ]] \
         && ! source_changed_since_output "$source" "$output" \
         && [[ "$previous" == "$signature" ]]; then
+        rebuilt_outputs["$output"]=false
         printf '[cached] %s\n' "$output"
         return
     fi
 
     printf '[build]  %s\n' "$output"
     NIX_HARDENING_ENABLE= "${command[@]}"
+    rebuilt_outputs["$output"]=true
     printf '%s\n' "$signature" >"${stamp}.tmp"
     mv "${stamp}.tmp" "$stamp"
 }
@@ -59,11 +78,9 @@ build_program() {
         "$source"
         -o "$output"
     )
-    local version
-    version=$("$tool" --version)
-    version=${version%%$'\n'*}
+    read_dash_version "$tool"
     run_cached_build "$source" "$output" \
-        "compiler=${version}"$'\n'"target=x86_64-linux"$'\n'"backend=${tool}" \
+        "compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=${tool}" \
         "${command[@]}"
 }
 
@@ -92,11 +109,9 @@ build_c_fixture_directory() {
     local -a command=(
         "$compiler" -std=c17 -Wall -Wextra -Werror "$@" "${sources[@]}" -o "$output"
     )
-    local version
-    version=$("$compiler" --version)
-    version=${version%%$'\n'*}
+    read_dash_version "$compiler"
     run_cached_build "$source_dir" "$output" \
-        "compiler=${version}"$'\n'"target=x86_64-linux"$'\n'"backend=${compiler}" \
+        "compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=${compiler}" \
         "${command[@]}"
 }
 
@@ -143,13 +158,13 @@ build_go_fixture() {
     local -a command=(
         env CGO_ENABLED=0 go build -buildvcs=false "$@" -o "$output" "${sources[@]}"
     )
-    local version
-    version=$(go version)
-    local target
-    target=$(go env GOOS GOARCH)
-    target=${target//$'\n'//}
+    if [[ -z "$go_version" ]]; then
+        go_version=$(go version)
+        go_target=$(go env GOOS GOARCH)
+        go_target=${go_target//$'\n'//}
+    fi
     run_cached_build "$package_dir" "$output" \
-        "compiler=${version}"$'\n'"target=${target}"$'\n'"backend=gc" \
+        "compiler=${go_version}"$'\n'"target=${go_target}"$'\n'"backend=gc" \
         "${command[@]}"
 }
 
@@ -161,11 +176,31 @@ build_zig_fixture() {
         zig build-exe "$source" -target x86_64-linux-gnu -fllvm -fno-strip
         -funwind-tables "$@" "-femit-bin=${output}"
     )
-    local version
-    version=$(zig version)
+    if [[ -z "$zig_version" ]]; then
+        zig_version=$(zig version)
+    fi
     run_cached_build "$source" "$output" \
-        "compiler=zig ${version}"$'\n'"target=x86_64-linux-gnu"$'\n'"backend=llvm" \
+        "compiler=zig ${zig_version}"$'\n'"target=x86_64-linux-gnu"$'\n'"backend=llvm" \
         "${command[@]}"
+}
+
+validation_is_cached() {
+    local output="$1"
+    local stamp="$2"
+    local signature="$3"
+    local previous=""
+
+    if [[ -f "$stamp" ]]; then
+        previous=$(<"$stamp")
+    fi
+    [[ "${rebuilt_outputs[$output]:-true}" == false && "$previous" == "$signature" ]]
+}
+
+record_validation() {
+    local stamp="$1"
+    local signature="$2"
+    printf '%s\n' "$signature" >"${stamp}.tmp"
+    mv "${stamp}.tmp" "$stamp"
 }
 
 # Fails the build when a fixture no longer emits a sibling-call jump a test
@@ -174,6 +209,11 @@ require_tail_jump() {
     local output="$1"
     local caller="$2"
     local callee="$3"
+    local stamp="${output}.validation-tail-${caller}-${callee}"
+    local signature="validator=tail-jump-v1"$'\n'"caller=${caller}"$'\n'"callee=${callee}"
+    if validation_is_cached "$output" "$stamp" "$signature"; then
+        return
+    fi
     # grep reads all input; grep -q would exit early and objdump's SIGPIPE
     # would fail the pipeline under pipefail despite a successful match.
     if ! objdump -d --no-show-raw-insn "$output" \
@@ -183,6 +223,7 @@ require_tail_jump() {
             "$output" "$caller" "$callee" >&2
         exit 1
     fi
+    record_validation "$stamp" "$signature"
 }
 
 # Fails the build when a fixture's DWARF stops exercising the operation a test
@@ -190,12 +231,19 @@ require_tail_jump() {
 require_dwarf_operation() {
     local output="$1"
     local operation="$2"
+    local key=${operation//[^a-zA-Z0-9]/_}
+    local stamp="${output}.validation-dwarf-${key}"
+    local signature="validator=dwarf-operation-v1"$'\n'"operation=${operation}"
+    if validation_is_cached "$output" "$stamp" "$signature"; then
+        return
+    fi
     # grep reads all input; grep -q would exit early and objdump's SIGPIPE
     # would fail the pipeline under pipefail despite a successful match.
     if ! objdump --dwarf=info,loc "$output" | grep "$operation" >/dev/null; then
         printf 'error: %s does not exercise %s\n' "$output" "$operation" >&2
         exit 1
     fi
+    record_validation "$stamp" "$signature"
 }
 
 mkdir -p "$output_dir"
