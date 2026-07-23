@@ -618,6 +618,59 @@ fn print_renders_nested_records_arrays_and_bit_fields() {
 }
 
 #[test]
+fn print_renders_symbolic_enums_variants_and_raw_unions() {
+    let rust = fixture("build/test-programs/enums-rust-o0");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break inspect_enum",
+            "--eval",
+            "run",
+            "--eval",
+            "print *value",
+            "--eval",
+            "print *fieldless",
+            "--eval",
+            "print *wide",
+        ])
+        .arg(rust)
+        .output()
+        .expect("render Rust enum values");
+    let stdout = assert_success(output);
+    assert!(
+        stdout.contains("*value = {Integer = {__0 = 42}}"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("*fieldless = Negative (-3)"), "{stdout}");
+    assert!(
+        stdout.contains("*wide = Huge (1267650600228229401496703205385)"),
+        "{stdout}"
+    );
+
+    let c = fixture("build/test-programs/enums-c-gcc-o0");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break inspect_enums",
+            "--eval",
+            "run",
+            "--eval",
+            "print *raw",
+        ])
+        .arg(c)
+        .output()
+        .expect("render raw C union");
+    let stdout = assert_success(output);
+    assert!(
+        stdout.contains("*raw = {integer = 42, floating = ")
+            && stdout.contains("} <active member unknown>"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn globals_lists_metadata_and_print_accepts_exact_qualification() {
     let executable = fixture("build/test-programs/globals-c-gcc-o0");
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))

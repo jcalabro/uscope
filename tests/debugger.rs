@@ -1303,6 +1303,468 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
 }
 
 #[tokio::test]
+async fn rust_payload_enum_is_never_published_as_an_empty_record() {
+    let fixture = "enums-rust-o0";
+    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    scenario.add_breakpoint("inspect_enum").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+
+    let value = dereference_named(&scenario, "value", 1).await;
+    let graph = available_graph(&value.state);
+    let uscope::VariableValue::Variant {
+        discriminant,
+        active: Some(active),
+        ..
+    } = root_value(graph)
+    else {
+        panic!("payload enum did not decode as an active variant: {value:?}");
+    };
+    assert_eq!(
+        *discriminant,
+        Some(uscope::IntegerValue::Unsigned(1)),
+        "{value:?}"
+    );
+    assert_eq!(active.members.len(), 1, "{value:?}");
+    assert_eq!(
+        active.members[0].member.name.as_deref(),
+        Some("Integer"),
+        "{value:?}"
+    );
+    let payload = record_member(graph, active.members[0].value, "__0");
+    assert!(
+        matches!(
+            payload.state,
+            uscope::ValueNodeState::Available(uscope::VariableValue::Scalar(
+                ScalarValue::Unsigned(42)
+            ))
+        ),
+        "{value:?}"
+    );
+
+    let selected_payload = scenario
+        .operation(
+            "select active Rust enum payload",
+            scenario
+                .handle()
+                .inspect(value_expression(&["value", "Integer", "__0"])),
+        )
+        .await;
+    assert!(
+        matches!(
+            root_value(available_graph(&selected_payload.state)),
+            uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+        ),
+        "{selected_payload:?}"
+    );
+    let inactive_payload = scenario
+        .operation(
+            "reject inactive Rust enum payload",
+            scenario
+                .handle()
+                .inspect(value_expression(&["value", "Unit"])),
+        )
+        .await;
+    assert!(
+        matches!(
+            inactive_payload.state,
+            VariableState::Unavailable(uscope::VariableUnavailableReason::Other(ref reason))
+                if reason.contains("inactive arm")
+        ),
+        "{inactive_payload:?}"
+    );
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one matrix keeps identical symbolic-value assertions aligned across C and Rust producers"
+)]
+async fn c_and_rust_fieldless_enums_preserve_values_names_aliases_and_unknowns() {
+    for fixture in [
+        "enums-c-gcc-o0",
+        "enums-c-clang-o0",
+        "enums-c-gcc-o2",
+        "enums-c-clang-o2",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspect_enums").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        for (name, expected, expected_names) in [
+            (
+                "signed_value",
+                uscope::IntegerValue::Signed(-3),
+                &["SIGNED_NEGATIVE"][..],
+            ),
+            (
+                "zero_alias",
+                uscope::IntegerValue::Signed(0),
+                &["SIGNED_ZERO", "SIGNED_ZERO_ALIAS"][..],
+            ),
+            ("flags", uscope::IntegerValue::Unsigned(3), &[][..]),
+            (
+                "byte_value",
+                uscope::IntegerValue::Unsigned(255),
+                &["BYTE_MAX"][..],
+            ),
+        ] {
+            let inspected = dereference_named(&scenario, name, 1).await;
+            let uscope::VariableValue::Enumeration { value, matches } =
+                root_value(available_graph(&inspected.state))
+            else {
+                panic!("{fixture} {name}: value was not an enumeration: {inspected:?}");
+            };
+            assert_eq!(*value, expected, "{fixture} {name}: {inspected:?}");
+            assert_eq!(
+                matches
+                    .iter()
+                    .map(|enumerator| enumerator.name.as_ref())
+                    .collect::<Vec<_>>(),
+                expected_names,
+                "{fixture} {name}: {inspected:?}"
+            );
+        }
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+
+    for fixture in ["enums-rust-o0", "enums-rust-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspect_enum").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let fieldless = dereference_named(&scenario, "fieldless", 1).await;
+        assert!(
+            matches!(
+                root_value(available_graph(&fieldless.state)),
+                uscope::VariableValue::Enumeration {
+                    value: uscope::IntegerValue::Signed(-3),
+                    matches,
+                } if matches.len() == 1 && matches[0].name.as_ref() == "Negative"
+            ),
+            "{fieldless:?}"
+        );
+        let payload = dereference_named(&scenario, "value", 1).await;
+        assert!(
+            matches!(
+                root_value(available_graph(&payload.state)),
+                uscope::VariableValue::Variant {
+                    active: Some(active),
+                    ..
+                } if active.members.first().and_then(|member| member.member.name.as_deref())
+                    == Some("Integer")
+            ),
+            "{fixture}: {payload:?}"
+        );
+        let wide = dereference_named(&scenario, "wide", 1).await;
+        assert!(
+            matches!(
+                root_value(available_graph(&wide.state)),
+                uscope::VariableValue::Enumeration {
+                    value: uscope::IntegerValue::Unsigned(value),
+                    matches,
+                } if *value == (1_u128 << 100) + 9
+                    && matches.len() == 1
+                    && matches[0].name.as_ref() == "Huge"
+            ),
+            "{fixture}: {wide:?}"
+        );
+        let optional = dereference_named(&scenario, "optional", 1).await;
+        assert!(
+            matches!(
+                root_value(available_graph(&optional.state)),
+                uscope::VariableValue::Variant {
+                    active: Some(active),
+                    ..
+                } if active.members.first().and_then(|member| member.member.name.as_deref())
+                    == Some("Some")
+            ),
+            "{fixture}: {optional:?}"
+        );
+        let empty = dereference_named(&scenario, "empty", 1).await;
+        assert!(
+            matches!(
+                root_value(available_graph(&empty.state)),
+                uscope::VariableValue::Variant {
+                    active: Some(active),
+                    ..
+                } if active.members.first().and_then(|member| member.member.name.as_deref())
+                    == Some("None")
+            ),
+            "{fixture}: {empty:?}"
+        );
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn go_named_integer_constants_reconstruct_symbolic_values() {
+    for fixture in ["enums-go-o0", "enums-go-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("main.inspectEnums").await;
+        run_go_to_breakpoint(&mut scenario, fixture).await;
+
+        for (name, expected, expected_names) in [
+            (
+                "negative",
+                uscope::IntegerValue::Signed(-3),
+                &["main.StateNegative"][..],
+            ),
+            (
+                "alias",
+                uscope::IntegerValue::Signed(0),
+                &["main.StateZero", "main.StateAlias"][..],
+            ),
+            ("unknown", uscope::IntegerValue::Signed(5), &[][..]),
+        ] {
+            let inspected = dereference_named(&scenario, name, 1).await;
+            let uscope::VariableValue::Enumeration { value, matches } =
+                root_value(available_graph(&inspected.state))
+            else {
+                panic!("{fixture} {name}: value was not symbolic: {inspected:?}");
+            };
+            assert_eq!(*value, expected, "{fixture} {name}: {inspected:?}");
+            assert_eq!(
+                matches
+                    .iter()
+                    .map(|enumerator| enumerator.name.as_ref())
+                    .collect::<Vec<_>>(),
+                expected_names,
+                "{fixture} {name}: {inspected:?}"
+            );
+        }
+
+        resume_go_to_exit(&mut scenario, fixture).await;
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
+#[tokio::test]
+async fn c_raw_unions_expose_overlapping_interpretations_without_claiming_an_active_member() {
+    for fixture in [
+        "enums-c-gcc-o0",
+        "enums-c-clang-o0",
+        "enums-c-gcc-o2",
+        "enums-c-clang-o2",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspect_enums").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let raw = dereference_named(&scenario, "raw", 1).await;
+        let graph = available_graph(&raw.state);
+        let uscope::VariableValue::Union { members, omitted } = root_value(graph) else {
+            panic!("{fixture}: raw value was not a union: {raw:?}");
+        };
+        assert_eq!(*omitted, 0, "{fixture}: {raw:?}");
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.member.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("integer"), Some("floating")],
+            "{fixture}: {raw:?}"
+        );
+        assert_signed_node(
+            graph
+                .node(members[0].value)
+                .expect("integer interpretation"),
+            42,
+        );
+
+        let integer = scenario
+            .operation(
+                "inspect a union interpretation",
+                scenario
+                    .handle()
+                    .inspect(value_expression(&["raw", "integer"])),
+            )
+            .await;
+        assert_inspected_signed(&integer, 42, fixture);
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn cpp_scoped_enums_and_unions_preserve_language_semantics() {
+    for fixture in [
+        "enums-cpp-gcc-o0",
+        "enums-cpp-clang-o0",
+        "enums-cpp-gcc-o2",
+        "enums-cpp-clang-o2",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspect_enums").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        for (name, expected, expected_names) in [
+            ("state", uscope::IntegerValue::Signed(-3), &["Negative"][..]),
+            (
+                "alias",
+                uscope::IntegerValue::Signed(0),
+                &["Zero", "Alias"][..],
+            ),
+        ] {
+            let inspected = dereference_named(&scenario, name, 1).await;
+            let uscope::VariableValue::Enumeration { value, matches } =
+                root_value(available_graph(&inspected.state))
+            else {
+                panic!("{fixture} {name}: value was not an enumeration: {inspected:?}");
+            };
+            assert_eq!(*value, expected, "{fixture} {name}: {inspected:?}");
+            assert_eq!(
+                matches
+                    .iter()
+                    .map(|enumerator| enumerator.name.as_ref())
+                    .collect::<Vec<_>>(),
+                expected_names,
+                "{fixture} {name}: {inspected:?}"
+            );
+        }
+        let raw = dereference_named(&scenario, "raw", 1).await;
+        assert!(
+            matches!(
+                root_value(available_graph(&raw.state)),
+                uscope::VariableValue::Union { members, .. } if members.len() == 2
+            ),
+            "{fixture}: {raw:?}"
+        );
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
+    for fixture in ["enums-zig-o0", "enums-zig-o2"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario
+            .add_source_breakpoint("tests/fixtures/zig/enums.zig", 27)
+            .await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let state = dereference_named(&scenario, "state", 1).await;
+        let VariableState::Available {
+            value: state_graph, ..
+        } = &state.state
+        else {
+            panic!("{fixture}: state was unavailable: {state:?}");
+        };
+        assert!(
+            matches!(
+                root_value(state_graph),
+                uscope::VariableValue::Enumeration {
+                    value: uscope::IntegerValue::Signed(-3),
+                    matches,
+                } if matches.len() == 1 && matches[0].name.as_ref() == "negative"
+            ),
+            "{fixture}: {state:?}"
+        );
+        let tagged = dereference_named(&scenario, "tagged", 1).await;
+        let VariableState::Available { value: graph, .. } = &tagged.state else {
+            panic!("{fixture}: tagged union was unavailable: {tagged:?}");
+        };
+        let uscope::VariableValue::Variant {
+            active: Some(active),
+            ..
+        } = root_value(graph)
+        else {
+            panic!("{fixture}: tagged union did not select an arm: {tagged:?}");
+        };
+        let integer = active
+            .members
+            .iter()
+            .find(|member| member.member.name.as_deref() == Some("integer"))
+            .unwrap_or_else(|| panic!("{fixture}: integer arm missing: {tagged:?}"));
+        assert!(
+            matches!(
+                graph.node(integer.value).map(|node| &node.state),
+                Some(uscope::ValueNodeState::Available(
+                    uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+                ))
+            ),
+            "{fixture}: {tagged:?}"
+        );
+        let raw = dereference_named(&scenario, "raw", 1).await;
+        assert!(
+            matches!(
+                root_value(available_graph(&raw.state)),
+                uscope::VariableValue::Union { members, .. } if members.len() == 2
+            ),
+            "{fixture}: {raw:?}"
+        );
+        for (name, arm, expected) in [("optional", "some", 43), ("failure", "success", 44)] {
+            let inspected = dereference_named(&scenario, name, 1).await;
+            let graph = available_graph(&inspected.state);
+            let uscope::VariableValue::Variant {
+                active: Some(active),
+                ..
+            } = root_value(graph)
+            else {
+                panic!("{fixture}: {name} did not select an arm: {inspected:?}");
+            };
+            assert_eq!(active.variant.name.as_deref(), Some(arm), "{inspected:?}");
+            assert_eq!(active.members.len(), 1, "{inspected:?}");
+            assert!(
+                matches!(
+                    graph.node(active.members[0].value).map(|node| &node.state),
+                    Some(uscope::ValueNodeState::Available(
+                        uscope::VariableValue::Scalar(ScalarValue::Unsigned(value))
+                    )) if *value == expected
+                ),
+                "{fixture}: {inspected:?}"
+            );
+        }
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() {
     let fixture = "pointer-memory-gcc-o0";
     let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
