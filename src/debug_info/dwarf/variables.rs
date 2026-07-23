@@ -32,6 +32,7 @@ const MAX_VALUE_NODES: usize = 4_096;
 const MAX_TYPES: usize = 65_536;
 const MAX_TYPE_RESOLUTION_DEPTH: usize = 256;
 const MAX_RECORD_CHILDREN: usize = 4_096;
+const MAX_VARIANT_METADATA: usize = 4_096;
 const MAX_SYMBOLIC_NAMES: usize = 262_144;
 const MAX_AGGREGATE_DEPTH: usize = 64;
 
@@ -195,6 +196,21 @@ enum TypeEntry {
     Malformed(Arc<str>),
 }
 
+fn variant_metadata_limit_type(
+    reference: TypeReference,
+    name: &Arc<str>,
+    byte_size: Option<u64>,
+) -> TypeEntry {
+    TypeEntry::Resolved(TypeInfo {
+        reference,
+        name: Arc::clone(name),
+        byte_size,
+        kind: TypeKind::Opaque {
+            description: "variant metadata exceeds its resource limit".into(),
+        },
+    })
+}
+
 struct TypeArenaBuilder<'a, 'data> {
     dwarf: &'a gimli::Dwarf<Reader<'data>>,
     units: &'a [gimli::Unit<Reader<'data>>],
@@ -231,6 +247,33 @@ enum NamedConstantCollection {
     Enumerators(Vec<Enumerator>),
     Malformed(Arc<str>),
     Limit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum VariantMetadataError {
+    Malformed(Arc<str>),
+    Limit,
+}
+
+impl From<Arc<str>> for VariantMetadataError {
+    fn from(reason: Arc<str>) -> Self {
+        Self::Malformed(reason)
+    }
+}
+
+#[derive(Default)]
+struct VariantMetadataBudget {
+    items: usize,
+}
+
+impl VariantMetadataBudget {
+    const fn consume(&mut self) -> std::result::Result<(), VariantMetadataError> {
+        if self.items >= MAX_VARIANT_METADATA {
+            return Err(VariantMetadataError::Limit);
+        }
+        self.items += 1;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1671,44 +1714,62 @@ fn copy_variant_selection(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     representation: &BaseType,
     byte_order: ByteOrder,
-) -> std::result::Result<VariantSelection, Arc<str>> {
+    budget: &mut VariantMetadataBudget,
+) -> std::result::Result<VariantSelection, VariantMetadataError> {
     let exact = entry.attr_value(gimli::DW_AT_discr_value);
     let list = entry.attr_value(gimli::DW_AT_discr_list);
     if exact.is_some() && list.is_some() {
-        return Err("variant has both DW_AT_discr_value and DW_AT_discr_list".into());
+        return Err(VariantMetadataError::Malformed(
+            "variant has both DW_AT_discr_value and DW_AT_discr_list".into(),
+        ));
     }
     if let Some(value) = exact {
+        budget.consume()?;
         return enumeration_constant(value, representation, byte_order)
-            .map(|value| VariantSelection::Selectors(Arc::from([VariantSelector::Value(value)])));
+            .map(|value| VariantSelection::Selectors(Arc::from([VariantSelector::Value(value)])))
+            .map_err(VariantMetadataError::Malformed);
     }
     let Some(list) = list else {
         return Ok(VariantSelection::Default);
     };
     let gimli::AttributeValue::Block(list) = list else {
-        return Err("DW_AT_discr_list does not use a block form".into());
+        return Err(VariantMetadataError::Malformed(
+            "DW_AT_discr_list does not use a block form".into(),
+        ));
     };
     let bytes = list
         .to_slice()
-        .map_err(|error| Arc::from(error.to_string()))?;
+        .map_err(|error| VariantMetadataError::Malformed(error.to_string().into()))?;
+    parse_discriminant_list(bytes.as_ref(), representation, budget)
+}
+
+fn parse_discriminant_list(
+    bytes: &[u8],
+    representation: &BaseType,
+    budget: &mut VariantMetadataBudget,
+) -> std::result::Result<VariantSelection, VariantMetadataError> {
     if bytes.is_empty() {
-        return Ok(VariantSelection::Default);
+        return Err(VariantMetadataError::Malformed(
+            "DW_AT_discr_list is empty".into(),
+        ));
     }
     let mut cursor = 0_usize;
     let mut selectors = Vec::new();
     while cursor < bytes.len() {
+        budget.consume()?;
         let descriptor = bytes[cursor];
         cursor += 1;
-        let low = read_discriminant_leb128(bytes.as_ref(), &mut cursor, representation)?;
+        let low = read_discriminant_leb128(bytes, &mut cursor, representation)?;
         let selector = match descriptor {
             value if value == gimli::DW_DSC_label.0 => VariantSelector::Value(low),
             value if value == gimli::DW_DSC_range.0 => {
-                let high = read_discriminant_leb128(bytes.as_ref(), &mut cursor, representation)?;
+                let high = read_discriminant_leb128(bytes, &mut cursor, representation)?;
                 VariantSelector::Range { low, high }
             }
             _ => {
-                return Err(
+                return Err(VariantMetadataError::Malformed(
                     format!("DW_AT_discr_list has unknown descriptor {descriptor:#x}").into(),
-                );
+                ));
             }
         };
         selectors.push(selector);
@@ -1803,6 +1864,20 @@ fn validate_variant_selections(variants: &[Variant]) -> std::result::Result<(), 
         }
     }
     Ok(())
+}
+
+fn zig_optional_payload_name(name: &str) -> Option<&str> {
+    name.strip_prefix('?').filter(|payload| !payload.is_empty())
+}
+
+fn zig_error_union_type_names(name: &str) -> Option<(&str, &str)> {
+    let (error, payload) = name.split_once('!')?;
+    if payload.is_empty()
+        || !(error == "anyerror" || error.starts_with("error{") && error.ends_with('}'))
+    {
+        return None;
+    }
+    Some((error, payload))
 }
 
 fn copy_location(
@@ -3210,85 +3285,96 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let payload_index = members
             .iter()
             .position(|member| member.name.as_deref() == Some("payload"))?;
-        let (discriminant_index, variants, duplicate_discriminant_member) = if name.starts_with('?')
-        {
-            let some_index = members
-                .iter()
-                .position(|member| member.name.as_deref() == Some("some"))?;
-            let some_type = self
-                .resolved_integer_base(members[some_index].type_ref.id)
-                .ok()?;
-            if some_type.byte_size != 1
-                || !matches!(
-                    some_type.encoding,
-                    BaseTypeEncoding::Boolean
-                        | BaseTypeEncoding::Unsigned
-                        | BaseTypeEncoding::UnsignedCharacter
+        let optional_payload = zig_optional_payload_name(name);
+        let error_union_types = zig_error_union_type_names(name);
+        let (discriminant_index, variants, duplicate_discriminant_member) =
+            if let Some(expected_payload) = optional_payload {
+                if self.target_name(members[payload_index].type_ref).as_ref() != expected_payload {
+                    return None;
+                }
+                let some_index = members
+                    .iter()
+                    .position(|member| member.name.as_deref() == Some("some"))?;
+                let some_type = self
+                    .resolved_integer_base(members[some_index].type_ref.id)
+                    .ok()?;
+                if some_type.byte_size != 1
+                    || !matches!(
+                        some_type.encoding,
+                        BaseTypeEncoding::Boolean
+                            | BaseTypeEncoding::Unsigned
+                            | BaseTypeEncoding::UnsignedCharacter
+                    )
+                {
+                    return None;
+                }
+                (
+                    some_index,
+                    vec![
+                        Variant {
+                            name: Some("null".into()),
+                            selection: VariantSelection::Selectors(Arc::from([
+                                VariantSelector::Value(IntegerValue::Unsigned(0)),
+                            ])),
+                            members: Arc::from([]),
+                        },
+                        Variant {
+                            name: Some("some".into()),
+                            selection: VariantSelection::Selectors(Arc::from([
+                                VariantSelector::Value(IntegerValue::Unsigned(1)),
+                            ])),
+                            members: Arc::from([members[payload_index].clone()]),
+                        },
+                    ],
+                    false,
                 )
-            {
+            } else if let Some((expected_error, expected_payload)) = error_union_types {
+                let error_index = members
+                    .iter()
+                    .position(|member| member.name.as_deref() == Some("error"))?;
+                if self.target_name(members[error_index].type_ref).as_ref() != expected_error
+                    || self.target_name(members[payload_index].type_ref).as_ref()
+                        != expected_payload
+                {
+                    return None;
+                }
+                let error_type = self
+                    .resolved_integer_base(members[error_index].type_ref.id)
+                    .ok()?;
+                if matches!(
+                    error_type.encoding,
+                    BaseTypeEncoding::Signed
+                        | BaseTypeEncoding::SignedCharacter
+                        | BaseTypeEncoding::Floating
+                ) {
+                    return None;
+                }
+                (
+                    error_index,
+                    vec![
+                        Variant {
+                            name: Some("success".into()),
+                            selection: VariantSelection::Selectors(Arc::from([
+                                VariantSelector::Value(IntegerValue::Unsigned(0)),
+                            ])),
+                            members: Arc::from([members[payload_index].clone()]),
+                        },
+                        Variant {
+                            name: Some("error".into()),
+                            selection: VariantSelection::Default,
+                            members: Arc::from([members[error_index].clone()]),
+                        },
+                    ],
+                    true,
+                )
+            } else {
                 return None;
-            }
-            (
-                some_index,
-                vec![
-                    Variant {
-                        name: Some("null".into()),
-                        selection: VariantSelection::Selectors(Arc::from([
-                            VariantSelector::Value(IntegerValue::Unsigned(0)),
-                        ])),
-                        members: Arc::from([]),
-                    },
-                    Variant {
-                        name: Some("some".into()),
-                        selection: VariantSelection::Selectors(Arc::from([
-                            VariantSelector::Value(IntegerValue::Unsigned(1)),
-                        ])),
-                        members: Arc::from([members[payload_index].clone()]),
-                    },
-                ],
-                false,
-            )
-        } else if name.contains('!') {
-            let error_index = members
-                .iter()
-                .position(|member| member.name.as_deref() == Some("error"))?;
-            let error_type = self
-                .resolved_integer_base(members[error_index].type_ref.id)
-                .ok()?;
-            if matches!(
-                error_type.encoding,
-                BaseTypeEncoding::Signed
-                    | BaseTypeEncoding::SignedCharacter
-                    | BaseTypeEncoding::Floating
-            ) {
-                return None;
-            }
-            (
-                error_index,
-                vec![
-                    Variant {
-                        name: Some("success".into()),
-                        selection: VariantSelection::Selectors(Arc::from([
-                            VariantSelector::Value(IntegerValue::Unsigned(0)),
-                        ])),
-                        members: Arc::from([members[payload_index].clone()]),
-                    },
-                    Variant {
-                        name: Some("error".into()),
-                        selection: VariantSelection::Default,
-                        members: Arc::from([members[error_index].clone()]),
-                    },
-                ],
-                true,
-            )
-        } else {
-            return None;
-        };
+            };
         if let Err(reason) = validate_variant_selections(&variants) {
             return Some(Err(reason));
         }
 
-        let payload_variant = usize::from(name.starts_with('?'));
+        let payload_variant = usize::from(optional_payload.is_some());
         let declaration_snapshot = self.record_member_declarations.clone();
         for metadata in &mut self.record_member_declarations {
             if metadata.aggregate != aggregate {
@@ -3464,6 +3550,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("<anonymous variant@0x{:x}>", entry.offset().0)));
+        let mut metadata_budget = VariantMetadataBudget::default();
         let record_kind = if storage == VariantStorageKind::Class {
             RecordKind::Class
         } else {
@@ -3494,16 +3581,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             let child = child_node.entry();
             match child.tag() {
                 gimli::DW_TAG_member => {
-                    if common_members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN {
-                        return TypeEntry::Resolved(TypeInfo {
-                            reference,
-                            name,
-                            byte_size: explicit_size,
-                            kind: TypeKind::Opaque {
-                                description:
-                                    "variant common-child count exceeds its resource limit".into(),
-                            },
-                        });
+                    if metadata_budget.consume().is_err() {
+                        return variant_metadata_limit_type(reference, &name, explicit_size);
                     }
                     let index = common_members.len();
                     let absent_offset = (storage == VariantStorageKind::Union).then_some(0_u64);
@@ -3523,16 +3602,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     common_members.push(member);
                 }
                 gimli::DW_TAG_inheritance if storage != VariantStorageKind::Union => {
-                    if common_members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN {
-                        return TypeEntry::Resolved(TypeInfo {
-                            reference,
-                            name,
-                            byte_size: explicit_size,
-                            kind: TypeKind::Opaque {
-                                description:
-                                    "variant common-child count exceeds its resource limit".into(),
-                            },
-                        });
+                    if metadata_budget.consume().is_err() {
+                        return variant_metadata_limit_type(reference, &name, explicit_size);
                     }
                     let target = match self.target(child, unit_index) {
                         Ok(Some(target)) => target,
@@ -3606,6 +3677,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                             if part_child.tag() != gimli::DW_TAG_member {
                                 return TypeEntry::Malformed(
                                     "DW_AT_discr does not reference a member child".into(),
+                                );
+                            }
+                            if metadata_budget.consume().is_err() {
+                                return variant_metadata_limit_type(
+                                    reference,
+                                    &name,
+                                    explicit_size,
                                 );
                             }
                             let member = match self.build_variant_member(
@@ -3687,23 +3765,26 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                                 .into(),
                             );
                         }
-                        if variants.len() >= MAX_RECORD_CHILDREN {
-                            return TypeEntry::Resolved(TypeInfo {
-                                reference,
-                                name,
-                                byte_size: explicit_size,
-                                kind: TypeKind::Opaque {
-                                    description: "variant count exceeds its resource limit".into(),
-                                },
-                            });
+                        if metadata_budget.consume().is_err() {
+                            return variant_metadata_limit_type(reference, &name, explicit_size);
                         }
                         let selection = match copy_variant_selection(
                             variant_entry,
                             &representation,
                             self.byte_order,
+                            &mut metadata_budget,
                         ) {
                             Ok(selection) => selection,
-                            Err(reason) => return TypeEntry::Malformed(reason),
+                            Err(VariantMetadataError::Malformed(reason)) => {
+                                return TypeEntry::Malformed(reason);
+                            }
+                            Err(VariantMetadataError::Limit) => {
+                                return variant_metadata_limit_type(
+                                    reference,
+                                    &name,
+                                    explicit_size,
+                                );
+                            }
                         };
                         let variant_name = match copy_name(self.dwarf, unit, variant_entry) {
                             Ok(name) => name,
@@ -3730,17 +3811,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                                     .into(),
                                 );
                             }
-                            if members.len() >= MAX_RECORD_CHILDREN {
-                                return TypeEntry::Resolved(TypeInfo {
+                            if metadata_budget.consume().is_err() {
+                                return variant_metadata_limit_type(
                                     reference,
-                                    name,
-                                    byte_size: explicit_size,
-                                    kind: TypeKind::Opaque {
-                                        description:
-                                            "variant component count exceeds its resource limit"
-                                                .into(),
-                                    },
-                                });
+                                    &name,
+                                    explicit_size,
+                                );
                             }
                             let member_index = members.len();
                             let member = match self.build_variant_member(
@@ -8131,14 +8207,22 @@ impl<'a> ValueGraphBuilder<'a> {
                 return Ok(());
             }
         };
-        let ValueShapeKind::Scalar(base) = &shape.kind else {
-            self.set(
-                id,
-                ValueNodeState::Unavailable(VariableUnavailableReason::Other(
-                    "non-scalar bit-fields are unsupported".into(),
-                )),
-            );
-            return Ok(());
+        let (base, enumerators) = match &shape.kind {
+            ValueShapeKind::Scalar(base) => (base, None),
+            ValueShapeKind::Enumeration {
+                representation,
+                enumerators,
+                ..
+            } => (representation, Some(enumerators)),
+            _ => {
+                self.set(
+                    id,
+                    ValueNodeState::Unavailable(VariableUnavailableReason::Other(
+                        "non-integral bit-fields are unsupported".into(),
+                    )),
+                );
+                return Ok(());
+            }
         };
         let storage_bits = base
             .byte_size
@@ -8154,16 +8238,8 @@ impl<'a> ValueGraphBuilder<'a> {
             return Ok(());
         }
         let object = &parent.raw[parent.start..parent.end];
-        let mut value = extract_bit_field(object, bit_offset, bit_size, target.byte_order)
+        let value = extract_bit_field(object, bit_offset, bit_size, target.byte_order)
             .map_err(VariableUnavailableReason::Other)?;
-        if matches!(
-            base.encoding,
-            BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
-        ) && bit_size < 128
-            && value & (1_u128 << (bit_size - 1)) != 0
-        {
-            value |= u128::MAX << bit_size;
-        }
         let byte_size = usize::try_from(base.byte_size)
             .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
         let full = value.to_le_bytes();
@@ -8171,13 +8247,27 @@ impl<'a> ValueGraphBuilder<'a> {
         if target.byte_order == ByteOrder::Big {
             bytes.reverse();
         }
-        self.set(
-            id,
-            match decode_scalar(base, &bytes, target) {
+        let mut narrowed = base.clone();
+        narrowed.bit_size = Some(bit_size);
+        let state = enumerators.map_or_else(
+            || match decode_scalar(&narrowed, &bytes, target) {
                 Ok(value) => ValueNodeState::Available(VariableValue::Scalar(value)),
                 Err(reason) => ValueNodeState::Unavailable(reason),
             },
+            |enumerators| match decode_integer_value(&narrowed, &bytes, target.byte_order) {
+                Ok(value) => {
+                    let matches = enumerators
+                        .iter()
+                        .filter(|enumerator| enumerator.value == value)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into();
+                    ValueNodeState::Available(VariableValue::Enumeration { value, matches })
+                }
+                Err(reason) => ValueNodeState::Unavailable(reason.into()),
+            },
         );
+        self.set(id, state);
         Ok(())
     }
 
@@ -9033,6 +9123,42 @@ mod tests {
     }
 
     #[test]
+    fn explicit_discriminant_lists_are_nonempty_and_share_one_metadata_budget() {
+        let representation = scalar_type(BaseTypeEncoding::Unsigned, 1);
+        let mut budget = VariantMetadataBudget::default();
+        assert!(matches!(
+            parse_discriminant_list(&[], &representation, &mut budget),
+            Err(VariantMetadataError::Malformed(_))
+        ));
+
+        for _ in 0..MAX_VARIANT_METADATA - 1 {
+            budget.consume().expect("budget entry");
+        }
+        let selector = [gimli::DW_DSC_label.0, 1];
+        assert!(parse_discriminant_list(&selector, &representation, &mut budget).is_ok());
+        assert_eq!(
+            parse_discriminant_list(&selector, &representation, &mut budget),
+            Err(VariantMetadataError::Limit)
+        );
+    }
+
+    #[test]
+    fn zig_synthetic_variant_names_require_canonical_type_syntax() {
+        assert_eq!(zig_optional_payload_name("?u32"), Some("u32"));
+        assert_eq!(zig_optional_payload_name("named.?u32"), None);
+        assert_eq!(
+            zig_error_union_type_names("error{bad}!u32"),
+            Some(("error{bad}", "u32"))
+        );
+        assert_eq!(
+            zig_error_union_type_names("anyerror!*const u8"),
+            Some(("anyerror", "*const u8"))
+        );
+        assert_eq!(zig_error_union_type_names("user!record"), None);
+        assert_eq!(zig_error_union_type_names("error{bad}!"), None);
+    }
+
+    #[test]
     fn sub_byte_integer_representations_mask_and_sign_extend() {
         let base = |encoding, bit_size| BaseType {
             name: "bits".into(),
@@ -9059,6 +9185,77 @@ mod tests {
             .unwrap(),
             IntegerValue::Signed(-3)
         );
+    }
+
+    #[test]
+    fn enum_typed_record_bit_fields_retain_symbolic_values() {
+        let image = ModuleImageId::new(1);
+        let reference = |id| TypeReference {
+            image,
+            id: TypeId::new(id),
+        };
+        let representation = BaseType {
+            name: "State".into(),
+            base_name: "unsigned int".into(),
+            encoding: BaseTypeEncoding::Unsigned,
+            byte_size: 1,
+            bit_size: None,
+        };
+        let enumerator = Enumerator {
+            name: "Ready".into(),
+            value: IntegerValue::Unsigned(1),
+        };
+        let types = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "State".into(),
+                byte_size: Some(1),
+                kind: TypeKind::Enumeration {
+                    representation,
+                    underlying: None,
+                    enumerators: Arc::from([enumerator.clone()]),
+                    origin: EnumerationOrigin::Language,
+                    scoped: false,
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "Packed".into(),
+                byte_size: Some(1),
+                kind: TypeKind::Record {
+                    kind: RecordKind::Struct,
+                    members: Arc::from([RecordMember {
+                        name: Some("state".into()),
+                        type_ref: reference(0),
+                        layout: RecordMemberLayout::BitRange {
+                            bit_offset: 0,
+                            bit_size: 1,
+                        },
+                        accessibility: Accessibility::Public,
+                        artificial: false,
+                        embedded: false,
+                        declaration: None,
+                    }]),
+                    bases: Arc::from([]),
+                    incomplete: false,
+                },
+            }),
+        ];
+        let shape = value_shape_from(&types, TypeId::new(1)).expect("record shape");
+        let graph =
+            decode_value_graph(&types, &shape, Arc::from([1_u8]), target(ByteOrder::Little))
+                .expect("record graph");
+        let ValueNodeState::Available(VariableValue::Record { members, .. }) = &graph.root().state
+        else {
+            panic!("root was not a record: {graph:?}");
+        };
+        assert!(matches!(
+            graph.node(members[0].value).map(|node| &node.state),
+            Some(ValueNodeState::Available(VariableValue::Enumeration {
+                value: IntegerValue::Unsigned(1),
+                matches,
+            })) if matches.as_ref() == [enumerator]
+        ));
     }
 
     #[test]

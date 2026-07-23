@@ -1500,6 +1500,7 @@ fn format_value_graph(graph: &uscope::ValueGraph) -> String {
                         ));
                     }
                 }
+                let omitted = total_variant_omitted(*omitted, active.as_ref());
                 let child_count = children.len();
                 let suffix = match (active, discriminant) {
                     (Some(active), _) if child_count == 0 => active
@@ -1514,7 +1515,7 @@ fn format_value_graph(graph: &uscope::ValueGraph) -> String {
                     _ => String::new(),
                 };
                 work.push(Work::Text(format!("}}{suffix}")));
-                if *omitted != 0 {
+                if omitted != 0 {
                     work.push(Work::Text(format!("<{omitted} omitted>")));
                     if child_count != 0 {
                         work.push(Work::Text(", ".to_owned()));
@@ -1549,6 +1550,10 @@ fn format_integer(value: uscope::IntegerValue) -> String {
         uscope::IntegerValue::Unsigned(value) => value.to_string(),
         _ => "<unsupported integer value>".to_owned(),
     }
+}
+
+fn total_variant_omitted(common: u64, active: Option<&uscope::ActiveVariantValue>) -> u64 {
+    common.saturating_add(active.map_or(0, |active| active.omitted))
 }
 
 fn format_scalar_value(value: &ScalarValue, character: bool) -> String {
@@ -2070,5 +2075,20 @@ mod tests {
             }),
             "3.125"
         );
+    }
+
+    #[test]
+    fn variant_omission_count_includes_active_members() {
+        let active = uscope::ActiveVariantValue {
+            variant: uscope::Variant {
+                name: Some("Ready".into()),
+                selection: uscope::VariantSelection::Default,
+                members: Arc::from([]),
+            },
+            members: Arc::from([]),
+            omitted: 2,
+        };
+        assert_eq!(total_variant_omitted(0, Some(&active)), 2);
+        assert_eq!(total_variant_omitted(u64::MAX, Some(&active)), u64::MAX);
     }
 }
