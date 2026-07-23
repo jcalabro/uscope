@@ -259,6 +259,37 @@ pub struct BaseType {
     pub encoding: BaseTypeEncoding,
     /// The number of bytes occupied in target storage.
     pub byte_size: u64,
+    /// The meaningful low-order bits when the representation is narrower than its storage.
+    pub bit_size: Option<u64>,
+}
+
+/// An exact integral value with producer-defined signedness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum IntegerValue {
+    /// A signed integral value.
+    Signed(i128),
+    /// An unsigned integral value.
+    Unsigned(u128),
+}
+
+/// Whether symbolic integer names came from a language enumeration or associated constants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EnumerationOrigin {
+    /// A source-language enumeration represented by `DW_TAG_enumeration_type`.
+    Language,
+    /// Constants associated with a named integer type, as emitted by Go.
+    NamedConstants,
+}
+
+/// One symbolic name and exact value in an enumeration-like type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enumerator {
+    /// The producer/source name.
+    pub name: Arc<str>,
+    /// The exact signed or unsigned value.
+    pub value: IntegerValue,
 }
 
 /// Stable identity of one normalized type in a module image.
@@ -304,6 +335,18 @@ pub enum RecordKind {
     Struct,
     /// A class value.
     Class,
+}
+
+/// The aggregate storage category that owns a discriminated variant part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariantStorageKind {
+    /// Structure storage.
+    Struct,
+    /// Class storage.
+    Class,
+    /// Union storage.
+    Union,
 }
 
 /// Source visibility attached to a record member or base class.
@@ -377,12 +420,71 @@ pub struct BaseClass {
     pub virtuality: BaseClassVirtuality,
 }
 
+/// One exact or inclusive-range selector for a discriminated variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariantSelector {
+    /// One exact discriminator value.
+    Value(IntegerValue),
+    /// An inclusive discriminator range.
+    Range {
+        /// The first selected value.
+        low: IntegerValue,
+        /// The last selected value.
+        high: IntegerValue,
+    },
+}
+
+/// How a variant is selected by the discriminator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariantSelection {
+    /// The fallback when no explicit selector matches.
+    Default,
+    /// One or more exact values or inclusive ranges.
+    Selectors(Arc<[VariantSelector]>),
+}
+
+/// A stored discriminator member or a tag type without runtime storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariantDiscriminant {
+    /// A concrete member whose location supplies the runtime discriminator.
+    Stored(RecordMember),
+    /// A tag type is described but no discriminator field exists in storage.
+    TagType(TypeReference),
+}
+
+/// One variant and the components selected with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variant {
+    /// The variant DIE name, when supplied independently of its components.
+    pub name: Option<Arc<str>>,
+    /// Its discriminator selection rule.
+    pub selection: VariantSelection,
+    /// Components in producer/source order.
+    pub members: Arc<[RecordMember]>,
+}
+
 /// The normalized shape of a debug type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TypeKind {
     /// A directly encoded scalar base type.
     Base(BaseType),
+    /// An integral representation with ordered symbolic names.
+    Enumeration {
+        /// The normalized integral storage representation.
+        representation: BaseType,
+        /// The producer-supplied underlying type edge, when present.
+        underlying: Option<TypeReference>,
+        /// Symbolic names in producer/source order. Duplicate values are preserved.
+        enumerators: Arc<[Enumerator]>,
+        /// Whether this is a language enum or a named integer with associated constants.
+        origin: EnumerationOrigin,
+        /// Whether the producer marked enumerator names as scoped.
+        scoped: bool,
+    },
     /// A thin pointer. A missing target represents an unspecified pointee such as `void`.
     Pointer {
         /// The pointed-to type, when supplied by the producer.
@@ -422,6 +524,28 @@ pub enum TypeKind {
         /// Base-class subobjects in producer/source order.
         bases: Arc<[BaseClass]>,
         /// Whether this is a declaration without a complete layout.
+        incomplete: bool,
+    },
+    /// Overlapping aggregate storage without a producer-described active member.
+    Union {
+        /// Alternative member interpretations in producer/source order.
+        members: Arc<[RecordMember]>,
+        /// Whether this is a declaration without a complete layout.
+        incomplete: bool,
+    },
+    /// Aggregate storage whose active components are selected by a discriminator.
+    Variant {
+        /// The containing aggregate category.
+        storage: VariantStorageKind,
+        /// Ordinary members outside the variant part.
+        common_members: Arc<[RecordMember]>,
+        /// Base subobjects outside the variant part.
+        bases: Arc<[BaseClass]>,
+        /// Stored discriminator or tag-only metadata.
+        discriminant: Box<VariantDiscriminant>,
+        /// Variants in producer/source order.
+        variants: Arc<[Variant]>,
+        /// Whether the containing aggregate has no complete layout.
         incomplete: bool,
     },
     /// An ordered qualifier around another type.
@@ -511,6 +635,13 @@ pub struct AddressValue {
 pub enum VariableValue {
     /// A supported scalar value.
     Scalar(ScalarValue),
+    /// An integral value retaining all exact symbolic matches.
+    Enumeration {
+        /// The exact target value.
+        value: IntegerValue,
+        /// Exact symbolic matches in producer/source order.
+        matches: Arc<[Enumerator]>,
+    },
     /// A concrete thin pointer or reference address.
     Address(AddressValue),
     /// An optimized pointer with no concrete address representation.
@@ -544,6 +675,26 @@ pub enum VariableValue {
         /// Members or bases omitted by the inspection budget.
         omitted: u64,
     },
+    /// All readable interpretations of raw overlapping union storage.
+    Union {
+        /// Alternative member interpretations in producer/source order.
+        members: Arc<[RecordMemberValue]>,
+        /// Members omitted by the inspection budget.
+        omitted: u64,
+    },
+    /// A discriminated aggregate with only its selected components materialized.
+    Variant {
+        /// The decoded stored discriminator; absent for tagless single variants.
+        discriminant: Option<IntegerValue>,
+        /// Ordinary members outside the variant part.
+        common_members: Arc<[RecordMemberValue]>,
+        /// Base-subobject values outside the variant part.
+        bases: Arc<[BaseClassValue]>,
+        /// The selected variant, or `None` when no selector matched.
+        active: Option<ActiveVariantValue>,
+        /// Common members or bases omitted by the inspection budget.
+        omitted: u64,
+    },
 }
 
 /// One member edge in a stopped record value.
@@ -553,6 +704,17 @@ pub struct RecordMemberValue {
     pub member: RecordMember,
     /// The typed child node.
     pub value: ValueNodeId,
+}
+
+/// The selected branch of a decoded discriminated variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveVariantValue {
+    /// Immutable metadata for the selected variant.
+    pub variant: Variant,
+    /// Decoded component values in producer/source order.
+    pub members: Arc<[RecordMemberValue]>,
+    /// Components omitted by the inspection budget.
+    pub omitted: u64,
 }
 
 /// One base-subobject edge in a stopped class value.
@@ -634,6 +796,21 @@ impl ValueGraph {
                     members.iter().any(|member| !valid(member.value))
                         || bases.iter().any(|base| !valid(base.value))
                 }
+                ValueNodeState::Available(VariableValue::Union { members, .. }) => {
+                    members.iter().any(|member| !valid(member.value))
+                }
+                ValueNodeState::Available(VariableValue::Variant {
+                    common_members,
+                    bases,
+                    active,
+                    ..
+                }) => {
+                    common_members.iter().any(|member| !valid(member.value))
+                        || bases.iter().any(|base| !valid(base.value))
+                        || active.as_ref().is_some_and(|active| {
+                            active.members.iter().any(|member| !valid(member.value))
+                        })
+                }
                 ValueNodeState::Cycle { original } => !valid(*original),
                 _ => false,
             })
@@ -667,6 +844,32 @@ impl ValueGraph {
                 ValueNodeState::Available(VariableValue::Record { members, bases, .. }) => {
                     work.extend(bases.iter().rev().map(|base| (base.value, false)));
                     work.extend(members.iter().rev().map(|member| (member.value, false)));
+                }
+                ValueNodeState::Available(VariableValue::Union { members, .. }) => {
+                    work.extend(members.iter().rev().map(|member| (member.value, false)));
+                }
+                ValueNodeState::Available(VariableValue::Variant {
+                    common_members,
+                    bases,
+                    active,
+                    ..
+                }) => {
+                    work.extend(bases.iter().rev().map(|base| (base.value, false)));
+                    work.extend(
+                        common_members
+                            .iter()
+                            .rev()
+                            .map(|member| (member.value, false)),
+                    );
+                    if let Some(active) = active {
+                        work.extend(
+                            active
+                                .members
+                                .iter()
+                                .rev()
+                                .map(|member| (member.value, false)),
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -2385,6 +2588,7 @@ mod tests {
             base_name: "int".into(),
             encoding: BaseTypeEncoding::Signed,
             byte_size: 4,
+            bit_size: None,
         };
         TypeInfo {
             reference: TypeReference {
@@ -2461,6 +2665,7 @@ mod tests {
                 base_name: "int".into(),
                 encoding: BaseTypeEncoding::Signed,
                 byte_size: 4,
+                bit_size: None,
             };
             GlobalVariableType::Resolved(TypeInfo {
                 reference: TypeReference {

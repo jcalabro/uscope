@@ -1338,6 +1338,27 @@ fn format_value_graph(graph: &uscope::ValueGraph) -> String {
             uscope::VariableValue::Scalar(value) => {
                 output.push_str(&format_scalar(&node.type_info, value));
             }
+            uscope::VariableValue::Enumeration { value, matches } => {
+                let raw = format_integer(*value);
+                match matches.as_ref() {
+                    [] => output.push_str(&raw),
+                    [enumerator] => {
+                        write!(output, "{} ({raw})", enumerator.name)
+                            .expect("String writes cannot fail");
+                    }
+                    aliases => {
+                        output.push_str(&raw);
+                        output.push_str(" <");
+                        for (index, alias) in aliases.iter().enumerate() {
+                            if index != 0 {
+                                output.push_str(", ");
+                            }
+                            output.push_str(&alias.name);
+                        }
+                        output.push('>');
+                    }
+                }
+            }
             uscope::VariableValue::Address(value) => {
                 let width = node
                     .type_info
@@ -1407,6 +1428,107 @@ fn format_value_graph(graph: &uscope::ValueGraph) -> String {
                 }
                 output.push('{');
             }
+            uscope::VariableValue::Union { members, omitted } => {
+                let children = members
+                    .iter()
+                    .filter(|member| !member.member.artificial)
+                    .map(|member| {
+                        (
+                            format!(
+                                "{} = ",
+                                member.member.name.as_deref().unwrap_or("<anonymous>")
+                            ),
+                            member.value,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let child_count = children.len();
+                work.push(Work::Text("} <active member unknown>".to_owned()));
+                if *omitted != 0 {
+                    work.push(Work::Text(format!("<{omitted} omitted>")));
+                    if child_count != 0 {
+                        work.push(Work::Text(", ".to_owned()));
+                    }
+                }
+                for (index, (label, child)) in children.into_iter().enumerate().rev() {
+                    if index + 1 != child_count {
+                        work.push(Work::Text(", ".to_owned()));
+                    }
+                    work.push(Work::Node(child, depth + 1));
+                    work.push(Work::Text(label));
+                }
+                output.push('{');
+            }
+            uscope::VariableValue::Variant {
+                discriminant,
+                common_members,
+                bases,
+                active,
+                omitted,
+            } => {
+                let mut children = Vec::new();
+                for base in bases.iter() {
+                    let name = graph
+                        .node(base.value)
+                        .map_or("<unknown base>", |node| node.type_info.name.as_ref());
+                    children.push((format!("<base {name}> = "), base.value));
+                }
+                for member in common_members
+                    .iter()
+                    .filter(|member| !member.member.artificial)
+                {
+                    children.push((
+                        format!(
+                            "{} = ",
+                            member.member.name.as_deref().unwrap_or("<anonymous>")
+                        ),
+                        member.value,
+                    ));
+                }
+                if let Some(active) = active {
+                    for member in active
+                        .members
+                        .iter()
+                        .filter(|member| !member.member.artificial)
+                    {
+                        children.push((
+                            format!(
+                                "{} = ",
+                                member.member.name.as_deref().unwrap_or("<anonymous>")
+                            ),
+                            member.value,
+                        ));
+                    }
+                }
+                let child_count = children.len();
+                let suffix = match (active, discriminant) {
+                    (Some(active), _) if child_count == 0 => active
+                        .variant
+                        .name
+                        .as_deref()
+                        .map_or_else(String::new, |name| format!("<{name}>")),
+                    (None, Some(discriminant)) => {
+                        format!("<no matching variant: {}>", format_integer(*discriminant))
+                    }
+                    (None, None) => "<no matching variant>".to_owned(),
+                    _ => String::new(),
+                };
+                work.push(Work::Text(format!("}}{suffix}")));
+                if *omitted != 0 {
+                    work.push(Work::Text(format!("<{omitted} omitted>")));
+                    if child_count != 0 {
+                        work.push(Work::Text(", ".to_owned()));
+                    }
+                }
+                for (index, (label, child)) in children.into_iter().enumerate().rev() {
+                    if index + 1 != child_count {
+                        work.push(Work::Text(", ".to_owned()));
+                    }
+                    work.push(Work::Node(child, depth + 1));
+                    work.push(Work::Text(label));
+                }
+                output.push('{');
+            }
             _ => output.push_str("<unsupported value>"),
         }
     }
@@ -1419,6 +1541,14 @@ fn format_scalar(type_info: &uscope::TypeInfo, value: &ScalarValue) -> String {
         uscope::TypeKind::Base(base) if base.base_name.as_ref() == "char"
     );
     format_scalar_value(value, character)
+}
+
+fn format_integer(value: uscope::IntegerValue) -> String {
+    match value {
+        uscope::IntegerValue::Signed(value) => value.to_string(),
+        uscope::IntegerValue::Unsigned(value) => value.to_string(),
+        _ => "<unsupported integer value>".to_owned(),
+    }
 }
 
 fn format_scalar_value(value: &ScalarValue, character: bool) -> String {

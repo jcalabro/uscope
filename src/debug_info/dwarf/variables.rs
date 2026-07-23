@@ -9,16 +9,18 @@ use super::{DieKey, DwarfError, Reader, die_reference, source_file_id, source_pa
 use crate::debug_info::{VariableContext, VariableInfo, VariableRuntime};
 use crate::model::ArrayDimension;
 use crate::{
-    Accessibility, AddressRange, AddressValue, Architecture, BaseClass, BaseClassValue,
-    BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId, ColumnNumber,
-    DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue, Error,
-    FloatValue, GlobalVariableId, GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility,
-    ImageAddress, InspectedValue, InspectionLimit, LineNumber, ModuleImageId, RecordKind,
-    RecordMember, RecordMemberLayout, RecordMemberValue, ReferenceKind, Result, ScalarValue,
-    SourceFile, SourceFileId, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeKind,
-    TypeQualifier, TypeReference, ValueGraph, ValueNode, ValueNodeId, ValueNodeState, Variable,
-    VariableKind, VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
-    VariableValue, VariableValueSource, VirtualAddress,
+    Accessibility, ActiveVariantValue, AddressRange, AddressValue, Architecture, BaseClass,
+    BaseClassValue, BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
+    ColumnNumber, DereferenceReference, DereferenceState, DereferenceUnavailableReason,
+    DereferencedValue, EnumerationOrigin, Enumerator, Error, FloatValue, GlobalVariableId,
+    GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility, ImageAddress, InspectedValue,
+    InspectionLimit, IntegerValue, LineNumber, ModuleImageId, RecordKind, RecordMember,
+    RecordMemberLayout, RecordMemberValue, ReferenceKind, Result, ScalarValue, SourceFile,
+    SourceFileId, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeKind, TypeQualifier,
+    TypeReference, ValueGraph, ValueNode, ValueNodeId, ValueNodeState, Variable, VariableKind,
+    VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
+    VariableValue, VariableValueSource, Variant, VariantDiscriminant, VariantSelection,
+    VariantSelector, VariantStorageKind, VirtualAddress,
 };
 
 const MAX_SCALAR_BYTES: u64 = 16;
@@ -30,6 +32,7 @@ const MAX_VALUE_NODES: usize = 4_096;
 const MAX_TYPES: usize = 65_536;
 const MAX_TYPE_RESOLUTION_DEPTH: usize = 256;
 const MAX_RECORD_CHILDREN: usize = 4_096;
+const MAX_SYMBOLIC_NAMES: usize = 262_144;
 const MAX_AGGREGATE_DEPTH: usize = 64;
 
 #[derive(Default)]
@@ -205,15 +208,43 @@ struct TypeArenaBuilder<'a, 'data> {
     resolution_depth: usize,
     byte_order: ByteOrder,
     limit_type: Option<TypeId>,
-    dynamic_record_layouts: HashMap<DynamicRecordLayoutKey, Expression>,
-    record_member_declarations: Vec<(TypeId, usize, DieKey)>,
+    dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
+    record_member_declarations: Vec<AggregateMemberDeclaration>,
+    symbolic_names: usize,
+}
+
+#[derive(Clone, Copy)]
+struct AggregateMemberDeclaration {
+    aggregate: TypeId,
+    member: AggregateMemberPath,
+    die: DieKey,
+}
+
+#[derive(Clone, Copy)]
+enum AggregateMemberPath {
+    Direct(usize),
+    Discriminant,
+    Variant { variant: usize, member: usize },
+}
+
+enum NamedConstantCollection {
+    Enumerators(Vec<Enumerator>),
+    Malformed(Arc<str>),
+    Limit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct DynamicRecordLayoutKey {
-    record: TypeId,
-    child: usize,
-    base: bool,
+struct DynamicAggregateLayoutKey {
+    aggregate: TypeId,
+    child: DynamicAggregateChild,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum DynamicAggregateChild {
+    Member(usize),
+    Base(usize),
+    Discriminant,
+    VariantMember { variant: usize, member: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -225,6 +256,11 @@ struct ValueShape {
 #[derive(Clone, Debug)]
 enum ValueShapeKind {
     Scalar(BaseType),
+    Enumeration {
+        representation: BaseType,
+        enumerators: Arc<[Enumerator]>,
+        byte_size: u64,
+    },
     Array {
         element: TypeId,
         dimensions: Arc<[ArrayDimension]>,
@@ -242,6 +278,21 @@ enum ValueShapeKind {
         bases: Arc<[BaseClass]>,
         byte_size: u64,
     },
+    Union {
+        /// The canonical union DIE after aliases and qualifiers are removed.
+        union: TypeId,
+        members: Arc<[RecordMember]>,
+        byte_size: u64,
+    },
+    Variant {
+        /// The canonical aggregate DIE after aliases and qualifiers are removed.
+        aggregate: TypeId,
+        common_members: Arc<[RecordMember]>,
+        bases: Arc<[BaseClass]>,
+        discriminant: VariantDiscriminant,
+        variants: Arc<[Variant]>,
+        byte_size: u64,
+    },
     Indirection {
         target: Option<TypeId>,
         byte_size: u64,
@@ -256,12 +307,16 @@ enum PathStep {
         byte_size: u64,
         address_class: u64,
     },
-    Member {
-        record: TypeId,
-        index: usize,
-        member: RecordMember,
-    },
+    Member(Box<PlannedMemberStep>),
     Unavailable(VariableUnavailableReason),
+}
+
+#[derive(Clone)]
+struct PlannedMemberStep {
+    aggregate: TypeId,
+    child: DynamicAggregateChild,
+    member: RecordMember,
+    required_variant: Option<(usize, VariantDiscriminant, Arc<[Variant]>)>,
 }
 
 struct PlannedPath {
@@ -269,6 +324,7 @@ struct PlannedPath {
     terminal: Option<TypeId>,
 }
 
+#[derive(Clone)]
 enum LocatedStorage {
     Memory(VirtualAddress),
     Bytes {
@@ -399,7 +455,7 @@ pub(super) struct DwarfVariableInfo {
     globals: Arc<[usize]>,
     evaluation_units: Arc<[EvaluationUnit]>,
     types: Arc<[TypeEntry]>,
-    dynamic_record_layouts: HashMap<DynamicRecordLayoutKey, Expression>,
+    dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
     objects_by_debug_offset: HashMap<u64, usize>,
     target: TargetDescription,
     endian: RunTimeEndian,
@@ -987,6 +1043,7 @@ pub(super) fn load_variable_info<'data>(
         .enumerate()
         .filter_map(|(index, object)| object.debug_info_offset.map(|offset| (offset, index)))
         .collect();
+    types.populate_go_named_constants();
     types.populate_record_member_declarations(source_files, source_file_ids);
     Ok(LoadedVariables {
         info: Arc::new(DwarfVariableInfo {
@@ -1362,6 +1419,392 @@ fn copy_constant(
     })
 }
 
+fn integer_bit_width(base: &BaseType) -> std::result::Result<u32, Arc<str>> {
+    let storage_bits = base
+        .byte_size
+        .checked_mul(8)
+        .ok_or_else(|| Arc::from("integer storage bit width overflows"))?;
+    let bits = base.bit_size.unwrap_or(storage_bits);
+    if bits == 0 || bits > storage_bits || bits > 128 {
+        return Err("integer bit width is outside its storage representation".into());
+    }
+    u32::try_from(bits).map_err(|_| Arc::from("integer bit width exceeds u32"))
+}
+
+fn checked_integer_value(
+    value: IntegerValue,
+    base: &BaseType,
+) -> std::result::Result<IntegerValue, Arc<str>> {
+    let bits = integer_bit_width(base)?;
+    match (base.encoding, value) {
+        (
+            BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter,
+            IntegerValue::Signed(value),
+        ) => {
+            if bits < 128 {
+                let minimum = -(1_i128 << (bits - 1));
+                let maximum = (1_i128 << (bits - 1)) - 1;
+                if !(minimum..=maximum).contains(&value) {
+                    return Err("signed enumerator does not fit its representation".into());
+                }
+            }
+            Ok(IntegerValue::Signed(value))
+        }
+        (
+            BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter,
+            IntegerValue::Unsigned(value),
+        ) => {
+            let value = i128::try_from(value)
+                .map_err(|_| Arc::from("enumerator does not fit its signed representation"))?;
+            checked_integer_value(IntegerValue::Signed(value), base)
+        }
+        (
+            BaseTypeEncoding::Boolean
+            | BaseTypeEncoding::Unsigned
+            | BaseTypeEncoding::UnsignedCharacter,
+            IntegerValue::Unsigned(value),
+        ) => {
+            if bits < 128 && value >= 1_u128 << bits {
+                return Err("unsigned enumerator does not fit its representation".into());
+            }
+            if matches!(base.encoding, BaseTypeEncoding::Boolean) && value > 1 {
+                return Err("boolean enumerator is neither zero nor one".into());
+            }
+            Ok(IntegerValue::Unsigned(value))
+        }
+        (
+            BaseTypeEncoding::Boolean
+            | BaseTypeEncoding::Unsigned
+            | BaseTypeEncoding::UnsignedCharacter,
+            IntegerValue::Signed(value),
+        ) => {
+            let value = u128::try_from(value)
+                .map_err(|_| Arc::from("negative enumerator has an unsigned representation"))?;
+            checked_integer_value(IntegerValue::Unsigned(value), base)
+        }
+        (BaseTypeEncoding::Floating, _) => {
+            Err("enumerator representation is floating-point".into())
+        }
+    }
+}
+
+fn decode_integer_value(
+    base: &BaseType,
+    bytes: &[u8],
+    byte_order: ByteOrder,
+) -> std::result::Result<IntegerValue, Arc<str>> {
+    let expected = usize::try_from(base.byte_size)
+        .map_err(|_| Arc::from("integer byte size does not fit host usize"))?;
+    if bytes.len() != expected {
+        return Err("integer storage size mismatch".into());
+    }
+    let bits = integer_bit_width(base)?;
+    let raw = unsigned_value(bytes, byte_order).map_err(|reason| Arc::from(reason.to_string()))?
+        & low_bits_mask(usize::try_from(bits).expect("bit width fits usize"));
+    let value = match base.encoding {
+        BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => {
+            let signed = if bits == 128 {
+                raw.cast_signed()
+            } else {
+                let shift = 128 - bits;
+                (raw << shift).cast_signed() >> shift
+            };
+            IntegerValue::Signed(signed)
+        }
+        BaseTypeEncoding::Boolean
+        | BaseTypeEncoding::Unsigned
+        | BaseTypeEncoding::UnsignedCharacter => IntegerValue::Unsigned(raw),
+        BaseTypeEncoding::Floating => {
+            return Err("integer representation is floating-point".into());
+        }
+    };
+    checked_integer_value(value, base)
+}
+
+fn enumeration_constant(
+    value: gimli::AttributeValue<Reader<'_>>,
+    base: &BaseType,
+    byte_order: ByteOrder,
+) -> std::result::Result<IntegerValue, Arc<str>> {
+    let signed = matches!(
+        base.encoding,
+        BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
+    );
+    let value = match value {
+        gimli::AttributeValue::Data1(value) if signed => {
+            IntegerValue::Signed(i128::from(value.cast_signed()))
+        }
+        gimli::AttributeValue::Data2(value) if signed => {
+            IntegerValue::Signed(i128::from(value.cast_signed()))
+        }
+        gimli::AttributeValue::Data4(value) if signed => {
+            IntegerValue::Signed(i128::from(value.cast_signed()))
+        }
+        gimli::AttributeValue::Data8(value) if signed => {
+            IntegerValue::Signed(i128::from(value.cast_signed()))
+        }
+        gimli::AttributeValue::Data16(value) if signed => IntegerValue::Signed(value.cast_signed()),
+        gimli::AttributeValue::Data1(value) => IntegerValue::Unsigned(u128::from(value)),
+        gimli::AttributeValue::Data2(value) => IntegerValue::Unsigned(u128::from(value)),
+        gimli::AttributeValue::Data4(value) => IntegerValue::Unsigned(u128::from(value)),
+        gimli::AttributeValue::Data8(value) | gimli::AttributeValue::Udata(value) => {
+            IntegerValue::Unsigned(u128::from(value))
+        }
+        gimli::AttributeValue::Data16(value) => IntegerValue::Unsigned(value),
+        gimli::AttributeValue::Sdata(value) => IntegerValue::Signed(i128::from(value)),
+        gimli::AttributeValue::Block(value) => {
+            let bytes = value
+                .to_slice()
+                .map_err(|error| Arc::from(error.to_string()))?;
+            return decode_integer_value(base, bytes.as_ref(), byte_order);
+        }
+        _ => return Err("enumerator constant has an unsupported form".into()),
+    };
+    checked_integer_value(value, base)
+}
+
+fn read_uleb128_u128(bytes: &[u8], cursor: &mut usize) -> std::result::Result<u128, Arc<str>> {
+    let mut value = 0_u128;
+    let mut shift = 0_u32;
+    loop {
+        let byte = *bytes
+            .get(*cursor)
+            .ok_or_else(|| Arc::from("truncated unsigned discriminant LEB128"))?;
+        *cursor = cursor
+            .checked_add(1)
+            .ok_or_else(|| Arc::from("discriminant-list cursor overflows"))?;
+        let payload = u128::from(byte & 0x7f);
+        if shift >= 128 {
+            if payload != 0 {
+                return Err("unsigned discriminant LEB128 exceeds 128 bits".into());
+            }
+        } else {
+            let available = 128 - shift;
+            if available < 7 && payload >= 1_u128 << available {
+                return Err("unsigned discriminant LEB128 exceeds 128 bits".into());
+            }
+            value |= payload << shift;
+        }
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift = shift
+            .checked_add(7)
+            .ok_or_else(|| Arc::from("unsigned discriminant LEB128 shift overflows"))?;
+        if shift > 133 {
+            return Err("unsigned discriminant LEB128 is overlong".into());
+        }
+    }
+}
+
+fn read_sleb128_i128(bytes: &[u8], cursor: &mut usize) -> std::result::Result<i128, Arc<str>> {
+    let mut value = 0_u128;
+    let mut shift = 0_u32;
+    loop {
+        let byte = *bytes
+            .get(*cursor)
+            .ok_or_else(|| Arc::from("truncated signed discriminant LEB128"))?;
+        *cursor = cursor
+            .checked_add(1)
+            .ok_or_else(|| Arc::from("discriminant-list cursor overflows"))?;
+        let payload = u128::from(byte & 0x7f);
+        if shift < 128 {
+            let available = 128 - shift;
+            value |= (payload & low_bits_mask(usize::try_from(available.min(7)).unwrap())) << shift;
+        }
+        if byte & 0x80 == 0 {
+            let negative = byte & 0x40 != 0;
+            if shift >= 128 {
+                let canonical = if negative {
+                    payload == 0x7f
+                } else {
+                    payload == 0
+                };
+                if !canonical {
+                    return Err("signed discriminant LEB128 exceeds 128 bits".into());
+                }
+            } else {
+                let consumed = shift + 7;
+                if negative && consumed < 128 {
+                    value |= u128::MAX << consumed;
+                } else if consumed > 128 {
+                    let used = 128 - shift;
+                    let high = payload >> used;
+                    let expected = if negative {
+                        low_bits_mask(usize::try_from(7 - used).unwrap())
+                    } else {
+                        0
+                    };
+                    if high != expected {
+                        return Err("signed discriminant LEB128 exceeds 128 bits".into());
+                    }
+                }
+            }
+            return Ok(value.cast_signed());
+        }
+        shift = shift
+            .checked_add(7)
+            .ok_or_else(|| Arc::from("signed discriminant LEB128 shift overflows"))?;
+        if shift > 133 {
+            return Err("signed discriminant LEB128 is overlong".into());
+        }
+    }
+}
+
+fn read_discriminant_leb128(
+    bytes: &[u8],
+    cursor: &mut usize,
+    base: &BaseType,
+) -> std::result::Result<IntegerValue, Arc<str>> {
+    let value = if matches!(
+        base.encoding,
+        BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
+    ) {
+        IntegerValue::Signed(read_sleb128_i128(bytes, cursor)?)
+    } else {
+        IntegerValue::Unsigned(read_uleb128_u128(bytes, cursor)?)
+    };
+    checked_integer_value(value, base)
+}
+
+fn copy_variant_selection(
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    representation: &BaseType,
+    byte_order: ByteOrder,
+) -> std::result::Result<VariantSelection, Arc<str>> {
+    let exact = entry.attr_value(gimli::DW_AT_discr_value);
+    let list = entry.attr_value(gimli::DW_AT_discr_list);
+    if exact.is_some() && list.is_some() {
+        return Err("variant has both DW_AT_discr_value and DW_AT_discr_list".into());
+    }
+    if let Some(value) = exact {
+        return enumeration_constant(value, representation, byte_order)
+            .map(|value| VariantSelection::Selectors(Arc::from([VariantSelector::Value(value)])));
+    }
+    let Some(list) = list else {
+        return Ok(VariantSelection::Default);
+    };
+    let gimli::AttributeValue::Block(list) = list else {
+        return Err("DW_AT_discr_list does not use a block form".into());
+    };
+    let bytes = list
+        .to_slice()
+        .map_err(|error| Arc::from(error.to_string()))?;
+    if bytes.is_empty() {
+        return Ok(VariantSelection::Default);
+    }
+    let mut cursor = 0_usize;
+    let mut selectors = Vec::new();
+    while cursor < bytes.len() {
+        let descriptor = bytes[cursor];
+        cursor += 1;
+        let low = read_discriminant_leb128(bytes.as_ref(), &mut cursor, representation)?;
+        let selector = match descriptor {
+            value if value == gimli::DW_DSC_label.0 => VariantSelector::Value(low),
+            value if value == gimli::DW_DSC_range.0 => {
+                let high = read_discriminant_leb128(bytes.as_ref(), &mut cursor, representation)?;
+                VariantSelector::Range { low, high }
+            }
+            _ => {
+                return Err(
+                    format!("DW_AT_discr_list has unknown descriptor {descriptor:#x}").into(),
+                );
+            }
+        };
+        selectors.push(selector);
+    }
+    Ok(VariantSelection::Selectors(selectors.into()))
+}
+
+fn compare_integer_values(
+    left: IntegerValue,
+    right: IntegerValue,
+) -> std::result::Result<std::cmp::Ordering, Arc<str>> {
+    match (left, right) {
+        (IntegerValue::Signed(left), IntegerValue::Signed(right)) => Ok(left.cmp(&right)),
+        (IntegerValue::Unsigned(left), IntegerValue::Unsigned(right)) => Ok(left.cmp(&right)),
+        _ => Err("variant selectors mix signed and unsigned values".into()),
+    }
+}
+
+fn variant_selection_matches(
+    selection: &VariantSelection,
+    value: IntegerValue,
+) -> std::result::Result<bool, Arc<str>> {
+    let VariantSelection::Selectors(selectors) = selection else {
+        return Ok(false);
+    };
+    for selector in selectors.iter() {
+        let matches = match *selector {
+            VariantSelector::Value(expected) => expected == value,
+            VariantSelector::Range { low, high } => {
+                !compare_integer_values(value, low)?.is_lt()
+                    && !compare_integer_values(value, high)?.is_gt()
+            }
+        };
+        if matches {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn selected_variant_index(
+    variants: &[Variant],
+    value: IntegerValue,
+) -> std::result::Result<Option<usize>, Arc<str>> {
+    let mut selected = None;
+    let mut default = None;
+    for (index, variant) in variants.iter().enumerate() {
+        match &variant.selection {
+            VariantSelection::Default => default = Some(index),
+            VariantSelection::Selectors(_) => {
+                if variant_selection_matches(&variant.selection, value)? {
+                    selected = Some(index);
+                }
+            }
+        }
+    }
+    Ok(selected.or(default))
+}
+
+fn validate_variant_selections(variants: &[Variant]) -> std::result::Result<(), Arc<str>> {
+    let mut default_count = 0_usize;
+    let mut ranges = Vec::new();
+    for (variant_index, variant) in variants.iter().enumerate() {
+        match &variant.selection {
+            VariantSelection::Default => default_count += 1,
+            VariantSelection::Selectors(selectors) => {
+                if selectors.is_empty() {
+                    return Err("explicit variant selector list is empty".into());
+                }
+                for selector in selectors.iter() {
+                    let (low, high) = match *selector {
+                        VariantSelector::Value(value) => (value, value),
+                        VariantSelector::Range { low, high } => (low, high),
+                    };
+                    if compare_integer_values(low, high)?.is_gt() {
+                        return Err("variant discriminator range is reversed".into());
+                    }
+                    ranges.push((low, high, variant_index));
+                }
+            }
+        }
+    }
+    if default_count > 1 {
+        return Err("variant part has multiple default variants".into());
+    }
+    ranges.sort_by(|left, right| {
+        compare_integer_values(left.0, right.0).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for pair in ranges.windows(2) {
+        if !compare_integer_values(pair[0].1, pair[1].0)?.is_lt() {
+            return Err("variant discriminator selectors overlap".into());
+        }
+    }
+    Ok(())
+}
+
 fn copy_location(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit_index: usize,
@@ -1529,6 +1972,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             limit_type: None,
             dynamic_record_layouts: HashMap::new(),
             record_member_declarations: Vec::new(),
+            symbolic_names: 0,
         }
     }
 
@@ -1592,6 +2036,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         id
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "type dispatch validates common attributes before one exhaustive tag match"
+    )]
     fn build(&mut self, key: DieKey, id: TypeId) -> TypeEntry {
         let Some(unit) = self.units.get(key.unit) else {
             return TypeEntry::Malformed("type reference is outside loaded units".into());
@@ -1642,11 +2090,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         // producer never specified.
         let address_class = match resolve_address_class(&entry, reference, explicit_name.clone()) {
             Ok(address_class) => address_class,
-            Err(resolved) => return resolved,
+            Err(resolved) => return *resolved,
         };
         let explicit_size = match resolve_explicit_size(&entry, reference, explicit_name.clone()) {
             Ok(size) => size,
-            Err(resolved) => return resolved,
+            Err(resolved) => return *resolved,
         };
         let pointer_size = explicit_size
             .or_else(|| (address_class == 0).then_some(u64::from(unit.encoding().address_size)));
@@ -1655,6 +2103,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             gimli::DW_TAG_base_type => {
                 Self::build_base_type(&entry, reference, explicit_name, explicit_size)
             }
+            gimli::DW_TAG_enumeration_type => self.build_enumeration_type(
+                &entry,
+                key.unit,
+                reference,
+                explicit_name,
+                explicit_size,
+            ),
             gimli::DW_TAG_pointer_type => self.build_pointer_type(
                 &entry,
                 key.unit,
@@ -1682,6 +2137,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => {
                 self.build_record_type(&entry, key.unit, reference, explicit_name, explicit_size)
+            }
+            gimli::DW_TAG_union_type => {
+                self.build_union_type(&entry, key.unit, reference, explicit_name, explicit_size)
             }
             gimli::DW_TAG_typedef
             | gimli::DW_TAG_const_type
@@ -1735,15 +2193,6 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             None => Ok(Accessibility::Public),
             Some(_) => Err("record accessibility has an invalid encoding".into()),
         }
-    }
-
-    fn record_constant_offset(
-        entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
-    ) -> std::result::Result<u64, Arc<str>> {
-        entry
-            .attr(gimli::DW_AT_data_member_location)
-            .and_then(gimli::Attribute::udata_value)
-            .ok_or_else(|| Arc::from("record member location is not a constant"))
     }
 
     fn record_byte_layout(
@@ -1848,6 +2297,18 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             return TypeEntry::Malformed("base type has no byte size".into());
         };
         if byte_size == 0 {
+            // Zig models its storage-less `void` payload as a zero-byte signed
+            // base type. It is not a scalar and must not poison a containing
+            // aggregate, so normalize that compiler representation to the
+            // platform-neutral unspecified type.
+            if name.as_ref() == "void" {
+                return TypeEntry::Resolved(TypeInfo {
+                    reference,
+                    name,
+                    byte_size: Some(0),
+                    kind: TypeKind::Unspecified,
+                });
+            }
             // A zero-width scalar is defective regardless of its encoding; reject
             // it before the encoding branch so an unsupported encoding cannot
             // mask the malformed size.
@@ -1880,12 +2341,258 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             base_name: Arc::clone(&name),
             encoding,
             byte_size,
+            bit_size: match entry.attr(gimli::DW_AT_bit_size) {
+                None => None,
+                Some(attribute) => match unsigned_constant(attribute) {
+                    UnsignedConstant::Value(0) => {
+                        return TypeEntry::Malformed("base type has a zero bit size".into());
+                    }
+                    UnsignedConstant::Value(bit_size)
+                        if bit_size <= byte_size.saturating_mul(8) =>
+                    {
+                        Some(bit_size)
+                    }
+                    UnsignedConstant::Value(_) | UnsignedConstant::Oversized => {
+                        return TypeEntry::Malformed(
+                            "base type bit size exceeds its byte storage".into(),
+                        );
+                    }
+                    UnsignedConstant::NonConstant => {
+                        return TypeEntry::Malformed(
+                            "DW_AT_bit_size is not an unsigned integer constant".into(),
+                        );
+                    }
+                },
+            },
         };
         TypeEntry::Resolved(TypeInfo {
             reference,
             name,
             byte_size: Some(byte_size),
             kind: TypeKind::Base(base),
+        })
+    }
+
+    fn resolved_integer_base(&self, id: TypeId) -> std::result::Result<BaseType, Arc<str>> {
+        let mut current = id;
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                return Err("enumeration underlying type contains a wrapper cycle".into());
+            }
+            let entry = self
+                .entries
+                .get(usize::try_from(current.get()).expect("type ID fits usize"))
+                .ok_or_else(|| Arc::from("enumeration underlying type is outside the arena"))?;
+            let info = match entry {
+                TypeEntry::Resolved(info) => info,
+                TypeEntry::Malformed(reason) => return Err(Arc::clone(reason)),
+                TypeEntry::Building => {
+                    return Err("enumeration underlying type did not finish building".into());
+                }
+            };
+            match &info.kind {
+                TypeKind::Base(base) if !matches!(base.encoding, BaseTypeEncoding::Floating) => {
+                    return Ok(base.clone());
+                }
+                TypeKind::Enumeration { representation, .. } => {
+                    return Ok(representation.clone());
+                }
+                TypeKind::Qualified { target, .. } | TypeKind::Alias { target } => {
+                    current = target.id;
+                }
+                TypeKind::Base(_) => {
+                    return Err("enumeration underlying type is not integral".into());
+                }
+                _ => return Err("enumeration underlying type is not an integer type".into()),
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "enumeration normalization validates representation and ordered symbols together"
+    )]
+    fn build_enumeration_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> TypeEntry {
+        let name = explicit_name.unwrap_or_else(|| {
+            Arc::from(format!("<anonymous enumeration@0x{:x}>", entry.offset().0))
+        });
+        let underlying = match self.target(entry, unit_index) {
+            Ok(underlying) => underlying,
+            Err(reason) => return TypeEntry::Malformed(reason),
+        };
+        let mut representation = if let Some(underlying) = underlying {
+            match self.resolved_integer_base(underlying.id) {
+                Ok(base) => base,
+                Err(reason) => return TypeEntry::Malformed(reason),
+            }
+        } else {
+            let Some(byte_size) = explicit_size else {
+                return TypeEntry::Malformed(
+                    "enumeration has neither an underlying type nor a byte size".into(),
+                );
+            };
+            if byte_size == 0 {
+                return TypeEntry::Malformed("enumeration has a zero byte size".into());
+            }
+            let Ok(raw_encoding) = base_type_encoding(entry) else {
+                return TypeEntry::Malformed(
+                    "enumeration without an underlying type has no encoding".into(),
+                );
+            };
+            let encoding = match gimli::DwAte(raw_encoding) {
+                gimli::DW_ATE_boolean => BaseTypeEncoding::Boolean,
+                gimli::DW_ATE_signed => BaseTypeEncoding::Signed,
+                gimli::DW_ATE_signed_char => BaseTypeEncoding::SignedCharacter,
+                gimli::DW_ATE_unsigned => BaseTypeEncoding::Unsigned,
+                gimli::DW_ATE_unsigned_char => BaseTypeEncoding::UnsignedCharacter,
+                _ => {
+                    return TypeEntry::Malformed(
+                        "enumeration encoding is not an integral encoding".into(),
+                    );
+                }
+            };
+            BaseType {
+                name: Arc::clone(&name),
+                base_name: Arc::clone(&name),
+                encoding,
+                byte_size,
+                bit_size: None,
+            }
+        };
+        let byte_size = explicit_size.unwrap_or(representation.byte_size);
+        if byte_size == 0 {
+            return TypeEntry::Malformed("enumeration has a zero byte size".into());
+        }
+        if byte_size != representation.byte_size {
+            return TypeEntry::Malformed(
+                "enumeration byte size differs from its underlying type".into(),
+            );
+        }
+        if let Some(attribute) = entry.attr(gimli::DW_AT_encoding) {
+            let enum_encoding = match unsigned_constant(attribute) {
+                UnsignedConstant::Value(value) => u8::try_from(value).ok(),
+                UnsignedConstant::Oversized | UnsignedConstant::NonConstant => None,
+            };
+            let compatible = enum_encoding.is_some_and(|encoding| {
+                matches!(
+                    (gimli::DwAte(encoding), representation.encoding),
+                    (gimli::DW_ATE_boolean, BaseTypeEncoding::Boolean)
+                        | (
+                            gimli::DW_ATE_signed | gimli::DW_ATE_signed_char,
+                            BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
+                        )
+                        | (
+                            gimli::DW_ATE_unsigned | gimli::DW_ATE_unsigned_char,
+                            BaseTypeEncoding::Unsigned | BaseTypeEncoding::UnsignedCharacter
+                        )
+                )
+            });
+            if !compatible {
+                return TypeEntry::Malformed(
+                    "enumeration encoding differs from its underlying type".into(),
+                );
+            }
+        }
+        if let Some(attribute) = entry.attr(gimli::DW_AT_bit_size) {
+            representation.bit_size = match unsigned_constant(attribute) {
+                UnsignedConstant::Value(0) => {
+                    return TypeEntry::Malformed("enumeration has a zero bit size".into());
+                }
+                UnsignedConstant::Value(value) if value <= byte_size.saturating_mul(8) => {
+                    Some(value)
+                }
+                UnsignedConstant::Value(_)
+                | UnsignedConstant::Oversized
+                | UnsignedConstant::NonConstant => {
+                    return TypeEntry::Malformed(
+                        "enumeration bit size is not valid for its byte storage".into(),
+                    );
+                }
+            };
+        }
+        representation.name = Arc::clone(&name);
+
+        let Some(unit) = self.units.get(unit_index) else {
+            return TypeEntry::Malformed("enumeration type unit is unavailable".into());
+        };
+        let mut tree = match unit.entries_tree(Some(entry.offset())) {
+            Ok(tree) => tree,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let root = match tree.root() {
+            Ok(root) => root,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let mut enumerators = Vec::new();
+        let mut children = root.children();
+        loop {
+            let child = match children.next() {
+                Ok(Some(child)) => child,
+                Ok(None) => break,
+                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+            };
+            let child = child.entry();
+            if child.tag() != gimli::DW_TAG_enumerator {
+                return TypeEntry::Malformed(
+                    format!(
+                        "enumeration contains unsupported direct child {:?}",
+                        child.tag()
+                    )
+                    .into(),
+                );
+            }
+            if enumerators.len() >= MAX_RECORD_CHILDREN || self.symbolic_names >= MAX_SYMBOLIC_NAMES
+            {
+                return TypeEntry::Resolved(TypeInfo {
+                    reference,
+                    name,
+                    byte_size: Some(byte_size),
+                    kind: TypeKind::Opaque {
+                        description: "enumerator metadata exceeds its resource limit".into(),
+                    },
+                });
+            }
+            self.symbolic_names += 1;
+            let enumerator_name = match copy_name(self.dwarf, unit, child) {
+                Ok(Some(name)) => name,
+                Ok(None) => return TypeEntry::Malformed("enumerator has no name".into()),
+                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+            };
+            let Some(value) = child.attr_value(gimli::DW_AT_const_value) else {
+                return TypeEntry::Malformed("enumerator has no constant value".into());
+            };
+            let value = match enumeration_constant(value, &representation, self.byte_order) {
+                Ok(value) => value,
+                Err(reason) => return TypeEntry::Malformed(reason),
+            };
+            enumerators.push(Enumerator {
+                name: enumerator_name,
+                value,
+            });
+        }
+        let scoped = match strict_flag(entry, gimli::DW_AT_enum_class) {
+            Ok(scoped) => scoped,
+            Err(reason) => return TypeEntry::Malformed(reason),
+        };
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size: Some(byte_size),
+            kind: TypeKind::Enumeration {
+                representation,
+                underlying,
+                enumerators: enumerators.into(),
+                origin: EnumerationOrigin::Language,
+                scoped,
+            },
         })
     }
 
@@ -1931,12 +2638,132 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .map_err(|error| error.to_string().into())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Go constant reconstruction keeps producer filtering, validation, budgets, and promotion together"
+    )]
+    fn populate_go_named_constants(&mut self) {
+        let mut constants = HashMap::<TypeId, NamedConstantCollection>::new();
+        for (unit_index, unit) in self.units.iter().enumerate() {
+            let mut entries = unit.entries();
+            let Ok(Some(root)) = entries.next_dfs() else {
+                continue;
+            };
+            if !matches!(
+                root.attr_value(gimli::DW_AT_language),
+                Some(gimli::AttributeValue::Language(language)) if language == gimli::DW_LANG_Go
+            ) {
+                continue;
+            }
+            while let Ok(Some(entry)) = entries.next_dfs() {
+                if entry.tag() != gimli::DW_TAG_constant {
+                    continue;
+                }
+                let Ok(Some(key)) =
+                    die_reference(entry.attr_value(gimli::DW_AT_type), unit_index, self.units)
+                else {
+                    continue;
+                };
+                let target = self.resolve(key);
+                let Some(TypeEntry::Resolved(info)) = self
+                    .entries
+                    .get(usize::try_from(target.get()).expect("type ID fits usize"))
+                else {
+                    continue;
+                };
+                let TypeKind::Base(base) = &info.kind else {
+                    continue;
+                };
+                if !info.name.contains('.') || matches!(base.encoding, BaseTypeEncoding::Floating) {
+                    continue;
+                }
+                let representation = base.clone();
+                let enumerator = copy_name(self.dwarf, unit, entry)
+                    .map_err(|error| Arc::from(error.to_string()))
+                    .and_then(|name| name.ok_or_else(|| Arc::from("typed Go constant has no name")))
+                    .and_then(|name| {
+                        entry
+                            .attr_value(gimli::DW_AT_const_value)
+                            .ok_or_else(|| Arc::from("typed Go constant has no value"))
+                            .and_then(|value| {
+                                enumeration_constant(value, &representation, self.byte_order)
+                            })
+                            .map(|value| Enumerator { name, value })
+                    });
+                let symbolic_limit =
+                    enumerator.is_ok() && self.symbolic_names >= MAX_SYMBOLIC_NAMES;
+                if enumerator.is_ok() && !symbolic_limit {
+                    self.symbolic_names += 1;
+                }
+                let collection = constants
+                    .entry(target)
+                    .or_insert_with(|| NamedConstantCollection::Enumerators(Vec::new()));
+                if symbolic_limit {
+                    *collection = NamedConstantCollection::Limit;
+                    continue;
+                }
+                match (collection, enumerator) {
+                    (NamedConstantCollection::Enumerators(values), Ok(enumerator))
+                        if values.len() < MAX_RECORD_CHILDREN =>
+                    {
+                        values.push(enumerator);
+                    }
+                    (collection @ NamedConstantCollection::Enumerators(_), Ok(_)) => {
+                        *collection = NamedConstantCollection::Limit;
+                    }
+                    (collection @ NamedConstantCollection::Enumerators(_), Err(reason)) => {
+                        *collection = NamedConstantCollection::Malformed(reason);
+                    }
+                    (NamedConstantCollection::Malformed(_) | NamedConstantCollection::Limit, _) => {
+                    }
+                }
+            }
+        }
+
+        for (target, collection) in constants {
+            let index = usize::try_from(target.get()).expect("type ID fits usize");
+            match collection {
+                NamedConstantCollection::Malformed(reason) => {
+                    self.entries[index] = TypeEntry::Malformed(reason);
+                }
+                NamedConstantCollection::Limit => {
+                    let TypeEntry::Resolved(info) = &mut self.entries[index] else {
+                        continue;
+                    };
+                    info.kind = TypeKind::Opaque {
+                        description: "typed Go constant count exceeds its resource limit".into(),
+                    };
+                }
+                NamedConstantCollection::Enumerators(enumerators) if !enumerators.is_empty() => {
+                    let TypeEntry::Resolved(info) = &mut self.entries[index] else {
+                        continue;
+                    };
+                    let TypeKind::Base(base) = &info.kind else {
+                        continue;
+                    };
+                    let mut representation = base.clone();
+                    representation.name = Arc::clone(&info.name);
+                    info.kind = TypeKind::Enumeration {
+                        representation,
+                        underlying: None,
+                        enumerators: enumerators.into(),
+                        origin: EnumerationOrigin::NamedConstants,
+                        scoped: false,
+                    };
+                }
+                NamedConstantCollection::Enumerators(_) => {}
+            }
+        }
+    }
+
     fn populate_record_member_declarations(
         &mut self,
         source_files: &mut Vec<SourceFile>,
         source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
     ) {
-        for (record, member, key) in self.record_member_declarations.clone() {
+        for metadata in self.record_member_declarations.clone() {
+            let record = metadata.aggregate;
+            let key = metadata.die;
             let declaration = (|| -> std::result::Result<Option<SourceLocation>, Arc<str>> {
                 let unit = self
                     .units
@@ -1972,13 +2799,45 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             else {
                 continue;
             };
-            let TypeKind::Record { members, .. } = &mut info.kind else {
-                continue;
-            };
-            let mut updated = members.to_vec();
-            if let Some(member) = updated.get_mut(member) {
-                member.declaration = declaration;
-                *members = updated.into();
+            match (&mut info.kind, metadata.member) {
+                (
+                    TypeKind::Record { members, .. }
+                    | TypeKind::Union { members, .. }
+                    | TypeKind::Variant {
+                        common_members: members,
+                        ..
+                    },
+                    AggregateMemberPath::Direct(member),
+                ) => {
+                    let mut updated = members.to_vec();
+                    if let Some(member) = updated.get_mut(member) {
+                        member.declaration = declaration;
+                        *members = updated.into();
+                    }
+                }
+                (TypeKind::Variant { discriminant, .. }, AggregateMemberPath::Discriminant) => {
+                    match discriminant.as_mut() {
+                        VariantDiscriminant::Stored(member) => {
+                            member.declaration = declaration;
+                        }
+                        VariantDiscriminant::TagType(_) => {}
+                    }
+                }
+                (
+                    TypeKind::Variant { variants, .. },
+                    AggregateMemberPath::Variant { variant, member },
+                ) => {
+                    let mut updated_variants = variants.to_vec();
+                    if let Some(variant) = updated_variants.get_mut(variant) {
+                        let mut updated_members = variant.members.to_vec();
+                        if let Some(member) = updated_members.get_mut(member) {
+                            member.declaration = declaration;
+                            variant.members = updated_members.into();
+                            *variants = updated_variants.into();
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -2108,9 +2967,860 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         })
     }
 
+    fn has_direct_variant_part(
+        &self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+    ) -> std::result::Result<bool, Arc<str>> {
+        let unit = self
+            .units
+            .get(unit_index)
+            .ok_or_else(|| Arc::from("aggregate type unit is unavailable"))?;
+        let mut tree = unit
+            .entries_tree(Some(entry.offset()))
+            .map_err(|error| Arc::from(error.to_string()))?;
+        let root = tree.root().map_err(|error| Arc::from(error.to_string()))?;
+        let mut found = false;
+        let mut children = root.children();
+        while let Some(child) = children
+            .next()
+            .map_err(|error| Arc::from(error.to_string()))?
+        {
+            if child.entry().tag() == gimli::DW_TAG_variant_part {
+                if found {
+                    return Err("aggregate contains multiple direct variant parts".into());
+                }
+                found = true;
+            }
+        }
+        Ok(found)
+    }
+
+    fn unit_is_zig(&self, unit_index: usize) -> bool {
+        let Some(unit) = self.units.get(unit_index) else {
+            return false;
+        };
+        let mut entries = unit.entries();
+        let Ok(Some(root)) = entries.next_dfs() else {
+            return false;
+        };
+        let Some(producer) = root.attr_value(gimli::DW_AT_producer) else {
+            return false;
+        };
+        self.dwarf
+            .attr_string(unit, producer)
+            .is_ok_and(|producer| producer.to_string_lossy().contains("zig"))
+    }
+
     #[expect(
         clippy::too_many_lines,
-        clippy::match_same_arms,
+        reason = "Zig tagged-union recognition and remapping form one fail-closed structural validation"
+    )]
+    fn normalize_zig_tagged_union(
+        &mut self,
+        unit_index: usize,
+        aggregate: TypeId,
+        members: &[RecordMember],
+        incomplete: bool,
+    ) -> Option<std::result::Result<TypeKind, Arc<str>>> {
+        if incomplete || !self.unit_is_zig(unit_index) || members.len() != 2 {
+            return None;
+        }
+        let payload_index = members
+            .iter()
+            .position(|member| member.name.as_deref() == Some("payload"))?;
+        let tag_index = members
+            .iter()
+            .position(|member| member.name.as_deref() == Some("tag"))?;
+        let payload = &members[payload_index];
+        let tag = &members[tag_index];
+        let payload_info = self
+            .entries
+            .get(usize::try_from(payload.type_ref.id.get()).expect("type ID fits usize"))?;
+        let tag_info = self
+            .entries
+            .get(usize::try_from(tag.type_ref.id.get()).expect("type ID fits usize"))?;
+        let (
+            TypeEntry::Resolved(TypeInfo {
+                name: payload_name,
+                kind:
+                    TypeKind::Union {
+                        members: payload_members,
+                        incomplete: false,
+                    },
+                ..
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                name: tag_name,
+                kind:
+                    TypeKind::Enumeration {
+                        enumerators,
+                        origin: EnumerationOrigin::Language,
+                        ..
+                    },
+                ..
+            }),
+        ) = (payload_info, tag_info)
+        else {
+            return None;
+        };
+        if !payload_name.ends_with(":Payload")
+            || !tag_name.starts_with("@typeInfo(")
+            || !tag_name.contains(".@\"union\".tag_type")
+        {
+            return None;
+        }
+        let payload_members = Arc::clone(payload_members);
+        let enumerators = Arc::clone(enumerators);
+        let payload_offset = match payload.layout {
+            RecordMemberLayout::ByteOffset(offset) => offset,
+            RecordMemberLayout::BitRange { .. } | RecordMemberLayout::Runtime => {
+                return Some(Err(
+                    "Zig tagged-union payload has a non-byte-static location".into(),
+                ));
+            }
+        };
+        let mut variants = Vec::with_capacity(enumerators.len());
+        for enumerator in enumerators.iter() {
+            let matching = payload_members
+                .iter()
+                .enumerate()
+                .filter(|(_, member)| member.name.as_deref() == Some(enumerator.name.as_ref()))
+                .collect::<Vec<_>>();
+            let [(payload_member_index, payload_member)] = matching.as_slice() else {
+                return Some(Err(format!(
+                    "Zig tagged-union arm '{}' does not map uniquely to its payload union",
+                    enumerator.name
+                )
+                .into()));
+            };
+            let payload_type = self
+                .entries
+                .get(usize::try_from(payload_member.type_ref.id.get()).expect("type ID fits usize"))
+                .and_then(|entry| match entry {
+                    TypeEntry::Resolved(info) => Some(&info.kind),
+                    TypeEntry::Building | TypeEntry::Malformed(_) => None,
+                });
+            let variant_members = if matches!(payload_type, Some(TypeKind::Unspecified)) {
+                Arc::from([])
+            } else {
+                let mut member = (*payload_member).clone();
+                member.layout = match member.layout {
+                    RecordMemberLayout::ByteOffset(offset) => {
+                        let Some(offset) = payload_offset.checked_add(offset) else {
+                            return Some(Err(
+                                "Zig tagged-union payload member offset overflows".into()
+                            ));
+                        };
+                        RecordMemberLayout::ByteOffset(offset)
+                    }
+                    RecordMemberLayout::BitRange {
+                        bit_offset,
+                        bit_size,
+                    } => {
+                        let Some(bit_offset) = payload_offset
+                            .checked_mul(8)
+                            .and_then(|offset| offset.checked_add(bit_offset))
+                        else {
+                            return Some(Err(
+                                "Zig tagged-union payload bit offset overflows".into()
+                            ));
+                        };
+                        RecordMemberLayout::BitRange {
+                            bit_offset,
+                            bit_size,
+                        }
+                    }
+                    RecordMemberLayout::Runtime => {
+                        return Some(Err(
+                            "Zig tagged-union payload member has a runtime location".into(),
+                        ));
+                    }
+                };
+                if let Some(metadata) = self.record_member_declarations.iter().find(|metadata| {
+                    metadata.aggregate == payload.type_ref.id
+                        && matches!(
+                            metadata.member,
+                            AggregateMemberPath::Direct(index)
+                                if index == *payload_member_index
+                        )
+                }) {
+                    self.record_member_declarations
+                        .push(AggregateMemberDeclaration {
+                            aggregate,
+                            member: AggregateMemberPath::Variant {
+                                variant: variants.len(),
+                                member: 0,
+                            },
+                            die: metadata.die,
+                        });
+                }
+                Arc::from([member])
+            };
+            variants.push(Variant {
+                name: Some(Arc::clone(&enumerator.name)),
+                selection: VariantSelection::Selectors(Arc::from([VariantSelector::Value(
+                    enumerator.value,
+                )])),
+                members: variant_members,
+            });
+        }
+        for metadata in &mut self.record_member_declarations {
+            if metadata.aggregate == aggregate
+                && matches!(
+                    metadata.member,
+                    AggregateMemberPath::Direct(index) if index == tag_index
+                )
+            {
+                metadata.member = AggregateMemberPath::Discriminant;
+            }
+        }
+        self.record_member_declarations.retain(|metadata| {
+            metadata.aggregate != aggregate
+                || !matches!(
+                    metadata.member,
+                    AggregateMemberPath::Direct(index) if index == payload_index
+                )
+        });
+        Some(Ok(TypeKind::Variant {
+            storage: VariantStorageKind::Struct,
+            common_members: Arc::from([]),
+            bases: Arc::from([]),
+            discriminant: Box::new(VariantDiscriminant::Stored(tag.clone())),
+            variants: variants.into(),
+            incomplete: false,
+        }))
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Zig optional/error-union recognition remaps layout, declarations, and dynamic expressions atomically"
+    )]
+    fn normalize_zig_optional_or_error_union(
+        &mut self,
+        unit_index: usize,
+        aggregate: TypeId,
+        name: &str,
+        members: &[RecordMember],
+        incomplete: bool,
+    ) -> Option<std::result::Result<TypeKind, Arc<str>>> {
+        if incomplete || !self.unit_is_zig(unit_index) || members.len() != 2 {
+            return None;
+        }
+        let payload_index = members
+            .iter()
+            .position(|member| member.name.as_deref() == Some("payload"))?;
+        let (discriminant_index, variants, duplicate_discriminant_member) = if name.starts_with('?')
+        {
+            let some_index = members
+                .iter()
+                .position(|member| member.name.as_deref() == Some("some"))?;
+            let some_type = self
+                .resolved_integer_base(members[some_index].type_ref.id)
+                .ok()?;
+            if some_type.byte_size != 1
+                || !matches!(
+                    some_type.encoding,
+                    BaseTypeEncoding::Boolean
+                        | BaseTypeEncoding::Unsigned
+                        | BaseTypeEncoding::UnsignedCharacter
+                )
+            {
+                return None;
+            }
+            (
+                some_index,
+                vec![
+                    Variant {
+                        name: Some("null".into()),
+                        selection: VariantSelection::Selectors(Arc::from([
+                            VariantSelector::Value(IntegerValue::Unsigned(0)),
+                        ])),
+                        members: Arc::from([]),
+                    },
+                    Variant {
+                        name: Some("some".into()),
+                        selection: VariantSelection::Selectors(Arc::from([
+                            VariantSelector::Value(IntegerValue::Unsigned(1)),
+                        ])),
+                        members: Arc::from([members[payload_index].clone()]),
+                    },
+                ],
+                false,
+            )
+        } else if name.contains('!') {
+            let error_index = members
+                .iter()
+                .position(|member| member.name.as_deref() == Some("error"))?;
+            let error_type = self
+                .resolved_integer_base(members[error_index].type_ref.id)
+                .ok()?;
+            if matches!(
+                error_type.encoding,
+                BaseTypeEncoding::Signed
+                    | BaseTypeEncoding::SignedCharacter
+                    | BaseTypeEncoding::Floating
+            ) {
+                return None;
+            }
+            (
+                error_index,
+                vec![
+                    Variant {
+                        name: Some("success".into()),
+                        selection: VariantSelection::Selectors(Arc::from([
+                            VariantSelector::Value(IntegerValue::Unsigned(0)),
+                        ])),
+                        members: Arc::from([members[payload_index].clone()]),
+                    },
+                    Variant {
+                        name: Some("error".into()),
+                        selection: VariantSelection::Default,
+                        members: Arc::from([members[error_index].clone()]),
+                    },
+                ],
+                true,
+            )
+        } else {
+            return None;
+        };
+        if let Err(reason) = validate_variant_selections(&variants) {
+            return Some(Err(reason));
+        }
+
+        let payload_variant = usize::from(name.starts_with('?'));
+        let declaration_snapshot = self.record_member_declarations.clone();
+        for metadata in &mut self.record_member_declarations {
+            if metadata.aggregate != aggregate {
+                continue;
+            }
+            match metadata.member {
+                AggregateMemberPath::Direct(index) if index == discriminant_index => {
+                    metadata.member = AggregateMemberPath::Discriminant;
+                }
+                AggregateMemberPath::Direct(index) if index == payload_index => {
+                    metadata.member = AggregateMemberPath::Variant {
+                        variant: payload_variant,
+                        member: 0,
+                    };
+                }
+                _ => {}
+            }
+        }
+        if duplicate_discriminant_member
+            && let Some(metadata) = declaration_snapshot.iter().find(|metadata| {
+                metadata.aggregate == aggregate
+                    && matches!(
+                        metadata.member,
+                        AggregateMemberPath::Direct(index) if index == discriminant_index
+                    )
+            })
+        {
+            self.record_member_declarations
+                .push(AggregateMemberDeclaration {
+                    aggregate,
+                    member: AggregateMemberPath::Variant {
+                        variant: 1,
+                        member: 0,
+                    },
+                    die: metadata.die,
+                });
+        }
+
+        for (index, child) in [
+            (
+                payload_index,
+                DynamicAggregateChild::VariantMember {
+                    variant: payload_variant,
+                    member: 0,
+                },
+            ),
+            (discriminant_index, DynamicAggregateChild::Discriminant),
+        ] {
+            if let Some(expression) =
+                self.dynamic_record_layouts
+                    .remove(&DynamicAggregateLayoutKey {
+                        aggregate,
+                        child: DynamicAggregateChild::Member(index),
+                    })
+            {
+                self.dynamic_record_layouts
+                    .insert(DynamicAggregateLayoutKey { aggregate, child }, expression);
+            }
+        }
+        if duplicate_discriminant_member
+            && let Some(expression) = self
+                .dynamic_record_layouts
+                .get(&DynamicAggregateLayoutKey {
+                    aggregate,
+                    child: DynamicAggregateChild::Discriminant,
+                })
+                .cloned()
+        {
+            self.dynamic_record_layouts.insert(
+                DynamicAggregateLayoutKey {
+                    aggregate,
+                    child: DynamicAggregateChild::VariantMember {
+                        variant: 1,
+                        member: 0,
+                    },
+                },
+                expression,
+            );
+        }
+
+        Some(Ok(TypeKind::Variant {
+            storage: VariantStorageKind::Struct,
+            common_members: Arc::from([]),
+            bases: Arc::from([]),
+            discriminant: Box::new(VariantDiscriminant::Stored(
+                members[discriminant_index].clone(),
+            )),
+            variants: variants.into(),
+            incomplete: false,
+        }))
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "variant members retain owner, location identity, access, and declaration provenance"
+    )]
+    fn build_variant_member(
+        &mut self,
+        child: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit: &gimli::Unit<Reader<'data>>,
+        unit_index: usize,
+        aggregate: TypeId,
+        dynamic_child: DynamicAggregateChild,
+        absent_byte_offset: Option<u64>,
+        record_kind: RecordKind,
+        declaration_path: AggregateMemberPath,
+    ) -> std::result::Result<RecordMember, Arc<str>> {
+        let chain = origin_chain(self.units, unit_index, child)
+            .map_err(|error| Arc::from(error.to_string()))?;
+        let target = self
+            .target_with_origins(child, unit_index, &chain)?
+            .ok_or_else(|| Arc::from("variant component has no type"))?;
+        let name = copy_name_with_origins(self.dwarf, self.units, unit, child, &chain)
+            .map_err(|error| Arc::from(error.to_string()))?;
+        let layout = self.record_member_layout(child, target, absent_byte_offset)?;
+        if layout == RecordMemberLayout::Runtime
+            && let Some(expression) = self
+                .copy_dynamic_record_layout(child, unit_index)
+                .map_err(|error| Arc::from(error.to_string()))?
+        {
+            self.dynamic_record_layouts.insert(
+                DynamicAggregateLayoutKey {
+                    aggregate,
+                    child: dynamic_child,
+                },
+                expression,
+            );
+        }
+        self.record_member_declarations
+            .push(AggregateMemberDeclaration {
+                aggregate,
+                member: declaration_path,
+                die: DieKey {
+                    unit: unit_index,
+                    offset: child.offset().0,
+                },
+            });
+        Ok(RecordMember {
+            name,
+            type_ref: target,
+            layout,
+            accessibility: Self::record_accessibility(child, record_kind)?,
+            artificial: strict_flag(child, gimli::DW_AT_artificial)?,
+            embedded: child.attr(gimli::DwAt(0x2903)).is_some_and(|attribute| {
+                match attribute.value() {
+                    gimli::AttributeValue::Flag(value) => value,
+                    _ => attribute.udata_value().is_some_and(|value| value != 0),
+                }
+            }),
+            declaration: None,
+        })
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "standard variant normalization validates the full nested DIE contract together"
+    )]
+    fn build_variant_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+        storage: VariantStorageKind,
+    ) -> TypeEntry {
+        let incomplete = match strict_flag(entry, gimli::DW_AT_declaration) {
+            Ok(value) => value,
+            Err(reason) => return TypeEntry::Malformed(reason),
+        };
+        if !incomplete && explicit_size.is_none() {
+            return TypeEntry::Malformed("complete variant aggregate has no byte size".into());
+        }
+        let name = explicit_name
+            .unwrap_or_else(|| Arc::from(format!("<anonymous variant@0x{:x}>", entry.offset().0)));
+        let record_kind = if storage == VariantStorageKind::Class {
+            RecordKind::Class
+        } else {
+            RecordKind::Struct
+        };
+        let Some(unit) = self.units.get(unit_index) else {
+            return TypeEntry::Malformed("variant aggregate unit is unavailable".into());
+        };
+        let mut tree = match unit.entries_tree(Some(entry.offset())) {
+            Ok(tree) => tree,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let root = match tree.root() {
+            Ok(root) => root,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let mut common_members = Vec::new();
+        let mut bases = Vec::new();
+        let mut discriminant = None;
+        let mut variants = Vec::new();
+        let mut children = root.children();
+        loop {
+            let child_node = match children.next() {
+                Ok(Some(child)) => child,
+                Ok(None) => break,
+                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+            };
+            let child = child_node.entry();
+            match child.tag() {
+                gimli::DW_TAG_member => {
+                    if common_members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN {
+                        return TypeEntry::Resolved(TypeInfo {
+                            reference,
+                            name,
+                            byte_size: explicit_size,
+                            kind: TypeKind::Opaque {
+                                description:
+                                    "variant common-child count exceeds its resource limit".into(),
+                            },
+                        });
+                    }
+                    let index = common_members.len();
+                    let absent_offset = (storage == VariantStorageKind::Union).then_some(0_u64);
+                    let member = match self.build_variant_member(
+                        child,
+                        unit,
+                        unit_index,
+                        reference.id,
+                        DynamicAggregateChild::Member(index),
+                        absent_offset,
+                        record_kind,
+                        AggregateMemberPath::Direct(index),
+                    ) {
+                        Ok(member) => member,
+                        Err(reason) => return TypeEntry::Malformed(reason),
+                    };
+                    common_members.push(member);
+                }
+                gimli::DW_TAG_inheritance if storage != VariantStorageKind::Union => {
+                    if common_members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN {
+                        return TypeEntry::Resolved(TypeInfo {
+                            reference,
+                            name,
+                            byte_size: explicit_size,
+                            kind: TypeKind::Opaque {
+                                description:
+                                    "variant common-child count exceeds its resource limit".into(),
+                            },
+                        });
+                    }
+                    let target = match self.target(child, unit_index) {
+                        Ok(Some(target)) => target,
+                        Ok(None) => {
+                            return TypeEntry::Malformed("variant base class has no type".into());
+                        }
+                        Err(reason) => return TypeEntry::Malformed(reason),
+                    };
+                    let layout = Self::record_byte_layout(child);
+                    if layout == RecordMemberLayout::Runtime {
+                        match self.copy_dynamic_record_layout(child, unit_index) {
+                            Ok(Some(expression)) => {
+                                self.dynamic_record_layouts.insert(
+                                    DynamicAggregateLayoutKey {
+                                        aggregate: reference.id,
+                                        child: DynamicAggregateChild::Base(bases.len()),
+                                    },
+                                    expression,
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                        }
+                    }
+                    bases.push(BaseClass {
+                        type_ref: target,
+                        layout,
+                        accessibility: match Self::record_accessibility(child, record_kind) {
+                            Ok(accessibility) => accessibility,
+                            Err(reason) => return TypeEntry::Malformed(reason),
+                        },
+                        virtuality: BaseClassVirtuality::None,
+                    });
+                }
+                gimli::DW_TAG_variant_part => {
+                    if discriminant.is_some() || !variants.is_empty() {
+                        return TypeEntry::Malformed(
+                            "variant aggregate contains multiple variant parts".into(),
+                        );
+                    }
+                    let discr_key = match die_reference(
+                        child.attr_value(gimli::DW_AT_discr),
+                        unit_index,
+                        self.units,
+                    ) {
+                        Ok(key) => key,
+                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                    };
+                    let tag_type = match self.target(child, unit_index) {
+                        Ok(tag_type) => tag_type,
+                        Err(reason) => return TypeEntry::Malformed(reason),
+                    };
+                    let variant_part_offset = child.offset();
+                    let mut part_children = child_node.children();
+                    if let Some(discr_key) = discr_key {
+                        let mut stored = None;
+                        loop {
+                            let part_child = match part_children.next() {
+                                Ok(Some(part_child)) => part_child,
+                                Ok(None) => break,
+                                Err(error) => {
+                                    return TypeEntry::Malformed(error.to_string().into());
+                                }
+                            };
+                            let part_child = part_child.entry();
+                            if part_child.offset().0 != discr_key.offset
+                                || discr_key.unit != unit_index
+                            {
+                                continue;
+                            }
+                            if part_child.tag() != gimli::DW_TAG_member {
+                                return TypeEntry::Malformed(
+                                    "DW_AT_discr does not reference a member child".into(),
+                                );
+                            }
+                            let member = match self.build_variant_member(
+                                part_child,
+                                unit,
+                                unit_index,
+                                reference.id,
+                                DynamicAggregateChild::Discriminant,
+                                None,
+                                record_kind,
+                                AggregateMemberPath::Discriminant,
+                            ) {
+                                Ok(member) => member,
+                                Err(reason) => return TypeEntry::Malformed(reason),
+                            };
+                            stored = Some(member);
+                        }
+                        let Some(stored) = stored else {
+                            return TypeEntry::Malformed(
+                                "DW_AT_discr references a non-child discriminator".into(),
+                            );
+                        };
+                        if let Some(tag_type) = tag_type
+                            && tag_type.id != stored.type_ref.id
+                        {
+                            return TypeEntry::Malformed(
+                                "variant tag type differs from its discriminator member".into(),
+                            );
+                        }
+                        discriminant = Some(VariantDiscriminant::Stored(stored));
+                    } else {
+                        let Some(tag_type) = tag_type else {
+                            return TypeEntry::Malformed(
+                                "variant part has neither a discriminator nor a tag type".into(),
+                            );
+                        };
+                        discriminant = Some(VariantDiscriminant::TagType(tag_type));
+                    }
+                    let representation = match discriminant.as_ref().expect("set above") {
+                        VariantDiscriminant::Stored(member) => {
+                            match self.resolved_integer_base(member.type_ref.id) {
+                                Ok(base) => base,
+                                Err(reason) => return TypeEntry::Malformed(reason),
+                            }
+                        }
+                        VariantDiscriminant::TagType(tag_type) => {
+                            match self.resolved_integer_base(tag_type.id) {
+                                Ok(base) => base,
+                                Err(reason) => return TypeEntry::Malformed(reason),
+                            }
+                        }
+                    };
+
+                    let mut variant_part_tree = match unit.entries_tree(Some(variant_part_offset)) {
+                        Ok(tree) => tree,
+                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                    };
+                    let variant_part_root = match variant_part_tree.root() {
+                        Ok(root) => root,
+                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                    };
+                    let mut part_children = variant_part_root.children();
+                    loop {
+                        let variant_node = match part_children.next() {
+                            Ok(Some(part_child)) => part_child,
+                            Ok(None) => break,
+                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                        };
+                        let variant_entry = variant_node.entry();
+                        if variant_entry.tag() == gimli::DW_TAG_member {
+                            continue;
+                        }
+                        if variant_entry.tag() != gimli::DW_TAG_variant {
+                            return TypeEntry::Malformed(
+                                format!(
+                                    "variant part contains unsupported direct child {:?}",
+                                    variant_entry.tag()
+                                )
+                                .into(),
+                            );
+                        }
+                        if variants.len() >= MAX_RECORD_CHILDREN {
+                            return TypeEntry::Resolved(TypeInfo {
+                                reference,
+                                name,
+                                byte_size: explicit_size,
+                                kind: TypeKind::Opaque {
+                                    description: "variant count exceeds its resource limit".into(),
+                                },
+                            });
+                        }
+                        let selection = match copy_variant_selection(
+                            variant_entry,
+                            &representation,
+                            self.byte_order,
+                        ) {
+                            Ok(selection) => selection,
+                            Err(reason) => return TypeEntry::Malformed(reason),
+                        };
+                        let variant_name = match copy_name(self.dwarf, unit, variant_entry) {
+                            Ok(name) => name,
+                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                        };
+                        let variant_index = variants.len();
+                        let mut members = Vec::new();
+                        let mut variant_children = variant_node.children();
+                        loop {
+                            let member_node = match variant_children.next() {
+                                Ok(Some(member)) => member,
+                                Ok(None) => break,
+                                Err(error) => {
+                                    return TypeEntry::Malformed(error.to_string().into());
+                                }
+                            };
+                            let member_entry = member_node.entry();
+                            if member_entry.tag() != gimli::DW_TAG_member {
+                                return TypeEntry::Malformed(
+                                    format!(
+                                        "variant contains unsupported component {:?}",
+                                        member_entry.tag()
+                                    )
+                                    .into(),
+                                );
+                            }
+                            if members.len() >= MAX_RECORD_CHILDREN {
+                                return TypeEntry::Resolved(TypeInfo {
+                                    reference,
+                                    name,
+                                    byte_size: explicit_size,
+                                    kind: TypeKind::Opaque {
+                                        description:
+                                            "variant component count exceeds its resource limit"
+                                                .into(),
+                                    },
+                                });
+                            }
+                            let member_index = members.len();
+                            let member = match self.build_variant_member(
+                                member_entry,
+                                unit,
+                                unit_index,
+                                reference.id,
+                                DynamicAggregateChild::VariantMember {
+                                    variant: variant_index,
+                                    member: member_index,
+                                },
+                                None,
+                                record_kind,
+                                AggregateMemberPath::Variant {
+                                    variant: variant_index,
+                                    member: member_index,
+                                },
+                            ) {
+                                Ok(member) => member,
+                                Err(reason) => return TypeEntry::Malformed(reason),
+                            };
+                            members.push(member);
+                        }
+                        variants.push(Variant {
+                            name: variant_name,
+                            selection,
+                            members: members.into(),
+                        });
+                    }
+                }
+                gimli::DW_TAG_subprogram
+                | gimli::DW_TAG_variable
+                | gimli::DW_TAG_typedef
+                | gimli::DW_TAG_structure_type
+                | gimli::DW_TAG_class_type
+                | gimli::DW_TAG_union_type
+                | gimli::DW_TAG_enumeration_type
+                | gimli::DW_TAG_template_type_parameter
+                | gimli::DW_TAG_template_value_parameter => {}
+                tag => {
+                    return TypeEntry::Resolved(TypeInfo {
+                        reference,
+                        name,
+                        byte_size: explicit_size,
+                        kind: TypeKind::Opaque {
+                            description: format!(
+                                "variant aggregate contains unsupported direct child {tag:?}"
+                            )
+                            .into(),
+                        },
+                    });
+                }
+            }
+        }
+        let Some(discriminant) = discriminant else {
+            return TypeEntry::Malformed("variant aggregate has no variant part".into());
+        };
+        if variants.is_empty() {
+            return TypeEntry::Malformed("variant part has no variants".into());
+        }
+        if let Err(reason) = validate_variant_selections(&variants) {
+            return TypeEntry::Malformed(reason);
+        }
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size: explicit_size,
+            kind: TypeKind::Variant {
+                storage,
+                common_members: common_members.into(),
+                bases: bases.into(),
+                discriminant: Box::new(discriminant),
+                variants: variants.into(),
+                incomplete,
+            },
+        })
+    }
+
+    #[expect(
+        clippy::too_many_lines,
         reason = "record normalization keeps all storage and scope child tags in one auditable dispatch"
     )]
     fn build_record_type(
@@ -2133,6 +3843,24 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if !incomplete && explicit_size.is_none() {
             return TypeEntry::Malformed("complete record type has no byte size".into());
         }
+        match self.has_direct_variant_part(entry, unit_index) {
+            Ok(true) => {
+                return self.build_variant_type(
+                    entry,
+                    unit_index,
+                    reference,
+                    explicit_name,
+                    explicit_size,
+                    if kind == RecordKind::Class {
+                        VariantStorageKind::Class
+                    } else {
+                        VariantStorageKind::Struct
+                    },
+                );
+            }
+            Ok(false) => {}
+            Err(reason) => return TypeEntry::Malformed(reason),
+        }
         let Some(unit) = self.units.get(unit_index) else {
             return TypeEntry::Malformed("record type unit is unavailable".into());
         };
@@ -2147,7 +3875,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let mut members = Vec::new();
         let mut bases = Vec::new();
         let mut children = root.children();
-        while let Ok(Some(child)) = children.next() {
+        loop {
+            let child = match children.next() {
+                Ok(Some(child)) => child,
+                Ok(None) => break,
+                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+            };
             let child = child.entry();
             match child.tag() {
                 gimli::DW_TAG_member => {
@@ -2170,7 +3903,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                             Ok(name) => name,
                             Err(error) => return TypeEntry::Malformed(error.to_string().into()),
                         };
-                    let layout = match self.record_member_layout(child, target) {
+                    let layout = match self.record_member_layout(child, target, None) {
                         Ok(layout) => layout,
                         Err(reason) => return TypeEntry::Malformed(reason),
                     };
@@ -2178,10 +3911,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         match self.copy_dynamic_record_layout(child, unit_index) {
                             Ok(Some(expression)) => {
                                 self.dynamic_record_layouts.insert(
-                                    DynamicRecordLayoutKey {
-                                        record: reference.id,
-                                        child: members.len(),
-                                        base: false,
+                                    DynamicAggregateLayoutKey {
+                                        aggregate: reference.id,
+                                        child: DynamicAggregateChild::Member(members.len()),
                                     },
                                     expression,
                                 );
@@ -2211,14 +3943,15 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         }),
                         declaration: None,
                     });
-                    self.record_member_declarations.push((
-                        reference.id,
-                        member_index,
-                        DieKey {
-                            unit: unit_index,
-                            offset: child.offset().0,
-                        },
-                    ));
+                    self.record_member_declarations
+                        .push(AggregateMemberDeclaration {
+                            aggregate: reference.id,
+                            member: AggregateMemberPath::Direct(member_index),
+                            die: DieKey {
+                                unit: unit_index,
+                                offset: child.offset().0,
+                            },
+                        });
                 }
                 gimli::DW_TAG_inheritance => {
                     if members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN {
@@ -2234,10 +3967,9 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         match self.copy_dynamic_record_layout(child, unit_index) {
                             Ok(Some(expression)) => {
                                 self.dynamic_record_layouts.insert(
-                                    DynamicRecordLayoutKey {
-                                        record: reference.id,
-                                        child: bases.len(),
-                                        base: true,
+                                    DynamicAggregateLayoutKey {
+                                        aggregate: reference.id,
+                                        child: DynamicAggregateChild::Base(bases.len()),
                                     },
                                     expression,
                                 );
@@ -2273,6 +4005,21 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         virtuality,
                     });
                 }
+                gimli::DW_TAG_variant_part => {
+                    let name = explicit_name.unwrap_or_else(|| {
+                        Arc::from(format!("<anonymous {:?}@0x{:x}>", kind, entry.offset().0))
+                    });
+                    return TypeEntry::Resolved(TypeInfo {
+                        reference,
+                        name,
+                        byte_size: explicit_size,
+                        kind: TypeKind::Opaque {
+                            description:
+                                "record contains a discriminated variant part that is unsupported"
+                                    .into(),
+                        },
+                    });
+                }
                 // These DIEs describe class scope, not bytes in an instance.
                 gimli::DW_TAG_subprogram
                 | gimli::DW_TAG_variable
@@ -2283,12 +4030,57 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 | gimli::DW_TAG_enumeration_type
                 | gimli::DW_TAG_template_type_parameter
                 | gimli::DW_TAG_template_value_parameter => {}
-                _ => {}
+                tag => {
+                    let name = explicit_name.unwrap_or_else(|| {
+                        Arc::from(format!("<anonymous {:?}@0x{:x}>", kind, entry.offset().0))
+                    });
+                    return TypeEntry::Resolved(TypeInfo {
+                        reference,
+                        name,
+                        byte_size: explicit_size,
+                        kind: TypeKind::Opaque {
+                            description: format!(
+                                "record contains unsupported direct child {tag:?}"
+                            )
+                            .into(),
+                        },
+                    });
+                }
             }
         }
         let name = explicit_name.unwrap_or_else(|| {
             Arc::from(format!("<anonymous {:?}@0x{:x}>", kind, entry.offset().0))
         });
+        if let Some(normalized) = self.normalize_zig_optional_or_error_union(
+            unit_index,
+            reference.id,
+            &name,
+            &members,
+            incomplete,
+        ) {
+            return match normalized {
+                Ok(kind) => TypeEntry::Resolved(TypeInfo {
+                    reference,
+                    name,
+                    byte_size: explicit_size,
+                    kind,
+                }),
+                Err(reason) => TypeEntry::Malformed(reason),
+            };
+        }
+        if let Some(normalized) =
+            self.normalize_zig_tagged_union(unit_index, reference.id, &members, incomplete)
+        {
+            return match normalized {
+                Ok(kind) => TypeEntry::Resolved(TypeInfo {
+                    reference,
+                    name,
+                    byte_size: explicit_size,
+                    kind,
+                }),
+                Err(reason) => TypeEntry::Malformed(reason),
+            };
+        }
         TypeEntry::Resolved(TypeInfo {
             reference,
             name,
@@ -2302,10 +4094,182 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "union normalization keeps overlapping storage and scope children explicit"
+    )]
+    fn build_union_type(
+        &mut self,
+        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        reference: TypeReference,
+        explicit_name: Option<Arc<str>>,
+        explicit_size: Option<u64>,
+    ) -> TypeEntry {
+        let incomplete = match strict_flag(entry, gimli::DW_AT_declaration) {
+            Ok(value) => value,
+            Err(reason) => return TypeEntry::Malformed(reason),
+        };
+        if !incomplete && explicit_size.is_none() {
+            return TypeEntry::Malformed("complete union type has no byte size".into());
+        }
+        match self.has_direct_variant_part(entry, unit_index) {
+            Ok(true) => {
+                return self.build_variant_type(
+                    entry,
+                    unit_index,
+                    reference,
+                    explicit_name,
+                    explicit_size,
+                    VariantStorageKind::Union,
+                );
+            }
+            Ok(false) => {}
+            Err(reason) => return TypeEntry::Malformed(reason),
+        }
+        let name = explicit_name
+            .unwrap_or_else(|| Arc::from(format!("<anonymous union@0x{:x}>", entry.offset().0)));
+        let Some(unit) = self.units.get(unit_index) else {
+            return TypeEntry::Malformed("union type unit is unavailable".into());
+        };
+        let mut tree = match unit.entries_tree(Some(entry.offset())) {
+            Ok(tree) => tree,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let root = match tree.root() {
+            Ok(root) => root,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
+        let mut members = Vec::new();
+        let mut children = root.children();
+        loop {
+            let child = match children.next() {
+                Ok(Some(child)) => child,
+                Ok(None) => break,
+                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+            };
+            let child = child.entry();
+            match child.tag() {
+                gimli::DW_TAG_member => {
+                    if members.len() >= MAX_RECORD_CHILDREN {
+                        return TypeEntry::Resolved(TypeInfo {
+                            reference,
+                            name,
+                            byte_size: explicit_size,
+                            kind: TypeKind::Opaque {
+                                description: "union member count exceeds its resource limit".into(),
+                            },
+                        });
+                    }
+                    let chain = match origin_chain(self.units, unit_index, child) {
+                        Ok(chain) => chain,
+                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                    };
+                    let target = match self.target_with_origins(child, unit_index, &chain) {
+                        Ok(Some(target)) => target,
+                        Ok(None) => return TypeEntry::Malformed("union member has no type".into()),
+                        Err(reason) => return TypeEntry::Malformed(reason),
+                    };
+                    let member_name =
+                        match copy_name_with_origins(self.dwarf, self.units, unit, child, &chain) {
+                            Ok(name) => name,
+                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                        };
+                    let layout = match self.record_member_layout(child, target, Some(0)) {
+                        Ok(layout) => layout,
+                        Err(reason) => return TypeEntry::Malformed(reason),
+                    };
+                    if layout == RecordMemberLayout::Runtime {
+                        match self.copy_dynamic_record_layout(child, unit_index) {
+                            Ok(Some(expression)) => {
+                                self.dynamic_record_layouts.insert(
+                                    DynamicAggregateLayoutKey {
+                                        aggregate: reference.id,
+                                        child: DynamicAggregateChild::Member(members.len()),
+                                    },
+                                    expression,
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                        }
+                    }
+                    let member_index = members.len();
+                    members.push(RecordMember {
+                        name: member_name,
+                        type_ref: target,
+                        layout,
+                        accessibility: match Self::record_accessibility(child, RecordKind::Struct) {
+                            Ok(accessibility) => accessibility,
+                            Err(reason) => return TypeEntry::Malformed(reason),
+                        },
+                        artificial: match strict_flag(child, gimli::DW_AT_artificial) {
+                            Ok(value) => value,
+                            Err(reason) => return TypeEntry::Malformed(reason),
+                        },
+                        embedded: false,
+                        declaration: None,
+                    });
+                    self.record_member_declarations
+                        .push(AggregateMemberDeclaration {
+                            aggregate: reference.id,
+                            member: AggregateMemberPath::Direct(member_index),
+                            die: DieKey {
+                                unit: unit_index,
+                                offset: child.offset().0,
+                            },
+                        });
+                }
+                gimli::DW_TAG_variant_part => {
+                    return TypeEntry::Resolved(TypeInfo {
+                        reference,
+                        name,
+                        byte_size: explicit_size,
+                        kind: TypeKind::Opaque {
+                            description:
+                                "union contains a discriminated variant part that is unsupported"
+                                    .into(),
+                        },
+                    });
+                }
+                gimli::DW_TAG_subprogram
+                | gimli::DW_TAG_variable
+                | gimli::DW_TAG_typedef
+                | gimli::DW_TAG_structure_type
+                | gimli::DW_TAG_class_type
+                | gimli::DW_TAG_union_type
+                | gimli::DW_TAG_enumeration_type
+                | gimli::DW_TAG_template_type_parameter
+                | gimli::DW_TAG_template_value_parameter => {}
+                tag => {
+                    return TypeEntry::Resolved(TypeInfo {
+                        reference,
+                        name,
+                        byte_size: explicit_size,
+                        kind: TypeKind::Opaque {
+                            description: format!("union contains unsupported direct child {tag:?}")
+                                .into(),
+                        },
+                    });
+                }
+            }
+        }
+        TypeEntry::Resolved(TypeInfo {
+            reference,
+            name,
+            byte_size: explicit_size,
+            kind: TypeKind::Union {
+                members: members.into(),
+                incomplete,
+            },
+        })
+    }
+
     fn record_member_layout(
         &self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         target: TypeReference,
+        absent_byte_offset: Option<u64>,
     ) -> std::result::Result<RecordMemberLayout, Arc<str>> {
         let bit_size = entry
             .attr(gimli::DW_AT_bit_size)
@@ -2330,7 +4294,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 .attr(gimli::DW_AT_bit_offset)
                 .and_then(gimli::Attribute::udata_value)
             {
-                let byte_offset = Self::record_constant_offset(entry)?;
+                let byte_offset = entry
+                    .attr(gimli::DW_AT_data_member_location)
+                    .and_then(gimli::Attribute::udata_value)
+                    .or(absent_byte_offset)
+                    .ok_or_else(|| Arc::from("record member location is not a constant"))?;
                 let storage_bytes = entry
                     .attr(gimli::DW_AT_byte_size)
                     .and_then(gimli::Attribute::udata_value)
@@ -2364,7 +4332,17 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
             return Err("bit-field has no bit offset".into());
         }
-        Ok(Self::record_byte_layout(entry))
+        Ok(entry.attr(gimli::DW_AT_data_member_location).map_or_else(
+            || {
+                absent_byte_offset
+                    .map_or(RecordMemberLayout::Runtime, RecordMemberLayout::ByteOffset)
+            },
+            |attribute| {
+                attribute
+                    .udata_value()
+                    .map_or(RecordMemberLayout::Runtime, RecordMemberLayout::ByteOffset)
+            },
+        ))
     }
 
     fn copy_dynamic_record_layout(
@@ -2860,23 +4838,23 @@ fn resolve_address_class(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     reference: TypeReference,
     explicit_name: Option<Arc<str>>,
-) -> std::result::Result<u64, TypeEntry> {
+) -> std::result::Result<u64, Box<TypeEntry>> {
     let Some(attribute) = entry.attr(gimli::DW_AT_address_class) else {
         return Ok(0);
     };
     match unsigned_constant(attribute) {
         UnsignedConstant::Value(value) => Ok(value),
-        UnsignedConstant::Oversized => Err(TypeEntry::Resolved(TypeInfo {
+        UnsignedConstant::Oversized => Err(Box::new(TypeEntry::Resolved(TypeInfo {
             reference,
             name: explicit_name.unwrap_or_else(|| Arc::from("<unsupported type>")),
             byte_size: None,
             kind: TypeKind::Opaque {
                 description: "DW_AT_address_class exceeds the supported u64 range".into(),
             },
-        })),
-        UnsignedConstant::NonConstant => Err(TypeEntry::Malformed(
+        }))),
+        UnsignedConstant::NonConstant => Err(Box::new(TypeEntry::Malformed(
             "DW_AT_address_class is not an unsigned integer constant".into(),
-        )),
+        ))),
     }
 }
 
@@ -2892,30 +4870,30 @@ fn resolve_explicit_size(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     reference: TypeReference,
     explicit_name: Option<Arc<str>>,
-) -> std::result::Result<Option<u64>, TypeEntry> {
+) -> std::result::Result<Option<u64>, Box<TypeEntry>> {
     match byte_size_attribute(entry) {
         ByteSize::Absent => Ok(None),
         ByteSize::Constant(size) => Ok(Some(size)),
-        ByteSize::Unsupported(description) => Err(TypeEntry::Resolved(TypeInfo {
+        ByteSize::Unsupported(description) => Err(Box::new(TypeEntry::Resolved(TypeInfo {
             reference,
             name: explicit_name.unwrap_or_else(|| Arc::from("<oversized type>")),
             byte_size: None,
             kind: TypeKind::Opaque { description },
-        })),
+        }))),
         // A dynamic size is valid metadata this backend cannot statically size.
         // Mandatory tag attributes were already validated by the caller, so a
         // defect cannot be masked here.
-        ByteSize::Dynamic => Err(TypeEntry::Resolved(TypeInfo {
+        ByteSize::Dynamic => Err(Box::new(TypeEntry::Resolved(TypeInfo {
             reference,
             name: explicit_name.unwrap_or_else(|| Arc::from("<dynamically sized type>")),
             byte_size: None,
             kind: TypeKind::Opaque {
                 description: "dynamic DW_AT_byte_size is unsupported".into(),
             },
-        })),
-        ByteSize::Malformed => Err(TypeEntry::Malformed(
+        }))),
+        ByteSize::Malformed => Err(Box::new(TypeEntry::Malformed(
             "DW_AT_byte_size is neither a constant nor a supported dynamic form".into(),
-        )),
+        ))),
     }
 }
 
@@ -3122,6 +5100,39 @@ fn value_shape_from(
                     kind: ValueShapeKind::Scalar(base),
                 });
             }
+            TypeKind::Enumeration {
+                representation,
+                enumerators,
+                ..
+            } => {
+                if representation.byte_size == 0 {
+                    return Err(ValueShapeError::Malformed(
+                        "enumeration has a zero byte size".into(),
+                    ));
+                }
+                if representation.byte_size > MAX_SCALAR_BYTES {
+                    return Err(ValueShapeError::Unsupported(
+                        format!("enumeration occupies {} bytes", representation.byte_size).into(),
+                    ));
+                }
+                integer_bit_width(representation).map_err(ValueShapeError::Malformed)?;
+                let mut representation = representation.clone();
+                representation.name = Arc::clone(
+                    &type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .name,
+                );
+                return Ok(ValueShape {
+                    type_info: type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .clone(),
+                    kind: ValueShapeKind::Enumeration {
+                        byte_size: representation.byte_size,
+                        representation,
+                        enumerators: Arc::clone(enumerators),
+                    },
+                });
+            }
             TypeKind::Array {
                 element,
                 dimensions,
@@ -3193,6 +5204,72 @@ fn value_shape_from(
                         record: current,
                         members: Arc::clone(members),
                         bases: Arc::clone(bases),
+                        byte_size,
+                    },
+                });
+            }
+            TypeKind::Union {
+                members,
+                incomplete,
+            } => {
+                if *incomplete {
+                    return Err(ValueShapeError::Unsupported(
+                        "incomplete union values are unsupported".into(),
+                    ));
+                }
+                let byte_size = info.byte_size.ok_or_else(|| {
+                    ValueShapeError::Malformed("complete union type has no byte size".into())
+                })?;
+                return Ok(ValueShape {
+                    type_info: type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .clone(),
+                    kind: ValueShapeKind::Union {
+                        union: current,
+                        members: Arc::clone(members),
+                        byte_size,
+                    },
+                });
+            }
+            TypeKind::Variant {
+                common_members,
+                bases,
+                discriminant,
+                variants,
+                incomplete,
+                ..
+            } => {
+                if *incomplete {
+                    return Err(ValueShapeError::Unsupported(
+                        "incomplete variant values are unsupported".into(),
+                    ));
+                }
+                if matches!(discriminant.as_ref(), VariantDiscriminant::TagType(_))
+                    && !matches!(
+                        variants.as_ref(),
+                        [Variant {
+                            selection: VariantSelection::Default,
+                            ..
+                        }]
+                    )
+                {
+                    return Err(ValueShapeError::Unsupported(
+                        "tagless variant selection is unsupported".into(),
+                    ));
+                }
+                let byte_size = info.byte_size.ok_or_else(|| {
+                    ValueShapeError::Malformed("complete variant type has no byte size".into())
+                })?;
+                return Ok(ValueShape {
+                    type_info: type_info_from(types, id)
+                        .map_err(ValueShapeError::Malformed)?
+                        .clone(),
+                    kind: ValueShapeKind::Variant {
+                        aggregate: current,
+                        common_members: Arc::clone(common_members),
+                        bases: Arc::clone(bases),
+                        discriminant: discriminant.as_ref().clone(),
+                        variants: Arc::clone(variants),
                         byte_size,
                     },
                 });
@@ -3310,11 +5387,20 @@ impl DwarfVariableInfo {
         members: &[String],
         explicit_dereferences: u32,
     ) -> Result<PlannedPath> {
+        enum AggregateMembers<'a> {
+            Direct(&'a [RecordMember]),
+            Variant {
+                common_members: &'a [RecordMember],
+                discriminant: &'a VariantDiscriminant,
+                variants: &'a Arc<[Variant]>,
+            },
+        }
+
         let mut current = root;
         let mut steps = Vec::new();
         for member_name in members {
             let mut indirections = HashSet::new();
-            let (record, members) = loop {
+            let (aggregate, aggregate_members) = loop {
                 let source_info = self.type_info(current).map_err(|description| {
                     Error::debug_info(DwarfError::MalformedVariable(description))
                 })?;
@@ -3363,7 +5449,24 @@ impl DwarfVariableInfo {
                         });
                         current = target.id;
                     }
-                    TypeKind::Record { members, .. } => break (canonical, members),
+                    TypeKind::Record { members, .. } | TypeKind::Union { members, .. } => {
+                        break (canonical, AggregateMembers::Direct(members));
+                    }
+                    TypeKind::Variant {
+                        common_members,
+                        discriminant,
+                        variants,
+                        ..
+                    } => {
+                        break (
+                            canonical,
+                            AggregateMembers::Variant {
+                                common_members,
+                                discriminant: discriminant.as_ref(),
+                                variants,
+                            },
+                        );
+                    }
                     _ => {
                         return Err(Error::MemberAccessOnNonRecord {
                             member: member_name.clone(),
@@ -3372,15 +5475,74 @@ impl DwarfVariableInfo {
                     }
                 }
             };
-            let matching = members
-                .iter()
-                .filter(|member| {
-                    !member.artificial && member.name.as_deref() == Some(member_name.as_str())
-                })
-                .collect::<Vec<_>>();
-            let [member] = matching.as_slice() else {
-                let type_name =
-                    Arc::clone(&self.type_info(record).expect("record type resolved").name);
+            let mut matching = Vec::new();
+            match aggregate_members {
+                AggregateMembers::Direct(members) => {
+                    matching.extend(
+                        members
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, member)| {
+                                !member.artificial
+                                    && member.name.as_deref() == Some(member_name.as_str())
+                            })
+                            .map(|(index, member)| {
+                                (DynamicAggregateChild::Member(index), None, member)
+                            }),
+                    );
+                }
+                AggregateMembers::Variant {
+                    common_members,
+                    discriminant,
+                    variants,
+                } => {
+                    matching.extend(
+                        common_members
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, member)| {
+                                !member.artificial
+                                    && member.name.as_deref() == Some(member_name.as_str())
+                            })
+                            .map(|(index, member)| {
+                                (DynamicAggregateChild::Member(index), None, member)
+                            }),
+                    );
+                    for (variant_index, variant) in variants.iter().enumerate() {
+                        matching.extend(
+                            variant
+                                .members
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, member)| {
+                                    !member.artificial
+                                        && member.name.as_deref() == Some(member_name.as_str())
+                                })
+                                .map(|(member_index, member)| {
+                                    (
+                                        DynamicAggregateChild::VariantMember {
+                                            variant: variant_index,
+                                            member: member_index,
+                                        },
+                                        Some((
+                                            variant_index,
+                                            discriminant.clone(),
+                                            Arc::clone(variants),
+                                        )),
+                                        member,
+                                    )
+                                }),
+                        );
+                    }
+                }
+            }
+            let [(child, required_variant, member)] = matching.as_slice() else {
+                let type_name = Arc::clone(
+                    &self
+                        .type_info(aggregate)
+                        .expect("aggregate type resolved")
+                        .name,
+                );
                 if matching.is_empty() {
                     return Err(Error::MemberNotFound {
                         member: member_name.clone(),
@@ -3392,16 +5554,13 @@ impl DwarfVariableInfo {
                     type_name,
                 });
             };
-            let index = members
-                .iter()
-                .position(|candidate| std::ptr::eq(candidate, *member))
-                .expect("matched member belongs to the record");
-            self.validate_static_member_layout(record, member)?;
-            steps.push(PathStep::Member {
-                record,
-                index,
+            self.validate_static_member_layout(aggregate, member)?;
+            steps.push(PathStep::Member(Box::new(PlannedMemberStep {
+                aggregate,
+                child: *child,
                 member: (*member).clone(),
-            });
+                required_variant: required_variant.clone(),
+            })));
             current = member.type_ref.id;
         }
         for _ in 0..explicit_dereferences {
@@ -3752,10 +5911,16 @@ impl DwarfVariableInfo {
                 PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
             }
         })?;
-        let ValueShapeKind::Scalar(base) = &shape.kind else {
-            return Err(PathEvaluationError::Unavailable(
-                VariableUnavailableReason::Other("non-scalar bit-fields are unsupported".into()),
-            ));
+        let base = match &shape.kind {
+            ValueShapeKind::Scalar(base) => base,
+            ValueShapeKind::Enumeration { representation, .. } => representation,
+            _ => {
+                return Err(PathEvaluationError::Unavailable(
+                    VariableUnavailableReason::Other(
+                        "non-integral bit-fields are unsupported".into(),
+                    ),
+                ));
+            }
         };
         let storage_bits = base
             .byte_size
@@ -3816,8 +5981,8 @@ impl DwarfVariableInfo {
     fn runtime_member_storage(
         &self,
         storage: &LocatedStorage,
-        record: TypeId,
-        index: usize,
+        aggregate: TypeId,
+        child: DynamicAggregateChild,
         runtime: &mut dyn VariableRuntime,
         budget: &mut EvaluationBudget,
     ) -> std::result::Result<LocatedStorage, PathEvaluationError> {
@@ -3826,43 +5991,84 @@ impl DwarfVariableInfo {
                 "runtime member location has no concrete containing-object address".into(),
             ))
         })?;
-        let key = DynamicRecordLayoutKey {
-            record,
-            child: index,
-            base: false,
-        };
-        let expression = self.dynamic_record_layouts.get(&key).ok_or_else(|| {
-            PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
-                "runtime member location form is unsupported".into(),
-            ))
-        })?;
-        let pieces = evaluate_with_object(
-            expression,
+        let key = DynamicAggregateLayoutKey { aggregate, child };
+        let address = evaluate_dynamic_aggregate_address(
+            &self.dynamic_record_layouts,
+            key,
             self.endian,
-            &mut FrameBase::Unsupported,
             &self.evaluation_units,
             runtime,
             budget,
-            Some(object_address),
-        )
-        .map_err(|error| match error {
-            EvaluateError::Unavailable(reason) => PathEvaluationError::Unavailable(reason),
-            EvaluateError::Malformed(description) => PathEvaluationError::Malformed(description),
-        })?;
-        let [piece] = pieces.as_slice() else {
-            return Err(PathEvaluationError::Malformed(
-                "runtime member location produced multiple pieces".into(),
-            ));
+            object_address,
+        )?;
+        Ok(LocatedStorage::Memory(address))
+    }
+
+    fn active_variant_from_storage(
+        &self,
+        storage: &LocatedStorage,
+        aggregate: TypeId,
+        discriminant: &VariantDiscriminant,
+        variants: &[Variant],
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut EvaluationBudget,
+    ) -> std::result::Result<Option<usize>, PathEvaluationError> {
+        let VariantDiscriminant::Stored(member) = discriminant else {
+            return Ok(Some(0));
         };
-        if piece.size_in_bits.is_some() || piece.bit_offset.is_some() {
-            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
-        }
-        let Location::Address { address } = piece.location else {
-            return Err(PathEvaluationError::Malformed(
-                "runtime member location did not produce an address".into(),
-            ));
+        let shape = self
+            .value_shape(member.type_ref.id)
+            .map_err(|error| match error {
+                ValueShapeError::Malformed(description) => {
+                    PathEvaluationError::Malformed(description)
+                }
+                ValueShapeError::Unsupported(description) => {
+                    PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
+                }
+            })?;
+        let representation = match &shape.kind {
+            ValueShapeKind::Scalar(base)
+                if !matches!(base.encoding, BaseTypeEncoding::Floating) =>
+            {
+                base
+            }
+            ValueShapeKind::Enumeration { representation, .. } => representation,
+            _ => {
+                return Err(PathEvaluationError::Malformed(
+                    "variant discriminator type is not integral".into(),
+                ));
+            }
         };
-        Ok(LocatedStorage::Memory(VirtualAddress::new(address)))
+        let selected = match member.layout {
+            RecordMemberLayout::ByteOffset(offset) => Self::storage_with_offset(
+                storage.clone(),
+                i64::try_from(offset).map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+            )?,
+            RecordMemberLayout::BitRange {
+                bit_offset,
+                bit_size,
+            } => self.bit_field_storage(
+                storage.clone(),
+                member.type_ref.id,
+                bit_offset,
+                bit_size,
+                runtime,
+                budget,
+            )?,
+            RecordMemberLayout::Runtime => self.runtime_member_storage(
+                storage,
+                aggregate,
+                DynamicAggregateChild::Discriminant,
+                runtime,
+                budget,
+            )?,
+        };
+        let size = usize::try_from(representation.byte_size)
+            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let (_, raw) = Self::read_storage(&selected, size, runtime, budget)?;
+        let value = decode_integer_value(representation, &raw, self.target.byte_order)
+            .map_err(PathEvaluationError::Malformed)?;
+        selected_variant_index(variants, value).map_err(PathEvaluationError::Malformed)
     }
 
     #[expect(
@@ -4030,45 +6236,74 @@ impl DwarfVariableInfo {
                         LocatedStorage::Memory(pointer)
                     }
                 }
-                PathStep::Member {
-                    record,
-                    index,
-                    member,
-                } => match member.layout {
-                    RecordMemberLayout::ByteOffset(offset) => {
-                        match i64::try_from(offset)
-                            .map_err(|_| VariableUnavailableReason::EvaluationLimit.into())
-                            .and_then(|offset| Self::storage_with_offset(storage, offset))
-                        {
-                            Ok(storage) => storage,
+                PathStep::Member(step) => {
+                    let PlannedMemberStep {
+                        aggregate,
+                        child,
+                        member,
+                        required_variant,
+                    } = *step;
+                    if let Some((required, discriminant, variants)) = required_variant {
+                        let active = match self.active_variant_from_storage(
+                            &storage,
+                            aggregate,
+                            &discriminant,
+                            &variants,
+                            runtime,
+                            &mut budget,
+                        ) {
+                            Ok(active) => active,
                             Err(error) => return failure(error),
+                        };
+                        if active != Some(required) {
+                            let name = variants
+                                .get(required)
+                                .and_then(|variant| variant.name.as_deref())
+                                .unwrap_or("<anonymous>");
+                            return failure(PathEvaluationError::Unavailable(
+                                VariableUnavailableReason::Other(
+                                    format!("variant member belongs to inactive arm '{name}'")
+                                        .into(),
+                                ),
+                            ));
                         }
                     }
-                    RecordMemberLayout::BitRange {
-                        bit_offset,
-                        bit_size,
-                    } => match self.bit_field_storage(
-                        storage,
-                        member.type_ref.id,
-                        bit_offset,
-                        bit_size,
-                        runtime,
-                        &mut budget,
-                    ) {
-                        Ok(storage) => storage,
-                        Err(error) => return failure(error),
-                    },
-                    RecordMemberLayout::Runtime => match self.runtime_member_storage(
-                        &storage,
-                        record,
-                        index,
-                        runtime,
-                        &mut budget,
-                    ) {
-                        Ok(storage) => storage,
-                        Err(error) => return failure(error),
-                    },
-                },
+                    match member.layout {
+                        RecordMemberLayout::ByteOffset(offset) => {
+                            match i64::try_from(offset)
+                                .map_err(|_| VariableUnavailableReason::EvaluationLimit.into())
+                                .and_then(|offset| Self::storage_with_offset(storage, offset))
+                            {
+                                Ok(storage) => storage,
+                                Err(error) => return failure(error),
+                            }
+                        }
+                        RecordMemberLayout::BitRange {
+                            bit_offset,
+                            bit_size,
+                        } => match self.bit_field_storage(
+                            storage,
+                            member.type_ref.id,
+                            bit_offset,
+                            bit_size,
+                            runtime,
+                            &mut budget,
+                        ) {
+                            Ok(storage) => storage,
+                            Err(error) => return failure(error),
+                        },
+                        RecordMemberLayout::Runtime => match self.runtime_member_storage(
+                            &storage,
+                            aggregate,
+                            child,
+                            runtime,
+                            &mut budget,
+                        ) {
+                            Ok(storage) => storage,
+                            Err(error) => return failure(error),
+                        },
+                    }
+                }
                 PathStep::Unavailable(reason) => {
                     return failure(PathEvaluationError::Unavailable(reason));
                 }
@@ -4670,12 +6905,16 @@ fn available_implicit_pointer(
         ValueShapeKind::Array { .. }
         | ValueShapeKind::Slice { .. }
         | ValueShapeKind::Record { .. }
+        | ValueShapeKind::Union { .. }
+        | ValueShapeKind::Variant { .. }
         | ValueShapeKind::Indirection { .. } => {
             VariableState::Unavailable(crate::UnsupportedVariableFeature::CompositeLocation.into())
         }
-        ValueShapeKind::Scalar(_) => VariableState::Malformed(VariableMalformedReason {
-            description: "DW_OP_implicit_pointer described a non-pointer value".into(),
-        }),
+        ValueShapeKind::Scalar(_) | ValueShapeKind::Enumeration { .. } => {
+            VariableState::Malformed(VariableMalformedReason {
+                description: "DW_OP_implicit_pointer described a non-pointer value".into(),
+            })
+        }
     };
     Variable {
         kind: variable.kind,
@@ -4691,27 +6930,36 @@ impl ValueShape {
     const fn byte_size(&self) -> u64 {
         match &self.kind {
             ValueShapeKind::Scalar(base) => base.byte_size,
-            ValueShapeKind::Indirection { byte_size, .. }
+            ValueShapeKind::Enumeration { byte_size, .. }
+            | ValueShapeKind::Indirection { byte_size, .. }
             | ValueShapeKind::Array { byte_size, .. }
             | ValueShapeKind::Slice { byte_size, .. }
-            | ValueShapeKind::Record { byte_size, .. } => *byte_size,
+            | ValueShapeKind::Record { byte_size, .. }
+            | ValueShapeKind::Union { byte_size, .. }
+            | ValueShapeKind::Variant { byte_size, .. } => *byte_size,
         }
     }
 
     const fn scalar(&self) -> Option<&BaseType> {
         match &self.kind {
             ValueShapeKind::Scalar(base) => Some(base),
-            ValueShapeKind::Indirection { .. }
+            ValueShapeKind::Enumeration { .. }
+            | ValueShapeKind::Indirection { .. }
             | ValueShapeKind::Array { .. }
             | ValueShapeKind::Slice { .. }
-            | ValueShapeKind::Record { .. } => None,
+            | ValueShapeKind::Record { .. }
+            | ValueShapeKind::Union { .. }
+            | ValueShapeKind::Variant { .. } => None,
         }
     }
 
     const fn record_id(&self) -> Option<TypeId> {
         match self.kind {
             ValueShapeKind::Record { record, .. } => Some(record),
+            ValueShapeKind::Union { union, .. } => Some(union),
+            ValueShapeKind::Variant { aggregate, .. } => Some(aggregate),
             ValueShapeKind::Scalar(_)
+            | ValueShapeKind::Enumeration { .. }
             | ValueShapeKind::Indirection { .. }
             | ValueShapeKind::Array { .. }
             | ValueShapeKind::Slice { .. } => None,
@@ -4732,7 +6980,7 @@ impl ValueShape {
 )]
 fn available(
     types: &[TypeEntry],
-    dynamic_record_layouts: &HashMap<DynamicRecordLayoutKey, Expression>,
+    dynamic_record_layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
     evaluation_units: &[EvaluationUnit],
     endian: RunTimeEndian,
     variable: &CatalogDataObject,
@@ -4774,7 +7022,7 @@ fn available(
 )]
 fn decode_value_state(
     types: &[TypeEntry],
-    dynamic_record_layouts: &HashMap<DynamicRecordLayoutKey, Expression>,
+    dynamic_record_layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
     evaluation_units: &[EvaluationUnit],
     endian: RunTimeEndian,
     shape: &ValueShape,
@@ -4787,8 +7035,11 @@ fn decode_value_state(
 ) -> VariableState {
     match &shape.kind {
         ValueShapeKind::Scalar(_)
+        | ValueShapeKind::Enumeration { .. }
         | ValueShapeKind::Array { .. }
-        | ValueShapeKind::Record { .. } => {
+        | ValueShapeKind::Record { .. }
+        | ValueShapeKind::Union { .. }
+        | ValueShapeKind::Variant { .. } => {
             match decode_value_graph_live(
                 types,
                 dynamic_record_layouts,
@@ -4868,7 +7119,7 @@ fn decode_value_state(
 )]
 fn decode_slice_state(
     types: &[TypeEntry],
-    dynamic_record_layouts: &HashMap<DynamicRecordLayoutKey, Expression>,
+    dynamic_record_layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
     evaluation_units: &[EvaluationUnit],
     endian: RunTimeEndian,
     shape: &ValueShape,
@@ -5034,7 +7285,7 @@ struct PendingValueNode {
 }
 
 struct DynamicDecodeContext<'a> {
-    layouts: &'a HashMap<DynamicRecordLayoutKey, Expression>,
+    layouts: &'a HashMap<DynamicAggregateLayoutKey, Expression>,
     units: &'a [EvaluationUnit],
     endian: RunTimeEndian,
     runtime: &'a mut dyn VariableRuntime,
@@ -5155,6 +7406,30 @@ impl<'a> ValueGraphBuilder<'a> {
                         },
                     );
                 }
+                ValueShapeKind::Enumeration {
+                    representation,
+                    enumerators,
+                    ..
+                } => {
+                    self.set(
+                        pending.id,
+                        match decode_integer_value(representation, raw, target.byte_order) {
+                            Ok(value) => {
+                                let matches = enumerators
+                                    .iter()
+                                    .filter(|enumerator| enumerator.value == value)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .into();
+                                ValueNodeState::Available(VariableValue::Enumeration {
+                                    value,
+                                    matches,
+                                })
+                            }
+                            Err(reason) => ValueNodeState::Unavailable(reason.into()),
+                        },
+                    );
+                }
                 ValueShapeKind::Indirection { byte_size, .. } => {
                     self.set(
                         pending.id,
@@ -5252,10 +7527,9 @@ impl<'a> ValueGraphBuilder<'a> {
                             member.type_ref.id,
                             member.layout,
                             target,
-                            DynamicRecordLayoutKey {
-                                record: *record,
-                                child: index,
-                                base: false,
+                            DynamicAggregateLayoutKey {
+                                aggregate: *record,
+                                child: DynamicAggregateChild::Member(index),
                             },
                             dynamic.as_deref_mut(),
                         )?;
@@ -5274,10 +7548,9 @@ impl<'a> ValueGraphBuilder<'a> {
                             base.type_ref.id,
                             base.layout,
                             target,
-                            DynamicRecordLayoutKey {
-                                record: *record,
-                                child: index,
-                                base: true,
+                            DynamicAggregateLayoutKey {
+                                aggregate: *record,
+                                child: DynamicAggregateChild::Base(index),
                             },
                             dynamic.as_deref_mut(),
                         )?;
@@ -5302,6 +7575,188 @@ impl<'a> ValueGraphBuilder<'a> {
                         }),
                     );
                 }
+                ValueShapeKind::Union { union, members, .. } => {
+                    let mut member_values = Vec::with_capacity(members.len());
+                    for (index, member) in members.iter().enumerate() {
+                        if self.nodes.len() >= MAX_VALUE_NODES {
+                            continue;
+                        }
+                        let child = self.record_child(
+                            &pending,
+                            member.type_ref.id,
+                            member.layout,
+                            target,
+                            DynamicAggregateLayoutKey {
+                                aggregate: *union,
+                                child: DynamicAggregateChild::Member(index),
+                            },
+                            dynamic.as_deref_mut(),
+                        )?;
+                        member_values.push(RecordMemberValue {
+                            member: member.clone(),
+                            value: child,
+                        });
+                    }
+                    let omitted = u64::try_from(members.len().saturating_sub(member_values.len()))
+                        .unwrap_or(u64::MAX);
+                    self.set(
+                        pending.id,
+                        ValueNodeState::Available(VariableValue::Union {
+                            members: member_values.into(),
+                            omitted,
+                        }),
+                    );
+                }
+                ValueShapeKind::Variant {
+                    aggregate,
+                    common_members,
+                    bases,
+                    discriminant,
+                    variants,
+                    ..
+                } => {
+                    let (discriminant_value, active_index) = match discriminant {
+                        VariantDiscriminant::Stored(member) => {
+                            let value = match self.decode_variant_discriminant(
+                                &pending,
+                                *aggregate,
+                                member,
+                                target,
+                                dynamic.as_deref_mut(),
+                            ) {
+                                Ok(value) => value,
+                                Err(PathEvaluationError::Unavailable(reason)) => {
+                                    self.set(pending.id, ValueNodeState::Unavailable(reason));
+                                    continue;
+                                }
+                                Err(PathEvaluationError::Malformed(description)) => {
+                                    self.set(
+                                        pending.id,
+                                        ValueNodeState::Malformed(VariableMalformedReason {
+                                            description,
+                                        }),
+                                    );
+                                    continue;
+                                }
+                            };
+                            let active = match selected_variant_index(variants, value) {
+                                Ok(active) => active,
+                                Err(description) => {
+                                    self.set(
+                                        pending.id,
+                                        ValueNodeState::Malformed(VariableMalformedReason {
+                                            description,
+                                        }),
+                                    );
+                                    continue;
+                                }
+                            };
+                            (Some(value), active)
+                        }
+                        VariantDiscriminant::TagType(_) => (None, Some(0)),
+                    };
+
+                    let mut common_values = Vec::with_capacity(common_members.len());
+                    for (index, member) in common_members.iter().enumerate() {
+                        if self.nodes.len() >= MAX_VALUE_NODES {
+                            continue;
+                        }
+                        let child = self.record_child(
+                            &pending,
+                            member.type_ref.id,
+                            member.layout,
+                            target,
+                            DynamicAggregateLayoutKey {
+                                aggregate: *aggregate,
+                                child: DynamicAggregateChild::Member(index),
+                            },
+                            dynamic.as_deref_mut(),
+                        )?;
+                        common_values.push(RecordMemberValue {
+                            member: member.clone(),
+                            value: child,
+                        });
+                    }
+                    let mut base_values = Vec::with_capacity(bases.len());
+                    for (index, base) in bases.iter().enumerate() {
+                        if self.nodes.len() >= MAX_VALUE_NODES {
+                            continue;
+                        }
+                        let child = self.record_child(
+                            &pending,
+                            base.type_ref.id,
+                            base.layout,
+                            target,
+                            DynamicAggregateLayoutKey {
+                                aggregate: *aggregate,
+                                child: DynamicAggregateChild::Base(index),
+                            },
+                            dynamic.as_deref_mut(),
+                        )?;
+                        base_values.push(BaseClassValue {
+                            base: base.clone(),
+                            value: child,
+                        });
+                    }
+                    let active = if let Some(active_index) = active_index {
+                        let variant = variants
+                            .get(active_index)
+                            .expect("validated variant index")
+                            .clone();
+                        let mut member_values = Vec::with_capacity(variant.members.len());
+                        for (member_index, member) in variant.members.iter().enumerate() {
+                            if self.nodes.len() >= MAX_VALUE_NODES {
+                                continue;
+                            }
+                            let child = self.record_child(
+                                &pending,
+                                member.type_ref.id,
+                                member.layout,
+                                target,
+                                DynamicAggregateLayoutKey {
+                                    aggregate: *aggregate,
+                                    child: DynamicAggregateChild::VariantMember {
+                                        variant: active_index,
+                                        member: member_index,
+                                    },
+                                },
+                                dynamic.as_deref_mut(),
+                            )?;
+                            member_values.push(RecordMemberValue {
+                                member: member.clone(),
+                                value: child,
+                            });
+                        }
+                        let omitted = u64::try_from(
+                            variant.members.len().saturating_sub(member_values.len()),
+                        )
+                        .unwrap_or(u64::MAX);
+                        Some(ActiveVariantValue {
+                            variant,
+                            members: member_values.into(),
+                            omitted,
+                        })
+                    } else {
+                        None
+                    };
+                    let omitted = u64::try_from(
+                        common_members
+                            .len()
+                            .saturating_add(bases.len())
+                            .saturating_sub(common_values.len().saturating_add(base_values.len())),
+                    )
+                    .unwrap_or(u64::MAX);
+                    self.set(
+                        pending.id,
+                        ValueNodeState::Available(VariableValue::Variant {
+                            discriminant: discriminant_value,
+                            common_members: common_values.into(),
+                            bases: base_values.into(),
+                            active,
+                            omitted,
+                        }),
+                    );
+                }
             }
         }
         Ok(())
@@ -5313,7 +7768,7 @@ impl<'a> ValueGraphBuilder<'a> {
         type_id: TypeId,
         layout: RecordMemberLayout,
         target: TargetDescription,
-        dynamic_key: DynamicRecordLayoutKey,
+        dynamic_key: DynamicAggregateLayoutKey,
         dynamic: Option<&mut DynamicDecodeContext<'_>>,
     ) -> std::result::Result<ValueNodeId, VariableUnavailableReason> {
         let type_info = type_info_from(self.types, type_id)
@@ -5396,6 +7851,130 @@ impl<'a> ValueGraphBuilder<'a> {
 
     #[expect(
         clippy::too_many_lines,
+        reason = "static, bit-field, and runtime discriminator reads preserve distinct typed failures"
+    )]
+    fn decode_variant_discriminant(
+        &self,
+        parent: &PendingValueNode,
+        aggregate: TypeId,
+        member: &RecordMember,
+        target: TargetDescription,
+        dynamic: Option<&mut DynamicDecodeContext<'_>>,
+    ) -> std::result::Result<IntegerValue, PathEvaluationError> {
+        let shape =
+            value_shape_from(self.types, member.type_ref.id).map_err(|error| match error {
+                ValueShapeError::Malformed(reason) => PathEvaluationError::Malformed(reason),
+                ValueShapeError::Unsupported(reason) => {
+                    PathEvaluationError::Unavailable(VariableUnavailableReason::Other(reason))
+                }
+            })?;
+        let mut representation = match &shape.kind {
+            ValueShapeKind::Scalar(base)
+                if !matches!(base.encoding, BaseTypeEncoding::Floating) =>
+            {
+                base.clone()
+            }
+            ValueShapeKind::Enumeration { representation, .. } => representation.clone(),
+            _ => {
+                return Err(PathEvaluationError::Malformed(
+                    "variant discriminator type is not integral".into(),
+                ));
+            }
+        };
+        match member.layout {
+            RecordMemberLayout::ByteOffset(offset) => {
+                let offset = usize::try_from(offset).map_err(|_| {
+                    PathEvaluationError::Malformed(
+                        "variant discriminator offset exceeds host usize".into(),
+                    )
+                })?;
+                let size = usize::try_from(representation.byte_size).map_err(|_| {
+                    PathEvaluationError::Malformed(
+                        "variant discriminator size exceeds host usize".into(),
+                    )
+                })?;
+                let start = parent.start.checked_add(offset).ok_or_else(|| {
+                    PathEvaluationError::Malformed("variant discriminator offset overflows".into())
+                })?;
+                let end = start.checked_add(size).ok_or_else(|| {
+                    PathEvaluationError::Malformed("variant discriminator range overflows".into())
+                })?;
+                if end > parent.end {
+                    return Err(PathEvaluationError::Malformed(
+                        "variant discriminator extends beyond its containing object".into(),
+                    ));
+                }
+                decode_integer_value(&representation, &parent.raw[start..end], target.byte_order)
+                    .map_err(PathEvaluationError::Malformed)
+            }
+            RecordMemberLayout::BitRange {
+                bit_offset,
+                bit_size,
+            } => {
+                let raw = extract_bit_field(
+                    &parent.raw[parent.start..parent.end],
+                    bit_offset,
+                    bit_size,
+                    target.byte_order,
+                )
+                .map_err(PathEvaluationError::Malformed)?;
+                representation.bit_size = Some(bit_size);
+                let size = usize::try_from(representation.byte_size).map_err(|_| {
+                    PathEvaluationError::Malformed(
+                        "variant discriminator byte size exceeds host usize".into(),
+                    )
+                })?;
+                let full = raw.to_le_bytes();
+                let mut bytes = full[..size].to_vec();
+                if target.byte_order == ByteOrder::Big {
+                    bytes.reverse();
+                }
+                decode_integer_value(&representation, &bytes, target.byte_order)
+                    .map_err(PathEvaluationError::Malformed)
+            }
+            RecordMemberLayout::Runtime => {
+                let Some(dynamic) = dynamic else {
+                    return Err(PathEvaluationError::Unavailable(
+                        VariableUnavailableReason::Other(
+                            "runtime variant discriminator requires a live object address".into(),
+                        ),
+                    ));
+                };
+                let Some(object_address) = parent.address else {
+                    return Err(PathEvaluationError::Unavailable(
+                        VariableUnavailableReason::Other(
+                            "runtime variant discriminator has no concrete containing-object address"
+                                .into(),
+                        ),
+                    ));
+                };
+                let address = evaluate_dynamic_aggregate_address(
+                    dynamic.layouts,
+                    DynamicAggregateLayoutKey {
+                        aggregate,
+                        child: DynamicAggregateChild::Discriminant,
+                    },
+                    dynamic.endian,
+                    dynamic.units,
+                    dynamic.runtime,
+                    &mut dynamic.budget,
+                    object_address,
+                )?;
+                let size = usize::try_from(representation.byte_size)
+                    .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+                dynamic.budget.consume_memory(size)?;
+                let raw = dynamic
+                    .runtime
+                    .read_memory(address, size)
+                    .map_err(VariableUnavailableReason::Other)?;
+                decode_integer_value(&representation, &raw, target.byte_order)
+                    .map_err(PathEvaluationError::Malformed)
+            }
+        }
+    }
+
+    #[expect(
+        clippy::too_many_lines,
         reason = "dynamic children preserve every evaluator, address, read, and child-state failure distinctly"
     )]
     fn decode_dynamic_record_child(
@@ -5403,7 +7982,7 @@ impl<'a> ValueGraphBuilder<'a> {
         id: ValueNodeId,
         parent: &PendingValueNode,
         type_id: TypeId,
-        key: DynamicRecordLayoutKey,
+        key: DynamicAggregateLayoutKey,
         dynamic: Option<&mut DynamicDecodeContext<'_>>,
         target: TargetDescription,
     ) -> std::result::Result<(), VariableUnavailableReason> {
@@ -5650,7 +8229,7 @@ fn decode_value_graph(
 )]
 fn decode_value_graph_live(
     types: &[TypeEntry],
-    dynamic_record_layouts: &HashMap<DynamicRecordLayoutKey, Expression>,
+    dynamic_record_layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
     evaluation_units: &[EvaluationUnit],
     endian: RunTimeEndian,
     shape: &ValueShape,
@@ -5856,6 +8435,49 @@ fn evaluate<'expression>(
     budget: &mut EvaluationBudget,
 ) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, EvaluateError> {
     evaluate_with_object(expression, endian, frame_base, units, runtime, budget, None)
+}
+
+fn evaluate_dynamic_aggregate_address(
+    layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
+    key: DynamicAggregateLayoutKey,
+    endian: RunTimeEndian,
+    units: &[EvaluationUnit],
+    runtime: &mut dyn VariableRuntime,
+    budget: &mut EvaluationBudget,
+    object_address: VirtualAddress,
+) -> std::result::Result<VirtualAddress, PathEvaluationError> {
+    let expression = layouts.get(&key).ok_or_else(|| {
+        PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
+            "runtime aggregate child location form is unsupported".into(),
+        ))
+    })?;
+    let pieces = evaluate_with_object(
+        expression,
+        endian,
+        &mut FrameBase::Unsupported,
+        units,
+        runtime,
+        budget,
+        Some(object_address),
+    )
+    .map_err(|error| match error {
+        EvaluateError::Unavailable(reason) => PathEvaluationError::Unavailable(reason),
+        EvaluateError::Malformed(description) => PathEvaluationError::Malformed(description),
+    })?;
+    let [piece] = pieces.as_slice() else {
+        return Err(PathEvaluationError::Malformed(
+            "runtime aggregate child location produced multiple pieces".into(),
+        ));
+    };
+    if piece.size_in_bits.is_some() || piece.bit_offset.is_some() {
+        return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
+    }
+    let Location::Address { address } = piece.location else {
+        return Err(PathEvaluationError::Malformed(
+            "runtime aggregate child location did not produce an address".into(),
+        ));
+    };
+    Ok(VirtualAddress::new(address))
 }
 
 #[expect(
@@ -6282,17 +8904,38 @@ fn decode_scalar(
         return Err("scalar storage size mismatch".into());
     }
     match type_info.encoding {
-        BaseTypeEncoding::Boolean => match unsigned_value(bytes, target.byte_order)? {
-            0 => Ok(ScalarValue::Boolean(false)),
-            1 => Ok(ScalarValue::Boolean(true)),
-            value => Err(format!("invalid boolean representation {value}").into()),
-        },
-        BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => {
-            Ok(ScalarValue::Signed(signed_value(bytes, target.byte_order)?))
+        BaseTypeEncoding::Boolean => {
+            match decode_integer_value(type_info, bytes, target.byte_order)
+                .map_err(VariableUnavailableReason::Other)?
+            {
+                IntegerValue::Unsigned(0) => Ok(ScalarValue::Boolean(false)),
+                IntegerValue::Unsigned(1) => Ok(ScalarValue::Boolean(true)),
+                IntegerValue::Unsigned(value) => {
+                    Err(format!("invalid boolean representation {value}").into())
+                }
+                IntegerValue::Signed(_) => {
+                    unreachable!("boolean encoding returns an unsigned value")
+                }
+            }
         }
-        BaseTypeEncoding::Unsigned | BaseTypeEncoding::UnsignedCharacter => Ok(
-            ScalarValue::Unsigned(unsigned_value(bytes, target.byte_order)?),
-        ),
+        BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => {
+            let IntegerValue::Signed(value) =
+                decode_integer_value(type_info, bytes, target.byte_order)
+                    .map_err(VariableUnavailableReason::Other)?
+            else {
+                unreachable!("signed encoding returns a signed integer");
+            };
+            Ok(ScalarValue::Signed(value))
+        }
+        BaseTypeEncoding::Unsigned | BaseTypeEncoding::UnsignedCharacter => {
+            let IntegerValue::Unsigned(value) =
+                decode_integer_value(type_info, bytes, target.byte_order)
+                    .map_err(VariableUnavailableReason::Other)?
+            else {
+                unreachable!("unsigned encoding returns an unsigned integer");
+            };
+            Ok(ScalarValue::Unsigned(value))
+        }
         BaseTypeEncoding::Floating => decode_float(bytes, target).map(ScalarValue::Floating),
     }
 }
@@ -6313,19 +8956,6 @@ fn unsigned_value(
         ByteOrder::Little => u128::from_le_bytes(value),
         ByteOrder::Big => u128::from_be_bytes(value),
     })
-}
-
-fn signed_value(
-    bytes: &[u8],
-    byte_order: ByteOrder,
-) -> std::result::Result<i128, VariableUnavailableReason> {
-    let unsigned = unsigned_value(bytes, byte_order)?;
-    let bits = u32::try_from(bytes.len() * 8).expect("scalar bit count fits u32");
-    if bits == 128 {
-        return Ok(unsigned.cast_signed());
-    }
-    let shift = 128 - bits;
-    Ok((unsigned << shift).cast_signed() >> shift)
 }
 
 fn decode_float(
@@ -6355,6 +8985,81 @@ fn decode_float(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn discriminant_leb128_parsers_cover_full_width_and_reject_overflow() {
+        let mut unsigned_max = vec![0xff; 18];
+        unsigned_max.push(0x03);
+        let mut cursor = 0;
+        assert_eq!(
+            read_uleb128_u128(&unsigned_max, &mut cursor).unwrap(),
+            u128::MAX
+        );
+        assert_eq!(cursor, unsigned_max.len());
+
+        let mut unsigned_overflow = vec![0xff; 18];
+        unsigned_overflow.push(0x04);
+        assert!(read_uleb128_u128(&unsigned_overflow, &mut 0).is_err());
+        assert_eq!(read_sleb128_i128(&[0x7d], &mut 0).unwrap(), -3);
+        assert!(read_sleb128_i128(&[0x80; 20], &mut 0).is_err());
+    }
+
+    #[test]
+    fn variant_selection_validation_rejects_overlap_and_multiple_defaults() {
+        let variant = |selection| Variant {
+            name: None,
+            selection,
+            members: Arc::from([]),
+        };
+        let overlapping = [
+            variant(VariantSelection::Selectors(Arc::from([
+                VariantSelector::Range {
+                    low: IntegerValue::Signed(-3),
+                    high: IntegerValue::Signed(3),
+                },
+            ]))),
+            variant(VariantSelection::Selectors(Arc::from([
+                VariantSelector::Value(IntegerValue::Signed(3)),
+            ]))),
+        ];
+        assert!(validate_variant_selections(&overlapping).is_err());
+        assert!(
+            validate_variant_selections(&[
+                variant(VariantSelection::Default),
+                variant(VariantSelection::Default),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sub_byte_integer_representations_mask_and_sign_extend() {
+        let base = |encoding, bit_size| BaseType {
+            name: "bits".into(),
+            base_name: "bits".into(),
+            encoding,
+            byte_size: 1,
+            bit_size: Some(bit_size),
+        };
+        assert_eq!(
+            decode_integer_value(
+                &base(BaseTypeEncoding::Unsigned, 3),
+                &[0xff],
+                ByteOrder::Little
+            )
+            .unwrap(),
+            IntegerValue::Unsigned(7)
+        );
+        assert_eq!(
+            decode_integer_value(
+                &base(BaseTypeEncoding::Signed, 3),
+                &[0x05],
+                ByteOrder::Little
+            )
+            .unwrap(),
+            IntegerValue::Signed(-3)
+        );
+    }
 
     #[test]
     fn specification_chains_reject_cycles() {
@@ -6471,6 +9176,7 @@ mod tests {
             base_name: "test".into(),
             encoding,
             byte_size,
+            bit_size: None,
         }
     }
 
