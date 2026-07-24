@@ -138,7 +138,9 @@ impl GlobalVariableId {
 }
 
 impl TypeId {
-    pub(crate) const fn get(self) -> u32 {
+    /// Returns the dense index within the containing module image.
+    #[must_use]
+    pub const fn get(self) -> u32 {
         self.0
     }
 }
@@ -301,10 +303,10 @@ pub struct TypeReference {
     pub id: TypeId,
 }
 
-/// A source qualifier retained as an ordered type-graph node.
+/// A source modifier retained as an ordered type-graph node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum TypeQualifier {
+pub enum TypeModifier {
     /// C-family `const` qualification.
     Const,
     /// C-family `volatile` qualification.
@@ -315,6 +317,24 @@ pub enum TypeQualifier {
     Atomic,
     /// Producer-defined immutable qualification.
     Immutable,
+    /// Packed representation.
+    Packed,
+    /// Producer-defined shared qualification.
+    Shared,
+}
+
+/// The relationship between a named type and its representation target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NamedTypeRelationship {
+    /// A source-language synonym, such as a C or C++ typedef.
+    Synonym,
+    /// A source-language type with distinct identity, such as a Go definition.
+    Distinct,
+    /// A producer-created wrapper describing a language encoding.
+    Encoding,
+    /// The producer and language do not establish the relationship safely.
+    Unspecified,
 }
 
 /// The source-level category represented by a DWARF reference type.
@@ -548,17 +568,19 @@ pub enum TypeKind {
         /// Whether the containing aggregate has no complete layout.
         incomplete: bool,
     },
-    /// An ordered qualifier around another type.
-    Qualified {
-        /// The qualifier at this graph node.
-        qualifier: TypeQualifier,
-        /// The qualified type.
+    /// An ordered source modifier around another type.
+    Modified {
+        /// The modifier at this graph node.
+        modifier: TypeModifier,
+        /// The modified type.
         target: TypeReference,
     },
-    /// A source alias around another type.
-    Alias {
-        /// The aliased type.
-        target: TypeReference,
+    /// A named type relationship described by a producer wrapper.
+    Named {
+        /// The representation target, absent for an incomplete declaration.
+        target: Option<TypeReference>,
+        /// The source or producer relationship to that target.
+        relationship: NamedTypeRelationship,
     },
     /// A deliberately unspecified type such as C `void`.
     Unspecified,
@@ -589,6 +611,32 @@ pub struct TypeInfo {
     pub byte_size: Option<u64>,
     /// The node's normalized shape.
     pub kind: TypeKind,
+}
+
+/// One finalized node in an image's immutable normalized type graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TypeNode {
+    /// A type whose normalized metadata is available.
+    Resolved(TypeInfo),
+    /// A type DIE whose metadata is defective and cannot be interpreted safely.
+    Malformed {
+        /// Stable identity within the owning module image.
+        reference: TypeReference,
+        /// A stable description of the defect.
+        description: Arc<str>,
+    },
+}
+
+impl TypeNode {
+    /// Returns this node's stable identity.
+    #[must_use]
+    pub const fn reference(&self) -> TypeReference {
+        match self {
+            Self::Resolved(info) => info.reference,
+            Self::Malformed { reference, .. } => *reference,
+        }
+    }
 }
 
 /// Exact target bits for a supported floating-point value.
@@ -1768,6 +1816,7 @@ pub struct ModuleMetadata {
     pub code_instances: Vec<CodeInstanceInfo>,
     pub symbols: Vec<SymbolInfo>,
     pub globals: Vec<GlobalVariableInfo>,
+    pub types: Arc<[TypeNode]>,
     pub source_files: Vec<SourceFile>,
     pub statements: Vec<StatementRow>,
     pub lines: Vec<LineEntry>,
@@ -2060,6 +2109,13 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             "global IDs are dense and ordered"
         );
     }
+    for (index, node) in metadata.types.iter().enumerate() {
+        assert_eq!(
+            usize::try_from(node.reference().id.get()).expect("type ID fits usize"),
+            index,
+            "type IDs are dense and ordered"
+        );
+    }
 }
 
 /// Immutable, normalized debug metadata for one ELF module image.
@@ -2073,6 +2129,7 @@ pub struct ModuleImage {
     code_instances: Arc<[CodeInstanceInfo]>,
     symbols: Arc<[SymbolInfo]>,
     globals: Arc<[GlobalVariableInfo]>,
+    types: Arc<[TypeNode]>,
     source_files: Arc<[SourceFile]>,
     statements: Arc<[StatementRow]>,
     lines: Arc<[LineEntry]>,
@@ -2122,6 +2179,7 @@ impl ModuleImage {
             code_instances: metadata.code_instances.into(),
             symbols: metadata.symbols.into(),
             globals: metadata.globals.into(),
+            types: metadata.types,
             source_files: metadata.source_files.into(),
             statements: metadata.statements.into(),
             lines: metadata.lines.into(),
@@ -2138,7 +2196,11 @@ impl ModuleImage {
         }
     }
 
-    pub(crate) const fn with_id(mut self, id: ModuleImageId) -> Self {
+    pub(crate) fn with_id(mut self, id: ModuleImageId) -> Self {
+        assert!(
+            self.types.iter().all(|node| node.reference().image == id),
+            "every type node is owned by its module image"
+        );
         self.id = id;
         self
     }
@@ -2201,6 +2263,32 @@ impl ModuleImage {
     #[must_use]
     pub fn global(&self, id: GlobalVariableId) -> Option<&GlobalVariableInfo> {
         self.globals.get(usize::try_from(id.0).ok()?)
+    }
+
+    /// Returns the reachable, normalized type graph in stable identifier order.
+    #[must_use]
+    pub fn types(&self) -> &[TypeNode] {
+        &self.types
+    }
+
+    /// Resolves a reference owned by this image to its finalized graph node.
+    #[must_use]
+    pub fn type_node(&self, reference: TypeReference) -> Option<&TypeNode> {
+        if reference.image != self.id {
+            return None;
+        }
+        self.types
+            .get(usize::try_from(reference.id.get()).ok()?)
+            .filter(|node| node.reference() == reference)
+    }
+
+    /// Resolves a reference to normalized metadata when the node is not malformed.
+    #[must_use]
+    pub fn type_info(&self, reference: TypeReference) -> Option<&TypeInfo> {
+        match self.type_node(reference)? {
+            TypeNode::Resolved(info) => Some(info),
+            TypeNode::Malformed { .. } => None,
+        }
     }
 
     /// Resolves a basename, canonical qualification, source qualification, or
@@ -2715,6 +2803,7 @@ mod tests {
                 code_instances: Vec::new(),
                 symbols: Vec::new(),
                 globals,
+                types: Arc::default(),
                 source_files: vec![
                     SourceFile {
                         id: SourceFileId::new(0),
@@ -2775,6 +2864,90 @@ mod tests {
                 (GlobalVariableId::new(0), "left::shared"),
                 (GlobalVariableId::new(1), "right::shared"),
             ]
+        );
+    }
+
+    #[test]
+    fn module_type_graph_resolves_only_owned_dense_references() {
+        let image_id = ModuleImageId::new(7);
+        let resolved_reference = TypeReference {
+            image: image_id,
+            id: TypeId::new(0),
+        };
+        let malformed_reference = TypeReference {
+            image: image_id,
+            id: TypeId::new(1),
+        };
+        let image = ModuleImage::new(
+            PathBuf::from("/test/types"),
+            TargetDescription {
+                architecture: Architecture::X86_64,
+                byte_order: ByteOrder::Little,
+                pointer_width: PointerWidth::Bits64,
+            },
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(1),
+            },
+            ModuleMetadata {
+                functions: Vec::new(),
+                code_instances: Vec::new(),
+                symbols: Vec::new(),
+                globals: Vec::new(),
+                types: Arc::from([
+                    TypeNode::Resolved(TypeInfo {
+                        reference: resolved_reference,
+                        name: "int".into(),
+                        byte_size: Some(4),
+                        kind: TypeKind::Opaque {
+                            description: "test type".into(),
+                        },
+                    }),
+                    TypeNode::Malformed {
+                        reference: malformed_reference,
+                        description: "bad type".into(),
+                    },
+                ]),
+                source_files: Vec::new(),
+                statements: Vec::new(),
+                lines: Vec::new(),
+            },
+        )
+        .with_id(image_id);
+
+        assert_eq!(image.types().len(), 2);
+        assert!(matches!(
+            image.type_node(resolved_reference),
+            Some(TypeNode::Resolved(info)) if info.name.as_ref() == "int"
+        ));
+        assert_eq!(
+            image
+                .type_info(resolved_reference)
+                .expect("resolved type")
+                .name
+                .as_ref(),
+            "int"
+        );
+        assert!(matches!(
+            image.type_node(malformed_reference),
+            Some(TypeNode::Malformed { description, .. }) if description.as_ref() == "bad type"
+        ));
+        assert!(image.type_info(malformed_reference).is_none());
+        assert!(
+            image
+                .type_node(TypeReference {
+                    image: ModuleImageId::new(8),
+                    id: TypeId::new(0),
+                })
+                .is_none()
+        );
+        assert!(
+            image
+                .type_node(TypeReference {
+                    image: image_id,
+                    id: TypeId::new(2),
+                })
+                .is_none()
         );
     }
 
@@ -2848,6 +3021,7 @@ mod tests {
                 code_instances,
                 symbols: Vec::new(),
                 globals: Vec::new(),
+                types: Arc::default(),
                 source_files: Vec::new(),
                 statements: Vec::new(),
                 lines: Vec::new(),
@@ -2971,6 +3145,7 @@ mod tests {
                 code_instances: boundary_test_instances(),
                 symbols: Vec::new(),
                 globals: Vec::new(),
+                types: Arc::default(),
                 source_files: Vec::new(),
                 statements: boundary_test_rows(),
                 lines: Vec::new(),

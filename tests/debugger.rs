@@ -39,6 +39,283 @@ fn value_expression(components: &[&str]) -> uscope::ValueExpression {
     }
 }
 
+fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
+    let mut edges = Vec::new();
+    match kind {
+        uscope::TypeKind::Enumeration { underlying, .. } => {
+            edges.extend(underlying.iter().copied());
+        }
+        uscope::TypeKind::Pointer { target, .. } | uscope::TypeKind::Named { target, .. } => {
+            edges.extend(target.iter().copied());
+        }
+        uscope::TypeKind::Reference { target, .. } | uscope::TypeKind::Modified { target, .. } => {
+            edges.push(*target);
+        }
+        uscope::TypeKind::Array { element, .. } | uscope::TypeKind::Slice { element, .. } => {
+            edges.push(*element);
+        }
+        uscope::TypeKind::Record { members, bases, .. } => {
+            edges.extend(members.iter().map(|member| member.type_ref));
+            edges.extend(bases.iter().map(|base| base.type_ref));
+        }
+        uscope::TypeKind::Union { members, .. } => {
+            edges.extend(members.iter().map(|member| member.type_ref));
+        }
+        uscope::TypeKind::Variant {
+            common_members,
+            bases,
+            discriminant,
+            variants,
+            ..
+        } => {
+            edges.extend(common_members.iter().map(|member| member.type_ref));
+            edges.extend(bases.iter().map(|base| base.type_ref));
+            match discriminant.as_ref() {
+                uscope::VariantDiscriminant::Stored(member) => edges.push(member.type_ref),
+                uscope::VariantDiscriminant::TagType(reference) => edges.push(*reference),
+                _ => {}
+            }
+            edges.extend(
+                variants
+                    .iter()
+                    .flat_map(|variant| variant.members.iter())
+                    .map(|member| member.type_ref),
+            );
+        }
+        _ => {}
+    }
+    edges
+}
+
+#[test]
+fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
+    for fixture in [
+        "variables-gcc-o0",
+        "variables-clang-o0",
+        "types-c-gcc-o0",
+        "types-c-clang-o0",
+        "variables-cpp-gcc-o0",
+        "variables-cpp-clang-o0",
+        "variables-rust-o0",
+        "variables-zig-o0",
+        "variables-go-o0",
+        "types-cpp-gcc-dwarf4",
+        "types-cpp-gcc-dwarf5",
+    ] {
+        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load type graph");
+        let handle = debugger.handle();
+        let image = handle.module_image();
+        assert!(!image.types().is_empty(), "{fixture}");
+        for (index, node) in image.types().iter().enumerate() {
+            let reference = node.reference();
+            assert_eq!(reference.image, image.id(), "{fixture}: {node:?}");
+            assert_eq!(
+                usize::try_from(reference.id.get()).expect("type ID fits usize"),
+                index,
+                "{fixture}: {node:?}"
+            );
+            assert_eq!(
+                image.type_node(reference),
+                Some(node),
+                "{fixture}: {node:?}"
+            );
+            if let uscope::TypeNode::Resolved(info) = node {
+                for edge in type_edges(&info.kind) {
+                    assert!(
+                        image.type_node(edge).is_some(),
+                        "{fixture}: dangling edge {edge:?} from {info:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one compiler-language matrix keeps the cross-language semantic contract visible"
+)]
+fn normalized_named_types_and_modifiers_preserve_language_semantics() {
+    for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
+        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load C types");
+        let handle = debugger.handle();
+        let resolved = handle
+            .module_image()
+            .types()
+            .iter()
+            .filter_map(|node| match node {
+                uscope::TypeNode::Resolved(info) => Some(info),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            resolved.iter().any(|info| {
+                info.name.as_ref() == "aliased_int"
+                    && matches!(
+                        info.kind,
+                        uscope::TypeKind::Named {
+                            target: Some(_),
+                            relationship: uscope::NamedTypeRelationship::Synonym,
+                        }
+                    )
+            }),
+            "{fixture}: {resolved:#?}"
+        );
+        assert!(
+            resolved.iter().any(|info| {
+                info.name.as_ref() == "const int *"
+                    && matches!(info.kind, uscope::TypeKind::Pointer { .. })
+            }),
+            "{fixture}: {resolved:#?}"
+        );
+        assert!(
+            resolved.iter().any(|info| {
+                info.name.as_ref() == "int * const"
+                    && matches!(
+                        info.kind,
+                        uscope::TypeKind::Modified {
+                            modifier: uscope::TypeModifier::Const,
+                            ..
+                        }
+                    )
+            }),
+            "{fixture}: {resolved:#?}"
+        );
+    }
+
+    for fixture in ["variables-cpp-gcc-o0", "variables-cpp-clang-o0"] {
+        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load C++ types");
+        assert!(
+            debugger
+                .handle()
+                .module_image()
+                .types()
+                .iter()
+                .any(|node| matches!(
+                    node,
+                    uscope::TypeNode::Resolved(uscope::TypeInfo {
+                        name,
+                        kind: uscope::TypeKind::Named {
+                            target: Some(_),
+                            relationship: uscope::NamedTypeRelationship::Synonym,
+                        },
+                        ..
+                    }) if name.as_ref() == "aliased_int"
+                )),
+            "{fixture}: C++ alias was not normalized as a synonym"
+        );
+    }
+
+    for fixture in ["types-c-gcc-o0", "types-c-clang-o0"] {
+        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load C modifiers");
+        let modifiers = debugger
+            .handle()
+            .module_image()
+            .types()
+            .iter()
+            .filter_map(|node| match node {
+                uscope::TypeNode::Resolved(uscope::TypeInfo {
+                    kind: uscope::TypeKind::Modified { modifier, .. },
+                    ..
+                }) => Some(*modifier),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for expected in [
+            uscope::TypeModifier::Const,
+            uscope::TypeModifier::Volatile,
+            uscope::TypeModifier::Restrict,
+            uscope::TypeModifier::Atomic,
+        ] {
+            assert!(
+                modifiers.contains(&expected),
+                "{fixture}: missing {expected:?} in {modifiers:?}"
+            );
+        }
+    }
+
+    let go = Debugger::new(Scenario::fixture("variables-go-o0")).expect("load Go types");
+    assert!(
+        go.handle()
+            .module_image()
+            .types()
+            .iter()
+            .any(|node| matches!(
+                node,
+                uscope::TypeNode::Resolved(uscope::TypeInfo {
+                    kind: uscope::TypeKind::Named {
+                        relationship: uscope::NamedTypeRelationship::Distinct,
+                        target: Some(_),
+                    },
+                    ..
+                })
+            )),
+        "Go definitions must retain distinct identity"
+    );
+    let go_handle = go.handle();
+    let go_names = go_handle
+        .module_image()
+        .types()
+        .iter()
+        .filter_map(|node| match node {
+            uscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        go_names.contains(&"main.definedInt"),
+        "Go defined scalar type was lost: {go_names:?}"
+    );
+    assert!(
+        go_names
+            .iter()
+            .any(|name| name.contains("recursiveList[int32]")),
+        "Go instantiated recursive generic type was lost: {go_names:?}"
+    );
+    assert!(
+        !go_names.iter().any(|name| name.contains("scalarAlias")),
+        "Go source aliases erased by the producer must not be reconstructed: {go_names:?}"
+    );
+    drop(go_handle);
+    drop(go);
+
+    let zig = Debugger::new(Scenario::fixture("variables-zig-o0")).expect("load Zig types");
+    assert!(
+        zig.handle()
+            .module_image()
+            .types()
+            .iter()
+            .any(|node| matches!(
+                node,
+                uscope::TypeNode::Resolved(uscope::TypeInfo {
+                    kind: uscope::TypeKind::Named {
+                        relationship: uscope::NamedTypeRelationship::Encoding,
+                        target: Some(_),
+                    },
+                    ..
+                })
+            )),
+        "Zig producer wrappers must be identified as encodings"
+    );
+    drop(zig);
+
+    let rust = Debugger::new(Scenario::fixture("variables-rust-o0")).expect("load Rust types");
+    let rust_handle = rust.handle();
+    assert!(
+        rust_handle
+            .module_image()
+            .types()
+            .iter()
+            .filter_map(|node| match node {
+                uscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
+                _ => None,
+            })
+            .all(|name| name != "AliasedInt"),
+        "rustc-erased source aliases must not be reconstructed heuristically"
+    );
+}
+
 fn assert_inspected_signed(value: &uscope::InspectedValue, expected: i128, context: &str) {
     assert!(
         matches!(
@@ -4386,7 +4663,7 @@ async fn optimized_cpp_and_rust_scalars_materialize_supported_locations() {
 async fn go_scalars_are_printable_at_a_user_breakpoint_without_stepping() {
     let fixture = "variables-go-o0";
     let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
-    scenario.add_source_breakpoint("main.go", 37).await;
+    scenario.add_source_breakpoint("main.go", 49).await;
     run_go_to_breakpoint(&mut scenario, fixture).await;
 
     let state = scenario.snapshot().await;
@@ -4475,7 +4752,7 @@ async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
 async fn go_slices_decode_subranges_empty_and_nil_descriptors() {
     let fixture = "variables-go-o0";
     let mut scenario = Scenario::new("Go slice descriptors", Scenario::fixture(fixture));
-    scenario.add_source_breakpoint("main.go", 73).await;
+    scenario.add_source_breakpoint("main.go", 88).await;
     run_go_to_breakpoint(&mut scenario, fixture).await;
 
     for (name, capacity, expected) in [
@@ -4511,7 +4788,7 @@ async fn go_slices_decode_subranges_empty_and_nil_descriptors() {
 async fn go_variable_lookup_respects_nested_lexical_shadowing() {
     let fixture = "variables-go-o0";
     let mut scenario = Scenario::new("Go lexical shadowing", Scenario::fixture(fixture));
-    scenario.add_source_breakpoint("main.go", 62).await;
+    scenario.add_source_breakpoint("main.go", 77).await;
     run_go_to_breakpoint(&mut scenario, fixture).await;
 
     let innermost = scenario

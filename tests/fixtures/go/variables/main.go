@@ -5,6 +5,9 @@ import "runtime"
 var goGlobal int64 = 73
 var goSink int64
 
+type scalarAlias = int32
+type definedInt int32
+
 type pointerPair struct {
 	first  int32
 	second int32
@@ -13,6 +16,11 @@ type pointerPair struct {
 type pointerNode struct {
 	next  *pointerNode
 	value int32
+}
+
+type recursiveList[T any] struct {
+	next  *recursiveList[T]
+	value T
 }
 
 //go:noinline
@@ -34,6 +42,10 @@ func inspectScalars(
 	localUnsigned := unsignedValue + 2
 	localSingle := single + 0.5
 	localDouble := doublePrecision - 0.25
+	localAlias := scalarAlias(signedValue)
+	localDefined := definedInt(signedValue)
+	localList := recursiveList[int32]{value: signedValue}
+	localList.next = &localList
 	goSink = int64(localSigned)
 	optimizedAway := signedValue * 3
 	_ = optimizedAway
@@ -47,6 +59,9 @@ func inspectScalars(
 	runtime.KeepAlive(localUnsigned)
 	runtime.KeepAlive(localSingle)
 	runtime.KeepAlive(localDouble)
+	runtime.KeepAlive(localAlias)
+	runtime.KeepAlive(localDefined)
+	runtime.KeepAlive(localList)
 	return !localFlag && localSigned == -41 && *pointerParameter == 42 &&
 		**pointerPointer == 42 && structurePointer.first+structurePointer.second == 42 &&
 		recursivePointer.next == nil && recursivePointer.value == 42 &&

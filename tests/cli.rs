@@ -526,6 +526,12 @@ fn print_selects_members_and_implicitly_dereferences_only_intermediate_pointers(
             "--eval",
             "p structure_pointer.first",
             "--eval",
+            "p const_pointee",
+            "--eval",
+            "p const_pointer",
+            "--eval",
+            "p array_pointer",
+            "--eval",
             "p recursive_pointer.next",
             "--eval",
             "p recursive_pointer.next.next.value",
@@ -544,8 +550,24 @@ fn print_selects_members_and_implicitly_dereferences_only_intermediate_pointers(
         "{stdout}"
     );
     assert!(
-        stdout.contains("recursive_pointer.next = 0x"),
+        stdout.contains("(const int *) const_pointee = 0x"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("(int * const) const_pointer = 0x"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("(int (*)[2]) array_pointer = 0x"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("(pointer_node *) recursive_pointer.next = 0x"),
         "terminal pointer must render its address: {stdout}"
+    );
+    assert!(
+        !stdout.contains("<recursive type>"),
+        "construction placeholders must not escape into finalized names: {stdout}"
     );
     assert!(
         stdout.contains("(int) recursive_pointer.next.next.value = 42"),
@@ -557,6 +579,41 @@ fn print_selects_members_and_implicitly_dereferences_only_intermediate_pointers(
         ),
         "{stdout}"
     );
+}
+
+#[test]
+fn print_resolves_recursive_types_from_dwarf_four_and_five_type_units() {
+    for fixture_name in [
+        "build/test-programs/types-cpp-gcc-dwarf4",
+        "build/test-programs/types-cpp-gcc-dwarf5",
+    ] {
+        let executable = fixture(fixture_name);
+        let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .args([
+                "--batch",
+                "--eval",
+                "break types.cpp:31",
+                "--eval",
+                "run",
+                "--eval",
+                "p recursive.value",
+                "--eval",
+                "p mutual.peer",
+            ])
+            .arg(executable)
+            .output()
+            .expect("run type-unit print commands");
+        let stdout = assert_success(output);
+
+        assert!(
+            stdout.contains("(volatile alias_chain) recursive.value = 9"),
+            "{fixture_name}: {stdout}"
+        );
+        assert!(
+            stdout.contains("(right *) mutual.peer = 0x"),
+            "{fixture_name}: {stdout}"
+        );
+    }
 }
 
 #[test]
