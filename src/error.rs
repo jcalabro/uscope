@@ -42,6 +42,26 @@ pub enum Error {
     AmbiguousMember { member: String, type_name: Arc<str> },
     #[error("cannot select member '{member}' from non-record type '{type_name}'")]
     MemberAccessOnNonRecord { member: String, type_name: Arc<str> },
+    #[error("cannot index non-array or non-slice type '{type_name}'")]
+    IndexAccessOnNonIndexable { type_name: Arc<str> },
+    #[error(
+        "index {index} is outside the source bounds starting at {lower_bound} with {count} elements"
+    )]
+    ValueIndexOutOfBounds {
+        index: i128,
+        lower_bound: i128,
+        count: u64,
+    },
+    #[error(
+        "array type '{type_name}' requires {expected} indices at this level, but {supplied} were supplied"
+    )]
+    IncompleteArrayIndex {
+        type_name: Arc<str>,
+        expected: usize,
+        supplied: usize,
+    },
+    #[error("invalid value range: {0}")]
+    InvalidValueRange(Arc<str>),
     #[error("global variable selector '{selector}' is ambiguous: {candidates:?}")]
     AmbiguousGlobalVariable {
         selector: String,

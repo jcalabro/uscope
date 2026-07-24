@@ -22,9 +22,10 @@ use crate::{
     ReferenceKind, Result, ScalarValue, SourceFile, SourceFileId, SourceLocation,
     TargetDescription, TypeId, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
     ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
-    ValuePageCompletion, Variable, VariableKind, VariableMalformedReason, VariableQuery,
-    VariableState, VariableUnavailableReason, VariableValue, VariableValueSource, Variant,
-    VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind, VirtualAddress,
+    ValuePageCompletion, ValuePathStep, Variable, VariableKind, VariableMalformedReason,
+    VariableQuery, VariableState, VariableUnavailableReason, VariableValue, VariableValueSource,
+    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
+    VirtualAddress,
 };
 
 const MAX_SCALAR_BYTES: u64 = 16;
@@ -350,6 +351,15 @@ enum PathStep {
         byte_size: u64,
         address_class: u64,
     },
+    ArrayIndex {
+        byte_offset: i64,
+    },
+    SliceIndex {
+        index: u64,
+        element_size: u64,
+        descriptor_size: u64,
+        has_capacity: bool,
+    },
     Member(Box<PlannedMemberStep>),
     Unavailable(VariableUnavailableReason),
 }
@@ -383,10 +393,57 @@ enum LocatedStorage {
     },
 }
 
+struct DecodedSlice {
+    source: VariableValueSource,
+    raw: Arc<[u8]>,
+    address: VirtualAddress,
+    length: u64,
+    capacity: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrayIndexCalculationError {
+    OutOfBounds {
+        index: i128,
+        lower_bound: i128,
+        count: u64,
+    },
+    Overflow,
+}
+
 #[derive(Clone)]
 enum PathEvaluationError {
     Unavailable(VariableUnavailableReason),
     Malformed(Arc<str>),
+}
+
+fn row_major_array_index(
+    dimensions: &[ArrayDimension],
+    indices: &[i128],
+) -> std::result::Result<u64, ArrayIndexCalculationError> {
+    assert_eq!(
+        dimensions.len(),
+        indices.len(),
+        "array index planning must supply one source index per dimension"
+    );
+    let mut linear = 0_u64;
+    for (index, dimension) in indices.iter().copied().zip(dimensions) {
+        let relative = index
+            .checked_sub(dimension.lower_bound)
+            .and_then(|relative| u64::try_from(relative).ok());
+        let Some(relative) = relative.filter(|relative| *relative < dimension.count) else {
+            return Err(ArrayIndexCalculationError::OutOfBounds {
+                index,
+                lower_bound: dimension.lower_bound,
+                count: dimension.count,
+            });
+        };
+        linear = linear
+            .checked_mul(dimension.count)
+            .and_then(|value| value.checked_add(relative))
+            .ok_or(ArrayIndexCalculationError::Overflow)?;
+    }
+    Ok(linear)
 }
 
 fn static_member_layout_is_valid(
@@ -5147,13 +5204,12 @@ impl VariableInfo for DwarfVariableInfo {
         address: ImageAddress,
         selected: Option<CodeInstanceId>,
         root: &str,
-        members: &[String],
-        explicit_dereferences: u32,
+        selectors: &[ValuePathStep],
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<InspectedValue> {
         let object = self.visible_object(address, selected, root)?;
-        if members.is_empty() && explicit_dereferences == 0 {
+        if selectors.is_empty() {
             let mut frame_base = FrameBaseCache::Empty;
             let variable =
                 self.inspect_data_object(object, Some(address), context, runtime, &mut frame_base);
@@ -5173,7 +5229,7 @@ impl VariableInfo for DwarfVariableInfo {
                 });
             }
         };
-        let plan = self.plan_path(root_type, members, explicit_dereferences)?;
+        let plan = self.plan_path(root_type, selectors)?;
         Ok(self.evaluate_path(object, plan, Some(address), context, runtime))
     }
 
@@ -5198,8 +5254,7 @@ impl VariableInfo for DwarfVariableInfo {
         &self,
         id: GlobalVariableId,
         address: Option<ImageAddress>,
-        members: &[String],
-        explicit_dereferences: u32,
+        selectors: &[ValuePathStep],
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<InspectedValue> {
@@ -5209,7 +5264,7 @@ impl VariableInfo for DwarfVariableInfo {
             .get(global_index)
             .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
         let object = &self.objects[object_index];
-        if members.is_empty() && explicit_dereferences == 0 {
+        if selectors.is_empty() {
             let mut frame_base = FrameBaseCache::Empty;
             let variable =
                 self.inspect_data_object(object, address, context, runtime, &mut frame_base);
@@ -5229,7 +5284,7 @@ impl VariableInfo for DwarfVariableInfo {
                 });
             }
         };
-        let plan = self.plan_path(root_type, members, explicit_dereferences)?;
+        let plan = self.plan_path(root_type, selectors)?;
         Ok(self.evaluate_path(object, plan, address, context, runtime))
     }
 
@@ -6170,12 +6225,7 @@ impl DwarfVariableInfo {
         clippy::too_many_lines,
         reason = "path planning keeps type traversal and its typed failures in one auditable state machine"
     )]
-    fn plan_path(
-        &self,
-        root: TypeId,
-        members: &[String],
-        explicit_dereferences: u32,
-    ) -> Result<PlannedPath> {
+    fn plan_path(&self, root: TypeId, selectors: &[ValuePathStep]) -> Result<PlannedPath> {
         enum AggregateMembers<'a> {
             Direct(&'a [RecordMember]),
             Variant {
@@ -6187,7 +6237,222 @@ impl DwarfVariableInfo {
 
         let mut current = root;
         let mut steps = Vec::new();
-        for member_name in members {
+        let mut selectors = selectors.iter().peekable();
+        while let Some(selector) = selectors.next() {
+            if matches!(selector, ValuePathStep::Dereference) {
+                let (_canonical, info) = match self.transparent_type(current) {
+                    Ok(value) => value,
+                    Err(ValueShapeError::Malformed(description)) => {
+                        return Err(Error::debug_info(DwarfError::MalformedVariable(
+                            description,
+                        )));
+                    }
+                    Err(ValueShapeError::Unsupported(description)) => {
+                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                            description,
+                        )));
+                        return Ok(PlannedPath {
+                            steps,
+                            terminal: None,
+                        });
+                    }
+                };
+                let (target, address_class) = match &info.kind {
+                    TypeKind::Pointer {
+                        target: Some(target),
+                        address_class,
+                    }
+                    | TypeKind::Reference {
+                        target,
+                        address_class,
+                        ..
+                    } => (target.id, *address_class),
+                    TypeKind::Pointer { target: None, .. } => {
+                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                            DereferenceUnavailableReason::UnspecifiedPointee
+                                .to_string()
+                                .into(),
+                        )));
+                        return Ok(PlannedPath {
+                            steps,
+                            terminal: None,
+                        });
+                    }
+                    _ => {
+                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                            "the value is not a pointer or reference".into(),
+                        )));
+                        return Ok(PlannedPath {
+                            steps,
+                            terminal: Some(current),
+                        });
+                    }
+                };
+                let byte_size = match indirection_byte_size(
+                    info.byte_size,
+                    address_class,
+                    "pointer or reference",
+                ) {
+                    Ok(byte_size) => byte_size,
+                    Err(ValueShapeError::Malformed(description)) => {
+                        return Err(Error::debug_info(DwarfError::MalformedVariable(
+                            description,
+                        )));
+                    }
+                    Err(ValueShapeError::Unsupported(description)) => {
+                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                            description,
+                        )));
+                        current = target;
+                        continue;
+                    }
+                };
+                steps.push(PathStep::Dereference {
+                    target,
+                    byte_size,
+                    address_class,
+                });
+                current = target;
+                continue;
+            }
+
+            if let ValuePathStep::Index(first_index) = selector {
+                let source_info = self.type_info(current).map_err(|description| {
+                    Error::debug_info(DwarfError::MalformedVariable(description))
+                })?;
+                let (_canonical, info) = match self.transparent_type(current) {
+                    Ok(value) => value,
+                    Err(ValueShapeError::Malformed(description)) => {
+                        return Err(Error::debug_info(DwarfError::MalformedVariable(
+                            description,
+                        )));
+                    }
+                    Err(ValueShapeError::Unsupported(description)) => {
+                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                            description,
+                        )));
+                        return Ok(PlannedPath {
+                            steps,
+                            terminal: None,
+                        });
+                    }
+                };
+                match &info.kind {
+                    TypeKind::Array {
+                        element,
+                        dimensions,
+                    } => {
+                        let mut indices = vec![*first_index];
+                        while indices.len() < dimensions.len() {
+                            let Some(ValuePathStep::Index(index)) = selectors.peek() else {
+                                return Err(Error::IncompleteArrayIndex {
+                                    type_name: Arc::clone(&source_info.name),
+                                    expected: dimensions.len(),
+                                    supplied: indices.len(),
+                                });
+                            };
+                            indices.push(*index);
+                            selectors.next();
+                        }
+                        let linear = row_major_array_index(dimensions, &indices).map_err(
+                            |error| match error {
+                                ArrayIndexCalculationError::OutOfBounds {
+                                    index,
+                                    lower_bound,
+                                    count,
+                                } => Error::ValueIndexOutOfBounds {
+                                    index,
+                                    lower_bound,
+                                    count,
+                                },
+                                ArrayIndexCalculationError::Overflow => {
+                                    Error::InvalidValueExpression(
+                                        "array row-major index overflows".to_owned(),
+                                    )
+                                }
+                            },
+                        )?;
+                        let element_size = match self.value_shape(element.id) {
+                            Ok(shape) => shape.byte_size(),
+                            Err(ValueShapeError::Malformed(description)) => {
+                                return Err(Error::debug_info(DwarfError::MalformedVariable(
+                                    description,
+                                )));
+                            }
+                            Err(ValueShapeError::Unsupported(description)) => {
+                                steps.push(PathStep::Unavailable(
+                                    VariableUnavailableReason::Other(description),
+                                ));
+                                return Ok(PlannedPath {
+                                    steps,
+                                    terminal: Some(element.id),
+                                });
+                            }
+                        };
+                        let byte_offset = linear
+                            .checked_mul(element_size)
+                            .and_then(|offset| i64::try_from(offset).ok())
+                            .ok_or_else(|| {
+                                Error::InvalidValueExpression(
+                                    "array element offset overflows".to_owned(),
+                                )
+                            })?;
+                        steps.push(PathStep::ArrayIndex { byte_offset });
+                        current = element.id;
+                    }
+                    TypeKind::Slice {
+                        element,
+                        has_capacity,
+                    } => {
+                        let index = u64::try_from(*first_index).map_err(|_| {
+                            Error::ValueIndexOutOfBounds {
+                                index: *first_index,
+                                lower_bound: 0,
+                                count: 0,
+                            }
+                        })?;
+                        let descriptor_size = info.byte_size.ok_or_else(|| {
+                            Error::debug_info(DwarfError::MalformedVariable(
+                                "slice descriptor has no byte size".into(),
+                            ))
+                        })?;
+                        let element_size = match self.value_shape(element.id) {
+                            Ok(shape) => shape.byte_size(),
+                            Err(ValueShapeError::Malformed(description)) => {
+                                return Err(Error::debug_info(DwarfError::MalformedVariable(
+                                    description,
+                                )));
+                            }
+                            Err(ValueShapeError::Unsupported(description)) => {
+                                steps.push(PathStep::Unavailable(
+                                    VariableUnavailableReason::Other(description),
+                                ));
+                                return Ok(PlannedPath {
+                                    steps,
+                                    terminal: Some(element.id),
+                                });
+                            }
+                        };
+                        steps.push(PathStep::SliceIndex {
+                            index,
+                            element_size,
+                            descriptor_size,
+                            has_capacity: *has_capacity,
+                        });
+                        current = element.id;
+                    }
+                    _ => {
+                        return Err(Error::IndexAccessOnNonIndexable {
+                            type_name: Arc::clone(&source_info.name),
+                        });
+                    }
+                }
+                continue;
+            }
+
+            let ValuePathStep::Named(member_name) = selector else {
+                unreachable!("all public value path steps were handled")
+            };
             let mut indirections = HashSet::new();
             let (aggregate, aggregate_members) = loop {
                 let source_info = self.type_info(current).map_err(|description| {
@@ -6365,81 +6630,6 @@ impl DwarfVariableInfo {
                 required_variant: required_variant.clone(),
             })));
             current = member.type_ref.id;
-        }
-        for _ in 0..explicit_dereferences {
-            let (_canonical, info) = match self.transparent_type(current) {
-                Ok(value) => value,
-                Err(ValueShapeError::Malformed(description)) => {
-                    return Err(Error::debug_info(DwarfError::MalformedVariable(
-                        description,
-                    )));
-                }
-                Err(ValueShapeError::Unsupported(description)) => {
-                    steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                        description,
-                    )));
-                    return Ok(PlannedPath {
-                        steps,
-                        terminal: None,
-                    });
-                }
-            };
-            let (target, address_class) = match &info.kind {
-                TypeKind::Pointer {
-                    target: Some(target),
-                    address_class,
-                }
-                | TypeKind::Reference {
-                    target,
-                    address_class,
-                    ..
-                } => (target.id, *address_class),
-                TypeKind::Pointer { target: None, .. } => {
-                    steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                        DereferenceUnavailableReason::UnspecifiedPointee
-                            .to_string()
-                            .into(),
-                    )));
-                    return Ok(PlannedPath {
-                        steps,
-                        terminal: None,
-                    });
-                }
-                _ => {
-                    steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                        "the value is not a pointer or reference".into(),
-                    )));
-                    return Ok(PlannedPath {
-                        steps,
-                        terminal: Some(current),
-                    });
-                }
-            };
-            let byte_size = match indirection_byte_size(
-                info.byte_size,
-                address_class,
-                "pointer or reference",
-            ) {
-                Ok(byte_size) => byte_size,
-                Err(ValueShapeError::Malformed(description)) => {
-                    return Err(Error::debug_info(DwarfError::MalformedVariable(
-                        description,
-                    )));
-                }
-                Err(ValueShapeError::Unsupported(description)) => {
-                    steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                        description,
-                    )));
-                    current = target;
-                    continue;
-                }
-            };
-            steps.push(PathStep::Dereference {
-                target,
-                byte_size,
-                address_class,
-            });
-            current = target;
         }
         Ok(PlannedPath {
             steps,
@@ -6703,6 +6893,67 @@ impl DwarfVariableInfo {
                 "an unresolved implicit pointer cannot be read".into(),
             )),
         }
+    }
+
+    fn decode_slice(
+        &self,
+        storage: &LocatedStorage,
+        byte_size: u64,
+        has_capacity: bool,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut EvaluationBudget,
+    ) -> std::result::Result<DecodedSlice, PathEvaluationError> {
+        let size =
+            usize::try_from(byte_size).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let (source, raw) = Self::read_storage(storage, size, runtime, budget)?;
+        let pointer_bytes = match self.target.pointer_width {
+            crate::PointerWidth::Bits32 => 4,
+            crate::PointerWidth::Bits64 => 8,
+        };
+        let words = if has_capacity { 3 } else { 2 };
+        if raw.len() != pointer_bytes * words {
+            return Err(PathEvaluationError::Malformed(
+                "slice descriptor size does not match its target layout".into(),
+            ));
+        }
+        let word = |index: usize| {
+            unsigned_value(
+                &raw[index * pointer_bytes..(index + 1) * pointer_bytes],
+                self.target.byte_order,
+            )
+            .map_err(|reason| Arc::<str>::from(reason.to_string()))
+            .and_then(|value| {
+                u64::try_from(value)
+                    .map_err(|_| Arc::<str>::from("slice word exceeds target address width"))
+            })
+        };
+        let address = word(0)
+            .map(VirtualAddress::new)
+            .map_err(PathEvaluationError::Malformed)?;
+        let length = word(1).map_err(PathEvaluationError::Malformed)?;
+        let capacity = if has_capacity {
+            let capacity = word(2).map_err(PathEvaluationError::Malformed)?;
+            if capacity < length {
+                return Err(PathEvaluationError::Malformed(
+                    "slice length exceeds its capacity".into(),
+                ));
+            }
+            Some(capacity)
+        } else {
+            None
+        };
+        if address.get() == 0 && length != 0 {
+            return Err(PathEvaluationError::Malformed(
+                "non-empty slice has a null data pointer".into(),
+            ));
+        }
+        Ok(DecodedSlice {
+            source,
+            raw,
+            address,
+            length,
+            capacity,
+        })
     }
 
     const fn concrete_storage_address(storage: &LocatedStorage) -> Option<VirtualAddress> {
@@ -7155,6 +7406,54 @@ impl DwarfVariableInfo {
                         LocatedStorage::Memory(pointer)
                     }
                 }
+                PathStep::ArrayIndex { byte_offset } => {
+                    match Self::storage_with_offset(storage, byte_offset) {
+                        Ok(storage) => storage,
+                        Err(error) => return failure(error),
+                    }
+                }
+                PathStep::SliceIndex {
+                    index,
+                    element_size,
+                    descriptor_size,
+                    has_capacity,
+                } => {
+                    let decoded = match self.decode_slice(
+                        &storage,
+                        descriptor_size,
+                        has_capacity,
+                        runtime,
+                        &mut budget,
+                    ) {
+                        Ok(decoded) => decoded,
+                        Err(error) => return failure(error),
+                    };
+                    if index >= decoded.length {
+                        return InspectedValue {
+                            type_info: terminal_type,
+                            state: VariableState::Unavailable(
+                                VariableUnavailableReason::IndexOutOfBounds {
+                                    index: i128::from(index),
+                                    lower_bound: 0,
+                                    count: decoded.length,
+                                },
+                            ),
+                        };
+                    }
+                    let Some(byte_offset) = index
+                        .checked_mul(element_size)
+                        .and_then(|offset| i64::try_from(offset).ok())
+                    else {
+                        return failure(VariableUnavailableReason::EvaluationLimit.into());
+                    };
+                    match Self::storage_with_offset(
+                        LocatedStorage::Memory(decoded.address),
+                        byte_offset,
+                    ) {
+                        Ok(storage) => storage,
+                        Err(error) => return failure(error),
+                    }
+                }
                 PathStep::Member(step) => {
                     let PlannedMemberStep {
                         aggregate,
@@ -7468,80 +7767,33 @@ impl DwarfVariableInfo {
                 byte_size,
                 has_capacity,
             } => {
-                let (source, raw) = match read(*byte_size, runtime, budget) {
-                    Ok(value) => value,
-                    Err(PathEvaluationError::Unavailable(reason)) => {
-                        return VariableState::Unavailable(reason);
-                    }
-                    Err(PathEvaluationError::Malformed(description)) => {
-                        return VariableState::Malformed(VariableMalformedReason { description });
-                    }
-                };
-                let pointer_bytes = match self.target.pointer_width {
-                    crate::PointerWidth::Bits32 => 4,
-                    crate::PointerWidth::Bits64 => 8,
-                };
-                let words = if *has_capacity { 3 } else { 2 };
-                if raw.len() != pointer_bytes * words {
-                    return VariableState::Malformed(VariableMalformedReason {
-                        description: "slice descriptor size does not match its target layout"
-                            .into(),
-                    });
-                }
-                let word = |index: usize| {
-                    unsigned_value(
-                        &raw[index * pointer_bytes..(index + 1) * pointer_bytes],
-                        self.target.byte_order,
-                    )
-                    .map_err(|reason| Arc::<str>::from(reason.to_string()))
-                    .and_then(|value| {
-                        u64::try_from(value).map_err(|_| {
-                            Arc::<str>::from("slice word exceeds target address width")
-                        })
-                    })
-                };
-                let address = match word(0) {
-                    Ok(value) => VirtualAddress::new(value),
-                    Err(description) => {
-                        return VariableState::Malformed(VariableMalformedReason { description });
-                    }
-                };
-                let length = match word(1) {
-                    Ok(value) => value,
-                    Err(description) => {
-                        return VariableState::Malformed(VariableMalformedReason { description });
-                    }
-                };
-                let capacity = if *has_capacity {
-                    match word(2) {
-                        Ok(value) if value >= length => Some(value),
-                        Ok(_) => {
-                            return VariableState::Malformed(VariableMalformedReason {
-                                description: "slice length exceeds its capacity".into(),
-                            });
+                let decoded =
+                    match self.decode_slice(storage, *byte_size, *has_capacity, runtime, budget) {
+                        Ok(value) => value,
+                        Err(PathEvaluationError::Unavailable(reason)) => {
+                            return VariableState::Unavailable(reason);
                         }
-                        Err(description) => {
+                        Err(PathEvaluationError::Malformed(description)) => {
                             return VariableState::Malformed(VariableMalformedReason {
                                 description,
                             });
                         }
-                    }
-                } else {
-                    None
-                };
-                if address.get() == 0 && length != 0 {
-                    return VariableState::Malformed(VariableMalformedReason {
-                        description: "non-empty slice has a null data pointer".into(),
-                    });
-                }
-                let backing = LocatedStorage::Memory(address);
+                    };
+                let backing = LocatedStorage::Memory(decoded.address);
                 VariableState::Available {
-                    source,
-                    raw: Some(raw),
-                    value: VariableValue::Slice { length, capacity },
+                    source: decoded.source,
+                    raw: Some(decoded.raw),
+                    value: VariableValue::Slice {
+                        length: decoded.length,
+                        capacity: decoded.capacity,
+                    },
                     dereference: DereferenceState::NotApplicable,
                     children: ValueChildren::Available(Self::child_reference(
-                        &backing, context, type_id, length, None,
+                        &backing,
+                        context,
+                        type_id,
+                        decoded.length,
+                        None,
                     )),
                 }
             }
@@ -9059,6 +9311,52 @@ mod tests {
         Sections, Unit,
     };
     use gimli::{Encoding, Format, LittleEndian};
+
+    #[test]
+    fn row_major_array_indices_honor_lower_bounds_and_reject_overflow() {
+        let dimensions = [
+            ArrayDimension {
+                lower_bound: -2,
+                count: 3,
+            },
+            ArrayDimension {
+                lower_bound: 10,
+                count: 2,
+            },
+        ];
+        assert_eq!(row_major_array_index(&dimensions, &[0, 11]), Ok(5));
+        assert!(matches!(
+            row_major_array_index(&dimensions, &[-3, 10]),
+            Err(ArrayIndexCalculationError::OutOfBounds {
+                index: -3,
+                lower_bound: -2,
+                count: 3,
+            })
+        ));
+        assert!(matches!(
+            row_major_array_index(&dimensions, &[0, 12]),
+            Err(ArrayIndexCalculationError::OutOfBounds {
+                index: 12,
+                lower_bound: 10,
+                count: 2,
+            })
+        ));
+
+        let overflowing = [
+            ArrayDimension {
+                lower_bound: 0,
+                count: u64::MAX,
+            },
+            ArrayDimension {
+                lower_bound: 0,
+                count: 2,
+            },
+        ];
+        assert_eq!(
+            row_major_array_index(&overflowing, &[i128::from(u64::MAX - 1), 1]),
+            Err(ArrayIndexCalculationError::Overflow)
+        );
+    }
 
     #[test]
     fn declaration_canonicalization_cannot_launder_a_non_type_reference() {

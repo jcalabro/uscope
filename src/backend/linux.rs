@@ -40,8 +40,8 @@ use crate::{
     InlineFrameLookup, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
     LoadedModuleSnapshot, ModuleImage, RegisterDescriptor, RegisterId, RegisterRole,
     RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame, ThreadId as DebugThreadId,
-    UnwindTermination, ValueExpression, VariableSnapshot, VariableUnavailableReason,
-    VirtualAddress,
+    UnwindTermination, ValueExpression, ValueIndexRange, ValuePageCompletion, ValuePathStep,
+    VariableSnapshot, VariableUnavailableReason, VirtualAddress,
 };
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
@@ -49,8 +49,9 @@ const WAITER_THREAD_NAME: &str = "uscope-waitpid";
 const BREAKPOINT_OPCODE: u8 = 0xcc;
 const TRAP_UNKNOWN: i32 = 5;
 const MAX_LOGICAL_MEMORY_READ: usize = 1024 * 1024;
-const MAX_VALUE_EXPRESSION_COMPONENTS: usize = 64;
-const MAX_VALUE_EXPRESSION_DEREFERENCES: u32 = 64;
+const MAX_VALUE_EXPRESSION_STEPS: usize = 64;
+const MAX_VALUE_EXPRESSION_DEREFERENCES: usize = 63;
+const MAX_VALUE_CHILD_PAGE_LIMIT: u32 = 256;
 
 static LINUX_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -603,6 +604,20 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.inspect(stop_id, debug_pid(thread_id), &expression));
+            }
+            Request::InspectRange {
+                expression,
+                range,
+                stop_id,
+                thread_id,
+                reply,
+            } => {
+                let _ = reply.send(self.inspect_range(
+                    stop_id,
+                    debug_pid(thread_id),
+                    &expression,
+                    range,
+                ));
             }
             Request::Dereference { reference, reply } => {
                 let _ = reply.send(self.dereference(&reference));
@@ -3744,9 +3759,21 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .and_then(|module| module.link_map),
         };
 
-        for root_components in (1..=expression.components.len()).rev() {
-            let root = expression.components[..root_components].join(".");
-            let members = &expression.components[root_components..];
+        let named_prefix = expression
+            .steps
+            .iter()
+            .take_while(|step| matches!(step, ValuePathStep::Named(_)))
+            .count();
+        for root_components in (1..=named_prefix).rev() {
+            let root = expression.steps[..root_components]
+                .iter()
+                .map(|step| match step {
+                    ValuePathStep::Named(name) => name.as_str(),
+                    _ => unreachable!("root prefix contains only names"),
+                })
+                .collect::<Vec<_>>()
+                .join(".");
+            let selectors = &expression.steps[root_components..];
             let local = image_address.zip(selected_instance).map_or_else(
                 || Err(Error::VariableNotFound(root.clone())),
                 |(address, selected)| {
@@ -3754,8 +3781,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         address,
                         selected,
                         &root,
-                        members,
-                        expression.explicit_dereferences,
+                        selectors,
                         context,
                         &mut runtime,
                     )
@@ -3789,8 +3815,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         instruction,
                         &cfa,
                         *global,
-                        members,
-                        expression.explicit_dereferences,
+                        selectors,
                     );
                 }
                 _ => {
@@ -3802,7 +3827,126 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
 
-        Err(Error::VariableNotFound(expression.components.join(".")))
+        Err(Error::VariableNotFound(
+            expression
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    ValuePathStep::Named(name) => Some(name.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("."),
+        ))
+    }
+
+    fn inspect_range(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        expression: &ValueExpression,
+        range: ValueIndexRange,
+    ) -> Result<crate::ValueChildPage> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_stopped_thread(inferior, pid)?;
+        let length = range
+            .end
+            .checked_sub(range.start)
+            .ok_or_else(|| Error::InvalidValueRange("the range end precedes its start".into()))?;
+        if length < 0 {
+            return Err(Error::InvalidValueRange(
+                "the range end precedes its start".into(),
+            ));
+        }
+        if length > i128::from(MAX_VALUE_CHILD_PAGE_LIMIT) {
+            return Err(Error::InvalidValueRange(
+                format!("a range may contain at most {MAX_VALUE_CHILD_PAGE_LIMIT} elements").into(),
+            ));
+        }
+        let inspected = self.inspect(stop_id, pid, expression)?;
+        let type_name = inspected
+            .type_info
+            .as_ref()
+            .map_or_else(|| Arc::from("<unknown>"), |info| Arc::clone(&info.name));
+        let (lower_bound, count, reference) = match inspected.state {
+            crate::VariableState::Available {
+                value: crate::VariableValue::Array { ref dimensions, .. },
+                children: crate::ValueChildren::Available(reference),
+                ..
+            } => {
+                let [dimension] = dimensions.as_ref() else {
+                    return Err(Error::InvalidValueRange(
+                        "ranges currently require a one-dimensional array".into(),
+                    ));
+                };
+                (dimension.lower_bound, dimension.count, reference)
+            }
+            crate::VariableState::Available {
+                value: crate::VariableValue::Slice { length, .. },
+                children: crate::ValueChildren::Available(reference),
+                ..
+            } => (0, length, reference),
+            crate::VariableState::Available { .. } => {
+                return Err(Error::IndexAccessOnNonIndexable { type_name });
+            }
+            crate::VariableState::Unavailable(reason) => {
+                return Err(Error::InvalidValueRange(
+                    format!("the selected aggregate is unavailable: {reason}").into(),
+                ));
+            }
+            crate::VariableState::Malformed(reason) => {
+                return Err(Error::InvalidValueRange(
+                    format!(
+                        "the selected aggregate is malformed: {}",
+                        reason.description
+                    )
+                    .into(),
+                ));
+            }
+        };
+        let relative_start = range
+            .start
+            .checked_sub(lower_bound)
+            .and_then(|index| u64::try_from(index).ok());
+        let relative_end = range
+            .end
+            .checked_sub(lower_bound)
+            .and_then(|index| u64::try_from(index).ok());
+        let (Some(offset), Some(end)) = (relative_start, relative_end) else {
+            return Err(Error::ValueIndexOutOfBounds {
+                index: range.start,
+                lower_bound,
+                count,
+            });
+        };
+        if offset > count || end > count {
+            return Err(Error::ValueIndexOutOfBounds {
+                index: if offset > count {
+                    range.start
+                } else {
+                    range.end.checked_sub(1).unwrap_or(range.end)
+                },
+                lower_bound,
+                count,
+            });
+        }
+        if length == 0 {
+            return Ok(crate::ValueChildPage {
+                stop_id,
+                offset,
+                total: count,
+                children: Arc::from([]),
+                completion: ValuePageCompletion::Complete,
+            });
+        }
+        self.value_children(
+            &reference,
+            &crate::ValueChildQuery {
+                offset,
+                limit: u32::try_from(length).expect("validated range length fits u32"),
+            },
+        )
     }
 
     #[expect(
@@ -3817,8 +3961,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         instruction: VirtualAddress,
         cfa: &std::result::Result<VirtualAddress, VariableUnavailableReason>,
         global: GlobalVariableReference,
-        members: &[String],
-        explicit_dereferences: u32,
+        selectors: &[ValuePathStep],
     ) -> Result<InspectedValue> {
         let module = self
             .modules
@@ -3845,8 +3988,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         module.variables.inspect_global_path(
             global.variable,
             context_address,
-            members,
-            explicit_dereferences,
+            selectors,
             VariableContext {
                 stop_id: inferior
                     .public_stop
@@ -3925,7 +4067,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         // A capability must be rejected before consulting modules, registers,
         // or memory if its stopped snapshot is no longer current.
         validate_public_stop(inferior, Some(reference.stop_id))?;
-        if !(1..=256).contains(&query.limit) {
+        if !(1..=MAX_VALUE_CHILD_PAGE_LIMIT).contains(&query.limit) {
             return Err(Error::InvalidValueChildPageLimit(query.limit));
         }
         let pid = debug_pid(reference.thread);
@@ -4614,12 +4756,16 @@ fn read_logical_memory_with(
             maximum: MAX_LOGICAL_MEMORY_READ,
         }));
     }
+    if size == 0 {
+        return Ok(Vec::new());
+    }
     let end = address
         .get()
         .checked_add(u64::try_from(size).expect("memory read size fits u64"))
         .ok_or(Error::AddressOverflow)?;
     let mut bytes = Vec::with_capacity(size);
-    let mut current = address.get();
+    let word_size = u64::try_from(std::mem::size_of::<u64>()).expect("word size fits u64");
+    let mut current = address.get() & !(word_size - 1);
     while current < end {
         let mut word = read_word(current)?.to_le_bytes();
         for (&site_address, site) in breakpoints {
@@ -4630,11 +4776,17 @@ fn read_logical_memory_with(
                 word[usize::try_from(offset).expect("word offset fits usize")] = site.original_byte;
             }
         }
-        let remaining = usize::try_from(end - current).expect("remaining bytes fit usize");
-        let count = remaining.min(word.len());
-        bytes.extend_from_slice(&word[..count]);
+        let word_end = current.saturating_add(word_size);
+        let selected_start = address.get().max(current);
+        let selected_end = end.min(word_end);
+        let start = usize::try_from(selected_start - current).expect("word offset fits usize");
+        let selected_end = usize::try_from(selected_end - current).expect("word offset fits usize");
+        bytes.extend_from_slice(&word[start..selected_end]);
+        if current.saturating_add(word_size) >= end {
+            break;
+        }
         current = current
-            .checked_add(u64::try_from(count).expect("word size fits u64"))
+            .checked_add(word_size)
             .ok_or(Error::AddressOverflow)?;
     }
     Ok(bytes)
@@ -5388,22 +5540,34 @@ fn validate_stopped_thread(inferior: &Inferior, pid: Pid) -> Result<()> {
 }
 
 fn validate_value_expression(expression: &ValueExpression) -> Result<()> {
-    if expression.components.is_empty() {
+    if expression.steps.is_empty()
+        || !matches!(expression.steps.first(), Some(ValuePathStep::Named(_)))
+    {
         return Err(Error::InvalidValueExpression(
             "an expression must name a data object".to_owned(),
         ));
     }
-    if expression.components.len() > MAX_VALUE_EXPRESSION_COMPONENTS {
+    if expression.steps.len() > MAX_VALUE_EXPRESSION_STEPS {
         return Err(Error::InvalidValueExpression(format!(
-            "an expression may contain at most {MAX_VALUE_EXPRESSION_COMPONENTS} components"
+            "an expression may contain at most {MAX_VALUE_EXPRESSION_STEPS} operations"
         )));
     }
-    if expression.components.iter().any(String::is_empty) {
+    if expression
+        .steps
+        .iter()
+        .any(|step| matches!(step, ValuePathStep::Named(name) if name.is_empty()))
+    {
         return Err(Error::InvalidValueExpression(
-            "expression components must not be empty".to_owned(),
+            "expression names must not be empty".to_owned(),
         ));
     }
-    if expression.explicit_dereferences > MAX_VALUE_EXPRESSION_DEREFERENCES {
+    if expression
+        .steps
+        .iter()
+        .filter(|step| matches!(step, ValuePathStep::Dereference))
+        .count()
+        > MAX_VALUE_EXPRESSION_DEREFERENCES
+    {
         return Err(Error::InvalidValueExpression(format!(
             "an expression may contain at most {MAX_VALUE_EXPRESSION_DEREFERENCES} explicit dereferences"
         )));
@@ -5750,30 +5914,44 @@ mod tests {
     #[test]
     fn value_expression_validation_bounds_untrusted_request_structure() {
         let valid = ValueExpression {
-            components: vec!["root".to_owned(), "member".to_owned()].into(),
-            explicit_dereferences: MAX_VALUE_EXPRESSION_DEREFERENCES,
+            steps: std::iter::once(ValuePathStep::Named("root".to_owned()))
+                .chain(std::iter::repeat_n(
+                    ValuePathStep::Dereference,
+                    MAX_VALUE_EXPRESSION_DEREFERENCES,
+                ))
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        validate_value_expression(&valid).expect("bounded dereferences");
+        let valid = ValueExpression {
+            steps: vec![
+                ValuePathStep::Named("root".to_owned()),
+                ValuePathStep::Named("member".to_owned()),
+                ValuePathStep::Index(1),
+            ]
+            .into(),
         };
         validate_value_expression(&valid).expect("bounded expression");
 
         for expression in [
             ValueExpression {
-                components: Arc::new([]),
-                explicit_dereferences: 0,
+                steps: Arc::new([]),
             },
             ValueExpression {
-                components: vec!["root".to_owned(), String::new()].into(),
-                explicit_dereferences: 0,
+                steps: vec![
+                    ValuePathStep::Named("root".to_owned()),
+                    ValuePathStep::Named(String::new()),
+                ]
+                .into(),
             },
             ValueExpression {
-                components: (0..=MAX_VALUE_EXPRESSION_COMPONENTS)
-                    .map(|index| format!("member{index}"))
+                steps: (0..=MAX_VALUE_EXPRESSION_STEPS)
+                    .map(|index| ValuePathStep::Named(format!("member{index}")))
                     .collect::<Vec<_>>()
                     .into(),
-                explicit_dereferences: 0,
             },
             ValueExpression {
-                components: Arc::new(["root".to_owned()]),
-                explicit_dereferences: MAX_VALUE_EXPRESSION_DEREFERENCES + 1,
+                steps: vec![ValuePathStep::Index(0)].into(),
             },
         ] {
             assert!(matches!(
@@ -5828,6 +6006,7 @@ mod tests {
     fn logical_memory_reads_unaligned_cross_word_ranges_and_hides_traps() {
         let address = VirtualAddress::new(0x1003);
         let mut breakpoints = BTreeMap::new();
+        let mut reads = Vec::new();
         breakpoints.insert(
             VirtualAddress::new(0x1005),
             BreakpointSite {
@@ -5837,6 +6016,7 @@ mod tests {
             },
         );
         let bytes = read_logical_memory_with(address, 10, &breakpoints, |current| {
+            reads.push(current);
             let mut bytes = [0_u8; 8];
             for (offset, byte) in bytes.iter_mut().enumerate() {
                 *byte = u8::try_from(current + offset as u64 - 0x1000).expect("test byte fits u8");
@@ -5849,6 +6029,12 @@ mod tests {
         })
         .expect("logical memory read");
         assert_eq!(bytes, [3, 4, 0x55, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(reads, [0x1000, 0x1008]);
+        let empty = read_logical_memory_with(address, 0, &breakpoints, |_| {
+            panic!("an empty logical read must not read target memory")
+        })
+        .expect("empty logical memory read");
+        assert!(empty.is_empty());
     }
 
     struct RecordingTrace {
@@ -6019,8 +6205,7 @@ mod tests {
             _address: ImageAddress,
             _selected: Option<crate::CodeInstanceId>,
             _root: &str,
-            _members: &[String],
-            _explicit_dereferences: u32,
+            _selectors: &[crate::ValuePathStep],
             _context: VariableContext,
             _runtime: &mut dyn VariableRuntime,
         ) -> Result<crate::InspectedValue> {
@@ -6041,8 +6226,7 @@ mod tests {
             &self,
             _id: crate::GlobalVariableId,
             _address: Option<ImageAddress>,
-            _members: &[String],
-            _explicit_dereferences: u32,
+            _selectors: &[crate::ValuePathStep],
             _context: VariableContext,
             _runtime: &mut dyn VariableRuntime,
         ) -> Result<crate::InspectedValue> {

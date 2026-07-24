@@ -997,6 +997,15 @@ pub enum VariableUnavailableReason {
     RegisterUnavailable(Arc<str>),
     /// The expression exceeded the debugger's bounded work limits.
     EvaluationLimit,
+    /// A runtime-sized array or slice index is outside its current bounds.
+    IndexOutOfBounds {
+        /// Requested source index.
+        index: i128,
+        /// First valid source index.
+        lower_bound: i128,
+        /// Number of valid elements.
+        count: u64,
+    },
     /// Another explicit limitation or runtime failure.
     Other(Arc<str>),
 }
@@ -1013,6 +1022,14 @@ impl fmt::Display for VariableUnavailableReason {
             Self::EvaluationLimit => {
                 formatter.write_str("DWARF expression evaluation limit exceeded")
             }
+            Self::IndexOutOfBounds {
+                index,
+                lower_bound,
+                count,
+            } => write!(
+                formatter,
+                "index {index} is outside the source bounds starting at {lower_bound} with {count} elements"
+            ),
             Self::Other(description) => formatter.write_str(description),
         }
     }
@@ -1072,17 +1089,45 @@ pub enum VariableState {
     Malformed(VariableMalformedReason),
 }
 
+/// One ordered operation in a bounded structural value expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValuePathStep {
+    /// A source-level name. The controller resolves the longest initial run as
+    /// the data-object root; later names select aggregate members.
+    Named(String),
+    /// One source-language array or slice index.
+    Index(i128),
+    /// One explicit pointer or reference dereference.
+    Dereference,
+}
+
 /// One bounded, structural value expression evaluated at a stopped snapshot.
 ///
-/// The first component names a visible data object. Remaining components name
-/// record members. Dots embedded in source-level object names are preserved by
-/// the controller's longest-prefix root lookup.
+/// Dots embedded in source-level object names are preserved by the
+/// controller's longest-prefix root lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueExpression {
-    /// Dot-separated syntactic components, before source-level root resolution.
-    pub components: Arc<[String]>,
-    /// Explicit dereference operations applied after member selection.
-    pub explicit_dereferences: u32,
+    /// Operations in evaluation order, beginning with at least one name.
+    pub steps: Arc<[ValuePathStep]>,
+}
+
+/// One half-open source-index range selected from a one-dimensional array or slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValueIndexRange {
+    /// First source index included in the page.
+    pub start: i128,
+    /// First source index excluded from the page.
+    pub end: i128,
+}
+
+/// A parsed structural expression and its optional terminal range view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedValueExpression {
+    /// The value or aggregate containing the terminal range.
+    pub expression: ValueExpression,
+    /// A terminal bounded range; absent when the expression selects one value.
+    pub range: Option<ValueIndexRange>,
 }
 
 /// The terminal value produced by structural expression inspection.

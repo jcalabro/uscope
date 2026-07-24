@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 use std::{env, thread};
 
 use anyhow::{Context, Result};
@@ -17,8 +17,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
     Breakpoint, BreakpointId, BreakpointLocation, BreakpointSpec, ByteOrder, Debugger,
     DebuggerHandle, Error, ExitStatus, FloatValue, LineNumber, RegisterSnapshot, ScalarValue,
-    SourceContext, StateSnapshot, StepKind, StopReason, ThreadId, ThreadState, ValueExpression,
-    Variable, VariableSnapshot, VariableState, VirtualAddress,
+    SourceContext, StateSnapshot, StepKind, StopReason, ThreadId, ThreadState, Variable,
+    VariableSnapshot, VariableState, VirtualAddress,
 };
 
 mod terminal;
@@ -145,8 +145,8 @@ const COMMANDS: &[CommandSpec] = &[
         Print,
         "print",
         ["p"],
-        "print [*...variable[.member...]]",
-        "Print one or all visible variables, selecting members through pointers"
+        "print [value-path]",
+        "Print variables, indexed values, members, or one bounded range"
     ),
     command!(
         Globals,
@@ -833,9 +833,14 @@ async fn execute_print<'a>(
     let argument = optional_argument(words, usage)?;
     match argument {
         Some(expression) => {
-            let value = debugger
-                .inspect(parse_value_expression(expression, usage)?)
-                .await?;
+            let parsed = parse_value_expression(expression, usage)?;
+            if let Some(range) = parsed.range {
+                let page = debugger.inspect_range(parsed.expression, range).await?;
+                return Ok(Control::Continue(format_value_range(
+                    expression, &page, renderer,
+                )));
+            }
+            let value = debugger.inspect(parsed.expression).await?;
             let output = match value.type_info.as_ref() {
                 Some(type_info) => {
                     format_typed_state_expanded(
@@ -858,25 +863,11 @@ async fn execute_print<'a>(
     }
 }
 
-fn parse_value_expression(expression: &str, usage: &str) -> uscope::Result<ValueExpression> {
-    let explicit_dereferences = expression.bytes().take_while(|byte| *byte == b'*').count();
-    let path = &expression[explicit_dereferences..];
-    // Components are opaque names, not code. Keeping their spelling broad
-    // preserves source-path and linkage selectors without adding evaluation.
-    let components = path.split('.').map(str::to_owned).collect::<Vec<_>>();
-    if path.contains("->")
-        || path.starts_with('&')
-        || components.iter().any(String::is_empty)
-        || path.chars().all(|character| character.is_ascii_digit())
-    {
-        return Err(Error::InvalidCommand(usage.to_owned()));
-    }
-
-    Ok(ValueExpression {
-        components: Arc::from(components),
-        explicit_dereferences: u32::try_from(explicit_dereferences)
-            .map_err(|_| Error::InvalidCommand(usage.to_owned()))?,
-    })
+fn parse_value_expression(
+    expression: &str,
+    usage: &str,
+) -> uscope::Result<uscope::ParsedValueExpression> {
+    uscope::parse_value_expression(expression).map_err(|_| Error::InvalidCommand(usage.to_owned()))
 }
 
 fn optional_argument<'a>(
@@ -1283,6 +1274,44 @@ fn format_typed_state(
         "({}) {} = {value}",
         renderer.paint(Role::Type, &type_info.name),
         renderer.paint(Role::Name, name)
+    )
+}
+
+fn format_value_range(
+    expression: &str,
+    page: &uscope::ValueChildPage,
+    renderer: Renderer,
+) -> String {
+    let values = page
+        .children
+        .iter()
+        .map(|child| {
+            let index = match &child.relationship {
+                uscope::ValueChildRelationship::ArrayElement { indices, .. } => indices
+                    .iter()
+                    .map(i128::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                uscope::ValueChildRelationship::SliceElement { index } => index.to_string(),
+                _ => "?".to_owned(),
+            };
+            let value = match &child.state {
+                VariableState::Available {
+                    value, children, ..
+                } => format_value_summary(&child.type_info, value, children),
+                VariableState::Unavailable(reason) => format!("<unavailable: {reason}>"),
+                VariableState::Malformed(reason) => {
+                    format!("<malformed: {}>", reason.description)
+                }
+            };
+            format!("{index}: {value}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} = [{}]",
+        renderer.paint(Role::Name, expression),
+        renderer.paint(Role::Value, values)
     )
 }
 
@@ -1924,33 +1953,56 @@ mod tests {
         let expression = parse_value_expression("**my_value.first.second.third", "usage")
             .expect("valid structural path");
         assert_eq!(
-            expression.components.as_ref(),
-            ["my_value", "first", "second", "third"]
+            expression.expression.steps.as_ref(),
+            [
+                uscope::ValuePathStep::Named("my_value".to_owned()),
+                uscope::ValuePathStep::Named("first".to_owned()),
+                uscope::ValuePathStep::Named("second".to_owned()),
+                uscope::ValuePathStep::Named("third".to_owned()),
+                uscope::ValuePathStep::Dereference,
+                uscope::ValuePathStep::Dereference,
+            ]
         );
-        assert_eq!(expression.explicit_dereferences, 2);
 
         let qualified = parse_value_expression("one.c::duplicate", "usage")
             .expect("qualified dotted global remains available to root resolution");
-        assert_eq!(qualified.components.as_ref(), ["one", "c::duplicate"]);
-        assert_eq!(qualified.explicit_dereferences, 0);
+        assert_eq!(
+            qualified.expression.steps.as_ref(),
+            [
+                uscope::ValuePathStep::Named("one".to_owned()),
+                uscope::ValuePathStep::Named("c::duplicate".to_owned()),
+            ]
+        );
 
         let package = parse_value_expression("github.com/acme/my-pkg.global", "usage")
             .expect("language-qualified global remains available to root resolution");
         assert_eq!(
-            package.components.as_ref(),
-            ["github", "com/acme/my-pkg", "global"]
+            package.expression.steps.as_ref(),
+            [
+                uscope::ValuePathStep::Named("github".to_owned()),
+                uscope::ValuePathStep::Named("com/acme/my-pkg".to_owned()),
+                uscope::ValuePathStep::Named("global".to_owned()),
+            ]
         );
 
         let template = parse_value_expression("Wrapper<int>::value", "usage")
             .expect("C++-qualified global remains available to root resolution");
-        assert_eq!(template.components.as_ref(), ["Wrapper<int>::value"]);
+        assert_eq!(
+            template.expression.steps.as_ref(),
+            [uscope::ValuePathStep::Named(
+                "Wrapper<int>::value".to_owned()
+            )]
+        );
 
         let source_qualified =
             parse_value_expression("/build/src/9-right.c::right::shared", "usage")
                 .expect("source-qualified global remains available to root resolution");
         assert_eq!(
-            source_qualified.components.as_ref(),
-            ["/build/src/9-right", "c::right::shared"]
+            source_qualified.expression.steps.as_ref(),
+            [
+                uscope::ValuePathStep::Named("/build/src/9-right".to_owned()),
+                uscope::ValuePathStep::Named("c::right::shared".to_owned()),
+            ]
         );
     }
 

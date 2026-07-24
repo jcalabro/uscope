@@ -13,8 +13,8 @@ use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
     InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StopId,
-    ThreadId, UnwindTermination, ValueChildPage, ValueChildrenReference, Variable, VariableQuery,
-    VariableUnavailableReason, VirtualAddress,
+    ThreadId, UnwindTermination, ValueChildPage, ValueChildrenReference, ValuePathStep, Variable,
+    VariableQuery, VariableUnavailableReason, VirtualAddress,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -71,17 +71,12 @@ pub trait VariableInfo: Send + Sync {
 
     /// Inspects one visible local or parameter and follows a structural member
     /// path atomically within one stopped-state validation.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "structural inspection requires explicit frame, path, stop context, and runtime inputs"
-    )]
     fn inspect_path(
         &self,
         address: ImageAddress,
         selected: Option<CodeInstanceId>,
         root: &str,
-        members: &[String],
-        explicit_dereferences: u32,
+        selectors: &[ValuePathStep],
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<InspectedValue>;
@@ -106,8 +101,7 @@ pub trait VariableInfo: Send + Sync {
         &self,
         id: GlobalVariableId,
         address: Option<ImageAddress>,
-        members: &[String],
-        explicit_dereferences: u32,
+        selectors: &[ValuePathStep],
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<InspectedValue>;

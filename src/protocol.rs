@@ -506,6 +506,13 @@ pub enum Request {
         thread_id: ThreadId,
         reply: Reply<crate::InspectedValue>,
     },
+    InspectRange {
+        expression: crate::ValueExpression,
+        range: crate::ValueIndexRange,
+        stop_id: StopId,
+        thread_id: ThreadId,
+        reply: Reply<ValueChildPage>,
+    },
     Dereference {
         reference: DereferenceReference,
         reply: Reply<DereferencedValue>,

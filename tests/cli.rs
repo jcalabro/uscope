@@ -391,10 +391,7 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
         .expect("run uscope");
     let stdout = assert_success(output);
 
-    assert!(
-        stdout.contains("print [*...variable[.member...]]\n"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("print [value-path]\n"), "{stdout}");
     assert!(stdout.contains("aliases: p"), "{stdout}");
     assert!(stdout.contains("  Pause execution"), "{stdout}");
     assert!(!stdout.contains("usage: pause"), "{stdout}");
@@ -440,7 +437,7 @@ fn print_and_p_render_parameters_and_locals() {
     let stdout = assert_success(output);
 
     assert!(
-        stdout.contains("Print one or all visible variables"),
+        stdout.contains("Print variables, indexed values, members, or one bounded range"),
         "{stdout}"
     );
     assert_eq!(stdout.matches("(int) signed_int = -1234567").count(), 2);
@@ -656,6 +653,12 @@ fn print_renders_nested_records_arrays_and_bit_fields() {
             "print *bits",
             "--eval",
             "print *records",
+            "--eval",
+            "print huge_array[1048576]",
+            "--eval",
+            "print huge_array[3..7]",
+            "--eval",
+            "print (*records)[1].values[1]",
         ])
         .arg(executable)
         .output()
@@ -672,6 +675,18 @@ fn print_renders_nested_records_arrays_and_bit_fields() {
         "{stdout}"
     );
     assert!(stdout.contains("values = [43, 44]"), "{stdout}");
+    assert!(
+        stdout.contains("(unsigned char) huge_array[1048576] = 0"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("huge_array[3..7] = [3: 0, 4: 0, 5: 0, 6: 0]"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("(int32_t) (*records)[1].values[1] = 44"),
+        "{stdout}"
+    );
 }
 
 #[test]
