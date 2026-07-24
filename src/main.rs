@@ -28,6 +28,9 @@ use terminal::{
 };
 
 const REPL_PROMPT: &str = "(uscope) ";
+const DEFAULT_HEX_DUMP_BYTES: u64 = 64;
+const MAX_HEX_DUMP_BYTES: u64 = 8 * 1024;
+const HEX_DUMP_BYTES_PER_LINE: usize = 16;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -169,8 +172,8 @@ const COMMANDS: &[CommandSpec] = &[
         Examine,
         "x",
         [],
-        "x <runtime-address>",
-        "Examine one native word"
+        "x <runtime-address> [byte-count]",
+        "Display target memory as hexadecimal bytes and ASCII"
     ),
     command!(
         Address,
@@ -772,13 +775,104 @@ async fn execute_examine<'a>(
     usage: &str,
     renderer: Renderer,
 ) -> uscope::Result<Control> {
-    let address = parse_address(one_argument(words, usage)?)?;
-    let value = debugger.read_word(VirtualAddress::new(address)).await?;
-    Ok(Control::Continue(format!(
-        "{}: {}",
-        renderer.paint(Role::Metadata, format_args!("{address:#018x}")),
-        renderer.paint(Role::Value, format_args!("{value:#018x}"))
-    )))
+    let address = words
+        .next()
+        .ok_or_else(|| Error::InvalidCommand(usage.to_owned()))
+        .and_then(parse_address)?;
+    let byte_count = parse_memory_byte_count(words.next(), usage)?;
+    if words.next().is_some() {
+        return Err(Error::InvalidCommand(usage.to_owned()));
+    }
+    let read = debugger
+        .read_memory(VirtualAddress::new(address), byte_count)
+        .await?;
+    Ok(Control::Continue(format_memory_read(&read, renderer)))
+}
+
+fn parse_memory_byte_count(value: Option<&str>, usage: &str) -> uscope::Result<u64> {
+    let Some(value) = value else {
+        return Ok(DEFAULT_HEX_DUMP_BYTES);
+    };
+    let parsed = value.strip_prefix("0x").map_or_else(
+        || value.parse::<u64>(),
+        |hexadecimal| u64::from_str_radix(hexadecimal, 16),
+    );
+    let parsed = parsed.map_err(|_| Error::InvalidCommand(usage.to_owned()))?;
+    if parsed == 0 || parsed > MAX_HEX_DUMP_BYTES {
+        return Err(Error::InvalidCommand(usage.to_owned()));
+    }
+    Ok(parsed)
+}
+
+fn format_memory_read(read: &uscope::MemoryRead, renderer: Renderer) -> String {
+    let address_width = match read.target.pointer_width {
+        uscope::PointerWidth::Bits32 => 8,
+        uscope::PointerWidth::Bits64 => 16,
+    };
+    let mut output = String::new();
+    for (line_index, bytes) in read.bytes.chunks(HEX_DUMP_BYTES_PER_LINE).enumerate() {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        let offset = u64::try_from(line_index * HEX_DUMP_BYTES_PER_LINE)
+            .expect("bounded hex-dump offset fits u64");
+        let address = read
+            .address
+            .get()
+            .checked_add(offset)
+            .expect("validated memory range cannot overflow");
+        let address = format!("0x{address:0address_width$x}");
+        let mut hexadecimal = String::new();
+        for index in 0..HEX_DUMP_BYTES_PER_LINE {
+            if index == HEX_DUMP_BYTES_PER_LINE / 2 {
+                hexadecimal.push(' ');
+            }
+            match bytes.get(index) {
+                Some(byte) => write!(hexadecimal, "{byte:02x} ")
+                    .expect("writing formatted bytes to a String cannot fail"),
+                None => hexadecimal.push_str("   "),
+            }
+        }
+        let mut ascii = String::with_capacity(HEX_DUMP_BYTES_PER_LINE);
+        for byte in bytes {
+            ascii.push(if (0x20..=0x7e).contains(byte) {
+                char::from(*byte)
+            } else {
+                '.'
+            });
+        }
+        ascii.extend(std::iter::repeat_n(
+            ' ',
+            HEX_DUMP_BYTES_PER_LINE - bytes.len(),
+        ));
+        write!(
+            output,
+            "{}: {} |{}|",
+            renderer.paint(Role::Metadata, address),
+            renderer.paint(Role::Value, hexadecimal),
+            renderer.paint(Role::Value, ascii)
+        )
+        .expect("writing a hex-dump row to a String cannot fail");
+    }
+    if let uscope::MemoryReadCompletion::Incomplete {
+        next_address,
+        reason,
+    } = read.completion
+    {
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        let address = next_address.get();
+        let message = format!(
+            "<incomplete: {reason} at 0x{address:0address_width$x}; read {} of {} bytes>",
+            read.bytes.len(),
+            read.requested
+        );
+        output.push_str(&renderer.paint(Role::Warning, message).to_string());
+    }
+    let limit = usize::try_from(uscope::InspectionLimits::default().output_bytes)
+        .expect("default output limit fits usize");
+    bound_rendered_output(&output, limit)
 }
 
 async fn execute_address<'a>(
@@ -2046,6 +2140,8 @@ fn format_exit_status(status: ExitStatus, renderer: Renderer) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -2218,6 +2314,113 @@ mod tests {
             format_register_bytes(&[0x12, 0x34, 0x56, 0x78], ByteOrder::Big),
             "0x12345678"
         );
+    }
+
+    #[test]
+    fn memory_byte_counts_are_bounded_and_accept_decimal_or_hexadecimal() {
+        assert_eq!(
+            parse_memory_byte_count(None, "usage").expect("default count"),
+            DEFAULT_HEX_DUMP_BYTES
+        );
+        assert_eq!(
+            parse_memory_byte_count(Some("128"), "usage").expect("decimal count"),
+            128
+        );
+        assert_eq!(
+            parse_memory_byte_count(Some("0x80"), "usage").expect("hexadecimal count"),
+            128
+        );
+        for count in ["0", "0x0", "8193", "0x2001", "invalid"] {
+            assert!(
+                matches!(
+                    parse_memory_byte_count(Some(count), "usage"),
+                    Err(Error::InvalidCommand(message)) if message == "usage"
+                ),
+                "accepted invalid byte count {count:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_reads_render_canonical_hex_ascii_rows_and_partial_outcomes() {
+        let target = uscope::TargetDescription {
+            architecture: uscope::Architecture::X86_64,
+            byte_order: uscope::ByteOrder::Little,
+            pointer_width: uscope::PointerWidth::Bits64,
+        };
+        let read = uscope::MemoryRead {
+            revision: 4,
+            stop_id: uscope::StopId::new(3),
+            target,
+            address: VirtualAddress::new(0x1003),
+            requested: 20,
+            bytes: Arc::from([
+                0x20, 0x21, 0x7e, 0x7f, 0x41, 0x00, 0xff, 0x5a, 8, 9, 10, 11, 12, 13, 14, 15, 0x61,
+                0x62, 0x63,
+            ]),
+            completion: uscope::MemoryReadCompletion::Incomplete {
+                next_address: VirtualAddress::new(0x1016),
+                reason: uscope::MemoryReadUnavailableReason::Inaccessible,
+            },
+        };
+
+        assert_eq!(
+            format_memory_read(&read, Renderer::new(false)),
+            concat!(
+                "0x0000000000001003: 20 21 7e 7f 41 00 ff 5a  08 09 0a 0b 0c 0d 0e 0f  | !~.A..Z........|\n",
+                "0x0000000000001013: 61 62 63                                          |abc             |\n",
+                "<incomplete: memory inaccessible at 0x0000000000001016; read 19 of 20 bytes>"
+            )
+        );
+    }
+
+    #[test]
+    fn wholly_inaccessible_memory_reads_render_without_an_empty_data_row() {
+        let read = uscope::MemoryRead {
+            revision: 4,
+            stop_id: uscope::StopId::new(3),
+            target: uscope::TargetDescription {
+                architecture: uscope::Architecture::X86_64,
+                byte_order: uscope::ByteOrder::Little,
+                pointer_width: uscope::PointerWidth::Bits32,
+            },
+            address: VirtualAddress::new(1),
+            requested: 8,
+            bytes: Arc::new([]),
+            completion: uscope::MemoryReadCompletion::Incomplete {
+                next_address: VirtualAddress::new(1),
+                reason: uscope::MemoryReadUnavailableReason::Inaccessible,
+            },
+        };
+
+        assert_eq!(
+            format_memory_read(&read, Renderer::new(false)),
+            "<incomplete: memory inaccessible at 0x00000001; read 0 of 8 bytes>"
+        );
+    }
+
+    #[test]
+    fn largest_cli_memory_read_fits_the_output_budget_with_color() {
+        let read = uscope::MemoryRead {
+            revision: 4,
+            stop_id: uscope::StopId::new(3),
+            target: uscope::TargetDescription {
+                architecture: uscope::Architecture::X86_64,
+                byte_order: uscope::ByteOrder::Little,
+                pointer_width: uscope::PointerWidth::Bits64,
+            },
+            address: VirtualAddress::new(0x1000),
+            requested: MAX_HEX_DUMP_BYTES,
+            bytes: vec![0; usize::try_from(MAX_HEX_DUMP_BYTES).expect("test size fits")].into(),
+            completion: uscope::MemoryReadCompletion::Complete,
+        };
+
+        let rendered = format_memory_read(&read, Renderer::new(true));
+        let output_limit = usize::try_from(uscope::InspectionLimits::default().output_bytes)
+            .expect("default output limit fits");
+        assert!(rendered.len() <= output_limit);
+        assert!(!rendered.contains(OUTPUT_TRUNCATION_MARKER));
+        assert_eq!(rendered.lines().count(), 512);
     }
 
     #[test]

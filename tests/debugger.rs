@@ -2666,6 +2666,68 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
 }
 
 #[tokio::test]
+async fn raw_memory_reads_publish_prefixes_at_unmapped_boundaries() {
+    for fixture in ["pointer-memory-gcc-o0", "pointer-memory-clang-o0"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspect_boundaries").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let boundary_array = scenario
+            .operation(
+                "inspect boundary array pointer",
+                scenario.handle().variable("boundary_array"),
+            )
+            .await;
+        let boundary_address = match available_value(&boundary_array.state) {
+            uscope::VariableValue::Address(value) => value.address,
+            value => panic!("{fixture}: boundary array was not an address: {value:?}"),
+        };
+        let readable_prefix = scenario
+            .operation(
+                "read memory across an unmapped boundary",
+                scenario.handle().read_memory(boundary_address, 16),
+            )
+            .await;
+        assert_eq!(
+            readable_prefix.bytes.as_ref(),
+            [41_i32.to_le_bytes(), 42_i32.to_le_bytes()].concat()
+        );
+        assert_eq!(
+            readable_prefix.completion,
+            uscope::MemoryReadCompletion::Incomplete {
+                next_address: VirtualAddress::new(boundary_address.get() + 8),
+                reason: uscope::MemoryReadUnavailableReason::Inaccessible,
+            }
+        );
+
+        let inaccessible_address = VirtualAddress::new(boundary_address.get() + 8);
+        let inaccessible = scenario
+            .operation(
+                "read wholly inaccessible memory",
+                scenario.handle().read_memory(inaccessible_address, 8),
+            )
+            .await;
+        assert!(inaccessible.bytes.is_empty(), "{inaccessible:?}");
+        assert_eq!(
+            inaccessible.completion,
+            uscope::MemoryReadCompletion::Incomplete {
+                next_address: inaccessible_address,
+                reason: uscope::MemoryReadUnavailableReason::Inaccessible,
+            }
+        );
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn value_child_pages_are_arbitrary_repeatable_bounded_and_stop_scoped() {
     for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
@@ -6834,6 +6896,95 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
         StopReason::Exited(ExitStatus::Code(0))
     );
 
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn raw_memory_reads_are_bounded_stop_scoped_and_hide_breakpoints() {
+    let mut scenario = Scenario::new("raw memory", Scenario::fixture("basic"));
+    scenario.add_breakpoint("breakpoint_target").await;
+    let first_address = match scenario.run_to_stop().await {
+        StopReason::Breakpoint { address } => address,
+        other => panic!("expected breakpoint, got {other:?}"),
+    };
+    let value_address = scenario
+        .operation(
+            "resolve uscope_value",
+            scenario.handle().runtime_address("uscope_value"),
+        )
+        .await;
+    let stopped = scenario.snapshot().await;
+
+    let value_bytes = scenario
+        .operation(
+            "read uscope_value bytes",
+            scenario.handle().read_memory(value_address, 8),
+        )
+        .await;
+    assert_eq!(
+        value_bytes.bytes.as_ref(),
+        0x1122_3344_5566_7788_u64.to_le_bytes()
+    );
+    assert_eq!(
+        value_bytes.completion,
+        uscope::MemoryReadCompletion::Complete
+    );
+    assert_eq!(value_bytes.revision, scenario.last_revision());
+    assert_eq!(Some(value_bytes.stop_id), stopped.stop_id);
+    assert_eq!(
+        value_bytes.target,
+        scenario.handle().module_image().target()
+    );
+
+    let breakpoint_bytes = scenario
+        .operation(
+            "read logical breakpoint bytes",
+            scenario.handle().read_memory(first_address, 1),
+        )
+        .await;
+    assert_eq!(
+        breakpoint_bytes.completion,
+        uscope::MemoryReadCompletion::Complete
+    );
+    assert_ne!(
+        breakpoint_bytes.bytes.as_ref(),
+        [0xcc],
+        "the installed trap leaked through the logical memory API"
+    );
+
+    let empty = scenario
+        .operation(
+            "read an empty memory range",
+            scenario.handle().read_memory(value_address, 0),
+        )
+        .await;
+    assert!(empty.bytes.is_empty());
+    assert_eq!(empty.completion, uscope::MemoryReadCompletion::Complete);
+    assert!(matches!(
+        scenario.handle().read_memory(value_address, 65_537).await,
+        Err(Error::MemoryReadTooLarge {
+            requested: 65_537,
+            maximum: 65_536,
+        })
+    ));
+    assert!(matches!(
+        scenario
+            .handle()
+            .read_memory(VirtualAddress::new(u64::MAX), 1)
+            .await,
+        Err(Error::AddressOverflow)
+    ));
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint {
+            address: first_address
+        }
+    );
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
     scenario.shutdown().await;
 }
 

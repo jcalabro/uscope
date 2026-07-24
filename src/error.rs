@@ -101,6 +101,8 @@ pub enum Error {
     UnclassifiableStop,
     #[error("address arithmetic overflow")]
     AddressOverflow,
+    #[error("memory read of {requested} bytes exceeds the {maximum}-byte limit")]
+    MemoryReadTooLarge { requested: u64, maximum: u64 },
     #[error("address is outside the loaded module")]
     AddressOutsideModule,
     #[error("the stopped location is unavailable")]
