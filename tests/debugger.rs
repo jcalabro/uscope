@@ -1,6 +1,7 @@
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use uscope::{
     Architecture, BreakpointLocation, ByteOrder, CodeInstanceKind, Debugger, EntryProvenance,
@@ -87,8 +88,19 @@ fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
     edges
 }
 
-#[test]
-fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
+async fn load_fixture_image(fixture: &str) -> Arc<ModuleImage> {
+    let debugger = Debugger::new(Scenario::fixture(fixture))
+        .unwrap_or_else(|error| panic!("load {fixture} metadata: {error}"));
+    let image = Arc::clone(debugger.handle().module_image());
+    debugger
+        .shutdown()
+        .await
+        .unwrap_or_else(|error| panic!("shut down {fixture} metadata session: {error}"));
+    image
+}
+
+#[tokio::test]
+async fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
     for fixture in [
         "variables-gcc-o0",
         "variables-clang-o0",
@@ -102,9 +114,7 @@ fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
         "types-cpp-gcc-dwarf4",
         "types-cpp-gcc-dwarf5",
     ] {
-        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load type graph");
-        let handle = debugger.handle();
-        let image = handle.module_image();
+        let image = load_fixture_image(fixture).await;
         assert!(!image.types().is_empty(), "{fixture}");
         for (index, node) in image.types().iter().enumerate() {
             let reference = node.reference();
@@ -131,17 +141,15 @@ fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
     }
 }
 
-#[test]
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "one compiler-language matrix keeps the cross-language semantic contract visible"
 )]
-fn normalized_named_types_and_modifiers_preserve_language_semantics() {
+async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
-        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load C types");
-        let handle = debugger.handle();
-        let resolved = handle
-            .module_image()
+        let image = load_fixture_image(fixture).await;
+        let resolved = image
             .types()
             .iter()
             .filter_map(|node| match node {
@@ -185,33 +193,26 @@ fn normalized_named_types_and_modifiers_preserve_language_semantics() {
     }
 
     for fixture in ["variables-cpp-gcc-o0", "variables-cpp-clang-o0"] {
-        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load C++ types");
+        let image = load_fixture_image(fixture).await;
         assert!(
-            debugger
-                .handle()
-                .module_image()
-                .types()
-                .iter()
-                .any(|node| matches!(
-                    node,
-                    uscope::TypeNode::Resolved(uscope::TypeInfo {
-                        name,
-                        kind: uscope::TypeKind::Named {
-                            target: Some(_),
-                            relationship: uscope::NamedTypeRelationship::Synonym,
-                        },
-                        ..
-                    }) if name.as_ref() == "aliased_int"
-                )),
+            image.types().iter().any(|node| matches!(
+                node,
+                uscope::TypeNode::Resolved(uscope::TypeInfo {
+                    name,
+                    kind: uscope::TypeKind::Named {
+                        target: Some(_),
+                        relationship: uscope::NamedTypeRelationship::Synonym,
+                    },
+                    ..
+                }) if name.as_ref() == "aliased_int"
+            )),
             "{fixture}: C++ alias was not normalized as a synonym"
         );
     }
 
     for fixture in ["types-c-gcc-o0", "types-c-clang-o0"] {
-        let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load C modifiers");
-        let modifiers = debugger
-            .handle()
-            .module_image()
+        let image = load_fixture_image(fixture).await;
+        let modifiers = image
             .types()
             .iter()
             .filter_map(|node| match node {
@@ -235,27 +236,21 @@ fn normalized_named_types_and_modifiers_preserve_language_semantics() {
         }
     }
 
-    let go = Debugger::new(Scenario::fixture("variables-go-o0")).expect("load Go types");
+    let go = load_fixture_image("variables-go-o0").await;
     assert!(
-        go.handle()
-            .module_image()
-            .types()
-            .iter()
-            .any(|node| matches!(
-                node,
-                uscope::TypeNode::Resolved(uscope::TypeInfo {
-                    kind: uscope::TypeKind::Named {
-                        relationship: uscope::NamedTypeRelationship::Distinct,
-                        target: Some(_),
-                    },
-                    ..
-                })
-            )),
+        go.types().iter().any(|node| matches!(
+            node,
+            uscope::TypeNode::Resolved(uscope::TypeInfo {
+                kind: uscope::TypeKind::Named {
+                    relationship: uscope::NamedTypeRelationship::Distinct,
+                    target: Some(_),
+                },
+                ..
+            })
+        )),
         "Go definitions must retain distinct identity"
     );
-    let go_handle = go.handle();
-    let go_names = go_handle
-        .module_image()
+    let go_names = go
         .types()
         .iter()
         .filter_map(|node| match node {
@@ -277,35 +272,27 @@ fn normalized_named_types_and_modifiers_preserve_language_semantics() {
         !go_names.iter().any(|name| name.contains("scalarAlias")),
         "Go source aliases erased by the producer must not be reconstructed: {go_names:?}"
     );
-    drop(go_handle);
     drop(go);
 
-    let zig = Debugger::new(Scenario::fixture("variables-zig-o0")).expect("load Zig types");
+    let zig = load_fixture_image("variables-zig-o0").await;
     assert!(
-        zig.handle()
-            .module_image()
-            .types()
-            .iter()
-            .any(|node| matches!(
-                node,
-                uscope::TypeNode::Resolved(uscope::TypeInfo {
-                    kind: uscope::TypeKind::Named {
-                        relationship: uscope::NamedTypeRelationship::Encoding,
-                        target: Some(_),
-                    },
-                    ..
-                })
-            )),
+        zig.types().iter().any(|node| matches!(
+            node,
+            uscope::TypeNode::Resolved(uscope::TypeInfo {
+                kind: uscope::TypeKind::Named {
+                    relationship: uscope::NamedTypeRelationship::Encoding,
+                    target: Some(_),
+                },
+                ..
+            })
+        )),
         "Zig producer wrappers must be identified as encodings"
     );
     drop(zig);
 
-    let rust = Debugger::new(Scenario::fixture("variables-rust-o0")).expect("load Rust types");
-    let rust_handle = rust.handle();
+    let rust = load_fixture_image("variables-rust-o0").await;
     assert!(
-        rust_handle
-            .module_image()
-            .types()
+        rust.types()
             .iter()
             .filter_map(|node| match node {
                 uscope::TypeNode::Resolved(info) => Some(info.name.as_ref()),
