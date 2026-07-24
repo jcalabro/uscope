@@ -1285,26 +1285,14 @@ fn format_value_range(
     let values = page
         .children
         .iter()
-        .map(|child| {
-            let index = match &child.relationship {
-                uscope::ValueChildRelationship::ArrayElement { indices, .. } => indices
-                    .iter()
-                    .map(i128::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
-                uscope::ValueChildRelationship::SliceElement { index } => index.to_string(),
-                _ => "?".to_owned(),
-            };
-            let value = match &child.state {
-                VariableState::Available {
-                    value, children, ..
-                } => format_value_summary(&child.type_info, value, children),
-                VariableState::Unavailable(reason) => format!("<unavailable: {reason}>"),
-                VariableState::Malformed(reason) => {
-                    format!("<malformed: {}>", reason.description)
-                }
-            };
-            format!("{index}: {value}")
+        .map(|child| match &child.state {
+            VariableState::Available {
+                value, children, ..
+            } => format_value_summary(&child.type_info, value, children),
+            VariableState::Unavailable(reason) => format!("<unavailable: {reason}>"),
+            VariableState::Malformed(reason) => {
+                format!("<malformed: {}>", reason.description)
+            }
         })
         .collect::<Vec<_>>()
         .join(", ");
