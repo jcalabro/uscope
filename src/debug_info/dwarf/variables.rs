@@ -5,7 +5,11 @@ use std::sync::Arc;
 
 use gimli::{EvaluationResult, Location, Reader as _, RunTimeEndian, Value};
 
-use super::{DieKey, DwarfError, Reader, die_reference, source_file_id, source_path};
+use super::{
+    DieKey, DwarfError, Reader, TypeSignatures, UnitCatalog, die_reference,
+    die_reference_with_signatures, is_type_unit, source_file_id, source_path,
+    type_unit_source_file_id,
+};
 use crate::debug_info::{VariableContext, VariableInfo, VariableRuntime};
 use crate::model::ArrayDimension;
 use crate::{
@@ -14,13 +18,13 @@ use crate::{
     ColumnNumber, DereferenceReference, DereferenceState, DereferenceUnavailableReason,
     DereferencedValue, EnumerationOrigin, Enumerator, Error, FloatValue, GlobalVariableId,
     GlobalVariableInfo, GlobalVariableType, GlobalVariableVisibility, ImageAddress, InspectedValue,
-    InspectionLimit, IntegerValue, LineNumber, ModuleImageId, RecordKind, RecordMember,
-    RecordMemberLayout, RecordMemberValue, ReferenceKind, Result, ScalarValue, SourceFile,
-    SourceFileId, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeKind, TypeQualifier,
-    TypeReference, ValueGraph, ValueNode, ValueNodeId, ValueNodeState, Variable, VariableKind,
-    VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
-    VariableValue, VariableValueSource, Variant, VariantDiscriminant, VariantSelection,
-    VariantSelector, VariantStorageKind, VirtualAddress,
+    InspectionLimit, IntegerValue, LineNumber, ModuleImageId, NamedTypeRelationship, RecordKind,
+    RecordMember, RecordMemberLayout, RecordMemberValue, ReferenceKind, Result, ScalarValue,
+    SourceFile, SourceFileId, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeKind,
+    TypeModifier, TypeNode, TypeReference, ValueGraph, ValueNode, ValueNodeId, ValueNodeState,
+    Variable, VariableKind, VariableMalformedReason, VariableQuery, VariableState,
+    VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
+    VariantSelection, VariantSelector, VariantStorageKind, VirtualAddress,
 };
 
 const MAX_SCALAR_BYTES: u64 = 16;
@@ -189,7 +193,7 @@ enum TypeResolution {
     Malformed(Arc<str>),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum TypeEntry {
     Building,
     Resolved(TypeInfo),
@@ -214,13 +218,19 @@ fn variant_metadata_limit_type(
 struct TypeArenaBuilder<'a, 'data> {
     dwarf: &'a gimli::Dwarf<Reader<'data>>,
     units: &'a [gimli::Unit<Reader<'data>>],
+    type_signatures: &'a TypeSignatures,
     image: ModuleImageId,
     by_die: HashMap<DieKey, TypeId>,
+    type_definitions: HashMap<DieKey, DieKey>,
+    ambiguous_type_declarations: HashSet<DieKey>,
     entries: Vec<TypeEntry>,
     /// DIE-boundary offsets per unit, indexed by unit position. A `DW_AT_type`
     /// offset that is not in its unit's set points into the middle of a DIE and
     /// is defective. Built once so target validation stays O(1) per reference.
     die_offsets: Vec<HashSet<usize>>,
+    unit_languages: Vec<Option<gimli::DwLang>>,
+    zig_units: Vec<bool>,
+    explicit_names: HashSet<TypeId>,
     resolution_depth: usize,
     byte_order: ByteOrder,
     limit_type: Option<TypeId>,
@@ -497,7 +507,7 @@ pub(super) struct DwarfVariableInfo {
     address_index: BTreeMap<ImageAddress, Arc<[usize]>>,
     globals: Arc<[usize]>,
     evaluation_units: Arc<[EvaluationUnit]>,
-    types: Arc<[TypeEntry]>,
+    types: Arc<[TypeNode]>,
     dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
     objects_by_debug_offset: HashMap<u64, usize>,
     target: TargetDescription,
@@ -507,6 +517,7 @@ pub(super) struct DwarfVariableInfo {
 pub(super) struct LoadedVariables {
     pub info: Arc<dyn VariableInfo>,
     pub globals: Vec<GlobalVariableInfo>,
+    pub types: Arc<[crate::TypeNode]>,
 }
 
 #[derive(Clone, Default)]
@@ -580,6 +591,9 @@ fn load_globals<'data>(
     // Pass one records lexical ownership for every DIE. A later definition
     // may point backward to a declaration nested in a namespace or class.
     for (unit_index, unit) in units.iter().enumerate() {
+        if is_type_unit(unit) {
+            continue;
+        }
         let mut entries = unit.entries();
         let mut scopes = Vec::<GlobalScope>::new();
         while let Some(entry) = entries.next_dfs()? {
@@ -628,6 +642,9 @@ fn load_globals<'data>(
 
     // Pass two resolves every non-routine data object independently.
     for (unit_index, unit) in units.iter().enumerate() {
+        if is_type_unit(unit) {
+            continue;
+        }
         let mut entries = unit.entries();
         while let Some(entry) = entries.next_dfs()? {
             if entry.tag() != gimli::DW_TAG_variable {
@@ -858,18 +875,25 @@ const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {
 )]
 pub(super) fn load_variable_info<'data>(
     dwarf: &gimli::Dwarf<Reader<'data>>,
-    units: &[gimli::Unit<Reader<'data>>],
+    catalog: &UnitCatalog<'data>,
     target: TargetDescription,
     image_id: ModuleImageId,
     instance_ids: &HashMap<DieKey, CodeInstanceId>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> std::result::Result<LoadedVariables, DwarfError> {
+    let units = catalog.units.as_slice();
     let mut objects = Vec::new();
     let mut functions = Vec::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
-    let mut types = TypeArenaBuilder::new(dwarf, units, image_id, target.byte_order);
+    let mut types = TypeArenaBuilder::new(
+        dwarf,
+        units,
+        &catalog.type_signatures,
+        image_id,
+        target.byte_order,
+    );
     let (globals, global_objects) = load_globals(
         dwarf,
         units,
@@ -881,6 +905,9 @@ pub(super) fn load_variable_info<'data>(
     )?;
 
     for (unit_index, unit) in units.iter().enumerate() {
+        if is_type_unit(unit) {
+            continue;
+        }
         let mut entries = unit.entries();
         let mut scopes = Vec::<Option<Scope>>::new();
 
@@ -1088,6 +1115,28 @@ pub(super) fn load_variable_info<'data>(
         .collect();
     types.populate_go_named_constants();
     types.populate_record_member_declarations(source_files, source_file_ids);
+    types.finalize_type_graph();
+    let finalized_types = std::mem::take(&mut types.entries)
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| match entry {
+            TypeEntry::Resolved(info) => TypeNode::Resolved(info),
+            TypeEntry::Malformed(description) => TypeNode::Malformed {
+                reference: TypeReference {
+                    image: image_id,
+                    id: TypeId::new(u32::try_from(index).expect("type count fits u32")),
+                },
+                description,
+            },
+            TypeEntry::Building => TypeNode::Malformed {
+                reference: TypeReference {
+                    image: image_id,
+                    id: TypeId::new(u32::try_from(index).expect("type count fits u32")),
+                },
+                description: "type graph did not finish building".into(),
+            },
+        })
+        .collect::<Arc<[_]>>();
     Ok(LoadedVariables {
         info: Arc::new(DwarfVariableInfo {
             objects: objects.into(),
@@ -1098,7 +1147,7 @@ pub(super) fn load_variable_info<'data>(
                 .collect(),
             globals: global_objects.into(),
             evaluation_units: evaluation_units.into(),
-            types: types.entries.into(),
+            types: Arc::clone(&finalized_types),
             dynamic_record_layouts: types.dynamic_record_layouts,
             objects_by_debug_offset,
             target,
@@ -1108,6 +1157,7 @@ pub(super) fn load_variable_info<'data>(
             },
         }),
         globals,
+        types: finalized_types,
     })
 }
 
@@ -1347,8 +1397,13 @@ fn declaration_with_origins<'data>(
         return Ok(None);
     };
     let path = source_path(dwarf, file_unit, program.header(), file)?;
+    let file = if is_type_unit(file_unit) {
+        type_unit_source_file_id(path, source_files, source_file_ids)
+    } else {
+        source_file_id(path, source_files, source_file_ids)
+    };
     Ok(Some(SourceLocation {
-        file: source_file_id(path, source_files, source_file_ids),
+        file,
         line,
         column: dies
             .iter()
@@ -2021,27 +2076,73 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     fn new(
         dwarf: &'a gimli::Dwarf<Reader<'data>>,
         units: &'a [gimli::Unit<Reader<'data>>],
+        type_signatures: &'a TypeSignatures,
         image: ModuleImageId,
         byte_order: ByteOrder,
     ) -> Self {
-        let die_offsets: Vec<HashSet<usize>> = units
-            .iter()
-            .map(|unit| {
-                let mut offsets = HashSet::new();
-                let mut entries = unit.entries();
-                while let Ok(Some(entry)) = entries.next_dfs() {
-                    offsets.insert(entry.offset().0);
+        let mut die_offsets = Vec::with_capacity(units.len());
+        let mut unit_languages = Vec::with_capacity(units.len());
+        let mut zig_units = Vec::with_capacity(units.len());
+        let mut type_definitions = HashMap::new();
+        let mut ambiguous_type_declarations = HashSet::new();
+        for (unit_index, unit) in units.iter().enumerate() {
+            let mut offsets = HashSet::new();
+            let mut language = None;
+            let mut zig_producer = false;
+            let mut first = true;
+            let mut entries = unit.entries();
+            while let Ok(Some(entry)) = entries.next_dfs() {
+                offsets.insert(entry.offset().0);
+                if first {
+                    first = false;
+                    language = match entry.attr_value(gimli::DW_AT_language) {
+                        Some(gimli::AttributeValue::Language(language)) => Some(language),
+                        _ => None,
+                    };
+                    zig_producer = entry
+                        .attr_value(gimli::DW_AT_producer)
+                        .and_then(|value| dwarf.attr_string(unit, value).ok())
+                        .is_some_and(|producer| producer.to_string_lossy().starts_with("zig "));
                 }
-                offsets
-            })
-            .collect();
+                if !is_type_die_tag(entry.tag()) {
+                    continue;
+                }
+                let Ok(Some(declaration)) = die_reference_with_signatures(
+                    entry.attr_value(gimli::DW_AT_specification),
+                    unit_index,
+                    units,
+                    type_signatures,
+                ) else {
+                    continue;
+                };
+                let definition = DieKey {
+                    unit: unit_index,
+                    offset: entry.offset().0,
+                };
+                if type_definitions
+                    .insert(declaration, definition)
+                    .is_some_and(|existing| existing != definition)
+                {
+                    ambiguous_type_declarations.insert(declaration);
+                }
+            }
+            die_offsets.push(offsets);
+            unit_languages.push(language);
+            zig_units.push(zig_producer);
+        }
         Self {
             dwarf,
             units,
+            type_signatures,
             image,
             by_die: HashMap::new(),
+            type_definitions,
+            ambiguous_type_declarations,
             entries: Vec::new(),
             die_offsets,
+            unit_languages,
+            zig_units,
+            explicit_names: HashSet::new(),
             resolution_depth: 0,
             byte_order,
             limit_type: None,
@@ -2056,7 +2157,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         unit_index: usize,
         value: Option<gimli::AttributeValue<Reader<'data>>>,
     ) -> TypeResolution {
-        let key = match die_reference(value, unit_index, self.units) {
+        let key = match die_reference_with_signatures(
+            value,
+            unit_index,
+            self.units,
+            self.type_signatures,
+        ) {
             Ok(Some(key)) => key,
             Ok(None) => return TypeResolution::Malformed("variable has no type".into()),
             Err(error) => return TypeResolution::Malformed(error.to_string().into()),
@@ -2079,21 +2185,27 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if let Some(id) = self.by_die.get(&key) {
             return *id;
         }
-        if self.entries.len() >= MAX_TYPES {
-            let id = if let Some(id) = self.limit_type {
-                id
-            } else {
+        match self.canonical_type_key(key) {
+            Ok(canonical) if canonical != key => {
+                let id = self.resolve(canonical);
+                self.by_die.insert(key, id);
+                return id;
+            }
+            Ok(_) => {}
+            Err(reason) => {
+                if self.entries.len() >= MAX_TYPES {
+                    return self.type_limit(key);
+                }
                 let id = TypeId::new(
                     u32::try_from(self.entries.len()).expect("bounded type count fits u32"),
                 );
-                self.entries.push(TypeEntry::Malformed(
-                    "type graph exceeds its work limit".into(),
-                ));
-                self.limit_type = Some(id);
-                id
-            };
-            self.by_die.insert(key, id);
-            return id;
+                self.by_die.insert(key, id);
+                self.entries.push(TypeEntry::Malformed(reason));
+                return id;
+            }
+        }
+        if self.entries.len() >= MAX_TYPES {
+            return self.type_limit(key);
         }
         let id =
             TypeId::new(u32::try_from(self.entries.len()).expect("bounded type count fits u32"));
@@ -2109,6 +2221,53 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         self.resolution_depth -= 1;
         self.entries[usize::try_from(id.get()).expect("type ID fits usize")] = entry;
         id
+    }
+
+    fn type_limit(&mut self, key: DieKey) -> TypeId {
+        let id = if let Some(id) = self.limit_type {
+            id
+        } else {
+            let id = TypeId::new(u32::try_from(self.entries.len()).expect("type count fits u32"));
+            self.entries.push(TypeEntry::Malformed(
+                "type graph exceeds its work limit".into(),
+            ));
+            self.limit_type = Some(id);
+            id
+        };
+        self.by_die.insert(key, id);
+        id
+    }
+
+    fn canonical_type_key(&self, key: DieKey) -> std::result::Result<DieKey, Arc<str>> {
+        let mut current = key;
+        let mut visited = HashSet::new();
+        while visited.insert(current) {
+            if self.ambiguous_type_declarations.contains(&current) {
+                return Err("type declaration has multiple definitions".into());
+            }
+            if let Some(definition) = self.type_definitions.get(&current).copied() {
+                current = definition;
+                continue;
+            }
+            let Some(unit) = self.units.get(current.unit) else {
+                return Err("type reference is outside loaded units".into());
+            };
+            let entry = unit
+                .entry(gimli::UnitOffset(current.offset))
+                .map_err(|error| Arc::from(error.to_string()))?;
+            let Some(signature) = entry.attr_value(gimli::DW_AT_signature) else {
+                return Ok(current);
+            };
+            current = die_reference_with_signatures(
+                Some(signature),
+                current.unit,
+                self.units,
+                self.type_signatures,
+            )
+            .map_err(|error| Arc::from(error.to_string()))?
+            .ok_or_else(|| Arc::from("type declaration signature has no definition"))?;
+        }
+        Err("type declaration/definition references form a cycle".into())
     }
 
     #[expect(
@@ -2147,10 +2306,18 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             image: self.image,
             id,
         };
-        let explicit_name = match copy_name(self.dwarf, unit, &entry) {
-            Ok(name) => name,
+        let origins = match origin_chain(self.units, key.unit, &entry) {
+            Ok(origins) => origins,
             Err(error) => return TypeEntry::Malformed(error.to_string().into()),
         };
+        let explicit_name =
+            match copy_name_with_origins(self.dwarf, self.units, unit, &entry, &origins) {
+                Ok(name) => name,
+                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+            };
+        if explicit_name.is_some() {
+            self.explicit_names.insert(id);
+        }
         // Validate the tag's mandatory attributes before classifying the byte
         // size. A dynamic or oversized size returns a terminal entry early, so
         // without this a defective encoding or missing target would be masked as
@@ -2217,11 +2384,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 self.build_union_type(&entry, key.unit, reference, explicit_name, explicit_size)
             }
             gimli::DW_TAG_typedef
+            | gimli::DW_TAG_template_alias
             | gimli::DW_TAG_const_type
             | gimli::DW_TAG_volatile_type
             | gimli::DW_TAG_restrict_type
             | gimli::DW_TAG_atomic_type
-            | gimli::DW_TAG_immutable_type => {
+            | gimli::DW_TAG_immutable_type
+            | gimli::DW_TAG_packed_type
+            | gimli::DW_TAG_shared_type => {
                 self.build_wrapper_type(&entry, key.unit, reference, explicit_name, explicit_size)
             }
             gimli::DW_TAG_unspecified_type => TypeEntry::Resolved(TypeInfo {
@@ -2299,8 +2469,19 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     "reference type",
                     TargetRequirement::Required,
                 ),
-            gimli::DW_TAG_typedef
-            | gimli::DW_TAG_const_type
+            gimli::DW_TAG_typedef | gimli::DW_TAG_template_alias => {
+                let declaration = match strict_flag(entry, gimli::DW_AT_declaration) {
+                    Ok(declaration) => declaration,
+                    Err(reason) => return Some(reason),
+                };
+                self.target_defect(
+                    entry,
+                    unit_index,
+                    "named type",
+                    named_type_target_requirement(declaration),
+                )
+            }
+            gimli::DW_TAG_const_type
             | gimli::DW_TAG_volatile_type
             | gimli::DW_TAG_restrict_type
             | gimli::DW_TAG_atomic_type
@@ -2334,7 +2515,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         kind: &str,
         requirement: TargetRequirement,
     ) -> Option<Arc<str>> {
-        match die_reference(entry.attr_value(gimli::DW_AT_type), unit_index, self.units) {
+        match die_reference_with_signatures(
+            entry.attr_value(gimli::DW_AT_type),
+            unit_index,
+            self.units,
+            self.type_signatures,
+        ) {
             Ok(Some(key)) => {
                 // The offset must be a DIE boundary, not merely a byte offset
                 // that happens to decode; otherwise a dangling reference could
@@ -2473,7 +2659,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 TypeKind::Enumeration { representation, .. } => {
                     return Ok(representation.clone());
                 }
-                TypeKind::Qualified { target, .. } | TypeKind::Alias { target } => {
+                TypeKind::Modified { target, .. }
+                | TypeKind::Named {
+                    target: Some(target),
+                    ..
+                } => {
                     current = target.id;
                 }
                 TypeKind::Base(_) => {
@@ -2676,14 +2866,19 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
     ) -> std::result::Result<Option<TypeReference>, Arc<str>> {
-        die_reference(entry.attr_value(gimli::DW_AT_type), unit_index, self.units)
-            .map(|key| {
-                key.map(|key| TypeReference {
-                    image: self.image,
-                    id: self.resolve(key),
-                })
+        die_reference_with_signatures(
+            entry.attr_value(gimli::DW_AT_type),
+            unit_index,
+            self.units,
+            self.type_signatures,
+        )
+        .map(|key| {
+            key.map(|key| TypeReference {
+                image: self.image,
+                id: self.resolve(key),
             })
-            .map_err(|error| error.to_string().into())
+        })
+        .map_err(|error| error.to_string().into())
     }
 
     fn target_with_origins(
@@ -2703,7 +2898,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 })
             })
             .map_or((unit_index, None), |(owner, value)| (owner, Some(value)));
-        die_reference(value, owner, self.units)
+        die_reference_with_signatures(value, owner, self.units, self.type_signatures)
             .map(|key| {
                 key.map(|key| TypeReference {
                     image: self.image,
@@ -2734,9 +2929,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 if entry.tag() != gimli::DW_TAG_constant {
                     continue;
                 }
-                let Ok(Some(key)) =
-                    die_reference(entry.attr_value(gimli::DW_AT_type), unit_index, self.units)
-                else {
+                let Ok(Some(key)) = die_reference_with_signatures(
+                    entry.attr_value(gimli::DW_AT_type),
+                    unit_index,
+                    self.units,
+                    self.type_signatures,
+                ) else {
                     continue;
                 };
                 let target = self.resolve(key);
@@ -2927,6 +3125,157 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .unwrap_or_else(|| Arc::from("<recursive type>"))
     }
 
+    fn finalize_type_graph(&mut self) {
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if matches!(entry, TypeEntry::Building) {
+                *entry = TypeEntry::Malformed(
+                    format!("type graph node {index} did not finish building").into(),
+                );
+            }
+        }
+
+        propagate_wrapper_sizes(&mut self.entries);
+
+        self.reject_inline_storage_cycles();
+
+        #[expect(
+            clippy::needless_collect,
+            reason = "name rendering borrows the complete graph immutably before names are replaced"
+        )]
+        let names = (0..self.entries.len())
+            .map(|index| {
+                let id = TypeId::new(u32::try_from(index).expect("bounded type count fits u32"));
+                self.render_type_name(id, &mut HashSet::new())
+            })
+            .collect::<Vec<_>>();
+        for (index, name) in names.into_iter().enumerate() {
+            if self.explicit_names.contains(&TypeId::new(
+                u32::try_from(index).expect("bounded type count fits u32"),
+            )) {
+                continue;
+            }
+            if let Some(TypeEntry::Resolved(info)) = self.entries.get_mut(index) {
+                info.name = name;
+            }
+        }
+    }
+
+    fn reject_inline_storage_cycles(&mut self) {
+        let description: Arc<str> = "type graph contains an inline-storage cycle".into();
+        for node in inline_storage_cycle_nodes(&self.entries) {
+            self.entries[node] = TypeEntry::Malformed(Arc::clone(&description));
+        }
+    }
+
+    fn render_type_name(&self, id: TypeId, visiting: &mut HashSet<TypeId>) -> Arc<str> {
+        if !visiting.insert(id) {
+            return Arc::from(format!("<type #{}>", id.get()));
+        }
+        let Some(TypeEntry::Resolved(info)) = self
+            .entries
+            .get(usize::try_from(id.get()).expect("type ID fits usize"))
+        else {
+            visiting.remove(&id);
+            return Arc::from(format!("<type #{}>", id.get()));
+        };
+        if self.explicit_names.contains(&id) {
+            visiting.remove(&id);
+            return Arc::clone(&info.name);
+        }
+
+        let rendered = match &info.kind {
+            TypeKind::Pointer { target, .. } => target.as_ref().map_or_else(
+                || Arc::from("void *"),
+                |target| {
+                    let target_name = self.render_type_name(target.id, visiting);
+                    Arc::from(self.indirection_type_name(target.id, &target_name, "*"))
+                },
+            ),
+            TypeKind::Reference { kind, target, .. } => {
+                let target_name = self.render_type_name(target.id, visiting);
+                Arc::from(self.indirection_type_name(
+                    target.id,
+                    &target_name,
+                    if *kind == ReferenceKind::Lvalue {
+                        "&"
+                    } else {
+                        "&&"
+                    },
+                ))
+            }
+            TypeKind::Array {
+                element,
+                dimensions,
+            } => {
+                let mut name = self.render_type_name(element.id, visiting).to_string();
+                for dimension in dimensions.iter() {
+                    use std::fmt::Write;
+                    let _ = write!(name, "[{}]", dimension.count);
+                }
+                Arc::from(name)
+            }
+            TypeKind::Modified { modifier, target } => {
+                let target_name = self.render_type_name(target.id, visiting);
+                let target_is_indirection = self.modified_target_is_indirection(target.id);
+                Arc::from(modifier_type_name(
+                    *modifier,
+                    &target_name,
+                    target_is_indirection,
+                ))
+            }
+            TypeKind::Named {
+                target: Some(target),
+                ..
+            } => self.render_type_name(target.id, visiting),
+            _ => Arc::clone(&info.name),
+        };
+        visiting.remove(&id);
+        rendered
+    }
+
+    fn modified_target_is_indirection(&self, start: TypeId) -> bool {
+        let mut current = start;
+        let mut visited = HashSet::new();
+        while visited.insert(current) {
+            let Some(TypeEntry::Resolved(info)) = self
+                .entries
+                .get(usize::try_from(current.get()).expect("type ID fits usize"))
+            else {
+                return false;
+            };
+            match info.kind {
+                TypeKind::Pointer { .. } | TypeKind::Reference { .. } => return true,
+                TypeKind::Modified { target, .. } => current = target.id,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    fn indirection_type_name(&self, target: TypeId, target_name: &str, symbol: &str) -> String {
+        let target_is_synthesized_array = !self.explicit_names.contains(&target)
+            && self
+                .entries
+                .get(usize::try_from(target.get()).expect("type ID fits usize"))
+                .is_some_and(|entry| {
+                    matches!(
+                        entry,
+                        TypeEntry::Resolved(TypeInfo {
+                            kind: TypeKind::Array { .. },
+                            ..
+                        })
+                    )
+                });
+        if target_is_synthesized_array && let Some(suffix) = target_name.find('[') {
+            return format!(
+                "{} ({symbol}){}",
+                target_name[..suffix].trim_end(),
+                &target_name[suffix..]
+            );
+        }
+        format!("{target_name} {symbol}")
+    }
+
     fn build_pointer_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -3004,41 +3353,58 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_size: Option<u64>,
     ) -> TypeEntry {
         let target = match self.target(entry, unit_index) {
-            Ok(Some(target)) => target,
-            Ok(None) => return TypeEntry::Malformed("type wrapper has no target".into()),
+            Ok(target) => target,
             Err(reason) => return TypeEntry::Malformed(reason),
         };
-        let inherited_size = self
-            .entries
-            .get(usize::try_from(target.id.get()).expect("type ID fits usize"))
+        let inherited_size = target
+            .and_then(|target| {
+                self.entries
+                    .get(usize::try_from(target.id.get()).expect("type ID fits usize"))
+            })
             .and_then(|entry| match entry {
                 TypeEntry::Resolved(info) => info.byte_size,
                 TypeEntry::Building | TypeEntry::Malformed(_) => None,
             });
         let byte_size = explicit_size.or(inherited_size);
-        if entry.tag() == gimli::DW_TAG_typedef {
+        if matches!(
+            entry.tag(),
+            gimli::DW_TAG_typedef | gimli::DW_TAG_template_alias
+        ) {
+            let relationship = named_type_relationship(
+                entry.tag(),
+                self.unit_languages.get(unit_index).copied().flatten(),
+                self.zig_units.get(unit_index).copied().unwrap_or(false),
+            );
             return TypeEntry::Resolved(TypeInfo {
                 reference,
-                name: explicit_name.unwrap_or_else(|| self.target_name(target)),
+                name: explicit_name.unwrap_or_else(|| {
+                    target.map_or_else(
+                        || Arc::from("<incomplete named type>"),
+                        |target| self.target_name(target),
+                    )
+                }),
                 byte_size,
-                kind: TypeKind::Alias { target },
+                kind: TypeKind::Named {
+                    target,
+                    relationship,
+                },
             });
         }
-        let qualifier = match entry.tag() {
-            gimli::DW_TAG_const_type => TypeQualifier::Const,
-            gimli::DW_TAG_volatile_type => TypeQualifier::Volatile,
-            gimli::DW_TAG_restrict_type => TypeQualifier::Restrict,
-            gimli::DW_TAG_atomic_type => TypeQualifier::Atomic,
-            gimli::DW_TAG_immutable_type => TypeQualifier::Immutable,
-            _ => unreachable!("wrapper tags matched by caller"),
+        let Some(target) = target else {
+            return TypeEntry::Malformed("type modifier has no target".into());
         };
+        let qualifier =
+            type_modifier(entry.tag()).expect("modifier wrapper tags were matched by caller");
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("{qualifier:?} {}", self.target_name(target))));
         TypeEntry::Resolved(TypeInfo {
             reference,
             name,
             byte_size,
-            kind: TypeKind::Qualified { qualifier, target },
+            kind: TypeKind::Modified {
+                modifier: qualifier,
+                target,
+            },
         })
     }
 
@@ -3644,10 +4010,11 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                             "variant aggregate contains multiple variant parts".into(),
                         );
                     }
-                    let discr_key = match die_reference(
+                    let discr_key = match die_reference_with_signatures(
                         child.attr_value(gimli::DW_AT_discr),
                         unit_index,
                         self.units,
+                        self.type_signatures,
                     ) {
                         Ok(key) => key,
                         Err(error) => return TypeEntry::Malformed(error.to_string().into()),
@@ -4974,13 +5341,65 @@ fn resolve_explicit_size(
 }
 
 /// Whether a type DIE's `DW_AT_type` edge must be present.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetRequirement {
     /// The tag mandates a target (e.g. a reference or qualifier).
     Required,
     /// The target is optional (e.g. a `void` pointer), but if present it must
     /// still name a real type DIE.
     Optional,
+}
+
+const fn named_type_target_requirement(declaration: bool) -> TargetRequirement {
+    if declaration {
+        TargetRequirement::Optional
+    } else {
+        TargetRequirement::Required
+    }
+}
+
+fn named_type_relationship(
+    tag: gimli::DwTag,
+    language: Option<gimli::DwLang>,
+    zig_producer: bool,
+) -> NamedTypeRelationship {
+    if tag == gimli::DW_TAG_template_alias {
+        return NamedTypeRelationship::Synonym;
+    }
+    if zig_producer {
+        return NamedTypeRelationship::Encoding;
+    }
+    match language {
+        Some(
+            gimli::DW_LANG_C89
+            | gimli::DW_LANG_C
+            | gimli::DW_LANG_C99
+            | gimli::DW_LANG_C11
+            | gimli::DW_LANG_C17
+            | gimli::DW_LANG_C_plus_plus
+            | gimli::DW_LANG_C_plus_plus_03
+            | gimli::DW_LANG_C_plus_plus_11
+            | gimli::DW_LANG_C_plus_plus_14
+            | gimli::DW_LANG_C_plus_plus_17
+            | gimli::DW_LANG_C_plus_plus_20,
+        ) => NamedTypeRelationship::Synonym,
+        Some(gimli::DW_LANG_Go) => NamedTypeRelationship::Distinct,
+        Some(gimli::DW_LANG_Zig) => NamedTypeRelationship::Encoding,
+        _ => NamedTypeRelationship::Unspecified,
+    }
+}
+
+const fn type_modifier(tag: gimli::DwTag) -> Option<TypeModifier> {
+    match tag {
+        gimli::DW_TAG_const_type => Some(TypeModifier::Const),
+        gimli::DW_TAG_volatile_type => Some(TypeModifier::Volatile),
+        gimli::DW_TAG_restrict_type => Some(TypeModifier::Restrict),
+        gimli::DW_TAG_atomic_type => Some(TypeModifier::Atomic),
+        gimli::DW_TAG_immutable_type => Some(TypeModifier::Immutable),
+        gimli::DW_TAG_packed_type => Some(TypeModifier::Packed),
+        gimli::DW_TAG_shared_type => Some(TypeModifier::Shared),
+        _ => None,
+    }
 }
 
 /// Whether a DIE tag denotes a type. A `DW_AT_type` edge must name one of
@@ -5069,13 +5488,250 @@ fn byte_size_attribute(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) -> 
     }
 }
 
-fn type_info_from(types: &[TypeEntry], id: TypeId) -> std::result::Result<&TypeInfo, Arc<str>> {
-    match types.get(usize::try_from(id.get()).expect("type ID fits usize")) {
-        Some(TypeEntry::Resolved(info)) => Ok(info),
-        Some(TypeEntry::Malformed(reason)) => Err(Arc::clone(reason)),
-        Some(TypeEntry::Building) => Err("type graph did not finish building".into()),
-        None => Err("type ID is outside the module arena".into()),
+trait TypeMetadataEntry {
+    fn type_info(&self) -> std::result::Result<&TypeInfo, Arc<str>>;
+}
+
+impl TypeMetadataEntry for TypeEntry {
+    fn type_info(&self) -> std::result::Result<&TypeInfo, Arc<str>> {
+        match self {
+            Self::Resolved(info) => Ok(info),
+            Self::Malformed(reason) => Err(Arc::clone(reason)),
+            Self::Building => Err("type graph did not finish building".into()),
+        }
     }
+}
+
+impl TypeMetadataEntry for TypeNode {
+    fn type_info(&self) -> std::result::Result<&TypeInfo, Arc<str>> {
+        match self {
+            Self::Resolved(info) => Ok(info),
+            Self::Malformed { description, .. } => Err(Arc::clone(description)),
+        }
+    }
+}
+
+fn type_info_from<T: TypeMetadataEntry>(
+    types: &[T],
+    id: TypeId,
+) -> std::result::Result<&TypeInfo, Arc<str>> {
+    types
+        .get(usize::try_from(id.get()).expect("type ID fits usize"))
+        .map_or_else(
+            || Err("type ID is outside the module arena".into()),
+            TypeMetadataEntry::type_info,
+        )
+}
+
+fn propagate_wrapper_sizes(types: &mut [TypeEntry]) {
+    for _ in 0..types.len() {
+        let inherited = types
+            .iter()
+            .map(|entry| match entry {
+                TypeEntry::Resolved(info) => info.byte_size,
+                TypeEntry::Building | TypeEntry::Malformed(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for entry in &mut *types {
+            let TypeEntry::Resolved(info) = entry else {
+                continue;
+            };
+            let target = match info.kind {
+                TypeKind::Modified { target, .. }
+                | TypeKind::Named {
+                    target: Some(target),
+                    ..
+                } => Some(target),
+                _ => None,
+            };
+            if info.byte_size.is_none()
+                && let Some(size) = target
+                    .and_then(|target| usize::try_from(target.id.get()).ok())
+                    .and_then(|index| inherited.get(index).copied().flatten())
+            {
+                info.byte_size = Some(size);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
+    let mut edges = vec![Vec::new(); types.len()];
+    for (index, entry) in types.iter().enumerate() {
+        let TypeEntry::Resolved(info) = entry else {
+            continue;
+        };
+        inline_storage_targets(&info.kind, &mut edges[index]);
+        edges[index].retain(|target| *target < types.len());
+    }
+    let mut reverse = vec![Vec::new(); edges.len()];
+    for (source, targets) in edges.iter().enumerate() {
+        for target in targets {
+            reverse[*target].push(source);
+        }
+    }
+
+    let mut visited = vec![false; edges.len()];
+    let mut finish = Vec::with_capacity(edges.len());
+    for start in 0..edges.len() {
+        if visited[start] {
+            continue;
+        }
+        visited[start] = true;
+        let mut stack = vec![(start, 0_usize)];
+        while let Some((node, edge_index)) = stack.last_mut() {
+            if let Some(next) = edges[*node].get(*edge_index).copied() {
+                *edge_index += 1;
+                if !visited[next] {
+                    visited[next] = true;
+                    stack.push((next, 0));
+                }
+            } else {
+                finish.push(*node);
+                stack.pop();
+            }
+        }
+    }
+
+    let mut assigned = vec![false; edges.len()];
+    let mut cyclic_nodes = Vec::new();
+    for start in finish.into_iter().rev() {
+        if assigned[start] {
+            continue;
+        }
+        assigned[start] = true;
+        let mut component = Vec::new();
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            component.push(node);
+            for predecessor in &reverse[node] {
+                if !assigned[*predecessor] {
+                    assigned[*predecessor] = true;
+                    stack.push(*predecessor);
+                }
+            }
+        }
+        let cyclic = component.len() > 1
+            || component
+                .first()
+                .is_some_and(|node| edges[*node].contains(node));
+        if cyclic {
+            cyclic_nodes.extend(component);
+        }
+    }
+    cyclic_nodes
+}
+
+fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
+    let mut push = |reference: TypeReference| {
+        if let Ok(index) = usize::try_from(reference.id.get()) {
+            targets.push(index);
+        }
+    };
+    match kind {
+        TypeKind::Enumeration {
+            underlying: Some(target),
+            ..
+        }
+        | TypeKind::Modified { target, .. }
+        | TypeKind::Named {
+            target: Some(target),
+            ..
+        } => push(*target),
+        TypeKind::Array { element, .. } => push(*element),
+        TypeKind::Record { members, bases, .. } => {
+            for member in members.iter() {
+                push(member.type_ref);
+            }
+            for base in bases.iter() {
+                push(base.type_ref);
+            }
+        }
+        TypeKind::Union { members, .. } => {
+            for member in members.iter() {
+                push(member.type_ref);
+            }
+        }
+        TypeKind::Variant {
+            common_members,
+            bases,
+            discriminant,
+            variants,
+            ..
+        } => {
+            for member in common_members.iter() {
+                push(member.type_ref);
+            }
+            for base in bases.iter() {
+                push(base.type_ref);
+            }
+            if let VariantDiscriminant::Stored(member) = discriminant.as_ref() {
+                push(member.type_ref);
+            }
+            for variant in variants.iter() {
+                for member in variant.members.iter() {
+                    push(member.type_ref);
+                }
+            }
+        }
+        TypeKind::Base(_)
+        | TypeKind::Enumeration {
+            underlying: None, ..
+        }
+        | TypeKind::Pointer { .. }
+        | TypeKind::Reference { .. }
+        | TypeKind::Slice { .. }
+        | TypeKind::Named { target: None, .. }
+        | TypeKind::Unspecified
+        | TypeKind::Opaque { .. } => {}
+    }
+}
+
+fn modifier_type_name(modifier: TypeModifier, target: &str, indirection: bool) -> String {
+    let keyword = match modifier {
+        TypeModifier::Const => "const",
+        TypeModifier::Volatile => "volatile",
+        TypeModifier::Restrict => "restrict",
+        TypeModifier::Immutable => "immutable",
+        TypeModifier::Packed => "packed",
+        TypeModifier::Shared => "shared",
+        TypeModifier::Atomic => return format!("_Atomic({target})"),
+    };
+    if indirection {
+        format!("{target} {keyword}")
+    } else {
+        format!("{keyword} {target}")
+    }
+}
+
+enum TransparentRepresentationError {
+    Malformed(Arc<str>),
+    Unsupported(Arc<str>),
+}
+
+fn transparent_representation<T: TypeMetadataEntry>(
+    types: &[T],
+    wrapper: &TypeInfo,
+    target: TypeReference,
+) -> std::result::Result<(), TransparentRepresentationError> {
+    let target =
+        type_info_from(types, target.id).map_err(TransparentRepresentationError::Malformed)?;
+    if let (Some(wrapper_size), Some(target_size)) = (wrapper.byte_size, target.byte_size)
+        && wrapper_size != target_size
+    {
+        return Err(TransparentRepresentationError::Unsupported(
+            format!(
+                "transparent type wrapper size {wrapper_size} differs from target size {target_size}"
+            )
+            .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Why a value shape could not be resolved from a type graph.
@@ -5138,8 +5794,8 @@ fn indirection_byte_size(
     clippy::too_many_lines,
     reason = "each normalized type shape has distinct validation"
 )]
-fn value_shape_from(
-    types: &[TypeEntry],
+fn value_shape_from<T: TypeMetadataEntry>(
+    types: &[T],
     id: TypeId,
 ) -> std::result::Result<ValueShape, ValueShapeError> {
     let mut current = id;
@@ -5383,8 +6039,25 @@ fn value_shape_from(
                     },
                 });
             }
-            TypeKind::Qualified { target, .. } | TypeKind::Alias { target } => {
+            TypeKind::Modified { target, .. }
+            | TypeKind::Named {
+                target: Some(target),
+                ..
+            } => {
+                transparent_representation(types, info, *target).map_err(|error| match error {
+                    TransparentRepresentationError::Malformed(reason) => {
+                        ValueShapeError::Malformed(reason)
+                    }
+                    TransparentRepresentationError::Unsupported(reason) => {
+                        ValueShapeError::Unsupported(reason)
+                    }
+                })?;
                 current = target.id;
+            }
+            TypeKind::Named { target: None, .. } => {
+                return Err(ValueShapeError::Unsupported(
+                    "incomplete named type has no representation target".into(),
+                ));
             }
             TypeKind::Unspecified => {
                 return Err(ValueShapeError::Unsupported(
@@ -5431,8 +6104,21 @@ impl DwarfVariableInfo {
             }
             let info = self.type_info(current)?;
             match info.kind {
-                TypeKind::Qualified { target, .. } | TypeKind::Alias { target } => {
+                TypeKind::Modified { target, .. }
+                | TypeKind::Named {
+                    target: Some(target),
+                    ..
+                } => {
+                    transparent_representation(&self.types, info, target).map_err(|error| {
+                        match error {
+                            TransparentRepresentationError::Malformed(reason)
+                            | TransparentRepresentationError::Unsupported(reason) => reason,
+                        }
+                    })?;
                     current = target.id;
+                }
+                TypeKind::Named { target: None, .. } => {
+                    return Err("incomplete named type has no representation target".into());
                 }
                 _ => return Ok((current, info)),
             }
@@ -7055,7 +7741,7 @@ impl ValueShape {
     reason = "materialization keeps provider state, stop context, source, target, and runtime explicit"
 )]
 fn available(
-    types: &[TypeEntry],
+    types: &[TypeNode],
     dynamic_record_layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
     evaluation_units: &[EvaluationUnit],
     endian: RunTimeEndian,
@@ -7097,7 +7783,7 @@ fn available(
     reason = "decoding keeps immutable provider inputs and the live runtime explicit"
 )]
 fn decode_value_state(
-    types: &[TypeEntry],
+    types: &[TypeNode],
     dynamic_record_layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
     evaluation_units: &[EvaluationUnit],
     endian: RunTimeEndian,
@@ -7193,8 +7879,8 @@ fn decode_value_state(
     clippy::too_many_lines,
     reason = "slice decoding keeps provider state, budget, descriptor, backing read, graph, and provenance explicit"
 )]
-fn decode_slice_state(
-    types: &[TypeEntry],
+fn decode_slice_state<T: TypeMetadataEntry>(
+    types: &[T],
     dynamic_record_layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
     evaluation_units: &[EvaluationUnit],
     endian: RunTimeEndian,
@@ -7368,15 +8054,15 @@ struct DynamicDecodeContext<'a> {
     budget: EvaluationBudget,
 }
 
-struct ValueGraphBuilder<'a> {
-    types: &'a [TypeEntry],
+struct ValueGraphBuilder<'a, T> {
+    types: &'a [T],
     nodes: Vec<ValueNode>,
     pending: Vec<PendingValueNode>,
     expanded_storage: HashMap<(TypeId, u64, u64), ValueNodeId>,
 }
 
-impl<'a> ValueGraphBuilder<'a> {
-    fn new(types: &'a [TypeEntry], root_type: TypeInfo) -> Self {
+impl<'a, T: TypeMetadataEntry> ValueGraphBuilder<'a, T> {
+    fn new(types: &'a [T], root_type: TypeInfo) -> Self {
         Self {
             types,
             nodes: vec![ValueNode {
@@ -8277,8 +8963,8 @@ impl<'a> ValueGraphBuilder<'a> {
     }
 }
 
-fn decode_value_graph(
-    types: &[TypeEntry],
+fn decode_value_graph<T: TypeMetadataEntry>(
+    types: &[T],
     shape: &ValueShape,
     raw: Arc<[u8]>,
     target: TargetDescription,
@@ -8317,8 +9003,8 @@ fn decode_value_graph(
     clippy::too_many_arguments,
     reason = "record materialization keeps target, provider metadata, and live runtime explicit"
 )]
-fn decode_value_graph_live(
-    types: &[TypeEntry],
+fn decode_value_graph_live<T: TypeMetadataEntry>(
+    types: &[T],
     dynamic_record_layouts: &HashMap<DynamicAggregateLayoutKey, Expression>,
     evaluation_units: &[EvaluationUnit],
     endian: RunTimeEndian,
@@ -10013,16 +10699,17 @@ mod tests {
                 reference: reference(0),
                 name: "left".into(),
                 byte_size: Some(8),
-                kind: TypeKind::Alias {
-                    target: reference(1),
+                kind: TypeKind::Named {
+                    target: Some(reference(1)),
+                    relationship: NamedTypeRelationship::Synonym,
                 },
             }),
             TypeEntry::Resolved(TypeInfo {
                 reference: reference(1),
                 name: "right".into(),
                 byte_size: Some(8),
-                kind: TypeKind::Qualified {
-                    qualifier: TypeQualifier::Const,
+                kind: TypeKind::Modified {
+                    modifier: TypeModifier::Const,
                     target: reference(0),
                 },
             }),
@@ -10049,6 +10736,217 @@ mod tests {
                 byte_size: 8,
                 address_class: 0,
             }, .. }) if id == TypeId::new(0)
+        ));
+    }
+
+    #[test]
+    fn graph_finalization_propagates_wrapper_sizes_to_a_fixpoint() {
+        let image = ModuleImageId::new(7);
+        let reference = |id| TypeReference {
+            image,
+            id: TypeId::new(id),
+        };
+        let mut types = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "outer".into(),
+                byte_size: None,
+                kind: TypeKind::Named {
+                    target: Some(reference(1)),
+                    relationship: NamedTypeRelationship::Synonym,
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "const inner".into(),
+                byte_size: None,
+                kind: TypeKind::Modified {
+                    modifier: TypeModifier::Const,
+                    target: reference(2),
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(2),
+                name: "inner".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Opaque {
+                    description: "test representation".into(),
+                },
+            }),
+        ];
+
+        propagate_wrapper_sizes(&mut types);
+
+        assert!(
+            types.iter().all(
+                |entry| matches!(entry, TypeEntry::Resolved(info) if info.byte_size == Some(8))
+            ),
+            "{types:?}"
+        );
+    }
+
+    #[test]
+    fn named_relationships_and_modifier_tags_are_explicit() {
+        assert_eq!(
+            named_type_relationship(gimli::DW_TAG_typedef, Some(gimli::DW_LANG_C11), false),
+            NamedTypeRelationship::Synonym
+        );
+        assert_eq!(
+            named_type_relationship(
+                gimli::DW_TAG_template_alias,
+                Some(gimli::DW_LANG_Rust),
+                false,
+            ),
+            NamedTypeRelationship::Synonym
+        );
+        assert_eq!(
+            named_type_relationship(gimli::DW_TAG_typedef, Some(gimli::DW_LANG_Go), false),
+            NamedTypeRelationship::Distinct
+        );
+        assert_eq!(
+            named_type_relationship(gimli::DW_TAG_typedef, Some(gimli::DW_LANG_C99), true),
+            NamedTypeRelationship::Encoding
+        );
+        assert_eq!(
+            named_type_relationship(gimli::DW_TAG_typedef, Some(gimli::DW_LANG_Rust), false),
+            NamedTypeRelationship::Unspecified
+        );
+        assert_eq!(
+            named_type_target_requirement(true),
+            TargetRequirement::Optional
+        );
+        assert_eq!(
+            named_type_target_requirement(false),
+            TargetRequirement::Required
+        );
+        assert_eq!(
+            type_modifier(gimli::DW_TAG_packed_type),
+            Some(TypeModifier::Packed)
+        );
+        assert_eq!(
+            type_modifier(gimli::DW_TAG_shared_type),
+            Some(TypeModifier::Shared)
+        );
+        assert_eq!(type_modifier(gimli::DW_TAG_typedef), None);
+        assert_eq!(
+            modifier_type_name(TypeModifier::Const, "int * volatile", true),
+            "int * volatile const"
+        );
+        assert_eq!(
+            modifier_type_name(TypeModifier::Const, "int", false),
+            "const int"
+        );
+        assert_eq!(
+            modifier_type_name(TypeModifier::Atomic, "int", false),
+            "_Atomic(int)"
+        );
+    }
+
+    #[test]
+    fn inline_cycle_analysis_distinguishes_storage_from_indirection() {
+        let image = ModuleImageId::new(7);
+        let reference = |id| TypeReference {
+            image,
+            id: TypeId::new(id),
+        };
+        let by_value_cycle = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "left".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Named {
+                    target: Some(reference(1)),
+                    relationship: NamedTypeRelationship::Synonym,
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "right".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Modified {
+                    modifier: TypeModifier::Const,
+                    target: reference(0),
+                },
+            }),
+        ];
+        let mut cycle_nodes = inline_storage_cycle_nodes(&by_value_cycle);
+        cycle_nodes.sort_unstable();
+        assert_eq!(cycle_nodes, [0, 1]);
+
+        let pointer_recursion = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "node".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Record {
+                    kind: RecordKind::Struct,
+                    members: Arc::from([RecordMember {
+                        name: Some("next".into()),
+                        type_ref: reference(1),
+                        layout: RecordMemberLayout::ByteOffset(0),
+                        accessibility: Accessibility::Public,
+                        artificial: false,
+                        embedded: false,
+                        declaration: None,
+                    }]),
+                    bases: Arc::default(),
+                    incomplete: false,
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "node *".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Pointer {
+                    target: Some(reference(0)),
+                    address_class: 0,
+                },
+            }),
+        ];
+        assert!(inline_storage_cycle_nodes(&pointer_recursion).is_empty());
+    }
+
+    #[test]
+    fn transparent_wrappers_reject_incompatible_storage_sizes() {
+        let image = ModuleImageId::new(7);
+        let reference = |id| TypeReference {
+            image,
+            id: TypeId::new(id),
+        };
+        let types = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "encoded".into(),
+                byte_size: Some(4),
+                kind: TypeKind::Named {
+                    target: Some(reference(1)),
+                    relationship: NamedTypeRelationship::Encoding,
+                },
+            }),
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(1),
+                name: "representation".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Opaque {
+                    description: "test representation".into(),
+                },
+            }),
+        ];
+
+        assert!(matches!(
+            value_shape_from(&types, TypeId::new(0)),
+            Err(ValueShapeError::Unsupported(description))
+                if description.contains("wrapper size 4 differs from target size 8")
+        ));
+
+        let malformed_target = [
+            types[0].clone(),
+            TypeEntry::Malformed("broken representation".into()),
+        ];
+        assert!(matches!(
+            value_shape_from(&malformed_target, TypeId::new(0)),
+            Err(ValueShapeError::Malformed(description))
+                if description.as_ref() == "broken representation"
         ));
     }
 

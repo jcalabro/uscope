@@ -42,6 +42,10 @@ enum DwarfError {
     ReferenceOutsideUnits(usize),
     #[error("unsupported DWARF reference form")]
     UnsupportedReferenceForm,
+    #[error("DWARF type signature {0:#018x} has no loaded definition")]
+    TypeSignatureMissing(u64),
+    #[error("DWARF type signature {0:#018x} has multiple definitions")]
+    DuplicateTypeSignature(u64),
     #[error("DWARF reference targets an unsupported DIE at unit {unit}, offset {offset:#x}")]
     ReferencedFunctionMissing { unit: usize, offset: usize },
     #[error("DWARF reference cycle")]
@@ -53,6 +57,12 @@ enum DwarfError {
 }
 
 type Reader<'data> = EndianSlice<'data, RunTimeEndian>;
+type TypeSignatures = HashMap<gimli::DebugTypeSignature, DieKey>;
+
+struct UnitCatalog<'data> {
+    units: Vec<gimli::Unit<Reader<'data>>>,
+    type_signatures: TypeSignatures,
+}
 
 mod variables;
 
@@ -103,11 +113,23 @@ fn load_debug_info(
     while let Some(header) = unit_headers.next()? {
         units.push(dwarf.unit(header)?);
     }
+    let mut type_unit_headers = dwarf.type_units();
+    while let Some(header) = type_unit_headers.next()? {
+        units.push(dwarf.unit(header)?);
+    }
+    let catalog = UnitCatalog {
+        type_signatures: type_signature_index(&units)?,
+        units,
+    };
 
-    let mut function_metadata =
-        load_function_metadata(&dwarf, &units, &mut source_files, &mut source_file_ids)?;
+    let mut function_metadata = load_function_metadata(
+        &dwarf,
+        &catalog.units,
+        &mut source_files,
+        &mut source_file_ids,
+    )?;
 
-    for unit in &units {
+    for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
         load_lines(
             &dwarf,
             unit,
@@ -128,7 +150,7 @@ fn load_debug_info(
 
     let variables = variables::load_variable_info(
         &dwarf,
-        &units,
+        &catalog,
         target,
         image_id,
         &function_metadata.instance_ids,
@@ -145,6 +167,7 @@ fn load_debug_info(
                 code_instances: function_metadata.code_instances,
                 symbols: load_symbols(&object),
                 globals: variables.globals,
+                types: variables.types,
                 source_files,
                 statements,
                 lines,
@@ -159,6 +182,45 @@ fn load_debug_info(
         unwind,
         variables: variables.info,
     })
+}
+
+fn type_signature_index(
+    units: &[gimli::Unit<Reader<'_>>],
+) -> std::result::Result<TypeSignatures, DwarfError> {
+    let mut signatures = HashMap::new();
+    for (unit_index, unit) in units.iter().enumerate() {
+        let (gimli::UnitType::Type {
+            type_signature,
+            type_offset,
+        }
+        | gimli::UnitType::SplitType {
+            type_signature,
+            type_offset,
+        }) = unit.header.type_()
+        else {
+            continue;
+        };
+        if signatures
+            .insert(
+                type_signature,
+                DieKey {
+                    unit: unit_index,
+                    offset: type_offset.0,
+                },
+            )
+            .is_some()
+        {
+            return Err(DwarfError::DuplicateTypeSignature(type_signature.0));
+        }
+    }
+    Ok(signatures)
+}
+
+fn is_type_unit(unit: &gimli::Unit<Reader<'_>>) -> bool {
+    matches!(
+        unit.header.type_(),
+        gimli::UnitType::Type { .. } | gimli::UnitType::SplitType { .. }
+    )
 }
 
 fn image_address_range(
@@ -679,6 +741,9 @@ fn collect_function_dies(
     let mut functions = Vec::new();
 
     for (unit_index, unit) in units.iter().enumerate() {
+        if is_type_unit(unit) {
+            continue;
+        }
         let mut entries = unit.entries();
         let mut scopes = Vec::<Option<DieKey>>::new();
 
@@ -815,6 +880,22 @@ fn die_reference(
             Err(DwarfError::UnsupportedSupplementaryReference)
         }
         _ => Err(DwarfError::UnsupportedReferenceForm),
+    }
+}
+
+fn die_reference_with_signatures(
+    value: Option<gimli::AttributeValue<Reader<'_>>>,
+    unit_index: usize,
+    units: &[gimli::Unit<Reader<'_>>],
+    signatures: &TypeSignatures,
+) -> std::result::Result<Option<DieKey>, DwarfError> {
+    match value {
+        Some(gimli::AttributeValue::DebugTypesRef(signature)) => signatures
+            .get(&signature)
+            .copied()
+            .map(Some)
+            .ok_or(DwarfError::TypeSignatureMissing(signature.0)),
+        value => die_reference(value, unit_index, units),
     }
 }
 
@@ -1045,6 +1126,25 @@ fn source_file_id(
         });
         id
     })
+}
+
+fn type_unit_source_file_id(
+    path: PathBuf,
+    source_files: &mut Vec<SourceFile>,
+    source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
+) -> SourceFileId {
+    if path.is_relative() {
+        let mut suffix_matches = source_file_ids
+            .iter()
+            .filter(|(candidate, _)| candidate.is_absolute() && candidate.ends_with(&path))
+            .map(|(_, id)| *id);
+        if let Some(id) = suffix_matches.next()
+            && suffix_matches.next().is_none()
+        {
+            return id;
+        }
+    }
+    source_file_id(path, source_files, source_file_ids)
 }
 
 fn source_path(
@@ -1286,7 +1386,7 @@ fn target_description(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use gimli::write::{
         Address, Dwarf as WriteDwarf, EndianVec, LineProgram, LineString, Sections, Unit,
@@ -1294,6 +1394,65 @@ mod tests {
     use gimli::{Encoding, Format, LineEncoding, LittleEndian, Register};
 
     use super::*;
+
+    #[test]
+    fn type_signature_references_resolve_only_indexed_primary_dies() {
+        let signature = gimli::DebugTypeSignature(0x1234_5678_9abc_def0);
+        let key = DieKey {
+            unit: 3,
+            offset: 0x40,
+        };
+        let signatures = HashMap::from([(signature, key)]);
+        let units = Vec::<gimli::Unit<Reader<'_>>>::new();
+
+        assert_eq!(
+            die_reference_with_signatures(
+                Some(gimli::AttributeValue::DebugTypesRef(signature)),
+                0,
+                &units,
+                &signatures,
+            )
+            .expect("indexed signature"),
+            Some(key)
+        );
+        assert!(matches!(
+            die_reference_with_signatures(
+                Some(gimli::AttributeValue::DebugTypesRef(
+                    gimli::DebugTypeSignature(7)
+                )),
+                0,
+                &units,
+                &signatures,
+            ),
+            Err(DwarfError::TypeSignatureMissing(7))
+        ));
+    }
+
+    #[test]
+    fn relative_type_unit_source_paths_coalesce_only_with_a_unique_absolute_suffix() {
+        let mut files = Vec::new();
+        let mut ids = HashMap::new();
+        let absolute = type_unit_source_file_id(
+            PathBuf::from("/work/project/src/types.cpp"),
+            &mut files,
+            &mut ids,
+        );
+        assert_eq!(
+            type_unit_source_file_id(PathBuf::from("src/types.cpp"), &mut files, &mut ids),
+            absolute
+        );
+        assert_eq!(files.len(), 1);
+
+        type_unit_source_file_id(
+            PathBuf::from("/other/project/src/types.cpp"),
+            &mut files,
+            &mut ids,
+        );
+        let ambiguous_relative =
+            type_unit_source_file_id(PathBuf::from("src/types.cpp"), &mut files, &mut ids);
+        assert_ne!(ambiguous_relative, absolute);
+        assert_eq!(files.len(), 3);
+    }
 
     struct TestMemory {
         values: BTreeMap<VirtualAddress, u64>,
