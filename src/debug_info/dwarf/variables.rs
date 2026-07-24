@@ -5173,7 +5173,7 @@ impl VariableInfo for DwarfVariableInfo {
             let mut frame_base = FrameBaseCache::Empty;
             let mut variables = Vec::new();
             for object in active() {
-                if budget.consume_variables(1).is_err() || budget.consume_value_nodes(1).is_err() {
+                if budget.consume_variable_value().is_err() {
                     break;
                 }
                 variables.push(self.inspect_data_object(
@@ -5209,7 +5209,7 @@ impl VariableInfo for DwarfVariableInfo {
         let mut frame_base = FrameBaseCache::Empty;
         let mut variables = Vec::new();
         for object in selected_objects {
-            if budget.consume_variables(1).is_err() || budget.consume_value_nodes(1).is_err() {
+            if budget.consume_variable_value().is_err() {
                 break;
             }
             variables.push(self.inspect_data_object(
@@ -5235,10 +5235,7 @@ impl VariableInfo for DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> Result<InspectedValue> {
         let object = self.visible_object(address, selected, root)?;
-        if let Err(exhaustion) = budget
-            .consume_variables(1)
-            .and_then(|()| budget.consume_value_nodes(1))
-        {
+        if let Err(exhaustion) = budget.consume_variable_value() {
             return Ok(inspected_value(
                 None,
                 VariableState::Unavailable(exhaustion.into()),
@@ -5287,10 +5284,7 @@ impl VariableInfo for DwarfVariableInfo {
             .get(global_index)
             .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
         let object = &self.objects[object_index];
-        if let Err(exhaustion) = budget
-            .consume_variables(1)
-            .and_then(|()| budget.consume_value_nodes(1))
-        {
+        if let Err(exhaustion) = budget.consume_variable_value() {
             return Ok(unavailable(object, None, exhaustion.into()));
         }
         let mut frame_base = FrameBaseCache::Empty;
@@ -5312,10 +5306,7 @@ impl VariableInfo for DwarfVariableInfo {
             .get(global_index)
             .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
         let object = &self.objects[object_index];
-        if let Err(exhaustion) = budget
-            .consume_variables(1)
-            .and_then(|()| budget.consume_value_nodes(1))
-        {
+        if let Err(exhaustion) = budget.consume_variable_value() {
             return Ok(inspected_value(
                 None,
                 VariableState::Unavailable(exhaustion.into()),
@@ -8817,11 +8808,13 @@ fn resolve_frame_base(
                 Ok(Some(expression)) => {
                     match evaluate_frame_base(expression, endian, units, runtime, budget) {
                         Ok(value) => FrameBaseCache::Available(value),
-                        // The budget belongs to the current variable; a limit
-                        // hit here must not poison the cache other variables
-                        // share at this stop.
-                        Err(VariableUnavailableReason::EvaluationLimit) => {
-                            return Err(VariableUnavailableReason::EvaluationLimit.into());
+                        // Request-specific exhaustion must not poison the
+                        // frame-base cache shared by later inspections.
+                        Err(
+                            reason @ (VariableUnavailableReason::EvaluationLimit
+                            | VariableUnavailableReason::InspectionLimit(_)),
+                        ) => {
+                            return Err(reason.into());
                         }
                         Err(reason) => FrameBaseCache::Unavailable(reason),
                     }

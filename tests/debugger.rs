@@ -1614,6 +1614,36 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             })
         ));
 
+        let node_limited_variables = scenario
+            .operation(
+                "reserve each visible variable and value node atomically",
+                scenario
+                    .handle()
+                    .variables_with_limits(uscope::InspectionLimits {
+                        value_nodes: 1,
+                        ..uscope::InspectionLimits::default()
+                    }),
+            )
+            .await;
+        assert_eq!(
+            node_limited_variables.variables.len(),
+            1,
+            "{node_limited_variables:?}"
+        );
+        assert_eq!(
+            node_limited_variables.usage.variables, 1,
+            "{node_limited_variables:?}"
+        );
+        assert!(matches!(
+            node_limited_variables.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::ValueNodes,
+                limit: 1,
+                used: 1,
+                requested: 1,
+            })
+        ));
+
         let huge = scenario
             .operation(
                 "obtain a stop-scoped large-array capability",

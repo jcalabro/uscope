@@ -790,7 +790,7 @@ impl InspectionLimits {
         Self {
             variables: self.variables.saturating_sub(usage.variables),
             value_nodes: self.value_nodes.saturating_sub(usage.value_nodes),
-            aggregate_depth: self.aggregate_depth,
+            aggregate_depth: self.aggregate_depth.saturating_sub(usage.aggregate_depth),
             memory_reads: self.memory_reads.saturating_sub(usage.memory_reads),
             memory_bytes: self.memory_bytes.saturating_sub(usage.memory_bytes),
             expression_work: self.expression_work.saturating_sub(usage.expression_work),
@@ -2767,6 +2767,11 @@ mod tests {
             limits.remaining_after(usage).memory_bytes,
             0,
             "usage must subtract without wrapping"
+        );
+        assert_eq!(
+            limits.remaining_after(usage).aggregate_depth,
+            0,
+            "composed inspection must retain only unused path depth"
         );
     }
 
