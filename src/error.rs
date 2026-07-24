@@ -51,6 +51,8 @@ pub enum Error {
     VariableContextUnsupported,
     #[error("global catalog page limit {0} is outside 1..=256")]
     InvalidGlobalPageLimit(u32),
+    #[error("value child page limit {0} is outside 1..=256")]
+    InvalidValueChildPageLimit(u32),
     #[error("loaded global selector '{selector}' is ambiguous: {candidates:?}")]
     AmbiguousLoadedGlobalVariable {
         selector: String,

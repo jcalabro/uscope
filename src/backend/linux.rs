@@ -607,6 +607,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::Dereference { reference, reply } => {
                 let _ = reply.send(self.dereference(&reference));
             }
+            Request::ValueChildren {
+                reference,
+                query,
+                reply,
+            } => {
+                let _ = reply.send(self.value_children(&reference, &query));
+            }
             Request::Globals { query, reply } => {
                 let _ = reply.send(self.globals(&query));
             }
@@ -3909,6 +3916,67 @@ impl<P: LinuxTraceOps> Controller<P> {
         module.variables.dereference(reference, &mut runtime)
     }
 
+    fn value_children(
+        &self,
+        reference: &crate::ValueChildrenReference,
+        query: &crate::ValueChildQuery,
+    ) -> Result<crate::ValueChildPage> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        // A capability must be rejected before consulting modules, registers,
+        // or memory if its stopped snapshot is no longer current.
+        validate_public_stop(inferior, Some(reference.stop_id))?;
+        if !(1..=256).contains(&query.limit) {
+            return Err(Error::InvalidValueChildPageLimit(query.limit));
+        }
+        let pid = debug_pid(reference.thread);
+        validate_stopped_thread(inferior, pid)?;
+        if inferior.exec_unsupported {
+            return Err(backend_error(LinuxError::UnsupportedExec));
+        }
+        let module = self
+            .modules
+            .get(&reference.module)
+            .ok_or(Error::ModuleNotLoaded(reference.module))?;
+        if module.loaded.image != reference.image {
+            return Err(Error::StaleModuleImage);
+        }
+        let native = self.ptrace.registers(pid)?;
+        let registers = x86_64_registers(&native);
+        let instruction = VirtualAddress::new(native.rip);
+        let cfa = inferior
+            .loaded_module
+            .image_address(instruction)
+            .ok()
+            .filter(|address| self.module_image.contains_address(*address))
+            .map_or_else(
+                || {
+                    Err(VariableUnavailableReason::Other(
+                        "instruction is outside the main image".into(),
+                    ))
+                },
+                |address| {
+                    self.unwind_info
+                        .cfa(address, &registers)
+                        .map_err(|termination| {
+                            VariableUnavailableReason::Other(format!("{termination:?}").into())
+                        })
+                },
+            );
+        let mut runtime = LinuxVariableRuntime {
+            ptrace: &self.ptrace,
+            pid,
+            loaded_module: module.loaded,
+            breakpoints: &inferior.breakpoints,
+            native: &native,
+            floating: None,
+            cfa,
+            link_map: module.link_map,
+        };
+        module
+            .variables
+            .value_children(reference, query.offset, query.limit, &mut runtime)
+    }
+
     fn globals(&self, query: &GlobalVariableQuery) -> Result<GlobalVariablePage> {
         if !(1..=256).contains(&query.limit) {
             return Err(Error::InvalidGlobalPageLimit(query.limit));
@@ -5987,6 +6055,16 @@ mod tests {
             _runtime: &mut dyn VariableRuntime,
         ) -> Result<crate::DereferencedValue> {
             panic!("unexpected dereference")
+        }
+
+        fn value_children(
+            &self,
+            _reference: &crate::ValueChildrenReference,
+            _offset: u64,
+            _limit: u32,
+            _runtime: &mut dyn VariableRuntime,
+        ) -> Result<crate::ValueChildPage> {
+            panic!("unexpected value child lookup")
         }
     }
 

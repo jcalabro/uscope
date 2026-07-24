@@ -29,6 +29,7 @@ struct large_record {
 struct incomplete_record;
 
 struct outer_record global_record = {{-7, 9}, {20, 22}};
+unsigned char huge_array[1024 * 1024 + 1];
 
 __attribute__((noinline)) static int inspect_records(
     struct outer_record *record,

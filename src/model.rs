@@ -124,10 +124,6 @@ id_type!(
     TypeId,
     "Identifies a normalized type within a module image."
 );
-id_type!(
-    ValueNodeId,
-    "Identifies one node in an immutable stopped-value graph."
-);
 
 impl GlobalVariableId {
     /// Returns the dense index within the containing module image.
@@ -145,13 +141,6 @@ impl TypeId {
     }
 }
 
-impl ValueNodeId {
-    /// Returns the dense index within the containing value graph.
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-}
 id_type!(
     StackFrameId,
     "Identifies a stack frame within one stop revision."
@@ -677,7 +666,7 @@ pub struct AddressValue {
     pub address: VirtualAddress,
 }
 
-/// A decoded variable or dereferenced value.
+/// A decoded variable, child, or dereferenced value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VariableValue {
@@ -694,84 +683,51 @@ pub enum VariableValue {
     Address(AddressValue),
     /// An optimized pointer with no concrete address representation.
     ImplicitPointer,
-    /// A bounded aggregate, represented in row-major/source order.
+    /// An array whose elements are available through explicit child pages.
     Array {
         /// The array dimensions.
         dimensions: Arc<[ArrayDimension]>,
-        /// Decoded element nodes in row-major/source order.
-        elements: Arc<[ValueNodeId]>,
-        /// Elements omitted by the inspection budget.
-        omitted: u64,
     },
-    /// A decoded language slice and its bounded element values.
+    /// A decoded language slice whose elements are available through child pages.
     Slice {
         /// Runtime length from the descriptor.
         length: u64,
         /// Runtime capacity when present in the descriptor.
         capacity: Option<u64>,
-        /// Element nodes decoded from the backing storage.
-        elements: Arc<[ValueNodeId]>,
-        /// Elements omitted by the inspection budget.
-        omitted: u64,
     },
-    /// A decoded structure or class value.
-    Record {
-        /// Direct instance-member values in source order.
-        members: Arc<[RecordMemberValue]>,
-        /// Base-subobject values in source order.
-        bases: Arc<[BaseClassValue]>,
-        /// Members or bases omitted by the inspection budget.
-        omitted: u64,
-    },
-    /// All readable interpretations of raw overlapping union storage.
-    Union {
-        /// Alternative member interpretations in producer/source order.
-        members: Arc<[RecordMemberValue]>,
-        /// Members omitted by the inspection budget.
-        omitted: u64,
-    },
-    /// A discriminated aggregate with only its selected components materialized.
+    /// A structure or class whose bases and members are available through child pages.
+    Record,
+    /// Overlapping union storage whose interpretations are available through child pages.
+    Union,
+    /// A discriminated aggregate whose selected components are available through child pages.
     Variant {
         /// The decoded stored discriminator; absent for tagless single variants.
         discriminant: Option<IntegerValue>,
-        /// Ordinary members outside the variant part.
-        common_members: Arc<[RecordMemberValue]>,
-        /// Base-subobject values outside the variant part.
-        bases: Arc<[BaseClassValue]>,
         /// The selected variant, or `None` when no selector matched.
-        active: Option<ActiveVariantValue>,
-        /// Common members or bases omitted by the inspection budget.
-        omitted: u64,
+        active: Option<Arc<Variant>>,
     },
 }
 
-/// One member edge in a stopped record value.
+/// How one lazily evaluated child relates to its parent value.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RecordMemberValue {
-    /// The immutable member metadata.
-    pub member: RecordMember,
-    /// The typed child node.
-    pub value: ValueNodeId,
-}
-
-/// The selected branch of a decoded discriminated variant.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActiveVariantValue {
-    /// Immutable metadata for the selected variant.
-    pub variant: Variant,
-    /// Decoded component values in producer/source order.
-    pub members: Arc<[RecordMemberValue]>,
-    /// Components omitted by the inspection budget.
-    pub omitted: u64,
-}
-
-/// One base-subobject edge in a stopped class value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BaseClassValue {
-    /// The immutable base metadata.
-    pub base: BaseClass,
-    /// The typed child node.
-    pub value: ValueNodeId,
+#[non_exhaustive]
+pub enum ValueChildRelationship {
+    /// One row-major array element and its source-language indices.
+    ArrayElement {
+        /// The zero-based row-major index.
+        index: u64,
+        /// One index per source dimension, including each declared lower bound.
+        indices: Arc<[i128]>,
+    },
+    /// One runtime slice element.
+    SliceElement {
+        /// The zero-based runtime index.
+        index: u64,
+    },
+    /// One direct record, union, common-variant, or active-variant member.
+    Member(RecordMember),
+    /// One base-class subobject.
+    Base(BaseClass),
 }
 
 /// Which bounded resource prevented complete value materialization.
@@ -796,161 +752,106 @@ pub enum InspectionLimit {
     OutputBytes,
 }
 
-/// The state of one typed node in a stopped-value graph.
+/// Storage retained by an opaque child capability.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ValueNodeState {
-    /// The node was decoded exactly.
-    Available(VariableValue),
-    /// Valid metadata cannot produce a supported readable value here.
-    Unavailable(VariableUnavailableReason),
-    /// The node's metadata is defective.
-    Malformed(VariableMalformedReason),
-    /// Materialization stopped at an explicit resource boundary.
-    Truncated(InspectionLimit),
-    /// Automatic expansion reached storage already represented by another node.
-    Cycle {
-        /// The first node representing the same typed storage extent.
-        original: ValueNodeId,
+pub enum ValueStorage {
+    /// Storage in the inferior's virtual address space.
+    Memory(VirtualAddress),
+    /// Bounded immutable bytes captured while evaluating the parent value.
+    Bytes {
+        source: VariableValueSource,
+        raw: Arc<[u8]>,
+        start: usize,
+        end: usize,
+        address: Option<VirtualAddress>,
+    },
+    /// A DWARF implicit pointer that must be resolved at the originating frame.
+    ImplicitPointer {
+        debug_info_offset: u64,
+        byte_offset: i64,
     },
 }
 
-/// One typed node in an immutable stopped-value graph.
+/// Opaque capability for expanding one aggregate at one exact stopped state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValueNode {
-    /// The node's source-facing normalized type.
+pub struct ValueChildrenReference {
+    pub(crate) stop_id: crate::StopId,
+    pub(crate) thread: ThreadId,
+    pub(crate) module: ModuleId,
+    pub(crate) image: ModuleImageId,
+    pub(crate) context_address: Option<ImageAddress>,
+    pub(crate) target_type: TypeId,
+    pub(crate) storage: ValueStorage,
+    pub(crate) total: u64,
+    pub(crate) active_variant: Option<usize>,
+}
+
+impl ValueChildrenReference {
+    /// Returns the stopped snapshot that owns this capability.
+    #[must_use]
+    pub const fn stop_id(&self) -> crate::StopId {
+        self.stop_id
+    }
+
+    /// Returns the thread whose frame context produced this capability.
+    #[must_use]
+    pub const fn thread(&self) -> ThreadId {
+        self.thread
+    }
+
+    /// Returns the deterministic number of children exposed by this capability.
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.total
+    }
+}
+
+/// Whether an available value exposes lazily evaluated children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValueChildren {
+    /// Scalars, enumerations, pointers, and references have no structural children.
+    NotApplicable,
+    /// Children can be requested in arbitrary bounded pages.
+    Available(Arc<ValueChildrenReference>),
+    /// The aggregate header is valid but its children cannot be evaluated.
+    Unavailable(VariableUnavailableReason),
+}
+
+/// One child returned from a bounded aggregate page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueChild {
+    /// Its stable relationship to the page's parent.
+    pub relationship: ValueChildRelationship,
+    /// Its source-facing normalized type.
     pub type_info: TypeInfo,
-    /// Its current decoded or partial state.
-    pub state: ValueNodeState,
+    /// Its current availability and decoded summary.
+    pub state: VariableState,
 }
 
-/// One immutable, bounded value graph produced from a stopped state.
+/// Whether a requested child page reached its requested end.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValueGraph {
-    root: ValueNodeId,
-    nodes: Arc<[ValueNode]>,
+#[non_exhaustive]
+pub enum ValuePageCompletion {
+    /// Every child in the requested in-range interval was represented.
+    Complete,
+    /// Work stopped at a typed resource boundary.
+    Truncated(InspectionLimit),
 }
 
-impl ValueGraph {
-    pub(crate) fn new(root: ValueNodeId, nodes: Arc<[ValueNode]>) -> Option<Self> {
-        let valid =
-            |id: ValueNodeId| usize::try_from(id.get()).is_ok_and(|index| index < nodes.len());
-        if !valid(root)
-            || nodes.iter().any(|node| match &node.state {
-                ValueNodeState::Available(
-                    VariableValue::Array { elements, .. } | VariableValue::Slice { elements, .. },
-                ) => elements.iter().copied().any(|id| !valid(id)),
-                ValueNodeState::Available(VariableValue::Record { members, bases, .. }) => {
-                    members.iter().any(|member| !valid(member.value))
-                        || bases.iter().any(|base| !valid(base.value))
-                }
-                ValueNodeState::Available(VariableValue::Union { members, .. }) => {
-                    members.iter().any(|member| !valid(member.value))
-                }
-                ValueNodeState::Available(VariableValue::Variant {
-                    common_members,
-                    bases,
-                    active,
-                    ..
-                }) => {
-                    common_members.iter().any(|member| !valid(member.value))
-                        || bases.iter().any(|base| !valid(base.value))
-                        || active.as_ref().is_some_and(|active| {
-                            active.members.iter().any(|member| !valid(member.value))
-                        })
-                }
-                ValueNodeState::Cycle { original } => !valid(*original),
-                _ => false,
-            })
-        {
-            return None;
-        }
-        // Aggregate edges must form one complete tree/DAG rooted at `root`.
-        // Repeated storage is represented only by `ValueNodeState::Cycle`, whose
-        // `original` is metadata rather than a traversable child edge.
-        let mut colors = vec![0_u8; nodes.len()];
-        let mut work = vec![(root, false)];
-        while let Some((id, exiting)) = work.pop() {
-            let index = usize::try_from(id.get()).ok()?;
-            if exiting {
-                colors[index] = 2;
-                continue;
-            }
-            match colors[index] {
-                1 => return None,
-                2 => continue,
-                _ => {}
-            }
-            colors[index] = 1;
-            work.push((id, true));
-            match &nodes[index].state {
-                ValueNodeState::Available(
-                    VariableValue::Array { elements, .. } | VariableValue::Slice { elements, .. },
-                ) => {
-                    work.extend(elements.iter().rev().map(|child| (*child, false)));
-                }
-                ValueNodeState::Available(VariableValue::Record { members, bases, .. }) => {
-                    work.extend(bases.iter().rev().map(|base| (base.value, false)));
-                    work.extend(members.iter().rev().map(|member| (member.value, false)));
-                }
-                ValueNodeState::Available(VariableValue::Union { members, .. }) => {
-                    work.extend(members.iter().rev().map(|member| (member.value, false)));
-                }
-                ValueNodeState::Available(VariableValue::Variant {
-                    common_members,
-                    bases,
-                    active,
-                    ..
-                }) => {
-                    work.extend(bases.iter().rev().map(|base| (base.value, false)));
-                    work.extend(
-                        common_members
-                            .iter()
-                            .rev()
-                            .map(|member| (member.value, false)),
-                    );
-                    if let Some(active) = active {
-                        work.extend(
-                            active
-                                .members
-                                .iter()
-                                .rev()
-                                .map(|member| (member.value, false)),
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-        if colors.contains(&0) {
-            return None;
-        }
-        Some(Self { root, nodes })
-    }
-
-    /// Returns the graph's root identifier.
-    #[must_use]
-    pub const fn root_id(&self) -> ValueNodeId {
-        self.root
-    }
-
-    /// Returns the graph's root node.
-    #[must_use]
-    pub fn root(&self) -> &ValueNode {
-        &self.nodes[usize::try_from(self.root.get()).expect("value node ID fits usize")]
-    }
-
-    /// Returns a node when the identifier belongs to this graph.
-    #[must_use]
-    pub fn node(&self, id: ValueNodeId) -> Option<&ValueNode> {
-        self.nodes.get(usize::try_from(id.get()).ok()?)
-    }
-
-    /// Returns all nodes in dense identifier order.
-    #[must_use]
-    pub fn nodes(&self) -> &[ValueNode] {
-        &self.nodes
-    }
+/// One immutable page of children evaluated at a stopped snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueChildPage {
+    /// The stopped snapshot that authorized the reads.
+    pub stop_id: crate::StopId,
+    /// The zero-based child offset represented by this page.
+    pub offset: u64,
+    /// The deterministic number of children exposed by the parent.
+    pub total: u64,
+    /// Children represented in stable parent order.
+    pub children: Arc<[ValueChild]>,
+    /// Whether the requested interval completed.
+    pub completion: ValuePageCompletion,
 }
 
 /// How a variable's current value was obtained.
@@ -1050,7 +951,7 @@ pub enum DereferenceState {
     Unavailable {
         /// The dereferenced expression's type (the pointee), when it resolves.
         /// `None` when the producer supplied no concrete pointee type.
-        pointee: Option<TypeInfo>,
+        pointee: Option<Box<TypeInfo>>,
         /// Why the dereference cannot be performed.
         reason: DereferenceUnavailableReason,
     },
@@ -1155,13 +1056,15 @@ pub enum VariableState {
     Available {
         /// How the bytes were obtained.
         source: VariableValueSource,
-        /// Exact bytes in target byte order, including ABI padding. An optimized
-        /// implicit pointer has no concrete byte representation.
+        /// Exact bytes materialized for this value in target byte order. Aggregate
+        /// summaries generally retain storage only in their opaque child capability.
         raw: Option<Arc<[u8]>>,
-        /// The decoded value graph.
-        value: ValueGraph,
+        /// The decoded scalar or aggregate summary.
+        value: VariableValue,
         /// Explicit lazy dereference state.
         dereference: DereferenceState,
+        /// Explicit lazy structural-child state.
+        children: ValueChildren,
     },
     /// Valid metadata does not provide a supported readable value here.
     Unavailable(VariableUnavailableReason),
@@ -2669,82 +2572,6 @@ impl LoadedModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn value_test_type(id: u32) -> TypeInfo {
-        let base = BaseType {
-            name: "int".into(),
-            base_name: "int".into(),
-            encoding: BaseTypeEncoding::Signed,
-            byte_size: 4,
-            bit_size: None,
-        };
-        TypeInfo {
-            reference: TypeReference {
-                image: ModuleImageId::new(0),
-                id: TypeId::new(id),
-            },
-            name: "int".into(),
-            byte_size: Some(4),
-            kind: TypeKind::Base(base),
-        }
-    }
-
-    #[test]
-    fn value_graph_rejects_invalid_roots_and_every_aggregate_child_edge() {
-        let scalar = ValueNode {
-            type_info: value_test_type(0),
-            state: ValueNodeState::Available(VariableValue::Scalar(ScalarValue::Signed(42))),
-        };
-        assert!(ValueGraph::new(ValueNodeId::new(1), Arc::from([scalar.clone()])).is_none());
-
-        let array = ValueNode {
-            type_info: value_test_type(1),
-            state: ValueNodeState::Available(VariableValue::Array {
-                dimensions: Arc::from([ArrayDimension {
-                    lower_bound: 0,
-                    count: 1,
-                }]),
-                elements: Arc::from([ValueNodeId::new(1)]),
-                omitted: 0,
-            }),
-        };
-        assert!(ValueGraph::new(ValueNodeId::new(0), Arc::from([array.clone()])).is_none());
-        assert!(ValueGraph::new(ValueNodeId::new(0), Arc::from([array, scalar.clone()])).is_some());
-
-        let record = ValueNode {
-            type_info: value_test_type(2),
-            state: ValueNodeState::Available(VariableValue::Record {
-                members: Arc::from([RecordMemberValue {
-                    member: RecordMember {
-                        name: Some("field".into()),
-                        type_ref: scalar.type_info.reference,
-                        layout: RecordMemberLayout::ByteOffset(0),
-                        accessibility: Accessibility::Public,
-                        artificial: false,
-                        embedded: false,
-                        declaration: None,
-                    },
-                    value: ValueNodeId::new(9),
-                }]),
-                bases: Arc::from([]),
-                omitted: 0,
-            }),
-        };
-        assert!(ValueGraph::new(ValueNodeId::new(0), Arc::from([record])).is_none());
-
-        let self_cycle = ValueNode {
-            type_info: value_test_type(3),
-            state: ValueNodeState::Available(VariableValue::Array {
-                dimensions: Arc::from([]),
-                elements: Arc::from([ValueNodeId::new(0)]),
-                omitted: 0,
-            }),
-        };
-        assert!(ValueGraph::new(ValueNodeId::new(0), Arc::from([self_cycle])).is_none());
-        assert!(
-            ValueGraph::new(ValueNodeId::new(0), Arc::from([scalar.clone(), scalar])).is_none()
-        );
-    }
 
     fn global_test_image() -> ModuleImage {
         let scalar = || {

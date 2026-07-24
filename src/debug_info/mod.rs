@@ -13,8 +13,8 @@ use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
     InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StopId,
-    ThreadId, UnwindTermination, Variable, VariableQuery, VariableUnavailableReason,
-    VirtualAddress,
+    ThreadId, UnwindTermination, ValueChildPage, ValueChildrenReference, Variable, VariableQuery,
+    VariableUnavailableReason, VirtualAddress,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +118,16 @@ pub trait VariableInfo: Send + Sync {
         reference: &DereferenceReference,
         runtime: &mut dyn VariableRuntime,
     ) -> Result<DereferencedValue>;
+
+    /// Evaluates one arbitrary bounded interval from a stop-scoped aggregate
+    /// capability.
+    fn value_children(
+        &self,
+        reference: &ValueChildrenReference,
+        offset: u64,
+        limit: u32,
+        runtime: &mut dyn VariableRuntime,
+    ) -> Result<ValueChildPage>;
 }
 
 pub trait UnwindInfo: Send + Sync {
