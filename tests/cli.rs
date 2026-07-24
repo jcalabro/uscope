@@ -680,7 +680,7 @@ fn print_renders_nested_records_arrays_and_bit_fields() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("huge_array[3..7] = [3: 0, 4: 0, 5: 0, 6: 0]"),
+        stdout.contains("huge_array[3..7] = [0, 0, 0, 0]"),
         "{stdout}"
     );
     assert!(
