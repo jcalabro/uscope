@@ -836,10 +836,19 @@ async fn execute_print<'a>(
             let value = debugger
                 .inspect(parse_value_expression(expression, usage)?)
                 .await?;
-            let output = value.type_info.as_ref().map_or_else(
-                || format_untyped_state(expression, &value.state, renderer),
-                |type_info| format_typed_state(type_info, expression, &value.state, renderer),
-            );
+            let output = match value.type_info.as_ref() {
+                Some(type_info) => {
+                    format_typed_state_expanded(
+                        debugger,
+                        type_info,
+                        expression,
+                        &value.state,
+                        renderer,
+                    )
+                    .await?
+                }
+                None => format_untyped_state(expression, &value.state, renderer),
+            };
             Ok(Control::Continue(output))
         }
         None => Ok(Control::Continue(format_variables(
@@ -1255,8 +1264,13 @@ fn format_typed_state(
     renderer: Renderer,
 ) -> String {
     let value = match state {
-        VariableState::Available { value, .. } => renderer
-            .paint(Role::Value, format_value_graph(value))
+        VariableState::Available {
+            value, children, ..
+        } => renderer
+            .paint(
+                Role::Value,
+                format_value_summary(type_info, value, children),
+            )
             .to_string(),
         VariableState::Unavailable(reason) => renderer
             .paint(Role::Warning, format!("<unavailable: {reason}>"))
@@ -1272,19 +1286,84 @@ fn format_typed_state(
     )
 }
 
+fn format_value_summary(
+    type_info: &uscope::TypeInfo,
+    value: &uscope::VariableValue,
+    children: &uscope::ValueChildren,
+) -> String {
+    let total = match children {
+        uscope::ValueChildren::Available(reference) => reference.total(),
+        _ => 0,
+    };
+    match value {
+        uscope::VariableValue::Scalar(value) => format_scalar(type_info, value),
+        uscope::VariableValue::Enumeration { value, matches } => {
+            let raw = format_integer(*value);
+            match matches.as_ref() {
+                [] => raw,
+                [enumerator] => format!("{} ({raw})", enumerator.name),
+                aliases => format!(
+                    "{raw} <{}>",
+                    aliases
+                        .iter()
+                        .map(|alias| alias.name.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+        uscope::VariableValue::Address(value) => {
+            let width = type_info
+                .byte_size
+                .and_then(|size| usize::try_from(size.checked_mul(2)?).ok())
+                .unwrap_or(16);
+            format!("0x{:0width$x}", value.address.get())
+        }
+        uscope::VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
+        uscope::VariableValue::Array { .. } => format!("[<{total} elements>]"),
+        uscope::VariableValue::Slice { length, capacity } => capacity.map_or_else(
+            || format!("[<{length} elements>]"),
+            |capacity| format!("[<{length} elements; capacity {capacity}>]"),
+        ),
+        uscope::VariableValue::Record => format!("{{<{total} fields>}}"),
+        uscope::VariableValue::Union => format!("{{<{total} alternatives; active unknown>}}"),
+        uscope::VariableValue::Variant {
+            discriminant,
+            active,
+        } => {
+            let active = active
+                .as_ref()
+                .and_then(|variant| variant.name.as_deref())
+                .unwrap_or("<no matching variant>");
+            discriminant.map_or_else(
+                || format!("{{<{active}; {total} fields>}}"),
+                |value| format!("{{<{active} = {}; {total} fields>}}", format_integer(value)),
+            )
+        }
+        _ => "<unsupported value>".to_owned(),
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
-    reason = "the iterative renderer handles every node and aggregate state without recursive calls"
+    reason = "the iterative renderer keeps bounded async expansion, output limits, and all value shapes in one state machine"
 )]
-fn format_value_graph(graph: &uscope::ValueGraph) -> String {
+async fn format_typed_state_expanded(
+    debugger: &DebuggerHandle,
+    type_info: &uscope::TypeInfo,
+    name: &str,
+    state: &VariableState,
+    renderer: Renderer,
+) -> uscope::Result<String> {
     const MAX_RENDER_DEPTH: usize = 64;
     const MAX_OUTPUT_BYTES: usize = 64 * 1024;
     enum Work {
-        Node(uscope::ValueNodeId, usize),
+        State(Box<(uscope::TypeInfo, VariableState, usize)>),
         Text(String),
     }
+
     let mut output = String::new();
-    let mut work = vec![Work::Node(graph.root_id(), 0)];
+    let mut work = vec![Work::State(Box::new((type_info.clone(), state.clone(), 0)))];
     while let Some(item) = work.pop() {
         if output.len() >= MAX_OUTPUT_BYTES {
             output.truncate(MAX_OUTPUT_BYTES);
@@ -1294,246 +1373,128 @@ fn format_value_graph(graph: &uscope::ValueGraph) -> String {
             output.push_str("<truncated: OutputBytes>");
             break;
         }
-        let Work::Node(id, depth) = item else {
+        let Work::State(state_work) = item else {
             let Work::Text(text) = item else {
                 unreachable!()
             };
             output.push_str(&text);
             continue;
         };
-        if depth > MAX_RENDER_DEPTH {
+        let (type_info, state, depth) = *state_work;
+        let VariableState::Available {
+            value, children, ..
+        } = state
+        else {
+            match state {
+                VariableState::Unavailable(reason) => {
+                    write!(output, "<unavailable: {reason}>").expect("String writes cannot fail");
+                }
+                VariableState::Malformed(reason) => {
+                    write!(output, "<malformed: {}>", reason.description)
+                        .expect("String writes cannot fail");
+                }
+                VariableState::Available { .. } => unreachable!(),
+            }
+            continue;
+        };
+        if matches!(
+            value,
+            uscope::VariableValue::Scalar(_)
+                | uscope::VariableValue::Enumeration { .. }
+                | uscope::VariableValue::Address(_)
+                | uscope::VariableValue::ImplicitPointer
+        ) {
+            output.push_str(&format_value_summary(&type_info, &value, &children));
+            continue;
+        }
+        if depth >= MAX_RENDER_DEPTH {
             output.push_str("<truncated: AggregateDepth>");
             continue;
         }
-        let Some(node) = graph.node(id) else {
-            output.push_str("<malformed: invalid value node>");
+        let uscope::ValueChildren::Available(reference) = children else {
+            output.push_str(&format_value_summary(&type_info, &value, &children));
             continue;
         };
-        let value = match &node.state {
-            uscope::ValueNodeState::Available(value) => value,
-            uscope::ValueNodeState::Unavailable(reason) => {
-                write!(output, "<unavailable: {reason}>").expect("String writes cannot fail");
-                continue;
-            }
-            uscope::ValueNodeState::Malformed(reason) => {
-                write!(output, "<malformed: {}>", reason.description)
-                    .expect("String writes cannot fail");
-                continue;
-            }
-            uscope::ValueNodeState::Truncated(limit) => {
-                write!(output, "<truncated: {limit:?}>").expect("String writes cannot fail");
-                continue;
-            }
-            uscope::ValueNodeState::Cycle { original } => {
-                write!(output, "<cycle to #{}>", original.get())
-                    .expect("String writes cannot fail");
-                continue;
-            }
-            _ => {
-                output.push_str("<unsupported value state>");
-                continue;
-            }
+        let requested = reference.total().min(256);
+        let page = if requested == 0 {
+            None
+        } else {
+            Some(
+                debugger
+                    .value_children(
+                        reference.clone(),
+                        uscope::ValueChildQuery {
+                            offset: 0,
+                            limit: u32::try_from(requested).expect("bounded page fits u32"),
+                        },
+                    )
+                    .await?,
+            )
         };
-        match value {
-            uscope::VariableValue::Scalar(value) => {
-                output.push_str(&format_scalar(&node.type_info, value));
-            }
-            uscope::VariableValue::Enumeration { value, matches } => {
-                let raw = format_integer(*value);
-                match matches.as_ref() {
-                    [] => output.push_str(&raw),
-                    [enumerator] => {
-                        write!(output, "{} ({raw})", enumerator.name)
-                            .expect("String writes cannot fail");
+        let page_children = page.as_ref().map_or(&[][..], |page| page.children.as_ref());
+        let children_to_render = page_children
+            .iter()
+            .filter(|child| {
+                !matches!(
+                    &child.relationship,
+                    uscope::ValueChildRelationship::Member(member) if member.artificial
+                )
+            })
+            .map(|child| {
+                let label = match &child.relationship {
+                    uscope::ValueChildRelationship::Member(member) => {
+                        format!("{} = ", member.name.as_deref().unwrap_or("<anonymous>"))
                     }
-                    aliases => {
-                        output.push_str(&raw);
-                        output.push_str(" <");
-                        for (index, alias) in aliases.iter().enumerate() {
-                            if index != 0 {
-                                output.push_str(", ");
-                            }
-                            output.push_str(&alias.name);
-                        }
-                        output.push('>');
+                    uscope::ValueChildRelationship::Base(_) => {
+                        format!("<base {}> = ", child.type_info.name)
                     }
-                }
-            }
-            uscope::VariableValue::Address(value) => {
-                let width = node
-                    .type_info
-                    .byte_size
-                    .and_then(|size| usize::try_from(size.checked_mul(2)?).ok())
-                    .unwrap_or(16);
-                write!(output, "0x{:0width$x}", value.address.get())
-                    .expect("String writes cannot fail");
-            }
-            uscope::VariableValue::ImplicitPointer => output.push_str("<implicit pointer>"),
-            uscope::VariableValue::Array {
-                elements, omitted, ..
-            }
-            | uscope::VariableValue::Slice {
-                elements, omitted, ..
-            } => {
-                work.push(Work::Text("]".to_owned()));
-                if *omitted != 0 {
-                    work.push(Work::Text(format!("<{omitted} omitted>")));
-                    if !elements.is_empty() {
-                        work.push(Work::Text(", ".to_owned()));
-                    }
-                }
-                for (index, element) in elements.iter().enumerate().rev() {
-                    if index + 1 != elements.len() {
-                        work.push(Work::Text(", ".to_owned()));
-                    }
-                    work.push(Work::Node(*element, depth + 1));
-                }
-                output.push('[');
-            }
-            uscope::VariableValue::Record {
-                members,
-                bases,
-                omitted,
-            } => {
-                let mut children = Vec::with_capacity(bases.len() + members.len());
-                for base in bases.iter() {
-                    let name = graph
-                        .node(base.value)
-                        .map_or("<unknown base>", |node| node.type_info.name.as_ref());
-                    children.push((format!("<base {name}> = "), base.value));
-                }
-                for member in members.iter().filter(|member| !member.member.artificial) {
-                    children.push((
-                        format!(
-                            "{} = ",
-                            member.member.name.as_deref().unwrap_or("<anonymous>")
-                        ),
-                        member.value,
-                    ));
-                }
-                let child_count = children.len();
-                work.push(Work::Text("}".to_owned()));
-                if *omitted != 0 {
-                    work.push(Work::Text(format!("<{omitted} omitted>")));
-                    if child_count != 0 {
-                        work.push(Work::Text(", ".to_owned()));
-                    }
-                }
-                for (index, (label, child)) in children.into_iter().enumerate().rev() {
-                    if index + 1 != child_count {
-                        work.push(Work::Text(", ".to_owned()));
-                    }
-                    work.push(Work::Node(child, depth + 1));
-                    work.push(Work::Text(label));
-                }
-                output.push('{');
-            }
-            uscope::VariableValue::Union { members, omitted } => {
-                let children = members
-                    .iter()
-                    .filter(|member| !member.member.artificial)
-                    .map(|member| {
-                        (
-                            format!(
-                                "{} = ",
-                                member.member.name.as_deref().unwrap_or("<anonymous>")
-                            ),
-                            member.value,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let child_count = children.len();
-                work.push(Work::Text("} <active member unknown>".to_owned()));
-                if *omitted != 0 {
-                    work.push(Work::Text(format!("<{omitted} omitted>")));
-                    if child_count != 0 {
-                        work.push(Work::Text(", ".to_owned()));
-                    }
-                }
-                for (index, (label, child)) in children.into_iter().enumerate().rev() {
-                    if index + 1 != child_count {
-                        work.push(Work::Text(", ".to_owned()));
-                    }
-                    work.push(Work::Node(child, depth + 1));
-                    work.push(Work::Text(label));
-                }
-                output.push('{');
-            }
-            uscope::VariableValue::Variant {
-                discriminant,
-                common_members,
-                bases,
-                active,
-                omitted,
-            } => {
-                let mut children = Vec::new();
-                for base in bases.iter() {
-                    let name = graph
-                        .node(base.value)
-                        .map_or("<unknown base>", |node| node.type_info.name.as_ref());
-                    children.push((format!("<base {name}> = "), base.value));
-                }
-                for member in common_members
-                    .iter()
-                    .filter(|member| !member.member.artificial)
-                {
-                    children.push((
-                        format!(
-                            "{} = ",
-                            member.member.name.as_deref().unwrap_or("<anonymous>")
-                        ),
-                        member.value,
-                    ));
-                }
-                if let Some(active) = active {
-                    for member in active
-                        .members
-                        .iter()
-                        .filter(|member| !member.member.artificial)
-                    {
-                        children.push((
-                            format!(
-                                "{} = ",
-                                member.member.name.as_deref().unwrap_or("<anonymous>")
-                            ),
-                            member.value,
-                        ));
-                    }
-                }
-                let omitted = total_variant_omitted(*omitted, active.as_ref());
-                let child_count = children.len();
-                let suffix = match (active, discriminant) {
-                    (Some(active), _) if child_count == 0 => active
-                        .variant
-                        .name
-                        .as_deref()
-                        .map_or_else(String::new, |name| format!("<{name}>")),
-                    (None, Some(discriminant)) => {
-                        format!("<no matching variant: {}>", format_integer(*discriminant))
-                    }
-                    (None, None) => "<no matching variant>".to_owned(),
-                    _ => String::new(),
+                    uscope::ValueChildRelationship::ArrayElement { .. }
+                    | uscope::ValueChildRelationship::SliceElement { .. } => String::new(),
+                    _ => "<child> = ".to_owned(),
                 };
-                work.push(Work::Text(format!("}}{suffix}")));
-                if omitted != 0 {
-                    work.push(Work::Text(format!("<{omitted} omitted>")));
-                    if child_count != 0 {
-                        work.push(Work::Text(", ".to_owned()));
-                    }
-                }
-                for (index, (label, child)) in children.into_iter().enumerate().rev() {
-                    if index + 1 != child_count {
-                        work.push(Work::Text(", ".to_owned()));
-                    }
-                    work.push(Work::Node(child, depth + 1));
-                    work.push(Work::Text(label));
-                }
-                output.push('{');
+                (label, child.type_info.clone(), child.state.clone())
+            })
+            .collect::<Vec<_>>();
+        let omitted = reference
+            .total()
+            .saturating_sub(u64::try_from(page_children.len()).expect("page length fits u64"));
+        let (opening, closing) = match &value {
+            uscope::VariableValue::Array { .. } | uscope::VariableValue::Slice { .. } => {
+                ("[", "]".to_owned())
             }
-            _ => output.push_str("<unsupported value>"),
+            uscope::VariableValue::Variant { active, .. } => (
+                "{",
+                active
+                    .as_ref()
+                    .and_then(|variant| variant.name.as_deref())
+                    .map_or_else(|| "}".to_owned(), |name| format!("}}<{name}>")),
+            ),
+            uscope::VariableValue::Union => ("{", "} <active member unknown>".to_owned()),
+            _ => ("{", "}".to_owned()),
+        };
+        output.push_str(opening);
+        work.push(Work::Text(closing));
+        if omitted != 0 {
+            work.push(Work::Text(format!("<{omitted} omitted>")));
+            if !children_to_render.is_empty() {
+                work.push(Work::Text(", ".to_owned()));
+            }
+        }
+        let child_count = children_to_render.len();
+        for (index, (label, type_info, state)) in children_to_render.into_iter().enumerate().rev() {
+            if index + 1 != child_count {
+                work.push(Work::Text(", ".to_owned()));
+            }
+            work.push(Work::State(Box::new((type_info, state, depth + 1))));
+            work.push(Work::Text(label));
         }
     }
-    output
+    Ok(format!(
+        "({}) {} = {}",
+        renderer.paint(Role::Type, &type_info.name),
+        renderer.paint(Role::Name, name),
+        renderer.paint(Role::Value, output)
+    ))
 }
 
 fn format_scalar(type_info: &uscope::TypeInfo, value: &ScalarValue) -> String {
@@ -1550,10 +1511,6 @@ fn format_integer(value: uscope::IntegerValue) -> String {
         uscope::IntegerValue::Unsigned(value) => value.to_string(),
         _ => "<unsupported integer value>".to_owned(),
     }
-}
-
-fn total_variant_omitted(common: u64, active: Option<&uscope::ActiveVariantValue>) -> u64 {
-    common.saturating_add(active.map_or(0, |active| active.omitted))
 }
 
 fn format_scalar_value(value: &ScalarValue, character: bool) -> String {
@@ -2075,20 +2032,5 @@ mod tests {
             }),
             "3.125"
         );
-    }
-
-    #[test]
-    fn variant_omission_count_includes_active_members() {
-        let active = uscope::ActiveVariantValue {
-            variant: uscope::Variant {
-                name: Some("Ready".into()),
-                selection: uscope::VariantSelection::Default,
-                members: Arc::from([]),
-            },
-            members: Arc::from([]),
-            omitted: 2,
-        };
-        assert_eq!(total_variant_omitted(0, Some(&active)), 2);
-        assert_eq!(total_variant_omitted(u64::MAX, Some(&active)), u64::MAX);
     }
 }

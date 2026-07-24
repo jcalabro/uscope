@@ -7,8 +7,10 @@
 volatile int32_t pointer_memory_sink;
 
 __attribute__((noinline)) static void inspect_boundaries(int32_t *valid_pointer,
-                                                         int32_t *boundary_pointer) {
-    __asm__ volatile("" : : "g"(valid_pointer), "g"(boundary_pointer) : "memory");
+                                                         int32_t *boundary_pointer,
+                                                         int32_t (*boundary_array)[4]) {
+    __asm__ volatile("" : : "g"(valid_pointer), "g"(boundary_pointer),
+                     "g"(boundary_array) : "memory");
     pointer_memory_sink = *valid_pointer;
 }
 
@@ -27,7 +29,10 @@ int main(void) {
     int32_t *boundary = (int32_t *)(mapping + page_size - 2);
     mapping[page_size - 2] = 0x2a;
     mapping[page_size - 1] = 0;
-    inspect_boundaries(&valid, boundary);
+    int32_t (*boundary_array)[4] = (int32_t(*)[4])(mapping + page_size - 8);
+    (*boundary_array)[0] = 41;
+    (*boundary_array)[1] = 42;
+    inspect_boundaries(&valid, boundary, boundary_array);
 
     if (munmap(mapping, (size_t)page_size) != 0) {
         return 1;

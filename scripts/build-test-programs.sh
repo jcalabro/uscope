@@ -253,6 +253,9 @@ build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic" \
 build_c_fixture_directory gcc "$c_fixtures_dir/pointer-memory" \
     "$output_dir/pointer-memory-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_c_fixture_directory clang "$c_fixtures_dir/pointer-memory" \
+    "$output_dir/pointer-memory-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/variables.c" "$output_dir/variables-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables.c" "$output_dir/variables-clang-o0" \

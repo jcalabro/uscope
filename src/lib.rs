@@ -7,23 +7,23 @@ mod unwind;
 
 pub use error::{Error, Result};
 pub use model::{
-    Accessibility, ActiveVariantValue, AddressRange, AddressValue, Architecture, Backtrace,
-    BaseClass, BaseClassValue, BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry,
-    BreakpointLocation, ByteOrder, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
-    ColumnNumber, DereferenceReference, DereferenceState, DereferenceUnavailableReason,
-    DereferencedValue, EntryProvenance, EnumerationOrigin, Enumerator, ExecutionLocation,
-    FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId,
-    GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference, GlobalVariableType,
-    GlobalVariableVisibility, ImageAddress, ImageLocation, InlineChain, InlineFrameLookup,
-    InspectedValue, InspectionLimit, IntegerValue, LineNumber, LineSequenceId,
-    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, ModuleId,
-    ModuleImage, ModuleImageId, NamedTypeRelationship, PointerWidth, RecordKind, RecordMember,
-    RecordMemberLayout, RecordMemberValue, ReferenceKind, RegisterDescriptor, RegisterId,
-    RegisterRole, RegisterSnapshot, RegisterValue, ScalarValue, SourceContext, SourceFile,
-    SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags,
-    StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId, TypeId, TypeInfo, TypeKind,
-    TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
-    ValueExpression, ValueGraph, ValueNode, ValueNodeId, ValueNodeState, Variable, VariableKind,
+    Accessibility, AddressRange, AddressValue, Architecture, Backtrace, BaseClass,
+    BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry, BreakpointLocation,
+    ByteOrder, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, ColumnNumber,
+    DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue,
+    EntryProvenance, EnumerationOrigin, Enumerator, ExecutionLocation, FloatValue, FrameKind,
+    FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
+    GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
+    ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionLimit,
+    IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule,
+    LoadedModuleRecord, LoadedModuleSnapshot, ModuleId, ModuleImage, ModuleImageId,
+    NamedTypeRelationship, PointerWidth, RecordKind, RecordMember, RecordMemberLayout,
+    ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
+    ScalarValue, SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame,
+    StackFrameId, StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId,
+    TypeId, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature,
+    UnwindTermination, ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren,
+    ValueChildrenReference, ValueExpression, ValuePageCompletion, Variable, VariableKind,
     VariableMalformedReason, VariableSnapshot, VariableState, VariableUnavailableReason,
     VariableValue, VariableValueSource, Variant, VariantDiscriminant, VariantSelection,
     VariantSelector, VariantStorageKind, VirtualAddress,
@@ -32,7 +32,7 @@ pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
     ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, InferiorState, PresentedFrame,
     ProcessId, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId,
-    StopReason, ThreadSnapshot, ThreadState, VariableQuery,
+    StopReason, ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery,
 };
 
 use std::path::{Path, PathBuf};
@@ -480,6 +480,20 @@ impl DebuggerHandle {
     pub async fn dereference(&self, reference: DereferenceReference) -> Result<DereferencedValue> {
         self.request(|reply| Request::Dereference { reference, reply })
             .await
+    }
+
+    /// Evaluates one arbitrary bounded page from an aggregate child capability.
+    pub async fn value_children(
+        &self,
+        reference: Arc<ValueChildrenReference>,
+        query: ValueChildQuery,
+    ) -> Result<ValueChildPage> {
+        self.request(|reply| Request::ValueChildren {
+            reference,
+            query,
+            reply,
+        })
+        .await
     }
 
     /// Lists one filtered, bounded page of immutable global metadata.

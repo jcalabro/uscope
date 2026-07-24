@@ -5,7 +5,8 @@ use tokio::sync::oneshot;
 use crate::{
     Backtrace, BreakpointLocation, CodeInstanceId, DereferenceReference, DereferencedValue,
     ExecutionLocation, GlobalVariablePage, GlobalVariableReference, LineNumber, LoadedModule,
-    LoadedModuleSnapshot, RegisterSnapshot, Result, ThreadId, VariableSnapshot, VirtualAddress,
+    LoadedModuleSnapshot, RegisterSnapshot, Result, ThreadId, ValueChildPage,
+    ValueChildrenReference, VariableSnapshot, VirtualAddress,
 };
 
 /// Selects data objects to inspect in the stopped thread's selected logical frame.
@@ -36,6 +37,24 @@ impl Default for GlobalVariableQuery {
             filter: None,
             offset: 0,
             limit: 100,
+        }
+    }
+}
+
+/// Selects an arbitrary bounded page of one aggregate's children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueChildQuery {
+    /// Zero-based offset within the parent's stable child ordering.
+    pub offset: u64,
+    /// Maximum children to return; must be between 1 and 256.
+    pub limit: u32,
+}
+
+impl Default for ValueChildQuery {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            limit: 32,
         }
     }
 }
@@ -490,6 +509,11 @@ pub enum Request {
     Dereference {
         reference: DereferenceReference,
         reply: Reply<DereferencedValue>,
+    },
+    ValueChildren {
+        reference: Arc<ValueChildrenReference>,
+        query: ValueChildQuery,
+        reply: Reply<ValueChildPage>,
     },
     Globals {
         query: GlobalVariableQuery,
