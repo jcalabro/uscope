@@ -4943,11 +4943,12 @@ fn read_logical_memory_with(
             }
             Err(MemoryAccessError::Fatal(error)) => return Err(error),
         };
-        for (&site_address, site) in breakpoints {
-            let Some(offset) = site_address.get().checked_sub(current) else {
-                continue;
-            };
-            if site.installed && offset < word.len() as u64 {
+        let last_word_address = current.saturating_add(word_size - 1);
+        for (&site_address, site) in
+            breakpoints.range(VirtualAddress::new(current)..=VirtualAddress::new(last_word_address))
+        {
+            let offset = site_address.get() - current;
+            if site.installed {
                 word[usize::try_from(offset).expect("word offset fits usize")] = site.original_byte;
             }
         }
@@ -6265,20 +6266,49 @@ mod tests {
                 owners: BTreeSet::new(),
             },
         );
+        breakpoints.insert(
+            VirtualAddress::new(0x1008),
+            BreakpointSite {
+                original_byte: 0x88,
+                installed: true,
+                owners: BTreeSet::new(),
+            },
+        );
+        breakpoints.insert(
+            VirtualAddress::new(0x1009),
+            BreakpointSite {
+                original_byte: 0x99,
+                installed: false,
+                owners: BTreeSet::new(),
+            },
+        );
+        breakpoints.insert(
+            VirtualAddress::new(0x1010),
+            BreakpointSite {
+                original_byte: 0x10,
+                installed: true,
+                owners: BTreeSet::new(),
+            },
+        );
         let bytes = read_logical_memory_with(address, 10, &breakpoints, |current| {
             reads.push(current);
             let mut bytes = [0_u8; 8];
             for (offset, byte) in bytes.iter_mut().enumerate() {
                 *byte = u8::try_from(current + offset as u64 - 0x1000).expect("test byte fits u8");
             }
-            if current <= 0x1005 && 0x1005 < current + 8 {
-                bytes[usize::try_from(0x1005 - current).expect("test offset fits usize")] =
-                    BREAKPOINT_OPCODE;
+            for (&site_address, site) in &breakpoints {
+                let Some(offset) = site_address.get().checked_sub(current) else {
+                    continue;
+                };
+                if site.installed && offset < bytes.len() as u64 {
+                    bytes[usize::try_from(offset).expect("test offset fits usize")] =
+                        BREAKPOINT_OPCODE;
+                }
             }
             Ok(u64::from_le_bytes(bytes))
         })
         .expect("logical memory read");
-        assert_eq!(bytes.bytes, [3, 4, 0x55, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(bytes.bytes, [3, 4, 0x55, 6, 7, 0x88, 9, 10, 11, 12]);
         assert_eq!(bytes.completion, MemoryReadCompletion::Complete);
         assert_eq!(reads, [0x1000, 0x1008]);
         let empty = read_logical_memory_with(address, 0, &breakpoints, |_| {
