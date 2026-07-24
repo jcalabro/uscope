@@ -130,6 +130,10 @@ async fn normalized_type_graph_is_public_dense_and_closed_across_languages() {
                 "{fixture}: {node:?}"
             );
             if let uscope::TypeNode::Resolved(info) = node {
+                assert!(
+                    !info.name.contains("<recursive type>"),
+                    "{fixture}: construction placeholder escaped into finalized type metadata: {info:?}"
+                );
                 for edge in type_edges(&info.kind) {
                     assert!(
                         image.type_node(edge).is_some(),
@@ -3805,8 +3809,20 @@ async fn global_catalog_normalizes_compiler_qualification_and_optimized_storage(
         ),
     ] {
         let debugger = Debugger::new(Scenario::fixture(fixture)).expect("load global catalog");
+        let handle = debugger.handle();
+        let image = handle.module_image();
         for qualified in expected {
-            catalog_global(debugger.handle().module_image(), qualified);
+            catalog_global(image, qualified);
+        }
+        for global in image.globals() {
+            if let uscope::GlobalVariableType::Resolved(type_info) = &global.type_info {
+                assert_eq!(
+                    image.type_info(type_info.reference),
+                    Some(type_info),
+                    "{fixture}: global {} published type metadata that disagrees with its type graph node",
+                    global.qualified_name
+                );
+            }
         }
         debugger
             .shutdown()

@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -793,29 +793,6 @@ fn load_globals<'data>(
                 frame_base: Metadata::Unavailable("globals have no frame base".into()),
                 malformed,
             };
-            let public_type = match &type_info {
-                TypeResolution::Resolved(id) => match types
-                    .entries
-                    .get(usize::try_from(id.get()).expect("type ID fits usize"))
-                {
-                    Some(TypeEntry::Resolved(value)) => GlobalVariableType::Resolved(value.clone()),
-                    Some(TypeEntry::Malformed(description)) => {
-                        GlobalVariableType::Malformed(VariableMalformedReason {
-                            description: Arc::clone(description),
-                        })
-                    }
-                    Some(TypeEntry::Building) | None => {
-                        GlobalVariableType::Malformed(VariableMalformedReason {
-                            description: "type graph did not finish building".into(),
-                        })
-                    }
-                },
-                TypeResolution::Malformed(description) => {
-                    GlobalVariableType::Malformed(VariableMalformedReason {
-                        description: Arc::clone(description),
-                    })
-                }
-            };
             let info = GlobalVariableInfo {
                 id: GlobalVariableId::new(
                     u32::try_from(globals.len()).expect("global count fits u32"),
@@ -824,7 +801,10 @@ fn load_globals<'data>(
                 qualified_name,
                 linkage_name: linkage_name.clone(),
                 declaration: declaration.ok().flatten(),
-                type_info: public_type,
+                // This copy is replaced after graph finalization. Keeping the
+                // initial state accurate makes the builder invariant explicit
+                // without publishing construction-only names or sizes.
+                type_info: public_global_type(&type_info, &types.entries),
                 visibility,
             };
             let canonical_die = chain.first().map_or(key, |(origin_unit, origin)| DieKey {
@@ -869,6 +849,31 @@ const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {
     }
 }
 
+fn public_global_type(resolution: &TypeResolution, types: &[TypeEntry]) -> GlobalVariableType {
+    match resolution {
+        TypeResolution::Resolved(id) => {
+            match types.get(usize::try_from(id.get()).expect("type ID fits usize")) {
+                Some(TypeEntry::Resolved(value)) => GlobalVariableType::Resolved(value.clone()),
+                Some(TypeEntry::Malformed(description)) => {
+                    GlobalVariableType::Malformed(VariableMalformedReason {
+                        description: Arc::clone(description),
+                    })
+                }
+                Some(TypeEntry::Building) | None => {
+                    GlobalVariableType::Malformed(VariableMalformedReason {
+                        description: "type graph did not finish building".into(),
+                    })
+                }
+            }
+        }
+        TypeResolution::Malformed(description) => {
+            GlobalVariableType::Malformed(VariableMalformedReason {
+                description: Arc::clone(description),
+            })
+        }
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one depth-first DIE walk must keep scope, variable, and parameter state synchronized"
@@ -894,7 +899,7 @@ pub(super) fn load_variable_info<'data>(
         image_id,
         target.byte_order,
     );
-    let (globals, global_objects) = load_globals(
+    let (mut globals, global_objects) = load_globals(
         dwarf,
         units,
         &mut objects,
@@ -1116,6 +1121,17 @@ pub(super) fn load_variable_info<'data>(
     types.populate_go_named_constants();
     types.populate_record_member_declarations(source_files, source_file_ids);
     types.finalize_type_graph();
+    assert_eq!(
+        globals.len(),
+        global_objects.len(),
+        "every global catalog entry has one evaluation object"
+    );
+    for (global, object) in globals.iter_mut().zip(&global_objects) {
+        let object = objects
+            .get(*object)
+            .expect("global catalog references a known evaluation object");
+        global.type_info = public_global_type(&object.type_info, &types.entries);
+    }
     let finalized_types = std::mem::take(&mut types.entries)
         .into_iter()
         .enumerate()
@@ -2242,6 +2258,23 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let mut current = key;
         let mut visited = HashSet::new();
         while visited.insert(current) {
+            let unit = self
+                .units
+                .get(current.unit)
+                .ok_or_else(|| Arc::from("type reference is outside loaded units"))?;
+            if !self
+                .die_offsets
+                .get(current.unit)
+                .is_some_and(|offsets| offsets.contains(&current.offset))
+            {
+                return Err("type reference does not identify a DIE".into());
+            }
+            let entry = unit
+                .entry(gimli::UnitOffset(current.offset))
+                .map_err(|error| Arc::from(error.to_string()))?;
+            if !is_type_die_tag(entry.tag()) {
+                return Err(format!("DW_AT_type target has non-type tag {:?}", entry.tag()).into());
+            }
             if self.ambiguous_type_declarations.contains(&current) {
                 return Err("type declaration has multiple definitions".into());
             }
@@ -2249,12 +2282,6 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 current = definition;
                 continue;
             }
-            let Some(unit) = self.units.get(current.unit) else {
-                return Err("type reference is outside loaded units".into());
-            };
-            let entry = unit
-                .entry(gimli::UnitOffset(current.offset))
-                .map_err(|error| Arc::from(error.to_string()))?;
             let Some(signature) = entry.attr_value(gimli::DW_AT_signature) else {
                 return Ok(current);
             };
@@ -5524,38 +5551,47 @@ fn type_info_from<T: TypeMetadataEntry>(
 }
 
 fn propagate_wrapper_sizes(types: &mut [TypeEntry]) {
-    for _ in 0..types.len() {
-        let inherited = types
-            .iter()
-            .map(|entry| match entry {
-                TypeEntry::Resolved(info) => info.byte_size,
-                TypeEntry::Building | TypeEntry::Malformed(_) => None,
-            })
-            .collect::<Vec<_>>();
-        let mut changed = false;
-        for entry in &mut *types {
-            let TypeEntry::Resolved(info) = entry else {
+    let mut dependents = vec![Vec::new(); types.len()];
+    let mut ready = VecDeque::new();
+    for (index, entry) in types.iter().enumerate() {
+        let TypeEntry::Resolved(info) = entry else {
+            continue;
+        };
+        if info.byte_size.is_some() {
+            ready.push_back(index);
+            continue;
+        }
+        let (TypeKind::Modified { target, .. }
+        | TypeKind::Named {
+            target: Some(target),
+            ..
+        }) = info.kind
+        else {
+            continue;
+        };
+        if let Ok(target) = usize::try_from(target.id.get())
+            && let Some(target_dependents) = dependents.get_mut(target)
+        {
+            target_dependents.push(index);
+        }
+    }
+
+    while let Some(target) = ready.pop_front() {
+        let Some(size) = types
+            .get(target)
+            .and_then(|entry| entry.type_info().ok())
+            .and_then(|info| info.byte_size)
+        else {
+            continue;
+        };
+        for dependent in std::mem::take(&mut dependents[target]) {
+            let Some(TypeEntry::Resolved(info)) = types.get_mut(dependent) else {
                 continue;
             };
-            let target = match info.kind {
-                TypeKind::Modified { target, .. }
-                | TypeKind::Named {
-                    target: Some(target),
-                    ..
-                } => Some(target),
-                _ => None,
-            };
-            if info.byte_size.is_none()
-                && let Some(size) = target
-                    .and_then(|target| usize::try_from(target.id.get()).ok())
-                    .and_then(|index| inherited.get(index).copied().flatten())
-            {
+            if info.byte_size.is_none() {
                 info.byte_size = Some(size);
-                changed = true;
+                ready.push_back(dependent);
             }
-        }
-        if !changed {
-            break;
         }
     }
 }
@@ -5721,6 +5757,17 @@ fn transparent_representation<T: TypeMetadataEntry>(
 ) -> std::result::Result<(), TransparentRepresentationError> {
     let target =
         type_info_from(types, target.id).map_err(TransparentRepresentationError::Malformed)?;
+    if matches!(
+        wrapper.kind,
+        TypeKind::Modified {
+            modifier: TypeModifier::Shared,
+            ..
+        }
+    ) {
+        return Err(TransparentRepresentationError::Unsupported(
+            "shared-qualified values require UPC distributed-memory semantics".into(),
+        ));
+    }
     if let (Some(wrapper_size), Some(target_size)) = (wrapper.byte_size, target.byte_size)
         && wrapper_size != target_size
     {
@@ -6095,14 +6142,19 @@ impl DwarfVariableInfo {
             })
     }
 
-    fn transparent_type(&self, id: TypeId) -> std::result::Result<(TypeId, &TypeInfo), Arc<str>> {
+    fn transparent_type(
+        &self,
+        id: TypeId,
+    ) -> std::result::Result<(TypeId, &TypeInfo), ValueShapeError> {
         let mut current = id;
         let mut visited = HashSet::new();
         loop {
             if !visited.insert(current) {
-                return Err("type wrapper cycle".into());
+                return Err(ValueShapeError::Malformed("type wrapper cycle".into()));
             }
-            let info = self.type_info(current)?;
+            let info = self
+                .type_info(current)
+                .map_err(ValueShapeError::Malformed)?;
             match info.kind {
                 TypeKind::Modified { target, .. }
                 | TypeKind::Named {
@@ -6111,14 +6163,20 @@ impl DwarfVariableInfo {
                 } => {
                     transparent_representation(&self.types, info, target).map_err(|error| {
                         match error {
-                            TransparentRepresentationError::Malformed(reason)
-                            | TransparentRepresentationError::Unsupported(reason) => reason,
+                            TransparentRepresentationError::Malformed(reason) => {
+                                ValueShapeError::Malformed(reason)
+                            }
+                            TransparentRepresentationError::Unsupported(reason) => {
+                                ValueShapeError::Unsupported(reason)
+                            }
                         }
                     })?;
                     current = target.id;
                 }
                 TypeKind::Named { target: None, .. } => {
-                    return Err("incomplete named type has no representation target".into());
+                    return Err(ValueShapeError::Unsupported(
+                        "incomplete named type has no representation target".into(),
+                    ));
                 }
                 _ => return Ok((current, info)),
             }
@@ -6166,9 +6224,23 @@ impl DwarfVariableInfo {
                 let source_info = self.type_info(current).map_err(|description| {
                     Error::debug_info(DwarfError::MalformedVariable(description))
                 })?;
-                let (canonical, info) = self.transparent_type(current).map_err(|description| {
-                    Error::debug_info(DwarfError::MalformedVariable(description))
-                })?;
+                let (canonical, info) = match self.transparent_type(current) {
+                    Ok(value) => value,
+                    Err(ValueShapeError::Malformed(description)) => {
+                        return Err(Error::debug_info(DwarfError::MalformedVariable(
+                            description,
+                        )));
+                    }
+                    Err(ValueShapeError::Unsupported(description)) => {
+                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                            description,
+                        )));
+                        return Ok(PlannedPath {
+                            steps,
+                            terminal: None,
+                        });
+                    }
+                };
                 match &info.kind {
                     TypeKind::Pointer {
                         target: Some(target),
@@ -6326,9 +6398,23 @@ impl DwarfVariableInfo {
             current = member.type_ref.id;
         }
         for _ in 0..explicit_dereferences {
-            let (_canonical, info) = self.transparent_type(current).map_err(|description| {
-                Error::debug_info(DwarfError::MalformedVariable(description))
-            })?;
+            let (_canonical, info) = match self.transparent_type(current) {
+                Ok(value) => value,
+                Err(ValueShapeError::Malformed(description)) => {
+                    return Err(Error::debug_info(DwarfError::MalformedVariable(
+                        description,
+                    )));
+                }
+                Err(ValueShapeError::Unsupported(description)) => {
+                    steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
+                        description,
+                    )));
+                    return Ok(PlannedPath {
+                        steps,
+                        terminal: None,
+                    });
+                }
+            };
             let (target, address_class) = match &info.kind {
                 TypeKind::Pointer {
                     target: Some(target),
@@ -9762,6 +9848,78 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    use gimli::write::{
+        AttributeValue as WriteAttributeValue, Dwarf as WriteDwarf, EndianVec, LineProgram,
+        Sections, Unit,
+    };
+    use gimli::{Encoding, Format, LittleEndian};
+
+    #[test]
+    fn declaration_canonicalization_cannot_launder_a_non_type_reference() {
+        let encoding = Encoding {
+            format: Format::Dwarf32,
+            version: 5,
+            address_size: 8,
+        };
+        let mut written = WriteDwarf::new();
+        let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
+        let unit = written.units.get_mut(unit_id);
+        let root = unit.root();
+        let non_type = unit.add(root, gimli::DW_TAG_variable);
+        let definition = unit.add(root, gimli::DW_TAG_base_type);
+        unit.get_mut(definition).set(
+            gimli::DW_AT_specification,
+            WriteAttributeValue::UnitRef(non_type),
+        );
+        unit.get_mut(definition)
+            .set(gimli::DW_AT_encoding, WriteAttributeValue::Data1(5));
+        unit.get_mut(definition)
+            .set(gimli::DW_AT_byte_size, WriteAttributeValue::Udata(4));
+        let variable = unit.add(root, gimli::DW_TAG_variable);
+        unit.get_mut(variable)
+            .set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(non_type));
+
+        let mut sections = Sections::new(EndianVec::new(LittleEndian));
+        written.write(&mut sections).expect("write test DWARF");
+        let dwarf = gimli::Dwarf::load(|id| {
+            let bytes = sections.get(id).map(EndianVec::slice).unwrap_or_default();
+            Ok::<_, gimli::Error>(Reader::new(bytes, RunTimeEndian::Little))
+        })
+        .expect("read test DWARF");
+        let mut headers = dwarf.units();
+        let header = headers
+            .next()
+            .expect("read unit header")
+            .expect("one test unit");
+        let units = vec![dwarf.unit(header).expect("read test unit")];
+        let type_value = {
+            let mut entries = units[0].entries();
+            let mut value = None;
+            while let Some(entry) = entries.next_dfs().expect("read test DIE") {
+                if entry.tag() == gimli::DW_TAG_variable
+                    && let Some(candidate) = entry.attr_value(gimli::DW_AT_type)
+                {
+                    value = Some(candidate);
+                }
+            }
+            value.expect("referencing variable")
+        };
+        let signatures = HashMap::new();
+        let mut arena = TypeArenaBuilder::new(
+            &dwarf,
+            &units,
+            &signatures,
+            ModuleImageId::new(0),
+            ByteOrder::Little,
+        );
+
+        assert!(matches!(
+            arena.variable_type(0, Some(type_value)),
+            TypeResolution::Malformed(description)
+                if description.contains("non-type tag")
+        ));
+    }
+
     #[test]
     fn discriminant_leb128_parsers_cover_full_width_and_reject_overflow() {
         let mut unsigned_max = vec![0xff; 18];
@@ -10947,6 +11105,33 @@ mod tests {
             value_shape_from(&malformed_target, TypeId::new(0)),
             Err(ValueShapeError::Malformed(description))
                 if description.as_ref() == "broken representation"
+        ));
+
+        let shared = [
+            TypeEntry::Resolved(TypeInfo {
+                reference: reference(0),
+                name: "shared representation".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Modified {
+                    modifier: TypeModifier::Shared,
+                    target: reference(1),
+                },
+            }),
+            types[1].clone(),
+        ];
+        assert!(matches!(
+            value_shape_from(&shared, TypeId::new(0)),
+            Err(ValueShapeError::Unsupported(description))
+                if description.contains("distributed-memory semantics")
+        ));
+        let malformed_shared_target = [
+            shared[0].clone(),
+            TypeEntry::Malformed("broken shared representation".into()),
+        ];
+        assert!(matches!(
+            value_shape_from(&malformed_shared_target, TypeId::new(0)),
+            Err(ValueShapeError::Malformed(description))
+                if description.as_ref() == "broken shared representation"
         ));
     }
 
