@@ -9,11 +9,18 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-uscope = { path = ".." }
+uscope = { path = "..", features = ["fuzzing"] }
 
 [[bin]]
 name = "value-expression"
 path = "fuzz_targets/value_expression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dwarf-expression"
+path = "fuzz_targets/dwarf_expression.rs"
 test = false
 doc = false
 bench = false

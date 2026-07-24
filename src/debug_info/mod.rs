@@ -6,6 +6,11 @@ mod dwarf;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod x86_64;
 
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_dwarf_expression(data: &[u8]) {
+    dwarf::fuzz_expression(data);
+}
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -38,12 +43,25 @@ pub struct DebugInfo {
     pub variables: Arc<dyn VariableInfo>,
 }
 
+#[derive(Clone)]
+pub enum VariableRuntimeError {
+    Unavailable(VariableUnavailableReason),
+    Malformed(Arc<str>),
+    Fatal(Arc<str>),
+}
+
+impl From<VariableUnavailableReason> for VariableRuntimeError {
+    fn from(reason: VariableUnavailableReason) -> Self {
+        Self::Unavailable(reason)
+    }
+}
+
 pub trait VariableRuntime {
     fn register(
         &mut self,
         register: u16,
-    ) -> std::result::Result<VariableRegister, VariableUnavailableReason>;
-    fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason>;
+    ) -> std::result::Result<VariableRegister, VariableRuntimeError>;
+    fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableRuntimeError>;
     fn tls_address(
         &mut self,
         offset: u64,
@@ -53,7 +71,7 @@ pub trait VariableRuntime {
         &mut self,
         address: VirtualAddress,
         size: usize,
-    ) -> std::result::Result<Arc<[u8]>, Arc<str>>;
+    ) -> std::result::Result<Arc<[u8]>, VariableRuntimeError>;
 }
 
 pub trait VariableInfo: Send + Sync {

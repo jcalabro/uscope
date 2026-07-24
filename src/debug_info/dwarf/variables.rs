@@ -10,7 +10,7 @@ use super::{
     die_reference_with_signatures, is_type_unit, source_file_id, source_path,
     type_unit_source_file_id,
 };
-use crate::debug_info::{VariableContext, VariableInfo, VariableRuntime};
+use crate::debug_info::{VariableContext, VariableInfo, VariableRuntime, VariableRuntimeError};
 use crate::inspection::InspectionBudget;
 use crate::model::{ArrayDimension, ValueStorage};
 use crate::{
@@ -23,9 +23,10 @@ use crate::{
     ReferenceKind, Result, ScalarValue, SourceFile, SourceFileId, SourceLocation,
     TargetDescription, TypeId, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
     ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
-    ValuePathStep, Variable, VariableKind, VariableMalformedReason, VariableQuery, VariableState,
-    VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
-    VariantSelection, VariantSelector, VariantStorageKind, VirtualAddress,
+    ValuePathStep, Variable, VariableInvalidReason, VariableKind, VariableMalformedKind,
+    VariableMalformedReason, VariableQuery, VariableState, VariableUnavailableReason,
+    VariableValue, VariableValueSource, Variant, VariantDiscriminant, VariantSelection,
+    VariantSelector, VariantStorageKind, VirtualAddress,
 };
 
 const MAX_SCALAR_BYTES: u64 = 16;
@@ -41,6 +42,13 @@ const MAX_AGGREGATE_DEPTH: usize = 64;
 const MAX_DATA_OBJECTS: usize = 262_144;
 
 type EvaluationBudget = InspectionBudget;
+
+const fn malformed_reason(
+    kind: VariableMalformedKind,
+    description: Arc<str>,
+) -> VariableMalformedReason {
+    VariableMalformedReason { kind, description }
+}
 
 enum FrameBaseCache {
     Empty,
@@ -64,15 +72,26 @@ struct FrameBaseContext<'a> {
 
 /// An evaluation failure that preserves the unavailable-versus-malformed
 /// distinction of the frame-base metadata it may consult.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 enum EvaluateError {
     Unavailable(VariableUnavailableReason),
     Malformed(Arc<str>),
+    Fatal(Arc<str>),
 }
 
 impl From<VariableUnavailableReason> for EvaluateError {
     fn from(reason: VariableUnavailableReason) -> Self {
         Self::Unavailable(reason)
+    }
+}
+
+impl From<VariableRuntimeError> for EvaluateError {
+    fn from(error: VariableRuntimeError) -> Self {
+        match error {
+            VariableRuntimeError::Unavailable(reason) => Self::Unavailable(reason),
+            VariableRuntimeError::Malformed(description) => Self::Malformed(description),
+            VariableRuntimeError::Fatal(error) => Self::Fatal(error),
+        }
     }
 }
 
@@ -84,13 +103,13 @@ impl From<crate::InspectionExhaustion> for EvaluateError {
 
 impl From<Arc<str>> for EvaluateError {
     fn from(description: Arc<str>) -> Self {
-        Self::Unavailable(description.into())
+        Self::Malformed(description)
     }
 }
 
 impl From<&str> for EvaluateError {
     fn from(description: &str) -> Self {
-        Self::Unavailable(description.into())
+        Self::Malformed(description.into())
     }
 }
 
@@ -123,11 +142,17 @@ struct LocationDescription {
     entries: Arc<[LocationEntry]>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocationSelectionError {
+    Unavailable(VariableUnavailableReason),
+    Malformed(Arc<str>),
+}
+
 impl LocationDescription {
     fn expression(
         &self,
         address: Option<ImageAddress>,
-    ) -> std::result::Result<Option<&Expression>, VariableUnavailableReason> {
+    ) -> std::result::Result<Option<&Expression>, LocationSelectionError> {
         // Specific ranged entries override default (range-less) entries per
         // DWARF 5 default-location semantics. Without an instruction context we
         // cannot select a ranged entry; a range-less default still resolves, but
@@ -140,7 +165,9 @@ impl LocationDescription {
                 .filter(|entry| entry.range.is_some_and(|range| range.contains(address)));
             if let Some(entry) = specific.next() {
                 if specific.next().is_some() {
-                    return Err("multiple locations are active at the current instruction".into());
+                    return Err(LocationSelectionError::Unavailable(
+                        crate::UnsupportedVariableFeature::AlternativeLocations.into(),
+                    ));
                 }
                 return Ok(Some(&entry.expression));
             }
@@ -148,12 +175,16 @@ impl LocationDescription {
         let mut defaults = self.entries.iter().filter(|entry| entry.range.is_none());
         let expression = defaults.next().map(|entry| &entry.expression);
         if defaults.next().is_some() {
-            return Err("multiple default locations were supplied".into());
+            return Err(LocationSelectionError::Malformed(
+                "multiple default locations were supplied".into(),
+            ));
         }
         if address.is_none() && expression.is_none() && !self.entries.is_empty() {
             // A global was requested without a valid module-relative instruction,
             // yet every location entry is range-gated. Refuse to guess.
-            return Err("no instruction context to select this object's location".into());
+            return Err(LocationSelectionError::Unavailable(
+                VariableUnavailableReason::NoInstructionContext,
+            ));
         }
         Ok(expression)
     }
@@ -391,10 +422,28 @@ enum ArrayIndexCalculationError {
     Overflow,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PathEvaluationError {
     Unavailable(VariableUnavailableReason),
     Malformed(Arc<str>),
+    Fatal(Arc<str>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScalarDecodeError {
+    Unavailable(VariableUnavailableReason),
+    Invalid(VariableInvalidReason),
+    Malformed(Arc<str>),
+}
+
+fn path_error_state(error: PathEvaluationError) -> Result<VariableState> {
+    match error {
+        PathEvaluationError::Unavailable(reason) => Ok(VariableState::Unavailable(reason)),
+        PathEvaluationError::Malformed(description) => Ok(VariableState::Malformed(
+            malformed_reason(VariableMalformedKind::InvalidExpression, description),
+        )),
+        PathEvaluationError::Fatal(description) => Err(Error::VariableRuntime(description)),
+    }
 }
 
 fn row_major_array_index(
@@ -463,6 +512,16 @@ impl From<VariableUnavailableReason> for PathEvaluationError {
     }
 }
 
+impl From<VariableRuntimeError> for PathEvaluationError {
+    fn from(error: VariableRuntimeError) -> Self {
+        match error {
+            VariableRuntimeError::Unavailable(reason) => Self::Unavailable(reason),
+            VariableRuntimeError::Malformed(description) => Self::Malformed(description),
+            VariableRuntimeError::Fatal(error) => Self::Fatal(error),
+        }
+    }
+}
+
 impl From<crate::InspectionExhaustion> for PathEvaluationError {
     fn from(exhaustion: crate::InspectionExhaustion) -> Self {
         Self::Unavailable(exhaustion.into())
@@ -478,8 +537,15 @@ impl From<crate::UnsupportedVariableFeature> for PathEvaluationError {
 #[derive(Clone)]
 enum Metadata<T> {
     Value(T),
-    Unavailable(Arc<str>),
+    Absent(MetadataAbsence),
     Malformed(Arc<str>),
+}
+
+#[derive(Clone, Copy)]
+enum MetadataAbsence {
+    NoLocation,
+    NoFrameBase,
+    NotApplicable,
 }
 
 #[derive(Clone)]
@@ -789,7 +855,7 @@ fn load_globals<'data>(
             let declaration_only =
                 flag_attribute_with_origins(unit, entry, units, &chain, gimli::DW_AT_declaration)
                     .unwrap_or(false)
-                    && matches!(value, Metadata::Unavailable(_));
+                    && matches!(value, Metadata::Absent(_));
             if declaration_only {
                 continue;
             }
@@ -824,7 +890,7 @@ fn load_globals<'data>(
                 order: *order,
                 type_info: type_info.clone(),
                 value,
-                frame_base: Metadata::Unavailable("globals have no frame base".into()),
+                frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
                 malformed,
             };
             let info = GlobalVariableInfo {
@@ -879,7 +945,7 @@ const fn value_rank(value: &Metadata<ValueDescription>) -> u8 {
     match value {
         Metadata::Value(ValueDescription::Location(_)) => 3,
         Metadata::Value(ValueDescription::Constant(_)) => 2,
-        Metadata::Unavailable(_) => 1,
+        Metadata::Absent(_) => 1,
         Metadata::Malformed(_) => 0,
     }
 }
@@ -890,22 +956,23 @@ fn public_global_type(resolution: &TypeResolution, types: &[TypeEntry]) -> Globa
             match types.get(usize::try_from(id.get()).expect("type ID fits usize")) {
                 Some(TypeEntry::Resolved(value)) => GlobalVariableType::Resolved(value.clone()),
                 Some(TypeEntry::Malformed(description)) => {
-                    GlobalVariableType::Malformed(VariableMalformedReason {
-                        description: Arc::clone(description),
-                    })
+                    GlobalVariableType::Malformed(malformed_reason(
+                        VariableMalformedKind::InvalidTypeGraph,
+                        Arc::clone(description),
+                    ))
                 }
                 Some(TypeEntry::Building) | None => {
-                    GlobalVariableType::Malformed(VariableMalformedReason {
-                        description: "type graph did not finish building".into(),
-                    })
+                    GlobalVariableType::Malformed(malformed_reason(
+                        VariableMalformedKind::InvalidTypeGraph,
+                        "type graph did not finish building".into(),
+                    ))
                 }
             }
         }
-        TypeResolution::Malformed(description) => {
-            GlobalVariableType::Malformed(VariableMalformedReason {
-                description: Arc::clone(description),
-            })
-        }
+        TypeResolution::Malformed(description) => GlobalVariableType::Malformed(malformed_reason(
+            VariableMalformedKind::InvalidTypeGraph,
+            Arc::clone(description),
+        )),
     }
 }
 
@@ -973,6 +1040,7 @@ pub(super) fn load_variable_info<'data>(
                             unit_index,
                             unit,
                             entry.attr_value(gimli::DW_AT_frame_base),
+                            MetadataAbsence::NoFrameBase,
                         ),
                         routine: true,
                         function,
@@ -1532,9 +1600,10 @@ fn copy_optional_location(
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
     value: Option<gimli::AttributeValue<Reader<'_>>>,
+    absence: MetadataAbsence,
 ) -> Metadata<LocationDescription> {
     let Some(value) = value else {
-        return Metadata::Unavailable("no location was supplied".into());
+        return Metadata::Absent(absence);
     };
     match copy_location(dwarf, unit_index, unit, value) {
         Ok(location) => Metadata::Value(location),
@@ -1549,9 +1618,15 @@ fn copy_data_object_value(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> Metadata<ValueDescription> {
     if let Some(location) = entry.attr_value(gimli::DW_AT_location) {
-        return match copy_optional_location(dwarf, unit_index, unit, Some(location)) {
+        return match copy_optional_location(
+            dwarf,
+            unit_index,
+            unit,
+            Some(location),
+            MetadataAbsence::NoLocation,
+        ) {
             Metadata::Value(location) => Metadata::Value(ValueDescription::Location(location)),
-            Metadata::Unavailable(reason) => Metadata::Unavailable(reason),
+            Metadata::Absent(reason) => Metadata::Absent(reason),
             Metadata::Malformed(reason) => Metadata::Malformed(reason),
         };
     }
@@ -1561,7 +1636,7 @@ fn copy_data_object_value(
             Err(error) => Metadata::Malformed(error),
         };
     }
-    Metadata::Unavailable("no location was supplied".into())
+    Metadata::Absent(MetadataAbsence::NoLocation)
 }
 
 fn copy_data_object_value_with_origins(
@@ -1573,12 +1648,12 @@ fn copy_data_object_value_with_origins(
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
 ) -> Metadata<ValueDescription> {
     let direct = copy_data_object_value(dwarf, unit_index, unit, entry);
-    if !matches!(direct, Metadata::Unavailable(_)) {
+    if !matches!(direct, Metadata::Absent(_)) {
         return direct;
     }
     for (origin_unit, origin) in chain {
         let inherited = copy_data_object_value(dwarf, *origin_unit, &units[*origin_unit], origin);
-        if !matches!(inherited, Metadata::Unavailable(_)) {
+        if !matches!(inherited, Metadata::Absent(_)) {
             return inherited;
         }
     }
@@ -5183,7 +5258,7 @@ impl VariableInfo for DwarfVariableInfo {
                     runtime,
                     &mut frame_base,
                     budget,
-                ));
+                )?);
             }
             return Ok(variables);
         }
@@ -5219,7 +5294,7 @@ impl VariableInfo for DwarfVariableInfo {
                 runtime,
                 &mut frame_base,
                 budget,
-            ));
+            )?);
         }
         Ok(variables)
     }
@@ -5251,7 +5326,7 @@ impl VariableInfo for DwarfVariableInfo {
                 runtime,
                 &mut frame_base,
                 budget,
-            );
+            )?;
             return Ok(inspected_value(variable.type_info, variable.state, budget));
         }
         let root_type = match &object.type_info {
@@ -5259,15 +5334,16 @@ impl VariableInfo for DwarfVariableInfo {
             TypeResolution::Malformed(description) => {
                 return Ok(inspected_value(
                     None,
-                    VariableState::Malformed(VariableMalformedReason {
-                        description: Arc::clone(description),
-                    }),
+                    VariableState::Malformed(malformed_reason(
+                        VariableMalformedKind::InvalidTypeGraph,
+                        Arc::clone(description),
+                    )),
                     budget,
                 ));
             }
         };
         let plan = self.plan_path(root_type, selectors)?;
-        Ok(self.evaluate_path(object, plan, Some(address), context, runtime, budget))
+        self.evaluate_path(object, plan, Some(address), context, runtime, budget)
     }
 
     fn inspect_global(
@@ -5288,7 +5364,7 @@ impl VariableInfo for DwarfVariableInfo {
             return Ok(unavailable(object, None, exhaustion.into()));
         }
         let mut frame_base = FrameBaseCache::Empty;
-        Ok(self.inspect_data_object(object, address, context, runtime, &mut frame_base, budget))
+        self.inspect_data_object(object, address, context, runtime, &mut frame_base, budget)
     }
 
     fn inspect_global_path(
@@ -5322,7 +5398,7 @@ impl VariableInfo for DwarfVariableInfo {
                 runtime,
                 &mut frame_base,
                 budget,
-            );
+            )?;
             return Ok(inspected_value(variable.type_info, variable.state, budget));
         }
         let root_type = match &object.type_info {
@@ -5330,15 +5406,16 @@ impl VariableInfo for DwarfVariableInfo {
             TypeResolution::Malformed(description) => {
                 return Ok(inspected_value(
                     None,
-                    VariableState::Malformed(VariableMalformedReason {
-                        description: Arc::clone(description),
-                    }),
+                    VariableState::Malformed(malformed_reason(
+                        VariableMalformedKind::InvalidTypeGraph,
+                        Arc::clone(description),
+                    )),
                     budget,
                 ));
             }
         };
         let plan = self.plan_path(root_type, selectors)?;
-        Ok(self.evaluate_path(object, plan, address, context, runtime, budget))
+        self.evaluate_path(object, plan, address, context, runtime, budget)
     }
 
     fn dereference(
@@ -6302,10 +6379,10 @@ impl DwarfVariableInfo {
                             description,
                         )));
                     }
-                    Err(ValueShapeError::Unsupported(description)) => {
-                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                            description,
-                        )));
+                    Err(ValueShapeError::Unsupported(_)) => {
+                        steps.push(PathStep::Unavailable(
+                            crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                        ));
                         return Ok(PlannedPath {
                             steps,
                             terminal: None,
@@ -6323,23 +6400,25 @@ impl DwarfVariableInfo {
                         ..
                     } => (target.id, *address_class),
                     TypeKind::Pointer { target: None, .. } => {
-                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                            DereferenceUnavailableReason::UnspecifiedPointee
-                                .to_string()
-                                .into(),
-                        )));
+                        steps.push(PathStep::Unavailable(
+                            VariableUnavailableReason::ValueAccess(
+                                crate::ValueAccessUnavailableReason::UnspecifiedPointee,
+                            ),
+                        ));
                         return Ok(PlannedPath {
                             steps,
                             terminal: None,
                         });
                     }
                     _ => {
-                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                            "the value is not a pointer or reference".into(),
-                        )));
+                        steps.push(PathStep::Unavailable(
+                            VariableUnavailableReason::ValueAccess(
+                                crate::ValueAccessUnavailableReason::NotPointerOrReference,
+                            ),
+                        ));
                         return Ok(PlannedPath {
                             steps,
-                            terminal: Some(current),
+                            terminal: None,
                         });
                     }
                 };
@@ -6354,10 +6433,10 @@ impl DwarfVariableInfo {
                             description,
                         )));
                     }
-                    Err(ValueShapeError::Unsupported(description)) => {
-                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                            description,
-                        )));
+                    Err(ValueShapeError::Unsupported(_)) => {
+                        steps.push(PathStep::Unavailable(
+                            crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                        ));
                         current = target;
                         continue;
                     }
@@ -6382,10 +6461,10 @@ impl DwarfVariableInfo {
                             description,
                         )));
                     }
-                    Err(ValueShapeError::Unsupported(description)) => {
-                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                            description,
-                        )));
+                    Err(ValueShapeError::Unsupported(_)) => {
+                        steps.push(PathStep::Unavailable(
+                            crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                        ));
                         return Ok(PlannedPath {
                             steps,
                             terminal: None,
@@ -6434,9 +6513,9 @@ impl DwarfVariableInfo {
                                     description,
                                 )));
                             }
-                            Err(ValueShapeError::Unsupported(description)) => {
+                            Err(ValueShapeError::Unsupported(_)) => {
                                 steps.push(PathStep::Unavailable(
-                                    VariableUnavailableReason::Other(description),
+                                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
                                 ));
                                 return Ok(PlannedPath {
                                     steps,
@@ -6478,9 +6557,9 @@ impl DwarfVariableInfo {
                                     description,
                                 )));
                             }
-                            Err(ValueShapeError::Unsupported(description)) => {
+                            Err(ValueShapeError::Unsupported(_)) => {
                                 steps.push(PathStep::Unavailable(
-                                    VariableUnavailableReason::Other(description),
+                                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
                                 ));
                                 return Ok(PlannedPath {
                                     steps,
@@ -6520,10 +6599,10 @@ impl DwarfVariableInfo {
                             description,
                         )));
                     }
-                    Err(ValueShapeError::Unsupported(description)) => {
-                        steps.push(PathStep::Unavailable(VariableUnavailableReason::Other(
-                            description,
-                        )));
+                    Err(ValueShapeError::Unsupported(_)) => {
+                        steps.push(PathStep::Unavailable(
+                            crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                        ));
                         return Ok(PlannedPath {
                             steps,
                             terminal: None,
@@ -6557,9 +6636,9 @@ impl DwarfVariableInfo {
                                     description,
                                 )));
                             }
-                            Err(ValueShapeError::Unsupported(description)) => {
+                            Err(ValueShapeError::Unsupported(_)) => {
                                 steps.push(PathStep::Unavailable(
-                                    VariableUnavailableReason::Other(description),
+                                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
                                 ));
                                 current = target.id;
                                 continue;
@@ -6744,19 +6823,19 @@ impl DwarfVariableInfo {
         };
         let shape = self.value_shape(type_id).map_err(|error| match error {
             ValueShapeError::Malformed(description) => PathEvaluationError::Malformed(description),
-            ValueShapeError::Unsupported(description) => {
-                PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
-            }
+            ValueShapeError::Unsupported(_) => PathEvaluationError::Unavailable(
+                crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+            ),
         })?;
         let description = match &variable.value {
             Metadata::Value(description) => description,
-            Metadata::Unavailable(description) => {
-                let reason = if description.as_ref() == "no location was supplied" {
-                    VariableUnavailableReason::OptimizedOut
-                } else {
-                    Arc::clone(description).into()
-                };
-                return Err(PathEvaluationError::Unavailable(reason));
+            Metadata::Absent(MetadataAbsence::NoLocation) => {
+                return Err(PathEvaluationError::Unavailable(
+                    VariableUnavailableReason::OptimizedOut(crate::OptimizedOutReason::NoLocation),
+                ));
+            }
+            Metadata::Absent(MetadataAbsence::NoFrameBase | MetadataAbsence::NotApplicable) => {
+                unreachable!("data-object value cannot contain a frame-base absence")
             }
             Metadata::Malformed(description) => {
                 return Err(PathEvaluationError::Malformed(Arc::clone(description)));
@@ -6781,9 +6860,21 @@ impl DwarfVariableInfo {
         let ValueDescription::Location(location) = description else {
             unreachable!("constant values returned above")
         };
-        let expression = location.expression(address)?.ok_or_else(|| {
-            VariableUnavailableReason::Other("no location at the current instruction".into())
-        })?;
+        let expression = location
+            .expression(address)
+            .map_err(|error| match error {
+                LocationSelectionError::Unavailable(reason) => {
+                    PathEvaluationError::Unavailable(reason)
+                }
+                LocationSelectionError::Malformed(description) => {
+                    PathEvaluationError::Malformed(description)
+                }
+            })?
+            .ok_or({
+                PathEvaluationError::Unavailable(
+                    VariableUnavailableReason::UnavailableAtInstruction,
+                )
+            })?;
         let mut frame_base = FrameBase::Lazy(FrameBaseContext {
             location: &variable.frame_base,
             address,
@@ -6800,17 +6891,21 @@ impl DwarfVariableInfo {
         .map_err(|error| match error {
             EvaluateError::Unavailable(reason) => PathEvaluationError::Unavailable(reason),
             EvaluateError::Malformed(description) => PathEvaluationError::Malformed(description),
+            EvaluateError::Fatal(description) => PathEvaluationError::Fatal(description),
         })?;
         if pieces.len() > MAX_LOCATION_PIECES {
             return Err(VariableUnavailableReason::EvaluationLimit.into());
         }
-        let [piece] = pieces.as_slice() else {
-            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
-        };
         let expected_bits = shape
             .byte_size()
             .checked_mul(8)
             .ok_or(VariableUnavailableReason::EvaluationLimit)?;
+        if let Some(reason) = incomplete_piece_reason(&pieces, expected_bits)? {
+            return Err(reason.into());
+        }
+        let [piece] = pieces.as_slice() else {
+            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
+        };
         if piece.size_in_bits.is_some_and(|size| size != expected_bits)
             || piece.bit_offset.is_some()
         {
@@ -6860,9 +6955,9 @@ impl DwarfVariableInfo {
                 } else {
                     address.get().checked_sub(offset.unsigned_abs())
                 }
-                .ok_or_else(|| {
-                    PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
-                        "member address overflows".into(),
+                .ok_or({
+                    PathEvaluationError::Unavailable(VariableUnavailableReason::ValueAccess(
+                        crate::ValueAccessUnavailableReason::AddressOverflow,
                     ))
                 })?;
                 Ok(LocatedStorage::Memory(VirtualAddress::new(value)))
@@ -6922,9 +7017,7 @@ impl DwarfVariableInfo {
         match storage {
             LocatedStorage::Memory(address) => {
                 budget.consume_memory(size)?;
-                let raw = runtime
-                    .read_memory(*address, size)
-                    .map_err(VariableUnavailableReason::Other)?;
+                let raw = runtime.read_memory(*address, size)?;
                 Ok((VariableValueSource::Memory(*address), raw))
             }
             LocatedStorage::Bytes {
@@ -7110,17 +7203,17 @@ impl DwarfVariableInfo {
     ) -> std::result::Result<LocatedStorage, PathEvaluationError> {
         let shape = self.value_shape(type_id).map_err(|error| match error {
             ValueShapeError::Malformed(description) => PathEvaluationError::Malformed(description),
-            ValueShapeError::Unsupported(description) => {
-                PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
-            }
+            ValueShapeError::Unsupported(_) => PathEvaluationError::Unavailable(
+                crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+            ),
         })?;
         let base = match &shape.kind {
             ValueShapeKind::Scalar(base) => base,
             ValueShapeKind::Enumeration { representation, .. } => representation,
             _ => {
                 return Err(PathEvaluationError::Unavailable(
-                    VariableUnavailableReason::Other(
-                        "non-integral bit-fields are unsupported".into(),
+                    VariableUnavailableReason::ValueAccess(
+                        crate::ValueAccessUnavailableReason::NonIntegralBitField,
                     ),
                 ));
             }
@@ -7189,9 +7282,9 @@ impl DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut EvaluationBudget,
     ) -> std::result::Result<LocatedStorage, PathEvaluationError> {
-        let object_address = Self::concrete_storage_address(storage).ok_or_else(|| {
-            PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
-                "runtime member location has no concrete containing-object address".into(),
+        let object_address = Self::concrete_storage_address(storage).ok_or({
+            PathEvaluationError::Unavailable(VariableUnavailableReason::ValueAccess(
+                crate::ValueAccessUnavailableReason::NoConcreteObjectAddress,
             ))
         })?;
         let key = DynamicAggregateLayoutKey { aggregate, child };
@@ -7245,9 +7338,9 @@ impl DwarfVariableInfo {
                 ValueShapeError::Malformed(description) => {
                     PathEvaluationError::Malformed(description)
                 }
-                ValueShapeError::Unsupported(description) => {
-                    PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
-                }
+                ValueShapeError::Unsupported(_) => PathEvaluationError::Unavailable(
+                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                ),
             })?;
         let representation = match &shape.kind {
             ValueShapeKind::Scalar(base)
@@ -7332,9 +7425,9 @@ impl DwarfVariableInfo {
                 ValueShapeError::Malformed(description) => {
                     PathEvaluationError::Malformed(description)
                 }
-                ValueShapeError::Unsupported(description) => {
-                    PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
-                }
+                ValueShapeError::Unsupported(_) => PathEvaluationError::Unavailable(
+                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                ),
             })?
             .byte_size();
         let target_size = self
@@ -7343,9 +7436,9 @@ impl DwarfVariableInfo {
                 ValueShapeError::Malformed(description) => {
                     PathEvaluationError::Malformed(description)
                 }
-                ValueShapeError::Unsupported(description) => {
-                    PathEvaluationError::Unavailable(VariableUnavailableReason::Other(description))
-                }
+                ValueShapeError::Unsupported(_) => PathEvaluationError::Unavailable(
+                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                ),
             })?
             .byte_size();
         implicit_pointer_range(byte_offset, target_size, referenced_size)
@@ -7372,31 +7465,26 @@ impl DwarfVariableInfo {
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
-    ) -> InspectedValue {
+    ) -> Result<InspectedValue> {
         let terminal_type = match plan.terminal {
             Some(terminal) => match self.type_info(terminal) {
                 Ok(info) => Some(info.clone()),
                 Err(description) => {
-                    return inspected_value(
+                    return Ok(inspected_value(
                         None,
-                        VariableState::Malformed(VariableMalformedReason { description }),
+                        VariableState::Malformed(malformed_reason(
+                            VariableMalformedKind::InvalidTypeGraph,
+                            description,
+                        )),
                         budget,
-                    );
+                    ));
                 }
             },
             None => None,
         };
-        let failure = |error: PathEvaluationError, budget: &InspectionBudget| {
-            inspected_value(
-                terminal_type.clone(),
-                match error {
-                    PathEvaluationError::Unavailable(reason) => VariableState::Unavailable(reason),
-                    PathEvaluationError::Malformed(description) => {
-                        VariableState::Malformed(VariableMalformedReason { description })
-                    }
-                },
-                budget,
-            )
+        let failure = |error: PathEvaluationError, budget: &InspectionBudget| -> Result<_> {
+            let state = path_error_state(error)?;
+            Ok(inspected_value(terminal_type.clone(), state, budget))
         };
         let path_depth = u64::try_from(plan.steps.len()).unwrap_or(u64::MAX);
         if let Err(exhaustion) = budget
@@ -7438,11 +7526,13 @@ impl DwarfVariableInfo {
                     } else {
                         if address_class != 0 {
                             return failure(
-                                PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
-                                    DereferenceUnavailableReason::AddressClass(address_class)
-                                        .to_string()
-                                        .into(),
-                                )),
+                                PathEvaluationError::Unavailable(
+                                    VariableUnavailableReason::ValueAccess(
+                                        crate::ValueAccessUnavailableReason::AddressClass(
+                                            address_class,
+                                        ),
+                                    ),
+                                ),
                                 budget,
                             );
                         }
@@ -7458,13 +7548,15 @@ impl DwarfVariableInfo {
                         };
                         let pointer = match decode_address(&raw, byte_size, self.target) {
                             Ok(pointer) => pointer,
-                            Err(reason) => return failure(reason.into(), budget),
+                            Err(reason) => return failure(reason, budget),
                         };
                         if pointer.get() == 0 {
                             return failure(
-                                PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
-                                    DereferenceUnavailableReason::Null.to_string().into(),
-                                )),
+                                PathEvaluationError::Unavailable(
+                                    VariableUnavailableReason::ValueAccess(
+                                        crate::ValueAccessUnavailableReason::NullPointer,
+                                    ),
+                                ),
                                 budget,
                             );
                         }
@@ -7494,7 +7586,7 @@ impl DwarfVariableInfo {
                         Err(error) => return failure(error, budget),
                     };
                     if index >= decoded.length {
-                        return inspected_value(
+                        return Ok(inspected_value(
                             terminal_type,
                             VariableState::Unavailable(
                                 VariableUnavailableReason::IndexOutOfBounds {
@@ -7504,7 +7596,7 @@ impl DwarfVariableInfo {
                                 },
                             ),
                             budget,
-                        );
+                        ));
                     }
                     let Some(byte_offset) = index
                         .checked_mul(element_size)
@@ -7545,10 +7637,13 @@ impl DwarfVariableInfo {
                                 .and_then(|variant| variant.name.as_deref())
                                 .unwrap_or("<anonymous>");
                             return failure(
-                                PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
-                                    format!("variant member belongs to inactive arm '{name}'")
-                                        .into(),
-                                )),
+                                PathEvaluationError::Unavailable(
+                                    VariableUnavailableReason::ValueAccess(
+                                        crate::ValueAccessUnavailableReason::InactiveVariant(Some(
+                                            name.into(),
+                                        )),
+                                    ),
+                                ),
                                 budget,
                             );
                         }
@@ -7624,28 +7719,33 @@ impl DwarfVariableInfo {
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
-    ) -> InspectedValue {
+    ) -> Result<InspectedValue> {
         let shape = match self.value_shape(type_id) {
             Ok(shape) => shape,
             Err(ValueShapeError::Malformed(description)) => {
-                return inspected_value(
+                return Ok(inspected_value(
                     Some(type_info),
-                    VariableState::Malformed(VariableMalformedReason { description }),
+                    VariableState::Malformed(malformed_reason(
+                        VariableMalformedKind::InvalidTypeGraph,
+                        description,
+                    )),
                     budget,
-                );
+                ));
             }
-            Err(ValueShapeError::Unsupported(description)) => {
-                return inspected_value(
+            Err(ValueShapeError::Unsupported(_)) => {
+                return Ok(inspected_value(
                     Some(type_info),
-                    VariableState::Unavailable(description.into()),
+                    VariableState::Unavailable(
+                        crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                    ),
                     budget,
-                );
+                ));
             }
         };
         let mut state =
-            self.materialize_value_state(type_id, &shape, storage, context, runtime, budget);
+            self.materialize_value_state(type_id, &shape, storage, context, runtime, budget)?;
         self.constrain_dereference(&mut state, &shape);
-        inspected_value(Some(type_info), state, budget)
+        Ok(inspected_value(Some(type_info), state, budget))
     }
 
     #[expect(
@@ -7660,7 +7760,7 @@ impl DwarfVariableInfo {
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
         budget: &mut EvaluationBudget,
-    ) -> VariableState {
+    ) -> Result<VariableState> {
         let leaf = |source, raw, value, dereference| VariableState::Available {
             source,
             raw: Some(raw),
@@ -7679,7 +7779,7 @@ impl DwarfVariableInfo {
                 usize::try_from(size).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
             Self::read_storage(storage, size, runtime, budget)
         };
-        match &shape.kind {
+        Ok(match &shape.kind {
             ValueShapeKind::Scalar(base) => match read(base.byte_size, runtime, budget) {
                 Ok((source, raw)) => match decode_scalar(base, &raw, self.target) {
                     Ok(value) => leaf(
@@ -7688,11 +7788,24 @@ impl DwarfVariableInfo {
                         VariableValue::Scalar(value),
                         DereferenceState::NotApplicable,
                     ),
-                    Err(reason) => VariableState::Unavailable(reason),
+                    Err(ScalarDecodeError::Unavailable(reason)) => {
+                        VariableState::Unavailable(reason)
+                    }
+                    Err(ScalarDecodeError::Invalid(reason)) => VariableState::Invalid {
+                        source,
+                        raw,
+                        reason,
+                    },
+                    Err(ScalarDecodeError::Malformed(description)) => VariableState::Malformed(
+                        malformed_reason(VariableMalformedKind::InconsistentLayout, description),
+                    ),
                 },
                 Err(PathEvaluationError::Unavailable(reason)) => VariableState::Unavailable(reason),
-                Err(PathEvaluationError::Malformed(description)) => {
-                    VariableState::Malformed(VariableMalformedReason { description })
+                Err(PathEvaluationError::Malformed(description)) => VariableState::Malformed(
+                    malformed_reason(VariableMalformedKind::InvalidExpression, description),
+                ),
+                Err(PathEvaluationError::Fatal(description)) => {
+                    return Err(Error::VariableRuntime(description));
                 }
             },
             ValueShapeKind::Enumeration {
@@ -7716,14 +7829,18 @@ impl DwarfVariableInfo {
                                 DereferenceState::NotApplicable,
                             )
                         }
-                        Err(description) => {
-                            VariableState::Malformed(VariableMalformedReason { description })
-                        }
+                        Err(description) => VariableState::Malformed(malformed_reason(
+                            VariableMalformedKind::InvalidTypeGraph,
+                            description,
+                        )),
                     }
                 }
                 Err(PathEvaluationError::Unavailable(reason)) => VariableState::Unavailable(reason),
-                Err(PathEvaluationError::Malformed(description)) => {
-                    VariableState::Malformed(VariableMalformedReason { description })
+                Err(PathEvaluationError::Malformed(description)) => VariableState::Malformed(
+                    malformed_reason(VariableMalformedKind::InvalidExpression, description),
+                ),
+                Err(PathEvaluationError::Fatal(description)) => {
+                    return Err(Error::VariableRuntime(description));
                 }
             },
             ValueShapeKind::Indirection {
@@ -7801,13 +7918,27 @@ impl DwarfVariableInfo {
                                 dereference,
                             )
                         }
-                        Err(reason) => VariableState::Unavailable(reason),
+                        Err(PathEvaluationError::Unavailable(reason)) => {
+                            VariableState::Unavailable(reason)
+                        }
+                        Err(PathEvaluationError::Malformed(description)) => {
+                            VariableState::Malformed(malformed_reason(
+                                VariableMalformedKind::InconsistentLayout,
+                                description,
+                            ))
+                        }
+                        Err(PathEvaluationError::Fatal(description)) => {
+                            return Err(Error::VariableRuntime(description));
+                        }
                     },
                     Err(PathEvaluationError::Unavailable(reason)) => {
                         VariableState::Unavailable(reason)
                     }
-                    Err(PathEvaluationError::Malformed(description)) => {
-                        VariableState::Malformed(VariableMalformedReason { description })
+                    Err(PathEvaluationError::Malformed(description)) => VariableState::Malformed(
+                        malformed_reason(VariableMalformedKind::InvalidExpression, description),
+                    ),
+                    Err(PathEvaluationError::Fatal(description)) => {
+                        return Err(Error::VariableRuntime(description));
                     }
                 },
             },
@@ -7816,7 +7947,9 @@ impl DwarfVariableInfo {
                     .iter()
                     .try_fold(1_u64, |total, dimension| total.checked_mul(dimension.count))
                 else {
-                    return VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit);
+                    return Ok(VariableState::Unavailable(
+                        VariableUnavailableReason::EvaluationLimit,
+                    ));
                 };
                 VariableState::Available {
                     source: Self::storage_source(storage),
@@ -7839,12 +7972,16 @@ impl DwarfVariableInfo {
                     match self.decode_slice(storage, *byte_size, *has_capacity, runtime, budget) {
                         Ok(value) => value,
                         Err(PathEvaluationError::Unavailable(reason)) => {
-                            return VariableState::Unavailable(reason);
+                            return Ok(VariableState::Unavailable(reason));
                         }
                         Err(PathEvaluationError::Malformed(description)) => {
-                            return VariableState::Malformed(VariableMalformedReason {
+                            return Ok(VariableState::Malformed(malformed_reason(
+                                VariableMalformedKind::InconsistentLayout,
                                 description,
-                            });
+                            )));
+                        }
+                        Err(PathEvaluationError::Fatal(description)) => {
+                            return Err(Error::VariableRuntime(description));
                         }
                     };
                 let backing = LocatedStorage::Memory(decoded.address);
@@ -7908,10 +8045,16 @@ impl DwarfVariableInfo {
                 ) {
                     Ok(active) => active,
                     Err(PathEvaluationError::Unavailable(reason)) => {
-                        return VariableState::Unavailable(reason);
+                        return Ok(VariableState::Unavailable(reason));
                     }
                     Err(PathEvaluationError::Malformed(description)) => {
-                        return VariableState::Malformed(VariableMalformedReason { description });
+                        return Ok(VariableState::Malformed(malformed_reason(
+                            VariableMalformedKind::InconsistentLayout,
+                            description,
+                        )));
+                    }
+                    Err(PathEvaluationError::Fatal(description)) => {
+                        return Err(Error::VariableRuntime(description));
                     }
                 };
                 let total = bases
@@ -7942,7 +8085,7 @@ impl DwarfVariableInfo {
                     )),
                 }
             }
-        }
+        })
     }
 
     #[expect(
@@ -7995,21 +8138,18 @@ impl DwarfVariableInfo {
             .map_err(|description| Error::debug_info(DwarfError::MalformedVariable(description)))?
             .clone();
         let state = match storage {
-            Err(PathEvaluationError::Unavailable(reason)) => VariableState::Unavailable(reason),
-            Err(PathEvaluationError::Malformed(description)) => {
-                VariableState::Malformed(VariableMalformedReason { description })
-            }
+            Err(error) => path_error_state(error)?,
             Ok(storage) => match self.value_shape(type_id) {
-                Err(ValueShapeError::Malformed(description)) => {
-                    VariableState::Malformed(VariableMalformedReason { description })
-                }
-                Err(ValueShapeError::Unsupported(description)) => {
-                    VariableState::Unavailable(description.into())
-                }
+                Err(ValueShapeError::Malformed(description)) => VariableState::Malformed(
+                    malformed_reason(VariableMalformedKind::InvalidTypeGraph, description),
+                ),
+                Err(ValueShapeError::Unsupported(_)) => VariableState::Unavailable(
+                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                ),
                 Ok(shape) => {
                     let mut state = self.materialize_value_state(
                         type_id, &shape, &storage, context, runtime, budget,
-                    );
+                    )?;
                     self.constrain_dereference(&mut state, &shape);
                     state
                 }
@@ -8452,50 +8592,57 @@ impl DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         frame_base_cache: &mut FrameBaseCache,
         budget: &mut InspectionBudget,
-    ) -> Variable {
+    ) -> Result<Variable> {
         if let Some(description) = &variable.malformed {
-            return malformed(variable, None, Arc::clone(description));
+            return Ok(malformed(variable, None, Arc::clone(description)));
         }
         let type_id = match &variable.type_info {
             TypeResolution::Resolved(id) => *id,
             TypeResolution::Malformed(description) => {
-                return malformed(variable, None, Arc::clone(description));
+                return Ok(malformed(variable, None, Arc::clone(description)));
             }
         };
         let type_info = match self.type_info(type_id) {
             Ok(info) => info.clone(),
-            Err(description) => return malformed(variable, None, description),
+            Err(description) => return Ok(malformed(variable, None, description)),
         };
         let shape = match self.value_shape(type_id) {
             Ok(shape) => shape,
             Err(ValueShapeError::Malformed(description)) => {
-                return malformed(variable, Some(type_info), description);
+                return Ok(malformed(variable, Some(type_info), description));
             }
-            Err(ValueShapeError::Unsupported(description)) => {
-                return unavailable(variable, Some(type_info), description.into());
+            Err(ValueShapeError::Unsupported(_)) => {
+                return Ok(unavailable(
+                    variable,
+                    Some(type_info),
+                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                ));
             }
         };
         let storage =
             match self.located_data_object(variable, address, runtime, frame_base_cache, budget) {
                 Ok(storage) => storage,
                 Err(PathEvaluationError::Unavailable(reason)) => {
-                    return unavailable(variable, Some(type_info), reason);
+                    return Ok(unavailable(variable, Some(type_info), reason));
                 }
                 Err(PathEvaluationError::Malformed(description)) => {
-                    return malformed(variable, Some(type_info), description);
+                    return Ok(malformed(variable, Some(type_info), description));
+                }
+                Err(PathEvaluationError::Fatal(description)) => {
+                    return Err(Error::VariableRuntime(description));
                 }
             };
         let mut state =
-            self.materialize_value_state(type_id, &shape, &storage, context, runtime, budget);
+            self.materialize_value_state(type_id, &shape, &storage, context, runtime, budget)?;
         self.constrain_dereference(&mut state, &shape);
-        Variable {
+        Ok(Variable {
             kind: variable.kind,
             global: None,
             name: Arc::clone(&variable.name),
             declaration: variable.declaration.clone(),
             type_info: Some(type_info),
             state,
-        }
+        })
     }
 
     fn constrain_dereference(&self, state: &mut VariableState, shape: &ValueShape) {
@@ -8517,7 +8664,7 @@ impl DwarfVariableInfo {
             DereferenceState::Available(_) => {
                 let reason = match self.type_info(*target) {
                     Err(description) => Some(DereferenceUnavailableReason::Malformed(
-                        VariableMalformedReason { description },
+                        malformed_reason(VariableMalformedKind::InvalidTypeGraph, description),
                     )),
                     Ok(TypeInfo {
                         kind: TypeKind::Unspecified,
@@ -8526,9 +8673,10 @@ impl DwarfVariableInfo {
                     Ok(_) => match self.value_shape(*target) {
                         Ok(_) => None,
                         Err(ValueShapeError::Malformed(description)) => {
-                            Some(DereferenceUnavailableReason::Malformed(
-                                VariableMalformedReason { description },
-                            ))
+                            Some(DereferenceUnavailableReason::Malformed(malformed_reason(
+                                VariableMalformedKind::InvalidTypeGraph,
+                                description,
+                            )))
                         }
                         Err(ValueShapeError::Unsupported(description)) => Some(
                             DereferenceUnavailableReason::UnsupportedPointee(description),
@@ -8551,6 +8699,10 @@ impl DwarfVariableInfo {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dereference preserves typed type, storage, runtime, and budget failures"
+    )]
     fn dereference_value(
         &self,
         reference: &DereferenceReference,
@@ -8577,15 +8729,20 @@ impl DwarfVariableInfo {
             Err(ValueShapeError::Malformed(description)) => {
                 return Ok(DereferencedValue {
                     type_info,
-                    state: VariableState::Malformed(VariableMalformedReason { description }),
+                    state: VariableState::Malformed(malformed_reason(
+                        VariableMalformedKind::InvalidTypeGraph,
+                        description,
+                    )),
                     completion: budget.completion(),
                     usage: budget.usage(),
                 });
             }
-            Err(ValueShapeError::Unsupported(description)) => {
+            Err(ValueShapeError::Unsupported(_)) => {
                 return Ok(DereferencedValue {
                     type_info,
-                    state: VariableState::Unavailable(description.into()),
+                    state: VariableState::Unavailable(
+                        crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+                    ),
                     completion: budget.completion(),
                     usage: budget.usage(),
                 });
@@ -8626,12 +8783,16 @@ impl DwarfVariableInfo {
                     Err(PathEvaluationError::Malformed(description)) => {
                         return Ok(DereferencedValue {
                             type_info,
-                            state: VariableState::Malformed(VariableMalformedReason {
+                            state: VariableState::Malformed(malformed_reason(
+                                VariableMalformedKind::InvalidExpression,
                                 description,
-                            }),
+                            )),
                             completion: budget.completion(),
                             usage: budget.usage(),
                         });
+                    }
+                    Err(PathEvaluationError::Fatal(description)) => {
+                        return Err(Error::VariableRuntime(description));
                     }
                 }
             }
@@ -8643,7 +8804,7 @@ impl DwarfVariableInfo {
             context,
             runtime,
             budget,
-        );
+        )?;
         self.constrain_dereference(&mut state, &shape);
         Ok(DereferencedValue {
             type_info,
@@ -8674,19 +8835,21 @@ fn implicit_pointer_range(
     size: u64,
     containing_size: u64,
 ) -> std::result::Result<(u64, u64), VariableUnavailableReason> {
-    let start = u64::try_from(byte_offset).map_err(|_| {
-        VariableUnavailableReason::Other(
-            "negative implicit-pointer offsets outside the referenced object are unsupported"
-                .into(),
+    let unavailable = || {
+        VariableUnavailableReason::ValueAccess(
+            crate::ValueAccessUnavailableReason::ImplicitPointerOutOfBounds {
+                offset: byte_offset,
+                size,
+                containing_size,
+            },
         )
-    })?;
+    };
+    let start = u64::try_from(byte_offset).map_err(|_| unavailable())?;
     let end = start
         .checked_add(size)
         .ok_or(VariableUnavailableReason::EvaluationLimit)?;
     if end > containing_size {
-        return Err(VariableUnavailableReason::Other(
-            "implicit-pointer offset is outside the referenced value".into(),
-        ));
+        return Err(unavailable());
     }
     Ok((start, end))
 }
@@ -8791,7 +8954,10 @@ fn malformed(
         name: Arc::clone(&variable.name),
         declaration: variable.declaration.clone(),
         type_info,
-        state: VariableState::Malformed(VariableMalformedReason { description }),
+        state: VariableState::Malformed(malformed_reason(
+            VariableMalformedKind::InvalidAttribute,
+            description,
+        )),
     }
 }
 
@@ -8810,23 +8976,36 @@ fn resolve_frame_base(
                         Ok(value) => FrameBaseCache::Available(value),
                         // Request-specific exhaustion must not poison the
                         // frame-base cache shared by later inspections.
-                        Err(
+                        Err(EvaluateError::Unavailable(
                             reason @ (VariableUnavailableReason::EvaluationLimit
                             | VariableUnavailableReason::InspectionLimit(_)),
-                        ) => {
-                            return Err(reason.into());
+                        )) => return Err(reason.into()),
+                        Err(EvaluateError::Unavailable(reason)) => {
+                            FrameBaseCache::Unavailable(reason)
                         }
-                        Err(reason) => FrameBaseCache::Unavailable(reason),
+                        Err(EvaluateError::Malformed(description)) => {
+                            FrameBaseCache::Malformed(description)
+                        }
+                        Err(error @ EvaluateError::Fatal(_)) => return Err(error),
                     }
                 }
-                Err(reason) => FrameBaseCache::Unavailable(reason),
+                Err(LocationSelectionError::Unavailable(reason)) => {
+                    FrameBaseCache::Unavailable(reason)
+                }
+                Err(LocationSelectionError::Malformed(description)) => {
+                    FrameBaseCache::Malformed(description)
+                }
                 Ok(None) => {
-                    FrameBaseCache::Unavailable("no frame base at the current instruction".into())
+                    FrameBaseCache::Unavailable(VariableUnavailableReason::UnavailableAtInstruction)
                 }
             },
-            Metadata::Unavailable(description) => {
-                FrameBaseCache::Unavailable(Arc::clone(description).into())
-            }
+            Metadata::Absent(
+                MetadataAbsence::NoFrameBase
+                | MetadataAbsence::NotApplicable
+                | MetadataAbsence::NoLocation,
+            ) => FrameBaseCache::Unavailable(VariableUnavailableReason::CallFrameUnavailable(
+                crate::CallFrameUnavailableReason::NoInstructionContext,
+            )),
             Metadata::Malformed(description) => FrameBaseCache::Malformed(Arc::clone(description)),
         };
     }
@@ -8846,34 +9025,34 @@ fn evaluate_frame_base(
     units: &[EvaluationUnit],
     runtime: &mut dyn VariableRuntime,
     budget: &mut EvaluationBudget,
-) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
+) -> std::result::Result<VirtualAddress, EvaluateError> {
     // A frame-base expression may not itself require a frame base.
-    let pieces = match evaluate(
+    let pieces = evaluate(
         expression,
         endian,
         &mut FrameBase::Unsupported,
         units,
         runtime,
         budget,
-    ) {
-        Ok(pieces) => pieces,
-        Err(EvaluateError::Unavailable(reason)) => return Err(reason),
-        Err(EvaluateError::Malformed(description)) => {
-            return Err(VariableUnavailableReason::Other(description));
-        }
-    };
+    )?;
     let [piece] = pieces.as_slice() else {
-        return Err("frame base is not one complete piece".into());
+        return Err(EvaluateError::Malformed(
+            "frame base is not one complete piece".into(),
+        ));
     };
     if piece.size_in_bits.is_some() || piece.bit_offset.is_some() {
-        return Err("frame base is a partial piece".into());
+        return Err(EvaluateError::Malformed(
+            "frame base is a partial piece".into(),
+        ));
     }
     match piece.location {
         Location::Address { address } => Ok(VirtualAddress::new(address)),
         Location::Register { register } => {
             register_u64(runtime, register.0, endian).map(VirtualAddress::new)
         }
-        _ => Err("frame base did not evaluate to an address or register".into()),
+        _ => Err(EvaluateError::Malformed(
+            "frame base did not evaluate to an address or register".into(),
+        )),
     }
 }
 
@@ -8898,9 +9077,9 @@ fn evaluate_dynamic_aggregate_address(
     object_address: VirtualAddress,
 ) -> std::result::Result<VirtualAddress, PathEvaluationError> {
     let expression = layouts.get(&key).ok_or_else(|| {
-        PathEvaluationError::Unavailable(VariableUnavailableReason::Other(
-            "runtime aggregate child location form is unsupported".into(),
-        ))
+        PathEvaluationError::Unavailable(
+            crate::UnsupportedVariableFeature::RuntimeAggregateLocation.into(),
+        )
     })?;
     let pieces = evaluate_with_object(
         expression,
@@ -8914,6 +9093,7 @@ fn evaluate_dynamic_aggregate_address(
     .map_err(|error| match error {
         EvaluateError::Unavailable(reason) => PathEvaluationError::Unavailable(reason),
         EvaluateError::Malformed(description) => PathEvaluationError::Malformed(description),
+        EvaluateError::Fatal(description) => PathEvaluationError::Fatal(description),
     })?;
     let [piece] = pieces.as_slice() else {
         return Err(PathEvaluationError::Malformed(
@@ -9071,19 +9251,22 @@ fn evaluation_value(
     bytes: &[u8],
     value_type: gimli::ValueType,
     endian: RunTimeEndian,
-) -> std::result::Result<Value, VariableUnavailableReason> {
+) -> std::result::Result<Value, EvaluateError> {
     if value_type == gimli::ValueType::Generic {
         return bytes_to_u64(bytes, endian).map(Value::Generic);
     }
     let size = usize::try_from(value_type.bit_size(u64::MAX) / 8).expect("value size fits usize");
     if bytes.len() < size {
-        return Err("register or memory value is shorter than its DWARF type".into());
+        return Err(EvaluateError::Malformed(
+            "register or memory value is shorter than its DWARF type".into(),
+        ));
     }
     let bytes = match endian {
         RunTimeEndian::Little => &bytes[..size],
         RunTimeEndian::Big => &bytes[bytes.len() - size..],
     };
-    Value::parse(value_type, gimli::EndianSlice::new(bytes, endian)).map_err(evaluation_error)
+    Value::parse(value_type, gimli::EndianSlice::new(bytes, endian))
+        .map_err(|error| EvaluateError::Malformed(evaluation_error(error)))
 }
 
 fn materialize_pieces(
@@ -9094,22 +9277,28 @@ fn materialize_pieces(
     target: TargetDescription,
     runtime: &mut dyn VariableRuntime,
     budget: &mut EvaluationBudget,
-) -> std::result::Result<(VariableValueSource, Arc<[u8]>), VariableUnavailableReason> {
+) -> std::result::Result<(VariableValueSource, Arc<[u8]>), PathEvaluationError> {
     if pieces.len() > MAX_LOCATION_PIECES {
-        return Err(VariableUnavailableReason::EvaluationLimit);
+        return Err(VariableUnavailableReason::EvaluationLimit.into());
+    }
+    let expected_bits = byte_size
+        .checked_mul(8)
+        .ok_or_else(|| PathEvaluationError::Malformed("scalar bit size overflow".into()))?;
+    if let Some(reason) = incomplete_piece_reason(pieces, expected_bits)? {
+        return Err(reason.into());
     }
     let [piece] = pieces else {
         return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
     };
-    let expected_bits = byte_size
-        .checked_mul(8)
-        .ok_or_else(|| Arc::<str>::from("scalar bit size overflow"))?;
     if piece.size_in_bits.is_some_and(|size| size != expected_bits) || piece.bit_offset.is_some() {
         return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
     }
     let size = usize::try_from(byte_size).expect("supported value size fits usize");
     match piece.location {
-        Location::Empty => Err(VariableUnavailableReason::OptimizedOut),
+        Location::Empty => Err(VariableUnavailableReason::OptimizedOut(
+            crate::OptimizedOutReason::EmptyLocation,
+        )
+        .into()),
         Location::Address { address } => {
             budget.consume_memory(size)?;
             runtime
@@ -9120,7 +9309,7 @@ fn materialize_pieces(
                         raw,
                     )
                 })
-                .map_err(VariableUnavailableReason::Other)
+                .map_err(PathEvaluationError::from)
         }
         Location::Register { register } => {
             let register = runtime.register(register.0)?;
@@ -9136,9 +9325,14 @@ fn materialize_pieces(
             },
         )),
         Location::Bytes { ref value } => {
-            let bytes = value.to_slice().map_err(evaluation_error)?.into_owned();
+            let bytes = value
+                .to_slice()
+                .map_err(|error| PathEvaluationError::Malformed(evaluation_error(error)))?
+                .into_owned();
             if bytes.len() != size {
-                return Err("implicit value size does not match its scalar type".into());
+                return Err(PathEvaluationError::Malformed(
+                    "implicit value size does not match its scalar type".into(),
+                ));
             }
             Ok((VariableValueSource::Constant, bytes.into()))
         }
@@ -9148,13 +9342,64 @@ fn materialize_pieces(
     }
 }
 
+fn incomplete_piece_reason(
+    pieces: &[gimli::Piece<Reader<'_>>],
+    expected_bits: u64,
+) -> std::result::Result<Option<VariableUnavailableReason>, PathEvaluationError> {
+    if pieces.is_empty() {
+        return Err(PathEvaluationError::Malformed(
+            "DWARF location expression produced no pieces".into(),
+        ));
+    }
+    let mut offset = 0_u64;
+    let mut undefined = Vec::new();
+    for piece in pieces {
+        let size = match piece.size_in_bits {
+            Some(size) => size,
+            None if pieces.len() == 1 => expected_bits,
+            None => {
+                return Err(PathEvaluationError::Malformed(
+                    "one of multiple DWARF location pieces has no size".into(),
+                ));
+            }
+        };
+        let end = offset.checked_add(size).ok_or_else(|| {
+            PathEvaluationError::Malformed("DWARF location piece range overflows".into())
+        })?;
+        if end > expected_bits {
+            return Err(PathEvaluationError::Malformed(
+                "DWARF location pieces exceed the declared value size".into(),
+            ));
+        }
+        if matches!(piece.location, Location::Empty) {
+            undefined.push(crate::ValueBitRange { offset, size });
+        }
+        offset = end;
+    }
+    if undefined.is_empty() {
+        return Ok(None);
+    }
+    if undefined.len() == 1 && undefined[0].offset == 0 && undefined[0].size == expected_bits {
+        return Ok(Some(VariableUnavailableReason::OptimizedOut(
+            crate::OptimizedOutReason::EmptyLocation,
+        )));
+    }
+    Ok(Some(VariableUnavailableReason::OptimizedOut(
+        crate::OptimizedOutReason::UndefinedPieces {
+            ranges: undefined.into(),
+        },
+    )))
+}
+
 fn object_bytes(
     bytes: &[u8],
     size: usize,
     endian: RunTimeEndian,
-) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+) -> std::result::Result<Arc<[u8]>, PathEvaluationError> {
     if bytes.len() < size {
-        return Err("register value is shorter than the scalar type".into());
+        return Err(PathEvaluationError::Malformed(
+            "register value is shorter than the scalar type".into(),
+        ));
     }
     Ok(match endian {
         RunTimeEndian::Little => Arc::from(&bytes[..size]),
@@ -9166,7 +9411,7 @@ fn dwarf_value_bytes(
     value: Value,
     type_info: &BaseType,
     target: TargetDescription,
-) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+) -> std::result::Result<Arc<[u8]>, PathEvaluationError> {
     let size = usize::try_from(type_info.byte_size).expect("scalar size fits usize");
     let integer = match value {
         Value::Generic(value) | Value::U64(value) => Some(u128::from(value)),
@@ -9184,7 +9429,9 @@ fn dwarf_value_bytes(
             return integer_bytes(u128::from(value.to_bits()), size, target);
         }
         Value::F32(_) | Value::F64(_) => {
-            return Err("computed floating-point size mismatch".into());
+            return Err(PathEvaluationError::Malformed(
+                "computed floating-point size mismatch".into(),
+            ));
         }
     };
     let mut integer = integer.expect("integer DWARF values were classified above");
@@ -9201,9 +9448,9 @@ fn wrapping_integer_bytes(
     value: u128,
     size: usize,
     target: TargetDescription,
-) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+) -> std::result::Result<Arc<[u8]>, PathEvaluationError> {
     if size == 0 || size > 16 {
-        return Err("unsupported computed integer size".into());
+        return Err(crate::UnsupportedVariableFeature::ScalarRepresentation.into());
     }
     let value = value & low_bits_mask(size * 8);
     let bytes = match target.byte_order {
@@ -9217,7 +9464,7 @@ fn materialize_constant(
     value: &ConstantValue,
     size: usize,
     target: TargetDescription,
-) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+) -> std::result::Result<Arc<[u8]>, PathEvaluationError> {
     match value {
         // Producers use DW_FORM_sdata when the implicit high bits are signed.
         // A fixed data form supplies zero high bits; the target type then
@@ -9227,7 +9474,9 @@ fn materialize_constant(
         }
         ConstantValue::Signed(value) => signed_integer_bytes(*value, size, target),
         ConstantValue::Bytes(bytes) if bytes.len() == size => Ok(Arc::clone(bytes)),
-        ConstantValue::Bytes(_) => Err("constant value size does not match its scalar type".into()),
+        ConstantValue::Bytes(_) => Err(PathEvaluationError::Malformed(
+            "constant value size does not match its scalar type".into(),
+        )),
     }
 }
 
@@ -9235,7 +9484,7 @@ fn dwarf_address_bytes(
     value: Value,
     size: usize,
     target: TargetDescription,
-) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+) -> std::result::Result<Arc<[u8]>, PathEvaluationError> {
     let address = match value {
         Value::Generic(value) | Value::U64(value) => value,
         Value::U8(value) => u64::from(value),
@@ -9246,7 +9495,9 @@ fn dwarf_address_bytes(
         Value::I32(value) => i64::from(value).cast_unsigned(),
         Value::I64(value) => value.cast_unsigned(),
         Value::F32(_) | Value::F64(_) => {
-            return Err("floating-point value cannot represent an address".into());
+            return Err(PathEvaluationError::Malformed(
+                "floating-point value cannot represent an address".into(),
+            ));
         }
     };
     wrapping_integer_bytes(u128::from(address), size, target)
@@ -9256,12 +9507,16 @@ fn decode_address(
     raw: &[u8],
     byte_size: u64,
     target: TargetDescription,
-) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
-    let size = usize::try_from(byte_size).map_err(|_| {
-        VariableUnavailableReason::Other("pointer size does not fit host usize".into())
-    })?;
-    if size == 0 || size > 8 || raw.len() != size {
-        return Err("pointer representation is not a supported virtual address size".into());
+) -> std::result::Result<VirtualAddress, PathEvaluationError> {
+    let size =
+        usize::try_from(byte_size).map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+    if size == 0 || size > 8 {
+        return Err(crate::UnsupportedVariableFeature::ScalarRepresentation.into());
+    }
+    if raw.len() != size {
+        return Err(PathEvaluationError::Malformed(
+            "pointer storage size does not match its declared type".into(),
+        ));
     }
     let mut bytes = [0_u8; 8];
     match target.byte_order {
@@ -9279,9 +9534,11 @@ fn integer_bytes(
     value: u128,
     size: usize,
     target: TargetDescription,
-) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+) -> std::result::Result<Arc<[u8]>, PathEvaluationError> {
     if size == 0 || size > 16 || (size < 16 && value >= (1_u128 << (size * 8))) {
-        return Err("constant value does not fit its scalar type".into());
+        return Err(PathEvaluationError::Malformed(
+            "constant value does not fit its scalar type".into(),
+        ));
     }
     let bytes = match target.byte_order {
         ByteOrder::Little => value.to_le_bytes()[..size].to_vec(),
@@ -9294,16 +9551,18 @@ fn signed_integer_bytes(
     value: i128,
     size: usize,
     target: TargetDescription,
-) -> std::result::Result<Arc<[u8]>, VariableUnavailableReason> {
+) -> std::result::Result<Arc<[u8]>, PathEvaluationError> {
     if size == 0 || size > 16 {
-        return Err("unsupported signed constant size".into());
+        return Err(crate::UnsupportedVariableFeature::ScalarRepresentation.into());
     }
     let bits = size * 8;
     if bits < 128 {
         let minimum = -(1_i128 << (bits - 1));
         let maximum = (1_i128 << (bits - 1)) - 1;
         if !(minimum..=maximum).contains(&value) {
-            return Err("signed constant value does not fit its scalar type".into());
+            return Err(PathEvaluationError::Malformed(
+                "signed constant value does not fit its scalar type".into(),
+            ));
         }
     }
     integer_bytes(value.cast_unsigned() & low_bits_mask(bits), size, target)
@@ -9321,21 +9580,20 @@ fn register_u64(
     runtime: &mut dyn VariableRuntime,
     register: u16,
     endian: RunTimeEndian,
-) -> std::result::Result<u64, VariableUnavailableReason> {
+) -> std::result::Result<u64, EvaluateError> {
     let value = runtime.register(register)?;
     bytes_to_u64(&value.bytes, endian)
 }
 
-fn evaluation_error(error: gimli::Error) -> VariableUnavailableReason {
-    VariableUnavailableReason::Other(format!("DWARF expression evaluation failed: {error}").into())
+fn evaluation_error(error: gimli::Error) -> Arc<str> {
+    format!("DWARF expression evaluation failed: {error}").into()
 }
 
-fn bytes_to_u64(
-    bytes: &[u8],
-    endian: RunTimeEndian,
-) -> std::result::Result<u64, VariableUnavailableReason> {
+fn bytes_to_u64(bytes: &[u8], endian: RunTimeEndian) -> std::result::Result<u64, EvaluateError> {
     if bytes.len() > 8 {
-        return Err("DWARF expression requested more than one word".into());
+        return Err(EvaluateError::Malformed(
+            "DWARF expression requested more than one word".into(),
+        ));
     }
     let mut word = [0_u8; 8];
     match endian {
@@ -9352,30 +9610,31 @@ fn decode_scalar(
     type_info: &BaseType,
     bytes: &[u8],
     target: TargetDescription,
-) -> std::result::Result<ScalarValue, VariableUnavailableReason> {
+) -> std::result::Result<ScalarValue, ScalarDecodeError> {
     let expected = usize::try_from(type_info.byte_size).expect("scalar byte size fits usize");
     if bytes.len() != expected {
-        return Err("scalar storage size mismatch".into());
+        return Err(ScalarDecodeError::Malformed(
+            "scalar storage size mismatch".into(),
+        ));
     }
     match type_info.encoding {
         BaseTypeEncoding::Boolean => {
-            match decode_integer_value(type_info, bytes, target.byte_order)
-                .map_err(VariableUnavailableReason::Other)?
-            {
-                IntegerValue::Unsigned(0) => Ok(ScalarValue::Boolean(false)),
-                IntegerValue::Unsigned(1) => Ok(ScalarValue::Boolean(true)),
-                IntegerValue::Unsigned(value) => {
-                    Err(format!("invalid boolean representation {value}").into())
-                }
-                IntegerValue::Signed(_) => {
-                    unreachable!("boolean encoding returns an unsigned value")
-                }
+            let bits = integer_bit_width(type_info).map_err(ScalarDecodeError::Malformed)?;
+            let value = unsigned_value(bytes, target.byte_order)
+                .map_err(ScalarDecodeError::Malformed)?
+                & low_bits_mask(usize::try_from(bits).expect("bit width fits usize"));
+            match value {
+                0 => Ok(ScalarValue::Boolean(false)),
+                1 => Ok(ScalarValue::Boolean(true)),
+                value => Err(ScalarDecodeError::Invalid(
+                    VariableInvalidReason::BooleanRepresentation(value),
+                )),
             }
         }
         BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => {
             let IntegerValue::Signed(value) =
                 decode_integer_value(type_info, bytes, target.byte_order)
-                    .map_err(VariableUnavailableReason::Other)?
+                    .map_err(ScalarDecodeError::Malformed)?
             else {
                 unreachable!("signed encoding returns a signed integer");
             };
@@ -9384,7 +9643,7 @@ fn decode_scalar(
         BaseTypeEncoding::Unsigned | BaseTypeEncoding::UnsignedCharacter => {
             let IntegerValue::Unsigned(value) =
                 decode_integer_value(type_info, bytes, target.byte_order)
-                    .map_err(VariableUnavailableReason::Other)?
+                    .map_err(ScalarDecodeError::Malformed)?
             else {
                 unreachable!("unsigned encoding returns an unsigned integer");
             };
@@ -9394,10 +9653,7 @@ fn decode_scalar(
     }
 }
 
-fn unsigned_value(
-    bytes: &[u8],
-    byte_order: ByteOrder,
-) -> std::result::Result<u128, VariableUnavailableReason> {
+fn unsigned_value(bytes: &[u8], byte_order: ByteOrder) -> std::result::Result<u128, Arc<str>> {
     if bytes.is_empty() || bytes.len() > 16 {
         return Err("unsupported integer storage size".into());
     }
@@ -9415,13 +9671,19 @@ fn unsigned_value(
 fn decode_float(
     bytes: &[u8],
     target: TargetDescription,
-) -> std::result::Result<FloatValue, VariableUnavailableReason> {
+) -> std::result::Result<FloatValue, ScalarDecodeError> {
     match bytes.len() {
         4 => Ok(FloatValue::Binary32(
-            u32::try_from(unsigned_value(bytes, target.byte_order)?).expect("four bytes fit u32"),
+            u32::try_from(
+                unsigned_value(bytes, target.byte_order).map_err(ScalarDecodeError::Malformed)?,
+            )
+            .expect("four bytes fit u32"),
         )),
         8 => Ok(FloatValue::Binary64(
-            u64::try_from(unsigned_value(bytes, target.byte_order)?).expect("eight bytes fit u64"),
+            u64::try_from(
+                unsigned_value(bytes, target.byte_order).map_err(ScalarDecodeError::Malformed)?,
+            )
+            .expect("eight bytes fit u64"),
         )),
         16 if target.architecture == Architecture::X86_64
             && target.byte_order == ByteOrder::Little =>
@@ -9431,8 +9693,82 @@ fn decode_float(
                 sign_exponent: u16::from_le_bytes(bytes[8..10].try_into().expect("two-byte slice")),
             })
         }
-        size => Err(format!("unsupported floating-point storage size {size}").into()),
+        _ => Err(ScalarDecodeError::Unavailable(
+            crate::UnsupportedVariableFeature::ScalarRepresentation.into(),
+        )),
     }
+}
+
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_expression(data: &[u8]) {
+    struct FuzzRuntime;
+
+    impl VariableRuntime for FuzzRuntime {
+        fn register(
+            &mut self,
+            register: u16,
+        ) -> std::result::Result<crate::debug_info::VariableRegister, VariableRuntimeError>
+        {
+            Err(VariableRuntimeError::Unavailable(
+                VariableUnavailableReason::RegisterUnavailable(register.to_string().into()),
+            ))
+        }
+
+        fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableRuntimeError> {
+            Err(VariableRuntimeError::Unavailable(
+                VariableUnavailableReason::CallFrameUnavailable(
+                    crate::CallFrameUnavailableReason::NoInstructionContext,
+                ),
+            ))
+        }
+
+        fn tls_address(
+            &mut self,
+            _offset: u64,
+        ) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
+            Err(VariableUnavailableReason::TlsUnavailable(
+                crate::TlsUnavailableReason::ProviderUnavailable,
+            ))
+        }
+
+        fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
+            Ok(VirtualAddress::new(address.get()))
+        }
+
+        fn read_memory(
+            &mut self,
+            address: VirtualAddress,
+            size: usize,
+        ) -> std::result::Result<Arc<[u8]>, VariableRuntimeError> {
+            Err(VariableRuntimeError::Unavailable(
+                VariableUnavailableReason::MemoryInaccessible {
+                    address,
+                    requested: u64::try_from(size).unwrap_or(u64::MAX),
+                    completed: 0,
+                    next_address: address,
+                },
+            ))
+        }
+    }
+
+    let expression = Expression {
+        bytes: Arc::from(&data[..data.len().min(MAX_EVALUATION_MEMORY_BYTES)]),
+        encoding: gimli::Encoding {
+            format: gimli::Format::Dwarf32,
+            version: 5,
+            address_size: 8,
+        },
+        unit: 0,
+        indexed_addresses: Arc::new(HashMap::new()),
+    };
+    let _ = evaluate(
+        &expression,
+        RunTimeEndian::Little,
+        &mut FrameBase::Unsupported,
+        &[],
+        &mut FuzzRuntime,
+        &mut EvaluationBudget::default(),
+    );
 }
 
 #[cfg(test)]
@@ -9721,10 +10057,12 @@ mod tests {
         fn register(
             &mut self,
             register: u16,
-        ) -> std::result::Result<crate::debug_info::VariableRegister, VariableUnavailableReason>
+        ) -> std::result::Result<crate::debug_info::VariableRegister, VariableRuntimeError>
         {
             let value = self.registers.get(&register).copied().ok_or_else(|| {
-                VariableUnavailableReason::RegisterUnavailable(register.to_string().into())
+                VariableRuntimeError::Unavailable(VariableUnavailableReason::RegisterUnavailable(
+                    register.to_string().into(),
+                ))
             })?;
             Ok(crate::debug_info::VariableRegister {
                 descriptor: crate::RegisterDescriptor {
@@ -9737,8 +10075,8 @@ mod tests {
             })
         }
 
-        fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
-            self.cfa.clone()
+        fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableRuntimeError> {
+            self.cfa.clone().map_err(VariableRuntimeError::Unavailable)
         }
 
         fn tls_address(
@@ -9756,12 +10094,12 @@ mod tests {
             &mut self,
             _address: VirtualAddress,
             size: usize,
-        ) -> std::result::Result<Arc<[u8]>, Arc<str>> {
+        ) -> std::result::Result<Arc<[u8]>, VariableRuntimeError> {
             self.memory_reads += 1;
             self.memory
                 .as_ref()
                 .map(|memory| Arc::from(&memory[..size]))
-                .ok_or_else(|| Arc::from("unexpected memory read"))
+                .ok_or_else(|| VariableRuntimeError::Fatal("unexpected memory read".into()))
         }
     }
 
@@ -9878,7 +10216,9 @@ mod tests {
     fn cfa_expression_limit_remains_a_typed_unavailable_reason() {
         let mut runtime = Runtime {
             registers: BTreeMap::new(),
-            cfa: Err(VariableUnavailableReason::CfaExpression),
+            cfa: Err(VariableUnavailableReason::CallFrameUnavailable(
+                crate::CallFrameUnavailableReason::CfaExpression,
+            )),
             memory: None,
             memory_reads: 0,
         };
@@ -9890,7 +10230,11 @@ mod tests {
                 &mut runtime,
                 &mut EvaluationBudget::default(),
             ),
-            Err(VariableUnavailableReason::CfaExpression)
+            Err(EvaluateError::Unavailable(
+                VariableUnavailableReason::CallFrameUnavailable(
+                    crate::CallFrameUnavailableReason::CfaExpression,
+                )
+            ))
         );
     }
 
@@ -9998,6 +10342,47 @@ mod tests {
     }
 
     #[test]
+    fn undefined_location_pieces_report_exact_destination_ranges() {
+        let pieces = [
+            gimli::Piece::<Reader<'_>> {
+                location: Location::Value {
+                    value: Value::Generic(0x12),
+                },
+                size_in_bits: Some(8),
+                bit_offset: None,
+            },
+            gimli::Piece::<Reader<'_>> {
+                location: Location::Empty,
+                size_in_bits: Some(16),
+                bit_offset: None,
+            },
+            gimli::Piece::<Reader<'_>> {
+                location: Location::Value {
+                    value: Value::Generic(0x34),
+                },
+                size_in_bits: Some(8),
+                bit_offset: None,
+            },
+        ];
+
+        assert_eq!(
+            incomplete_piece_reason(&pieces, 32),
+            Ok(Some(VariableUnavailableReason::OptimizedOut(
+                crate::OptimizedOutReason::UndefinedPieces {
+                    ranges: Arc::from([crate::ValueBitRange {
+                        offset: 8,
+                        size: 16,
+                    }]),
+                },
+            )))
+        );
+        assert!(matches!(
+            incomplete_piece_reason(&pieces, 24),
+            Err(PathEvaluationError::Malformed(_))
+        ));
+    }
+
+    #[test]
     fn deferred_operations_and_missing_types_have_stable_typed_reasons() {
         let mut runtime = Runtime {
             registers: BTreeMap::from([(0, 1)]),
@@ -10081,6 +10466,35 @@ mod tests {
     }
 
     #[test]
+    fn operational_memory_failures_escape_the_per_variable_result_lane() {
+        let mut bytes = vec![gimli::DW_OP_addr.0];
+        bytes.extend_from_slice(&0x1000_u64.to_le_bytes());
+        bytes.extend_from_slice(&[gimli::DW_OP_deref.0, gimli::DW_OP_stack_value.0]);
+        let mut runtime = Runtime {
+            registers: BTreeMap::new(),
+            cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: None,
+            memory_reads: 0,
+        };
+
+        assert_eq!(
+            evaluate(
+                &expression(&bytes),
+                RunTimeEndian::Little,
+                &mut FrameBase::Unsupported,
+                &units([]),
+                &mut runtime,
+                &mut EvaluationBudget::default(),
+            ),
+            Err(EvaluateError::Fatal("unexpected memory read".into()))
+        );
+        assert!(matches!(
+            path_error_state(PathEvaluationError::Fatal("ptrace failed".into())),
+            Err(Error::VariableRuntime(description)) if description.as_ref() == "ptrace failed"
+        ));
+    }
+
+    #[test]
     fn data_object_catalog_has_an_exact_load_time_ceiling() {
         check_data_object_capacity(MAX_DATA_OBJECTS - 1).expect("last available object slot");
         assert!(matches!(
@@ -10136,7 +10550,7 @@ mod tests {
             gimli::DW_OP_lit0.0,
             gimli::DW_OP_stack_value.0,
         ]);
-        let location = Metadata::Unavailable("no frame base metadata".into());
+        let location = Metadata::Absent(MetadataAbsence::NoFrameBase);
         let mut cache = FrameBaseCache::Empty;
         let pieces = evaluate(
             &branching,
@@ -10324,11 +10738,15 @@ mod tests {
         );
         assert!(matches!(
             implicit_pointer_bytes(&[0; 8], -1, 4),
-            Err(VariableUnavailableReason::Other(_))
+            Err(VariableUnavailableReason::ValueAccess(
+                crate::ValueAccessUnavailableReason::ImplicitPointerOutOfBounds { .. }
+            ))
         ));
         assert!(matches!(
             implicit_pointer_bytes(&[0; 8], 6, 4),
-            Err(VariableUnavailableReason::Other(_))
+            Err(VariableUnavailableReason::ValueAccess(
+                crate::ValueAccessUnavailableReason::ImplicitPointerOutOfBounds { .. }
+            ))
         ));
         assert_eq!(
             implicit_pointer_bytes(&[0; 8], i64::MAX, usize::MAX),
@@ -10767,7 +11185,12 @@ mod tests {
                 .expect("false"),
             ScalarValue::Boolean(false)
         );
-        assert!(decode_scalar(&scalar_type(BaseTypeEncoding::Boolean, 1), &[2], little,).is_err());
+        assert_eq!(
+            decode_scalar(&scalar_type(BaseTypeEncoding::Boolean, 1), &[2], little),
+            Err(ScalarDecodeError::Invalid(
+                VariableInvalidReason::BooleanRepresentation(2)
+            ))
+        );
         assert_eq!(
             decode_scalar(
                 &scalar_type(BaseTypeEncoding::Floating, 4),

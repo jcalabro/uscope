@@ -9,6 +9,9 @@ readme = "README.md"
 keywords = ["debugger", "dwarf", "linux", "ptrace"]
 categories = ["command-line-utilities", "development-tools::debugging"]
 
+[features]
+fuzzing = []
+
 [lints.rust]
 future_incompatible = { level = "deny", priority = -1 }
 rust_2018_idioms = { level = "deny", priority = -1 }

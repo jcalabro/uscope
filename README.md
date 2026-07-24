@@ -26,6 +26,7 @@ Use `x <runtime-address> [byte-count]` to display a bounded target-memory range 
 Use `print <name>` or `p <name>` to print one visible scalar. Lookup is local-first and then considers globals; exact namespace, module, container, linkage, and source-file qualifications are accepted. `print` with no argument continues to list only parameters followed by locals in the selected logical frame, including an inline function frame.
 Use `globals [filter]` to list a bounded page of immutable global metadata without reading every value.
 Scalar inspection supports one-piece values in memory, general-purpose and XMM registers, constants, computed DWARF stack values, and glibc TLS. Entry values, composite locations, non-default address spaces, and general cross-DIE expression evaluation remain explicitly unavailable.
+Every inspected value has an explicit state: available, unavailable for a typed reason, readable but invalid for its source type, or backed by malformed debug metadata. Optimized-out values distinguish a missing location, an empty location, and explicitly undefined DWARF pieces. Typed reads across inaccessible memory remain all-or-unavailable and report the requested bytes, readable prefix length, and first inaccessible address; debugger operational failures remain request errors rather than convincing per-variable results.
 
 | Language/compiler | Variable inspection | Execution control |
 | --- | --- | --- |

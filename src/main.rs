@@ -1347,6 +1347,9 @@ fn format_untyped_state(name: &str, state: &VariableState, renderer: Renderer) -
         VariableState::Malformed(reason) => {
             (Role::Error, format!("<malformed: {}>", reason.description))
         }
+        VariableState::Invalid { reason, .. } => {
+            (Role::Error, format!("<invalid value: {reason}>"))
+        }
         VariableState::Available { .. } => (Role::Warning, "<unknown value>".to_owned()),
     };
     bound_rendered_output(
@@ -1381,6 +1384,9 @@ fn format_typed_state(
         VariableState::Malformed(reason) => renderer
             .paint(Role::Error, format!("<malformed: {}>", reason.description))
             .to_string(),
+        VariableState::Invalid { reason, .. } => renderer
+            .paint(Role::Error, format!("<invalid value: {reason}>"))
+            .to_string(),
     };
     bound_rendered_output(
         &format!(
@@ -1411,6 +1417,9 @@ fn format_value_range(
             VariableState::Unavailable(reason) => format!("<unavailable: {reason}>"),
             VariableState::Malformed(reason) => {
                 format!("<malformed: {}>", reason.description)
+            }
+            VariableState::Invalid { reason, .. } => {
+                format!("<invalid value: {reason}>")
             }
         };
         values.push_str(&value);
@@ -1641,6 +1650,10 @@ async fn format_typed_state_expanded(
                 }
                 VariableState::Malformed(reason) => {
                     write!(output, "<malformed: {}>", reason.description)
+                        .expect("bounded writes cannot fail");
+                }
+                VariableState::Invalid { reason, .. } => {
+                    write!(output, "<invalid value: {reason}>")
                         .expect("bounded writes cannot fail");
                 }
                 VariableState::Available { .. } => unreachable!(),
@@ -2474,6 +2487,7 @@ mod tests {
         let limit = usize::try_from(uscope::InspectionLimits::default().output_bytes)
             .expect("default output limit fits usize");
         let state = VariableState::Malformed(uscope::VariableMalformedReason {
+            kind: uscope::VariableMalformedKind::InvalidAttribute,
             description: "x".repeat(limit).into(),
         });
         let rendered = format_untyped_state("value", &state, Renderer::new(false));

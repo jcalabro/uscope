@@ -1,5 +1,5 @@
 #include <stdbool.h>
-
+static int invalid_boolean_target(void);
 volatile int pointer_sink;
 int pointer_parameter_value = 42;
 
@@ -108,7 +108,7 @@ int main(void) {
     if (parameter_target(4) + changing_target() + shadow_target() + partial_target() +
             pointer_target(40, &pointer_parameter_value) +
             pointer_target(40, &pointer_parameter_value) + implicit_pointer_target(40) +
-            implicit_pointer_offset_target(40) != 339) {
+            implicit_pointer_offset_target(40) + invalid_boolean_target() != 341) {
         return 1;
     }
     return boolean && character == 65 && signed_character == -12 &&
@@ -121,4 +121,14 @@ int main(void) {
                    double_precision == -2.5 && extended == 3.125L
                ? 0
                : 1;
+}
+
+__attribute__((noinline)) static int inspect_invalid_boolean(const _Bool *invalid) {
+    __asm__ volatile("" : : "g"(invalid) : "memory");
+    return *(const volatile unsigned char *)invalid;
+}
+
+__attribute__((noinline)) static int invalid_boolean_target(void) {
+    unsigned char storage = 2;
+    return inspect_invalid_boolean((const _Bool *)&storage);
 }
