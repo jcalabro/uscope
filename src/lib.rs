@@ -1,11 +1,13 @@
 mod backend;
 mod debug_info;
 mod error;
+mod expression;
 pub(crate) mod model;
 mod protocol;
 mod unwind;
 
 pub use error::{Error, Result};
+pub use expression::parse_value_expression;
 pub use model::{
     Accessibility, AddressRange, AddressValue, Architecture, Backtrace, BaseClass,
     BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry, BreakpointLocation,
@@ -17,13 +19,14 @@ pub use model::{
     ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionLimit,
     IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule,
     LoadedModuleRecord, LoadedModuleSnapshot, ModuleId, ModuleImage, ModuleImageId,
-    NamedTypeRelationship, PointerWidth, RecordKind, RecordMember, RecordMemberLayout,
-    ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
-    ScalarValue, SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame,
-    StackFrameId, StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId,
-    TypeId, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature,
-    UnwindTermination, ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren,
-    ValueChildrenReference, ValueExpression, ValuePageCompletion, Variable, VariableKind,
+    NamedTypeRelationship, ParsedValueExpression, PointerWidth, RecordKind, RecordMember,
+    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
+    RegisterSnapshot, RegisterValue, ScalarValue, SourceContext, SourceFile, SourceFileId,
+    SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolId,
+    SymbolInfo, TargetDescription, ThreadId, TypeId, TypeInfo, TypeKind, TypeModifier, TypeNode,
+    TypeReference, UnsupportedVariableFeature, UnwindTermination, ValueChild, ValueChildPage,
+    ValueChildRelationship, ValueChildren, ValueChildrenReference, ValueExpression,
+    ValueIndexRange, ValuePageCompletion, ValuePathStep, Variable, VariableKind,
     VariableMalformedReason, VariableSnapshot, VariableState, VariableUnavailableReason,
     VariableValue, VariableValueSource, Variant, VariantDiscriminant, VariantSelection,
     VariantSelector, VariantStorageKind, VirtualAddress,
@@ -441,6 +444,24 @@ impl DebuggerHandle {
         let selection = self.stopped_selection().await?;
         self.request(|reply| Request::Inspect {
             expression,
+            stop_id: selection.stop,
+            thread_id: selection.thread,
+            reply,
+        })
+        .await
+    }
+
+    /// Inspects a one-dimensional array or slice expression and returns one
+    /// bounded half-open source-index range from the same stopped snapshot.
+    pub async fn inspect_range(
+        &self,
+        expression: ValueExpression,
+        range: ValueIndexRange,
+    ) -> Result<ValueChildPage> {
+        let selection = self.stopped_selection().await?;
+        self.request(|reply| Request::InspectRange {
+            expression,
+            range,
             stop_id: selection.stop,
             thread_id: selection.thread,
             reply,

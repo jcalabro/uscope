@@ -1,0 +1,19 @@
+[package]
+name = "uscope-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+uscope = { path = ".." }
+
+[[bin]]
+name = "value-expression"
+path = "fuzz_targets/value_expression.rs"
+test = false
+doc = false
+bench = false

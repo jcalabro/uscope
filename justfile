@@ -29,6 +29,10 @@ test: build-test-programs
     test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; cargo nextest run --all-targets --test-threads "$test_threads"
     cargo test --doc
 
+# Fuzzes the bounded structural value-expression parser.
+fuzz-value-expression *ARGS="":
+    cargo fuzz run value-expression -- "$@"
+
 # Checks formatting, runs Clippy, and runs the complete test suite.
 check: build-test-programs
     cargo fmt --check

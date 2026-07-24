@@ -30,6 +30,7 @@ struct incomplete_record;
 
 struct outer_record global_record = {{-7, 9}, {20, 22}};
 unsigned char huge_array[1024 * 1024 + 1];
+int32_t matrix[2][3] = {{1, 2, 3}, {4, 5, 6}};
 
 __attribute__((noinline)) static int inspect_records(
     struct outer_record *record,

@@ -119,13 +119,22 @@ async fn assert_dereferenced_record(
 
 fn value_expression(components: &[&str]) -> uscope::ValueExpression {
     uscope::ValueExpression {
-        components: components
+        steps: components
             .iter()
-            .map(|component| (*component).to_owned())
+            .map(|component| uscope::ValuePathStep::Named((*component).to_owned()))
             .collect::<Vec<_>>()
             .into(),
-        explicit_dereferences: 0,
     }
+}
+
+fn parsed_value_expression(expression: &str) -> uscope::ValueExpression {
+    let parsed = uscope::parse_value_expression(expression)
+        .unwrap_or_else(|error| panic!("parse test value expression {expression:?}: {error}"));
+    assert_eq!(
+        parsed.range, None,
+        "test expression unexpectedly selected a range"
+    );
+    parsed.expression
 }
 
 fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
@@ -1013,6 +1022,46 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 .await;
             if fixture == "variables-rust-o0" {
                 assert_slice_values(&scenario, &slice, None, &[20, 22], fixture).await;
+                let indexed = scenario
+                    .operation(
+                        "inspect one Rust slice element directly",
+                        scenario
+                            .handle()
+                            .inspect(parsed_value_expression("slice[1]")),
+                    )
+                    .await;
+                assert_inspected_signed(&indexed, 22, fixture);
+                let range =
+                    uscope::parse_value_expression("slice[0..2]").expect("parse slice range");
+                let range_page = scenario
+                    .operation(
+                        "inspect one bounded Rust slice range",
+                        scenario
+                            .handle()
+                            .inspect_range(range.expression, range.range.expect("terminal range")),
+                    )
+                    .await;
+                assert_eq!(range_page.children.len(), 2, "{fixture}: {range_page:?}");
+                let out_of_bounds = scenario
+                    .handle()
+                    .inspect(parsed_value_expression("slice[2]"))
+                    .await;
+                assert!(
+                    matches!(
+                        out_of_bounds,
+                        Ok(uscope::InspectedValue {
+                            state: VariableState::Unavailable(
+                                uscope::VariableUnavailableReason::IndexOutOfBounds {
+                                    index: 2,
+                                    lower_bound: 0,
+                                    count: 2,
+                                }
+                            ),
+                            ..
+                        })
+                    ),
+                    "{fixture}: {out_of_bounds:?}"
+                );
             } else {
                 assert!(
                     matches!(
@@ -1351,7 +1400,110 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             available_value(&huge_tail.children[0].state),
             uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
         ));
-
+        for expression in ["huge_array[0]", "huge_array[1048576]"] {
+            let indexed = scenario
+                .operation(
+                    "inspect one large-array element directly",
+                    scenario
+                        .handle()
+                        .inspect(parsed_value_expression(expression)),
+                )
+                .await;
+            assert!(
+                matches!(
+                    available_value(&indexed.state),
+                    uscope::VariableValue::Scalar(ScalarValue::Unsigned(0))
+                ),
+                "{fixture}: {expression}: {indexed:?}"
+            );
+        }
+        let nested_array_member = scenario
+            .operation(
+                "inspect through an explicitly dereferenced array",
+                scenario
+                    .handle()
+                    .inspect(parsed_value_expression("(*records)[1].values[1]")),
+            )
+            .await;
+        assert_inspected_signed(&nested_array_member, 44, fixture);
+        let matrix_element = scenario
+            .operation(
+                "inspect one multidimensional array element",
+                scenario
+                    .handle()
+                    .inspect(parsed_value_expression("matrix[1][2]")),
+            )
+            .await;
+        assert_inspected_signed(&matrix_element, 6, fixture);
+        let range =
+            uscope::parse_value_expression("huge_array[3..7]").expect("parse bounded array range");
+        let range_page = scenario
+            .operation(
+                "inspect one bounded array range",
+                scenario.handle().inspect_range(
+                    range.expression,
+                    range.range.expect("parsed terminal range"),
+                ),
+            )
+            .await;
+        assert_eq!(range_page.offset, 3, "{fixture}: {range_page:?}");
+        assert_eq!(range_page.children.len(), 4, "{fixture}: {range_page:?}");
+        assert!(range_page.children.iter().enumerate().all(|(relative, child)| {
+            matches!(
+                &child.relationship,
+                uscope::ValueChildRelationship::ArrayElement { index, indices }
+                    if *index == 3 + u64::try_from(relative).expect("small index")
+                        && indices.as_ref() == [i128::try_from(3 + relative).expect("small index")]
+            )
+        }));
+        let empty = uscope::parse_value_expression("huge_array[7..7]").expect("parse empty range");
+        let empty_page = scenario
+            .operation(
+                "inspect one empty in-bounds range",
+                scenario
+                    .handle()
+                    .inspect_range(empty.expression, empty.range.expect("terminal range")),
+            )
+            .await;
+        assert_eq!(empty_page.offset, 7, "{fixture}: {empty_page:?}");
+        assert!(empty_page.children.is_empty(), "{fixture}: {empty_page:?}");
+        for expression in [
+            "huge_array[7..3]",
+            "huge_array[0..257]",
+            "huge_array[1048576..1048578]",
+            "matrix[0..1]",
+            "global_record[0..1]",
+        ] {
+            let parsed =
+                uscope::parse_value_expression(expression).expect("parse invalid semantic range");
+            let result = scenario
+                .handle()
+                .inspect_range(parsed.expression, parsed.range.expect("terminal range"))
+                .await;
+            assert!(result.is_err(), "{fixture}: {expression}: {result:?}");
+        }
+        let out_of_bounds = scenario
+            .handle()
+            .inspect(parsed_value_expression("huge_array[1048577]"))
+            .await;
+        assert!(
+            matches!(
+                out_of_bounds,
+                Err(uscope::Error::ValueIndexOutOfBounds { .. })
+            ),
+            "{fixture}: {out_of_bounds:?}"
+        );
+        let pointer_index = scenario
+            .handle()
+            .inspect(parsed_value_expression("records[0]"))
+            .await;
+        assert!(
+            matches!(
+                pointer_index,
+                Err(uscope::Error::IndexAccessOnNonIndexable { .. })
+            ),
+            "{fixture}: {pointer_index:?}"
+        );
         for (components, expected) in [
             (&["record", "inner", "signed_value"][..], -7),
             (&["bits", "negative"][..], -3),
@@ -2156,6 +2308,44 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
             unreadable,
             "{fixture}: repeated page evaluation changed at one stop"
         );
+        let indexed_readable = scenario
+            .operation(
+                "inspect a readable element at a mapping boundary",
+                scenario
+                    .handle()
+                    .inspect(parsed_value_expression("(*boundary_array)[1]")),
+            )
+            .await;
+        assert_inspected_signed(&indexed_readable, 42, fixture);
+        let indexed_unreadable = scenario
+            .operation(
+                "inspect an unreadable element at a mapping boundary",
+                scenario
+                    .handle()
+                    .inspect(parsed_value_expression("(*boundary_array)[2]")),
+            )
+            .await;
+        assert!(
+            matches!(indexed_unreadable.state, VariableState::Unavailable(_)),
+            "{fixture}: {indexed_unreadable:?}"
+        );
+        let parsed = uscope::parse_value_expression("(*boundary_array)[0..4]")
+            .expect("parse boundary range");
+        let range = scenario
+            .operation(
+                "inspect a range crossing an unmapped boundary",
+                scenario
+                    .handle()
+                    .inspect_range(parsed.expression, parsed.range.expect("terminal range")),
+            )
+            .await;
+        assert_signed_state(&range.children[0].state, 41);
+        assert_signed_state(&range.children[1].state, 42);
+        assert!(
+            range.children[2..]
+                .iter()
+                .all(|child| matches!(child.state, VariableState::Unavailable(_)))
+        );
 
         assert_eq!(
             scenario.resume_to_stop().await,
@@ -2406,10 +2596,9 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
     let atomic_pointee = scenario
         .operation(
             "inspect through implicit pointer chain atomically",
-            scenario.handle().inspect(uscope::ValueExpression {
-                components: vec!["pointer_pointer".to_owned()].into(),
-                explicit_dereferences: 2,
-            }),
+            scenario
+                .handle()
+                .inspect(parsed_value_expression("**pointer_pointer")),
         )
         .await;
     assert_inspected_signed(&atomic_pointee, 42, fixture);
@@ -2454,10 +2643,9 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
     let atomic_byte = offset
         .operation(
             "inspect through offset implicit pointer atomically",
-            offset.handle().inspect(uscope::ValueExpression {
-                components: vec!["byte_pointer".to_owned()].into(),
-                explicit_dereferences: 1,
-            }),
+            offset
+                .handle()
+                .inspect(parsed_value_expression("*byte_pointer")),
         )
         .await;
     assert!(
