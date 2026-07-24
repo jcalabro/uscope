@@ -7,7 +7,7 @@ use uscope::{
     Architecture, BreakpointLocation, ByteOrder, CodeInstanceKind, Debugger, EntryProvenance,
     Error, ExitStatus, InferiorState, InlineFrameLookup, ModuleImage, PointerWidth, RegisterRole,
     ScalarValue, SourceContext, SourceFile, SourceLocation, StepKind, StopReason, ThreadState,
-    UnwindTermination, VariableKind, VariableState, VirtualAddress,
+    UnwindTermination, VariableKind, VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
 use nix::sys::signal::{Signal, kill};
@@ -103,6 +103,7 @@ async fn record_page(
             total: 0,
             children: Arc::from([]),
             completion: uscope::ValuePageCompletion::Complete,
+            usage: uscope::InspectionUsage::default(),
         };
     }
     child_page(scenario, state, 0, limit).await
@@ -615,7 +616,7 @@ async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
         let dereferenced = partial
             .operation(
                 "dereference pointer",
-                partial.handle().dereference(reference),
+                partial.handle().dereference(reference.clone()),
             )
             .await;
         assert!(matches!(
@@ -629,6 +630,38 @@ async fn pointer_variables_are_available_and_explicitly_dereferenceable() {
             available_value(&dereferenced.state),
             &uscope::VariableValue::Scalar(ScalarValue::Signed(42))
         );
+        let constrained = partial
+            .operation(
+                "bound scalar dereference bytes",
+                partial.handle().dereference_with_limits(
+                    reference,
+                    uscope::InspectionLimits {
+                        memory_bytes: 3,
+                        ..uscope::InspectionLimits::default()
+                    },
+                ),
+            )
+            .await;
+        assert!(matches!(
+            constrained.state,
+            VariableState::Unavailable(VariableUnavailableReason::InspectionLimit(
+                uscope::InspectionExhaustion {
+                    resource: uscope::InspectionLimit::MemoryBytes,
+                    limit: 3,
+                    used: 0,
+                    requested: 4,
+                }
+            ))
+        ));
+        assert!(matches!(
+            constrained.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::MemoryBytes,
+                limit: 3,
+                used: 0,
+                requested: 4,
+            })
+        ));
         partial.shutdown().await;
     }
 }
@@ -1541,6 +1574,253 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             )
             .await;
         assert_inspected_signed(&selected, 73, fixture);
+
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one public scenario proves every budget resource and resumable partial pages"
+)]
+async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary() {
+    for fixture in ["records-c-gcc-o0", "records-c-clang-o0"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspect_records").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let limits = uscope::InspectionLimits {
+            variables: 1,
+            ..uscope::InspectionLimits::default()
+        };
+        let variables = scenario
+            .operation(
+                "truncate visible variables at the exact variable boundary",
+                scenario.handle().variables_with_limits(limits),
+            )
+            .await;
+        assert_eq!(variables.variables.len(), 1, "{variables:?}");
+        assert!(matches!(
+            variables.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::Variables,
+                limit: 1,
+                used: 1,
+                requested: 1,
+            })
+        ));
+
+        let huge = scenario
+            .operation(
+                "obtain a stop-scoped large-array capability",
+                scenario
+                    .handle()
+                    .inspect(parsed_value_expression("huge_array")),
+            )
+            .await;
+        let reference = available_children(&huge.state).clone();
+
+        let bounded_range =
+            uscope::parse_value_expression("huge_array[0..4]").expect("parse bounded range");
+        let range = scenario
+            .operation(
+                "share one value-node budget across range selection and its child page",
+                scenario.handle().inspect_range_with_limits(
+                    bounded_range.expression,
+                    bounded_range.range.expect("terminal range"),
+                    uscope::InspectionLimits {
+                        value_nodes: 3,
+                        ..uscope::InspectionLimits::default()
+                    },
+                ),
+            )
+            .await;
+        assert_eq!(range.children.len(), 2, "{range:?}");
+        assert!(matches!(
+            range.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::ValueNodes,
+                limit: 3,
+                used: 3,
+                requested: 1,
+            })
+        ));
+
+        let node_limits = uscope::InspectionLimits {
+            value_nodes: 2,
+            ..uscope::InspectionLimits::default()
+        };
+        let nodes = scenario
+            .operation(
+                "truncate a child page by value nodes",
+                scenario.handle().value_children_with_limits(
+                    reference.clone(),
+                    uscope::ValueChildQuery {
+                        offset: 0,
+                        limit: 4,
+                    },
+                    node_limits,
+                ),
+            )
+            .await;
+        assert_eq!(nodes.children.len(), 2, "{nodes:?}");
+        assert!(matches!(
+            nodes.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::ValueNodes,
+                limit: 2,
+                used: 2,
+                requested: 1,
+            })
+        ));
+        let resumed = scenario
+            .operation(
+                "resume after a truncated child prefix with a fresh budget",
+                scenario.handle().value_children_with_limits(
+                    reference.clone(),
+                    uscope::ValueChildQuery {
+                        offset: 2,
+                        limit: 2,
+                    },
+                    node_limits,
+                ),
+            )
+            .await;
+        assert!(matches!(
+            resumed.children.as_ref(),
+            [first, second]
+                if matches!(
+                    &first.relationship,
+                    uscope::ValueChildRelationship::ArrayElement { index: 2, .. }
+                ) && matches!(
+                    &second.relationship,
+                    uscope::ValueChildRelationship::ArrayElement { index: 3, .. }
+                )
+        ));
+
+        let byte_limits = uscope::InspectionLimits {
+            memory_bytes: 2,
+            ..uscope::InspectionLimits::default()
+        };
+        let bytes = scenario
+            .operation(
+                "truncate a child page by requested memory bytes",
+                scenario.handle().value_children_with_limits(
+                    reference.clone(),
+                    uscope::ValueChildQuery {
+                        offset: 0,
+                        limit: 4,
+                    },
+                    byte_limits,
+                ),
+            )
+            .await;
+        assert_eq!(bytes.children.len(), 2, "{bytes:?}");
+        assert_eq!(bytes.usage.memory_bytes, 2, "{bytes:?}");
+        assert!(matches!(
+            bytes.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::MemoryBytes,
+                limit: 2,
+                used: 2,
+                requested: 1,
+            })
+        ));
+
+        let read_limits = uscope::InspectionLimits {
+            memory_reads: 1,
+            memory_bytes: 3,
+            ..uscope::InspectionLimits::default()
+        };
+        let reads = scenario
+            .operation(
+                "truncate a child page by logical memory reads",
+                scenario.handle().value_children_with_limits(
+                    reference,
+                    uscope::ValueChildQuery {
+                        offset: 0,
+                        limit: 4,
+                    },
+                    read_limits,
+                ),
+            )
+            .await;
+        assert_eq!(reads.children.len(), 1, "{reads:?}");
+        assert_eq!(reads.usage.memory_reads, 1, "{reads:?}");
+        assert!(matches!(
+            reads.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::MemoryReads,
+                limit: 1,
+                used: 1,
+                requested: 1,
+            })
+        ));
+
+        let depth_limits = uscope::InspectionLimits {
+            aggregate_depth: 1,
+            ..uscope::InspectionLimits::default()
+        };
+        let depth = scenario
+            .operation(
+                "truncate a structural path by aggregate depth",
+                scenario.handle().inspect_with_limits(
+                    parsed_value_expression("global_record.inner.signed_value"),
+                    depth_limits,
+                ),
+            )
+            .await;
+        assert!(matches!(
+            depth.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::AggregateDepth,
+                limit: 1,
+                used: 0,
+                requested: 2,
+            })
+        ));
+
+        let work_limits = uscope::InspectionLimits {
+            expression_work: 1,
+            ..uscope::InspectionLimits::default()
+        };
+        let work = scenario
+            .operation(
+                "truncate DWARF evaluation by expression work",
+                scenario
+                    .handle()
+                    .inspect_with_limits(parsed_value_expression("huge_array[0]"), work_limits),
+            )
+            .await;
+        assert!(matches!(
+            work.completion,
+            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::ExpressionWork,
+                limit: 1,
+                used: 1,
+                requested: 10_000,
+            })
+        ));
+
+        let invalid = uscope::InspectionLimits {
+            memory_reads: 0,
+            ..uscope::InspectionLimits::default()
+        };
+        assert!(matches!(
+            scenario
+                .handle()
+                .inspect_with_limits(parsed_value_expression("huge_array"), invalid)
+                .await,
+            Err(uscope::Error::InvalidInspectionLimit {
+                resource: uscope::InspectionLimit::MemoryReads,
+                value: 0,
+                maximum: 1_024,
+            })
+        ));
 
         scenario.shutdown().await;
     }

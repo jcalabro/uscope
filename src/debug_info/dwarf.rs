@@ -52,6 +52,8 @@ enum DwarfError {
     ReferenceCycle,
     #[error("malformed variable type metadata: {0}")]
     MalformedVariable(Arc<str>),
+    #[error("DWARF data-object catalog exceeds {0} entries")]
+    DataObjectLimit(usize),
     #[error("concrete function has no source-level name")]
     MissingFunctionName,
 }

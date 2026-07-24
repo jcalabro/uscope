@@ -496,12 +496,14 @@ pub enum Request {
     },
     Variables {
         query: VariableQuery,
+        limits: crate::InspectionLimits,
         stop_id: StopId,
         thread_id: ThreadId,
         reply: Reply<VariableSnapshot>,
     },
     Inspect {
         expression: crate::ValueExpression,
+        limits: crate::InspectionLimits,
         stop_id: StopId,
         thread_id: ThreadId,
         reply: Reply<crate::InspectedValue>,
@@ -509,17 +511,20 @@ pub enum Request {
     InspectRange {
         expression: crate::ValueExpression,
         range: crate::ValueIndexRange,
+        limits: crate::InspectionLimits,
         stop_id: StopId,
         thread_id: ThreadId,
         reply: Reply<ValueChildPage>,
     },
     Dereference {
         reference: DereferenceReference,
+        limits: crate::InspectionLimits,
         reply: Reply<DereferencedValue>,
     },
     ValueChildren {
         reference: Arc<ValueChildrenReference>,
         query: ValueChildQuery,
+        limits: crate::InspectionLimits,
         reply: Reply<ValueChildPage>,
     },
     Globals {

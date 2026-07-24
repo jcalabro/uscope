@@ -734,22 +734,122 @@ pub enum ValueChildRelationship {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum InspectionLimit {
-    /// Maximum target bytes read or retained.
+    /// Maximum visible variables examined or returned.
+    Variables,
+    /// Maximum requested target bytes read.
     MemoryBytes,
-    /// Maximum number of target-memory reads.
+    /// Maximum number of logical target-memory reads.
     MemoryReads,
     /// Maximum number of value nodes.
     ValueNodes,
     /// Maximum aggregate nesting depth.
     AggregateDepth,
-    /// Maximum array or slice elements.
-    Elements,
-    /// Maximum record members or bases.
-    Members,
     /// Maximum debug-expression work.
     ExpressionWork,
     /// Maximum rendered output bytes.
     OutputBytes,
+}
+
+/// Resource ceilings for one logical inspection operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InspectionLimits {
+    /// Visible variables that may be examined or returned.
+    pub variables: u64,
+    /// Value nodes that may be materialized.
+    pub value_nodes: u64,
+    /// Deepest aggregate path or expansion level.
+    pub aggregate_depth: u64,
+    /// Logical target-memory reads.
+    pub memory_reads: u64,
+    /// Requested target-memory bytes.
+    pub memory_bytes: u64,
+    /// Conservatively reserved debug-expression work units.
+    pub expression_work: u64,
+    /// Bytes emitted by a client renderer.
+    pub output_bytes: u64,
+}
+
+impl Default for InspectionLimits {
+    fn default() -> Self {
+        Self {
+            variables: 256,
+            value_nodes: 512,
+            aggregate_depth: 64,
+            memory_reads: 64,
+            memory_bytes: 1_024,
+            expression_work: 5_120_000,
+            output_bytes: 64 * 1_024,
+        }
+    }
+}
+
+impl InspectionLimits {
+    /// Returns the unused allowance after one completed operation.
+    #[must_use]
+    pub const fn remaining_after(self, usage: InspectionUsage) -> Self {
+        Self {
+            variables: self.variables.saturating_sub(usage.variables),
+            value_nodes: self.value_nodes.saturating_sub(usage.value_nodes),
+            aggregate_depth: self.aggregate_depth,
+            memory_reads: self.memory_reads.saturating_sub(usage.memory_reads),
+            memory_bytes: self.memory_bytes.saturating_sub(usage.memory_bytes),
+            expression_work: self.expression_work.saturating_sub(usage.expression_work),
+            output_bytes: self.output_bytes.saturating_sub(usage.output_bytes),
+        }
+    }
+}
+
+/// Resources consumed while completing one inspection operation.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InspectionUsage {
+    /// Visible variables examined or returned.
+    pub variables: u64,
+    /// Value nodes materialized.
+    pub value_nodes: u64,
+    /// Deepest aggregate path or expansion level reached.
+    pub aggregate_depth: u64,
+    /// Logical target-memory reads attempted.
+    pub memory_reads: u64,
+    /// Target-memory bytes requested.
+    pub memory_bytes: u64,
+    /// Conservatively reserved debug-expression work units.
+    pub expression_work: u64,
+    /// Bytes emitted by a client renderer.
+    pub output_bytes: u64,
+}
+
+/// The exact attempted reservation that exhausted an inspection resource.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InspectionExhaustion {
+    /// Resource that could not be reserved.
+    pub resource: InspectionLimit,
+    /// Configured ceiling for the resource.
+    pub limit: u64,
+    /// Amount completed before the failed reservation.
+    pub used: u64,
+    /// Additional amount requested by the failed operation.
+    pub requested: u64,
+}
+
+/// Whether a bounded inspection operation completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InspectionCompletion {
+    /// The requested operation completed.
+    Complete,
+    /// Work stopped at a typed resource boundary.
+    Truncated(InspectionExhaustion),
+}
+
+impl InspectionCompletion {
+    /// Returns the typed exhaustion when this operation was truncated.
+    #[must_use]
+    pub const fn exhaustion(self) -> Option<InspectionExhaustion> {
+        match self {
+            Self::Complete => None,
+            Self::Truncated(exhaustion) => Some(exhaustion),
+        }
+    }
 }
 
 /// Storage retained by an opaque child capability.
@@ -829,15 +929,8 @@ pub struct ValueChild {
     pub state: VariableState,
 }
 
-/// Whether a requested child page reached its requested end.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ValuePageCompletion {
-    /// Every child in the requested in-range interval was represented.
-    Complete,
-    /// Work stopped at a typed resource boundary.
-    Truncated(InspectionLimit),
-}
+/// Backwards-compatible name for child-page inspection completion.
+pub type ValuePageCompletion = InspectionCompletion;
 
 /// One immutable page of children evaluated at a stopped snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -852,6 +945,8 @@ pub struct ValueChildPage {
     pub children: Arc<[ValueChild]>,
     /// Whether the requested interval completed.
     pub completion: ValuePageCompletion,
+    /// Resources consumed while producing this page.
+    pub usage: InspectionUsage,
 }
 
 /// How a variable's current value was obtained.
@@ -997,6 +1092,8 @@ pub enum VariableUnavailableReason {
     RegisterUnavailable(Arc<str>),
     /// The expression exceeded the debugger's bounded work limits.
     EvaluationLimit,
+    /// A typed live-inspection resource was exhausted.
+    InspectionLimit(InspectionExhaustion),
     /// A runtime-sized array or slice index is outside its current bounds.
     IndexOutOfBounds {
         /// Requested source index.
@@ -1022,6 +1119,11 @@ impl fmt::Display for VariableUnavailableReason {
             Self::EvaluationLimit => {
                 formatter.write_str("DWARF expression evaluation limit exceeded")
             }
+            Self::InspectionLimit(exhaustion) => write!(
+                formatter,
+                "{:?} limit {} exhausted after {} while requesting {}",
+                exhaustion.resource, exhaustion.limit, exhaustion.used, exhaustion.requested
+            ),
             Self::IndexOutOfBounds {
                 index,
                 lower_bound,
@@ -1137,6 +1239,10 @@ pub struct InspectedValue {
     pub type_info: Option<TypeInfo>,
     /// The terminal value's current availability and decoded representation.
     pub state: VariableState,
+    /// Whether the requested inspection completed.
+    pub completion: InspectionCompletion,
+    /// Resources consumed while producing this value.
+    pub usage: InspectionUsage,
 }
 
 /// The source-level role of a visible data object.
@@ -1264,6 +1370,10 @@ pub struct DereferencedValue {
     pub type_info: TypeInfo,
     /// Its current availability and value.
     pub state: VariableState,
+    /// Whether the dereference completed.
+    pub completion: InspectionCompletion,
+    /// Resources consumed while producing this value.
+    pub usage: InspectionUsage,
 }
 
 /// Variables inspected from one logical frame of a stopped thread.
@@ -1281,6 +1391,10 @@ pub struct VariableSnapshot {
     pub target: TargetDescription,
     /// Visible parameters followed by local variables in source declaration order.
     pub variables: Arc<[Variable]>,
+    /// Whether every selected variable was represented.
+    pub completion: InspectionCompletion,
+    /// Resources consumed while producing this snapshot.
+    pub usage: InspectionUsage,
 }
 
 /// The target CPU architecture described by a module.
@@ -2617,6 +2731,44 @@ impl LoadedModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspection_limits_report_exact_usage_and_exhaustion() {
+        let limits = InspectionLimits {
+            variables: 2,
+            value_nodes: 3,
+            aggregate_depth: 4,
+            memory_reads: 5,
+            memory_bytes: 6,
+            expression_work: 7,
+            output_bytes: 64,
+        };
+        let usage = InspectionUsage {
+            variables: 2,
+            value_nodes: 3,
+            aggregate_depth: 4,
+            memory_reads: 5,
+            memory_bytes: 6,
+            expression_work: 7,
+            output_bytes: 8,
+        };
+        let exhaustion = InspectionExhaustion {
+            resource: InspectionLimit::MemoryBytes,
+            limit: limits.memory_bytes,
+            used: usage.memory_bytes,
+            requested: 1,
+        };
+
+        assert_eq!(
+            InspectionCompletion::Truncated(exhaustion).exhaustion(),
+            Some(exhaustion)
+        );
+        assert_eq!(
+            limits.remaining_after(usage).memory_bytes,
+            0,
+            "usage must subtract without wrapping"
+        );
+    }
 
     fn global_test_image() -> ModuleImage {
         let scalar = || {

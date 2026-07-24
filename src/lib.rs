@@ -2,6 +2,7 @@ mod backend;
 mod debug_info;
 mod error;
 mod expression;
+mod inspection;
 pub(crate) mod model;
 mod protocol;
 mod unwind;
@@ -16,7 +17,8 @@ pub use model::{
     EntryProvenance, EnumerationOrigin, Enumerator, ExecutionLocation, FloatValue, FrameKind,
     FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
     GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
-    ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionLimit,
+    ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, InspectedValue,
+    InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage,
     IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule,
     LoadedModuleRecord, LoadedModuleSnapshot, ModuleId, ModuleImage, ModuleImageId,
     NamedTypeRelationship, ParsedValueExpression, PointerWidth, RecordKind, RecordMember,
@@ -422,14 +424,33 @@ impl DebuggerHandle {
 
     /// Inspects every visible parameter and local variable in the selected logical frame.
     pub async fn variables(&self) -> Result<VariableSnapshot> {
-        self.variable_query(VariableQuery::All).await
+        self.variables_with_limits(InspectionLimits::default())
+            .await
+    }
+
+    /// Inspects visible variables under explicit bounded resource limits.
+    pub async fn variables_with_limits(
+        &self,
+        limits: InspectionLimits,
+    ) -> Result<VariableSnapshot> {
+        self.variable_query(VariableQuery::All, limits).await
     }
 
     /// Inspects the innermost visible data object with the supplied name.
     pub async fn variable(&self, name: impl Into<String>) -> Result<Variable> {
+        self.variable_with_limits(name, InspectionLimits::default())
+            .await
+    }
+
+    /// Inspects one named data object under explicit bounded resource limits.
+    pub async fn variable_with_limits(
+        &self,
+        name: impl Into<String>,
+        limits: InspectionLimits,
+    ) -> Result<Variable> {
         let name = name.into();
         let snapshot = self
-            .variable_query(VariableQuery::Name(name.clone()))
+            .variable_query(VariableQuery::Name(name.clone()), limits)
             .await?;
         snapshot
             .variables
@@ -441,9 +462,20 @@ impl DebuggerHandle {
     /// Atomically inspects one structural value expression in the selected
     /// logical frame of the current stopped thread.
     pub async fn inspect(&self, expression: ValueExpression) -> Result<InspectedValue> {
+        self.inspect_with_limits(expression, InspectionLimits::default())
+            .await
+    }
+
+    /// Inspects one structural expression under explicit bounded resource limits.
+    pub async fn inspect_with_limits(
+        &self,
+        expression: ValueExpression,
+        limits: InspectionLimits,
+    ) -> Result<InspectedValue> {
         let selection = self.stopped_selection().await?;
         self.request(|reply| Request::Inspect {
             expression,
+            limits,
             stop_id: selection.stop,
             thread_id: selection.thread,
             reply,
@@ -458,10 +490,22 @@ impl DebuggerHandle {
         expression: ValueExpression,
         range: ValueIndexRange,
     ) -> Result<ValueChildPage> {
+        self.inspect_range_with_limits(expression, range, InspectionLimits::default())
+            .await
+    }
+
+    /// Inspects one bounded range under explicit resource limits.
+    pub async fn inspect_range_with_limits(
+        &self,
+        expression: ValueExpression,
+        range: ValueIndexRange,
+        limits: InspectionLimits,
+    ) -> Result<ValueChildPage> {
         let selection = self.stopped_selection().await?;
         self.request(|reply| Request::InspectRange {
             expression,
             range,
+            limits,
             stop_id: selection.stop,
             thread_id: selection.thread,
             reply,
@@ -477,18 +521,43 @@ impl DebuggerHandle {
     /// global belonging to a shared library, resolve its owning module and pass
     /// the full [`GlobalVariableReference`] to [`Self::loaded_global`].
     pub async fn main_global(&self, id: GlobalVariableId) -> Result<Variable> {
+        self.main_global_with_limits(id, InspectionLimits::default())
+            .await
+    }
+
+    /// Inspects one main-image global under explicit bounded resource limits.
+    pub async fn main_global_with_limits(
+        &self,
+        id: GlobalVariableId,
+        limits: InspectionLimits,
+    ) -> Result<Variable> {
         let module = self.loaded_module().await?;
-        self.loaded_global(GlobalVariableReference {
-            module: module.id,
-            image: module.image,
-            variable: id,
-        })
+        self.loaded_global_with_limits(
+            GlobalVariableReference {
+                module: module.id,
+                image: module.image,
+                variable: id,
+            },
+            limits,
+        )
         .await
     }
 
     /// Inspects one exact global in a specific loaded module.
     pub async fn loaded_global(&self, global: GlobalVariableReference) -> Result<Variable> {
-        let snapshot = self.variable_query(VariableQuery::Global(global)).await?;
+        self.loaded_global_with_limits(global, InspectionLimits::default())
+            .await
+    }
+
+    /// Inspects one exact loaded global under explicit bounded resource limits.
+    pub async fn loaded_global_with_limits(
+        &self,
+        global: GlobalVariableReference,
+        limits: InspectionLimits,
+    ) -> Result<Variable> {
+        let snapshot = self
+            .variable_query(VariableQuery::Global(global), limits)
+            .await?;
         snapshot
             .variables
             .first()
@@ -499,8 +568,22 @@ impl DebuggerHandle {
     /// Explicitly dereferences a pointer or reference value produced at the
     /// current stopped snapshot.
     pub async fn dereference(&self, reference: DereferenceReference) -> Result<DereferencedValue> {
-        self.request(|reply| Request::Dereference { reference, reply })
+        self.dereference_with_limits(reference, InspectionLimits::default())
             .await
+    }
+
+    /// Dereferences a value under explicit bounded resource limits.
+    pub async fn dereference_with_limits(
+        &self,
+        reference: DereferenceReference,
+        limits: InspectionLimits,
+    ) -> Result<DereferencedValue> {
+        self.request(|reply| Request::Dereference {
+            reference,
+            limits,
+            reply,
+        })
+        .await
     }
 
     /// Evaluates one arbitrary bounded page from an aggregate child capability.
@@ -509,9 +592,21 @@ impl DebuggerHandle {
         reference: Arc<ValueChildrenReference>,
         query: ValueChildQuery,
     ) -> Result<ValueChildPage> {
+        self.value_children_with_limits(reference, query, InspectionLimits::default())
+            .await
+    }
+
+    /// Evaluates one child page under explicit bounded resource limits.
+    pub async fn value_children_with_limits(
+        &self,
+        reference: Arc<ValueChildrenReference>,
+        query: ValueChildQuery,
+        limits: InspectionLimits,
+    ) -> Result<ValueChildPage> {
         self.request(|reply| Request::ValueChildren {
             reference,
             query,
+            limits,
             reply,
         })
         .await
@@ -528,10 +623,15 @@ impl DebuggerHandle {
         self.request(|reply| Request::LoadedModules { reply }).await
     }
 
-    async fn variable_query(&self, query: VariableQuery) -> Result<VariableSnapshot> {
+    async fn variable_query(
+        &self,
+        query: VariableQuery,
+        limits: InspectionLimits,
+    ) -> Result<VariableSnapshot> {
         let selection = self.stopped_selection().await?;
         self.request(|reply| Request::Variables {
             query,
+            limits,
             stop_id: selection.stop,
             thread_id: selection.thread,
             reply,
