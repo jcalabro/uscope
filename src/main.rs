@@ -848,6 +848,7 @@ async fn execute_print<'a>(
                         type_info,
                         expression,
                         &value.state,
+                        uscope::InspectionLimits::default().remaining_after(value.usage),
                         renderer,
                     )
                     .await?
@@ -1217,12 +1218,26 @@ fn format_registers(
 }
 
 fn format_variables(snapshot: &VariableSnapshot, renderer: Renderer) -> String {
-    snapshot
-        .variables
-        .iter()
-        .map(|variable| format_variable(variable, renderer))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut output = BoundedOutput::new(
+        usize::try_from(uscope::InspectionLimits::default().output_bytes)
+            .expect("default output limit fits usize"),
+    );
+    for (index, variable) in snapshot.variables.iter().enumerate() {
+        if index != 0 {
+            output.push_str("\n");
+        }
+        output.push_str(&format_variable(variable, renderer));
+        if output.is_truncated() {
+            break;
+        }
+    }
+    if let Some(exhaustion) = snapshot.completion.exhaustion() {
+        if !snapshot.variables.is_empty() {
+            output.push_str("\n");
+        }
+        output.push_str(&format_inspection_exhaustion(exhaustion));
+    }
+    output.into_string()
 }
 
 fn format_variable(variable: &Variable, renderer: Renderer) -> String {
@@ -1282,10 +1297,14 @@ fn format_value_range(
     page: &uscope::ValueChildPage,
     renderer: Renderer,
 ) -> String {
-    let values = page
-        .children
-        .iter()
-        .map(|child| match &child.state {
+    let limit = usize::try_from(uscope::InspectionLimits::default().output_bytes)
+        .expect("default output limit fits usize");
+    let mut values = BoundedOutput::new(limit);
+    for (index, child) in page.children.iter().enumerate() {
+        if index != 0 {
+            values.push_str(", ");
+        }
+        let value = match &child.state {
             VariableState::Available {
                 value, children, ..
             } => format_value_summary(&child.type_info, value, children),
@@ -1293,14 +1312,92 @@ fn format_value_range(
             VariableState::Malformed(reason) => {
                 format!("<malformed: {}>", reason.description)
             }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+        };
+        values.push_str(&value);
+        if values.is_truncated() {
+            break;
+        }
+    }
+    if let Some(exhaustion) = page.completion.exhaustion() {
+        if !page.children.is_empty() {
+            values.push_str(", ");
+        }
+        values.push_str(&format_inspection_exhaustion(exhaustion));
+    }
     format!(
         "{} = [{}]",
         renderer.paint(Role::Name, expression),
-        renderer.paint(Role::Value, values)
+        renderer.paint(Role::Value, values.into_string())
     )
+}
+
+const OUTPUT_TRUNCATION_MARKER: &str = "<truncated: OutputBytes>";
+
+struct BoundedOutput {
+    value: String,
+    limit: usize,
+    truncated: bool,
+}
+
+impl BoundedOutput {
+    const fn new(limit: usize) -> Self {
+        Self {
+            value: String::new(),
+            limit,
+            truncated: false,
+        }
+    }
+
+    fn push_str(&mut self, text: &str) {
+        if self.truncated {
+            return;
+        }
+        if self
+            .value
+            .len()
+            .checked_add(text.len())
+            .is_some_and(|length| length <= self.limit)
+        {
+            self.value.push_str(text);
+            return;
+        }
+        let marker_bytes = OUTPUT_TRUNCATION_MARKER.len().min(self.limit);
+        let content_limit = self.limit.saturating_sub(marker_bytes);
+        if self.value.len() > content_limit {
+            self.value.truncate(content_limit);
+            while !self.value.is_char_boundary(self.value.len()) {
+                self.value.pop();
+            }
+        }
+        let mut end = text
+            .len()
+            .min(content_limit.saturating_sub(self.value.len()));
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.value.push_str(&text[..end]);
+        let mut marker_end = marker_bytes;
+        while !OUTPUT_TRUNCATION_MARKER.is_char_boundary(marker_end) {
+            marker_end -= 1;
+        }
+        self.value.push_str(&OUTPUT_TRUNCATION_MARKER[..marker_end]);
+        self.truncated = true;
+    }
+
+    const fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    fn into_string(self) -> String {
+        self.value
+    }
+}
+
+impl std::fmt::Write for BoundedOutput {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        self.push_str(text);
+        Ok(())
+    }
 }
 
 fn format_value_summary(
@@ -1370,24 +1467,21 @@ async fn format_typed_state_expanded(
     type_info: &uscope::TypeInfo,
     name: &str,
     state: &VariableState,
+    mut remaining: uscope::InspectionLimits,
     renderer: Renderer,
 ) -> uscope::Result<String> {
-    const MAX_RENDER_DEPTH: usize = 64;
-    const MAX_OUTPUT_BYTES: usize = 64 * 1024;
     enum Work {
         State(Box<(uscope::TypeInfo, VariableState, usize)>),
         Text(String),
     }
 
-    let mut output = String::new();
+    let mut output = BoundedOutput::new(
+        usize::try_from(uscope::InspectionLimits::default().output_bytes)
+            .expect("default output limit fits usize"),
+    );
     let mut work = vec![Work::State(Box::new((type_info.clone(), state.clone(), 0)))];
     while let Some(item) = work.pop() {
-        if output.len() >= MAX_OUTPUT_BYTES {
-            output.truncate(MAX_OUTPUT_BYTES);
-            while !output.is_char_boundary(output.len()) {
-                output.pop();
-            }
-            output.push_str("<truncated: OutputBytes>");
+        if output.is_truncated() {
             break;
         }
         let Work::State(state_work) = item else {
@@ -1404,11 +1498,11 @@ async fn format_typed_state_expanded(
         else {
             match state {
                 VariableState::Unavailable(reason) => {
-                    write!(output, "<unavailable: {reason}>").expect("String writes cannot fail");
+                    write!(output, "<unavailable: {reason}>").expect("bounded writes cannot fail");
                 }
                 VariableState::Malformed(reason) => {
                     write!(output, "<malformed: {}>", reason.description)
-                        .expect("String writes cannot fail");
+                        .expect("bounded writes cannot fail");
                 }
                 VariableState::Available { .. } => unreachable!(),
             }
@@ -1424,7 +1518,7 @@ async fn format_typed_state_expanded(
             output.push_str(&format_value_summary(&type_info, &value, &children));
             continue;
         }
-        if depth >= MAX_RENDER_DEPTH {
+        if u64::try_from(depth).unwrap_or(u64::MAX) >= remaining.aggregate_depth {
             output.push_str("<truncated: AggregateDepth>");
             continue;
         }
@@ -1432,21 +1526,37 @@ async fn format_typed_state_expanded(
             output.push_str(&format_value_summary(&type_info, &value, &children));
             continue;
         };
-        let requested = reference.total().min(256);
+        let exhausted = [
+            (uscope::InspectionLimit::ValueNodes, remaining.value_nodes),
+            (uscope::InspectionLimit::MemoryReads, remaining.memory_reads),
+            (uscope::InspectionLimit::MemoryBytes, remaining.memory_bytes),
+            (
+                uscope::InspectionLimit::ExpressionWork,
+                remaining.expression_work,
+            ),
+        ]
+        .into_iter()
+        .find_map(|(resource, remaining)| (remaining == 0).then_some(resource));
+        if let Some(resource) = exhausted {
+            output.push_str(&format!("<truncated: {resource:?}>"));
+            continue;
+        }
+        let requested = reference.total().min(256).min(remaining.value_nodes);
         let page = if requested == 0 {
             None
         } else {
-            Some(
-                debugger
-                    .value_children(
-                        reference.clone(),
-                        uscope::ValueChildQuery {
-                            offset: 0,
-                            limit: u32::try_from(requested).expect("bounded page fits u32"),
-                        },
-                    )
-                    .await?,
-            )
+            let page = debugger
+                .value_children_with_limits(
+                    reference.clone(),
+                    uscope::ValueChildQuery {
+                        offset: 0,
+                        limit: u32::try_from(requested).expect("bounded page fits u32"),
+                    },
+                    remaining,
+                )
+                .await?;
+            remaining = remaining.remaining_after(page.usage);
+            Some(page)
         };
         let page_children = page.as_ref().map_or(&[][..], |page| page.children.as_ref());
         let children_to_render = page_children
@@ -1497,6 +1607,12 @@ async fn format_typed_state_expanded(
                 work.push(Work::Text(", ".to_owned()));
             }
         }
+        if let Some(exhaustion) = page.as_ref().and_then(|page| page.completion.exhaustion()) {
+            work.push(Work::Text(format_inspection_exhaustion(exhaustion)));
+            if !children_to_render.is_empty() {
+                work.push(Work::Text(", ".to_owned()));
+            }
+        }
         let child_count = children_to_render.len();
         for (index, (label, type_info, state)) in children_to_render.into_iter().enumerate().rev() {
             if index + 1 != child_count {
@@ -1510,8 +1626,15 @@ async fn format_typed_state_expanded(
         "({}) {} = {}",
         renderer.paint(Role::Type, &type_info.name),
         renderer.paint(Role::Name, name),
-        renderer.paint(Role::Value, output)
+        renderer.paint(Role::Value, output.into_string())
     ))
+}
+
+fn format_inspection_exhaustion(exhaustion: uscope::InspectionExhaustion) -> String {
+    format!(
+        "<truncated: {:?} limit {} after {}; requested {}>",
+        exhaustion.resource, exhaustion.limit, exhaustion.used, exhaustion.requested
+    )
 }
 
 fn format_scalar(type_info: &uscope::TypeInfo, value: &ScalarValue) -> String {
@@ -2044,6 +2167,31 @@ mod tests {
         assert_eq!(
             format_register_bytes(&[0x12, 0x34, 0x56, 0x78], ByteOrder::Big),
             "0x12345678"
+        );
+    }
+
+    #[test]
+    fn bounded_output_is_utf8_safe_and_never_exceeds_its_limit() {
+        let mut output = BoundedOutput::new(32);
+        output.push_str("prefix ");
+        output.push_str(&"é".repeat(32));
+        let rendered = output.into_string();
+
+        assert!(rendered.len() <= 32, "{rendered:?}");
+        assert!(rendered.is_char_boundary(rendered.len()));
+        assert!(rendered.ends_with(OUTPUT_TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn inspection_exhaustion_rendering_preserves_exact_accounting() {
+        assert_eq!(
+            format_inspection_exhaustion(uscope::InspectionExhaustion {
+                resource: uscope::InspectionLimit::MemoryBytes,
+                limit: 64,
+                used: 63,
+                requested: 4,
+            }),
+            "<truncated: MemoryBytes limit 64 after 63; requested 4>"
         );
     }
 

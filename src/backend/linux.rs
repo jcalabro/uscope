@@ -23,6 +23,7 @@ mod thread_db;
 use crate::debug_info::{
     UnwindInfo, VariableContext, VariableInfo, VariableRegister, VariableRuntime,
 };
+use crate::inspection::{InspectionBudget, MAX_INSPECTION_LIMITS};
 use crate::model::FrameMetadata;
 use crate::protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
@@ -40,8 +41,8 @@ use crate::{
     InlineFrameLookup, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
     LoadedModuleSnapshot, ModuleImage, RegisterDescriptor, RegisterId, RegisterRole,
     RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame, ThreadId as DebugThreadId,
-    UnwindTermination, ValueExpression, ValueIndexRange, ValuePageCompletion, ValuePathStep,
-    VariableSnapshot, VariableUnavailableReason, VirtualAddress,
+    UnwindTermination, ValueExpression, ValueIndexRange, ValuePathStep, VariableSnapshot,
+    VariableUnavailableReason, VirtualAddress,
 };
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
@@ -591,23 +592,27 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Request::Variables {
                 query,
+                limits,
                 stop_id,
                 thread_id,
                 reply,
             } => {
-                let _ = reply.send(self.variables(stop_id, debug_pid(thread_id), &query));
+                let _ = reply.send(self.variables(stop_id, debug_pid(thread_id), &query, limits));
             }
             Request::Inspect {
                 expression,
+                limits,
                 stop_id,
                 thread_id,
                 reply,
             } => {
-                let _ = reply.send(self.inspect(stop_id, debug_pid(thread_id), &expression));
+                let _ =
+                    reply.send(self.inspect(stop_id, debug_pid(thread_id), &expression, limits));
             }
             Request::InspectRange {
                 expression,
                 range,
+                limits,
                 stop_id,
                 thread_id,
                 reply,
@@ -617,17 +622,23 @@ impl<P: LinuxTraceOps> Controller<P> {
                     debug_pid(thread_id),
                     &expression,
                     range,
+                    limits,
                 ));
             }
-            Request::Dereference { reference, reply } => {
-                let _ = reply.send(self.dereference(&reference));
+            Request::Dereference {
+                reference,
+                limits,
+                reply,
+            } => {
+                let _ = reply.send(self.dereference(&reference, limits));
             }
             Request::ValueChildren {
                 reference,
                 query,
+                limits,
                 reply,
             } => {
-                let _ = reply.send(self.value_children(&reference, &query));
+                let _ = reply.send(self.value_children(&reference, &query, limits));
             }
             Request::Globals { query, reply } => {
                 let _ = reply.send(self.globals(&query));
@@ -3492,7 +3503,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         stop_id: StopId,
         pid: Pid,
         query: &VariableQuery,
+        limits: crate::InspectionLimits,
     ) -> Result<VariableSnapshot> {
+        validate_inspection_limits(limits)?;
+        let mut budget = InspectionBudget::new(limits);
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
@@ -3570,19 +3584,32 @@ impl<P: LinuxTraceOps> Controller<P> {
                 instruction,
                 &cfa,
                 *global,
+                &mut budget,
             )?],
             VariableQuery::All => {
                 let image_address = image_address.ok_or(Error::VariableContextUnsupported)?;
                 let selected = selected_instance.ok_or(Error::VariableContextUnsupported)?;
-                self.variable_info
-                    .inspect(image_address, selected, query, context, &mut runtime)?
+                self.variable_info.inspect(
+                    image_address,
+                    selected,
+                    query,
+                    context,
+                    &mut runtime,
+                    &mut budget,
+                )?
             }
             VariableQuery::Name(name) => {
                 let local = image_address.zip(selected_instance).map_or_else(
                     || Err(Error::VariableNotFound(name.clone())),
                     |(address, selected)| {
-                        self.variable_info
-                            .inspect(address, selected, query, context, &mut runtime)
+                        self.variable_info.inspect(
+                            address,
+                            selected,
+                            query,
+                            context,
+                            &mut runtime,
+                            &mut budget,
+                        )
                     },
                 );
                 match local {
@@ -3616,6 +3643,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                             instruction,
                             &cfa,
                             *global,
+                            &mut budget,
                         )?]
                     }
                     Err(error) => return Err(error),
@@ -3629,9 +3657,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             frame,
             target: self.module_image.target(),
             variables: variables.into(),
+            completion: budget.completion(),
+            usage: budget.usage(),
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "global evaluation shares one validated stopped runtime and request budget"
+    )]
     fn inspect_loaded_global(
         &self,
         inferior: &Inferior,
@@ -3640,6 +3674,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         instruction: VirtualAddress,
         cfa: &std::result::Result<VirtualAddress, VariableUnavailableReason>,
         global: GlobalVariableReference,
+        budget: &mut InspectionBudget,
     ) -> Result<crate::Variable> {
         let module = self
             .modules
@@ -3682,20 +3717,34 @@ impl<P: LinuxTraceOps> Controller<P> {
                 address: context_address,
             },
             &mut runtime,
+            budget,
         )?;
         variable.global = Some(global);
         Ok(variable)
+    }
+
+    fn inspect(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        expression: &ValueExpression,
+        limits: crate::InspectionLimits,
+    ) -> Result<InspectedValue> {
+        validate_inspection_limits(limits)?;
+        let mut budget = InspectionBudget::new(limits);
+        self.inspect_with_budget(stop_id, pid, expression, &mut budget)
     }
 
     #[expect(
         clippy::too_many_lines,
         reason = "longest-prefix local/global lookup shares one validated stopped runtime"
     )]
-    fn inspect(
+    fn inspect_with_budget(
         &self,
         stop_id: StopId,
         pid: Pid,
         expression: &ValueExpression,
+        budget: &mut InspectionBudget,
     ) -> Result<InspectedValue> {
         validate_value_expression(expression)?;
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
@@ -3784,6 +3833,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         selectors,
                         context,
                         &mut runtime,
+                        budget,
                     )
                 },
             );
@@ -3816,6 +3866,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         &cfa,
                         *global,
                         selectors,
+                        budget,
                     );
                 }
                 _ => {
@@ -3840,13 +3891,20 @@ impl<P: LinuxTraceOps> Controller<P> {
         ))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "range validation and selection preserve one atomic inspection budget"
+    )]
     fn inspect_range(
         &self,
         stop_id: StopId,
         pid: Pid,
         expression: &ValueExpression,
         range: ValueIndexRange,
+        limits: crate::InspectionLimits,
     ) -> Result<crate::ValueChildPage> {
+        validate_inspection_limits(limits)?;
+        let mut budget = InspectionBudget::new(limits);
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
@@ -3864,7 +3922,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 format!("a range may contain at most {MAX_VALUE_CHILD_PAGE_LIMIT} elements").into(),
             ));
         }
-        let inspected = self.inspect(stop_id, pid, expression)?;
+        let inspected = self.inspect_with_budget(stop_id, pid, expression, &mut budget)?;
         let type_name = inspected
             .type_info
             .as_ref()
@@ -3889,6 +3947,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => (0, length, reference),
             crate::VariableState::Available { .. } => {
                 return Err(Error::IndexAccessOnNonIndexable { type_name });
+            }
+            crate::VariableState::Unavailable(VariableUnavailableReason::InspectionLimit(_)) => {
+                return Ok(crate::ValueChildPage {
+                    stop_id,
+                    offset: 0,
+                    total: 0,
+                    children: Arc::from([]),
+                    completion: budget.completion(),
+                    usage: budget.usage(),
+                });
             }
             crate::VariableState::Unavailable(reason) => {
                 return Err(Error::InvalidValueRange(
@@ -3937,15 +4005,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                 offset,
                 total: count,
                 children: Arc::from([]),
-                completion: ValuePageCompletion::Complete,
+                completion: budget.completion(),
+                usage: budget.usage(),
             });
         }
-        self.value_children(
+        self.value_children_with_budget(
             &reference,
             &crate::ValueChildQuery {
                 offset,
                 limit: u32::try_from(length).expect("validated range length fits u32"),
             },
+            &mut budget,
         )
     }
 
@@ -3962,6 +4032,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         cfa: &std::result::Result<VirtualAddress, VariableUnavailableReason>,
         global: GlobalVariableReference,
         selectors: &[ValuePathStep],
+        budget: &mut InspectionBudget,
     ) -> Result<InspectedValue> {
         let module = self
             .modules
@@ -4001,13 +4072,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                 address: context_address,
             },
             &mut runtime,
+            budget,
         )
     }
 
     fn dereference(
         &self,
         reference: &crate::DereferenceReference,
+        limits: crate::InspectionLimits,
     ) -> Result<crate::DereferencedValue> {
+        validate_inspection_limits(limits)?;
+        let mut budget = InspectionBudget::new(limits);
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         // Validate the stop before consulting modules, registers, or memory.
         validate_public_stop(inferior, Some(reference.stop_id))?;
@@ -4055,13 +4130,27 @@ impl<P: LinuxTraceOps> Controller<P> {
             cfa,
             link_map: module.link_map,
         };
-        module.variables.dereference(reference, &mut runtime)
+        module
+            .variables
+            .dereference(reference, &mut runtime, &mut budget)
     }
 
     fn value_children(
         &self,
         reference: &crate::ValueChildrenReference,
         query: &crate::ValueChildQuery,
+        limits: crate::InspectionLimits,
+    ) -> Result<crate::ValueChildPage> {
+        validate_inspection_limits(limits)?;
+        let mut budget = InspectionBudget::new(limits);
+        self.value_children_with_budget(reference, query, &mut budget)
+    }
+
+    fn value_children_with_budget(
+        &self,
+        reference: &crate::ValueChildrenReference,
+        query: &crate::ValueChildQuery,
+        budget: &mut InspectionBudget,
     ) -> Result<crate::ValueChildPage> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         // A capability must be rejected before consulting modules, registers,
@@ -4116,7 +4205,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         module
             .variables
-            .value_children(reference, query.offset, query.limit, &mut runtime)
+            .value_children(reference, query.offset, query.limit, &mut runtime, budget)
     }
 
     fn globals(&self, query: &GlobalVariableQuery) -> Result<GlobalVariablePage> {
@@ -5575,6 +5664,55 @@ fn validate_value_expression(expression: &ValueExpression) -> Result<()> {
     Ok(())
 }
 
+fn validate_inspection_limits(limits: crate::InspectionLimits) -> Result<()> {
+    for (resource, value, maximum) in [
+        (
+            crate::InspectionLimit::Variables,
+            limits.variables,
+            MAX_INSPECTION_LIMITS.variables,
+        ),
+        (
+            crate::InspectionLimit::ValueNodes,
+            limits.value_nodes,
+            MAX_INSPECTION_LIMITS.value_nodes,
+        ),
+        (
+            crate::InspectionLimit::AggregateDepth,
+            limits.aggregate_depth,
+            MAX_INSPECTION_LIMITS.aggregate_depth,
+        ),
+        (
+            crate::InspectionLimit::MemoryReads,
+            limits.memory_reads,
+            MAX_INSPECTION_LIMITS.memory_reads,
+        ),
+        (
+            crate::InspectionLimit::MemoryBytes,
+            limits.memory_bytes,
+            MAX_INSPECTION_LIMITS.memory_bytes,
+        ),
+        (
+            crate::InspectionLimit::ExpressionWork,
+            limits.expression_work,
+            MAX_INSPECTION_LIMITS.expression_work,
+        ),
+        (
+            crate::InspectionLimit::OutputBytes,
+            limits.output_bytes,
+            MAX_INSPECTION_LIMITS.output_bytes,
+        ),
+    ] {
+        if value == 0 || value > maximum {
+            return Err(Error::InvalidInspectionLimit {
+                resource,
+                value,
+                maximum,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn scoped_threads(inferior: &Inferior, scope: ResumeScope) -> Result<BTreeSet<Pid>> {
     match scope {
         ResumeScope::Process(requested) => {
@@ -6196,6 +6334,7 @@ mod tests {
             _query: &VariableQuery,
             _context: VariableContext,
             _runtime: &mut dyn VariableRuntime,
+            _budget: &mut InspectionBudget,
         ) -> Result<Vec<crate::Variable>> {
             panic!("unexpected variable lookup")
         }
@@ -6208,6 +6347,7 @@ mod tests {
             _selectors: &[crate::ValuePathStep],
             _context: VariableContext,
             _runtime: &mut dyn VariableRuntime,
+            _budget: &mut InspectionBudget,
         ) -> Result<crate::InspectedValue> {
             panic!("unexpected variable path lookup")
         }
@@ -6218,6 +6358,7 @@ mod tests {
             _address: Option<ImageAddress>,
             _context: VariableContext,
             _runtime: &mut dyn VariableRuntime,
+            _budget: &mut InspectionBudget,
         ) -> Result<crate::Variable> {
             panic!("unexpected global variable lookup")
         }
@@ -6229,6 +6370,7 @@ mod tests {
             _selectors: &[crate::ValuePathStep],
             _context: VariableContext,
             _runtime: &mut dyn VariableRuntime,
+            _budget: &mut InspectionBudget,
         ) -> Result<crate::InspectedValue> {
             panic!("unexpected global variable path lookup")
         }
@@ -6237,6 +6379,7 @@ mod tests {
             &self,
             _reference: &crate::DereferenceReference,
             _runtime: &mut dyn VariableRuntime,
+            _budget: &mut InspectionBudget,
         ) -> Result<crate::DereferencedValue> {
             panic!("unexpected dereference")
         }
@@ -6247,6 +6390,7 @@ mod tests {
             _offset: u64,
             _limit: u32,
             _runtime: &mut dyn VariableRuntime,
+            _budget: &mut InspectionBudget,
         ) -> Result<crate::ValueChildPage> {
             panic!("unexpected value child lookup")
         }

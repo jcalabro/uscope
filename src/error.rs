@@ -73,6 +73,12 @@ pub enum Error {
     InvalidGlobalPageLimit(u32),
     #[error("value child page limit {0} is outside 1..=256")]
     InvalidValueChildPageLimit(u32),
+    #[error("{resource:?} inspection limit {value} is outside 1..={maximum}")]
+    InvalidInspectionLimit {
+        resource: crate::InspectionLimit,
+        value: u64,
+        maximum: u64,
+    },
     #[error("loaded global selector '{selector}' is ambiguous: {candidates:?}")]
     AmbiguousLoadedGlobalVariable {
         selector: String,

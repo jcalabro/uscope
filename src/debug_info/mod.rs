@@ -9,6 +9,7 @@ mod x86_64;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::inspection::InspectionBudget;
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
@@ -67,10 +68,15 @@ pub trait VariableInfo: Send + Sync {
         query: &VariableQuery,
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
     ) -> Result<Vec<Variable>>;
 
     /// Inspects one visible local or parameter and follows a structural member
     /// path atomically within one stopped-state validation.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the provider boundary keeps frame identity, path, runtime, and budget explicit"
+    )]
     fn inspect_path(
         &self,
         address: ImageAddress,
@@ -79,6 +85,7 @@ pub trait VariableInfo: Send + Sync {
         selectors: &[ValuePathStep],
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
     ) -> Result<InspectedValue>;
 
     /// Evaluates one cataloged global at the selected thread's current stop.
@@ -93,6 +100,7 @@ pub trait VariableInfo: Send + Sync {
         address: Option<ImageAddress>,
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
     ) -> Result<Variable>;
 
     /// Evaluates one cataloged global and follows a structural member path
@@ -104,6 +112,7 @@ pub trait VariableInfo: Send + Sync {
         selectors: &[ValuePathStep],
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
     ) -> Result<InspectedValue>;
 
     /// Dereferences one stop-scoped capability produced by this image.
@@ -111,6 +120,7 @@ pub trait VariableInfo: Send + Sync {
         &self,
         reference: &DereferenceReference,
         runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
     ) -> Result<DereferencedValue>;
 
     /// Evaluates one arbitrary bounded interval from a stop-scoped aggregate
@@ -121,6 +131,7 @@ pub trait VariableInfo: Send + Sync {
         offset: u64,
         limit: u32,
         runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
     ) -> Result<ValueChildPage>;
 }
 
