@@ -1255,11 +1255,14 @@ fn format_untyped_state(name: &str, state: &VariableState, renderer: Renderer) -
         }
         VariableState::Available { .. } => (Role::Warning, "<unknown value>".to_owned()),
     };
-    format!(
-        "({}) {} = {}",
-        renderer.paint(Role::Type, "<unknown type>"),
-        renderer.paint(Role::Name, name),
-        renderer.paint(role, value)
+    bound_rendered_output(
+        &format!(
+            "({}) {} = {}",
+            renderer.paint(Role::Type, "<unknown type>"),
+            renderer.paint(Role::Name, name),
+            renderer.paint(role, value)
+        ),
+        default_output_limit(),
     )
 }
 
@@ -1285,10 +1288,13 @@ fn format_typed_state(
             .paint(Role::Error, format!("<malformed: {}>", reason.description))
             .to_string(),
     };
-    format!(
-        "({}) {} = {value}",
-        renderer.paint(Role::Type, &type_info.name),
-        renderer.paint(Role::Name, name)
+    bound_rendered_output(
+        &format!(
+            "({}) {} = {value}",
+            renderer.paint(Role::Type, &type_info.name),
+            renderer.paint(Role::Name, name)
+        ),
+        default_output_limit(),
     )
 }
 
@@ -1324,14 +1330,18 @@ fn format_value_range(
         }
         values.push_str(&format_inspection_exhaustion(exhaustion));
     }
-    format!(
-        "{} = [{}]",
-        renderer.paint(Role::Name, expression),
-        renderer.paint(Role::Value, values.into_string())
+    bound_rendered_output(
+        &format!(
+            "{} = [{}]",
+            renderer.paint(Role::Name, expression),
+            renderer.paint(Role::Value, values.into_string())
+        ),
+        limit,
     )
 }
 
 const OUTPUT_TRUNCATION_MARKER: &str = "<truncated: OutputBytes>";
+const ANSI_RESET: &str = "\u{1b}[0m";
 
 struct BoundedOutput {
     value: String,
@@ -1362,20 +1372,25 @@ impl BoundedOutput {
             return;
         }
         let marker_bytes = OUTPUT_TRUNCATION_MARKER.len().min(self.limit);
-        let content_limit = self.limit.saturating_sub(marker_bytes);
+        let ansi = self.value.contains('\u{1b}') || text.contains('\u{1b}');
+        let reset_bytes = if ansi && self.limit >= marker_bytes.saturating_add(ANSI_RESET.len()) {
+            ANSI_RESET.len()
+        } else {
+            0
+        };
+        let content_limit = self
+            .limit
+            .saturating_sub(marker_bytes)
+            .saturating_sub(reset_bytes);
         if self.value.len() > content_limit {
-            self.value.truncate(content_limit);
-            while !self.value.is_char_boundary(self.value.len()) {
-                self.value.pop();
-            }
+            let end = safe_ansi_prefix_end(&self.value, content_limit);
+            self.value.truncate(end);
         }
-        let mut end = text
-            .len()
-            .min(content_limit.saturating_sub(self.value.len()));
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = safe_ansi_prefix_end(text, content_limit.saturating_sub(self.value.len()));
         self.value.push_str(&text[..end]);
+        if reset_bytes != 0 {
+            self.value.push_str(ANSI_RESET);
+        }
         let mut marker_end = marker_bytes;
         while !OUTPUT_TRUNCATION_MARKER.is_char_boundary(marker_end) {
             marker_end -= 1;
@@ -1391,6 +1406,36 @@ impl BoundedOutput {
     fn into_string(self) -> String {
         self.value
     }
+}
+
+fn safe_ansi_prefix_end(text: &str, limit: usize) -> usize {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let Some(escape) = text[..end].rfind('\u{1b}') else {
+        return end;
+    };
+    let sequence = &text.as_bytes()[escape..end];
+    if sequence.get(1) != Some(&b'[')
+        || !sequence
+            .get(2..)
+            .is_some_and(|body| body.iter().any(|byte| (0x40..=0x7e).contains(byte)))
+    {
+        return escape;
+    }
+    end
+}
+
+fn bound_rendered_output(rendered: &str, limit: usize) -> String {
+    let mut output = BoundedOutput::new(limit);
+    output.push_str(rendered);
+    output.into_string()
+}
+
+fn default_output_limit() -> usize {
+    usize::try_from(uscope::InspectionLimits::default().output_bytes)
+        .expect("default output limit fits usize")
 }
 
 impl std::fmt::Write for BoundedOutput {
@@ -1622,11 +1667,16 @@ async fn format_typed_state_expanded(
             work.push(Work::Text(label));
         }
     }
-    Ok(format!(
-        "({}) {} = {}",
-        renderer.paint(Role::Type, &type_info.name),
-        renderer.paint(Role::Name, name),
-        renderer.paint(Role::Value, output.into_string())
+    let limit = usize::try_from(uscope::InspectionLimits::default().output_bytes)
+        .expect("default output limit fits usize");
+    Ok(bound_rendered_output(
+        &format!(
+            "({}) {} = {}",
+            renderer.paint(Role::Type, &type_info.name),
+            renderer.paint(Role::Name, name),
+            renderer.paint(Role::Value, output.into_string())
+        ),
+        limit,
     ))
 }
 
@@ -2179,6 +2229,53 @@ mod tests {
 
         assert!(rendered.len() <= 32, "{rendered:?}");
         assert!(rendered.is_char_boundary(rendered.len()));
+        assert!(rendered.ends_with(OUTPUT_TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn bounded_output_closes_ansi_style_before_its_marker() {
+        let styled = Renderer::new(true)
+            .paint(Role::Value, "é".repeat(32))
+            .to_string();
+        let mut output = BoundedOutput::new(32);
+        output.push_str(&styled);
+        let rendered = output.into_string();
+        let marker = rendered
+            .strip_suffix(OUTPUT_TRUNCATION_MARKER)
+            .expect("truncated output ends with its marker");
+
+        assert!(rendered.len() <= 32, "{rendered:?}");
+        assert!(marker.ends_with("\u{1b}[0m"), "{rendered:?}");
+    }
+
+    #[test]
+    fn range_rendering_bounds_the_complete_emitted_value() {
+        let limit = usize::try_from(uscope::InspectionLimits::default().output_bytes)
+            .expect("default output limit fits usize");
+        let page = uscope::ValueChildPage {
+            stop_id: uscope::StopId::new(1),
+            offset: 0,
+            total: 0,
+            children: [].into(),
+            completion: uscope::InspectionCompletion::Complete,
+            usage: uscope::InspectionUsage::default(),
+        };
+        let rendered = format_value_range(&"x".repeat(limit), &page, Renderer::new(false));
+
+        assert!(rendered.len() <= limit, "rendered {} bytes", rendered.len());
+        assert!(rendered.ends_with(OUTPUT_TRUNCATION_MARKER));
+    }
+
+    #[test]
+    fn direct_untyped_rendering_is_output_bounded() {
+        let limit = usize::try_from(uscope::InspectionLimits::default().output_bytes)
+            .expect("default output limit fits usize");
+        let state = VariableState::Malformed(uscope::VariableMalformedReason {
+            description: "x".repeat(limit).into(),
+        });
+        let rendered = format_untyped_state("value", &state, Renderer::new(false));
+
+        assert!(rendered.len() <= limit, "rendered {} bytes", rendered.len());
         assert!(rendered.ends_with(OUTPUT_TRUNCATION_MARKER));
     }
 
