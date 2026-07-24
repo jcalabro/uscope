@@ -2762,7 +2762,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             thread.expected = ExpectedStop::None;
 
             if let Some(barrier) = inferior.barrier.as_mut() {
-                if barrier.reason == StopReason::Pause && reason != StopReason::Pause {
+                if visible_stop_priority(&reason) > visible_stop_priority(&barrier.reason) {
                     barrier.triggering_thread = pid;
                     barrier.reason = reason;
                 }
@@ -2846,9 +2846,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             })
             .collect();
         for pid in running {
-            self.ptrace.request_stop(tgid, pid)?;
             let thread = inferior.threads.get_mut(&pid).expect("thread exists");
-            thread.debugger_stop_pending = true;
+            // A clone or another ptrace event can stop this thread and satisfy an
+            // earlier barrier before its requested SIGSTOP is delivered. Standard
+            // signals coalesce, so retain that outstanding request instead of
+            // sending an indistinguishable duplicate for the next barrier.
+            if !thread.debugger_stop_pending {
+                self.ptrace.request_stop(tgid, pid)?;
+                thread.debugger_stop_pending = true;
+            }
             thread.state = NativeThreadState::StopRequested {
                 barrier: barrier_id,
             };
@@ -3055,6 +3061,25 @@ impl<P: LinuxTraceOps> Controller<P> {
             ExpectedStop::AwaitBreakpoint { .. } => self.resume_awaiting_thread(pid),
             ExpectedStop::InitialExec | ExpectedStop::None => self.continue_thread(pid),
         }
+    }
+}
+
+/// Chooses the one primary reason published for coincident all-stop events.
+///
+/// Lower-priority reasons remain attached to their native threads, including
+/// pending signals. Control completions must outrank exceptions so resuming an
+/// unrelated signal stop cannot silently repair and consume a user breakpoint
+/// or completed step. Unsafe state transitions outrank ordinary control stops.
+const fn visible_stop_priority(reason: &StopReason) -> u8 {
+    match reason {
+        StopReason::Pause => 0,
+        StopReason::Exception(_) => 1,
+        StopReason::Breakpoint { .. }
+        | StopReason::Step { .. }
+        | StopReason::ThreadExited { .. } => 2,
+        StopReason::Exec => 3,
+        StopReason::Unclassifiable { .. } => 4,
+        StopReason::Exited(_) => 5,
     }
 }
 
@@ -6796,6 +6821,105 @@ mod tests {
                 .try_virtual_step(process_id(pid), StopId::new(1), pid, StepKind::IntoSource,),
             Err(Error::StaleStop)
         ));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn outstanding_debugger_stop_is_reused_across_barriers() {
+        let VirtualStepHarness {
+            mut controller,
+            actions,
+            pid,
+            ..
+        } = virtual_step_controller();
+        let thread = controller
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.threads.get_mut(&pid))
+            .expect("test thread exists");
+        thread.state = NativeThreadState::Running;
+        thread.debugger_stop_pending = true;
+
+        controller
+            .request_stops(2)
+            .expect("reuse outstanding debugger stop");
+
+        assert!(
+            actions.borrow().is_empty(),
+            "an outstanding SIGSTOP must not be duplicated"
+        );
+        let thread = controller
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.threads.get(&pid))
+            .expect("test thread exists");
+        assert_eq!(
+            thread.state,
+            NativeThreadState::StopRequested { barrier: 2 }
+        );
+        assert!(thread.debugger_stop_pending);
+    }
+
+    #[test]
+    fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
+        let VirtualStepHarness {
+            mut controller,
+            actions,
+            pid,
+            ..
+        } = virtual_step_controller();
+        let breakpoint_thread = Pid::from_raw(pid.as_raw() + 1);
+        let pending_thread = Pid::from_raw(pid.as_raw() + 2);
+        let exception = exception_info(NixSignal::SIGURG);
+        let inferior = controller.inferior.as_mut().expect("test inferior exists");
+        inferior.public_stop = None;
+        inferior
+            .threads
+            .get_mut(&pid)
+            .expect("triggering thread exists")
+            .reason = Some(StopReason::Exception(exception.clone()));
+        inferior.threads.insert(
+            breakpoint_thread,
+            TraceThread {
+                state: NativeThreadState::Running,
+                expected: ExpectedStop::None,
+                pending_signal: None,
+                reason: None,
+                stopped_at_breakpoint: None,
+                awaiting_breakpoint: None,
+                debugger_stop_pending: false,
+            },
+        );
+        inferior.threads.insert(
+            pending_thread,
+            TraceThread {
+                state: NativeThreadState::StopRequested { barrier: 1 },
+                expected: ExpectedStop::None,
+                pending_signal: None,
+                reason: None,
+                stopped_at_breakpoint: None,
+                awaiting_breakpoint: None,
+                debugger_stop_pending: true,
+            },
+        );
+        inferior.barrier = Some(StopBarrier {
+            execution: Some(ExecutionId::new(2)),
+            triggering_thread: pid,
+            reason: StopReason::Exception(exception),
+        });
+        let address = VirtualAddress::new(0x20);
+
+        controller
+            .begin_visible_stop(breakpoint_thread, StopReason::Breakpoint { address })
+            .expect("record coincident breakpoint");
+
+        let barrier = controller
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.barrier.as_ref())
+            .expect("pending thread keeps barrier active");
+        assert_eq!(barrier.triggering_thread, breakpoint_thread);
+        assert_eq!(barrier.reason, StopReason::Breakpoint { address });
         assert!(actions.borrow().is_empty());
     }
 
