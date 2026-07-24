@@ -1436,6 +1436,56 @@ pub struct TargetDescription {
     pub pointer_width: PointerWidth,
 }
 
+/// Why a stopped target-memory read could not continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemoryReadUnavailableReason {
+    /// The target rejected access to the next requested address.
+    Inaccessible,
+}
+
+impl fmt::Display for MemoryReadUnavailableReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inaccessible => formatter.write_str("memory inaccessible"),
+        }
+    }
+}
+
+/// Whether a stopped target-memory read returned its complete requested range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MemoryReadCompletion {
+    /// Every requested byte was returned.
+    Complete,
+    /// A contiguous prefix was returned before target memory became unavailable.
+    Incomplete {
+        /// The first requested address not represented in `MemoryRead::bytes`.
+        next_address: VirtualAddress,
+        /// Why reading could not continue.
+        reason: MemoryReadUnavailableReason,
+    },
+}
+
+/// Immutable bytes read from one exact stopped target state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryRead {
+    /// The debugger revision at which the bytes were read.
+    pub revision: u64,
+    /// The stopped snapshot that authorized the read.
+    pub stop_id: crate::StopId,
+    /// Target properties relevant to address and byte presentation.
+    pub target: TargetDescription,
+    /// The first requested virtual address.
+    pub address: VirtualAddress,
+    /// The number of bytes requested.
+    pub requested: u64,
+    /// The readable contiguous prefix beginning at `address`.
+    pub bytes: Arc<[u8]>,
+    /// Whether every requested byte was returned.
+    pub completion: MemoryReadCompletion,
+}
+
 /// A one-based source line number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LineNumber(u64);

@@ -22,6 +22,7 @@ just run build/test-programs/basic
 ```
 
 At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
+Use `x <runtime-address> [byte-count]` to display a bounded target-memory range as hexadecimal bytes and printable ASCII. The default is 64 bytes and the CLI accepts at most 8192 bytes per command. Reads return the readable contiguous prefix and identify the first inaccessible address instead of discarding bytes read before a mapping boundary.
 Use `print <name>` or `p <name>` to print one visible scalar. Lookup is local-first and then considers globals; exact namespace, module, container, linkage, and source-file qualifications are accepted. `print` with no argument continues to list only parameters followed by locals in the selected logical frame, including an inline function frame.
 Use `globals [filter]` to list a bounded page of immutable global metadata without reading every value.
 Scalar inspection supports one-piece values in memory, general-purpose and XMM registers, constants, computed DWARF stack values, and glibc TLS. Entry values, composite locations, non-default address spaces, and general cross-DIE expression evaluation remain explicitly unavailable.

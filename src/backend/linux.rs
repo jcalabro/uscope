@@ -39,10 +39,11 @@ use crate::{
     Backtrace, BreakpointLocation, CodeInstanceId, CodeInstanceKind, Error, ExecutionLocation,
     FrameKind, GlobalVariablePage, GlobalVariableReference, ImageAddress, ImageLocation,
     InlineFrameLookup, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
-    LoadedModuleSnapshot, ModuleImage, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame, ThreadId as DebugThreadId,
-    UnwindTermination, ValueExpression, ValueIndexRange, ValuePathStep, VariableSnapshot,
-    VariableUnavailableReason, VirtualAddress,
+    LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason,
+    ModuleImage, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
+    Result, SourceLocation, StackFrame, ThreadId as DebugThreadId, UnwindTermination,
+    ValueExpression, ValueIndexRange, ValuePathStep, VariableSnapshot, VariableUnavailableReason,
+    VirtualAddress,
 };
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
@@ -50,6 +51,7 @@ const WAITER_THREAD_NAME: &str = "uscope-waitpid";
 const BREAKPOINT_OPCODE: u8 = 0xcc;
 const TRAP_UNKNOWN: i32 = 5;
 const MAX_LOGICAL_MEMORY_READ: usize = 1024 * 1024;
+const MAX_PUBLIC_MEMORY_READ: u64 = 64 * 1024;
 const MAX_VALUE_EXPRESSION_STEPS: usize = 64;
 const MAX_VALUE_EXPRESSION_DEREFERENCES: usize = 63;
 const MAX_VALUE_CHILD_PAGE_LIMIT: u32 = 256;
@@ -382,6 +384,8 @@ enum LinuxError {
     ResumeRecovery { cause: String, recovery: String },
     #[error("logical memory read of {size} bytes exceeds the {maximum}-byte limit")]
     MemoryReadTooLarge { size: usize, maximum: usize },
+    #[error("target memory is inaccessible at {address}")]
+    MemoryInaccessible { address: VirtualAddress },
 }
 
 struct Controller<P: LinuxTraceOps> {
@@ -542,6 +546,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             ),
             Request::Pause { process_id, reply } => self.pause(process_id, reply),
+            Request::ReadMemory {
+                process_id,
+                stop_id,
+                address,
+                byte_count,
+                reply,
+            } => {
+                let _ = reply.send(self.read_memory(process_id, stop_id, address, byte_count));
+            }
             Request::ReadWord {
                 process_id,
                 stop_id,
@@ -3116,20 +3129,57 @@ impl<P: LinuxTraceOps> Controller<P> {
         stop_id: StopId,
         address: VirtualAddress,
     ) -> Result<u64> {
+        let read = self.read_memory(
+            requested_process,
+            stop_id,
+            address,
+            u64::try_from(std::mem::size_of::<u64>()).expect("native word size fits u64"),
+        )?;
+        if let MemoryReadCompletion::Incomplete { next_address, .. } = read.completion {
+            return Err(backend_error(LinuxError::MemoryInaccessible {
+                address: next_address,
+            }));
+        }
+        Ok(u64::from_le_bytes(
+            read.bytes
+                .as_ref()
+                .try_into()
+                .expect("one complete native word was requested"),
+        ))
+    }
+
+    fn read_memory(
+        &self,
+        requested_process: ProcessId,
+        stop_id: StopId,
+        address: VirtualAddress,
+        byte_count: u64,
+    ) -> Result<MemoryRead> {
+        if byte_count > MAX_PUBLIC_MEMORY_READ {
+            return Err(Error::MemoryReadTooLarge {
+                requested: byte_count,
+                maximum: MAX_PUBLIC_MEMORY_READ,
+            });
+        }
+        address
+            .get()
+            .checked_add(byte_count)
+            .ok_or(Error::AddressOverflow)?;
+        let size = usize::try_from(byte_count).expect("bounded memory read size fits usize");
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_process(inferior, requested_process)?;
         validate_public_stop(inferior, Some(stop_id))?;
         let pid = inferior.selected_thread.ok_or(Error::NotStopped)?;
-        let bytes = read_logical_memory(
-            &self.ptrace,
-            pid,
-            &inferior.breakpoints,
+        let read = read_logical_memory(&self.ptrace, pid, &inferior.breakpoints, address, size)?;
+        Ok(MemoryRead {
+            revision: self.revision,
+            stop_id,
+            target: self.module_image.target(),
             address,
-            std::mem::size_of::<u64>(),
-        )?;
-        Ok(u64::from_le_bytes(
-            bytes.try_into().expect("one native word was requested"),
-        ))
+            requested: byte_count,
+            bytes: read.bytes.into(),
+            completion: read.completion,
+        })
     }
 
     fn write_word(
@@ -4815,10 +4865,25 @@ impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         address: VirtualAddress,
         size: usize,
     ) -> std::result::Result<Arc<[u8]>, Arc<str>> {
-        read_logical_memory(self.ptrace, self.pid, self.breakpoints, address, size)
-            .map(Arc::from)
-            .map_err(|error| error.to_string().into())
+        let read = read_logical_memory(self.ptrace, self.pid, self.breakpoints, address, size)
+            .map_err(|error| Arc::from(error.to_string()))?;
+        match read.completion {
+            MemoryReadCompletion::Complete => Ok(Arc::from(read.bytes)),
+            MemoryReadCompletion::Incomplete { next_address, .. } => Err(Arc::from(format!(
+                "memory is inaccessible at {next_address}"
+            ))),
+        }
     }
+}
+
+struct LogicalMemoryRead {
+    bytes: Vec<u8>,
+    completion: MemoryReadCompletion,
+}
+
+enum MemoryAccessError {
+    Inaccessible,
+    Fatal(Error),
 }
 
 fn read_logical_memory(
@@ -4827,9 +4892,9 @@ fn read_logical_memory(
     breakpoints: &BTreeMap<VirtualAddress, BreakpointSite>,
     address: VirtualAddress,
     size: usize,
-) -> Result<Vec<u8>> {
+) -> Result<LogicalMemoryRead> {
     read_logical_memory_with(address, size, breakpoints, |current| {
-        ptrace.read_word(pid, current)
+        ptrace.read_memory_word(pid, current)
     })
 }
 
@@ -4837,8 +4902,8 @@ fn read_logical_memory_with(
     address: VirtualAddress,
     size: usize,
     breakpoints: &BTreeMap<VirtualAddress, BreakpointSite>,
-    mut read_word: impl FnMut(u64) -> Result<u64>,
-) -> Result<Vec<u8>> {
+    mut read_word: impl FnMut(u64) -> std::result::Result<u64, MemoryAccessError>,
+) -> Result<LogicalMemoryRead> {
     if size > MAX_LOGICAL_MEMORY_READ {
         return Err(backend_error(LinuxError::MemoryReadTooLarge {
             size,
@@ -4846,7 +4911,10 @@ fn read_logical_memory_with(
         }));
     }
     if size == 0 {
-        return Ok(Vec::new());
+        return Ok(LogicalMemoryRead {
+            bytes: Vec::new(),
+            completion: MemoryReadCompletion::Complete,
+        });
     }
     let end = address
         .get()
@@ -4856,7 +4924,25 @@ fn read_logical_memory_with(
     let word_size = u64::try_from(std::mem::size_of::<u64>()).expect("word size fits u64");
     let mut current = address.get() & !(word_size - 1);
     while current < end {
-        let mut word = read_word(current)?.to_le_bytes();
+        let mut word = match read_word(current) {
+            Ok(word) => word.to_le_bytes(),
+            Err(MemoryAccessError::Inaccessible) => {
+                let returned = u64::try_from(bytes.len()).expect("memory read length fits u64");
+                let next_address = address
+                    .get()
+                    .checked_add(returned)
+                    .map(VirtualAddress::new)
+                    .ok_or(Error::AddressOverflow)?;
+                return Ok(LogicalMemoryRead {
+                    bytes,
+                    completion: MemoryReadCompletion::Incomplete {
+                        next_address,
+                        reason: MemoryReadUnavailableReason::Inaccessible,
+                    },
+                });
+            }
+            Err(MemoryAccessError::Fatal(error)) => return Err(error),
+        };
         for (&site_address, site) in breakpoints {
             let Some(offset) = site_address.get().checked_sub(current) else {
                 continue;
@@ -4878,7 +4964,10 @@ fn read_logical_memory_with(
             .checked_add(word_size)
             .ok_or(Error::AddressOverflow)?;
     }
-    Ok(bytes)
+    Ok(LogicalMemoryRead {
+        bytes,
+        completion: MemoryReadCompletion::Complete,
+    })
 }
 
 impl MemoryReader for PtraceMemory<'_> {
@@ -5142,6 +5231,14 @@ trait LinuxTraceOps {
         Ok(Vec::new())
     }
     fn read_word(&self, pid: Pid, address: u64) -> Result<u64>;
+    fn read_memory_word(
+        &self,
+        pid: Pid,
+        address: u64,
+    ) -> std::result::Result<u64, MemoryAccessError> {
+        self.read_word(pid, address)
+            .map_err(MemoryAccessError::Fatal)
+    }
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()>;
     fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()>;
@@ -5245,6 +5342,21 @@ impl LinuxTraceOps for LinuxPtrace {
         let value = ptrace::read(pid, address as ptrace::AddressType)
             .map_err(|error| backend_error(LinuxError::System(error)))?;
         Ok(u64::from_ne_bytes(value.to_ne_bytes()))
+    }
+
+    fn read_memory_word(
+        &self,
+        pid: Pid,
+        address: u64,
+    ) -> std::result::Result<u64, MemoryAccessError> {
+        self.assert_owner_thread();
+        match ptrace::read(pid, address as ptrace::AddressType) {
+            Ok(value) => Ok(u64::from_ne_bytes(value.to_ne_bytes())),
+            Err(Errno::EFAULT | Errno::EIO) => Err(MemoryAccessError::Inaccessible),
+            Err(error) => Err(MemoryAccessError::Fatal(backend_error(LinuxError::System(
+                error,
+            )))),
+        }
     }
 
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()> {
@@ -6166,13 +6278,53 @@ mod tests {
             Ok(u64::from_le_bytes(bytes))
         })
         .expect("logical memory read");
-        assert_eq!(bytes, [3, 4, 0x55, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(bytes.bytes, [3, 4, 0x55, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(bytes.completion, MemoryReadCompletion::Complete);
         assert_eq!(reads, [0x1000, 0x1008]);
         let empty = read_logical_memory_with(address, 0, &breakpoints, |_| {
             panic!("an empty logical read must not read target memory")
         })
         .expect("empty logical memory read");
-        assert!(empty.is_empty());
+        assert!(empty.bytes.is_empty());
+        assert_eq!(empty.completion, MemoryReadCompletion::Complete);
+    }
+
+    #[test]
+    fn logical_memory_reads_return_the_prefix_before_inaccessible_memory() {
+        let mut reads = Vec::new();
+        let result = read_logical_memory_with(
+            VirtualAddress::new(0x1003),
+            10,
+            &BTreeMap::new(),
+            |current| {
+                reads.push(current);
+                if current == 0x1008 {
+                    return Err(MemoryAccessError::Inaccessible);
+                }
+                Ok(u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]))
+            },
+        )
+        .expect("inaccessible memory is a typed partial result");
+
+        assert_eq!(result.bytes, [3, 4, 5, 6, 7]);
+        assert_eq!(
+            result.completion,
+            MemoryReadCompletion::Incomplete {
+                next_address: VirtualAddress::new(0x1008),
+                reason: MemoryReadUnavailableReason::Inaccessible,
+            }
+        );
+        assert_eq!(reads, [0x1000, 0x1008]);
+    }
+
+    #[test]
+    fn logical_memory_reads_do_not_disguise_operational_failures_as_inaccessible() {
+        let result =
+            read_logical_memory_with(VirtualAddress::new(0x1000), 8, &BTreeMap::new(), |_| {
+                Err(MemoryAccessError::Fatal(Error::RequestCancelled))
+            });
+
+        assert!(matches!(result, Err(Error::RequestCancelled)));
     }
 
     struct RecordingTrace {

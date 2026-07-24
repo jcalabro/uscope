@@ -20,18 +20,18 @@ pub use model::{
     ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, InspectedValue,
     InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage,
     IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule,
-    LoadedModuleRecord, LoadedModuleSnapshot, ModuleId, ModuleImage, ModuleImageId,
-    NamedTypeRelationship, ParsedValueExpression, PointerWidth, RecordKind, RecordMember,
-    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, ScalarValue, SourceContext, SourceFile, SourceFileId,
-    SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolId,
-    SymbolInfo, TargetDescription, ThreadId, TypeId, TypeInfo, TypeKind, TypeModifier, TypeNode,
-    TypeReference, UnsupportedVariableFeature, UnwindTermination, ValueChild, ValueChildPage,
-    ValueChildRelationship, ValueChildren, ValueChildrenReference, ValueExpression,
-    ValueIndexRange, ValuePageCompletion, ValuePathStep, Variable, VariableKind,
-    VariableMalformedReason, VariableSnapshot, VariableState, VariableUnavailableReason,
-    VariableValue, VariableValueSource, Variant, VariantDiscriminant, VariantSelection,
-    VariantSelector, VariantStorageKind, VirtualAddress,
+    LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
+    MemoryReadUnavailableReason, ModuleId, ModuleImage, ModuleImageId, NamedTypeRelationship,
+    ParsedValueExpression, PointerWidth, RecordKind, RecordMember, RecordMemberLayout,
+    ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
+    ScalarValue, SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame,
+    StackFrameId, StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId,
+    TypeId, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature,
+    UnwindTermination, ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren,
+    ValueChildrenReference, ValueExpression, ValueIndexRange, ValuePageCompletion, ValuePathStep,
+    Variable, VariableKind, VariableMalformedReason, VariableSnapshot, VariableState,
+    VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
+    VariantSelection, VariantSelector, VariantStorageKind, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
@@ -292,6 +292,28 @@ impl DebuggerHandle {
             .await?;
 
         self.wait_for_execution(&mut events, execution).await
+    }
+
+    /// Reads a bounded byte range from a stopped inferior.
+    ///
+    /// Readable bytes are returned as one contiguous prefix. Target memory
+    /// becoming inaccessible is represented by `MemoryRead::completion`;
+    /// debugger and process-control failures remain errors.
+    pub async fn read_memory(
+        &self,
+        address: VirtualAddress,
+        byte_count: u64,
+    ) -> Result<MemoryRead> {
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::ReadMemory {
+            process_id: selection.process,
+            stop_id: selection.stop,
+            address,
+            byte_count,
+            reply,
+        })
+        .await
     }
 
     /// Reads one native 64-bit word from a stopped inferior.

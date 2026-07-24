@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use object::{Object, ObjectSymbol};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
@@ -27,6 +28,17 @@ fn assert_no_sgr(output: &str) {
         !output.contains("\x1b["),
         "unexpected terminal styling in {output:?}"
     );
+}
+
+fn symbol_address(executable: &std::path::Path, name: &str) -> u64 {
+    let data = fs::read(executable).expect("read fixture");
+    let object = object::File::parse(data.as_slice()).expect("parse fixture");
+    object
+        .symbols()
+        .find_map(|symbol| {
+            (symbol.name().ok() == Some(name) && symbol.is_definition()).then(|| symbol.address())
+        })
+        .unwrap_or_else(|| panic!("fixture has no defined symbol named {name:?}"))
 }
 
 #[test]
@@ -412,6 +424,33 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
         stdout.contains("(long double) extended = 3.125"),
         "{stdout}"
     );
+}
+
+#[test]
+fn x_renders_a_bounded_hex_and_ascii_memory_view() {
+    let executable = fixture("build/test-programs/variables-gcc-nopie");
+    let address = symbol_address(&executable, "pointer_parameter_value");
+    let command = format!("x {address:#x} 4");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "break main",
+            "--eval",
+            "run",
+            "--eval",
+            &command,
+        ])
+        .arg(executable)
+        .output()
+        .expect("run memory view");
+    let stdout = assert_success(output);
+
+    assert!(
+        stdout.contains(&format!("{address:#018x}: 2a 00 00 00")),
+        "{stdout}"
+    );
+    assert!(stdout.contains("|*...            |"), "{stdout}");
 }
 
 #[test]

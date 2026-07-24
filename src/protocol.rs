@@ -457,6 +457,13 @@ pub enum Request {
         process_id: ProcessId,
         reply: Reply<ExecutionId>,
     },
+    ReadMemory {
+        process_id: ProcessId,
+        stop_id: StopId,
+        address: VirtualAddress,
+        byte_count: u64,
+        reply: Reply<crate::MemoryRead>,
+    },
     ReadWord {
         process_id: ProcessId,
         stop_id: StopId,
