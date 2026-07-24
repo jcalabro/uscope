@@ -68,6 +68,11 @@ struct UnitCatalog<'data> {
 
 mod variables;
 
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz_expression(data: &[u8]) {
+    variables::fuzz_expression(data);
+}
+
 struct DwarfUnwindInfo {
     eh_frame: Arc<[u8]>,
     debug_frame: Arc<[u8]>,

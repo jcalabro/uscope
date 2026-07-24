@@ -88,6 +88,8 @@ pub enum Error {
     ModuleNotLoaded(crate::ModuleId),
     #[error("loaded module identity refers to a stale image")]
     StaleModuleImage,
+    #[error("variable runtime access failed: {0}")]
+    VariableRuntime(Arc<str>),
 
     #[error("the inferior is already running")]
     AlreadyRunning,

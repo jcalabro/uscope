@@ -1076,20 +1076,147 @@ pub enum UnsupportedVariableFeature {
     RegisterClass,
     /// Applying a typed DWARF operation outside the supported scalar types.
     TypedValue,
+    /// Selecting among simultaneous valid locations for one object.
+    AlternativeLocations,
+    /// Materializing a valid source type representation not modeled by uscope.
+    TypeRepresentation,
+    /// Evaluating a valid runtime aggregate layout not modeled by uscope.
+    RuntimeAggregateLocation,
+    /// Decoding a valid scalar representation not modeled by uscope.
+    ScalarRepresentation,
+}
+
+impl fmt::Display for UnsupportedVariableFeature {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::EntryValue => "DWARF entry values",
+            Self::ParameterReference => "DWARF parameter references",
+            Self::CrossDieEvaluation => "cross-entry DWARF evaluation",
+            Self::Tls => "thread-local storage",
+            Self::AddressSpace => "non-default address spaces",
+            Self::CompositeLocation => "composite DWARF locations",
+            Self::ImplicitPointer => "DWARF implicit pointers",
+            Self::WasmLocation => "WebAssembly locations",
+            Self::RegisterClass => "the requested register class",
+            Self::TypedValue => "the requested typed DWARF value",
+            Self::AlternativeLocations => "simultaneous alternative DWARF locations",
+            Self::TypeRepresentation => "the source type representation",
+            Self::RuntimeAggregateLocation => "the runtime aggregate location",
+            Self::ScalarRepresentation => "the scalar representation",
+        })
+    }
+}
+
+/// One unavailable bit range within a source value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValueBitRange {
+    /// Offset from the least-addressed byte of the value, in bits.
+    pub offset: u64,
+    /// Number of unavailable bits.
+    pub size: u64,
+}
+
+/// Evidence that a source value has no complete executable representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OptimizedOutReason {
+    /// The defining entry supplies neither a location nor a constant.
+    NoLocation,
+    /// The selected location description is empty.
+    EmptyLocation,
+    /// Only the listed portions of a composite value are undefined.
+    UndefinedPieces {
+        /// Undefined destination ranges in source-value bit coordinates.
+        ranges: Arc<[ValueBitRange]>,
+    },
+}
+
+/// Why the selected frame cannot provide its call-frame address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CallFrameUnavailableReason {
+    /// The instruction has no usable module-relative context.
+    NoInstructionContext,
+    /// The call-frame information uses an unsupported CFA expression.
+    CfaExpression,
+    /// Unwinding terminated without producing a CFA.
+    UnwindTerminated(Arc<str>),
+}
+
+/// Why thread-local storage cannot be resolved for this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TlsUnavailableReason {
+    /// The module has no loader identity usable by the TLS provider.
+    ModuleIdentityUnavailable,
+    /// No compatible TLS provider is available.
+    ProviderUnavailable,
+    /// The provider could not resolve this thread's address.
+    LookupFailed(Arc<str>),
+}
+
+/// Why a requested structural value operation cannot be completed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValueAccessUnavailableReason {
+    /// A pointer type does not name a concrete pointee type.
+    UnspecifiedPointee,
+    /// A dereference was requested from a non-pointer, non-reference value.
+    NotPointerOrReference,
+    /// The pointer uses a target-specific address class.
+    AddressClass(u64),
+    /// Dereferencing a null pointer cannot produce a value.
+    NullPointer,
+    /// Address arithmetic exceeded the target address width.
+    AddressOverflow,
+    /// A runtime member expression requires a concrete containing-object address.
+    NoConcreteObjectAddress,
+    /// The requested bit-field representation is non-integral.
+    NonIntegralBitField,
+    /// The selected member belongs to a different active variant.
+    InactiveVariant(Option<Arc<str>>),
+    /// An implicit-pointer view falls outside its referenced source object.
+    ImplicitPointerOutOfBounds {
+        /// Signed byte offset into the referenced object.
+        offset: i64,
+        /// Number of bytes requested from that offset.
+        size: u64,
+        /// Size of the referenced object.
+        containing_size: u64,
+    },
 }
 
 /// Why valid variable metadata cannot produce a value at this stop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VariableUnavailableReason {
-    /// The call-frame information uses a CFA expression not yet supported.
-    CfaExpression,
-    /// The producer supplied no value or active location at this instruction.
-    OptimizedOut,
+    /// The source value has no complete executable representation.
+    OptimizedOut(OptimizedOutReason),
+    /// No location-list entry applies at the current instruction.
+    UnavailableAtInstruction,
+    /// Selecting the location requires an instruction context that is unavailable.
+    NoInstructionContext,
     /// The value requires a valid feature outside the current implementation.
     Unsupported(UnsupportedVariableFeature),
+    /// A required target-memory interval is not completely readable.
+    MemoryInaccessible {
+        /// First address requested for the typed value.
+        address: VirtualAddress,
+        /// Total requested byte count.
+        requested: u64,
+        /// Contiguous bytes successfully read before the failure.
+        completed: u64,
+        /// First inaccessible address.
+        next_address: VirtualAddress,
+    },
     /// A required target register is unavailable.
     RegisterUnavailable(Arc<str>),
+    /// The selected frame cannot provide its call-frame address.
+    CallFrameUnavailable(CallFrameUnavailableReason),
+    /// Thread-local storage cannot be resolved for this value.
+    TlsUnavailable(TlsUnavailableReason),
+    /// A structural value operation cannot be completed.
+    ValueAccess(ValueAccessUnavailableReason),
     /// The expression exceeded the debugger's bounded work limits.
     EvaluationLimit,
     /// A typed live-inspection resource was exhausted.
@@ -1103,19 +1230,108 @@ pub enum VariableUnavailableReason {
         /// Number of valid elements.
         count: u64,
     },
-    /// Another explicit limitation or runtime failure.
-    Other(Arc<str>),
 }
 
 impl fmt::Display for VariableUnavailableReason {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "every public unavailable category has one stable user-facing diagnosis"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CfaExpression => formatter.write_str("CFA expressions are unsupported"),
-            Self::OptimizedOut => formatter.write_str("the value is optimized out"),
-            Self::Unsupported(feature) => write!(formatter, "{feature:?} is unsupported"),
+            Self::OptimizedOut(
+                OptimizedOutReason::NoLocation | OptimizedOutReason::EmptyLocation,
+            ) => formatter.write_str("the value is optimized out"),
+            Self::OptimizedOut(OptimizedOutReason::UndefinedPieces { ranges }) => {
+                formatter.write_str("the value is partially optimized out in ")?;
+                for (index, range) in ranges.iter().enumerate() {
+                    if index != 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    write!(
+                        formatter,
+                        "bits {}..{}",
+                        range.offset,
+                        range.offset.saturating_add(range.size)
+                    )?;
+                }
+                Ok(())
+            }
+            Self::UnavailableAtInstruction => {
+                formatter.write_str("the value is unavailable at the current instruction")
+            }
+            Self::NoInstructionContext => {
+                formatter.write_str("no instruction context is available to select the value")
+            }
+            Self::Unsupported(feature) => {
+                write!(formatter, "unsupported variable feature: {feature}")
+            }
+            Self::MemoryInaccessible {
+                address,
+                requested,
+                completed,
+                next_address,
+            } => write!(
+                formatter,
+                "memory is inaccessible at {next_address}; read {completed} of {requested} bytes from {address}"
+            ),
             Self::RegisterUnavailable(register) => {
                 write!(formatter, "register {register} is unavailable")
             }
+            Self::CallFrameUnavailable(CallFrameUnavailableReason::NoInstructionContext) => {
+                formatter.write_str("the instruction has no call-frame context")
+            }
+            Self::CallFrameUnavailable(CallFrameUnavailableReason::CfaExpression) => {
+                formatter.write_str("CFA expressions are unsupported")
+            }
+            Self::CallFrameUnavailable(CallFrameUnavailableReason::UnwindTerminated(reason)) => {
+                write!(formatter, "the call-frame address is unavailable: {reason}")
+            }
+            Self::TlsUnavailable(TlsUnavailableReason::ModuleIdentityUnavailable) => {
+                formatter.write_str("the module has no TLS loader identity")
+            }
+            Self::TlsUnavailable(TlsUnavailableReason::ProviderUnavailable) => {
+                formatter.write_str("no compatible TLS provider is available")
+            }
+            Self::TlsUnavailable(TlsUnavailableReason::LookupFailed(reason)) => {
+                write!(formatter, "TLS lookup failed: {reason}")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::UnspecifiedPointee) => {
+                formatter.write_str("the pointer has no concrete pointee type")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::NotPointerOrReference) => {
+                formatter.write_str("the value is not a pointer or reference")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::AddressClass(class)) => {
+                write!(formatter, "pointer address class {class} is unsupported")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::NullPointer) => {
+                formatter.write_str("cannot dereference a null pointer")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::AddressOverflow) => {
+                formatter.write_str("value address arithmetic overflowed")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::NoConcreteObjectAddress) => {
+                formatter.write_str("the value has no concrete containing-object address")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::NonIntegralBitField) => {
+                formatter.write_str("non-integral bit-fields are unsupported")
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::InactiveVariant(name)) => {
+                if let Some(name) = name {
+                    write!(formatter, "the member belongs to inactive variant '{name}'")
+                } else {
+                    formatter.write_str("the member belongs to an inactive variant")
+                }
+            }
+            Self::ValueAccess(ValueAccessUnavailableReason::ImplicitPointerOutOfBounds {
+                offset,
+                size,
+                containing_size,
+            }) => write!(
+                formatter,
+                "implicit-pointer range at offset {offset} with size {size} is outside its {containing_size}-byte object"
+            ),
             Self::EvaluationLimit => {
                 formatter.write_str("DWARF expression evaluation limit exceeded")
             }
@@ -1132,26 +1348,7 @@ impl fmt::Display for VariableUnavailableReason {
                 formatter,
                 "index {index} is outside the source bounds starting at {lower_bound} with {count} elements"
             ),
-            Self::Other(description) => formatter.write_str(description),
         }
-    }
-}
-
-impl From<Arc<str>> for VariableUnavailableReason {
-    fn from(description: Arc<str>) -> Self {
-        Self::Other(description)
-    }
-}
-
-impl From<&str> for VariableUnavailableReason {
-    fn from(description: &str) -> Self {
-        Self::Other(description.into())
-    }
-}
-
-impl From<String> for VariableUnavailableReason {
-    fn from(description: String) -> Self {
-        Self::Other(description.into())
     }
 }
 
@@ -1161,11 +1358,51 @@ impl From<UnsupportedVariableFeature> for VariableUnavailableReason {
     }
 }
 
+/// Stable category for defective variable metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariableMalformedKind {
+    /// An attribute has an invalid form or value.
+    InvalidAttribute,
+    /// A metadata reference has no valid target.
+    InvalidReference,
+    /// The normalized type graph is inconsistent.
+    InvalidTypeGraph,
+    /// A location list violates its structural contract.
+    InvalidLocationList,
+    /// A location expression is malformed.
+    InvalidExpression,
+    /// Type or aggregate layout metadata is inconsistent.
+    InconsistentLayout,
+    /// A constant cannot inhabit its declared type.
+    InvalidConstant,
+}
+
 /// Why one variable's debug metadata is defective.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariableMalformedReason {
+    /// Machine-readable defect category.
+    pub kind: VariableMalformedKind,
     /// A stable human-readable diagnosis.
     pub description: Arc<str>,
+}
+
+/// Why readable bytes are not a valid value of the declared source type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VariableInvalidReason {
+    /// A Boolean contains a representation other than zero or one.
+    BooleanRepresentation(u128),
+}
+
+impl fmt::Display for VariableInvalidReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BooleanRepresentation(value) => {
+                write!(formatter, "invalid boolean representation {value}")
+            }
+        }
+    }
 }
 
 /// The inspection state of one visible variable.
@@ -1187,6 +1424,15 @@ pub enum VariableState {
     },
     /// Valid metadata does not provide a supported readable value here.
     Unavailable(VariableUnavailableReason),
+    /// Bytes were read exactly, but do not form a valid value of the declared type.
+    Invalid {
+        /// How the bytes were obtained.
+        source: VariableValueSource,
+        /// Exact invalid bytes in target byte order.
+        raw: Arc<[u8]>,
+        /// Why the representation is invalid.
+        reason: VariableInvalidReason,
+    },
     /// This entry's metadata is defective.
     Malformed(VariableMalformedReason),
 }

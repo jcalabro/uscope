@@ -22,6 +22,7 @@ use super::ControllerMessage;
 mod thread_db;
 use crate::debug_info::{
     UnwindInfo, VariableContext, VariableInfo, VariableRegister, VariableRuntime,
+    VariableRuntimeError,
 };
 use crate::inspection::{InspectionBudget, MAX_INSPECTION_LIMITS};
 use crate::model::FrameMetadata;
@@ -36,14 +37,14 @@ use crate::unwind::{
     collect_backtrace,
 };
 use crate::{
-    Backtrace, BreakpointLocation, CodeInstanceId, CodeInstanceKind, Error, ExecutionLocation,
-    FrameKind, GlobalVariablePage, GlobalVariableReference, ImageAddress, ImageLocation,
-    InlineFrameLookup, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
-    LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason,
-    ModuleImage, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
-    Result, SourceLocation, StackFrame, ThreadId as DebugThreadId, UnwindTermination,
-    ValueExpression, ValueIndexRange, ValuePathStep, VariableSnapshot, VariableUnavailableReason,
-    VirtualAddress,
+    Backtrace, BreakpointLocation, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceKind,
+    Error, ExecutionLocation, FrameKind, GlobalVariablePage, GlobalVariableReference, ImageAddress,
+    ImageLocation, InlineFrameLookup, InspectedValue, LoadedGlobalVariableInfo, LoadedModule,
+    LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
+    MemoryReadUnavailableReason, ModuleImage, RegisterDescriptor, RegisterId, RegisterRole,
+    RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame, ThreadId as DebugThreadId,
+    TlsUnavailableReason, UnwindTermination, ValueExpression, ValueIndexRange, ValuePathStep,
+    VariableSnapshot, VariableUnavailableReason, VirtualAddress,
 };
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
@@ -3589,21 +3590,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             .filter(|address| self.module_image.contains_address(*address));
         let cfa = image_address.map_or_else(
             || {
-                Err(VariableUnavailableReason::Other(
-                    "instruction is outside the main image".into(),
+                Err(VariableRuntimeError::Unavailable(
+                    VariableUnavailableReason::CallFrameUnavailable(
+                        CallFrameUnavailableReason::NoInstructionContext,
+                    ),
                 ))
             },
             |address| {
                 self.unwind_info
                     .cfa(address, &registers)
-                    .map_err(|termination| match termination {
-                        UnwindTermination::UnsupportedUnwindInfo { feature }
-                            if feature.as_ref() == "CFA expression" =>
-                        {
-                            VariableUnavailableReason::CfaExpression
-                        }
-                        other => VariableUnavailableReason::Other(format!("{other:?}").into()),
-                    })
+                    .map_err(variable_cfa_error)
             },
         );
         let mut runtime = LinuxVariableRuntime {
@@ -3722,7 +3718,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         pid: Pid,
         native: &libc::user_regs_struct,
         instruction: VirtualAddress,
-        cfa: &std::result::Result<VirtualAddress, VariableUnavailableReason>,
+        cfa: &std::result::Result<VirtualAddress, VariableRuntimeError>,
         global: GlobalVariableReference,
         budget: &mut InspectionBudget,
     ) -> Result<crate::Variable> {
@@ -3820,21 +3816,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             .filter(|address| self.module_image.contains_address(*address));
         let cfa = image_address.map_or_else(
             || {
-                Err(VariableUnavailableReason::Other(
-                    "instruction is outside the main image".into(),
+                Err(VariableRuntimeError::Unavailable(
+                    VariableUnavailableReason::CallFrameUnavailable(
+                        CallFrameUnavailableReason::NoInstructionContext,
+                    ),
                 ))
             },
             |address| {
                 self.unwind_info
                     .cfa(address, &registers)
-                    .map_err(|termination| match termination {
-                        UnwindTermination::UnsupportedUnwindInfo { feature }
-                            if feature.as_ref() == "CFA expression" =>
-                        {
-                            VariableUnavailableReason::CfaExpression
-                        }
-                        other => VariableUnavailableReason::Other(format!("{other:?}").into()),
-                    })
+                    .map_err(variable_cfa_error)
             },
         );
         let context = VariableContext {
@@ -4022,6 +4013,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .into(),
                 ));
             }
+            crate::VariableState::Invalid { reason, .. } => {
+                return Err(Error::InvalidValueRange(
+                    format!("the selected aggregate has an invalid value: {reason}").into(),
+                ));
+            }
         };
         let relative_start = range
             .start
@@ -4079,7 +4075,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         pid: Pid,
         native: &libc::user_regs_struct,
         instruction: VirtualAddress,
-        cfa: &std::result::Result<VirtualAddress, VariableUnavailableReason>,
+        cfa: &std::result::Result<VirtualAddress, VariableRuntimeError>,
         global: GlobalVariableReference,
         selectors: &[ValuePathStep],
         budget: &mut InspectionBudget,
@@ -4158,16 +4154,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             .filter(|address| self.module_image.contains_address(*address))
             .map_or_else(
                 || {
-                    Err(VariableUnavailableReason::Other(
-                        "instruction is outside the main image".into(),
+                    Err(VariableRuntimeError::Unavailable(
+                        VariableUnavailableReason::CallFrameUnavailable(
+                            CallFrameUnavailableReason::NoInstructionContext,
+                        ),
                     ))
                 },
                 |address| {
                     self.unwind_info
                         .cfa(address, &registers)
-                        .map_err(|termination| {
-                            VariableUnavailableReason::Other(format!("{termination:?}").into())
-                        })
+                        .map_err(variable_cfa_error)
                 },
             );
         let mut runtime = LinuxVariableRuntime {
@@ -4231,16 +4227,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             .filter(|address| self.module_image.contains_address(*address))
             .map_or_else(
                 || {
-                    Err(VariableUnavailableReason::Other(
-                        "instruction is outside the main image".into(),
+                    Err(VariableRuntimeError::Unavailable(
+                        VariableUnavailableReason::CallFrameUnavailable(
+                            CallFrameUnavailableReason::NoInstructionContext,
+                        ),
                     ))
                 },
                 |address| {
                     self.unwind_info
                         .cfa(address, &registers)
-                        .map_err(|termination| {
-                            VariableUnavailableReason::Other(format!("{termination:?}").into())
-                        })
+                        .map_err(variable_cfa_error)
                 },
             );
         let mut runtime = LinuxVariableRuntime {
@@ -4802,6 +4798,76 @@ struct PtraceMemory<'a> {
     pid: Pid,
 }
 
+fn variable_cfa_error(termination: UnwindTermination) -> VariableRuntimeError {
+    match termination {
+        UnwindTermination::UnsupportedUnwindInfo { feature }
+            if feature.as_ref() == "CFA expression" =>
+        {
+            VariableUnavailableReason::CallFrameUnavailable(
+                CallFrameUnavailableReason::CfaExpression,
+            )
+            .into()
+        }
+        UnwindTermination::CorruptUnwindInfo { description } => {
+            VariableRuntimeError::Malformed(description)
+        }
+        UnwindTermination::NoUnwindInfo { address } => {
+            VariableUnavailableReason::CallFrameUnavailable(
+                CallFrameUnavailableReason::UnwindTerminated(
+                    format!("no unwind information covers {address}").into(),
+                ),
+            )
+            .into()
+        }
+        UnwindTermination::ModuleNotFound { address } => {
+            VariableUnavailableReason::CallFrameUnavailable(
+                CallFrameUnavailableReason::UnwindTerminated(
+                    format!("no loaded module contains {address}").into(),
+                ),
+            )
+            .into()
+        }
+        UnwindTermination::UnsupportedUnwindInfo { feature } => {
+            VariableUnavailableReason::CallFrameUnavailable(
+                CallFrameUnavailableReason::UnwindTerminated(
+                    format!("unsupported unwind feature: {feature}").into(),
+                ),
+            )
+            .into()
+        }
+        UnwindTermination::RegisterUnavailable { register } => {
+            VariableUnavailableReason::CallFrameUnavailable(
+                CallFrameUnavailableReason::UnwindTerminated(
+                    format!("register {register} is unavailable").into(),
+                ),
+            )
+            .into()
+        }
+        UnwindTermination::MemoryReadFailed { address } => {
+            VariableUnavailableReason::CallFrameUnavailable(
+                CallFrameUnavailableReason::UnwindTerminated(
+                    format!("unwind memory is unreadable at {address}").into(),
+                ),
+            )
+            .into()
+        }
+        UnwindTermination::InvalidCaller { description } => {
+            VariableRuntimeError::Malformed(format!("invalid unwind caller: {description}").into())
+        }
+        UnwindTermination::CycleDetected => {
+            VariableRuntimeError::Malformed("unwind metadata produced a frame cycle".into())
+        }
+        UnwindTermination::DepthLimit => VariableUnavailableReason::CallFrameUnavailable(
+            CallFrameUnavailableReason::UnwindTerminated("unwind depth limit reached".into()),
+        )
+        .into(),
+        UnwindTermination::Complete => VariableUnavailableReason::CallFrameUnavailable(
+            CallFrameUnavailableReason::UnwindTerminated("no caller frame exists".into()),
+        )
+        .into(),
+    }
+}
+
 struct LinuxVariableRuntime<'a, P> {
     ptrace: &'a P,
     pid: Pid,
@@ -4809,7 +4875,7 @@ struct LinuxVariableRuntime<'a, P> {
     breakpoints: &'a BTreeMap<VirtualAddress, BreakpointSite>,
     native: &'a libc::user_regs_struct,
     floating: Option<std::result::Result<libc::user_fpregs_struct, Arc<str>>>,
-    cfa: std::result::Result<VirtualAddress, VariableUnavailableReason>,
+    cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
     link_map: Option<VirtualAddress>,
 }
 
@@ -4817,7 +4883,7 @@ impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
     fn register(
         &mut self,
         register: u16,
-    ) -> std::result::Result<VariableRegister, VariableUnavailableReason> {
+    ) -> std::result::Result<VariableRegister, VariableRuntimeError> {
         if let Some(value) = x86_64_general_variable_register(self.native, register) {
             return Ok(value);
         }
@@ -4830,16 +4896,20 @@ impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
             return floating
                 .as_ref()
                 .map_err(|error| {
-                    VariableUnavailableReason::RegisterUnavailable(
-                        format!("xmm{} ({error})", register - 17).into(),
+                    VariableRuntimeError::Unavailable(
+                        VariableUnavailableReason::RegisterUnavailable(
+                            format!("xmm{} ({error})", register - 17).into(),
+                        ),
                     )
                 })
                 .map(|floating| x86_64_xmm_variable_register(floating, register));
         }
-        Err(crate::UnsupportedVariableFeature::RegisterClass.into())
+        Err(VariableRuntimeError::Unavailable(
+            crate::UnsupportedVariableFeature::RegisterClass.into(),
+        ))
     }
 
-    fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
+    fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableRuntimeError> {
         self.cfa.clone()
     }
 
@@ -4847,11 +4917,14 @@ impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         &mut self,
         offset: u64,
     ) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
-        let link_map = self.link_map.ok_or_else(|| {
-            VariableUnavailableReason::Other("module has no loader link_map".into())
-        })?;
-        thread_db::tls_address(self.pid, self.pid, link_map, offset)
-            .map_err(VariableUnavailableReason::Other)
+        let link_map = self
+            .link_map
+            .ok_or(VariableUnavailableReason::TlsUnavailable(
+                TlsUnavailableReason::ModuleIdentityUnavailable,
+            ))?;
+        thread_db::tls_address(self.pid, self.pid, link_map, offset).map_err(|reason| {
+            VariableUnavailableReason::TlsUnavailable(TlsUnavailableReason::LookupFailed(reason))
+        })
     }
 
     fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
@@ -4864,14 +4937,19 @@ impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         &mut self,
         address: VirtualAddress,
         size: usize,
-    ) -> std::result::Result<Arc<[u8]>, Arc<str>> {
+    ) -> std::result::Result<Arc<[u8]>, VariableRuntimeError> {
         let read = read_logical_memory(self.ptrace, self.pid, self.breakpoints, address, size)
-            .map_err(|error| Arc::from(error.to_string()))?;
+            .map_err(|error| VariableRuntimeError::Fatal(error.to_string().into()))?;
         match read.completion {
             MemoryReadCompletion::Complete => Ok(Arc::from(read.bytes)),
-            MemoryReadCompletion::Incomplete { next_address, .. } => Err(Arc::from(format!(
-                "memory is inaccessible at {next_address}"
-            ))),
+            MemoryReadCompletion::Incomplete { next_address, .. } => Err(
+                VariableRuntimeError::Unavailable(VariableUnavailableReason::MemoryInaccessible {
+                    address,
+                    requested: u64::try_from(size).unwrap_or(u64::MAX),
+                    completed: u64::try_from(read.bytes.len()).unwrap_or(u64::MAX),
+                    next_address,
+                }),
+            ),
         }
     }
 }

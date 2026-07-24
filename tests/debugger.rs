@@ -2184,8 +2184,9 @@ async fn rust_payload_enum_is_never_published_as_an_empty_record() {
     assert!(
         matches!(
             inactive_payload.state,
-            VariableState::Unavailable(uscope::VariableUnavailableReason::Other(ref reason))
-                if reason.contains("inactive arm")
+            VariableState::Unavailable(uscope::VariableUnavailableReason::ValueAccess(
+                uscope::ValueAccessUnavailableReason::InactiveVariant(Some(_))
+            ))
         ),
         "{inactive_payload:?}"
     );
@@ -2571,6 +2572,10 @@ async fn zig_enums_tagged_unions_and_bare_unions_decode_without_guessing() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario proves scalar, child-page, indexed, and ranged boundary reads"
+)]
 async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() {
     for fixture in ["pointer-memory-gcc-o0", "pointer-memory-clang-o0"] {
         let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
@@ -2584,7 +2589,17 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
         assert_dereferenced_scalar(&valid, 42, fixture);
         let boundary = dereference_named(&scenario, "boundary_pointer", 1).await;
         assert!(
-            matches!(boundary.state, VariableState::Unavailable(_)),
+            matches!(
+                boundary.state,
+                VariableState::Unavailable(
+                    VariableUnavailableReason::MemoryInaccessible {
+                        address,
+                        requested: 4,
+                        completed: 2,
+                        next_address,
+                    }
+                ) if next_address.get() == address.get() + 2
+            ),
             "{boundary:?}"
         );
         let valid_after_failure = dereference_named(&scenario, "valid_pointer", 1).await;
@@ -2636,7 +2651,14 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
             )
             .await;
         assert!(
-            matches!(indexed_unreadable.state, VariableState::Unavailable(_)),
+            matches!(
+                indexed_unreadable.state,
+                VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
+                    requested: 4,
+                    completed: 0,
+                    ..
+                })
+            ),
             "{fixture}: {indexed_unreadable:?}"
         );
         let parsed = uscope::parse_value_expression("(*boundary_array)[0..4]")
@@ -4867,8 +4889,8 @@ async fn rust_globals_preserve_module_qualification_and_honest_optimized_unavail
     assert!(matches!(
         root.state,
         VariableState::Unavailable(
-            uscope::VariableUnavailableReason::OptimizedOut
-                | uscope::VariableUnavailableReason::Other(_),
+            uscope::VariableUnavailableReason::OptimizedOut(_)
+                | uscope::VariableUnavailableReason::UnavailableAtInstruction,
         )
     ));
     assert_dereferenced_scalar(
@@ -5608,6 +5630,44 @@ async fn go_variable_lookup_respects_nested_lexical_shadowing() {
 
     resume_go_to_exit(&mut scenario, fixture).await;
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+}
+
+#[tokio::test]
+async fn readable_invalid_boolean_bytes_are_not_reported_as_unavailable_or_malformed() {
+    for fixture in ["variables-gcc-o0", "variables-clang-o0"] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        scenario.add_breakpoint("inspect_invalid_boolean").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+
+        let value = scenario
+            .operation(
+                "inspect invalid boolean representation",
+                scenario
+                    .handle()
+                    .inspect(parsed_value_expression("*invalid")),
+            )
+            .await;
+        assert!(
+            matches!(
+                value.state,
+                VariableState::Invalid {
+                    source: uscope::VariableValueSource::Memory(_),
+                    ref raw,
+                    reason: uscope::VariableInvalidReason::BooleanRepresentation(2),
+                } if raw.as_ref() == [2]
+            ),
+            "{fixture}: {value:?}"
+        );
+
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
 }
 
 #[tokio::test]
@@ -6576,7 +6636,9 @@ fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, 
         for index in 8..10 {
             assert_eq!(
                 snapshot.variables[index].state,
-                VariableState::Unavailable("no location at the current instruction".into()),
+                VariableState::Unavailable(
+                    uscope::VariableUnavailableReason::UnavailableAtInstruction
+                ),
                 "{fixture}: {:?}",
                 snapshot.variables[index]
             );

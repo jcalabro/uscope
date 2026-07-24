@@ -33,6 +33,10 @@ test: build-test-programs
 fuzz-value-expression *ARGS="":
     cargo fuzz run value-expression -- "$@"
 
+# Fuzzes bounded DWARF location-expression parsing and evaluation.
+fuzz-dwarf-expression *ARGS="":
+    cargo fuzz run dwarf-expression -- "$@"
+
 # Checks formatting, runs Clippy, and runs the complete test suite.
 check: build-test-programs
     cargo fmt --check

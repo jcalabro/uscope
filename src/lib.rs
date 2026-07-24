@@ -12,24 +12,26 @@ pub use expression::parse_value_expression;
 pub use model::{
     Accessibility, AddressRange, AddressValue, Architecture, Backtrace, BaseClass,
     BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry, BreakpointLocation,
-    ByteOrder, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, ColumnNumber,
-    DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue,
-    EntryProvenance, EnumerationOrigin, Enumerator, ExecutionLocation, FloatValue, FrameKind,
-    FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
-    GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
-    ImageAddress, ImageLocation, InlineChain, InlineFrameLookup, InspectedValue,
-    InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage,
-    IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule,
-    LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
+    ByteOrder, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
+    ColumnNumber, DereferenceReference, DereferenceState, DereferenceUnavailableReason,
+    DereferencedValue, EntryProvenance, EnumerationOrigin, Enumerator, ExecutionLocation,
+    FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId,
+    GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference, GlobalVariableType,
+    GlobalVariableVisibility, ImageAddress, ImageLocation, InlineChain, InlineFrameLookup,
+    InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits,
+    InspectionUsage, IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo,
+    LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
     MemoryReadUnavailableReason, ModuleId, ModuleImage, ModuleImageId, NamedTypeRelationship,
-    ParsedValueExpression, PointerWidth, RecordKind, RecordMember, RecordMemberLayout,
-    ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
-    ScalarValue, SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame,
-    StackFrameId, StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription, ThreadId,
-    TypeId, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature,
-    UnwindTermination, ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren,
-    ValueChildrenReference, ValueExpression, ValueIndexRange, ValuePageCompletion, ValuePathStep,
-    Variable, VariableKind, VariableMalformedReason, VariableSnapshot, VariableState,
+    OptimizedOutReason, ParsedValueExpression, PointerWidth, RecordKind, RecordMember,
+    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
+    RegisterSnapshot, RegisterValue, ScalarValue, SourceContext, SourceFile, SourceFileId,
+    SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolId,
+    SymbolInfo, TargetDescription, ThreadId, TlsUnavailableReason, TypeId, TypeInfo, TypeKind,
+    TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
+    ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
+    ValueChildRelationship, ValueChildren, ValueChildrenReference, ValueExpression,
+    ValueIndexRange, ValuePageCompletion, ValuePathStep, Variable, VariableInvalidReason,
+    VariableKind, VariableMalformedKind, VariableMalformedReason, VariableSnapshot, VariableState,
     VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
     VariantSelection, VariantSelector, VariantStorageKind, VirtualAddress,
 };
@@ -39,6 +41,13 @@ pub use protocol::{
     ProcessId, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId,
     StopReason, ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery,
 };
+
+/// Exercises bounded DWARF-expression parsing for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_dwarf_expression(data: &[u8]) {
+    debug_info::fuzz_dwarf_expression(data);
+}
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
