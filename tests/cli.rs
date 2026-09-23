@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -28,6 +28,55 @@ fn assert_no_sgr(output: &str) {
         !output.contains("\x1b["),
         "unexpected terminal styling in {output:?}"
     );
+}
+
+#[test]
+fn pid_only_attach_discovers_the_executable_and_quit_detaches() {
+    let executable = fixture("build/test-programs/attach");
+    let mut target = Command::new(&executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn attach target");
+    let mut ready = [0_u8; 6];
+    target
+        .stdout
+        .as_mut()
+        .expect("target stdout")
+        .read_exact(&mut ready)
+        .expect("wait for target readiness");
+    assert_eq!(&ready, b"READY\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "quit",
+            "--attach",
+            &target.id().to_string(),
+        ])
+        .output()
+        .expect("attach uscope by PID");
+    assert_success(output);
+
+    target
+        .stdin
+        .as_mut()
+        .expect("target stdin")
+        .write_all(b"x")
+        .expect("release detached target");
+    assert_eq!(target.wait().expect("reap target").code(), Some(23));
+}
+
+#[test]
+fn failed_pid_discovery_suggests_the_executable_fallback() {
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(["--attach", &i32::MAX.to_string(), "--batch"])
+        .output()
+        .expect("run uscope with a missing process");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+    assert!(stderr.contains("pass EXECUTABLE explicitly"), "{stderr}");
 }
 
 fn symbol_address(executable: &std::path::Path, name: &str) -> u64 {

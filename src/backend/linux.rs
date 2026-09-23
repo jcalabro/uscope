@@ -18,7 +18,7 @@ use nix::unistd::Pid;
 use object::{Object, ObjectSection, ObjectSegment};
 use tokio::sync::{broadcast, mpsc};
 
-use super::ControllerMessage;
+use super::{ControllerMessage, ExecutableSource, FileIdentity};
 mod thread_db;
 use crate::debug_info::{
     UnwindInfo, VariableContext, VariableInfo, VariableRegister, VariableRuntime,
@@ -152,6 +152,7 @@ enum NativeThreadState {
 #[derive(Debug, Clone)]
 enum ExpectedStop {
     InitialExec,
+    InitialAttach,
     None,
     BreakpointRepair { address: VirtualAddress },
     AwaitBreakpoint { address: VirtualAddress },
@@ -312,13 +313,14 @@ fn allocate_stop_id() -> StopId {
 }
 
 struct Inferior {
+    origin: InferiorOrigin,
     tgid: Pid,
     loaded_module: LoadedModule,
     breakpoints: BTreeMap<VirtualAddress, BreakpointSite>,
     threads: BTreeMap<Pid, TraceThread>,
     retired_threads: BTreeSet<Pid>,
     unowned_stops: BTreeMap<Pid, WaitStatus>,
-    waiter: Option<JoinHandle<()>>,
+    waiter: Option<Waiter>,
     active: Option<ActiveExecution>,
     repairs: VecDeque<RepairGroup>,
     barrier: Option<StopBarrier>,
@@ -327,6 +329,29 @@ struct Inferior {
     next_execution: u64,
     next_barrier: u64,
     exec_unsupported: bool,
+}
+
+struct Waiter {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+impl Waiter {
+    fn stop_and_join(self) -> Result<()> {
+        self.stop.store(true, Ordering::Release);
+        self.thread.thread().unpark();
+        self.thread.join().map_err(|_| Error::BackendThreadPanicked)
+    }
+
+    fn join(self) -> Result<()> {
+        self.thread.join().map_err(|_| Error::BackendThreadPanicked)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InferiorOrigin {
+    Launched,
+    Attached,
 }
 
 struct RuntimeModule {
@@ -339,6 +364,7 @@ struct RuntimeModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ModuleMapping {
     path: PathBuf,
+    inode: u64,
     start: u64,
     file_offset: u64,
 }
@@ -359,6 +385,8 @@ enum LinuxError {
     LoaderRendezvous(String),
     #[error("another Linux tracing session is already active in this process")]
     SessionActive,
+    #[error("the target's thread list did not stabilize while attaching")]
+    AttachThreadsUnstable,
     #[error("unsupported clone created a different thread group {0}")]
     UnsupportedClone(i32),
     #[error("floating-point register reads are unsupported by this tracing effect")]
@@ -392,6 +420,9 @@ enum LinuxError {
 struct Controller<P: LinuxTraceOps> {
     _lease: SessionLease,
     executable: Arc<PathBuf>,
+    executable_data: Arc<[u8]>,
+    executable_identity: FileIdentity,
+    expected_process_start_time: Option<u64>,
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
     variable_info: Arc<dyn VariableInfo>,
@@ -406,6 +437,7 @@ struct Controller<P: LinuxTraceOps> {
     breakpoints: Vec<Breakpoint>,
     next_breakpoint_id: u64,
     launch_reply: Option<Reply<ExecutionId>>,
+    attach_reply: Option<Reply<StopId>>,
     shutdown_reply: Option<Reply<()>>,
     revision: u64,
 }
@@ -417,7 +449,7 @@ struct ControllerChannels {
 }
 
 pub fn spawn_controller(
-    executable: Arc<PathBuf>,
+    executable: ExecutableSource,
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
     variable_info: Arc<dyn VariableInfo>,
@@ -450,7 +482,7 @@ pub fn spawn_controller(
 impl<P: LinuxTraceOps> Controller<P> {
     fn new(
         lease: SessionLease,
-        executable: Arc<PathBuf>,
+        executable: ExecutableSource,
         module_image: Arc<ModuleImage>,
         unwind_info: Arc<dyn UnwindInfo>,
         variable_info: Arc<dyn VariableInfo>,
@@ -465,7 +497,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         Self {
             _lease: lease,
-            executable,
+            executable: executable.display_path,
+            executable_data: executable.data,
+            executable_identity: executable.identity,
+            expected_process_start_time: executable.process_start_time,
             module_image,
             unwind_info,
             variable_info,
@@ -480,6 +515,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             breakpoints: Vec::new(),
             next_breakpoint_id: 1,
             launch_reply: None,
+            attach_reply: None,
             shutdown_reply: None,
             revision: 0,
         }
@@ -524,6 +560,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let _ = reply.send(self.remove_all_breakpoints());
             }
             Request::Launch { reply } => self.launch(reply),
+            Request::Attach { process_id, reply } => self.attach(process_id, reply),
             Request::Continue {
                 process_id,
                 stop_id,
@@ -723,6 +760,28 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             WaitStatus::Signaled(pid, signal, _) => {
                 self.handle_terminal(pid, ExitStatus::Terminated(exception_info(signal)))
+            }
+            WaitStatus::PtraceEvent(pid, _, event)
+                if event == libc::PTRACE_EVENT_STOP
+                    && self
+                        .inferior
+                        .as_ref()
+                        .and_then(|inferior| inferior.threads.get(&pid))
+                        .is_some_and(|thread| {
+                            matches!(thread.expected, ExpectedStop::InitialAttach)
+                        }) =>
+            {
+                self.handle_initial_attach_stop(pid)
+            }
+            WaitStatus::PtraceEvent(pid, _, event)
+                if event == libc::PTRACE_EVENT_STOP
+                    && self
+                        .inferior
+                        .as_ref()
+                        .and_then(|inferior| inferior.threads.get(&pid))
+                        .is_some_and(|thread| thread.debugger_stop_pending) =>
+            {
+                self.handle_classified_stop(pid, ClassifiedStop::DebuggerRequested)
             }
             WaitStatus::PtraceEvent(pid, _, event) => self.handle_ptrace_event(pid, event),
             WaitStatus::PtraceSyscall(pid) => self.handle_classified_stop(
@@ -979,6 +1038,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 threads.insert(pid, TraceThread::starting(ExpectedStop::InitialExec));
 
                 self.inferior = Some(Inferior {
+                    origin: InferiorOrigin::Launched,
                     tgid: pid,
                     loaded_module: LoadedModule::main(self.module_image.id(), 0),
                     breakpoints: BTreeMap::new(),
@@ -1014,9 +1074,185 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the attach transaction keeps seize rollback and state publication together"
+    )]
+    fn attach(&mut self, requested: ProcessId, reply: Reply<StopId>) {
+        if self.inferior.is_some() || self.launch_reply.is_some() || self.attach_reply.is_some() {
+            let _ = reply.send(Err(Error::AlreadyRunning));
+            return;
+        }
+        let Ok(raw) = i32::try_from(requested.get()) else {
+            let _ = reply.send(Err(Error::InvalidProcessId(requested.get())));
+            return;
+        };
+        if raw <= 0 {
+            let _ = reply.send(Err(Error::InvalidProcessId(requested.get())));
+            return;
+        }
+        let requested_pid = Pid::from_raw(raw);
+        let tgid = match self.ptrace.thread_group_id(requested_pid) {
+            Ok(tgid) => tgid,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+
+        let mut seized = BTreeSet::new();
+        let result = (|| -> Result<()> {
+            for _ in 0..128 {
+                let observed = self.ptrace.process_threads(tgid)?;
+                for tid in observed {
+                    if !seized.contains(&tid) && self.ptrace.seize(tid)? {
+                        seized.insert(tid);
+                    }
+                }
+                let current = self.ptrace.process_threads(tgid)?;
+                if current.iter().all(|tid| seized.contains(tid)) {
+                    seized.retain(|tid| current.binary_search(tid).is_ok());
+                    return Ok(());
+                }
+            }
+            Err(backend_error(LinuxError::AttachThreadsUnstable))
+        })();
+        if let Err(error) = result {
+            self.rollback_seized(&seized);
+            let _ = reply.send(Err(error));
+            return;
+        }
+        if self.expected_process_start_time.is_some_and(
+            |expected| !matches!(process_start_time(tgid), Ok(actual) if actual == expected),
+        ) {
+            self.rollback_seized(&seized);
+            let _ = reply.send(Err(Error::TargetChangedDuringAttach));
+            return;
+        }
+        if seized.is_empty() {
+            let _ = reply.send(Err(Error::NotRunning));
+            return;
+        }
+
+        let waiter = match self.ptrace.spawn_waiter(self.message_sender.clone()) {
+            Ok(waiter) => waiter,
+            Err(error) => {
+                self.rollback_seized(&seized);
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        let triggering_thread = seized
+            .contains(&tgid)
+            .then_some(tgid)
+            .or_else(|| seized.first().copied())
+            .expect("a live process has at least one seized thread");
+        let threads = seized
+            .iter()
+            .copied()
+            .map(|pid| (pid, TraceThread::starting(ExpectedStop::InitialAttach)))
+            .collect();
+        self.inferior = Some(Inferior {
+            origin: InferiorOrigin::Attached,
+            tgid,
+            loaded_module: LoadedModule::main(self.module_image.id(), 0),
+            breakpoints: BTreeMap::new(),
+            threads,
+            retired_threads: BTreeSet::new(),
+            unowned_stops: BTreeMap::new(),
+            waiter: Some(waiter),
+            active: None,
+            repairs: VecDeque::new(),
+            barrier: Some(StopBarrier {
+                execution: None,
+                triggering_thread,
+                reason: StopReason::Attach,
+            }),
+            public_stop: None,
+            selected_thread: None,
+            next_execution: 0,
+            next_barrier: 0,
+            exec_unsupported: false,
+        });
+        self.attach_reply = Some(reply);
+
+        let tids = self
+            .inferior
+            .as_ref()
+            .expect("attached inferior exists")
+            .threads
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for tid in tids {
+            match self.ptrace.interrupt(tid) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.inferior
+                        .as_mut()
+                        .expect("attached inferior exists")
+                        .threads
+                        .remove(&tid);
+                }
+                Err(error) => {
+                    self.fail_inferior(error);
+                    return;
+                }
+            }
+        }
+        let replacement_trigger = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.threads.keys().next().copied());
+        let Some(replacement_trigger) = replacement_trigger else {
+            self.fail_inferior(Error::NotRunning);
+            return;
+        };
+        let trigger_missing = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.barrier.as_ref().map(|barrier| (inferior, barrier)))
+            .is_some_and(|(inferior, barrier)| {
+                !inferior.threads.contains_key(&barrier.triggering_thread)
+            });
+        if trigger_missing {
+            self.inferior
+                .as_mut()
+                .and_then(|inferior| inferior.barrier.as_mut())
+                .expect("attach barrier exists")
+                .triggering_thread = replacement_trigger;
+        }
+    }
+
+    fn rollback_seized(&self, seized: &BTreeSet<Pid>) {
+        for &pid in seized {
+            let _ = self.ptrace.interrupt(pid);
+        }
+        for &pid in seized {
+            loop {
+                match waitpid(pid, Some(WaitPidFlag::__WALL)) {
+                    Ok(WaitStatus::Stopped(..) | WaitStatus::PtraceEvent(..)) => {
+                        let _ = self.ptrace.detach(pid, None);
+                        break;
+                    }
+                    Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) | Err(Errno::ECHILD) => {
+                        break;
+                    }
+                    Ok(_) | Err(Errno::EINTR) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
     fn handle_initial_stop(&mut self, pid: Pid) -> Result<()> {
-        self.ptrace.set_options(pid)?;
-        let load_bias = self.ptrace.load_bias(pid, &self.executable)?;
+        self.ptrace.set_options(pid, true)?;
+        let load_bias = self.ptrace.load_bias(
+            pid,
+            &self.executable,
+            &self.executable_data,
+            self.executable_identity,
+        )?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
         self.modules
@@ -1048,6 +1284,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             resumed: ResumeScope::Process(process_id),
         });
         Ok(())
+    }
+
+    fn handle_initial_attach_stop(&mut self, pid: Pid) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let thread = inferior.threads.get_mut(&pid).ok_or(Error::NotRunning)?;
+        thread.state = NativeThreadState::Stopped;
+        thread.expected = ExpectedStop::None;
+        self.finish_barrier_if_ready()
     }
 
     fn resume(
@@ -1882,7 +2126,11 @@ impl<P: LinuxTraceOps> Controller<P> {
 
 impl<P: LinuxTraceOps> Controller<P> {
     fn handle_thread_start(&mut self, pid: Pid) -> Result<()> {
-        self.ptrace.set_options(pid)?;
+        let exit_kill = self
+            .inferior
+            .as_ref()
+            .is_some_and(|inferior| inferior.origin == InferiorOrigin::Launched);
+        self.ptrace.set_options(pid, exit_kill)?;
         let (process_id, barrier_active, should_resume) = {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             let thread = inferior.threads.get_mut(&pid).expect("new thread exists");
@@ -2838,6 +3086,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn request_stops(&mut self, barrier_id: u64) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let tgid = inferior.tgid;
+        let attached = inferior.origin == InferiorOrigin::Attached;
         let running: Vec<_> = inferior
             .threads
             .iter()
@@ -2852,7 +3101,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             // signals coalesce, so retain that outstanding request instead of
             // sending an indistinguishable duplicate for the next barrier.
             if !thread.debugger_stop_pending {
-                self.ptrace.request_stop(tgid, pid)?;
+                if attached {
+                    let _ = self.ptrace.interrupt(pid)?;
+                } else {
+                    self.ptrace.request_stop(tgid, pid)?;
+                }
                 thread.debugger_stop_pending = true;
             }
             thread.state = NativeThreadState::StopRequested {
@@ -2874,6 +3127,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         }
 
+        if self.attach_reply.is_some() {
+            self.initialize_attached_inferior()?;
+        }
         self.restore_active_breakpoints()?;
         if let Some(execution) = self
             .inferior
@@ -2918,6 +3174,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.active = None;
         let process_id = process_id(inferior.tgid);
         self.bump_revision();
+        if self.attach_reply.is_some() {
+            let _ = self.events.send(DebuggerEvent::InferiorAttached {
+                revision: self.revision,
+                process_id,
+            });
+        }
         let _ = self.events.send(DebuggerEvent::InferiorStopped {
             revision: self.revision,
             process_id,
@@ -2927,6 +3189,29 @@ impl<P: LinuxTraceOps> Controller<P> {
             all_threads_stopped: true,
             reason: barrier.reason,
         });
+        if let Some(reply) = self.attach_reply.take() {
+            let _ = reply.send(Ok(stop_id));
+        }
+        Ok(())
+    }
+
+    fn initialize_attached_inferior(&mut self) -> Result<()> {
+        let pid = self.inferior.as_ref().ok_or(Error::NotRunning)?.tgid;
+        let load_bias = self.ptrace.load_bias(
+            pid,
+            &self.executable,
+            &self.executable_data,
+            self.executable_identity,
+        )?;
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
+        self.modules
+            .get_mut(&crate::ModuleId::new(0))
+            .expect("main module is registered")
+            .loaded = inferior.loaded_module;
+        for breakpoint in &self.breakpoints {
+            install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
+        }
         Ok(())
     }
 
@@ -3059,7 +3344,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.ptrace.step(pid, None)
             }
             ExpectedStop::AwaitBreakpoint { .. } => self.resume_awaiting_thread(pid),
-            ExpectedStop::InitialExec | ExpectedStop::None => self.continue_thread(pid),
+            ExpectedStop::InitialExec | ExpectedStop::InitialAttach | ExpectedStop::None => {
+                self.continue_thread(pid)
+            }
         }
     }
 }
@@ -3072,7 +3359,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 /// or completed step. Unsafe state transitions outrank ordinary control stops.
 const fn visible_stop_priority(reason: &StopReason) -> u8 {
     match reason {
-        StopReason::Pause => 0,
+        StopReason::Attach | StopReason::Pause => 0,
         StopReason::Exception(_) => 1,
         StopReason::Breakpoint { .. }
         | StopReason::Step { .. }
@@ -3102,7 +3389,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if remaining == 0 {
             let mut inferior = self.inferior.take().expect("inferior exists");
             if let Some(waiter) = inferior.waiter.take() {
-                waiter.join().map_err(|_| Error::BackendThreadPanicked)?;
+                waiter.join()?;
             }
             self.reset_runtime_modules();
             self.bump_revision();
@@ -4338,6 +4625,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         let main_loaded = inferior.loaded_module;
         let mut observed = Vec::<(PathBuf, u64)>::new();
         for mapping in self.ptrace.module_mappings(pid)? {
+            if mapping.inode == self.executable_identity.inode {
+                continue;
+            }
             let path = fs::canonicalize(&mapping.path)?;
             if path == *self.executable {
                 continue;
@@ -4350,7 +4640,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         observed.sort();
         observed.dedup();
-        let link_maps = loader_link_maps(&self.ptrace, pid, &self.executable, main_loaded)?;
+        let link_maps = loader_link_maps(&self.ptrace, pid, &self.executable_data, main_loaded)?;
 
         let observed_modules = observed.iter().cloned().collect::<BTreeSet<_>>();
         let unloaded = self
@@ -4445,8 +4735,58 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.launch_reply
             .take()
             .map(|reply| reply.send(Err(Error::RequestCancelled)));
+        self.attach_reply
+            .take()
+            .map(|reply| reply.send(Err(Error::RequestCancelled)));
 
-        if self.inferior.is_some() {
+        if self
+            .inferior
+            .as_ref()
+            .is_some_and(|inferior| inferior.origin == InferiorOrigin::Attached)
+        {
+            let all_stopped = self.inferior.as_ref().is_some_and(|inferior| {
+                inferior
+                    .threads
+                    .values()
+                    .all(|thread| matches!(thread.state, NativeThreadState::Stopped))
+            });
+            if all_stopped {
+                if let Err(error) = self.detach_inferior()
+                    && let Some(reply) = self.shutdown_reply.take()
+                {
+                    let _ = reply.send(Err(error));
+                }
+                return;
+            }
+            let tids = self
+                .inferior
+                .as_ref()
+                .expect("attached inferior exists")
+                .threads
+                .iter()
+                .filter_map(|(&pid, thread)| {
+                    (!matches!(thread.state, NativeThreadState::Stopped)).then_some(pid)
+                })
+                .collect::<Vec<_>>();
+            for tid in tids {
+                match self.ptrace.interrupt(tid) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.inferior
+                            .as_mut()
+                            .expect("attached inferior exists")
+                            .threads
+                            .remove(&tid);
+                    }
+                    Err(error) => {
+                        if let Some(reply) = self.shutdown_reply.take() {
+                            let _ = reply.send(Err(error));
+                        }
+                        return;
+                    }
+                }
+            }
+        } else if self.inferior.is_some() {
             if let Err(error) = self.kill_inferior()
                 && let Some(reply) = self.shutdown_reply.take()
             {
@@ -4458,6 +4798,13 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     fn handle_shutdown_wait(&mut self, status: WaitStatus) -> bool {
+        if self
+            .inferior
+            .as_ref()
+            .is_some_and(|inferior| inferior.origin == InferiorOrigin::Attached)
+        {
+            return self.handle_detach_wait(status);
+        }
         let result = match status {
             WaitStatus::Exited(pid, code) => {
                 self.handle_terminal(pid, ExitStatus::Code(i64::from(code)))
@@ -4484,6 +4831,123 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.inferior.is_some()
     }
 
+    fn handle_detach_wait(&mut self, status: WaitStatus) -> bool {
+        let result = match status {
+            WaitStatus::Exited(pid, code) => {
+                self.handle_terminal(pid, ExitStatus::Code(i64::from(code)))
+            }
+            WaitStatus::Signaled(pid, signal, _) => {
+                self.handle_terminal(pid, ExitStatus::Terminated(exception_info(signal)))
+            }
+            WaitStatus::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
+                self.ptrace.continue_execution(pid, None)
+            }
+            WaitStatus::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_CLONE => {
+                self.handle_clone_during_detach(pid)
+            }
+            WaitStatus::Stopped(pid, signal) => {
+                let classified = self.classify_stop(pid, signal);
+                let inferior = self.inferior.as_mut().ok_or(Error::NotRunning);
+                inferior.and_then(|inferior| {
+                    let thread = inferior.threads.get_mut(&pid).ok_or(Error::NotRunning)?;
+                    thread.state = NativeThreadState::Stopped;
+                    if let ClassifiedStop::SignalDelivery(pending) = classified {
+                        thread.pending_signal = Some(pending);
+                    }
+                    Ok(())
+                })
+            }
+            WaitStatus::PtraceEvent(pid, _, _) => {
+                let inferior = self.inferior.as_mut().ok_or(Error::NotRunning);
+                inferior.and_then(|inferior| {
+                    inferior
+                        .threads
+                        .get_mut(&pid)
+                        .ok_or(Error::NotRunning)?
+                        .state = NativeThreadState::Stopped;
+                    Ok(())
+                })
+            }
+            other => Err(backend_error(LinuxError::UnexpectedWait(format!(
+                "{other:?}"
+            )))),
+        };
+        if let Err(error) = result {
+            if let Some(reply) = self.shutdown_reply.take() {
+                let _ = reply.send(Err(error));
+            }
+            return false;
+        }
+        let ready = self.inferior.as_ref().is_some_and(|inferior| {
+            !inferior.threads.is_empty()
+                && inferior
+                    .threads
+                    .values()
+                    .all(|thread| matches!(thread.state, NativeThreadState::Stopped))
+        });
+        if ready && let Err(error) = self.detach_inferior() {
+            if let Some(reply) = self.shutdown_reply.take() {
+                let _ = reply.send(Err(error));
+            }
+            return false;
+        }
+        self.inferior.is_some()
+    }
+
+    fn handle_clone_during_detach(&mut self, parent: Pid) -> Result<()> {
+        let child = Pid::from_raw(
+            i32::try_from(self.ptrace.event_message(parent)?)
+                .map_err(|_| Error::AddressOverflow)?,
+        );
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        inferior
+            .threads
+            .get_mut(&parent)
+            .ok_or(Error::NotRunning)?
+            .state = NativeThreadState::Stopped;
+        inferior
+            .threads
+            .entry(child)
+            .or_insert_with(|| TraceThread::starting(ExpectedStop::None));
+        Ok(())
+    }
+
+    fn detach_inferior(&mut self) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let installed = inferior
+            .breakpoints
+            .iter()
+            .filter_map(|(&address, site)| site.installed.then_some(address))
+            .collect::<Vec<_>>();
+        for address in installed {
+            self.ptrace
+                .remove_breakpoint(inferior.tgid, &mut inferior.breakpoints, address)?;
+        }
+        let tids = inferior
+            .threads
+            .iter()
+            .map(|(&pid, thread)| (pid, thread.pending_signal.map(|pending| pending.signal)))
+            .collect::<Vec<_>>();
+        let process_id = process_id(inferior.tgid);
+        if let Some(waiter) = inferior.waiter.take() {
+            waiter.stop_and_join()?;
+        }
+        for (pid, signal) in tids {
+            self.ptrace.detach(pid, signal)?;
+        }
+        self.inferior.take().expect("attached inferior exists");
+        self.reset_runtime_modules();
+        self.bump_revision();
+        let _ = self.events.send(DebuggerEvent::InferiorDetached {
+            revision: self.revision,
+            process_id,
+        });
+        if let Some(reply) = self.shutdown_reply.take() {
+            let _ = reply.send(Ok(()));
+        }
+        Ok(())
+    }
+
     fn kill_inferior(&self) -> Result<()> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
@@ -4494,8 +4958,20 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn fail_inferior(&mut self, error: Error) {
         if let Some(reply) = self.launch_reply.take() {
             let _ = reply.send(Err(error));
+        } else if let Some(reply) = self.attach_reply.take() {
+            let _ = reply.send(Err(error));
+            self.begin_shutdown(None);
+            return;
         }
-        let _ = self.kill_inferior();
+        if self
+            .inferior
+            .as_ref()
+            .is_some_and(|inferior| inferior.origin == InferiorOrigin::Attached)
+        {
+            self.begin_shutdown(None);
+        } else {
+            let _ = self.kill_inferior();
+        }
     }
 
     fn bump_revision(&mut self) {
@@ -5324,11 +5800,21 @@ fn x86_64_register_snapshot(
 
 trait LinuxTraceOps {
     fn spawn(&self, executable: &Path) -> Result<Pid>;
-    fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<JoinHandle<()>>;
+    fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter>;
+    fn process_threads(&self, process: Pid) -> Result<Vec<Pid>>;
+    fn seize(&self, pid: Pid) -> Result<bool>;
+    fn interrupt(&self, pid: Pid) -> Result<bool>;
+    fn detach(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
     fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()>;
     fn reap(&self, pid: Pid) -> Result<()>;
     fn thread_group_id(&self, pid: Pid) -> Result<Pid>;
-    fn load_bias(&self, pid: Pid, executable: &Path) -> Result<u64>;
+    fn load_bias(
+        &self,
+        pid: Pid,
+        executable: &Path,
+        executable_data: &[u8],
+        identity: FileIdentity,
+    ) -> Result<u64>;
     fn module_mappings(&self, _pid: Pid) -> Result<Vec<ModuleMapping>> {
         // Deterministic effect fakes opt out of host /proc inspection. The
         // production ptrace edge overrides this method.
@@ -5352,7 +5838,7 @@ trait LinuxTraceOps {
         Err(backend_error(LinuxError::UnsupportedFloatingRegisters))
     }
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()>;
-    fn set_options(&self, pid: Pid) -> Result<()>;
+    fn set_options(&self, pid: Pid, exit_kill: bool) -> Result<()>;
     fn event_message(&self, pid: Pid) -> Result<libc::c_long>;
     fn signal_metadata(&self, pid: Pid) -> std::result::Result<SignalMetadata, Errno>;
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()>;
@@ -5396,9 +5882,40 @@ impl LinuxPtrace {
 }
 
 impl LinuxTraceOps for LinuxPtrace {
-    fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<JoinHandle<()>> {
+    fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
         self.assert_owner_thread();
         spawn_waiter(messages)
+    }
+
+    fn process_threads(&self, process: Pid) -> Result<Vec<Pid>> {
+        self.assert_owner_thread();
+        process_threads(process)
+    }
+
+    fn seize(&self, pid: Pid) -> Result<bool> {
+        self.assert_owner_thread();
+        match ptrace::seize(pid, trace_options(false)) {
+            Ok(()) => Ok(true),
+            Err(Errno::ESRCH) => Ok(false),
+            Err(error) => Err(backend_error(LinuxError::System(error))),
+        }
+    }
+
+    fn interrupt(&self, pid: Pid) -> Result<bool> {
+        self.assert_owner_thread();
+        match ptrace::interrupt(pid) {
+            Ok(()) => Ok(true),
+            Err(Errno::ESRCH) => Ok(false),
+            Err(error) => Err(backend_error(LinuxError::System(error))),
+        }
+    }
+
+    fn detach(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+        self.assert_owner_thread();
+        match ptrace::detach(pid, signal) {
+            Ok(()) | Err(Errno::ESRCH) => Ok(()),
+            Err(error) => Err(backend_error(LinuxError::System(error))),
+        }
     }
 
     fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
@@ -5421,9 +5938,15 @@ impl LinuxTraceOps for LinuxPtrace {
         thread_group_id(pid)
     }
 
-    fn load_bias(&self, pid: Pid, executable: &Path) -> Result<u64> {
+    fn load_bias(
+        &self,
+        pid: Pid,
+        executable: &Path,
+        executable_data: &[u8],
+        identity: FileIdentity,
+    ) -> Result<u64> {
         self.assert_owner_thread();
-        load_bias(pid, executable)
+        load_bias(pid, executable, executable_data, identity)
     }
 
     fn module_mappings(&self, pid: Pid) -> Result<Vec<ModuleMapping>> {
@@ -5504,14 +6027,10 @@ impl LinuxTraceOps for LinuxPtrace {
         ptrace::setregs(pid, registers).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
-    fn set_options(&self, pid: Pid) -> Result<()> {
+    fn set_options(&self, pid: Pid, exit_kill: bool) -> Result<()> {
         self.assert_owner_thread();
-        let options = Options::PTRACE_O_EXITKILL
-            | Options::PTRACE_O_TRACECLONE
-            | Options::PTRACE_O_TRACEEXEC
-            | Options::PTRACE_O_TRACEEXIT
-            | Options::PTRACE_O_TRACESYSGOOD;
-        ptrace::setoptions(pid, options).map_err(|error| backend_error(LinuxError::System(error)))
+        ptrace::setoptions(pid, trace_options(exit_kill))
+            .map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn event_message(&self, pid: Pid) -> Result<libc::c_long> {
@@ -5623,16 +6142,25 @@ impl ThreadAffinity {
     }
 }
 
-fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<JoinHandle<()>> {
-    Ok(thread::Builder::new()
+fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let thread = thread::Builder::new()
         .name(WAITER_THREAD_NAME.into())
         .spawn(move || {
-            loop {
-                let status = match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::__WALL)) {
+            while !thread_stop.load(Ordering::Acquire) {
+                let status = match waitpid(
+                    Pid::from_raw(-1),
+                    Some(WaitPidFlag::__WALL | WaitPidFlag::WNOHANG),
+                ) {
                     Ok(status) => status,
                     Err(Errno::EINTR) => continue,
                     Err(_) => break,
                 };
+                if status == WaitStatus::StillAlive {
+                    thread::park_timeout(std::time::Duration::from_millis(5));
+                    continue;
+                }
                 if messages
                     .blocking_send(ControllerMessage::Wait(status))
                     .is_err()
@@ -5640,7 +6168,8 @@ fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<JoinHandle<
                     break;
                 }
             }
-        })?)
+        })?;
+    Ok(Waiter { stop, thread })
 }
 
 #[allow(
@@ -6083,10 +6612,50 @@ fn thread_group_id(pid: Pid) -> Result<Pid> {
     Ok(Pid::from_raw(tgid))
 }
 
-fn load_bias(pid: Pid, executable: &Path) -> Result<u64> {
+fn process_threads(process: Pid) -> Result<Vec<Pid>> {
+    let mut threads = fs::read_dir(format!("/proc/{process}/task"))?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let raw = entry.file_name().to_str()?.parse::<i32>().ok()?;
+            (raw > 0).then_some(Pid::from_raw(raw))
+        })
+        .collect::<Vec<_>>();
+    threads.sort_unstable();
+    Ok(threads)
+}
+
+fn process_start_time(process: Pid) -> Result<u64> {
+    let stat = fs::read_to_string(format!("/proc/{process}/stat"))?;
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| {
+            backend_error(LinuxError::UnexpectedWait(format!(
+                "invalid process stat for {process}"
+            )))
+        })
+}
+
+fn trace_options(exit_kill: bool) -> Options {
+    let common = Options::PTRACE_O_TRACECLONE
+        | Options::PTRACE_O_TRACEEXEC
+        | Options::PTRACE_O_TRACEEXIT
+        | Options::PTRACE_O_TRACESYSGOOD;
+    if exit_kill {
+        common | Options::PTRACE_O_EXITKILL
+    } else {
+        common
+    }
+}
+
+fn load_bias(
+    pid: Pid,
+    executable: &Path,
+    executable_data: &[u8],
+    identity: FileIdentity,
+) -> Result<u64> {
     let maps = std::fs::read_to_string(format!("/proc/{pid}/maps"))?;
-    let data = std::fs::read(executable)?;
-    let object = object::File::parse(data.as_slice())
+    let object = object::File::parse(executable_data)
         .map_err(|error| Error::backend(LinuxError::Object(error)))?;
     let image_base = object
         .segments()
@@ -6094,18 +6663,18 @@ fn load_bias(pid: Pid, executable: &Path) -> Result<u64> {
         .min()
         .unwrap_or(0);
     let executable = executable.to_string_lossy();
-
     for line in maps.lines() {
-        let mut fields = line.split_whitespace();
+        let mut fields = line.splitn(6, char::is_whitespace);
         let Some(range) = fields.next() else { continue };
         let _permissions = fields.next();
         let Some(offset) = fields.next() else {
             continue;
         };
         let _device = fields.next();
-        let _inode = fields.next();
-        let Some(path) = fields.next() else { continue };
-        if path != executable || offset != "00000000" {
+        let Some(inode) = fields.next().and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        if inode != identity.inode || offset != "00000000" {
             continue;
         }
         let Some(start) = range.split('-').next() else {
@@ -6131,7 +6700,7 @@ fn module_mappings(pid: Pid) -> Result<Vec<ModuleMapping>> {
 fn loader_link_maps(
     ptrace: &impl LinuxTraceOps,
     pid: Pid,
-    executable: &Path,
+    executable_data: &[u8],
     main: LoadedModule,
 ) -> Result<BTreeMap<u64, VirtualAddress>> {
     const DYNAMIC_ENTRY_SIZE: u64 = 16;
@@ -6139,8 +6708,7 @@ fn loader_link_maps(
     const DT_DEBUG: u64 = 21;
     const MAX_LINK_MAPS: usize = 1_024;
 
-    let data = fs::read(executable)?;
-    let object = object::File::parse(data.as_slice())
+    let object = object::File::parse(executable_data)
         .map_err(|error| Error::backend(LinuxError::Object(error)))?;
     let Some(dynamic) = object.section_by_name(".dynamic") else {
         return Ok(BTreeMap::new());
@@ -6224,6 +6792,9 @@ fn parse_module_mappings(maps: &str) -> Result<Vec<ModuleMapping>> {
             .map_err(|_| backend_error(LinuxError::InvalidMapping(line.to_owned())))?;
         mappings.push(ModuleMapping {
             path: PathBuf::from(path),
+            inode: inode
+                .parse::<u64>()
+                .map_err(|_| backend_error(LinuxError::InvalidMapping(line.to_owned())))?,
             start,
             file_offset,
         });
@@ -6333,21 +6904,25 @@ mod tests {
             vec![
                 ModuleMapping {
                     path: PathBuf::from("/opt/bin/app"),
+                    inode: 8,
                     start: 0x7000,
                     file_offset: 0,
                 },
                 ModuleMapping {
                     path: PathBuf::from("/opt/lib/libsame.so"),
+                    inode: 7,
                     start: 0x2000,
                     file_offset: 0x1000,
                 },
                 ModuleMapping {
                     path: PathBuf::from("/opt/lib/libsame.so"),
+                    inode: 7,
                     start: 0x5000,
                     file_offset: 0x1000,
                 },
                 ModuleMapping {
                     path: PathBuf::from("/opt/my libs/libspace.so"),
+                    inode: 9,
                     start: 0x9000,
                     file_offset: 0,
                 },
@@ -6481,12 +7056,28 @@ mod tests {
             Ok(self.pid)
         }
 
-        fn spawn_waiter(
-            &self,
-            _messages: mpsc::Sender<ControllerMessage>,
-        ) -> Result<JoinHandle<()>> {
+        fn spawn_waiter(&self, _messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
             self.record("spawn_waiter");
-            Ok(thread::spawn(|| {}))
+            Ok(Waiter {
+                stop: Arc::new(AtomicBool::new(false)),
+                thread: thread::spawn(|| {}),
+            })
+        }
+
+        fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
+            Self::unexpected("process_threads")
+        }
+
+        fn seize(&self, _pid: Pid) -> Result<bool> {
+            Self::unexpected("seize")
+        }
+
+        fn interrupt(&self, _pid: Pid) -> Result<bool> {
+            Self::unexpected("interrupt")
+        }
+
+        fn detach(&self, _pid: Pid, _signal: Option<NixSignal>) -> Result<()> {
+            Self::unexpected("detach")
         }
 
         fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
@@ -6504,7 +7095,13 @@ mod tests {
             Self::unexpected("thread_group_id")
         }
 
-        fn load_bias(&self, pid: Pid, _executable: &Path) -> Result<u64> {
+        fn load_bias(
+            &self,
+            pid: Pid,
+            _executable: &Path,
+            _executable_data: &[u8],
+            _identity: FileIdentity,
+        ) -> Result<u64> {
             assert_eq!(pid, self.pid);
             self.record("load_bias");
             Ok(0x5000)
@@ -6541,7 +7138,7 @@ mod tests {
             Self::unexpected("set_registers")
         }
 
-        fn set_options(&self, pid: Pid) -> Result<()> {
+        fn set_options(&self, pid: Pid, _exit_kill: bool) -> Result<()> {
             assert_eq!(pid, self.pid);
             self.record("set_options");
             Ok(())
@@ -6715,7 +7312,12 @@ mod tests {
         let (events, _) = broadcast::channel(8);
         let mut controller = Controller::new(
             SessionLease::acquire().expect("acquire test session"),
-            Arc::new(PathBuf::from("/test/program")),
+            ExecutableSource {
+                display_path: Arc::new(PathBuf::from("/test/program")),
+                data: Arc::from([]),
+                identity: FileIdentity { inode: 0 },
+                process_start_time: None,
+            },
             image,
             Arc::new(UnusedUnwindInfo),
             Arc::new(UnusedVariableInfo),
@@ -7057,7 +7659,12 @@ mod tests {
         let (events, event_receiver) = broadcast::channel(8);
         let mut controller = Controller::new(
             SessionLease::detached(),
-            Arc::new(PathBuf::from("/test/inline")),
+            ExecutableSource {
+                display_path: Arc::new(PathBuf::from("/test/inline")),
+                data: Arc::from([]),
+                identity: FileIdentity { inode: 0 },
+                process_start_time: None,
+            },
             Arc::clone(&image),
             Arc::new(UnusedUnwindInfo),
             Arc::new(UnusedVariableInfo),
@@ -7085,6 +7692,7 @@ mod tests {
             hidden_inline_frames: 2,
         };
         Inferior {
+            origin: InferiorOrigin::Launched,
             tgid: pid,
             loaded_module: LoadedModule::main(image.id(), 0),
             breakpoints: BTreeMap::new(),

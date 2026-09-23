@@ -250,6 +250,10 @@ mkdir -p "$output_dir"
 
 build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic" \
     -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/attach.c" "$output_dir/attach" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/attach-threads.c" "$output_dir/attach-threads" \
+    -O0 -g3 -fPIE -pie -pthread
 build_c_fixture_directory gcc "$c_fixtures_dir/pointer-memory" \
     "$output_dir/pointer-memory-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie

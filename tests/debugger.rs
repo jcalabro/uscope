@@ -1,19 +1,257 @@
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::{Read as _, Write as _};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use uscope::{
     Architecture, BreakpointLocation, ByteOrder, CodeInstanceKind, Debugger, EntryProvenance,
-    Error, ExitStatus, InferiorState, InlineFrameLookup, ModuleImage, PointerWidth, RegisterRole,
-    ScalarValue, SourceContext, SourceFile, SourceLocation, StepKind, StopReason, ThreadState,
-    UnwindTermination, VariableKind, VariableState, VariableUnavailableReason, VirtualAddress,
+    Error, ExceptionDisposition, ExitStatus, InferiorState, InlineFrameLookup, ModuleImage,
+    PointerWidth, ProcessId, RegisterRole, ResumeScope, ScalarValue, SourceContext, SourceFile,
+    SourceLocation, StepKind, StopReason, ThreadState, UnwindTermination, VariableKind,
+    VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use support::Scenario;
 use tokio::time::{Duration, timeout};
+
+struct ExternalFixture {
+    child: Option<Child>,
+}
+
+impl ExternalFixture {
+    fn spawn(path: &Path) -> Self {
+        let mut child = Command::new(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn external fixture");
+        let mut ready = [0_u8; 6];
+        child
+            .stdout
+            .as_mut()
+            .expect("fixture stdout")
+            .read_exact(&mut ready)
+            .expect("wait for external fixture readiness");
+        assert_eq!(&ready, b"READY\n");
+        Self { child: Some(child) }
+    }
+
+    fn process_id(&self) -> ProcessId {
+        ProcessId::new(u64::from(self.child.as_ref().expect("live child").id()))
+    }
+
+    fn release(&mut self) {
+        self.child
+            .as_mut()
+            .expect("live child")
+            .stdin
+            .as_mut()
+            .expect("fixture stdin")
+            .write_all(b"x")
+            .expect("release external fixture");
+    }
+
+    fn wait(mut self) -> std::process::ExitStatus {
+        self.child
+            .take()
+            .expect("live child")
+            .wait()
+            .expect("reap external fixture")
+    }
+}
+
+impl Drop for ExternalFixture {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[tokio::test]
+async fn attach_discovers_the_executable_and_detaches_without_harming_the_process() {
+    let fixture = Scenario::fixture("attach");
+    let mut child = ExternalFixture::spawn(&fixture);
+
+    let process = child.process_id();
+    let debugger = timeout(Duration::from_secs(5), Debugger::attach(process))
+        .await
+        .expect("attach timed out")
+        .expect("attach debugger");
+    let handle = debugger.handle();
+    assert_eq!(handle.executable(), fixture);
+    let snapshot = handle.snapshot().await.expect("attached snapshot");
+    assert!(matches!(
+        snapshot.inferior,
+        InferiorState::Stopped {
+            process_id,
+            all_threads_stopped: true,
+            reason: StopReason::Attach,
+            ..
+        } if process_id == process
+    ));
+
+    handle
+        .add_breakpoint(uscope::BreakpointSpec::Function(
+            "attach_breakpoint".to_owned(),
+        ))
+        .await
+        .expect("set attached breakpoint");
+    child.release();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), handle.resume())
+            .await
+            .expect("attached resume timed out")
+            .expect("resume attached process"),
+        StopReason::Breakpoint { .. }
+    ));
+
+    debugger.shutdown().await.expect("detach debugger");
+    let status = child.wait();
+    assert_eq!(status.code(), Some(23));
+}
+
+#[tokio::test]
+async fn attach_stops_and_detaches_every_existing_native_thread() {
+    let mut child = ExternalFixture::spawn(&Scenario::fixture("attach-threads"));
+    let debugger = Debugger::attach(child.process_id())
+        .await
+        .expect("attach multithreaded fixture");
+    let snapshot = debugger
+        .handle()
+        .snapshot()
+        .await
+        .expect("attached snapshot");
+    assert_eq!(snapshot.threads.len(), 3);
+    assert!(
+        snapshot
+            .threads
+            .iter()
+            .all(|thread| { matches!(thread.state, ThreadState::Stopped { .. }) })
+    );
+
+    child.release();
+    debugger.shutdown().await.expect("detach every thread");
+    assert_eq!(child.wait().code(), Some(0));
+}
+
+#[tokio::test]
+async fn shutdown_interrupts_and_detaches_a_running_attached_process() {
+    let mut child = Command::new(Scenario::fixture("spin"))
+        .spawn()
+        .expect("spawn spinning target");
+    let process = ProcessId::new(u64::from(child.id()));
+    let debugger = Debugger::attach(process)
+        .await
+        .expect("attach spinning target");
+    let handle = debugger.handle();
+    let snapshot = handle.snapshot().await.expect("attached snapshot");
+    let (stop_id, process_id) = match snapshot.inferior {
+        InferiorState::Stopped {
+            stop_id,
+            process_id,
+            ..
+        } => (stop_id, process_id),
+        other => panic!("expected attached stop, got {other:?}"),
+    };
+    handle
+        .continue_execution(
+            stop_id,
+            ResumeScope::Process(process_id),
+            ExceptionDisposition::Pass,
+        )
+        .await
+        .expect("continue attached target");
+    assert!(matches!(
+        handle.snapshot().await.expect("running snapshot").inferior,
+        InferiorState::Running { .. }
+    ));
+    assert_eq!(
+        handle.pause().await.expect("pause attached target"),
+        StopReason::Pause
+    );
+    let paused = handle.snapshot().await.expect("paused snapshot");
+    let (stop_id, process_id) = match paused.inferior {
+        InferiorState::Stopped {
+            stop_id,
+            process_id,
+            ..
+        } => (stop_id, process_id),
+        other => panic!("expected paused attached target, got {other:?}"),
+    };
+    handle
+        .continue_execution(
+            stop_id,
+            ResumeScope::Process(process_id),
+            ExceptionDisposition::Pass,
+        )
+        .await
+        .expect("continue attached target after pause");
+
+    debugger.shutdown().await.expect("detach running target");
+    kill(
+        Pid::from_raw(i32::try_from(child.id()).expect("target PID fits i32")),
+        Signal::SIGKILL,
+    )
+    .expect("kill detached target");
+    assert!(child.wait().expect("reap detached target").code().is_none());
+}
+
+#[tokio::test]
+async fn attach_reads_an_unlinked_executable_through_proc() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("uscope-attach-{unique}"));
+    fs::create_dir(&directory).expect("create fixture directory");
+    let executable = directory.join("deleted-fixture");
+    fs::copy(Scenario::fixture("attach"), &executable).expect("copy attach fixture");
+    let mut child = ExternalFixture::spawn(&executable);
+    fs::remove_file(&executable).expect("unlink running fixture");
+
+    let debugger = Debugger::attach(child.process_id())
+        .await
+        .expect("attach through proc executable link");
+    assert!(
+        debugger
+            .handle()
+            .executable()
+            .to_string_lossy()
+            .ends_with(" (deleted)")
+    );
+    child.release();
+    debugger.shutdown().await.expect("detach deleted fixture");
+    assert_eq!(child.wait().code(), Some(23));
+    fs::remove_dir(&directory).expect("remove fixture directory");
+}
+
+#[tokio::test]
+async fn invalid_or_missing_attach_targets_fail_without_starting_a_session() {
+    assert!(matches!(
+        Debugger::attach(ProcessId::new(0)).await,
+        Err(Error::InvalidProcessId(0))
+    ));
+    assert!(matches!(
+        Debugger::attach(ProcessId::new(i32::MAX as u64)).await,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+    ));
+
+    let debugger = Debugger::new(Scenario::fixture("basic"))
+        .expect("failed attach did not retain the Linux session lease");
+    debugger
+        .shutdown()
+        .await
+        .expect("shutdown replacement debugger");
+}
 
 fn available_value(state: &VariableState) -> &uscope::VariableValue {
     match state {

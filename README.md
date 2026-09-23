@@ -19,7 +19,16 @@ just
 
 # start the debugger
 just run build/test-programs/basic
+
+# attach to a running process; uscope discovers its executable through /proc
+just dev --command cargo run -- --attach PID
 ```
+
+Use `--attach PID` or `-p PID` to attach to an existing process. `uscope` reads the
+running executable through `/proc/PID/exe`, stops every native thread, and detaches
+without terminating the process when the debugger exits. If automatic executable
+discovery is unavailable, pass its path as the positional `EXECUTABLE` argument
+alongside `--attach`.
 
 At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
 Use `x <runtime-address> [byte-count]` to display a bounded target-memory range as hexadecimal bytes and printable ASCII. The default is 64 bytes and the CLI accepts at most 8192 bytes per command. Reads return the readable contiguous prefix and identify the first inaccessible address instead of discarding bytes read before a mapping boundary.

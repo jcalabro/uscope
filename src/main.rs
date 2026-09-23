@@ -35,9 +35,13 @@ const HEX_DUMP_BYTES_PER_LINE: usize = 16;
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
-    /// Native executable to debug.
-    #[arg(value_name = "EXECUTABLE")]
-    executable: PathBuf,
+    /// Native executable to launch, or an attach fallback when used with --attach.
+    #[arg(value_name = "EXECUTABLE", required_unless_present = "attach")]
+    executable: Option<PathBuf>,
+
+    /// Attach to an existing process. The executable is discovered through /proc by default.
+    #[arg(short = 'p', long, value_name = "PID")]
+    attach: Option<u64>,
 
     /// Execute commands from a file. May be repeated.
     #[arg(short = 'c', long = "command", value_name = "FILE")]
@@ -263,12 +267,30 @@ async fn main() -> ExitCode {
 }
 
 async fn run_debugger(args: &Args, renderers: Renderers) -> Result<()> {
-    let debugger = Debugger::new(&args.executable).with_context(|| {
-        format!(
-            "failed to initialize debugger for {}",
-            args.executable.display()
-        )
-    })?;
+    let debugger = if let Some(pid) = args.attach {
+        let process = uscope::ProcessId::new(pid);
+        match args.executable.as_ref() {
+            Some(executable) => Debugger::attach_with_executable(process, executable).await,
+            None => Debugger::attach(process).await,
+        }
+        .with_context(|| {
+            if args.executable.is_some() {
+                format!("failed to attach to process {pid}")
+            } else {
+                format!(
+                    "failed to attach to process {pid}; if automatic /proc executable discovery is unavailable, pass EXECUTABLE explicitly"
+                )
+            }
+        })?
+    } else {
+        let executable = args
+            .executable
+            .as_ref()
+            .expect("clap requires an executable unless --attach is present");
+        Debugger::new(executable).with_context(|| {
+            format!("failed to initialize debugger for {}", executable.display())
+        })?
+    };
 
     let handle = debugger.handle();
     let result = run_with_interrupts(&handle, args, renderers).await;
@@ -307,12 +329,20 @@ async fn run_with_interrupts(
 
 async fn run(debugger: &DebuggerHandle, args: &Args, renderers: Renderers) -> Result<()> {
     if !args.batch {
+        let action = if args.attach.is_some() {
+            "attached to"
+        } else {
+            "debugging"
+        };
         println!(
-            "{} {}",
-            renderers.stdout.paint(Role::Success, "debugging"),
+            "{} {}{}",
+            renderers.stdout.paint(Role::Success, action),
             renderers
                 .stdout
-                .paint(Role::Metadata, debugger.executable().display())
+                .paint(Role::Metadata, debugger.executable().display()),
+            args.attach
+                .map(|pid| format!(" (process {pid})"))
+                .unwrap_or_default()
         );
         io::stdout().flush()?;
     }
@@ -2060,6 +2090,10 @@ fn format_breakpoint_spec(spec: &BreakpointSpec) -> String {
 
 fn format_stop(reason: StopReason, renderer: Renderer) -> String {
     match reason {
+        StopReason::Attach => format!(
+            "{} after attaching",
+            renderer.paint(Role::Current, "stopped")
+        ),
         StopReason::Breakpoint { address } => {
             format!(
                 "{} at breakpoint {}",
