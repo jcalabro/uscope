@@ -82,15 +82,20 @@ struct DwarfUnwindInfo {
 }
 
 pub fn load(path: &Path, image_id: crate::ModuleImageId) -> Result<DebugInfo> {
-    load_debug_info(path, image_id).map_err(Error::debug_info)
+    let data: Arc<[u8]> = fs::read(path)?.into();
+    load_debug_info(path, &data, image_id).map_err(Error::debug_info)
+}
+
+pub fn load_bytes(path: &Path, data: &[u8], image_id: crate::ModuleImageId) -> Result<DebugInfo> {
+    load_debug_info(path, data, image_id).map_err(Error::debug_info)
 }
 
 fn load_debug_info(
     path: &Path,
+    data: &[u8],
     image_id: crate::ModuleImageId,
 ) -> std::result::Result<DebugInfo, DwarfError> {
-    let data = fs::read(path)?;
-    let object = object::File::parse(data.as_slice())?;
+    let object = object::File::parse(data)?;
     let target = target_description(&object)?;
 
     let sections = DwarfSections::load(

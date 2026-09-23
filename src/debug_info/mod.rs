@@ -168,8 +168,8 @@ pub trait UnwindInfo: Send + Sync {
     ) -> std::result::Result<UnwindStep, UnwindTermination>;
 }
 
-pub fn load(path: &Path) -> Result<DebugInfo> {
-    dwarf::load(path, crate::ModuleImageId::new(0))
+pub fn load_bytes(path: &Path, data: &[u8]) -> Result<DebugInfo> {
+    dwarf::load_bytes(path, data, crate::ModuleImageId::new(0))
 }
 
 #[expect(

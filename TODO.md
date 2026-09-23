@@ -2,7 +2,6 @@
 
 ## Debugger core
 
-- [ ] Add attach-to-process support.
 - [ ] Add core dump debugging.
 - [ ] Add remote debugging support.
 - [ ] Add watchpoints.

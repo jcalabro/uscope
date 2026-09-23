@@ -93,6 +93,12 @@ pub enum Error {
 
     #[error("the inferior is already running")]
     AlreadyRunning,
+    #[error("process identifier {0} is invalid")]
+    InvalidProcessId(u64),
+    #[error("could not determine a stable identity for process {0}")]
+    ProcessIdentityUnavailable(u64),
+    #[error("the target process changed while the debugger was attaching")]
+    TargetChangedDuringAttach,
     #[error("the inferior has not been launched")]
     NotRunning,
     #[error("the inferior is not stopped")]

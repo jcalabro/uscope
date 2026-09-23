@@ -138,7 +138,7 @@ pub struct FramePresentation {
     pub hidden_inline_frames: u32,
 }
 
-/// Identifies an inferior process within a debug session.
+/// Identifies an inferior process; local attach accepts an operating-system process ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessId(u64);
 
@@ -272,6 +272,8 @@ pub enum ExitStatus {
 /// Describes why execution stopped or completed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
+    /// The debugger established an initial coherent stop after attaching.
+    Attach,
     /// Execution reached an installed breakpoint.
     Breakpoint { address: VirtualAddress },
     /// A stepping operation completed.
@@ -376,6 +378,12 @@ pub enum DebuggerEvent {
         process_id: ProcessId,
         execution_id: ExecutionId,
     },
+    InferiorAttached {
+        /// The state revision containing the attached inferior.
+        revision: u64,
+        /// The attached process.
+        process_id: ProcessId,
+    },
     InferiorContinued {
         revision: u64,
         process_id: ProcessId,
@@ -416,6 +424,12 @@ pub enum DebuggerEvent {
         execution_id: Option<ExecutionId>,
         status: ExitStatus,
     },
+    InferiorDetached {
+        /// The state revision after detaching.
+        revision: u64,
+        /// The process released from debugger control.
+        process_id: ProcessId,
+    },
     BreakpointsChanged {
         revision: u64,
     },
@@ -437,6 +451,10 @@ pub enum Request {
     },
     Launch {
         reply: Reply<ExecutionId>,
+    },
+    Attach {
+        process_id: ProcessId,
+        reply: Reply<StopId>,
     },
     Continue {
         process_id: ProcessId,

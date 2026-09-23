@@ -81,8 +81,39 @@ pub struct DebuggerHandle {
 impl Debugger {
     /// Creates a debugger for a native executable and starts its backend controller.
     pub fn new(executable: impl AsRef<Path>) -> Result<Self> {
-        let executable = Arc::new(executable.as_ref().canonicalize()?);
-        let debug_info = debug_info::load(&executable)?;
+        let executable = backend::executable_source(executable.as_ref())?;
+        Self::from_executable_source(executable)
+    }
+
+    /// Attaches to an existing local process and returns once it is coherently stopped.
+    pub async fn attach(process: ProcessId) -> Result<Self> {
+        let executable = backend::process_executable_source(process)?;
+        Self::attach_from_source(process, executable).await
+    }
+
+    /// Attaches using an explicitly supplied executable when automatic discovery is unavailable.
+    pub async fn attach_with_executable(
+        process: ProcessId,
+        executable: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let executable = backend::executable_source(executable.as_ref())?;
+        Self::attach_from_source(process, executable).await
+    }
+
+    async fn attach_from_source(
+        process: ProcessId,
+        executable: backend::ExecutableSource,
+    ) -> Result<Self> {
+        let debugger = Self::from_executable_source(executable)?;
+        if let Err(error) = debugger.handle.attach_process(process).await {
+            let _ = debugger.shutdown().await;
+            return Err(error);
+        }
+        Ok(debugger)
+    }
+
+    fn from_executable_source(executable: backend::ExecutableSource) -> Result<Self> {
+        let debug_info = debug_info::load_bytes(&executable.display_path, &executable.data)?;
         let module_image = Arc::clone(&debug_info.image);
         let (requests, receiver) = mpsc::channel(REQUEST_CAPACITY);
         let shutdown_permit = requests
@@ -91,7 +122,7 @@ impl Debugger {
             .expect("new request channel has shutdown capacity");
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
         let controller = backend::spawn_controller(
-            Arc::clone(&executable),
+            executable,
             Arc::clone(&module_image),
             debug_info.unwind,
             debug_info.variables,
@@ -102,7 +133,7 @@ impl Debugger {
 
         Ok(Self {
             handle: DebuggerHandle {
-                executable,
+                executable: Arc::new(module_image.path().to_owned()),
                 module_image,
                 requests,
                 events,
@@ -193,6 +224,12 @@ impl DebuggerHandle {
     /// Launches the inferior and acknowledges once native execution has started.
     pub async fn launch(&self) -> Result<ExecutionId> {
         self.request(|reply| Request::Launch { reply }).await
+    }
+
+    /// Attaches to an existing process and returns its coherent initial stop.
+    pub async fn attach_process(&self, process_id: ProcessId) -> Result<StopId> {
+        self.request(|reply| Request::Attach { process_id, reply })
+            .await
     }
 
     /// Launches the inferior and waits until that execution stops or exits.

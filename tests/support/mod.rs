@@ -253,13 +253,15 @@ impl Scenario {
             DebuggerEvent::StateChanged { revision }
             | DebuggerEvent::BreakpointsChanged { revision }
             | DebuggerEvent::InferiorLaunched { revision, .. }
+            | DebuggerEvent::InferiorAttached { revision, .. }
             | DebuggerEvent::InferiorContinued { revision, .. }
             | DebuggerEvent::InferiorStopped { revision, .. }
             | DebuggerEvent::ThreadStarted { revision, .. }
             | DebuggerEvent::ThreadExited { revision, .. }
             | DebuggerEvent::ModuleLoaded { revision, .. }
             | DebuggerEvent::ModuleUnloaded { revision, .. }
-            | DebuggerEvent::InferiorExited { revision, .. } => *revision,
+            | DebuggerEvent::InferiorExited { revision, .. }
+            | DebuggerEvent::InferiorDetached { revision, .. } => *revision,
         };
         if revision < self.last_revision {
             self.fail(&format!(
