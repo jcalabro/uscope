@@ -26,13 +26,14 @@
     in {
       devShells.${system}.default = pkgs.mkShell {
         NIX_HARDENING_ENABLE = "";
-        RUSTFLAGS = "-C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
+        RUSTFLAGS = "-C link-arg=-fuse-ld=mold -C link-arg=-Wl,--dynamic-linker=${pkgs.glibc}/lib/ld-linux-x86-64.so.2";
         packages = with pkgs; [
           rust
           cargo-fuzz
           cargo-nextest
           just
           gcc
+          mold
           clang
           gdb
           lldb
