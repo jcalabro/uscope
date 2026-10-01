@@ -138,6 +138,10 @@ struct DwarfUnwindInfo {
     endian: RunTimeEndian,
     address_size: u8,
     bases: BaseAddresses,
+    /// Code the Go toolchain compiled, sorted by start address. Go's calling
+    /// convention lets a callee overwrite registers the System V ABI
+    /// preserves.
+    go_code: Vec<AddressRange<ImageAddress>>,
 }
 
 pub fn load(path: &Path, image_id: crate::ModuleImageId) -> Result<DebugInfo> {
@@ -226,7 +230,8 @@ fn load_debug_info(
         &mut source_files,
         &mut source_file_ids,
     )?;
-    let unwind = Arc::new(load_unwind_info(&object, target)?);
+    let go_code = go_code_ranges(&dwarf, &catalog)?;
+    let unwind = Arc::new(load_unwind_info(&object, target, go_code)?);
     let symbols = super::elf::load_symbols(&object, &unwind.function_ranges());
     let image = Arc::new(
         ModuleImage::new(
@@ -254,6 +259,39 @@ fn load_debug_info(
         unwind,
         variables: variables.info,
     })
+}
+
+/// Returns the code ranges of every unit written in Go, merged and sorted
+/// by start address. A Go unit's ranges also cover the assembly functions
+/// of its package, which follow the same calling convention.
+fn go_code_ranges<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    catalog: &UnitCatalog<'data>,
+) -> std::result::Result<Vec<AddressRange<ImageAddress>>, DwarfError> {
+    let mut ranges = Vec::new();
+    for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
+        let mut entries = unit.entries();
+        let Some(root) = entries.next_dfs()? else {
+            continue;
+        };
+        if matches!(
+            root.attr_value(gimli::DW_AT_language),
+            Some(gimli::AttributeValue::Language(gimli::DW_LANG_Go))
+        ) {
+            ranges.extend(die_code_ranges(dwarf, unit, root, &catalog.code)?);
+        }
+    }
+    // Merging lets a lookup check only the last range starting at or before
+    // an address.
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<AddressRange<ImageAddress>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        match merged.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => merged.push(range),
+        }
+    }
+    Ok(merged)
 }
 
 fn type_signature_index(
@@ -324,6 +362,7 @@ fn image_address_range(
 fn load_unwind_info(
     object: &object::File<'_>,
     target: TargetDescription,
+    go_code: Vec<AddressRange<ImageAddress>>,
 ) -> std::result::Result<DwarfUnwindInfo, DwarfError> {
     let section = object.section_by_name(".eh_frame");
     let eh_frame = section
@@ -365,6 +404,7 @@ fn load_unwind_info(
             PointerWidth::Bits64 => 8,
         },
         bases,
+        go_code,
     })
 }
 
@@ -381,6 +421,17 @@ impl DwarfUnwindInfo {
         debug_frame.set_address_size(self.address_size);
         collect_function_ranges(&debug_frame, &self.bases, &mut ranges);
         ranges
+    }
+
+    /// Returns the registers the function at `address` may overwrite
+    /// without saving them, by the calling convention it follows.
+    fn call_clobbered_registers(&self, address: ImageAddress) -> &'static [u16] {
+        let after = self.go_code.partition_point(|range| range.start <= address);
+        if after > 0 && self.go_code[after - 1].contains(address) {
+            &X86_64_GO_CALL_CLOBBERED_REGISTERS
+        } else {
+            &X86_64_SYSV_CALL_CLOBBERED_REGISTERS
+        }
     }
 }
 
@@ -438,14 +489,29 @@ impl UnwindInfo for DwarfUnwindInfo {
     ) -> std::result::Result<UnwindStep, UnwindTermination> {
         let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
         eh_frame.set_address_size(self.address_size);
-        let result = unwind_from_section(&eh_frame, &self.bases, address, registers, memory);
+        let clobbered = self.call_clobbered_registers(address);
+        let result = unwind_from_section(
+            &eh_frame,
+            &self.bases,
+            address,
+            registers,
+            clobbered,
+            memory,
+        );
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
 
         let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
         debug_frame.set_address_size(self.address_size);
-        unwind_from_section(&debug_frame, &self.bases, address, registers, memory)
+        unwind_from_section(
+            &debug_frame,
+            &self.bases,
+            address,
+            registers,
+            clobbered,
+            memory,
+        )
     }
 }
 
@@ -475,6 +541,7 @@ fn unwind_from_section<'data, S>(
     bases: &BaseAddresses,
     address: ImageAddress,
     registers: &RegisterFile,
+    clobbered: &[u16],
     memory: &mut dyn MemoryReader,
 ) -> std::result::Result<UnwindStep, UnwindTermination>
 where
@@ -492,11 +559,11 @@ where
         .map_err(|error| cfi_error(error, address))?;
     let cfa = cfa_from_rule(row.cfa(), registers, section, encoding, memory)?;
     let mut caller = registers.clone();
-    // A callee may overwrite every register the ABI does not preserve across
-    // calls, so the caller's value survives only where the row says where
-    // it was saved. Keeping the callee's value would present it as the
-    // caller's.
-    for register in X86_64_CALL_CLOBBERED_REGISTERS {
+    // A callee may overwrite every register its calling convention does not
+    // preserve across calls, so the caller's value survives only where the
+    // row says where it was saved. Keeping the callee's value would present
+    // it as the caller's.
+    for &register in clobbered {
         if !row
             .registers()
             .any(|(described, _)| described.0 == register)
@@ -524,9 +591,19 @@ where
 /// The DWARF numbers of the registers the x86-64 System V ABI lets a callee
 /// overwrite: rax, rdx, rcx, rsi, rdi, r8-r11, rflags, the SSE registers,
 /// and the x87 stack.
-const X86_64_CALL_CLOBBERED_REGISTERS: [u16; 34] = [
+const X86_64_SYSV_CALL_CLOBBERED_REGISTERS: [u16; 34] = [
     0, 1, 2, 4, 5, 8, 9, 10, 11, 49, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
     32, 33, 34, 35, 36, 37, 38, 39, 40,
+];
+
+/// The DWARF numbers of the registers Go code may overwrite: every System V
+/// call-clobbered register, and rbx, rbp, and r12-r15 too. Go's register ABI
+/// preserves none of them across calls, assembly functions may overwrite the
+/// goroutine pointer in r14, and Go's call-frame information does not
+/// describe the frame pointer a prologue saves.
+const X86_64_GO_CALL_CLOBBERED_REGISTERS: [u16; 40] = [
+    0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 49, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
 ];
 
 fn cfa_from_rule<'data, S>(

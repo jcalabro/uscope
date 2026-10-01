@@ -1734,7 +1734,7 @@ fn frame_commands_move_through_caller_frames_and_show_their_source() {
         "build/test-programs/frames-gcc-o0.core",
         "--batch",
         "--eval",
-        "frame 4",
+        "frame 5",
         "--eval",
         "print depth",
         "--eval",
@@ -1762,7 +1762,7 @@ fn frame_commands_move_through_caller_frames_and_show_their_source() {
     let innermost_call = frames_line("return frames_keep(seed) + level;");
 
     let frame = line_index(&lines, 0, |line| {
-        line.starts_with("#4 ")
+        line.starts_with("#5 ")
             && line.contains(" in frames_recurse at ")
             && line.ends_with(&recursive_call)
     });
@@ -1770,22 +1770,22 @@ fn frame_commands_move_through_caller_frames_and_show_their_source() {
     let marked = line_index(&lines, frame, |line| line.starts_with("=> "));
     assert!(lines[marked].contains("frames_recurse(depth - 1, seed)"));
     let depth = line_index(&lines, marked, |line| line == "(int64_t) depth = 1");
-    let up = line_index(&lines, depth, |line| line.starts_with("#5 "));
+    let up = line_index(&lines, depth, |line| line.starts_with("#6 "));
     let depth = line_index(&lines, up, |line| line == "(int64_t) depth = 2");
     let location = line_index(&lines, depth, |line| {
         line.starts_with("frames_recurse at ") && line.contains(&format!("{recursive_call} (0x"))
     });
     let down = line_index(&lines, location, |line| {
-        line.starts_with("#3 ") && line.ends_with(&format!("frames.c:{innermost_call}"))
+        line.starts_with("#4 ") && line.ends_with(&format!("frames.c:{innermost_call}"))
     });
     let listed = line_index(&lines, down + 1, |line| {
         line.starts_with(&format!("=> {innermost_call} |"))
     });
-    let shown = line_index(&lines, listed, |line| line.starts_with("#3 "));
+    let shown = line_index(&lines, listed, |line| line.starts_with("#4 "));
     let outermost = line_index(&lines, shown, |line| {
-        line.starts_with("#10 ") && line.contains(" in _start+0x")
+        line.starts_with("#11 ") && line.contains(" in _start+0x")
     });
-    line_index(&lines, outermost, |line| line.starts_with("#9 "));
+    line_index(&lines, outermost, |line| line.starts_with("#10 "));
 }
 
 #[test]
@@ -1795,7 +1795,7 @@ fn frame_commands_report_the_ends_of_the_stack() {
         (&["up 100", "up"], "the outermost frame is selected"),
         (
             &["frame 99"],
-            "frame 99 does not exist; the backtrace has 11 frames",
+            "frame 99 does not exist; the backtrace has 12 frames",
         ),
         (&["up x"], "usage: up [count]"),
     ] {
@@ -1820,7 +1820,7 @@ fn disassembly_and_finish_follow_the_selected_frame() {
         "build/test-programs/frames-gcc-o0.core",
         "--batch",
         "--eval",
-        "frame 2",
+        "frame 3",
         "--eval",
         "disassemble",
     ]));
@@ -1830,7 +1830,7 @@ fn disassembly_and_finish_follow_the_selected_frame() {
     });
     let marked = line_index(&lines, function, |line| line.starts_with("=> "));
     assert!(
-        lines[marked - 1].contains("call") && lines[marked - 1].ends_with("<frames_leaf>"),
+        lines[marked - 1].contains("call") && lines[marked - 1].ends_with("<frames_relay>"),
         "{stdout}"
     );
 
@@ -1845,7 +1845,7 @@ fn disassembly_and_finish_follow_the_selected_frame() {
         "--eval",
         "run",
         "--eval",
-        "frame 4",
+        "frame 5",
         "--eval",
         "finish",
         "--eval",

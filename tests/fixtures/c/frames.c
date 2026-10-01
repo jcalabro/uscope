@@ -48,15 +48,25 @@ FRAMES_OPAQUE int64_t frames_leaf(int64_t token) {
     return leaf_local + 1;
 }
 
+// Uses no callee-saved register, so its callers' values in those registers
+// are unchanged here and its call-frame information never mentions them.
+FRAMES_OPAQUE int64_t frames_relay(int64_t value) {
+    int64_t result = frames_leaf(value);
+    // Keeps the call out of tail position.
+    __asm__ volatile("");
+    return result;
+}
+
 static inline __attribute__((always_inline)) int64_t frames_inlined(int64_t base) {
     int64_t doubled = base * 2;
-    int64_t result = frames_leaf(doubled);
+    int64_t result = frames_relay(doubled);
     return result + doubled;
 }
 
 FRAMES_OPAQUE int64_t frames_keep(int64_t seed) {
     // Live across the call, so optimized builds keep it in a callee-saved
-    // register that frames_leaf saves and overwrites.
+    // register that frames_relay leaves alone and frames_leaf saves and
+    // overwrites.
     int64_t kept = seed * 3 + 1;
     // Optimized builds describe the pointer by its target instead of an
     // address, so dereferencing it reads `kept` in this frame.
