@@ -1,16 +1,17 @@
 mod support;
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use object::read::elf::{FileHeader as _, ProgramHeader as _};
-use object::{Endianness, elf};
+use object::{Endianness, Object as _, elf};
 use uscope::{
     Backtrace, CoreDumpInfo, CoreDumpOptions, CoreModuleState, Debugger, Error,
     ExceptionDisposition, InferiorState, LoadedModuleSnapshot, MemoryReadCompletion,
     ModuleIdentity, ProcessId, RegisterRole, ResumeScope, ScalarValue, StepKind, StopId,
-    StopReason, ThreadState, UnwindTermination, Variable, VariableState, VariableUnavailableReason,
-    VariableValue, VirtualAddress,
+    StopReason, ThreadState, TlsUnavailableReason, UnwindTermination, Variable, VariableState,
+    VariableUnavailableReason, VariableValue, VirtualAddress,
 };
 
 use support::{Scenario, ScratchDir};
@@ -28,9 +29,9 @@ fn open_core(name: &str) -> Scenario {
 
 fn options(core_name: &str, executable: Option<&str>, allow: bool) -> CoreDumpOptions {
     CoreDumpOptions {
-        core: core(core_name),
         executable: executable.map(Scenario::fixture),
         allow_module_mismatch: allow,
+        ..CoreDumpOptions::new(core(core_name))
     }
 }
 
@@ -1030,9 +1031,9 @@ fn edited_executable(test: &str, edit: impl FnOnce(&mut Vec<u8>)) -> (ScratchDir
 
 fn with_executable(executable: &Path, allow: bool) -> CoreDumpOptions {
     CoreDumpOptions {
-        core: core("crash-gcc-o0-segv.core"),
         executable: Some(executable.to_owned()),
         allow_module_mismatch: allow,
+        ..CoreDumpOptions::new(core("crash-gcc-o0-segv.core"))
     }
 }
 
@@ -1164,9 +1165,12 @@ async fn invalid_core_files_fail_with_typed_errors() {
         ),
         "overlap",
     );
+    // An explicit executable that does not exist is an error naming it, not
+    // a missing module.
     assert!(matches!(
         Debugger::open_core(&options("crash-gcc-o0-segv.core", Some("absent-executable"), false)),
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        Err(Error::CoreModuleRead { path, error })
+            if path.ends_with("absent-executable") && error.kind() == std::io::ErrorKind::NotFound
     ));
 }
 
@@ -1318,4 +1322,506 @@ async fn core_reads_keep_backed_bytes_that_end_inside_a_word() {
         }
     );
     scenario.shutdown().await;
+}
+
+/// A core written on "another machine": at its recorded paths this machine
+/// holds different builds of the executable and library, and no C library.
+const FOREIGN_CORE: &str = "core-foreign/crash.core";
+
+fn foreign(update: impl FnOnce(&mut CoreDumpOptions)) -> CoreDumpOptions {
+    let mut options = CoreDumpOptions::new(core(FOREIGN_CORE));
+    update(&mut options);
+    options
+}
+
+/// Each module the foreign core records, with the file that was there when
+/// the dump was written.
+async fn foreign_modules() -> Vec<(PathBuf, PathBuf)> {
+    let scenario = Scenario::open_core(
+        "foreign modules",
+        &foreign(|options| options.allow_module_mismatch = true),
+    );
+    let info = core_info(&scenario);
+    scenario.shutdown().await;
+    info.modules
+        .iter()
+        .map(|module| {
+            let recorded = PathBuf::clone(&module.recorded_path);
+            let original = if recorded
+                .parent()
+                .is_some_and(|directory| directory.ends_with("core-foreign"))
+            {
+                match recorded.file_name().and_then(|name| name.to_str()) {
+                    Some("libc.so.6") => core("libc-foreign.so.6"),
+                    Some(name) => core(name),
+                    None => panic!("unnamed module {}", recorded.display()),
+                }
+            } else {
+                recorded.clone()
+            };
+            (recorded, original)
+        })
+        .collect()
+}
+
+fn named(modules: &[(PathBuf, PathBuf)], prefix: &str) -> (PathBuf, PathBuf) {
+    modules
+        .iter()
+        .find(|(recorded, _)| {
+            recorded
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(prefix))
+        })
+        .unwrap_or_else(|| panic!("no {prefix} module in {modules:#?}"))
+        .clone()
+}
+
+/// Copies `source` to where `recorded` lies under `root`.
+fn place(root: &Path, recorded: &Path, source: &Path) -> PathBuf {
+    let target = root.join(recorded.strip_prefix("/").expect("absolute recorded path"));
+    fs::create_dir_all(target.parent().expect("recorded parent")).expect("create directories");
+    fs::copy(source, &target).expect("copy module");
+    target
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        write!(text, "{byte:02x}").expect("writing to a String cannot fail");
+        text
+    })
+}
+
+fn build_id(path: &Path) -> Vec<u8> {
+    let data = fs::read(path).expect("read module");
+    object::File::parse(data.as_slice())
+        .expect("parse module")
+        .build_id()
+        .expect("read build-id")
+        .expect("module has a build-id")
+        .to_vec()
+}
+
+/// The canonical path of the file loaded for the recorded image whose file
+/// name is `name`, and how it was proven.
+fn loaded_from(info: &CoreDumpInfo, name: &str) -> (PathBuf, ModuleIdentity) {
+    info.modules
+        .iter()
+        .find_map(|module| match &module.state {
+            CoreModuleState::Loaded {
+                module: loaded,
+                identity,
+            } if module.recorded_path.file_name() == Some(name.as_ref()) => {
+                Some((PathBuf::clone(&loaded.path), identity.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{name} is not loaded: {info:#?}"))
+}
+
+#[tokio::test]
+async fn cores_from_other_machines_load_every_module_from_a_sysroot() {
+    // This machine has a different build at the executable's recorded path.
+    let host = Debugger::open_core(&foreign(|_| {}));
+    assert!(
+        matches!(&host, Err(Error::CoreModuleMismatch { path, detail })
+            if path.ends_with("core-foreign/crash-gcc-o0") && detail.contains("build-id")),
+        "{:?}",
+        host.err()
+    );
+
+    let modules = foreign_modules().await;
+    let (interpreter, interpreter_file) = named(&modules, "ld-linux");
+    let root = ScratchDir::new("foreign-sysroot");
+    for (recorded, original) in modules
+        .iter()
+        .filter(|(recorded, _)| *recorded != interpreter)
+    {
+        place(root.path(), recorded, original);
+    }
+    let options = foreign(|options| options.sysroot = Some(root.path().to_owned()));
+
+    // A module the sysroot lacks is missing even though this machine has a
+    // file at its recorded path; its recorded build-id says what to supply.
+    let partial = Scenario::open_core("partial sysroot", &options);
+    let info = core_info(&partial);
+    let missing = info
+        .modules
+        .iter()
+        .find(|module| *module.recorded_path == interpreter)
+        .expect("the interpreter is recorded");
+    assert_eq!(missing.state, CoreModuleState::Missing);
+    assert_eq!(
+        missing.build_id.as_deref(),
+        Some(build_id(&interpreter_file).as_slice())
+    );
+    partial.shutdown().await;
+
+    place(root.path(), &interpreter, &interpreter_file);
+    let scenario = Scenario::open_core("sysroot", &options);
+    let info = core_info(&scenario);
+    let canonical_root = root.path().canonicalize().expect("canonical sysroot");
+    assert_eq!(info.modules.len(), modules.len());
+    for module in info.modules.iter() {
+        let CoreModuleState::Loaded {
+            module: loaded,
+            identity,
+        } = &module.state
+        else {
+            panic!(
+                "{} is not loaded: {info:#?}",
+                module.recorded_path.display()
+            );
+        };
+        assert_eq!(identity, &ModuleIdentity::BuildId);
+        assert!(loaded.path.starts_with(&canonical_root), "{loaded:?}");
+        // The build-id read from the dump's saved header is the file's own,
+        // as an independent ELF reader sees it.
+        assert_eq!(
+            module.build_id.as_deref(),
+            Some(build_id(&loaded.path).as_slice())
+        );
+    }
+
+    let (_, names) = named_frames(&scenario).await;
+    assert_eq!(names[0].1.as_deref(), Some("crash_segv"));
+    assert_eq!(names[1].1.as_deref(), Some("main"));
+    assert_eq!(names[2].0, "libc.so.6", "{names:#?}");
+    assert_eq!(signed(&variable(&scenario, "depth").await), 3);
+    // Saved data is the dump's own; the rebuilt library on this machine
+    // would say 123.
+    assert_eq!(
+        signed(&variable(&scenario, "crash_library_value").await),
+        321
+    );
+    // Unsaved read-only data comes from the verified sysroot file.
+    let message = scenario
+        .operation(
+            "message",
+            scenario.handle().runtime_address("crash_message"),
+        )
+        .await;
+    let read = scenario
+        .operation("read message", scenario.handle().read_memory(message, 29))
+        .await;
+    assert_eq!(read.completion, MemoryReadCompletion::Complete);
+    assert_eq!(&*read.bytes, b"post-mortem read-only message");
+    // libthread_db reads the version of the other machine's C library from
+    // its sysroot file and refuses it, which must be reported as such.
+    let tls = variable(&scenario, "crash_tls").await;
+    assert!(
+        matches!(&tls.state, VariableState::Unavailable(
+            VariableUnavailableReason::TlsUnavailable(TlsUnavailableReason::LookupFailed(reason))
+        ) if reason.contains("TD_VERSION")),
+        "{tls:?}"
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_sysroot_copy_of_this_machine_serves_tls_through_its_c_library() {
+    let name = "crash-gcc-o0-segv.core";
+    let recorded = open_core(name);
+    let info = core_info(&recorded);
+    recorded.shutdown().await;
+    let root = ScratchDir::new("host-sysroot");
+    for module in info.modules.iter() {
+        place(root.path(), &module.recorded_path, &module.recorded_path);
+    }
+
+    let scenario = Scenario::open_core(
+        "host sysroot",
+        &CoreDumpOptions {
+            sysroot: Some(root.path().to_owned()),
+            ..CoreDumpOptions::new(core(name))
+        },
+    );
+    let canonical_root = root.path().canonicalize().expect("canonical sysroot");
+    let (libc, identity) = loaded_from(&core_info(&scenario), "libc.so.6");
+    assert!(libc.starts_with(&canonical_root), "{}", libc.display());
+    assert_eq!(identity, ModuleIdentity::BuildId);
+    // libthread_db finds the C library's symbols and version through the
+    // sysroot file, then the TLS blocks in the dump.
+    assert_eq!(signed(&variable(&scenario, "crash_tls").await), 100);
+    assert_eq!(signed(&variable(&scenario, "crash_library_tls").await), 654);
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn sysroot_paths_resolve_inside_the_sysroot_and_open_only_regular_files() {
+    let modules = foreign_modules().await;
+    let (executable, executable_file) = named(&modules, "crash-gcc-o0");
+    let (library, library_file) = named(&modules, "libcrash.so");
+    let (libc, _) = named(&modules, "libc.so.6");
+    let root = ScratchDir::new("escaping-sysroot");
+    for (recorded, original) in &modules {
+        place(root.path(), recorded, original);
+    }
+    // Each link would reach this machine's different build if it escaped the
+    // sysroot; inside it, the link reaches the original.
+    let decoy = |name: &str| core(name).strip_prefix("/").expect("absolute").to_owned();
+    let absolute = place(root.path(), &core("libcrash-rebuilt.so"), &library_file);
+    let relative = place(root.path(), &core("crash-gcc-o0-rebuilt"), &executable_file);
+    let library_link = root.path().join(library.strip_prefix("/").unwrap());
+    fs::remove_file(&library_link).unwrap();
+    std::os::unix::fs::symlink(
+        Path::new("/").join(decoy("libcrash-rebuilt.so")),
+        &library_link,
+    )
+    .unwrap();
+    let executable_link = root.path().join(executable.strip_prefix("/").unwrap());
+    fs::remove_file(&executable_link).unwrap();
+    let climb = "../".repeat(executable.components().count() + 4);
+    std::os::unix::fs::symlink(
+        Path::new(&climb).join(decoy("crash-gcc-o0-rebuilt")),
+        &executable_link,
+    )
+    .unwrap();
+
+    let options = foreign(|options| options.sysroot = Some(root.path().to_owned()));
+    let scenario = Scenario::open_core("links in sysroot", &options);
+    let info = core_info(&scenario);
+    assert_eq!(
+        loaded_from(&info, "crash-gcc-o0"),
+        (relative.canonicalize().unwrap(), ModuleIdentity::BuildId)
+    );
+    assert_eq!(
+        loaded_from(&info, "libcrash.so"),
+        (absolute.canonicalize().unwrap(), ModuleIdentity::BuildId)
+    );
+    scenario.shutdown().await;
+
+    // Recorded paths can name devices and FIFOs, which are never opened for
+    // reading, so this fails at once instead of blocking.
+    let libc_path = root.path().join(libc.strip_prefix("/").unwrap());
+    fs::remove_file(&libc_path).unwrap();
+    nix::unistd::mkfifo(&libc_path, nix::sys::stat::Mode::S_IRWXU).expect("create FIFO");
+    let fifo = Debugger::open_core(&options);
+    assert!(
+        matches!(&fifo, Err(Error::CoreModuleRead { path, error })
+            if path.ends_with("core-foreign/libc.so.6")
+                && error.kind() == std::io::ErrorKind::InvalidInput),
+        "{:?}",
+        fifo.err()
+    );
+
+    // Search locations that are not directories fail before any lookup.
+    let not_directory = foreign(|options| options.sysroot = Some(core("crash-gcc-o0")));
+    assert!(matches!(
+        Debugger::open_core(&not_directory),
+        Err(Error::CoreModuleSearch { path, error })
+            if path.ends_with("crash-gcc-o0") && error.kind() == std::io::ErrorKind::NotADirectory
+    ));
+    let absent = foreign(|options| options.module_paths = vec![root.path().join("absent")]);
+    assert!(matches!(
+        Debugger::open_core(&absent),
+        Err(Error::CoreModuleSearch { path, error })
+            if path.ends_with("absent") && error.kind() == std::io::ErrorKind::NotFound
+    ));
+    let not_directory = foreign(|options| options.module_paths = vec![core("crash-gcc-o0")]);
+    assert!(matches!(
+        Debugger::open_core(&not_directory),
+        Err(Error::CoreModuleSearch { error, .. })
+            if error.kind() == std::io::ErrorKind::NotADirectory
+    ));
+}
+
+#[tokio::test]
+async fn module_paths_supply_files_by_name_then_by_build_id() {
+    let modules = foreign_modules().await;
+    let (_, executable_file) = named(&modules, "crash-gcc-o0");
+    let (_, library_file) = named(&modules, "libcrash.so");
+    let (_, libc_file) = named(&modules, "libc.so.6");
+    let canonical = |path: &Path| path.canonicalize().expect("canonical path");
+
+    // Files named as recorded are found after this machine's mismatched ones.
+    let by_name = ScratchDir::new("module-path-names");
+    for (name, source) in [
+        ("crash-gcc-o0", &executable_file),
+        ("libcrash.so", &library_file),
+        ("libc.so.6", &libc_file),
+    ] {
+        fs::copy(source, by_name.path().join(name)).unwrap();
+    }
+    let scenario = Scenario::open_core(
+        "module path names",
+        &foreign(|options| options.module_paths = vec![by_name.path().to_owned()]),
+    );
+    let info = core_info(&scenario);
+    for name in ["crash-gcc-o0", "libcrash.so", "libc.so.6"] {
+        assert_eq!(
+            loaded_from(&info, name),
+            (
+                canonical(&by_name.path().join(name)),
+                ModuleIdentity::BuildId
+            )
+        );
+    }
+    // Modules this machine does hold stay at their recorded paths.
+    let (pthread, identity) = loaded_from(&info, "libpthread.so.0");
+    assert!(!pthread.starts_with(canonical(by_name.path())));
+    assert_eq!(identity, ModuleIdentity::BuildId);
+    assert_eq!(
+        signed(&variable(&scenario, "crash_library_value").await),
+        321
+    );
+    let (_, names) = named_frames(&scenario).await;
+    assert_eq!(names[2].0, "libc.so.6", "{names:#?}");
+    scenario.shutdown().await;
+
+    // Renamed files are found by build-id, past a same-named different build
+    // and a same-named directory.
+    let renamed = ScratchDir::new("module-path-build-ids");
+    for (name, source) in [
+        ("app", &executable_file),
+        ("libcrash.so.1", &library_file),
+        ("libc-other.so", &libc_file),
+        ("libcrash.so", &core("libcrash-rebuilt.so")),
+    ] {
+        fs::copy(source, renamed.path().join(name)).unwrap();
+    }
+    fs::create_dir(renamed.path().join("crash-gcc-o0")).unwrap();
+    let scenario = Scenario::open_core(
+        "module path build-ids",
+        &foreign(|options| {
+            options.module_paths = vec![renamed.path().to_owned()];
+        }),
+    );
+    let info = core_info(&scenario);
+    for (recorded, file) in [
+        ("crash-gcc-o0", "app"),
+        ("libcrash.so", "libcrash.so.1"),
+        ("libc.so.6", "libc-other.so"),
+    ] {
+        assert_eq!(
+            loaded_from(&info, recorded),
+            (
+                canonical(&renamed.path().join(file)),
+                ModuleIdentity::BuildId
+            )
+        );
+    }
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn unproven_module_files_are_errors_only_at_their_recorded_paths() {
+    let modules = foreign_modules().await;
+    let (_, executable_file) = named(&modules, "crash-gcc-o0");
+    let (_, libc_file) = named(&modules, "libc.so.6");
+
+    // With no proven file, the earliest equally usable candidate explains
+    // the failure, and is the one used once mismatches are allowed.
+    let decoys = ScratchDir::new("module-path-decoys");
+    fs::copy(&executable_file, decoys.path().join("crash-gcc-o0")).unwrap();
+    fs::copy(&libc_file, decoys.path().join("libc.so.6")).unwrap();
+    fs::copy(
+        core("libcrash-rebuilt.so"),
+        decoys.path().join("libcrash.so"),
+    )
+    .unwrap();
+    let strict = foreign(|options| options.module_paths = vec![decoys.path().to_owned()]);
+    let refused = Debugger::open_core(&strict);
+    assert!(
+        matches!(&refused, Err(Error::CoreModuleMismatch { path, .. })
+            if path.ends_with("core-foreign/libcrash.so")),
+        "{:?}",
+        refused.err()
+    );
+    let allowed = Scenario::open_core(
+        "module path mismatch",
+        &CoreDumpOptions {
+            allow_module_mismatch: true,
+            ..strict
+        },
+    );
+    let (path, identity) = loaded_from(&core_info(&allowed), "libcrash.so");
+    assert!(
+        path.ends_with("core-foreign/libcrash.so"),
+        "{}",
+        path.display()
+    );
+    assert!(matches!(identity, ModuleIdentity::Mismatched { .. }));
+    assert_eq!(
+        signed(&variable(&allowed, "crash_library_value").await),
+        321
+    );
+    allowed.shutdown().await;
+
+    // A file that searching found only shares the name, so where nothing is
+    // at the recorded path, a mismatched one leaves the module missing
+    // unless mismatches are allowed.
+    let root = ScratchDir::new("sysroot-without-library");
+    for (recorded, original) in &modules {
+        if !recorded.ends_with("libcrash.so") {
+            place(root.path(), recorded, original);
+        }
+    }
+    let searched = foreign(|options| {
+        options.sysroot = Some(root.path().to_owned());
+        options.module_paths = vec![decoys.path().to_owned()];
+    });
+    let scenario = Scenario::open_core("searched mismatch", &searched);
+    let library = core_info(&scenario)
+        .modules
+        .iter()
+        .find(|module| module.recorded_path.ends_with("libcrash.so"))
+        .expect("library is recorded")
+        .state
+        .clone();
+    assert_eq!(library, CoreModuleState::Missing);
+    assert!(matches!(
+        scenario.handle().variable("crash_library_tls").await,
+        Err(Error::VariableNotFound(_))
+    ));
+    scenario.shutdown().await;
+    let allowed = Scenario::open_core(
+        "allowed searched mismatch",
+        &CoreDumpOptions {
+            allow_module_mismatch: true,
+            ..searched
+        },
+    );
+    let (path, identity) = loaded_from(&core_info(&allowed), "libcrash.so");
+    assert_eq!(
+        path,
+        decoys.path().join("libcrash.so").canonicalize().unwrap()
+    );
+    assert!(matches!(identity, ModuleIdentity::Mismatched { .. }));
+    allowed.shutdown().await;
+}
+
+#[tokio::test]
+async fn executables_found_nowhere_name_the_search_and_the_build_id_to_supply() {
+    let modules = foreign_modules().await;
+    let (_, executable_file) = named(&modules, "crash-gcc-o0");
+    // An executable found nowhere names what was searched and what to supply.
+    let empty = ScratchDir::new("empty-sysroot");
+    let unavailable = Debugger::open_core(&foreign(|options| {
+        options.sysroot = Some(empty.path().to_owned());
+        options.module_paths = vec![empty.path().to_owned()];
+    }));
+    let expected_build_id = hex(&build_id(&executable_file));
+    assert!(
+        matches!(&unavailable, Err(Error::CoreExecutableUnavailable(message))
+            if message.contains(&format!("(build-id {expected_build_id}) does not exist under the sysroot"))
+                && message.contains("no module path holds a file matching it")),
+        "{:?}",
+        unavailable.err()
+    );
+    // An explicit executable needs no search.
+    let explicit = Scenario::open_core(
+        "explicit executable with sysroot",
+        &foreign(|options| {
+            options.sysroot = Some(empty.path().to_owned());
+            options.executable = Some(executable_file.clone());
+        }),
+    );
+    assert_eq!(
+        loaded_from(&core_info(&explicit), "crash-gcc-o0"),
+        (
+            executable_file.canonicalize().unwrap(),
+            ModuleIdentity::BuildId
+        )
+    );
+    explicit.shutdown().await;
 }

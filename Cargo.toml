@@ -47,7 +47,7 @@ cpp_demangle = "0.5"
 gimli = "0.34"
 iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "gas", "instr_info", "intel", "std"] }
 lzma-rs = "0.3"
-nix = { version = "0.31", features = ["ptrace", "process", "signal", "uio"] }
+nix = { version = "0.31", features = ["fs", "ptrace", "process", "signal", "uio"] }
 object = { version = "0.39", features = ["read"] }
 rustc-demangle = "0.1"
 

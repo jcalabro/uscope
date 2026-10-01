@@ -149,6 +149,16 @@ pub enum Error {
     CoreModuleUnverified { path: PathBuf },
     #[error("{path} cannot be placed at the image recorded in the core dump: {detail}")]
     CoreModuleUnplaceable { path: PathBuf, detail: String },
+    #[error("cannot search {path} for core dump modules: {error}")]
+    CoreModuleSearch {
+        path: PathBuf,
+        error: std::io::Error,
+    },
+    #[error("failed to read core dump module {path}: {error}")]
+    CoreModuleRead {
+        path: PathBuf,
+        error: std::io::Error,
+    },
     #[error("a post-mortem core dump cannot execute, be modified, or hold breakpoints")]
     PostMortemTarget,
 

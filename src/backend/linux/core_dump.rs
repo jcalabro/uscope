@@ -42,6 +42,11 @@ const MAX_NOTE_BYTES: u64 = 256 * 1024 * 1024;
 const PAGE_SIZE: u64 = 4096;
 const ELF_MAGIC: [u8; 4] = *b"\x7fELF";
 const CONTENT_COMPARE_CHUNK: u64 = 64 * 1024;
+/// Build-id notes sit in an image's first page; larger note segments are
+/// skipped rather than read.
+const MAX_BUILD_ID_NOTES: u64 = 64 * 1024;
+/// The most saved header bytes read to find an image's recorded build-id.
+const MAX_RECORDED_HEADER: u64 = 64 * 1024;
 
 pub(super) const AT_PHDR: u64 = 3;
 pub(super) const AT_ENTRY: u64 = 9;
@@ -719,6 +724,50 @@ pub(super) fn is_elf(data: &[u8]) -> bool {
     data.starts_with(&ELF_MAGIC)
 }
 
+/// The GNU build-id of a 64-bit little-endian ELF image. Only the header,
+/// program headers, and note segments are read, so a large file costs a few
+/// small reads.
+pub(super) fn elf_build_id<'data, R: ReadRef<'data>>(data: R) -> Option<&'data [u8]> {
+    let header = elf::FileHeader64::<LittleEndian>::parse(data).ok()?;
+    let endian = header.endian().ok()?;
+    for segment in header.program_headers(endian, data).ok()? {
+        if segment.p_type(endian) != elf::PT_NOTE || segment.p_filesz(endian) > MAX_BUILD_ID_NOTES {
+            continue;
+        }
+        let Ok(Some(mut notes)) = segment.notes(endian, data) else {
+            continue;
+        };
+        while let Ok(Some(note)) = notes.next() {
+            if note.name() == elf::ELF_NOTE_GNU
+                && note.n_type(endian) == elf::NT_GNU_BUILD_ID
+                && !note.desc().is_empty()
+            {
+                return Some(note.desc());
+            }
+        }
+    }
+    None
+}
+
+/// The build-id the dump saved in an image's header pages, which names the
+/// file to look for before any candidate is read.
+///
+/// The image's first mapping begins at file offset zero, so its saved bytes
+/// are the file's leading bytes and file offsets address them directly.
+pub(super) fn recorded_build_id(
+    core: &CoreDump,
+    image: &ImageMappings,
+) -> Result<Option<Vec<u8>>, CoreError> {
+    let first = &image.mappings[0];
+    let Some((offset, run)) = core.saved_run(first.start) else {
+        return Ok(None);
+    };
+    let length = run.min(first.end - first.start).min(MAX_RECORDED_HEADER);
+    let mut header = vec![0; usize::try_from(length).expect("the header bound fits usize")];
+    core.source.read_exact_at(&mut header, offset)?;
+    Ok(elf_build_id(header.as_slice()).map(<[u8]>::to_vec))
+}
+
 /// How strongly a module file is known to match a dumped image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ImageEvidence {
@@ -1118,8 +1167,10 @@ pub(super) fn fuzz(data: &[u8]) {
     let images = image_mappings(&core.files);
     let data: Arc<[u8]> = Arc::from(data);
     let mut backings = Vec::new();
+    let _ = elf_build_id(data.as_ref());
     for image in &images {
         let _ = saved_header(&core, image);
+        let _ = recorded_build_id(&core, image);
         if let Ok(ImageVerification::Placed { read_only, .. }) = verify_image(&core, image, &data) {
             backings.extend(FileBacking::for_image(image, &data, &read_only));
         }
@@ -1828,5 +1879,79 @@ mod tests {
         ));
         core.read_saved(0x13000, &mut saved).unwrap();
         assert_eq!(saved, [0xb2; 4]);
+    }
+
+    /// An image's first page: an ELF header whose one note segment, at
+    /// `note_offset`, holds a GNU build-id.
+    fn image_header(note_offset: usize, build_id: &[u8]) -> Vec<u8> {
+        let note_size = 16 + build_id.len();
+        let mut bytes = page(0);
+        bytes.resize(bytes.len().max(note_offset + note_size), 0);
+        put(&mut bytes, 0, b"\x7fELF\x02\x01\x01");
+        put(&mut bytes, 16, &elf::ET_DYN.to_le_bytes());
+        put(&mut bytes, 18, &elf::EM_X86_64.to_le_bytes());
+        put(&mut bytes, 20, &1_u32.to_le_bytes());
+        put(&mut bytes, 32, &(ELF_HEADER_SIZE as u64).to_le_bytes());
+        put(
+            &mut bytes,
+            52,
+            &u16::try_from(ELF_HEADER_SIZE).unwrap().to_le_bytes(),
+        );
+        put(
+            &mut bytes,
+            54,
+            &u16::try_from(PROGRAM_HEADER_SIZE).unwrap().to_le_bytes(),
+        );
+        put(&mut bytes, 56, &1_u16.to_le_bytes());
+        let header = ELF_HEADER_SIZE;
+        put(&mut bytes, header, &elf::PT_NOTE.to_le_bytes());
+        put(&mut bytes, header + 8, &(note_offset as u64).to_le_bytes());
+        put(&mut bytes, header + 32, &(note_size as u64).to_le_bytes());
+        put(&mut bytes, header + 48, &4_u64.to_le_bytes());
+        put(&mut bytes, note_offset, &4_u32.to_le_bytes());
+        put(
+            &mut bytes,
+            note_offset + 4,
+            &u32::try_from(build_id.len()).unwrap().to_le_bytes(),
+        );
+        put(
+            &mut bytes,
+            note_offset + 8,
+            &elf::NT_GNU_BUILD_ID.to_le_bytes(),
+        );
+        put(&mut bytes, note_offset + 12, b"GNU\0");
+        put(&mut bytes, note_offset + 16, build_id);
+        bytes
+    }
+
+    #[test]
+    fn recorded_build_ids_come_only_from_saved_bytes_of_the_first_mapping() {
+        const BUILD_ID: &[u8] = &[0xab; 20];
+        let recorded = |saved: Vec<u8>, mapping_end: u64| {
+            let mut notes = minimal_notes();
+            notes.push(note(
+                elf::NT_FILE,
+                file_note(PAGE_SIZE, &[(0x10000, mapping_end, 0, "/lib/a.so")]),
+            ));
+            let load = Load {
+                address: 0x10000,
+                memory: 0x2000,
+                saved,
+            };
+            let core = parse_bytes(core_bytes(&notes, &[load])).unwrap();
+            recorded_build_id(&core, &image_mappings(&core.files)[0]).unwrap()
+        };
+        assert_eq!(
+            recorded(image_header(0x200, BUILD_ID), 0x12000).as_deref(),
+            Some(BUILD_ID)
+        );
+        // File offsets address saved bytes only within the first mapping,
+        // and only bytes the dump kept.
+        let late = image_header(0x1800, BUILD_ID);
+        assert_eq!(recorded(late.clone(), 0x12000).as_deref(), Some(BUILD_ID));
+        assert_eq!(recorded(late.clone(), 0x11000), None);
+        assert_eq!(recorded(late[..0x1000].to_vec(), 0x12000), None);
+        assert_eq!(recorded(Vec::new(), 0x12000), None);
+        assert_eq!(recorded(page(0x7f), 0x12000), None);
     }
 }

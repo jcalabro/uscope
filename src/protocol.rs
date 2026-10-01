@@ -353,29 +353,47 @@ numeric_id!(
     "Identifies an inferior process; local attach accepts an operating-system process ID."
 );
 
-/// Selects a post-mortem core dump and how its module files are trusted.
+/// Selects a post-mortem core dump and how its module files are found and
+/// trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreDumpOptions {
     /// The ELF core file to open.
     pub core: PathBuf,
-    /// The executable that produced the dump. By default the path recorded in
-    /// the dump is used.
+    /// The executable that produced the dump. By default it is found like
+    /// every other recorded module.
     pub executable: Option<PathBuf>,
+    /// A directory holding the files of the machine that wrote the dump.
+    ///
+    /// Recorded paths are looked up inside it instead of on this machine.
+    /// Every path, including absolute symbolic links and `..`, resolves as if
+    /// the sysroot were `/`, so no file outside it is used.
+    pub sysroot: Option<PathBuf>,
+    /// Directories searched, in order, for module files missing from the
+    /// recorded path or not matching the dump: first for a file with the
+    /// recorded file name, then for any file with the recorded build-id.
+    ///
+    /// A file found here is used only when proven to match, unless module
+    /// mismatches are allowed, so a directory may hold unrelated builds.
+    pub module_paths: Vec<PathBuf>,
     /// Use module files that the dump cannot prove match its recorded images.
     ///
-    /// Such modules contribute debug metadata only: their file contents never
-    /// substitute for memory the dump did not save. A file that cannot be
-    /// placed at its recorded image is still refused, since relocating it
-    /// would be a guess.
+    /// A proven file is always preferred, then one the dump cannot verify,
+    /// then one that provably differs. Such modules contribute debug metadata
+    /// only: their file contents never substitute for memory the dump did not
+    /// save. A file that cannot be placed at its recorded image is still
+    /// refused, since relocating it would be a guess.
     pub allow_module_mismatch: bool,
 }
 
 impl CoreDumpOptions {
-    /// Opens `core` with its recorded executable and strict module identity.
+    /// Opens `core` with the files at its recorded paths on this machine and
+    /// strict module identity.
     pub fn new(core: impl Into<PathBuf>) -> Self {
         Self {
             core: core.into(),
             executable: None,
+            sysroot: None,
+            module_paths: Vec::new(),
             allow_module_mismatch: false,
         }
     }
@@ -420,8 +438,8 @@ pub enum CoreModuleState {
         /// The evidence that the file is the recorded image.
         identity: ModuleIdentity,
     },
-    /// No file exists at the recorded path; the image's frames and memory
-    /// outside the dump stay unavailable.
+    /// No file was found for the image; its frames and memory outside the
+    /// dump stay unavailable.
     Missing,
 }
 
@@ -432,6 +450,9 @@ pub struct CoreModule {
     pub recorded_path: Arc<PathBuf>,
     /// The image's lowest mapped address at dump time.
     pub start: VirtualAddress,
+    /// The GNU build-id the dump saved for the image, which identifies the
+    /// file to supply when it is missing or mismatched.
+    pub build_id: Option<Arc<[u8]>>,
     /// Whether and how a file was loaded for the image.
     pub state: CoreModuleState,
 }

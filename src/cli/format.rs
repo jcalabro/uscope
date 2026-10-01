@@ -548,8 +548,8 @@ pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
                 .map_or("none recorded", |exception| exception.description.as_ref())
         ),
     ];
-    for module in core.modules.iter() {
-        let state = match &module.state {
+    for core_module in core.modules.iter() {
+        let state = match &core_module.state {
             CoreModuleState::Loaded { module, identity } => {
                 let identity = match identity {
                     ModuleIdentity::BuildId => "verified by build-id".to_owned(),
@@ -563,17 +563,39 @@ pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
                         renderer.paint(Role::Warning, "unverified").to_string()
                     }
                 };
-                format!("module {} {identity}", module.module.id)
+                // A file found under a sysroot or in a module path is named.
+                let file = if module.path == core_module.recorded_path {
+                    String::new()
+                } else {
+                    format!(" from {}", module.path.display())
+                };
+                format!("module {}{file} {identity}", module.module.id)
             }
-            CoreModuleState::Missing => renderer.paint(Role::Warning, "missing").to_string(),
+            CoreModuleState::Missing => {
+                let build_id = core_module
+                    .build_id
+                    .as_deref()
+                    .map(|build_id| format!(" (build-id {})", build_id_text(build_id)))
+                    .unwrap_or_default();
+                renderer
+                    .paint(Role::Warning, format!("missing{build_id}"))
+                    .to_string()
+            }
         };
         lines.push(format!(
             "  {} {} {state}",
-            renderer.paint(Role::Metadata, module.start),
-            module.recorded_path.display()
+            renderer.paint(Role::Metadata, core_module.start),
+            core_module.recorded_path.display()
         ));
     }
     lines.join("\n")
+}
+
+fn build_id_text(build_id: &[u8]) -> String {
+    build_id.iter().fold(String::new(), |mut text, byte| {
+        write!(text, "{byte:02x}").expect("writing to a String cannot fail");
+        text
+    })
 }
 
 /// Describes every module whose file is not proven to match the dump.
@@ -582,8 +604,13 @@ pub fn core_module_warnings(core: &CoreDumpInfo) -> Vec<String> {
         .iter()
         .filter_map(|module| match &module.state {
             CoreModuleState::Missing => Some(format!(
-                "{} is missing; its frames and unsaved memory are unavailable",
-                module.recorded_path.display()
+                "{} is missing; its frames and unsaved memory are unavailable{}",
+                module.recorded_path.display(),
+                module
+                    .build_id
+                    .as_deref()
+                    .map(|build_id| format!(" (build-id {})", build_id_text(build_id)))
+                    .unwrap_or_default()
             )),
             CoreModuleState::Loaded {
                 module: loaded,

@@ -27,6 +27,35 @@ use super::{mapped_module_load_bias, module_mappings};
 use crate::VirtualAddress;
 
 const TD_OK: c_int = 0;
+const TD_TLSDEFER: c_int = 21;
+const TD_VERSION: c_int = 22;
+/// `td_err_e` names, indexed by value.
+const TD_ERRORS: [&str; 24] = [
+    "TD_OK",
+    "TD_ERR",
+    "TD_NOTHR",
+    "TD_NOSV",
+    "TD_NOLWP",
+    "TD_BADPH",
+    "TD_BADTH",
+    "TD_BADSH",
+    "TD_BADTA",
+    "TD_BADKEY",
+    "TD_NOMSG",
+    "TD_NOFPREGS",
+    "TD_NOLIBTHREAD",
+    "TD_NOEVENT",
+    "TD_NOCAPAB",
+    "TD_DBERR",
+    "TD_NOAPLIC",
+    "TD_NOTSD",
+    "TD_MALLOC",
+    "TD_PARTIALREG",
+    "TD_NOXREGS",
+    "TD_TLSDEFER",
+    "TD_VERSION",
+    "TD_NOTLS",
+];
 const PS_OK: c_int = 0;
 const PS_ERR: c_int = 1;
 const PS_BADLID: c_int = 3;
@@ -112,7 +141,11 @@ impl<'a> Agent<'a> {
         // libthread_db's own state; callers hold `THREAD_DB`.
         let initialized = unsafe { td_init() };
         if initialized != TD_OK {
-            return Err(format!("libthread_db initialization failed with {initialized}").into());
+            return Err(format!(
+                "libthread_db initialization failed with {}",
+                td_error(initialized)
+            )
+            .into());
         }
         // SAFETY: both pointers are valid for writes for the duration of the
         // call. libthread_db retains the process pointer, which stays valid
@@ -120,7 +153,11 @@ impl<'a> Agent<'a> {
         // until after td_ta_delete.
         let created = unsafe { td_ta_new((&raw mut *process).cast(), &raw mut raw) };
         if created != TD_OK || raw.is_null() {
-            return Err(format!("libthread_db agent creation failed with {created}").into());
+            return Err(format!(
+                "libthread_db agent creation failed with {}",
+                td_error(created)
+            )
+            .into());
         }
         Ok(Self {
             _process: process,
@@ -155,7 +192,7 @@ pub(super) fn tls_address(
     // the process represented by the agent.
     let mapped = unsafe { td_ta_map_lwp2thr(agent.raw, thread.as_raw(), &raw mut handle) };
     if mapped != TD_OK {
-        return Err(format!("libthread_db LWP lookup failed with {mapped}").into());
+        return Err(format!("libthread_db LWP lookup failed with {}", td_error(mapped)).into());
     }
     let mut address = ptr::null_mut();
     let link_map = usize::try_from(link_map.get())
@@ -166,11 +203,28 @@ pub(super) fn tls_address(
     let resolved =
         unsafe { td_thr_tls_get_addr(&raw const handle, link_map, offset, &raw mut address) };
     if resolved != TD_OK || address.is_null() {
-        return Err(format!("libthread_db TLS lookup failed with {resolved}").into());
+        return Err(format!("libthread_db TLS lookup failed with {}", td_error(resolved)).into());
     }
     Ok(VirtualAddress::new(
         u64::try_from(address.addr()).expect("x86-64 pointer address fits u64"),
     ))
+}
+
+/// Names a `td_err_e` result and explains the failures that describe the
+/// inferior rather than the debugger.
+fn td_error(code: c_int) -> String {
+    let name = usize::try_from(code)
+        .ok()
+        .and_then(|index| TD_ERRORS.get(index))
+        .map_or_else(|| format!("error {code}"), |name| (*name).to_owned());
+    let explanation = match code {
+        // libthread_db only reads a C library of its own version, so a core
+        // dump from another machine usually has none.
+        TD_VERSION => "the inferior's C library is not the version of the debugger's libthread_db",
+        TD_TLSDEFER => "the thread has not allocated the module's TLS block",
+        _ => return name,
+    };
+    format!("{name}: {explanation}")
 }
 
 fn with_process<T>(
