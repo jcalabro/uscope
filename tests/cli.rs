@@ -1258,3 +1258,34 @@ fn wait_for_running_executable(pid: u32, executable: &Path) {
         thread::sleep(Duration::from_millis(10));
     }
 }
+
+fn uscope(arguments: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(arguments)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run uscope")
+}
+
+#[test]
+fn backtraces_name_source_files_from_each_frames_own_module() {
+    let stdout = assert_success(uscope(&[
+        "build/test-programs/module-frames-gcc-o0",
+        "--batch",
+        "--eval",
+        "break module_callback",
+        "--eval",
+        "run",
+        "--eval",
+        "bt",
+    ]));
+    let library_frame = stdout
+        .lines()
+        .find(|line| line.contains(" in dso_apply"))
+        .unwrap_or_else(|| panic!("no shared-library frame: {stdout}"));
+    assert!(
+        library_frame.ends_with("tests/fixtures/c/module-frames/library.c:6"),
+        "{library_frame}"
+    );
+}

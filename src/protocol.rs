@@ -501,6 +501,10 @@ pub enum Request {
     LoadedModules {
         reply: Reply<LoadedModuleSnapshot>,
     },
+    ModuleImage {
+        module: crate::ModuleId,
+        reply: Reply<Arc<crate::ModuleImage>>,
+    },
     StoppedLocation {
         stop_id: StopId,
         thread_id: ThreadId,

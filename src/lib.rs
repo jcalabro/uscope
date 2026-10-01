@@ -694,6 +694,13 @@ impl DebuggerHandle {
         self.request(|reply| Request::LoadedModules { reply }).await
     }
 
+    /// Returns the immutable debug metadata of one loaded module, such as the
+    /// module owning a backtrace frame.
+    pub async fn loaded_module_image(&self, module: ModuleId) -> Result<Arc<ModuleImage>> {
+        self.request(|reply| Request::ModuleImage { module, reply })
+            .await
+    }
+
     async fn variable_query(
         &self,
         query: VariableQuery,

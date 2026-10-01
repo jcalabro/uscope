@@ -7443,12 +7443,187 @@ async fn dwarf_cfi_unwinds_the_compiler_and_linker_matrix() {
             trace.frames.len() >= 4,
             "backtrace was truncated: {trace:?}"
         );
-        assert!(matches!(
+        // Unwinding continues through libc's start code to its undefined
+        // return address rather than stopping at the main image's boundary.
+        assert_eq!(
             trace.termination,
-            UnwindTermination::ModuleNotFound { .. }
-                | UnwindTermination::NoUnwindInfo { .. }
-                | UnwindTermination::Complete
+            UnwindTermination::Complete,
+            "unexpected {fixture} backtrace: {trace:?}"
+        );
+
+        scenario.shutdown().await;
+    }
+}
+
+/// Summarizes one backtrace frame as its owning module's file name and its
+/// function name, so cross-module assertions name both identities.
+fn frame_modules(
+    trace: &uscope::Backtrace,
+    modules: &uscope::LoadedModuleSnapshot,
+) -> Vec<(String, Option<String>)> {
+    trace
+        .frames
+        .iter()
+        .map(|frame| {
+            let module = frame.module.map_or_else(
+                || "?".to_owned(),
+                |id| {
+                    let record = modules
+                        .modules
+                        .iter()
+                        .find(|record| record.module.id == id)
+                        .unwrap_or_else(|| panic!("frame references unknown module {id:?}"));
+                    record
+                        .path
+                        .file_name()
+                        .expect("module path names a file")
+                        .to_string_lossy()
+                        .into_owned()
+                },
+            );
+            (
+                module,
+                frame
+                    .function
+                    .as_ref()
+                    .map(|function| function.name.to_string()),
+            )
+        })
+        .collect()
+}
+
+fn position_of(frames: &[(String, Option<String>)], module: &str, function: &str) -> usize {
+    frames
+        .iter()
+        .position(|(frame_module, name)| {
+            frame_module == module && name.as_deref() == Some(function)
+        })
+        .unwrap_or_else(|| panic!("no {module}:{function} frame in {frames:#?}"))
+}
+
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stopped process visits each cross-module unwind boundary in order"
+)]
+async fn backtraces_unwind_through_shared_libraries_and_libc() {
+    for fixture in [
+        "module-frames-gcc-o0",
+        "module-frames-clang-o2",
+        "module-frames-gcc-nopie",
+    ] {
+        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let comparator = scenario.add_breakpoint("compare_values").await;
+        scenario.add_breakpoint("module_callback").await;
+
+        // main -> sort_values -> libc qsort -> compare_values: the comparator's
+        // caller is described only by libc's own call-frame information.
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
         ));
+        let modules = scenario
+            .operation("modules", scenario.handle().loaded_modules())
+            .await;
+        let trace = scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await;
+        let frames = frame_modules(&trace, &modules);
+        assert_eq!(
+            frames[0],
+            (fixture.to_owned(), Some("compare_values".to_owned())),
+            "{fixture}: {frames:#?}"
+        );
+        let sort = position_of(&frames, fixture, "sort_values");
+        let main = position_of(&frames, fixture, "main");
+        assert!(sort < main, "{fixture}: {frames:#?}");
+        assert!(
+            frames[1..sort]
+                .iter()
+                .all(|(module, _)| module.starts_with("libc.so")),
+            "{fixture}: qsort frames must belong to libc: {frames:#?}"
+        );
+        assert!(
+            sort > 1,
+            "{fixture}: no libc frame was reconstructed: {frames:#?}"
+        );
+        // glibc's entry code declares the return address undefined, so a
+        // complete trace proves the walk crossed back through libc into _start.
+        assert_eq!(
+            trace.termination,
+            UnwindTermination::Complete,
+            "{fixture}: {frames:#?}"
+        );
+        assert!(
+            frames[main + 1..]
+                .iter()
+                .any(|(module, _)| module.starts_with("libc.so")),
+            "{fixture}: main's caller must be libc's start code: {frames:#?}"
+        );
+
+        // main -> dso_apply (shared library with DWARF) -> module_callback.
+        scenario.remove_breakpoint(comparator.id).await;
+        assert!(matches!(
+            scenario.resume_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let trace = scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await;
+        let frames = frame_modules(&trace, &modules);
+        assert_eq!(
+            frames[..3],
+            [
+                (fixture.to_owned(), Some("module_callback".to_owned())),
+                (
+                    "libmodule-frames.so".to_owned(),
+                    Some("dso_apply".to_owned())
+                ),
+                (fixture.to_owned(), Some("main".to_owned())),
+            ],
+            "{fixture}: {frames:#?}"
+        );
+        let library_source = trace.frames[1]
+            .source
+            .as_ref()
+            .unwrap_or_else(|| panic!("{fixture}: dso_apply frame has no source"));
+        assert!(
+            trace.frames[1].code_instance.is_some(),
+            "{fixture}: dso_apply frame lost its code instance"
+        );
+        assert_eq!(
+            library_source.line.get(),
+            6,
+            "{fixture}: {library_source:?}"
+        );
+        assert_eq!(trace.termination, UnwindTermination::Complete);
+
+        // abort() raises SIGABRT inside libc: the innermost frames have no
+        // main-image metadata, yet the walk must still reach the caller.
+        assert!(matches!(
+            scenario.resume_to_stop().await,
+            StopReason::Exception(exception) if exception.code == 6
+        ));
+        let trace = scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await;
+        let frames = frame_modules(&trace, &modules);
+        assert!(
+            frames[0].0.starts_with("libc.so"),
+            "{fixture}: SIGABRT must stop inside libc: {frames:#?}"
+        );
+        let caller = position_of(&frames, fixture, "abort_in_libc");
+        assert!(
+            caller < position_of(&frames, fixture, "main"),
+            "{fixture}: {frames:#?}"
+        );
+        assert!(
+            frames[..caller]
+                .iter()
+                .all(|(module, _)| module.starts_with("libc.so")),
+            "{fixture}: {frames:#?}"
+        );
+        assert_eq!(trace.termination, UnwindTermination::Complete);
 
         scenario.shutdown().await;
     }

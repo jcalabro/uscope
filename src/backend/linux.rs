@@ -357,6 +357,7 @@ enum InferiorOrigin {
 struct RuntimeModule {
     loaded: LoadedModule,
     image: Arc<ModuleImage>,
+    unwind: Arc<dyn UnwindInfo>,
     variables: Arc<dyn VariableInfo>,
     link_map: Option<VirtualAddress>,
 }
@@ -492,6 +493,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let main = RuntimeModule {
             loaded: LoadedModule::main(module_image.id(), 0),
             image: Arc::clone(&module_image),
+            unwind: Arc::clone(&unwind_info),
             variables: Arc::clone(&variable_info),
             link_map: None,
         };
@@ -616,6 +618,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Request::LoadedModules { reply } => {
                 let _ = reply.send(self.loaded_modules());
+            }
+            Request::ModuleImage { module, reply } => {
+                let _ = reply.send(
+                    self.modules
+                        .get(&module)
+                        .map(|module| Arc::clone(&module.image))
+                        .ok_or(Error::ModuleNotLoaded(module)),
+                );
             }
             Request::StoppedLocation {
                 stop_id,
@@ -2888,9 +2898,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             signal_frame: false,
         };
         let mut provider = DwarfCallerProvider {
-            unwind_info: self.unwind_info.as_ref(),
-            loaded_module: inferior.loaded_module,
-            module_image: &self.module_image,
+            modules: vec![self.main_unwind_module(inferior)],
             registers: x86_64_registers(native),
             memory: PtraceMemory {
                 ptrace: &self.ptrace,
@@ -2927,9 +2935,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             signal_frame: false,
         };
         let mut provider = DwarfCallerProvider {
-            unwind_info: self.unwind_info.as_ref(),
-            loaded_module: inferior.loaded_module,
-            module_image: &self.module_image,
+            modules: vec![self.main_unwind_module(inferior)],
             registers: x86_64_registers(native),
             memory: PtraceMemory {
                 ptrace: &self.ptrace,
@@ -2973,9 +2979,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             signal_frame: false,
         };
         let mut provider = DwarfCallerProvider {
-            unwind_info: self.unwind_info.as_ref(),
-            loaded_module: inferior.loaded_module,
-            module_image: &self.module_image,
+            modules: vec![self.main_unwind_module(inferior)],
             registers: x86_64_registers(native),
             memory: PtraceMemory {
                 ptrace: &self.ptrace,
@@ -3812,10 +3816,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             cfa: None,
             signal_frame: false,
         };
+        let modules = self.unwind_modules(inferior);
         let mut provider = DwarfCallerProvider {
-            unwind_info: self.unwind_info.as_ref(),
-            loaded_module: inferior.loaded_module,
-            module_image: &self.module_image,
+            modules: modules.clone(),
             registers,
             memory: PtraceMemory {
                 ptrace: &self.ptrace,
@@ -3823,19 +3826,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             },
             first: true,
         };
-        let module_image = Arc::clone(&self.module_image);
-        let loaded_module = inferior.loaded_module;
 
         let physical = collect_backtrace(
             debug_thread_id(pid),
             initial,
             &mut provider,
             |level, context| {
-                let lookup = frame_lookup_address(level, context);
-                let location = lookup
-                    .and_then(|lookup| loaded_module.image_address(lookup).ok())
-                    .filter(|address| module_image.contains_address(*address))
-                    .map(|address| module_image.locate(address));
+                let located = frame_lookup_address(level, context)
+                    .and_then(|lookup| unwind_module_for(&modules, lookup));
                 StackFrame::new(
                     level,
                     if context.signal_frame {
@@ -3843,20 +3841,45 @@ impl<P: LinuxTraceOps> Controller<P> {
                     } else {
                         FrameKind::Physical
                     },
-                    location.as_ref().map(|_| loaded_module.id),
+                    located.as_ref().map(|(module, _)| module.loaded.id),
                     context.instruction,
-                    location,
+                    located.map(|(module, address)| module.image.locate(address)),
                 )
             },
             DEFAULT_MAX_FRAMES,
         );
 
-        expand_inline_backtrace(
-            physical,
-            &self.module_image,
-            inferior.loaded_module,
-            &presentation,
-        )
+        expand_inline_backtrace(physical, &modules, &presentation)
+    }
+
+    /// The main executable's unwind context, used by stepping plans that are
+    /// deliberately limited to code described by the main image.
+    fn main_unwind_module<'a>(&'a self, inferior: &Inferior) -> UnwindModule<'a> {
+        UnwindModule {
+            loaded: inferior.loaded_module,
+            image: &self.module_image,
+            unwind: self.unwind_info.as_ref(),
+        }
+    }
+
+    /// Every loaded module's unwind context, beginning with the main image.
+    fn unwind_modules<'a>(&'a self, inferior: &Inferior) -> Vec<UnwindModule<'a>> {
+        let mut modules = vec![self.main_unwind_module(inferior)];
+        // After exec(2) the retained shared-library registry describes the
+        // previous program's address space, so only the main image is used.
+        if !inferior.exec_unsupported {
+            modules.extend(
+                self.modules
+                    .values()
+                    .filter(|module| module.loaded.id != inferior.loaded_module.id)
+                    .map(|module| UnwindModule {
+                        loaded: module.loaded,
+                        image: &module.image,
+                        unwind: module.unwind.as_ref(),
+                    }),
+            );
+        }
+        modules
     }
 
     fn registers(&self, stop_id: StopId, pid: Pid) -> Result<RegisterSnapshot> {
@@ -4704,6 +4727,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 RuntimeModule {
                     loaded,
                     image: debug.image,
+                    unwind: debug.unwind,
                     variables: debug.variables,
                     link_map: link_maps.get(&load_bias).copied(),
                 },
@@ -5212,8 +5236,7 @@ fn source_line_changed(start: Option<&SourceLocation>, current: Option<&SourceLo
 
 fn expand_inline_backtrace(
     physical: Backtrace,
-    module_image: &ModuleImage,
-    loaded_module: LoadedModule,
+    modules: &[UnwindModule<'_>],
     presentation: &FramePresentation,
 ) -> Result<Backtrace> {
     let mut frames = Vec::new();
@@ -5224,19 +5247,31 @@ fn expand_inline_backtrace(
             cfa: None,
             signal_frame: physical_frame.kind == FrameKind::Signal,
         };
-        let location = frame_lookup_address(physical_frame.level, &context)
-            .and_then(|address| loaded_module.image_address(address).ok())
-            .filter(|address| module_image.contains_address(*address))
-            .map(|address| module_image.locate(address));
-        let module = location.as_ref().map(|_| loaded_module.id);
-        let physical_source = if let Some(location) = &location
-            && let InlineFrameLookup::Unique(chain) = &location.inline_frames
-        {
-            let visible = if physical_frame.level == 0 {
-                presentation_visible_count(location, presentation)?
-            } else {
-                chain.instances.len()
-            };
+        let located = frame_lookup_address(physical_frame.level, &context)
+            .and_then(|address| unwind_module_for(modules, address));
+        let Some((frame_module, image_address)) = located else {
+            let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+            frames.push(StackFrame::new(
+                level,
+                physical_frame.kind,
+                None,
+                physical_frame.instruction,
+                None,
+            ));
+            continue;
+        };
+        let module_image = frame_module.image;
+        let location = module_image.locate(image_address);
+        let module = Some(frame_module.loaded.id);
+        let physical_source = if let InlineFrameLookup::Unique(chain) = &location.inline_frames {
+            // The stop presentation describes the main image only; innermost
+            // frames in other modules show their complete inline chain.
+            let visible =
+                if physical_frame.level == 0 && frame_module.loaded.id == modules[0].loaded.id {
+                    presentation_visible_count(&location, presentation)?
+                } else {
+                    chain.instances.len()
+                };
             let mut source = if visible < chain.instances.len() {
                 chain
                     .instances
@@ -5275,14 +5310,11 @@ fn expand_inline_backtrace(
             }
             source
         } else {
-            location
-                .as_ref()
-                .and_then(|location| location.source.clone())
+            location.source.clone()
         };
 
         let physical_instance = location
-            .as_ref()
-            .and_then(|location| location.physical_instance)
+            .physical_instance
             .and_then(|instance| module_image.code_instance(instance));
         let function = physical_instance
             .and_then(|instance| module_image.function(instance.function))
@@ -5573,10 +5605,34 @@ impl MemoryReader for PtraceMemory<'_> {
     }
 }
 
+/// One loaded module's address mapping, metadata, and call-frame information.
+#[derive(Clone, Copy)]
+struct UnwindModule<'a> {
+    loaded: LoadedModule,
+    image: &'a ModuleImage,
+    unwind: &'a dyn UnwindInfo,
+}
+
+/// Finds the module whose image describes `address`.
+///
+/// A process address space cannot map two images at one address, so the
+/// first describing module is the only one.
+fn unwind_module_for<'a>(
+    modules: &[UnwindModule<'a>],
+    address: VirtualAddress,
+) -> Option<(UnwindModule<'a>, ImageAddress)> {
+    modules.iter().find_map(|module| {
+        module
+            .loaded
+            .image_address(address)
+            .ok()
+            .filter(|image_address| module.image.contains_address(*image_address))
+            .map(|image_address| (*module, image_address))
+    })
+}
+
 struct DwarfCallerProvider<'a> {
-    unwind_info: &'a dyn UnwindInfo,
-    loaded_module: LoadedModule,
-    module_image: &'a ModuleImage,
+    modules: Vec<UnwindModule<'a>>,
     registers: RegisterFile,
     memory: PtraceMemory<'a>,
     first: bool,
@@ -5593,14 +5649,11 @@ impl CallerProvider for DwarfCallerProvider<'_> {
             VirtualAddress::new(address)
         };
         self.first = false;
-        let Ok(image_address) = self.loaded_module.image_address(lookup) else {
+        let Some((module, image_address)) = unwind_module_for(&self.modules, lookup) else {
             return CallerResult::Finished(UnwindTermination::ModuleNotFound { address: lookup });
         };
-        if !self.module_image.contains_address(image_address) {
-            return CallerResult::Finished(UnwindTermination::ModuleNotFound { address: lookup });
-        }
-        let step = match self
-            .unwind_info
+        let step = match module
+            .unwind
             .unwind(image_address, &self.registers, &mut self.memory)
         {
             Ok(step) => step,

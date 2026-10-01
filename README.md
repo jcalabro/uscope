@@ -44,6 +44,7 @@ Every inspected value has an explicit state: available, unavailable for a typed 
 | Go 1.26 `gc` | Scalar parameters and locals in a `-N -l` build, plus package globals in unoptimized and optimized builds, at an explicit user breakpoint | Launch and continue only; source stepping, goroutine control, split-stack backtraces, and runtime-aware composite rendering are not supported |
 
 Globals are module-aware. The runtime registry synchronizes executable shared-object mappings at coherent all-stop snapshots, publishes module load/unload events, rejects stale module identities, and relocates each value through its owning mapping. TLS lookup uses glibc's `libthread_db` for the selected native thread and supports the main executable and dynamically allocated DSO TLS. glibc is currently the only supported libc for TLS; an unavailable or incompatible provider is reported explicitly.
+Backtraces unwind through every loaded module using its own call-frame information, so stops inside libc or another shared library still reach their callers. Frames are symbolized from the owning module's debug information; frames in modules without it show only their address.
 Breakpoint stops automatically print three surrounding source lines on each side when source is available.
 Use `list` or `l` to print that source context again for the current stop.
 Use `stepi`, `step`, `next`, and `finish` for instruction and source-level execution control.
