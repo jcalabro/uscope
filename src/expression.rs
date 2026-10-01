@@ -37,11 +37,8 @@ pub fn parse_value_expression(input: &str) -> Result<ParsedValueExpression> {
     if parser.cursor != input.len() {
         return Err(invalid("unexpected trailing expression syntax"));
     }
-    if parser.steps.is_empty() || !matches!(parser.steps.first(), Some(ValuePathStep::Named(_))) {
+    if !matches!(parser.steps.first(), Some(ValuePathStep::Named(_))) {
         return Err(invalid("an expression must begin with a data-object name"));
-    }
-    if parser.steps.len() > MAX_EXPRESSION_STEPS {
-        return Err(invalid("the expression contains too many operations"));
     }
 
     Ok(ParsedValueExpression {
@@ -66,6 +63,11 @@ impl Parser<'_> {
         }
         if self.consume('*') {
             self.parse_unary(depth + 1)?;
+            // `*p[0..2]` would dereference the range's base, unlike `*p[0]`,
+            // which dereferences the element. Require `(*p)[0..2]` instead.
+            if self.range.is_some() {
+                return Err(invalid("a range must be the final operation"));
+            }
             self.push(ValuePathStep::Dereference)?;
             return Ok(());
         }
@@ -251,6 +253,8 @@ mod tests {
             "pair[0...1]",
             "pair[0..1].field",
             "pair[0..1][2]",
+            "*pair[0..1]",
+            "(*pair[0..1])",
             "(pair",
             "pair)",
             "pair  .field",

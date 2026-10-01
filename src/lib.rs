@@ -8,10 +8,21 @@ pub(crate) mod model;
 mod protocol;
 mod unwind;
 
+use std::path::Path;
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::timeout;
+
+use backend::ControllerMessage;
+use protocol::Request;
+
 pub use error::{Error, Result};
 pub use expression::parse_value_expression;
 pub use model::{
-    Accessibility, AddressRange, AddressValue, Architecture, Backtrace, BaseClass,
+    Accessibility, AddressRange, AddressValue, Architecture, ArrayDimension, Backtrace, BaseClass,
     BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry, BreakpointLocation,
     ByteOrder, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
     ColumnNumber, DereferenceReference, DereferenceState, DereferenceUnavailableReason,
@@ -76,30 +87,27 @@ pub fn fuzz_dwarf_expression(data: &[u8]) {
     debug_info::fuzz_dwarf_expression(data);
 }
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::Duration;
-
-use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::time::timeout;
-
-use backend::ControllerMessage;
-use protocol::Request;
-
 const REQUEST_CAPACITY: usize = 32;
 const EVENT_CAPACITY: usize = 256;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// A debug session, owning the controller thread that serves its requests.
+///
+/// Dropping a debugger requests shutdown without waiting for it; prefer
+/// [`Debugger::shutdown`], which reports whether cleanup succeeded.
 pub struct Debugger {
     handle: DebuggerHandle,
     controller: Option<JoinHandle<()>>,
     shutdown_permit: Option<mpsc::OwnedPermit<ControllerMessage>>,
 }
 
+/// A clonable client of a running [`Debugger`].
+///
+/// Requests are queued to the controller, which acknowledges each one.
+/// Execution control is acknowledged before the stop it eventually causes;
+/// subscribe to events, or use the methods that wait, to observe the stop.
 #[derive(Clone)]
 pub struct DebuggerHandle {
-    executable: Arc<PathBuf>,
     module_image: Arc<ModuleImage>,
     core_dump: Option<Arc<CoreDumpInfo>>,
     requests: mpsc::Sender<ControllerMessage>,
@@ -146,51 +154,45 @@ impl Debugger {
     /// [`CoreDumpOptions::allow_module_mismatch`] is set. Execution control,
     /// memory writes, and breakpoints fail with [`Error::PostMortemTarget`].
     pub fn open_core(options: &CoreDumpOptions) -> Result<Self> {
-        let (requests, receiver) = mpsc::channel(REQUEST_CAPACITY);
-        let shutdown_permit = requests
-            .clone()
-            .try_reserve_owned()
-            .expect("new request channel has shutdown capacity");
-        let (events, _) = broadcast::channel(EVENT_CAPACITY);
-        let session = backend::open_core(options, requests.clone(), receiver, events.clone())?;
-
-        Ok(Self {
-            handle: DebuggerHandle {
-                executable: Arc::new(session.image.path().to_owned()),
-                module_image: session.image,
-                core_dump: Some(session.info),
-                requests,
-                events,
-            },
-            controller: Some(session.controller),
-            shutdown_permit: Some(shutdown_permit),
+        Self::start(|channels| {
+            let session = backend::open_core(options, channels)?;
+            Ok((session.image, Some(session.info), session.controller))
         })
     }
 
     fn from_executable_source(executable: backend::ExecutableSource) -> Result<Self> {
         let debug_info = debug_info::load_bytes(&executable.display_path, &executable.data)?;
-        let module_image = Arc::clone(&debug_info.image);
+        Self::start(|channels| {
+            let image = Arc::clone(&debug_info.image);
+            let controller = backend::spawn_controller(executable, debug_info, channels)?;
+            Ok((image, None, controller))
+        })
+    }
+
+    /// Creates the request and event channels and starts a controller that
+    /// serves them, reserving request capacity so shutdown can always be sent.
+    fn start(
+        spawn: impl FnOnce(
+            backend::ControllerChannels,
+        )
+            -> Result<(Arc<ModuleImage>, Option<Arc<CoreDumpInfo>>, JoinHandle<()>)>,
+    ) -> Result<Self> {
         let (requests, receiver) = mpsc::channel(REQUEST_CAPACITY);
         let shutdown_permit = requests
             .clone()
             .try_reserve_owned()
             .expect("new request channel has shutdown capacity");
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
-        let controller = backend::spawn_controller(
-            executable,
-            Arc::clone(&module_image),
-            debug_info.unwind,
-            debug_info.variables,
-            requests.clone(),
+        let (module_image, core_dump, controller) = spawn(backend::ControllerChannels {
+            sender: requests.clone(),
             receiver,
-            events.clone(),
-        )?;
+            events: events.clone(),
+        })?;
 
         Ok(Self {
             handle: DebuggerHandle {
-                executable: Arc::new(module_image.path().to_owned()),
                 module_image,
-                core_dump: None,
+                core_dump,
                 requests,
                 events,
             },
@@ -199,13 +201,14 @@ impl Debugger {
         })
     }
 
-    #[must_use]
     /// Returns a clonable handle for sending requests to the debugger.
+    #[must_use]
     pub fn handle(&self) -> DebuggerHandle {
         self.handle.clone()
     }
 
-    /// Stops and reaps the inferior, then joins the backend controller.
+    /// Ends the session and joins the backend controller. A launched inferior
+    /// is killed and reaped; an attached one is detached and left running.
     pub async fn shutdown(mut self) -> Result<()> {
         let (send, receive) = oneshot::channel();
         self.shutdown_permit
@@ -244,7 +247,7 @@ impl DebuggerHandle {
     /// Returns the canonical path of the executable being debugged.
     #[must_use]
     pub fn executable(&self) -> &Path {
-        &self.executable
+        self.module_image.path()
     }
 
     /// Returns the immutable debug metadata for the main executable.
@@ -259,8 +262,8 @@ impl DebuggerHandle {
         self.core_dump.as_ref()
     }
 
-    #[must_use]
     /// Subscribes to debugger state and lifecycle events.
+    #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<DebuggerEvent> {
         self.events.subscribe()
     }
@@ -429,15 +432,20 @@ impl DebuggerHandle {
 
     /// Steps the selected thread and waits until the operation stops or exits.
     pub async fn step(&self, kind: StepKind) -> Result<StopReason> {
+        self.step_with_exception(kind, ExceptionDisposition::Pass)
+            .await
+    }
+
+    /// Steps the selected thread with an explicit pending-exception disposition.
+    pub async fn step_with_exception(
+        &self,
+        kind: StepKind,
+        exception: ExceptionDisposition,
+    ) -> Result<StopReason> {
         let selection = self.stopped_selection().await?;
         let mut events = self.subscribe();
         let execution = self
-            .start_step(
-                selection.stop,
-                selection.thread,
-                kind,
-                ExceptionDisposition::Pass,
-            )
+            .start_step(selection.stop, selection.thread, kind, exception)
             .await?;
 
         self.wait_for_execution(&mut events, execution).await
@@ -456,7 +464,7 @@ impl DebuggerHandle {
             return Err(if matches!(snapshot.inferior, InferiorState::NotRunning) {
                 Error::NotRunning
             } else {
-                Error::NotStopped
+                Error::AlreadyStopped
             });
         };
         let mut events = self.subscribe();
@@ -544,13 +552,13 @@ impl DebuggerHandle {
             .await?
             .source_file(location.file)
             .cloned()
-            .expect("source location references a known file");
+            .ok_or(Error::SourceLocationUnavailable)?;
 
         let contents = tokio::fs::read_to_string(file.path.as_ref())
             .await
-            .map_err(|source| Error::SourceFileRead {
+            .map_err(|error| Error::SourceFileRead {
                 path: file.path.as_ref().clone(),
-                source,
+                error,
             })?;
 
         let all_lines: Vec<_> = contents.lines().collect();
@@ -895,13 +903,24 @@ impl DebuggerHandle {
         })
     }
 
+    /// Waits for the stop or exit that ends `execution`.
+    ///
+    /// The wait is cancelled if the inferior is detached first, such as by a
+    /// concurrent shutdown, or if the controller exits. Every handle keeps
+    /// the event channel open, so the controller's request queue closing is
+    /// what reveals its exit.
     async fn wait_for_execution(
         &self,
         events: &mut broadcast::Receiver<DebuggerEvent>,
         execution: ExecutionId,
     ) -> Result<StopReason> {
         loop {
-            match events.recv().await {
+            let event = tokio::select! {
+                biased;
+                event = events.recv() => event,
+                () = self.requests.closed() => return Err(Error::RequestCancelled),
+            };
+            match event {
                 Ok(DebuggerEvent::InferiorStopped {
                     execution_id: Some(event_execution),
                     reason,
@@ -912,10 +931,9 @@ impl DebuggerHandle {
                     status,
                     ..
                 }) if event_execution == execution => return Ok(StopReason::Exited(status)),
+                Ok(DebuggerEvent::InferiorDetached { .. })
+                | Err(broadcast::error::RecvError::Closed) => return Err(Error::RequestCancelled),
                 Ok(_) => {}
-                Err(broadcast::error::RecvError::Closed) => {
-                    return Err(Error::RequestCancelled);
-                }
                 Err(broadcast::error::RecvError::Lagged(count)) => {
                     return Err(Error::EventStreamLagged(count));
                 }

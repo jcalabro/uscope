@@ -577,7 +577,6 @@ mod tests {
                 SlotAccess::Write,
             )
             .unwrap();
-        let before = plan.clone();
         assert_eq!(
             plan.with_watchpoint(
                 WatchpointId::new(2),
@@ -589,7 +588,6 @@ mod tests {
                 available: 1
             })
         );
-        assert_eq!(plan, before);
     }
 
     #[test]

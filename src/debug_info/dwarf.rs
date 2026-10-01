@@ -64,6 +64,65 @@ type TypeSignatures = HashMap<gimli::DebugTypeSignature, DieKey>;
 struct UnitCatalog<'data> {
     units: Vec<gimli::Unit<Reader<'data>>>,
     type_signatures: TypeSignatures,
+    code: CodeRanges,
+}
+
+/// The executable address ranges of an image.
+///
+/// When a linker discards a function, through `--gc-sections` or by merging
+/// duplicate template instances, it points the function's debug information
+/// at address 0 or a tombstone near `u64::MAX`. Those ranges lie outside
+/// every executable section, which is how they are told apart from code.
+struct CodeRanges(Vec<AddressRange<ImageAddress>>);
+
+impl CodeRanges {
+    fn contains(&self, range: AddressRange<ImageAddress>) -> bool {
+        self.0
+            .iter()
+            .any(|code| code.start <= range.start && range.end <= code.end)
+    }
+
+    fn contains_address(&self, address: ImageAddress) -> bool {
+        self.0.iter().any(|code| code.contains(address))
+    }
+}
+
+/// Reads the code ranges a DIE covers, dropping empty ranges and the stubs
+/// of discarded functions that lie outside the image's code.
+fn die_code_ranges<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    unit: &gimli::Unit<Reader<'data>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    code: &CodeRanges,
+) -> std::result::Result<Vec<AddressRange<ImageAddress>>, DwarfError> {
+    let mut ranges = Vec::new();
+    if entry.attr_value(gimli::DW_AT_ranges).is_some() {
+        let mut list = dwarf.die_ranges(unit, entry)?;
+        while let Some(range) = list.next()? {
+            ranges.push((range.begin, Some(range.end)));
+        }
+    } else if let (Some(low), Some(high)) = (
+        entry.attr_value(gimli::DW_AT_low_pc),
+        entry.attr_value(gimli::DW_AT_high_pc),
+    ) && let Some(begin) = dwarf.attr_address(unit, low)?
+    {
+        // A constant high_pc is an offset from low_pc. gimli would add it
+        // unchecked, which overflows for a tombstone low_pc.
+        let end = dwarf
+            .attr_address(unit, high)?
+            .or_else(|| high.udata_value().and_then(|size| begin.checked_add(size)));
+        ranges.push((begin, end));
+    }
+    Ok(ranges
+        .into_iter()
+        .filter_map(|(begin, end)| {
+            let range = AddressRange {
+                start: ImageAddress::new(begin),
+                end: ImageAddress::new(end?),
+            };
+            (range.start < range.end && code.contains(range)).then_some(range)
+        })
+        .collect())
 }
 
 mod variables;
@@ -132,19 +191,17 @@ fn load_debug_info(
     let catalog = UnitCatalog {
         type_signatures: type_signature_index(&units)?,
         units,
+        code: CodeRanges(super::elf::executable_ranges(&object)),
     };
 
-    let mut function_metadata = load_function_metadata(
-        &dwarf,
-        &catalog.units,
-        &mut source_files,
-        &mut source_file_ids,
-    )?;
+    let mut function_metadata =
+        load_function_metadata(&dwarf, &catalog, &mut source_files, &mut source_file_ids)?;
 
     for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
         load_lines(
             &dwarf,
             unit,
+            &catalog.code,
             &mut source_files,
             &mut source_file_ids,
             &mut statements,
@@ -158,7 +215,7 @@ fn load_debug_info(
         target,
         &statements,
         &mut function_metadata.code_instances,
-    )?;
+    );
 
     let variables = variables::load_variable_info(
         &dwarf,
@@ -358,29 +415,18 @@ impl UnwindInfo for DwarfUnwindInfo {
         &self,
         address: ImageAddress,
         registers: &RegisterFile,
+        memory: &mut dyn MemoryReader,
     ) -> std::result::Result<VirtualAddress, UnwindTermination> {
         let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
         eh_frame.set_address_size(self.address_size);
-        let result = cfa_from_section(
-            &eh_frame,
-            &self.bases,
-            address,
-            registers,
-            &mut NoUnwindMemory,
-        );
+        let result = cfa_from_section(&eh_frame, &self.bases, address, registers, memory);
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
 
         let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
         debug_frame.set_address_size(self.address_size);
-        cfa_from_section(
-            &debug_frame,
-            &self.bases,
-            address,
-            registers,
-            &mut NoUnwindMemory,
-        )
+        cfa_from_section(&debug_frame, &self.bases, address, registers, memory)
     }
 
     fn unwind(
@@ -495,16 +541,6 @@ where
 // backward branch cannot hang the controller thread.
 const MAX_UNWIND_EXPRESSION_ITERATIONS: u32 = 10_000;
 
-/// A memory source for contexts where an unwind expression must not touch
-/// inferior memory (e.g. synchronous CFA queries without a stopped tracee).
-struct NoUnwindMemory;
-
-impl MemoryReader for NoUnwindMemory {
-    fn read_u64(&mut self, _address: VirtualAddress) -> std::result::Result<u64, ()> {
-        Err(())
-    }
-}
-
 fn evaluate_unwind_expression<'data, S>(
     expression: &UnwindExpression<usize>,
     section: &S,
@@ -548,7 +584,7 @@ where
                 let address = VirtualAddress::new(address);
                 let word = memory
                     .read_u64(address)
-                    .map_err(|()| UnwindTermination::MemoryReadFailed { address })?;
+                    .ok_or(UnwindTermination::MemoryReadFailed { address })?;
                 let bits = u32::from(size) * 8;
                 let value = if bits == 64 {
                     word
@@ -607,7 +643,7 @@ fn apply_register_rule(
                 })?);
             memory
                 .read_u64(address)
-                .map_err(|()| UnwindTermination::MemoryReadFailed { address })?
+                .ok_or(UnwindTermination::MemoryReadFailed { address })?
         }
         RegisterRule::ValOffset(offset) => {
             checked_add(cfa.get(), *offset).ok_or_else(|| UnwindTermination::InvalidCaller {
@@ -693,11 +729,11 @@ struct FunctionMetadata {
 
 fn load_function_metadata(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+    catalog: &UnitCatalog<'_>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> std::result::Result<FunctionMetadata, DwarfError> {
-    let raw = collect_function_dies(dwarf, units, source_files, source_file_ids)?;
+    let raw = collect_function_dies(dwarf, catalog, source_files, source_file_ids)?;
     let by_key: HashMap<_, _> = raw
         .iter()
         .enumerate()
@@ -791,10 +827,11 @@ fn load_function_metadata(
 
 fn collect_function_dies(
     dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
+    catalog: &UnitCatalog<'_>,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> std::result::Result<Vec<RawFunction>, DwarfError> {
+    let units = catalog.units.as_slice();
     let mut functions = Vec::new();
 
     for (unit_index, unit) in units.iter().enumerate() {
@@ -820,22 +857,7 @@ fn collect_function_dies(
             };
 
             if let Some(kind) = kind {
-                let mut ranges = dwarf.die_ranges(unit, entry)?;
-                let mut concrete_ranges = Vec::new();
-
-                while let Some(range) = ranges.next()? {
-                    if range.begin > range.end {
-                        return Err(DwarfError::InvalidRange);
-                    }
-                    if range.begin == range.end {
-                        continue;
-                    }
-                    concrete_ranges.push(AddressRange {
-                        start: ImageAddress::new(range.begin),
-                        end: ImageAddress::new(range.end),
-                    });
-                }
-
+                let concrete_ranges = die_code_ranges(dwarf, unit, entry, &catalog.code)?;
                 functions.push(RawFunction {
                     key,
                     kind,
@@ -1074,9 +1096,14 @@ fn entry_source_location(
     }))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "line loading appends to every per-image table the loader builds"
+)]
 fn load_lines(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit: &gimli::Unit<Reader<'_>>,
+    code: &CodeRanges,
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
     statements: &mut Vec<StatementRow>,
@@ -1087,8 +1114,15 @@ fn load_lines(
         return Ok(());
     };
     let (program, sequences) = program.sequences()?;
+    // Rows name files by index into the program header; resolving a path
+    // allocates, so each index is resolved once.
+    let mut file_ids = HashMap::new();
 
     for sequence in sequences {
+        // A discarded function's sequence starts outside the image's code.
+        if !code.contains_address(ImageAddress::new(sequence.start)) {
+            continue;
+        }
         let sequence_id = LineSequenceId::new(*next_sequence);
         *next_sequence = next_sequence
             .checked_add(1)
@@ -1122,9 +1156,16 @@ fn load_lines(
                 row.line().and_then(|line| LineNumber::new(line.get())),
             ) {
                 (Some(file), Some(line)) => {
-                    let path = source_path(dwarf, unit, header, file)?;
+                    let file = if let Some(&id) = file_ids.get(&row.file_index()) {
+                        id
+                    } else {
+                        let path = source_path(dwarf, unit, header, file)?;
+                        let id = source_file_id(path, source_files, source_file_ids);
+                        file_ids.insert(row.file_index(), id);
+                        id
+                    };
                     Some(SourceLocation {
-                        file: source_file_id(path, source_files, source_file_ids),
+                        file,
                         line,
                         column: match row.column() {
                             ColumnType::LeftEdge => None,
@@ -1173,6 +1214,9 @@ fn source_file_id(
     source_files: &mut Vec<SourceFile>,
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> SourceFileId {
+    if let Some(&id) = source_file_ids.get(&path) {
+        return id;
+    }
     *source_file_ids.entry(path.clone()).or_insert_with(|| {
         let id = SourceFileId::new(
             u32::try_from(source_files.len()).expect("source file count fits in u32"),
@@ -1264,27 +1308,29 @@ fn push_line_range(
     }
 }
 
+/// Moves an out-of-line function's breakpoint entry past a prologue that
+/// x86-64 instruction analysis proves only sets up the frame, when the line
+/// table marks no `prologue_end`. A heuristic: anything unproven keeps the
+/// raw entry, and no failure here fails the module.
 fn refine_proved_prologue_entries(
     object: &object::File<'_>,
     target: TargetDescription,
     statements: &[StatementRow],
     instances: &mut [CodeInstanceInfo],
-) -> std::result::Result<(), DwarfError> {
+) {
     if target.architecture != Architecture::X86_64 {
-        return Ok(());
+        return;
     }
+    let rows = StatementIndex::new(statements);
 
     for instance in instances {
-        if !matches!(instance.kind, CodeInstanceKind::OutOfLine) {
-            continue;
-        }
-        if statements.iter().any(|row| {
-            row.flags.prologue_end()
-                && instance
-                    .ranges
+        if !matches!(instance.kind, CodeInstanceKind::OutOfLine)
+            || instance.ranges.iter().any(|range| {
+                rows.within(*range)
                     .iter()
-                    .any(|range| range.contains(row.address))
-        }) {
+                    .any(|row| row.flags.prologue_end())
+            })
+        {
             continue;
         }
         let Some(raw_entry) = instance.breakpoint_entry.map(|entry| entry.address) else {
@@ -1297,11 +1343,11 @@ fn refine_proved_prologue_entries(
         else {
             continue;
         };
-        let Some(candidate) = first_distinct_source_statement(statements, *entry_range, raw_entry)
+        let Some(candidate) = first_distinct_source_statement(&rows, *entry_range, raw_entry)
         else {
             continue;
         };
-        let Some(bytes) = object_bytes(object, raw_entry.get(), candidate.get())? else {
+        let Some(bytes) = code_bytes(object, raw_entry.get(), candidate.get()) else {
             continue;
         };
 
@@ -1313,12 +1359,28 @@ fn refine_proved_prologue_entries(
             });
         }
     }
+}
 
-    Ok(())
+/// Statement rows sorted by address, keeping line-program order among rows
+/// at one address.
+struct StatementIndex<'a>(Vec<&'a StatementRow>);
+
+impl<'a> StatementIndex<'a> {
+    fn new(statements: &'a [StatementRow]) -> Self {
+        let mut rows = statements.iter().collect::<Vec<_>>();
+        rows.sort_by_key(|row| row.address);
+        Self(rows)
+    }
+
+    fn within(&self, range: AddressRange<ImageAddress>) -> &[&'a StatementRow] {
+        let start = self.0.partition_point(|row| row.address < range.start);
+        let end = self.0.partition_point(|row| row.address < range.end);
+        &self.0[start..end.max(start)]
+    }
 }
 
 fn first_distinct_source_statement(
-    statements: &[StatementRow],
+    rows: &StatementIndex<'_>,
     range: AddressRange<ImageAddress>,
     raw_entry: ImageAddress,
 ) -> Option<ImageAddress> {
@@ -1326,9 +1388,14 @@ fn first_distinct_source_statement(
     // attribute the same image address from unrelated sequences. Prologue
     // reasoning is only sound within the single sequence that describes the
     // entry, so an ambiguous entry attribution keeps the raw entry.
-    let mut entry_rows = statements
+    let entry_end = ImageAddress::new(raw_entry.get().checked_add(1)?);
+    let mut entry_rows = rows
+        .within(AddressRange {
+            start: raw_entry,
+            end: entry_end,
+        })
         .iter()
-        .filter(|row| row.address == raw_entry && row.location.is_some());
+        .filter(|row| row.location.is_some());
     let entry_row = entry_rows.next_back()?;
     if entry_rows.any(|row| row.sequence != entry_row.sequence) {
         return None;
@@ -1337,52 +1404,40 @@ fn first_distinct_source_statement(
     // attribution. Mirror that rule here, and do not mistake a later row for
     // the same signature line for proof that argument homing has completed.
     let entry_location = entry_row.location.as_ref()?;
-    statements
-        .iter()
-        .filter(|row| {
-            row.sequence == entry_row.sequence
-                && row.flags.is_statement()
-                && raw_entry < row.address
+    rows.within(AddressRange {
+        start: entry_end,
+        end: range.end,
+    })
+    .iter()
+    .filter(|row| row.sequence == entry_row.sequence && row.flags.is_statement())
+    .find(|row| {
+        row.location.as_ref().is_some_and(|location| {
+            location.file != entry_location.file || location.line != entry_location.line
         })
-        .filter(|row| range.contains(row.address))
-        .filter(|row| {
-            row.location.as_ref().is_some_and(|location| {
-                location.file != entry_location.file || location.line != entry_location.line
-            })
-        })
-        .map(|row| row.address)
-        .min()
+    })
+    .map(|row| row.address)
 }
 
-fn object_bytes<'data>(
+/// Returns the bytes of `[start, end)` from an executable section.
+fn code_bytes<'data>(
     object: &'data object::File<'data>,
     start: u64,
     end: u64,
-) -> std::result::Result<Option<&'data [u8]>, DwarfError> {
-    let Some(length) = end.checked_sub(start) else {
-        return Ok(None);
-    };
-    for section in object.sections() {
-        let section_start = section.address();
-        let Some(section_end) = section_start.checked_add(section.size()) else {
-            continue;
-        };
-        if start < section_start || section_end < end {
-            continue;
-        }
-        let data = section.data()?;
-        let offset =
-            usize::try_from(start - section_start).map_err(|_| gimli::Error::UnsupportedOffset)?;
-        let length = usize::try_from(length).map_err(|_| gimli::Error::UnsupportedOffset)?;
-        let end = offset
-            .checked_add(length)
-            .ok_or(gimli::Error::UnsupportedOffset)?;
-        let Some(bytes) = data.get(offset..end) else {
-            return Ok(None);
-        };
-        return Ok(Some(bytes));
-    }
-    Ok(None)
+) -> Option<&'data [u8]> {
+    let length = usize::try_from(end.checked_sub(start)?).ok()?;
+    let section = object.sections().find(|section| {
+        section.kind() == object::SectionKind::Text
+            && section.address() <= start
+            && section
+                .address()
+                .checked_add(section.size())
+                .is_some_and(|section_end| end <= section_end)
+    })?;
+    let offset = usize::try_from(start - section.address()).ok()?;
+    section
+        .data()
+        .ok()?
+        .get(offset..offset.checked_add(length)?)
 }
 
 fn target_description(
@@ -1534,9 +1589,30 @@ mod tests {
         let mut lines = Vec::new();
         let mut next_sequence = 0;
 
+        let code = |start, end| {
+            CodeRanges(vec![AddressRange {
+                start: ImageAddress::new(start),
+                end: ImageAddress::new(end),
+            }])
+        };
+        // A sequence outside the image's code belongs to a discarded function.
         load_lines(
             &dwarf,
             &unit,
+            &code(0x200, 0x300),
+            &mut source_files,
+            &mut source_file_ids,
+            &mut statements,
+            &mut lines,
+            &mut next_sequence,
+        )
+        .expect("load test line program");
+        assert!(statements.is_empty() && lines.is_empty());
+
+        load_lines(
+            &dwarf,
+            &unit,
+            &code(0x100, 0x200),
             &mut source_files,
             &mut source_file_ids,
             &mut statements,
@@ -1592,7 +1668,7 @@ mod tests {
 
         assert_eq!(
             first_distinct_source_statement(
-                &statements,
+                &StatementIndex::new(&statements),
                 AddressRange {
                     start: ImageAddress::new(0x100),
                     end: ImageAddress::new(0x130),
@@ -1614,7 +1690,7 @@ mod tests {
         ];
         assert_eq!(
             first_distinct_source_statement(
-                &ambiguous,
+                &StatementIndex::new(&ambiguous),
                 AddressRange {
                     start: ImageAddress::new(0x100),
                     end: ImageAddress::new(0x130),
@@ -1633,7 +1709,7 @@ mod tests {
         ];
         assert_eq!(
             first_distinct_source_statement(
-                &foreign_candidate,
+                &StatementIndex::new(&foreign_candidate),
                 AddressRange {
                     start: ImageAddress::new(0x100),
                     end: ImageAddress::new(0x130),
@@ -1645,8 +1721,8 @@ mod tests {
     }
 
     impl MemoryReader for TestMemory {
-        fn read_u64(&mut self, address: VirtualAddress) -> std::result::Result<u64, ()> {
-            self.values.get(&address).copied().ok_or(())
+        fn read_u64(&mut self, address: VirtualAddress) -> Option<u64> {
+            self.values.get(&address).copied()
         }
     }
 

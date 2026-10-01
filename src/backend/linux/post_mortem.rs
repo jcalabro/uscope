@@ -4,7 +4,7 @@
 //! [`CoreTarget`]. Requests that would execute, modify, or trap the target are
 //! rejected before reaching any process-control state.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::ops::Range;
@@ -17,7 +17,6 @@ use nix::libc;
 use nix::sys::signal::Signal as NixSignal;
 use nix::unistd::Pid;
 use object::Object as _;
-use tokio::sync::{broadcast, mpsc};
 
 use super::core_dump::{
     AT_ENTRY, AT_PHDR, CoreDump, CoreError, CoreMemory, CoreMemoryError, CoreSignal, CoreThread,
@@ -28,13 +27,13 @@ use super::thread_db::{self, ProcessServices};
 use super::{
     Controller, ControllerChannels, ExecutableSource, ExpectedStop, FileIdentity, Fxsave, Inferior,
     InferiorOrigin, InspectionOps, LinuxError, MemoryAccessError, NativeThreadState, PublicStop,
-    Reply, RuntimeModule, SessionLease, TraceThread, WatchState, allocate_stop_id, backend_error,
+    Reply, RuntimeModule, SessionLease, TraceThread, allocate_stop_id, backend_error,
     loader_link_maps,
 };
 use crate::backend::ControllerMessage;
 use crate::protocol::{
-    CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent, ExceptionInfo,
-    ModuleIdentity, ProcessId, Request, StopReason,
+    CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, ExceptionInfo, ModuleIdentity,
+    ProcessId, Request, StopReason,
 };
 use crate::{
     Error, LoadedModule, LoadedModuleRecord, ModuleId, ModuleImage, ModuleImageId, Result,
@@ -161,10 +160,12 @@ pub struct PostMortemSession {
     pub controller: JoinHandle<()>,
 }
 
-fn core_error(error: CoreError) -> Error {
-    match error {
-        CoreError::Io(error) => Error::Io(error),
-        CoreError::Invalid(message) => Error::InvalidCoreDump(message),
+impl From<CoreError> for Error {
+    fn from(error: CoreError) -> Self {
+        match error {
+            CoreError::Io(error) => Self::Io(error),
+            CoreError::Invalid(message) => Self::InvalidCoreDump(message),
+        }
     }
 }
 
@@ -200,6 +201,32 @@ fn accept_identity(path: &Path, evidence: ImageEvidence, allow: bool) -> Result<
     }
 }
 
+/// Reads a file the core dump names. Paths come from untrusted notes and can
+/// name devices or FIFOs, such as `/dev/zero` for shared anonymous memory,
+/// which would never finish reading; only regular files are opened.
+fn read_regular_file(path: &Path) -> io::Result<Vec<u8>> {
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    fs::read(path)
+}
+
+/// Whether a regular file begins with the ELF magic number.
+fn starts_like_elf(path: &Path) -> bool {
+    use io::Read as _;
+
+    if !fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return false;
+    }
+    let mut magic = Vec::with_capacity(4);
+    fs::File::open(path)
+        .and_then(|file| file.take(4).read_to_end(&mut magic))
+        .is_ok_and(|_| is_elf(&magic))
+}
+
 fn read_image_file(
     core: &CoreDump,
     image: &ImageMappings,
@@ -207,24 +234,23 @@ fn read_image_file(
     allow: bool,
     entry: Option<u64>,
 ) -> Result<ImageFile> {
-    let data: Arc<[u8]> = fs::read(path)?.into();
+    let data: Arc<[u8]> = read_regular_file(path)?.into();
     let path = path.canonicalize()?;
-    let (load_bias, mut evidence, read_only) =
-        match verify_image(core, image, &data).map_err(core_error)? {
-            ImageVerification::Placed {
-                load_bias,
-                evidence,
-                read_only,
-            } => (load_bias, evidence, read_only),
-            // Allowing a mismatch permits using a file's metadata, not
-            // relocating it to a guessed address.
-            ImageVerification::Unplaced(detail) if allow => {
-                return Err(Error::CoreModuleUnplaceable { path, detail });
-            }
-            ImageVerification::Unplaced(detail) => {
-                return Err(Error::CoreModuleMismatch { path, detail });
-            }
-        };
+    let (load_bias, mut evidence, read_only) = match verify_image(core, image, &data)? {
+        ImageVerification::Placed {
+            load_bias,
+            evidence,
+            read_only,
+        } => (load_bias, evidence, read_only),
+        // Allowing a mismatch permits using a file's metadata, not
+        // relocating it to a guessed address.
+        ImageVerification::Unplaced(detail) if allow => {
+            return Err(Error::CoreModuleUnplaceable { path, detail });
+        }
+        ImageVerification::Unplaced(detail) => {
+            return Err(Error::CoreModuleMismatch { path, detail });
+        }
+    };
     // The kernel records where execution began; a different entry point is
     // proof of a different executable even when no other evidence survives.
     if let Some(recorded) = entry
@@ -357,11 +383,11 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
         // Without a saved header, a file that is an ELF image on disk is
         // treated as a module so that its verification is reported rather
         // than silently skipped.
-        let header = saved_header(core, image).map_err(core_error)?;
+        let header = saved_header(core, image)?;
         let candidate = match header {
             SavedHeader::Elf => true,
             SavedHeader::Data => false,
-            SavedHeader::Unsaved => fs::read(&image.path).is_ok_and(|data| is_elf(&data)),
+            SavedHeader::Unsaved => starts_like_elf(&image.path),
         };
         if !candidate {
             continue;
@@ -414,11 +440,9 @@ fn resolve_modules(core: &CoreDump, options: &CoreDumpOptions) -> Result<Resolve
 /// that serves read-only requests against its single stopped snapshot.
 pub fn open_core(
     options: &CoreDumpOptions,
-    message_sender: mpsc::Sender<ControllerMessage>,
-    messages: mpsc::Receiver<ControllerMessage>,
-    events: broadcast::Sender<DebuggerEvent>,
+    channels: ControllerChannels,
 ) -> Result<PostMortemSession> {
-    let core = CoreDump::open(&options.core).map_err(core_error)?;
+    let core = CoreDump::open(&options.core)?;
     let core_path = options.core.canonicalize()?;
     let resolved = resolve_modules(&core, options)?;
     let backings = resolved.backings();
@@ -473,14 +497,8 @@ pub fn open_core(
             let mut controller = Controller::new(
                 SessionLease::detached(),
                 executable,
-                main_debug.image,
-                main_debug.unwind,
-                main_debug.variables,
-                ControllerChannels {
-                    messages,
-                    message_sender,
-                    events,
-                },
+                main_debug,
+                channels,
                 target,
             );
             let initialized = controller.initialize_post_mortem(
@@ -575,17 +593,6 @@ impl Controller<CoreTarget> {
             })
             .collect();
         self.inferior = Some(Inferior {
-            origin: InferiorOrigin::PostMortem,
-            tgid,
-            loaded_module: main,
-            breakpoints: BTreeMap::new(),
-            threads: trace_threads,
-            retired_threads: BTreeSet::new(),
-            unowned_stops: BTreeMap::new(),
-            waiter: None,
-            active: None,
-            repairs: VecDeque::new(),
-            barrier: None,
             public_stop: Some(PublicStop {
                 id: allocate_stop_id(),
                 triggering_thread: selected,
@@ -593,12 +600,9 @@ impl Controller<CoreTarget> {
                 presentations: BTreeMap::new(),
             }),
             selected_thread: Some(selected),
-            next_execution: 0,
-            next_barrier: 0,
-            exec_unsupported: false,
-            watch: WatchState::default(),
+            ..Inferior::new(InferiorOrigin::PostMortem, tgid, main, trace_threads, None)
         });
-        let presentation = self.presentation_for_thread(selected, reason)?;
+        let presentation = self.presentation_for_thread(selected, Some(reason))?;
         self.inferior
             .as_mut()
             .and_then(|inferior| inferior.public_stop.as_mut())

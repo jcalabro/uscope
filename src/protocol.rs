@@ -2,6 +2,8 @@ use std::{fmt, path::PathBuf, sync::Arc};
 
 use tokio::sync::oneshot;
 
+use crate::model::numeric_id;
+
 use crate::{
     Backtrace, BreakpointLocation, CodeInstanceId, DereferenceReference, DereferencedValue,
     ExecutionLocation, GlobalVariablePage, GlobalVariableReference, LineNumber, LoadedModule,
@@ -72,29 +74,21 @@ pub enum BreakpointSpec {
     Address(VirtualAddress),
 }
 
-/// Identifies one logical user breakpoint within a debug session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BreakpointId(u64);
-
-impl BreakpointId {
-    /// Creates a breakpoint identifier from its numeric representation.
-    #[must_use]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the numeric representation of this identifier.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for BreakpointId {
+impl fmt::Display for BreakpointSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+        match self {
+            Self::Function(function) => f.write_str(function),
+            Self::Source { path, line } => write!(f, "{}:{line}", path.display()),
+            Self::FileFunction { path, function } => write!(f, "{}:{function}", path.display()),
+            Self::Address(address) => address.fmt(f),
+        }
     }
 }
+
+numeric_id!(
+    BreakpointId,
+    "Identifies one logical user breakpoint within a debug session."
+);
 
 /// One deduplicated location resolved for a logical breakpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,29 +110,10 @@ pub struct Breakpoint {
     pub locations: Arc<[ResolvedBreakpointLocation]>,
 }
 
-/// Identifies one watchpoint within a debug session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WatchpointId(u64);
-
-impl WatchpointId {
-    /// Creates a watchpoint identifier from its numeric representation.
-    #[must_use]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the numeric representation of this identifier.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for WatchpointId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+numeric_id!(
+    WatchpointId,
+    "Identifies one watchpoint within a debug session."
+);
 
 /// The memory accesses that trigger a watchpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -373,29 +348,10 @@ pub struct FramePresentation {
     pub hidden_inline_frames: u32,
 }
 
-/// Identifies an inferior process; local attach accepts an operating-system process ID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ProcessId(u64);
-
-impl ProcessId {
-    /// Creates a process identifier from its numeric representation.
-    #[must_use]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the numeric process identifier.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for ProcessId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+numeric_id!(
+    ProcessId,
+    "Identifies an inferior process; local attach accepts an operating-system process ID."
+);
 
 /// Selects a post-mortem core dump and how its module files are trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -497,53 +453,15 @@ pub struct CoreDumpInfo {
     pub modules: Arc<[CoreModule]>,
 }
 
-/// Identifies an externally observable stopped snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct StopId(u64);
+numeric_id!(
+    StopId,
+    "Identifies an externally observable stopped snapshot."
+);
 
-impl StopId {
-    /// Creates a stop identifier from its numeric representation.
-    #[must_use]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the numeric representation of this identifier.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for StopId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-/// Identifies one accepted execution-control operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ExecutionId(u64);
-
-impl ExecutionId {
-    /// Creates an execution identifier from its numeric representation.
-    #[must_use]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the numeric representation of this identifier.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for ExecutionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+numeric_id!(
+    ExecutionId,
+    "Identifies one accepted execution-control operation."
+);
 
 /// Selects which execution contexts a control operation resumes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -703,8 +621,6 @@ pub enum InferiorState {
         stop_id: StopId,
         /// The thread selected by the stop.
         thread_id: ThreadId,
-        /// Whether every live thread is safe to inspect.
-        all_threads_stopped: bool,
         /// The reason execution stopped.
         reason: StopReason,
     },
@@ -732,75 +648,82 @@ pub struct StateSnapshot {
 }
 
 /// A state or lifecycle event emitted by the debugger.
+///
+/// Every event carries the state revision it produced; a
+/// [`StateSnapshot`] at that revision or later reflects it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DebuggerEvent {
-    StateChanged {
-        revision: u64,
-    },
+    /// Debugger state changed in a way no more specific event describes.
+    StateChanged { revision: u64 },
+    /// A launched inferior began executing under `execution_id`.
     InferiorLaunched {
         revision: u64,
         process_id: ProcessId,
         execution_id: ExecutionId,
     },
+    /// An existing process was attached and coherently stopped.
     InferiorAttached {
-        /// The state revision containing the attached inferior.
         revision: u64,
-        /// The attached process.
         process_id: ProcessId,
     },
+    /// Stopped threads resumed under `execution_id`.
     InferiorContinued {
         revision: u64,
         process_id: ProcessId,
         execution_id: ExecutionId,
         resumed: ResumeScope,
     },
+    /// Every live thread is stopped and safe to inspect.
     InferiorStopped {
         revision: u64,
         process_id: ProcessId,
+        /// The execution that ended, or `None` for a stop no client caused.
         execution_id: Option<ExecutionId>,
         stop_id: StopId,
+        /// The thread whose event caused the stop.
         thread_id: ThreadId,
-        all_threads_stopped: bool,
         reason: StopReason,
     },
+    /// A new thread appeared in the inferior.
     ThreadStarted {
         revision: u64,
         process_id: ProcessId,
         thread_id: ThreadId,
     },
+    /// One thread of a still-running inferior exited.
     ThreadExited {
         revision: u64,
         process_id: ProcessId,
         thread_id: ThreadId,
         status: ExitStatus,
     },
+    /// A shared object was mapped into the inferior.
     ModuleLoaded {
         revision: u64,
         module: crate::LoadedModuleRecord,
     },
+    /// A shared object was unmapped from the inferior.
     ModuleUnloaded {
         revision: u64,
         module: crate::LoadedModuleRecord,
     },
+    /// The inferior process exited.
     InferiorExited {
         revision: u64,
         process_id: ProcessId,
+        /// The execution that ended, when one was active.
         execution_id: Option<ExecutionId>,
         status: ExitStatus,
     },
+    /// The debugger released an attached process, which keeps running.
     InferiorDetached {
-        /// The state revision after detaching.
         revision: u64,
-        /// The process released from debugger control.
         process_id: ProcessId,
     },
-    BreakpointsChanged {
-        revision: u64,
-    },
+    /// The set of logical breakpoints changed.
+    BreakpointsChanged { revision: u64 },
     /// The set of armed watchpoints changed.
-    WatchpointsChanged {
-        revision: u64,
-    },
+    WatchpointsChanged { revision: u64 },
     /// Scoped watchpoints were removed because their storage's lifetime
     /// ended. A following `WatchpointsChanged` publishes the new set.
     WatchpointsInvalidated {
@@ -809,8 +732,33 @@ pub enum DebuggerEvent {
     },
 }
 
+impl DebuggerEvent {
+    /// Returns the state revision this event produced.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        match self {
+            Self::StateChanged { revision }
+            | Self::InferiorLaunched { revision, .. }
+            | Self::InferiorAttached { revision, .. }
+            | Self::InferiorContinued { revision, .. }
+            | Self::InferiorStopped { revision, .. }
+            | Self::ThreadStarted { revision, .. }
+            | Self::ThreadExited { revision, .. }
+            | Self::ModuleLoaded { revision, .. }
+            | Self::ModuleUnloaded { revision, .. }
+            | Self::InferiorExited { revision, .. }
+            | Self::InferiorDetached { revision, .. }
+            | Self::BreakpointsChanged { revision }
+            | Self::WatchpointsChanged { revision }
+            | Self::WatchpointsInvalidated { revision, .. } => *revision,
+        }
+    }
+}
+
+/// Carries one request's result back to the client awaiting it.
 pub type Reply<T> = oneshot::Sender<Result<T>>;
 
+/// A client request to the controller; each carries its reply channel.
 pub enum Request {
     AddBreakpoint {
         spec: BreakpointSpec,

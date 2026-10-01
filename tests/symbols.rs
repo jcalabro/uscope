@@ -1,7 +1,3 @@
-#[allow(
-    dead_code,
-    reason = "symbolization scenarios use a subset of the shared harness"
-)]
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -419,7 +415,7 @@ fn open_core(executable: &str) -> Scenario {
 #[tokio::test]
 async fn frames_in_code_without_debug_info_are_named_by_elf_symbols() {
     for (executable, library) in VARIANTS {
-        let mut scenario = Scenario::new(executable, Scenario::fixture(executable));
+        let mut scenario = Scenario::launch(executable);
         let site = scenario.add_breakpoint("chain_nested_site").await;
 
         // asm_nested_outer calls back before, within, and after its nested

@@ -2,14 +2,18 @@ use std::error::Error as StdError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Every failure a debugger request can report.
+///
+/// A message either embeds its cause or exposes it as [`StdError::source`],
+/// never both, so error reports that walk the chain print each cause once.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("I/O error: {0}")]
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("debug information error: {0}")]
-    DebugInfo(#[source] Box<dyn StdError + Send + Sync>),
+    DebugInfo(Box<dyn StdError + Send + Sync>),
     #[error("debugger backend error: {0}")]
-    Backend(#[source] Box<dyn StdError + Send + Sync>),
+    Backend(Box<dyn StdError + Send + Sync>),
 
     #[error("no function named '{0}' was found")]
     FunctionNotFound(String),
@@ -103,6 +107,10 @@ pub enum Error {
     NotRunning,
     #[error("the inferior is not stopped")]
     NotStopped,
+    #[error("the inferior is already stopped")]
+    AlreadyStopped,
+    #[error("thread {0} is not a thread of the inferior")]
+    UnknownThread(crate::ThreadId),
     #[error("the requested stopped snapshot is no longer current")]
     StaleStop,
     #[error("an unclassifiable native stop cannot be resumed safely")]
@@ -119,11 +127,10 @@ pub enum Error {
     AmbiguousInlineFrame,
     #[error("no source location is available for the stopped instruction")]
     SourceLocationUnavailable,
-    #[error("failed to read source file {path}: {source}")]
+    #[error("failed to read source file {path}: {error}")]
     SourceFileRead {
         path: PathBuf,
-        #[source]
-        source: std::io::Error,
+        error: std::io::Error,
     },
     #[error("source line {line} is outside {path}")]
     SourceLineOutOfRange { path: PathBuf, line: u64 },
@@ -182,11 +189,9 @@ pub enum Error {
     EventStreamLagged(u64),
     #[error("debugger shutdown timed out")]
     ShutdownTimedOut,
-
-    #[error("invalid command: {0}")]
-    InvalidCommand(String),
 }
 
+/// The result of a debugger request.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {

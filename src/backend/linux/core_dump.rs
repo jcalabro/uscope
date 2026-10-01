@@ -35,7 +35,10 @@ const AUXV_ENTRY_SIZE: usize = 16;
 const FILE_ENTRY_SIZE: usize = 24;
 /// Notes describe threads and mappings, not memory; a larger note segment is
 /// rejected rather than buffered.
-const MAX_NOTE_SEGMENT_BYTES: u64 = 256 * 1024 * 1024;
+/// The most note bytes read from all `PT_NOTE` segments together. The cap is
+/// cumulative: zeroed bytes parse as a stream of ignored notes, so many
+/// headers naming the same region would otherwise each be read in full.
+const MAX_NOTE_BYTES: u64 = 256 * 1024 * 1024;
 const PAGE_SIZE: u64 = 4096;
 const ELF_MAGIC: [u8; 4] = *b"\x7fELF";
 const CONTENT_COMPARE_CHUNK: u64 = 64 * 1024;
@@ -284,6 +287,7 @@ fn parse<'data, R: ReadRef<'data>>(data: R, len: u64) -> Result<Metadata, CoreEr
 
     let mut segments = Vec::new();
     let mut notes = NoteState::default();
+    let mut note_bytes = 0_u64;
     for program_header in program_headers {
         match program_header.p_type(endian) {
             elf::PT_LOAD => {
@@ -316,8 +320,9 @@ fn parse<'data, R: ReadRef<'data>>(data: R, len: u64) -> Result<Metadata, CoreEr
                 });
             }
             elf::PT_NOTE => {
-                if program_header.p_filesz(endian) > MAX_NOTE_SEGMENT_BYTES {
-                    return Err(invalid("note segment exceeds the supported size"));
+                note_bytes = note_bytes.saturating_add(program_header.p_filesz(endian));
+                if note_bytes > MAX_NOTE_BYTES {
+                    return Err(invalid("note segments exceed the supported size"));
                 }
                 let mut iterator = program_header
                     .notes(endian, data)
@@ -549,15 +554,12 @@ fn parse_siginfo(bytes: &[u8]) -> Result<CoreSignal, CoreError> {
     let code = i32_at(bytes, 8);
     // The union after the common header holds a fault address for kernel
     // fault reports and the sender for user-generated signals.
-    let fault = matches!(
-        number,
-        libc::SIGSEGV | libc::SIGBUS | libc::SIGILL | libc::SIGFPE | libc::SIGTRAP
-    ) && code > 0;
     Ok(CoreSignal {
         number,
         code,
-        fault_address: fault.then(|| u64_at(bytes, 16)),
-        sender: (code <= 0).then(|| i32_at(bytes, 16)),
+        fault_address: super::native::siginfo_has_fault_address(number, code)
+            .then(|| u64_at(bytes, 16)),
+        sender: super::native::siginfo_names_sender(code).then(|| i32_at(bytes, 16)),
     })
 }
 
@@ -1280,6 +1282,24 @@ mod tests {
         put(&mut bytes, 8, &code.to_le_bytes());
         put(&mut bytes, 16, &address.to_le_bytes());
         bytes
+    }
+
+    #[test]
+    fn siginfo_fields_follow_the_layout_their_code_selects() {
+        let parse = |number, code| {
+            let signal = parse_siginfo(&siginfo(number, code, 0x1234)).expect("valid siginfo");
+            (signal.fault_address, signal.sender)
+        };
+        let segv_maperr = 1;
+        // A page fault records its address; a general-protection fault
+        // (SI_KERNEL) records none, so 0 must not appear as an address.
+        assert_eq!(parse(libc::SIGSEGV, segv_maperr), (Some(0x1234), None));
+        assert_eq!(parse(libc::SIGSEGV, libc::SI_KERNEL), (None, None));
+        assert_eq!(parse(libc::SIGABRT, libc::SI_TKILL), (None, Some(0x1234)));
+        assert_eq!(parse(libc::SIGTERM, libc::SI_USER), (None, Some(0x1234)));
+        // These codes reuse the sender field for a timer ID and a poll band.
+        assert_eq!(parse(libc::SIGALRM, libc::SI_TIMER), (None, None));
+        assert_eq!(parse(libc::SIGIO, libc::SI_SIGIO), (None, None));
     }
 
     fn fxsave(marker: u8) -> Vec<u8> {
