@@ -1,16 +1,19 @@
 //! Renders debugger replies other than values.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
 use uscope::{
-    AddressDescription, Backtrace, Breakpoint, BreakpointLocation, ByteOrder, CoreDumpInfo,
-    CoreModuleState, ExitStatus, FunctionInfo, GlobalVariablePage, InvalidatedWatchpoint,
-    LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage,
-    PointerWidth, RegisterRole, RegisterSnapshot, SourceContext, StateSnapshot, StepKind,
-    StopReason, SymbolExtentProvenance, SymbolLocation, ThreadState, WatchScope, Watchpoint,
-    WatchpointHit, WatchpointInvalidation,
+    AddressDescription, Backtrace, BlockCompletion, BoundaryConflict, BoundaryEvidence, Breakpoint,
+    BreakpointLocation, ByteOrder, ContextShortfall, CoreDumpInfo, CoreModuleState,
+    DecodedInstruction, DisassembledInstruction, Disassembly, DisassemblyBlock, DisassemblyView,
+    ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, InstructionContent,
+    InstructionReferenceKind, InstructionTokenKind, InvalidatedWatchpoint, LoadedModuleSnapshot,
+    MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage, PointerWidth,
+    RegisterRole, RegisterSnapshot, SourceContext, StateSnapshot, StepKind, StopReason,
+    SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState, VirtualAddress,
+    WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec};
@@ -660,6 +663,335 @@ pub fn address_description(description: &AddressDescription, renderer: Renderer)
             )
         },
     )
+}
+
+/// Returns every module whose instructions a disassembly holds.
+pub fn disassembly_modules(disassembly: &Disassembly) -> BTreeSet<ModuleId> {
+    disassembly_blocks(disassembly)
+        .flat_map(|block| block.instructions.iter())
+        .filter_map(|instruction| instruction.location.module.as_ref())
+        .map(|module| module.module)
+        .collect()
+}
+
+fn disassembly_blocks(disassembly: &Disassembly) -> impl Iterator<Item = &DisassemblyBlock> {
+    match &disassembly.view {
+        DisassemblyView::Function { blocks, .. } => blocks.iter().collect::<Vec<_>>(),
+        DisassemblyView::Window { block, .. } => vec![block],
+    }
+    .into_iter()
+}
+
+/// Renders a disassembly: one line per instruction with its address, its
+/// offset from the containing symbol, its bytes, and its text, marking the
+/// stopped instruction, naming encoded addresses, and announcing each new
+/// source line. Unproven context, conflicts, and unreadable or truncated
+/// code are reported where they occur.
+pub fn disassembly(
+    disassembly: &Disassembly,
+    program_counter: Option<VirtualAddress>,
+    modules: &LoadedModuleSnapshot,
+    images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    renderer: Renderer,
+) -> String {
+    let mut lines = Vec::new();
+    match &disassembly.view {
+        DisassemblyView::Function { function, blocks } => {
+            let origin = match function.origin {
+                FunctionOrigin::DebugInfo { .. } => "",
+                FunctionOrigin::Symbol {
+                    provenance: SymbolExtentProvenance::Declared,
+                    ..
+                } => " (symbol)",
+                FunctionOrigin::Symbol { .. } => " (unsized symbol)",
+            };
+            let module = module_name(modules, function.module)
+                .map(|name| format!(" in {}", renderer.paint(Role::Metadata, name)))
+                .unwrap_or_default();
+            lines.push(format!(
+                "function {}{origin}{module}:",
+                renderer.paint(
+                    Role::Name,
+                    function
+                        .demangled_name()
+                        .unwrap_or_else(|| function.name.to_string())
+                )
+            ));
+            for (index, block) in blocks.iter().enumerate() {
+                if blocks.len() > 1 {
+                    lines.push(format!(
+                        "range {} of {}: {}..{}",
+                        index + 1,
+                        blocks.len(),
+                        renderer.paint(Role::Metadata, block.range.start),
+                        renderer.paint(Role::Metadata, block.range.end)
+                    ));
+                }
+                disassembly_block(
+                    &mut lines,
+                    block,
+                    program_counter,
+                    modules,
+                    images,
+                    renderer,
+                );
+            }
+        }
+        DisassemblyView::Window {
+            address,
+            boundary,
+            leading,
+            block,
+        } => {
+            if let Some(note) = target_boundary_note(*address, *boundary) {
+                lines.push(renderer.paint(Role::Warning, note).to_string());
+            }
+            if let Some(shortfall) = leading {
+                lines.push(
+                    renderer
+                        .paint(Role::Muted, context_shortfall_note(*shortfall))
+                        .to_string(),
+                );
+            }
+            disassembly_block(
+                &mut lines,
+                block,
+                program_counter,
+                modules,
+                images,
+                renderer,
+            );
+        }
+    }
+    lines.join("\n")
+}
+
+/// The widest instruction encoding whose bytes keep the text column aligned;
+/// longer encodings push their text right.
+const ALIGNED_INSTRUCTION_BYTES: usize = 8;
+
+fn disassembly_block(
+    lines: &mut Vec<String>,
+    block: &DisassemblyBlock,
+    program_counter: Option<VirtualAddress>,
+    modules: &LoadedModuleSnapshot,
+    images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    renderer: Renderer,
+) {
+    let place = |instruction: &DisassembledInstruction| {
+        instruction
+            .location
+            .module
+            .as_ref()
+            .and_then(|module| module.image.symbol.as_ref())
+            .map_or_else(
+                || ":".to_owned(),
+                |symbol| format!(" <{}>:", code_name(None, Some(symbol))),
+            )
+    };
+    let place_width = block
+        .instructions
+        .iter()
+        .map(|instruction| place(instruction).len())
+        .max()
+        .unwrap_or_default();
+    let bytes_width = block
+        .instructions
+        .iter()
+        .map(|instruction| instruction.bytes.len().min(ALIGNED_INSTRUCTION_BYTES) * 3)
+        .max()
+        .unwrap_or_default();
+
+    let mut source = None;
+    for instruction in block.instructions.iter() {
+        let module = instruction.location.module.as_ref();
+        let current_source = instruction.source.as_ref().and_then(|location| {
+            let file = images.get(&module?.module)?.source_file(location.file)?;
+            Some(format!("{}:{}", file.path.display(), location.line))
+        });
+        if current_source.is_some() && current_source != source {
+            lines.push(
+                renderer
+                    .paint(
+                        Role::Metadata,
+                        current_source.as_deref().unwrap_or_default(),
+                    )
+                    .to_string(),
+            );
+        }
+        source = current_source;
+
+        let marker = if Some(instruction.address) == program_counter {
+            renderer.paint(Role::Current, "=>").to_string()
+        } else {
+            "  ".to_owned()
+        };
+        let bytes = instruction_bytes(&instruction.bytes);
+        let text = match &instruction.content {
+            InstructionContent::Decoded(decoded) => instruction_text(
+                decoded,
+                module.map(|module| module.module),
+                modules,
+                renderer,
+            ),
+            InstructionContent::Invalid => renderer.paint(Role::Warning, "(bad)").to_string(),
+            InstructionContent::Truncated => renderer
+                .paint(Role::Warning, "(truncated by unreadable memory)")
+                .to_string(),
+        };
+        lines.push(format!(
+            "{marker} {}{} {bytes:<bytes_width$} {text}",
+            renderer.paint(
+                Role::Metadata,
+                format_args!("{:#018x}", instruction.address)
+            ),
+            renderer.paint(Role::Name, format!("{:<place_width$}", place(instruction))),
+        ));
+        for conflict in block
+            .conflicts
+            .iter()
+            .filter(|conflict| conflict.instruction == instruction.address)
+        {
+            lines.push(
+                renderer
+                    .paint(Role::Warning, conflict_note(conflict))
+                    .to_string(),
+            );
+        }
+    }
+    match block.completion {
+        BlockCompletion::Complete => {}
+        BlockCompletion::Unreadable { address, reason } => lines.push(
+            renderer
+                .paint(Role::Warning, format!("{reason} at {address}"))
+                .to_string(),
+        ),
+        BlockCompletion::Limited { next } => lines.push(
+            renderer
+                .paint(
+                    Role::Muted,
+                    format!(
+                        "stopped at the instruction limit; continue with `disassemble {next} <instruction-count>`"
+                    ),
+                )
+                .to_string(),
+        ),
+    }
+}
+
+fn conflict_note(conflict: &BoundaryConflict) -> String {
+    if conflict.evidence == BoundaryEvidence::RangeEnd {
+        format!(
+            "   this instruction extends past the end of the range at {}",
+            conflict.boundary
+        )
+    } else {
+        format!(
+            "   this instruction overlaps {}, where {} proves an instruction begins; decoding resumes there",
+            conflict.boundary, conflict.evidence
+        )
+    }
+}
+
+fn instruction_bytes(bytes: &[u8]) -> String {
+    bytes.iter().fold(String::new(), |mut text, byte| {
+        write!(text, "{byte:02x} ").expect("writing to a String cannot fail");
+        text
+    })
+}
+
+/// Renders an instruction's text with each encoded address named.
+fn instruction_text(
+    decoded: &DecodedInstruction,
+    module: Option<ModuleId>,
+    modules: &LoadedModuleSnapshot,
+    renderer: Renderer,
+) -> String {
+    let mut text = String::new();
+    for token in decoded.tokens.iter() {
+        let role = match token.kind {
+            InstructionTokenKind::Mnemonic | InstructionTokenKind::Prefix => Some(Role::Command),
+            InstructionTokenKind::Register => Some(Role::Type),
+            InstructionTokenKind::Number | InstructionTokenKind::Address => Some(Role::Value),
+            _ => None,
+        };
+        match role {
+            Some(role) => write!(text, "{}", renderer.paint(role, &token.text)),
+            None => write!(text, "{}", token.text),
+        }
+        .expect("writing to a String cannot fail");
+    }
+    for reference in decoded.references.iter() {
+        let Some(name) = reference_name(&reference.description, module, modules) else {
+            continue;
+        };
+        let name = renderer.paint(Role::Name, format!("<{name}>"));
+        match reference.kind {
+            InstructionReferenceKind::BranchTarget => write!(text, " {name}"),
+            InstructionReferenceKind::MemoryOperand => write!(
+                text,
+                "  {} {name}",
+                renderer.paint(Role::Muted, format_args!("# {}", reference.address))
+            ),
+        }
+        .expect("writing to a String cannot fail");
+    }
+    text
+}
+
+/// Names an encoded address by its symbol or, failing that, its section,
+/// adding the module when it differs from the instruction's.
+fn reference_name(
+    description: &AddressDescription,
+    from: Option<ModuleId>,
+    modules: &LoadedModuleSnapshot,
+) -> Option<String> {
+    let module = description.module.as_ref()?;
+    let mut name = match (&module.image.symbol, &module.image.section) {
+        (Some(symbol), _) => code_name(None, Some(symbol)),
+        (None, Some(section)) => format!("{}+{:#x}", section.name, section.offset),
+        (None, None) => return None,
+    };
+    if Some(module.module) != from
+        && let Some(file) = module_name(modules, module.module)
+    {
+        write!(name, " in {file}").expect("writing to a String cannot fail");
+    }
+    Some(name)
+}
+
+fn target_boundary_note(address: VirtualAddress, boundary: TargetBoundary) -> Option<String> {
+    match boundary {
+        TargetBoundary::Known(_) | TargetBoundary::Reached { .. } => None,
+        TargetBoundary::Crossed { from, instruction } => Some(format!(
+            "{address} lies inside the instruction at {instruction} when decoding from {from}; it is probably not an instruction start"
+        )),
+        TargetBoundary::Unverified(shortfall) => Some(format!(
+            "{address} is not proven to begin an instruction: {}",
+            shortfall_reason(shortfall)
+        )),
+    }
+}
+
+fn context_shortfall_note(shortfall: ContextShortfall) -> String {
+    format!(
+        "no earlier instructions are shown: {}",
+        shortfall_reason(shortfall)
+    )
+}
+
+fn shortfall_reason(shortfall: ContextShortfall) -> String {
+    match shortfall {
+        ContextShortfall::NoKnownBoundary => {
+            "no known instruction start precedes it closely enough".to_owned()
+        }
+        ContextShortfall::Desynchronized { boundary } => {
+            format!("decoding from the preceding known instruction start overlaps {boundary}")
+        }
+        ContextShortfall::Unreadable { address } => {
+            format!("memory is unreadable at {address}")
+        }
+    }
 }
 
 /// Returns the file name of a loaded module's image.

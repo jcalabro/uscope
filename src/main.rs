@@ -11,7 +11,7 @@ use clap::Parser;
 use uscope::{CoreDumpOptions, Debugger, ProcessId};
 
 use cli::terminal::{ColorChoice, Role};
-use cli::{Cli, Renderers};
+use cli::{Cli, DisassemblySyntax, Renderers};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -48,6 +48,10 @@ struct Args {
     /// Control colored terminal output.
     #[arg(long, value_enum, default_value_t)]
     color: ColorChoice,
+
+    /// The assembly syntax `disassemble` renders.
+    #[arg(long, value_enum, default_value_t)]
+    disassembly_syntax: DisassemblySyntax,
 }
 
 #[tokio::main]
@@ -71,7 +75,9 @@ async fn main() -> ExitCode {
 
 async fn run(args: &Args, renderers: Renderers) -> Result<()> {
     let debugger = open_debugger(args).await?;
-    let result = Cli::new(debugger.handle(), renderers).run(args).await;
+    let result = Cli::new(debugger.handle(), renderers, args.disassembly_syntax.into())
+        .run(args)
+        .await;
     let shutdown = debugger
         .shutdown()
         .await

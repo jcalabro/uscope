@@ -1,10 +1,12 @@
 //! The command table, argument parsing, and command handlers.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 use uscope::{
-    BreakpointId, BreakpointSpec, LineNumber, StepKind, ThreadId, VirtualAddress, WatchAccess,
+    BreakpointId, BreakpointSpec, ByteOrder, Disassembly, DisassemblyQuery, DisassemblyRange,
+    LineNumber, MAX_WINDOW_AFTER, RegisterRole, StepKind, ThreadId, VirtualAddress, WatchAccess,
     WatchpointId, WatchpointSpec,
 };
 
@@ -16,6 +18,9 @@ use super::{Cli, Control};
 const DEFAULT_HEX_DUMP_BYTES: u64 = 64;
 pub const MAX_HEX_DUMP_BYTES: u64 = 8 * 1024;
 const SOURCE_CONTEXT_RADIUS: u32 = 3;
+/// Instructions shown before and from a stop that no function contains.
+const DISASSEMBLY_CONTEXT_BEFORE: u32 = 8;
+const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -37,6 +42,7 @@ pub enum Command {
     Next,
     Finish,
     Examine,
+    Disassemble,
     Address,
     Where,
     List,
@@ -229,6 +235,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         repeatable
     ),
     command!(
+        Disassemble,
+        "disassemble",
+        ["disas"],
+        "disassemble [function|0xaddress] [instruction-count]",
+        "Disassemble a function, or instructions from an address"
+    ),
+    command!(
         Address,
         "address",
         [],
@@ -358,6 +371,10 @@ impl Cli {
                 let address = parse_address(arguments[0])?;
                 let byte_count = parse_memory_byte_count(arguments.get(1).copied(), spec)?;
                 format::memory_read(&debugger.read_memory(address, byte_count).await?, renderer)
+            }
+            Command::Disassemble => {
+                self.disassemble(first, arguments.get(1).copied(), spec)
+                    .await?
             }
             Command::Address => format!(
                 "{}: {}",
@@ -520,6 +537,96 @@ impl Cli {
             })
             .await?;
         Ok(format::globals(&page, self.renderers.stdout))
+    }
+
+    /// Disassembles the function containing the stopped instruction, a named
+    /// function, or the function containing an address; with a count,
+    /// disassembles that many instructions from the address instead.
+    async fn disassemble(
+        &self,
+        target: Option<&str>,
+        count: Option<&str>,
+        spec: &CommandSpec,
+    ) -> Result<String> {
+        let program_counter = self.program_counter().await?;
+        let count = count
+            .map(|count| {
+                parse_count(count)
+                    .and_then(|count| u32::try_from(count).ok())
+                    .filter(|count| (1..=MAX_WINDOW_AFTER).contains(count))
+                    .ok_or_else(|| {
+                        anyhow!("instruction count must be between 1 and {MAX_WINDOW_AFTER}")
+                    })
+            })
+            .transpose()?;
+        let address = match target {
+            None => program_counter.ok_or_else(|| spec.usage_error())?,
+            Some(target) if target.starts_with("0x") => parse_address(target)?,
+            Some(name) => self.debugger.runtime_address(name).await?,
+        };
+        let range = count.map_or(DisassemblyRange::Function(address), |after| {
+            DisassemblyRange::Window {
+                address,
+                before: 0,
+                after,
+            }
+        });
+        let disassembly = match self.disassemble_query(range).await {
+            // Code outside every function, such as a stop in the vDSO, is
+            // shown around the stopped instruction instead.
+            Err(uscope::Error::NoFunctionContainsAddress(_)) if target.is_none() => {
+                self.disassemble_query(DisassemblyRange::Window {
+                    address,
+                    before: DISASSEMBLY_CONTEXT_BEFORE,
+                    after: DISASSEMBLY_CONTEXT_AFTER,
+                })
+                .await?
+            }
+            Err(uscope::Error::NoFunctionContainsAddress(address)) => {
+                bail!(
+                    "no function or code symbol contains {address}; give an instruction count to disassemble from it"
+                )
+            }
+            result => result?,
+        };
+
+        let mut images = BTreeMap::new();
+        for module in format::disassembly_modules(&disassembly) {
+            images.insert(module, self.debugger.loaded_module_image(module).await?);
+        }
+        let modules = self.debugger.loaded_modules().await?;
+        Ok(format::disassembly(
+            &disassembly,
+            program_counter,
+            &modules,
+            &images,
+            self.renderers.stdout,
+        ))
+    }
+
+    async fn disassemble_query(&self, range: DisassemblyRange) -> uscope::Result<Disassembly> {
+        self.debugger
+            .disassemble(DisassemblyQuery {
+                range,
+                syntax: self.syntax,
+            })
+            .await
+    }
+
+    /// Returns the selected thread's program counter.
+    async fn program_counter(&self) -> Result<Option<VirtualAddress>> {
+        let registers = self.debugger.registers().await?;
+        Ok(registers
+            .registers
+            .iter()
+            .find(|value| value.register.role == Some(RegisterRole::ProgramCounter))
+            .and_then(|value| <[u8; 8]>::try_from(value.bytes.as_ref()).ok())
+            .map(|bytes| {
+                VirtualAddress::new(match registers.target.byte_order {
+                    ByteOrder::Little => u64::from_le_bytes(bytes),
+                    ByteOrder::Big => u64::from_be_bytes(bytes),
+                })
+            }))
     }
 
     async fn location(&self) -> Result<String> {
@@ -757,6 +864,7 @@ mod tests {
         assert_eq!(spec(Command::Info).arity(), (1, 2));
         assert_eq!(spec(Command::Print).arity(), (0, 1));
         assert_eq!(spec(Command::Examine).arity(), (1, 2));
+        assert_eq!(spec(Command::Disassemble).arity(), (0, 2));
         assert!(spec(Command::Next).repeatable);
         assert!(!spec(Command::Watch).repeatable);
     }
