@@ -207,8 +207,8 @@ fn logical_memory_reads_return_the_prefix_before_inaccessible_memory() {
 
 #[test]
 fn logical_memory_reads_keep_the_readable_bytes_of_a_partial_word() {
-    // Readable memory ends three bytes into the second word.
-    let read = |address, size| {
+    // Readable memory ends `readable` bytes into the second word.
+    let read = |address, size, readable| {
         read_logical_memory_with(
             VirtualAddress::new(address),
             size,
@@ -216,7 +216,7 @@ fn logical_memory_reads_keep_the_readable_bytes_of_a_partial_word() {
             |current| {
                 let word = u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]);
                 if current == 0x1008 {
-                    Err(MemoryAccessError::Partial { word, readable: 3 })
+                    Err(MemoryAccessError::Partial { word, readable })
                 } else {
                     Ok(word)
                 }
@@ -229,17 +229,24 @@ fn logical_memory_reads_keep_the_readable_bytes_of_a_partial_word() {
         reason: MemoryReadUnavailableReason::Inaccessible,
     };
 
-    let spanning = read(0x1006, 8);
+    let spanning = read(0x1006, 8, 3);
     assert_eq!(spanning.bytes, [6, 7, 0, 1, 2]);
     assert_eq!(spanning.completion, incomplete(0x100b));
     // A read that ends within the readable bytes is complete.
-    let within = read(0x1009, 2);
+    let within = read(0x1009, 2, 3);
     assert_eq!(within.bytes, [1, 2]);
     assert_eq!(within.completion, MemoryReadCompletion::Complete);
     // A read that begins after them returns nothing.
-    let after = read(0x100c, 2);
+    let after = read(0x100c, 2, 3);
     assert!(after.bytes.is_empty());
     assert_eq!(after.completion, incomplete(0x100c));
+    // A count covering the whole word keeps its final byte, and an
+    // oversized count is clamped to the word.
+    for readable in [8, 9] {
+        let whole = read(0x1006, 10, readable);
+        assert_eq!(whole.bytes, [6, 7, 0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(whole.completion, MemoryReadCompletion::Complete);
+    }
 }
 
 #[test]
