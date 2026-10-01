@@ -584,6 +584,8 @@ struct OracleFile {
     /// Every allocated section that occupies addresses, by section index:
     /// its name, range, and whether it is thread-local.
     allocated_sections: BTreeMap<u32, (String, u64, u64, bool)>,
+    /// The flags of every allocated section, by name.
+    section_flags: BTreeMap<String, String>,
     symbols: Vec<OracleSymbol>,
     /// The code range of every call-frame entry.
     unwind: Vec<(u64, u64)>,
@@ -650,6 +652,7 @@ impl OracleFile {
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         let mut executable_sections = BTreeMap::new();
         let mut allocated_sections = BTreeMap::new();
+        let mut section_flags = BTreeMap::new();
         let mut symbols = Vec::new();
         let mut unwind = Vec::new();
         let mut dynamic = false;
@@ -683,6 +686,7 @@ impl OracleFile {
                     if fields[6].contains('X') {
                         executable_sections.insert(index, (start, start + size));
                     }
+                    section_flags.insert(fields[0].to_owned(), fields[6].to_owned());
                     // A thread-local NOBITS section only describes a template.
                     let template = fields[6].contains('T') && fields[1] == "NOBITS";
                     if size != 0 && !template {
@@ -741,6 +745,7 @@ impl OracleFile {
         Self {
             executable_sections,
             allocated_sections,
+            section_flags,
             symbols,
             unwind,
         }
@@ -798,6 +803,43 @@ fn assert_catalog_matches_oracle(image: &ModuleImage, oracle: &Oracle, context: 
     }
     assert_code_extents_match_oracle(image, oracle, &catalog, context);
     assert_data_storage_matches_oracle(oracle, &catalog, context);
+    assert_sections_match_oracle(image, &oracle.files[0], context);
+}
+
+/// Checks that the image catalogs exactly the allocated sections readelf
+/// lists as occupying addresses, with their ranges and permissions.
+fn assert_sections_match_oracle(image: &ModuleImage, oracle: &OracleFile, context: &str) {
+    let mut expected = oracle
+        .allocated_sections
+        .values()
+        .map(|(name, start, end, _)| (*start, *end, name.clone()))
+        .collect::<Vec<_>>();
+    expected.sort();
+    let actual = image
+        .sections()
+        .iter()
+        .map(|section| {
+            (
+                section.range.start.get(),
+                section.range.end.get(),
+                section.name.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "{context}");
+    for section in image.sections() {
+        let flags = &oracle.section_flags[section.name.as_ref()];
+        assert_eq!(
+            section.executable,
+            flags.contains('X'),
+            "{context}: {section:?}"
+        );
+        assert_eq!(
+            section.writable,
+            flags.contains('W'),
+            "{context}: {section:?}"
+        );
+    }
 }
 
 /// Checks that exactly the data symbols readelf places in allocated,
