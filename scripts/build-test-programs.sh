@@ -935,7 +935,10 @@ generate_symbol_oracle() {
     local elf="$1"
     local oracle="$symbol_oracle_dir/${2:-${elf##*/}}.readelf"
     local frames="${3:-yes}"
-    local header="uscope-symbol-oracle-v2"
+    # Nix store files all date from 1970, so the modification time alone never
+    # notices a toolchain update. The resolved path names the store entry.
+    local header
+    header="uscope-symbol-oracle-v3 $(readlink -f "$elf")"
     # Registered so that deleting an oracle invalidates the cached suite.
     rebuilt_outputs["$oracle"]=false
     if [[ -s "$oracle" && "$oracle" -nt "$elf" && "$(head -n 1 "$oracle")" == "$header" ]]; then
