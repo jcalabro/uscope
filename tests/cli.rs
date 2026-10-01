@@ -1268,6 +1268,181 @@ fn uscope(arguments: &[&str]) -> std::process::Output {
         .expect("run uscope")
 }
 
+fn assert_failure(output: &std::process::Output, expected: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains(expected),
+        "expected failure containing {expected:?}:\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+const SEGV_CORE: &str = "build/test-programs/crash-gcc-o0-segv.core";
+
+#[test]
+fn core_dumps_are_inspected_in_batch_mode_without_executing() {
+    let output = uscope(&[
+        "--core",
+        SEGV_CORE,
+        "--batch",
+        "--eval",
+        "where",
+        "--eval",
+        "bt",
+        "--eval",
+        "threads",
+        "--eval",
+        "print depth",
+        "--eval",
+        "print crash_library_tls",
+        "--eval",
+        "info core",
+    ]);
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = assert_success(output);
+    assert!(stdout.starts_with("crash_segv at "), "{stdout}");
+    assert!(stdout.contains("#1 "), "{stdout}");
+    assert!(stdout.contains("in main at "), "{stdout}");
+    assert!(stdout.contains("unwind stopped: Complete"), "{stdout}");
+    assert_eq!(
+        stdout
+            .matches("process terminated by SIGSEGV (SEGV_MAPERR) at 0x0 (0xb)")
+            .count(),
+        1,
+        "only the faulting thread carries the reason: {stdout}"
+    );
+    assert!(stdout.contains("(int32_t) depth = 3"), "{stdout}");
+    assert!(stdout.contains("crash_library_tls = 654"), "{stdout}");
+    assert!(
+        stdout.contains("signal: SIGSEGV (SEGV_MAPERR) at 0x0"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("crash-gcc-o0 module 0 verified by build-id"),
+        "{stdout}"
+    );
+    assert_no_sgr(&stdout);
+
+    for command in [
+        "run",
+        "continue",
+        "step",
+        "next",
+        "finish",
+        "stepi",
+        "pause",
+        "break main",
+    ] {
+        assert_failure(
+            &uscope(&["--core", SEGV_CORE, "--batch", "--eval", command]),
+            "a post-mortem core dump cannot execute, be modified, or hold breakpoints",
+        );
+    }
+}
+
+#[test]
+fn core_banner_reports_the_signal_and_every_unproven_module() {
+    let stdout = assert_success(uscope(&["--core", SEGV_CORE]));
+    let mut lines = stdout.lines();
+    let banner = lines.next().unwrap_or_default();
+    assert!(
+        banner.starts_with("opened core dump ") && banner.contains("of crash-gcc-o0 (process "),
+        "{stdout}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("process terminated by SIGSEGV (SEGV_MAPERR) at 0x0 (0xb)")
+    );
+    assert!(!stdout.contains("warning"), "{stdout}");
+
+    let missing = assert_success(uscope(&[
+        "--core",
+        "build/test-programs/core-missing-library/crash.core",
+    ]));
+    assert!(
+        missing.contains("core-missing-library/libcrash.so is missing; its frames and unsaved memory are unavailable"),
+        "{missing}"
+    );
+    // Batch output stays clean; warnings move to stderr.
+    let batch = uscope(&[
+        "--core",
+        "build/test-programs/core-missing-library/crash.core",
+        "--batch",
+    ]);
+    assert!(String::from_utf8_lossy(&batch.stderr).contains("libcrash.so is missing"));
+    assert_eq!(assert_success(batch), "");
+}
+
+#[test]
+fn core_identity_mismatches_require_the_explicit_override() {
+    assert_failure(
+        &uscope(&[
+            "--core",
+            SEGV_CORE,
+            "build/test-programs/crash-gcc-o0-rebuilt",
+            "--batch",
+        ]),
+        "does not match the image recorded in the core dump: the build-id note differs; allow module mismatches",
+    );
+    let allowed = uscope(&[
+        "--core",
+        SEGV_CORE,
+        "build/test-programs/crash-gcc-o0-rebuilt",
+        "--allow-module-mismatch",
+        "--batch",
+        "--eval",
+        "info core",
+    ]);
+    let stderr = String::from_utf8_lossy(&allowed.stderr).into_owned();
+    assert!(
+        stderr.contains("crash-gcc-o0-rebuilt does not match the dump (the build-id note differs); using its metadata anyway"),
+        "{stderr}"
+    );
+    let stdout = assert_success(allowed);
+    assert!(
+        stdout.contains("module 0 mismatched: the build-id note differs"),
+        "{stdout}"
+    );
+
+    assert_failure(
+        &uscope(&[
+            "--core",
+            "build/test-programs/core-missing-executable/crash.core",
+            "--batch",
+        ]),
+        "no longer exists; supply the executable explicitly",
+    );
+    assert_failure(
+        &uscope(&["--core", "build/test-programs/crash-gcc-o0", "--batch"]),
+        "invalid core dump: the ELF file is not a core dump",
+    );
+}
+
+#[test]
+fn core_arguments_conflict_with_live_targets() {
+    assert_failure(
+        &uscope(&["--core", SEGV_CORE, "--attach", "1"]),
+        "cannot be used with",
+    );
+    assert_failure(
+        &uscope(&["--allow-module-mismatch", "build/test-programs/basic"]),
+        "--core <CORE>",
+    );
+    assert_failure(
+        &uscope(&[
+            "build/test-programs/basic",
+            "--batch",
+            "--eval",
+            "info core",
+        ]),
+        "no core dump is open",
+    );
+}
+
 #[test]
 fn backtraces_name_source_files_from_each_frames_own_module() {
     let stdout = assert_success(uscope(&[
