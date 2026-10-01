@@ -23,10 +23,11 @@ use nix::sys::uio::{RemoteIoVec, process_vm_readv};
 use nix::unistd::Pid;
 use object::{Object, ObjectSymbol, SymbolKind};
 
-use super::{mapped_module_load_bias, module_mappings};
+use super::{glibc_tls, mapped_module_load_bias, module_mappings};
 use crate::VirtualAddress;
 
 const TD_OK: c_int = 0;
+const TD_ERR: c_int = 1;
 const TD_TLSDEFER: c_int = 21;
 const TD_VERSION: c_int = 22;
 /// `td_err_e` names, indexed by value.
@@ -130,8 +131,24 @@ struct Agent<'a> {
     raw: *mut ThreadAgent,
 }
 
+/// Why no agent could be created: the step that failed and its `td_err_e`.
+struct AgentError {
+    step: &'static str,
+    code: c_int,
+}
+
+impl AgentError {
+    fn message(&self) -> String {
+        format!(
+            "libthread_db {} failed with {}",
+            self.step,
+            td_error(self.code)
+        )
+    }
+}
+
 impl<'a> Agent<'a> {
-    fn new(pid: Pid, services: &'a dyn ProcessServices) -> Result<Self, Arc<str>> {
+    fn new(pid: Pid, services: &'a dyn ProcessServices) -> Result<Self, AgentError> {
         let mut process = Box::new(ProcessHandle {
             pid: pid.as_raw(),
             services,
@@ -141,11 +158,10 @@ impl<'a> Agent<'a> {
         // libthread_db's own state; callers hold `THREAD_DB`.
         let initialized = unsafe { td_init() };
         if initialized != TD_OK {
-            return Err(format!(
-                "libthread_db initialization failed with {}",
-                td_error(initialized)
-            )
-            .into());
+            return Err(AgentError {
+                step: "initialization",
+                code: initialized,
+            });
         }
         // SAFETY: both pointers are valid for writes for the duration of the
         // call. libthread_db retains the process pointer, which stays valid
@@ -153,11 +169,10 @@ impl<'a> Agent<'a> {
         // until after td_ta_delete.
         let created = unsafe { td_ta_new((&raw mut *process).cast(), &raw mut raw) };
         if created != TD_OK || raw.is_null() {
-            return Err(format!(
-                "libthread_db agent creation failed with {}",
-                td_error(created)
-            )
-            .into());
+            return Err(AgentError {
+                step: "agent creation",
+                code: if created == TD_OK { TD_ERR } else { created },
+            });
         }
         Ok(Self {
             _process: process,
@@ -174,6 +189,9 @@ impl Drop for Agent<'_> {
     }
 }
 
+/// Resolves a TLS address through `libthread_db`, or through glibc's own
+/// layout descriptors when `libthread_db` refuses the inferior's C library
+/// as another version than its own.
 pub(super) fn tls_address(
     services: &dyn ProcessServices,
     process: Pid,
@@ -181,9 +199,27 @@ pub(super) fn tls_address(
     link_map: VirtualAddress,
     offset: u64,
 ) -> Result<VirtualAddress, Arc<str>> {
+    let described = || {
+        glibc_tls::tls_address(services, thread, link_map.get(), offset).map(VirtualAddress::new)
+    };
+    if glibc_tls::forced() {
+        return described().map_err(|error| error.to_string().into());
+    }
     let offset = usize::try_from(offset).map_err(|_| Arc::from("TLS offset exceeds usize"))?;
     let _serialized = THREAD_DB.lock().unwrap_or_else(PoisonError::into_inner);
-    let agent = Agent::new(process, services)?;
+    let agent = match Agent::new(process, services) {
+        Ok(agent) => agent,
+        Err(error) if error.code == TD_VERSION => {
+            return described().map_err(|described| {
+                format!(
+                    "{}, and the C library's own descriptors could not locate it: {described}",
+                    error.message()
+                )
+                .into()
+            });
+        }
+        Err(error) => return Err(error.message().into()),
+    };
     let mut handle = ThreadHandle {
         agent: ptr::null_mut(),
         unique: ptr::null_mut(),

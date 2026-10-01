@@ -112,6 +112,11 @@ pub fn open_core(
     linux::open_core(options, channels)
 }
 
+/// Makes TLS lookups in this process bypass the platform's thread library.
+pub fn force_internal_tls_lookup(forced: bool) {
+    linux::force_internal_tls_lookup(forced);
+}
+
 /// Describes the platform's hardware watchpoint support.
 pub fn watchpoint_capabilities() -> crate::WatchpointCapabilities {
     linux::watchpoint_capabilities()

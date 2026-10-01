@@ -59,6 +59,7 @@ mod core_files;
 mod debug_registers;
 mod disassembly;
 mod frames;
+mod glibc_tls;
 mod inspection;
 mod lifecycle;
 mod memory;
@@ -72,6 +73,12 @@ mod thread_db;
 mod watchpoints;
 
 pub use post_mortem::{PostMortemSession, open_core};
+
+/// Makes TLS lookups in this process use glibc's layout descriptors instead
+/// of `libthread_db`.
+pub fn force_internal_tls_lookup(forced: bool) {
+    glibc_tls::force(forced);
+}
 
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_core_dump(data: &[u8]) {

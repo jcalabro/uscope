@@ -30,7 +30,7 @@ const PRPSINFO_NAME: std::ops::Range<usize> = 40..56;
 const PRPSINFO_ARGUMENTS: std::ops::Range<usize> = 56..136;
 const SIGINFO_SIZE: usize = 128;
 pub(super) const FXSAVE_SIZE: usize = 512;
-const GENERAL_REGISTER_COUNT: usize = 27;
+pub(super) const GENERAL_REGISTER_COUNT: usize = 27;
 const AUXV_ENTRY_SIZE: usize = 16;
 const FILE_ENTRY_SIZE: usize = 24;
 /// Notes describe threads and mappings, not memory; a larger note segment is
@@ -487,7 +487,9 @@ fn parse_prstatus(bytes: &[u8]) -> Result<CoreThread, CoreError> {
 
 /// Builds the kernel's `user_regs_struct`, whose field order is the
 /// `elf_gregset_t` order saved in `NT_PRSTATUS`.
-const fn user_registers(values: [u64; GENERAL_REGISTER_COUNT]) -> libc::user_regs_struct {
+pub(super) const fn user_registers(
+    values: [u64; GENERAL_REGISTER_COUNT],
+) -> libc::user_regs_struct {
     let [
         r15,
         r14,

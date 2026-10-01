@@ -30,7 +30,8 @@
 ## Language and platform support
 
 - [ ] Expand Go execution control, goroutine awareness, and composite value rendering.
-- [ ] Add broader libc support for TLS.
+- [x] Locate TLS in a glibc of another version than the debugger's `libthread_db`.
+- [ ] Add broader libc support for TLS, such as musl.
 - [ ] Add first class support for tokio as much as it will allow
 - [ ] Add additional Linux architectures.
 - [ ] Establish the platform abstraction needed for other operating systems.
