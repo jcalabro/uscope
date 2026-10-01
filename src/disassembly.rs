@@ -9,6 +9,11 @@
 //! boundary; when one does not, the conflict is reported and decoding resumes
 //! at the known start. Instructions before an address are presented only when
 //! decoding forward from a known start lands exactly on that address.
+//!
+//! An indirect jump, call, or return is resolved against the stopped state:
+//! the memory it loads its target from is read at the stop, and registers
+//! are used only for the instruction the selected thread is about to
+//! execute, the one place the stop determines them.
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod x86_64;
@@ -17,8 +22,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::unwind::RegisterFile;
 use crate::{
-    AddressDescription, AddressRange, Architecture, CodeInstanceId, Error,
+    AddressDescription, AddressRange, Architecture, ByteOrder, CodeInstanceId, Error,
     MemoryReadUnavailableReason, ModuleId, Result, SourceLocation, StopId, SymbolExtentProvenance,
     SymbolId, TargetDescription, VirtualAddress,
 };
@@ -122,6 +128,52 @@ pub struct InstructionReference {
     pub description: AddressDescription,
 }
 
+/// Where an indirect jump, call, or return transfers control if it executes
+/// in the stopped state.
+///
+/// The target is what the stop holds: the register containing it, or the
+/// memory the instruction loads it from, such as a global offset table slot
+/// or a return address on the stack. Register values are known only for the
+/// instruction the selected thread is about to execute, so elsewhere a target
+/// is known only when the instruction alone determines the address it is
+/// loaded from. A slot the dynamic loader has not yet filled is reported as it is,
+/// such as one still holding a lazy-binding stub, or nothing before the
+/// loader has run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IndirectTarget {
+    /// A register holds the target.
+    Register {
+        /// The target and the module, section, and symbol containing it.
+        target: AddressDescription,
+    },
+    /// The target is loaded from memory.
+    Memory {
+        /// The memory holding the target and what contains it.
+        slot: AddressDescription,
+        /// The target and the module, section, and symbol containing it.
+        target: AddressDescription,
+    },
+    /// The memory holding the target is unreadable.
+    Unreadable {
+        /// The memory holding the target and what contains it.
+        slot: AddressDescription,
+        /// The first unreadable address.
+        address: VirtualAddress,
+        /// Why the memory is unreadable.
+        reason: MemoryReadUnavailableReason,
+    },
+    /// The target depends on a register whose value the stop does not
+    /// determine for this instruction: it is not the instruction the selected
+    /// thread is about to execute, or that thread is inside a system call the
+    /// kernel will restart.
+    NeedsRegisters,
+    /// The debugger does not compute targets of this form: a far transfer, a
+    /// return from an interrupt or system call, or a branch whose operand
+    /// size differs between processor vendors.
+    Unsupported,
+}
+
 /// A successfully decoded instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedInstruction {
@@ -131,6 +183,9 @@ pub struct DecodedInstruction {
     pub flow: ControlFlow,
     /// The addresses the instruction encodes.
     pub references: Arc<[InstructionReference]>,
+    /// For an indirect jump, call, or return, where it transfers control in
+    /// the stopped state.
+    pub indirect_target: Option<Arc<IndirectTarget>>,
 }
 
 impl DecodedInstruction {
@@ -439,6 +494,25 @@ pub trait CodeSource {
 
     /// Returns the source line containing an instruction address.
     fn source_location(&self, address: VirtualAddress) -> Option<SourceLocation>;
+
+    /// Returns the registers the selected thread will execute the instruction
+    /// at `address` with, when it is about to execute that instruction. A
+    /// register whose value the stop does not determine is absent.
+    fn registers(&self, address: VirtualAddress) -> Option<&RegisterFile>;
+}
+
+/// Where an indirect branch's target comes from, as one decoding determines
+/// it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawIndirect {
+    /// `size` bytes at `address`, in the target's byte order, hold the target.
+    Load { address: u64, size: usize },
+    /// A register holds the target.
+    Value(u64),
+    /// The target depends on registers that were not supplied.
+    NeedsRegisters,
+    /// The decoder does not compute this form's target.
+    Unsupported,
 }
 
 /// One decoding step of an architecture's instruction decoder.
@@ -448,6 +522,8 @@ pub enum RawDecode {
         tokens: Vec<InstructionToken>,
         flow: ControlFlow,
         references: Vec<(InstructionReferenceKind, u64)>,
+        /// Present exactly for an indirect jump, call, or return.
+        indirect: Option<RawIndirect>,
     },
     /// The bytes begin no valid instruction.
     Invalid,
@@ -460,8 +536,14 @@ pub trait InstructionDecoder {
     /// The longest encoding of one instruction.
     fn max_instruction_length(&self) -> usize;
 
-    /// Decodes the instruction at `address` from its leading bytes.
-    fn decode(&mut self, address: u64, bytes: &[u8]) -> RawDecode;
+    /// The byte order of values in memory.
+    fn byte_order(&self) -> ByteOrder;
+
+    /// Decodes the instruction at `address` from its leading bytes. An
+    /// indirect branch's register operands are evaluated only against
+    /// `registers`, the values the instruction will execute with.
+    fn decode(&mut self, address: u64, bytes: &[u8], registers: Option<&RegisterFile>)
+    -> RawDecode;
 }
 
 /// Returns the decoder for a target, or an error for an unsupported one.
@@ -762,12 +844,14 @@ impl<'a> Engine<'a> {
             let view = self.view(position, length)?;
             let mut truncated = None;
             let address = VirtualAddress::new(position);
-            let (content, length) = match self.decoder.decode(position, &view.bytes) {
+            let registers = self.source.registers(address);
+            let (content, length) = match self.decoder.decode(position, &view.bytes, registers) {
                 RawDecode::Instruction {
                     length,
                     tokens,
                     flow,
                     references,
+                    indirect,
                 } => (
                     InstructionContent::Decoded(DecodedInstruction {
                         tokens: tokens.into(),
@@ -783,6 +867,9 @@ impl<'a> Engine<'a> {
                                 }
                             })
                             .collect(),
+                        indirect_target: indirect
+                            .map(|indirect| self.indirect_target(indirect).map(Arc::new))
+                            .transpose()?,
                     }),
                     length,
                 ),
@@ -841,6 +928,38 @@ impl<'a> Engine<'a> {
             instructions,
             conflicts,
             end,
+        })
+    }
+
+    /// Resolves where an indirect branch transfers control by reading the
+    /// memory holding its target.
+    fn indirect_target(&mut self, indirect: RawIndirect) -> Result<IndirectTarget> {
+        Ok(match indirect {
+            RawIndirect::Load { address, size } => {
+                let slot = self.source.describe(VirtualAddress::new(address));
+                let view = self.view(address, size)?;
+                if view.bytes.len() < size {
+                    // A view never extends past the final address.
+                    IndirectTarget::Unreadable {
+                        slot,
+                        address: VirtualAddress::new(address + view.bytes.len() as u64),
+                        reason: view
+                            .unreadable
+                            .expect("only unreadable memory shortens a view"),
+                    }
+                } else {
+                    let target = target_value(&view.bytes, self.decoder.byte_order());
+                    IndirectTarget::Memory {
+                        slot,
+                        target: self.source.describe(VirtualAddress::new(target)),
+                    }
+                }
+            }
+            RawIndirect::Value(target) => IndirectTarget::Register {
+                target: self.source.describe(VirtualAddress::new(target)),
+            },
+            RawIndirect::NeedsRegisters => IndirectTarget::NeedsRegisters,
+            RawIndirect::Unsupported => IndirectTarget::Unsupported,
         })
     }
 
@@ -920,6 +1039,21 @@ impl<'a> Engine<'a> {
             bytes: read.bytes,
             unreadable,
         })
+    }
+}
+
+/// Reads an address of up to eight bytes stored in `byte_order`.
+fn target_value(bytes: &[u8], byte_order: ByteOrder) -> u64 {
+    let mut word = [0; 8];
+    match byte_order {
+        ByteOrder::Little => {
+            word[..bytes.len()].copy_from_slice(bytes);
+            u64::from_le_bytes(word)
+        }
+        ByteOrder::Big => {
+            word[8 - bytes.len()..].copy_from_slice(bytes);
+            u64::from_be_bytes(word)
+        }
     }
 }
 

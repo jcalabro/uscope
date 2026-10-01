@@ -4,14 +4,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::Arc;
 
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ObjectSymbol, ObjectSymbolTable};
 use support::Scenario;
 use uscope::{
-    AssemblySyntax, BlockCompletion, BoundaryConflict, BoundaryEvidence, BreakpointSpec,
-    ContextShortfall, ControlFlow, CoreDumpOptions, CoreModuleState, DisassembledInstruction,
-    Disassembly, DisassemblyBlock, DisassemblyQuery, DisassemblyRange, DisassemblyView, Error,
-    FunctionOrigin, ImageAddress, InstructionContent, InstructionReferenceKind, LoadedModuleRecord,
-    MAX_WINDOW_AFTER, MAX_WINDOW_BEFORE, ModuleImage, StopReason, SymbolExtentProvenance,
+    AddressDescription, AssemblySyntax, BlockCompletion, BoundaryConflict, BoundaryEvidence,
+    BreakpointSpec, ContextShortfall, ControlFlow, CoreDumpOptions, CoreModuleState,
+    DisassembledInstruction, Disassembly, DisassemblyBlock, DisassemblyQuery, DisassemblyRange,
+    DisassemblyView, Error, FunctionOrigin, ImageAddress, IndirectTarget, InstructionContent,
+    InstructionReferenceKind, LoadedModuleRecord, MAX_WINDOW_AFTER, MAX_WINDOW_BEFORE,
+    MemoryReadUnavailableReason, ModuleImage, StepKind, StopReason, SymbolExtentProvenance,
     SymbolKind, TargetBoundary, VirtualAddress,
 };
 
@@ -836,6 +837,7 @@ async fn assert_syntaxes_agree(
         let (intel, att) = (decoded(intel), decoded(att));
         assert_eq!(intel.flow, att.flow);
         assert_eq!(intel.references, att.references);
+        assert_eq!(intel.indirect_target, att.indirect_target);
     }
     assert!(
         att.iter()
@@ -1086,4 +1088,629 @@ async fn requests_are_validated() {
     );
     assert!(block.instructions.is_empty());
     scenario.shutdown().await;
+}
+
+/// Returns the instruction a window decodes at an address.
+async fn instruction_at(scenario: &Scenario, address: u64) -> DisassembledInstruction {
+    let (_, _, block) = into_window(disassemble(scenario, window(address, 0, 1)).await);
+    block.instructions[0].clone()
+}
+
+/// Returns every instruction of the function containing an address.
+async fn function_instructions(scenario: &Scenario, address: u64) -> Vec<DisassembledInstruction> {
+    let disassembly = disassemble(
+        scenario,
+        query(DisassemblyRange::Function(VirtualAddress::new(address))),
+    )
+    .await;
+    let DisassemblyView::Function { blocks, .. } = disassembly.view else {
+        panic!("a function query returned a window");
+    };
+    blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter().cloned())
+        .collect()
+}
+
+fn indirect_target(instruction: &DisassembledInstruction) -> &IndirectTarget {
+    decoded(instruction)
+        .indirect_target
+        .as_deref()
+        .unwrap_or_else(|| panic!("{:#x} is not an indirect branch", instruction.address))
+}
+
+/// Returns the slot and target of a target loaded from memory.
+fn loaded(target: &IndirectTarget) -> (&AddressDescription, &AddressDescription) {
+    match target {
+        IndirectTarget::Memory { slot, target } => (slot, target),
+        other => panic!("not loaded from memory: {other:?}"),
+    }
+}
+
+fn section(description: &AddressDescription) -> Option<&str> {
+    let module = description.module.as_ref()?;
+    module
+        .image
+        .section
+        .as_ref()
+        .map(|section| section.name.as_ref())
+}
+
+fn symbol(description: &AddressDescription) -> Option<(&str, u64)> {
+    let symbol = description.module.as_ref()?.image.symbol.as_ref()?;
+    Some((symbol.name.as_ref(), symbol.offset))
+}
+
+/// Returns the call in `main` to the procedure linkage table stub for
+/// `printf`, the program's only call through one.
+async fn printf_call(
+    scenario: &Scenario,
+    modules: &Modules,
+    fixture: &str,
+) -> DisassembledInstruction {
+    let main = function_instructions(scenario, modules.symbol(fixture, "main")).await;
+    let calls = main
+        .into_iter()
+        .filter(|instruction| {
+            decoded(instruction).flow == ControlFlow::Call
+                && section(&decoded(instruction).references[0].description)
+                    .is_some_and(|name| name.starts_with(".plt"))
+        })
+        .collect::<Vec<_>>();
+    let [call] = &calls[..] else {
+        panic!("{fixture}: {calls:#?}");
+    };
+    call.clone()
+}
+
+/// Returns the stub's jump through its global offset table slot.
+async fn stub_jump(scenario: &Scenario, call: &DisassembledInstruction) -> DisassembledInstruction {
+    let stub = decoded(call).references[0].address.get();
+    let (_, _, block) = into_window(disassemble(scenario, window(stub, 0, 4)).await);
+    block
+        .instructions
+        .iter()
+        .find(|instruction| decoded(instruction).flow == ControlFlow::IndirectJump)
+        .expect("a linkage stub jumps through its slot")
+        .clone()
+}
+
+fn register(registers: &uscope::RegisterSnapshot, name: &str) -> u64 {
+    let value = registers
+        .registers
+        .iter()
+        .find(|value| value.register.name.as_ref() == name)
+        .unwrap_or_else(|| panic!("no register {name}"));
+    let mut bytes = [0; 8];
+    bytes[..value.bytes.len()].copy_from_slice(&value.bytes);
+    u64::from_le_bytes(bytes)
+}
+
+/// Each labeled indirect branch in indirect.S, in execution order.
+const INDIRECT_BRANCHES: [&str; 7] = [
+    "disasm_call_slot",
+    "disasm_call_method",
+    "disasm_call_register",
+    "disasm_call_thread",
+    "disasm_call_got",
+    "disasm_jump_table",
+    "disasm_return",
+];
+
+/// Away from the stop, only a target loaded from memory that the instruction
+/// alone addresses is known.
+async fn assert_targets_away_from_the_stop(scenario: &Scenario, modules: &Modules, fixture: &str) {
+    let symbol_address = |name| modules.symbol(fixture, name);
+    let targets = function_instructions(scenario, symbol_address("disasm_indirect"))
+        .await
+        .into_iter()
+        .filter_map(|instruction| {
+            let target = decoded(&instruction).indirect_target.clone()?;
+            Some((instruction.address.get(), target))
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        targets.len(),
+        INDIRECT_BRANCHES.len(),
+        "{fixture}: {targets:#?}"
+    );
+    let (slot, target) = loaded(&targets[&symbol_address("disasm_call_slot")]);
+    assert_eq!(
+        (slot.address.get(), target.address.get()),
+        (
+            symbol_address("disasm_slot"),
+            symbol_address("disasm_target_one")
+        ),
+        "{fixture}"
+    );
+    assert_eq!(symbol(slot), Some(("disasm_slot", 0)));
+    assert_eq!(symbol(target), Some(("disasm_target_one", 0)));
+    // The dynamic loader filled the slot at startup.
+    let (slot, target) = loaded(&targets[&symbol_address("disasm_call_got")]);
+    assert_eq!(
+        (section(slot), target.address.get()),
+        (Some(".got"), modules.symbol("libc.so.6", "labs")),
+        "{fixture}"
+    );
+    for label in [
+        "disasm_call_method",
+        "disasm_call_register",
+        "disasm_call_thread",
+        "disasm_jump_table",
+        "disasm_return",
+    ] {
+        assert_eq!(
+            *targets[&symbol_address(label)],
+            IndirectTarget::NeedsRegisters,
+            "{fixture}: {label}"
+        );
+    }
+
+    let forms = function_instructions(scenario, symbol_address("disasm_indirect_forms"))
+        .await
+        .iter()
+        .map(|instruction| indirect_target(instruction).clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        forms,
+        [
+            IndirectTarget::Unreadable {
+                slot: AddressDescription {
+                    address: VirtualAddress::new(0),
+                    module: None,
+                },
+                address: VirtualAddress::new(0),
+                reason: MemoryReadUnavailableReason::Inaccessible,
+            },
+            IndirectTarget::Unsupported,
+            IndirectTarget::Unsupported,
+            IndirectTarget::Unsupported,
+        ],
+        "{fixture}"
+    );
+}
+
+/// Stops at each labeled branch, where the registers resolve its target,
+/// and steps it to check that execution reaches that target.
+async fn assert_targets_at_each_stop(scenario: &mut Scenario, modules: &Modules, fixture: &str) {
+    let symbol_address = |name| modules.symbol(fixture, name);
+    let return_site = function_instructions(scenario, symbol_address("main"))
+        .await
+        .into_iter()
+        .find(|instruction| {
+            let target = decoded(instruction).references.first();
+            target.is_some_and(|target| target.address.get() == symbol_address("disasm_indirect"))
+        })
+        .expect("main calls disasm_indirect")
+        .end()
+        .get();
+    for label in INDIRECT_BRANCHES {
+        let address = VirtualAddress::new(symbol_address(label));
+        scenario
+            .add_breakpoint_spec(BreakpointSpec::Address(address))
+            .await;
+    }
+    for label in INDIRECT_BRANCHES {
+        let pc = symbol_address(label);
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Breakpoint {
+                address: VirtualAddress::new(pc)
+            },
+            "{fixture}"
+        );
+        let registers = scenario.operation("registers", scenario.handle().registers());
+        let registers = registers.await;
+        let instruction = instruction_at(scenario, pc).await;
+        let encoded = decoded(&instruction)
+            .references
+            .first()
+            .map(|reference| reference.address.get());
+        // The slot holding each target, and the target.
+        let expected = match label {
+            "disasm_call_slot" => (encoded, symbol_address("disasm_target_one")),
+            "disasm_call_method" => (
+                Some(symbol_address("disasm_methods") + 8),
+                symbol_address("disasm_target_two"),
+            ),
+            "disasm_call_register" => (None, symbol_address("disasm_target_four")),
+            // The thread's slot lies just below its thread pointer.
+            "disasm_call_thread" => (
+                Some(register(&registers, "fs_base") - 8),
+                symbol_address("disasm_target_two"),
+            ),
+            "disasm_call_got" => (encoded, modules.symbol("libc.so.6", "labs")),
+            "disasm_jump_table" => (
+                Some(symbol_address("disasm_cases") + 8),
+                symbol_address("disasm_case_one"),
+            ),
+            "disasm_return" => (Some(register(&registers, "rsp")), return_site),
+            _ => unreachable!(),
+        };
+        let target = indirect_target(&instruction);
+        let context = format!("{fixture}: {label}: {target:#?}");
+        let (slot, destination) = match target {
+            IndirectTarget::Register { target } => (None, target),
+            IndirectTarget::Memory { slot, target } => (Some(slot), target),
+            _ => panic!("{context}: unresolved at the stop"),
+        };
+        assert_eq!(
+            (
+                slot.map(|slot| slot.address.get()),
+                destination.address.get()
+            ),
+            expected,
+            "{context}"
+        );
+        let names = (slot.and_then(symbol), symbol(destination));
+        match label {
+            "disasm_call_method" => assert_eq!(names.0, Some(("disasm_methods", 8))),
+            "disasm_jump_table" => assert_eq!(names.0, Some(("disasm_cases", 8))),
+            "disasm_return" => assert_eq!(names.1.map(|(name, _)| name), Some("main")),
+            _ => {}
+        }
+
+        scenario.step_to_stop(StepKind::Instruction).await;
+        let location = scenario.operation("location", scenario.handle().current_location());
+        assert_eq!(location.await.address, destination.address, "{context}");
+    }
+}
+
+#[tokio::test]
+async fn indirect_branches_name_the_targets_they_read_at_the_stop() {
+    for fixture in ["disassembly-gcc-o0", "disassembly-clang-o2-nopie"] {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_breakpoint("main").await;
+        scenario.run_to_stop().await;
+        let modules = Modules::load(&scenario).await;
+        assert_targets_away_from_the_stop(&scenario, &modules, fixture).await;
+
+        // Lazy binding leaves a linkage stub's slot pointing back into the
+        // stub until the first call resolves it.
+        let call = printf_call(&scenario, &modules, fixture).await;
+        let jump = stub_jump(&scenario, &call).await;
+        let (unresolved_slot, target) = loaded(indirect_target(&jump));
+        let unresolved_slot = unresolved_slot.clone();
+        assert_eq!(section(&unresolved_slot), Some(".got.plt"), "{fixture}");
+        assert_eq!(target.address, jump.end(), "{fixture}");
+        assert_eq!(section(target), Some(".plt"), "{fixture}");
+
+        assert_targets_at_each_stop(&mut scenario, &modules, fixture).await;
+
+        // After the first call, the slot holds the C library's function.
+        scenario
+            .add_breakpoint_spec(BreakpointSpec::Address(call.end()))
+            .await;
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Breakpoint {
+                address: call.end()
+            }
+        );
+        let jump = stub_jump(&scenario, &call).await;
+        let (slot, target) = loaded(indirect_target(&jump));
+        assert_eq!(*slot, unresolved_slot, "{fixture}");
+        assert_eq!(
+            target.address.get(),
+            modules.symbol("libc.so.6", "printf"),
+            "{fixture}"
+        );
+        scenario.shutdown().await;
+    }
+}
+
+/// Returns every indirect jump, call, and return in a module's executable
+/// sections, decoded as the objdump comparisons check, outside the extents
+/// of the `skipped` symbols.
+async fn indirect_branch_sites(
+    scenario: &Scenario,
+    modules: &Modules,
+    file_name: &str,
+    skipped: &[&str],
+) -> BTreeSet<VirtualAddress> {
+    let (record, image) = modules.named(file_name);
+    let bias = record.module.load_bias;
+    let skipped = image
+        .symbols()
+        .iter()
+        .filter(|symbol| skipped.contains(&symbol.name.as_ref()))
+        .filter_map(|symbol| symbol.extent)
+        .map(|extent| bias + extent.range.start.get()..bias + extent.range.end.get())
+        .collect::<Vec<_>>();
+    let kept =
+        |address: VirtualAddress| !skipped.iter().any(|range| range.contains(&address.get()));
+    let mut sites = BTreeSet::new();
+    for section in image.sections().iter().filter(|section| section.executable) {
+        let end = bias + section.range.end.get();
+        let mut address = bias + section.range.start.get();
+        while address < end {
+            let (_, _, block) =
+                into_window(disassemble(scenario, window(address, 0, MAX_WINDOW_AFTER)).await);
+            assert!(
+                block
+                    .conflicts
+                    .iter()
+                    .all(|conflict| conflict.boundary.get() >= end || !kept(conflict.instruction)),
+                "{file_name}: {:?}",
+                block.conflicts
+            );
+            assert!(!block.instructions.is_empty(), "{file_name}: {address:#x}");
+            for instruction in block
+                .instructions
+                .iter()
+                .take_while(|instruction| instruction.address.get() < end)
+            {
+                address = instruction.end().get();
+                if let InstructionContent::Decoded(decoded) = &instruction.content
+                    && decoded.indirect_target.is_some()
+                    && kept(instruction.address)
+                {
+                    sites.insert(instruction.address);
+                }
+            }
+        }
+    }
+    sites
+}
+
+/// Runs a fixture from `main` to its exit, stopping at every indirect jump,
+/// call, and return in its own code, the C library, and the dynamic loader,
+/// and checks that executing each one transfers control where its target
+/// said. Returns how many branches of each kind were checked.
+async fn assert_executed_targets(fixture: &str) -> BTreeMap<&'static str, usize> {
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_breakpoint("main").await;
+    scenario.run_to_stop().await;
+    let modules = Modules::load(&scenario).await;
+    // The functions of layout.S hide data in code, which decoding misreads.
+    let layout = ["disasm_marked_data", "disasm_hidden_data"];
+    let mut sites = indirect_branch_sites(&scenario, &modules, fixture, &layout).await;
+    for library in ["libc.so.6", "ld-linux-x86-64.so.2"] {
+        sites.extend(indirect_branch_sites(&scenario, &modules, library, &[]).await);
+    }
+    for site in &sites {
+        scenario
+            .add_breakpoint_spec(BreakpointSpec::Address(*site))
+            .await;
+    }
+
+    let mut verified = BTreeMap::new();
+    let mut stop = scenario.resume_to_stop().await;
+    loop {
+        let pc = match stop {
+            StopReason::Exited(status) => {
+                assert_eq!(status, uscope::ExitStatus::Code(0), "{fixture}");
+                break;
+            }
+            StopReason::Breakpoint { address } => address,
+            StopReason::Step { .. } => {
+                let location = scenario.operation("location", scenario.handle().current_location());
+                location.await.address
+            }
+            other => panic!("{fixture}: unexpected stop {other:?}"),
+        };
+        // A step may land on another site, which resuming would skip.
+        if !sites.contains(&pc) {
+            stop = scenario.resume_to_stop().await;
+            continue;
+        }
+        let instruction = instruction_at(&scenario, pc.get()).await;
+        let current = decoded(&instruction);
+        let context = format!("{fixture}: {pc}: {current:#?}");
+        let (kind, target) = match indirect_target(&instruction) {
+            IndirectTarget::Register { target } => ("register", target.address),
+            IndirectTarget::Memory { slot, target } => {
+                let encoded = current.references.iter().any(|reference| {
+                    reference.kind == InstructionReferenceKind::MemoryOperand
+                        && reference.address == slot.address
+                });
+                let kind = match (encoded, current.flow) {
+                    (true, _) => "memory the instruction addresses",
+                    (false, ControlFlow::Return) => "return address",
+                    (false, _) => "memory a register addresses",
+                };
+                (kind, target.address)
+            }
+            _ => panic!("{context}: unresolved at the stop"),
+        };
+        stop = scenario.step_to_stop(StepKind::Instruction).await;
+        assert_eq!(
+            stop,
+            StopReason::Step {
+                kind: StepKind::Instruction
+            },
+            "{context}"
+        );
+        let location = scenario.operation("location", scenario.handle().current_location());
+        assert_eq!(location.await.address, target, "{kind}: {context}");
+        *verified.entry(kind).or_default() += 1;
+    }
+    scenario.shutdown().await;
+    verified
+}
+
+/// Executing an indirect branch reaches the target read at its stop, for
+/// every one a program runs through lazy binding, formatted output, and exit.
+#[tokio::test]
+async fn indirect_targets_are_where_execution_goes() {
+    for fixture in ["disassembly-gcc-o0", "disassembly-clang-o2-nopie"] {
+        let verified = assert_executed_targets(fixture).await;
+        for kind in [
+            "register",
+            "memory the instruction addresses",
+            "memory a register addresses",
+            "return address",
+        ] {
+            assert!(
+                verified.get(kind).is_some_and(|count| *count > 0),
+                "{fixture}: {kind}: {verified:?}"
+            );
+        }
+    }
+}
+
+/// Maps each slot of an ELF file that the dynamic loader fills to the name of
+/// the symbol it holds, by image address.
+fn dynamic_slots(file_name: &str) -> BTreeMap<u64, String> {
+    let data = fs::read(Scenario::fixture(file_name)).expect("read fixture");
+    let file = object::File::parse(data.as_slice()).expect("parse fixture");
+    let symbols = file.dynamic_symbol_table().expect("dynamic symbols");
+    file.dynamic_relocations()
+        .expect("dynamic relocations")
+        .filter_map(|(offset, relocation)| {
+            let object::RelocationTarget::Symbol(index) = relocation.target() else {
+                return None;
+            };
+            let name = symbols.symbol_by_index(index).ok()?.name().ok()?;
+            Some((offset, name.to_owned()))
+        })
+        .collect()
+}
+
+/// Returns each linkage stub's jump through its slot, by the name of the
+/// symbol the slot holds.
+async fn linkage_jumps(
+    scenario: &Scenario,
+    modules: &Modules,
+    file_name: &str,
+) -> BTreeMap<String, DisassembledInstruction> {
+    let slots = dynamic_slots(file_name);
+    let (record, image) = modules.named(file_name);
+    let bias = record.module.load_bias;
+    let mut jumps = BTreeMap::new();
+    for section in image
+        .sections()
+        .iter()
+        .filter(|section| section.executable && section.name.starts_with(".plt"))
+    {
+        let (start, end) = (section.range.start.get(), section.range.end.get());
+        let count = u32::try_from((end - start) / 2).expect("small section");
+        let (_, _, block) =
+            into_window(disassemble(scenario, window(bias + start, 0, count)).await);
+        for instruction in block
+            .instructions
+            .iter()
+            .filter(|instruction| instruction.address.get() < bias + end)
+            .filter(|instruction| decoded(instruction).flow == ControlFlow::IndirectJump)
+        {
+            let slot = match indirect_target(instruction) {
+                IndirectTarget::Memory { slot, .. } | IndirectTarget::Unreadable { slot, .. } => {
+                    slot.address.get() - bias
+                }
+                other => panic!("{file_name}: {other:?}"),
+            };
+            // The first stub jumps to the lazy-binding resolver.
+            if let Some(name) = slots.get(&slot) {
+                jumps.insert(name.clone(), instruction.clone());
+            }
+        }
+    }
+    jumps
+}
+
+#[tokio::test]
+async fn core_dumps_name_the_targets_their_saved_slots_hold() {
+    // The program had called every stub it uses except abort's before it
+    // crashed, and lazy binding had resolved those.
+    let core = "crash-gcc-o0-segv.core";
+    let scenario = Scenario::open_core(core, &CoreDumpOptions::new(Scenario::fixture(core)));
+    let modules = Modules::load(&scenario).await;
+    let jumps = linkage_jumps(&scenario, &modules, "crash-gcc-o0").await;
+    let target = |name: &str| loaded(indirect_target(&jumps[name])).1.clone();
+    assert_eq!(
+        target("crash_library_touch").address.get(),
+        modules.symbol("libcrash.so", "crash_library_touch")
+    );
+    for name in [
+        "pthread_attr_init",
+        "pthread_attr_setguardsize",
+        "pthread_create",
+        "strcmp",
+        "__cxa_finalize",
+    ] {
+        let module = target(name).module.expect(name).module;
+        assert_eq!(
+            modules
+                .records
+                .iter()
+                .find(|record| record.module.id == module)
+                .map(|record| record.path.file_name()),
+            Some(Some("libc.so.6".as_ref())),
+            "{name}"
+        );
+    }
+    // crash-gcc-o0 links with lazy binding, so abort's slot still points
+    // back into its stub.
+    assert_eq!(target("abort").address, jumps["abort"].end());
+    assert_eq!(jumps.len(), 7, "{jumps:#?}");
+    scenario.shutdown().await;
+
+    // A dump that saved only file headers holds no slots, while the stubs
+    // themselves come from the verified file.
+    let core = "crash-gcc-o0-headers-only.core";
+    let scenario = Scenario::open_core(core, &CoreDumpOptions::new(Scenario::fixture(core)));
+    let modules = Modules::load(&scenario).await;
+    let jumps = linkage_jumps(&scenario, &modules, "crash-gcc-o0").await;
+    assert_eq!(jumps.len(), 7, "{jumps:#?}");
+    for (name, jump) in &jumps {
+        let IndirectTarget::Unreadable { slot, address, .. } = indirect_target(jump) else {
+            panic!("{name}: {jump:#?}");
+        };
+        assert_eq!(slot.address, *address, "{name}");
+    }
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_register_that_a_restarted_system_call_replaces_is_never_used() {
+    let child = support::ExternalProcess::spawn(&Scenario::fixture("attach-restart"));
+    // Waits until the thread blocks in pause(2), so that attaching
+    // interrupts the system call.
+    let syscall = format!("/proc/{}/syscall", child.process_id().get());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while fs::read_to_string(&syscall).is_ok_and(|text| !text.starts_with("34 ")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fixture never paused"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
+    let debugger = child.attach().await;
+    let handle = debugger.handle();
+    let location = handle.current_location().await.expect("location");
+    let modules = handle.loaded_modules().await.expect("modules");
+    let executable = &modules.modules[0];
+    let image = handle
+        .loaded_module_image(executable.module.id)
+        .await
+        .expect("image");
+    let jump = image
+        .symbols()
+        .iter()
+        .find(|symbol| symbol.name.as_ref() == "attach_restart_jump")
+        .expect("the jump is labeled");
+    assert_eq!(
+        location.address.get(),
+        executable.module.load_bias + jump.address.get()
+    );
+
+    // The kernel will restart the call, which replaces rax, so the jump
+    // through it has no known target even at the stop.
+    let registers = handle.registers().await.expect("registers");
+    assert_eq!(register(&registers, "orig_rax"), 34);
+    assert_eq!(register(&registers, "rax"), (-514_i64).cast_unsigned());
+    let disassembly = handle
+        .disassemble(window(location.address.get(), 0, 1))
+        .await
+        .expect("disassemble");
+    let (boundary, _, block) = into_window(disassembly);
+    assert_eq!(
+        boundary,
+        TargetBoundary::Known(BoundaryEvidence::ProgramCounter)
+    );
+    assert_eq!(
+        *indirect_target(&block.instructions[0]),
+        IndirectTarget::NeedsRegisters
+    );
+    debugger.shutdown().await.expect("detach");
 }

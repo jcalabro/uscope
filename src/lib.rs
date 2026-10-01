@@ -24,9 +24,9 @@ pub use disassembly::{
     AssemblySyntax, BlockCompletion, BoundaryConflict, BoundaryEvidence, ContextShortfall,
     ControlFlow, DecodedInstruction, DisassembledFunction, DisassembledInstruction, Disassembly,
     DisassemblyBlock, DisassemblyQuery, DisassemblyRange, DisassemblyView, FunctionOrigin,
-    InstructionContent, InstructionReference, InstructionReferenceKind, InstructionToken,
-    InstructionTokenKind, MAX_BACKWARD_DISTANCE, MAX_FUNCTION_INSTRUCTIONS, MAX_WINDOW_AFTER,
-    MAX_WINDOW_BEFORE, TargetBoundary,
+    IndirectTarget, InstructionContent, InstructionReference, InstructionReferenceKind,
+    InstructionToken, InstructionTokenKind, MAX_BACKWARD_DISTANCE, MAX_FUNCTION_INSTRUCTIONS,
+    MAX_WINDOW_AFTER, MAX_WINDOW_BEFORE, TargetBoundary,
 };
 pub use error::{Error, Result};
 pub use expression::parse_value_expression;
@@ -574,7 +574,8 @@ impl DebuggerHandle {
     /// breakpoint traps hidden. Instructions are decoded only forward from
     /// proven instruction starts, among them the selected thread's program
     /// counter; see [`Disassembly`] for how unproven, unreadable, and
-    /// conflicting code is reported.
+    /// conflicting code is reported. Indirect branches name the targets the
+    /// stopped state gives them; see [`IndirectTarget`].
     pub async fn disassemble(&self, query: DisassemblyQuery) -> Result<Disassembly> {
         let selection = self.stopped_selection().await?;
 

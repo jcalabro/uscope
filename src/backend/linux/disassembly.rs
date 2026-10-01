@@ -6,6 +6,7 @@ use nix::unistd::Pid;
 
 use crate::disassembly::{CodeRead, CodeSource, Engine, decoder_for};
 use crate::protocol::StopId;
+use crate::unwind::RegisterFile;
 use crate::{
     AddressDescription, AddressRange, BoundaryEvidence, DisassembledFunction, Disassembly,
     DisassemblyQuery, DisassemblyRange, DisassemblyView, Error, FunctionOrigin, MAX_WINDOW_AFTER,
@@ -15,6 +16,7 @@ use crate::{
 use super::frames::{UnwindModule, describe_address, unwind_module_for};
 use super::memory::read_logical_memory;
 use super::native::InspectionOps;
+use super::registers::x86_64_registers;
 use super::{
     BreakpointSite, Controller, validate_image_current, validate_public_stop,
     validate_stopped_thread,
@@ -41,12 +43,14 @@ impl<P: InspectionOps> Controller<P> {
         let target = self.module_image.target();
         let mut decoder = decoder_for(target, query.syntax)?;
         let modules = self.unwind_modules(inferior);
+        let native = self.ptrace.registers(pid)?;
         let mut source = TargetCode {
             ptrace: &self.ptrace,
             pid,
             breakpoints: &inferior.breakpoints,
             modules: &modules,
-            program_counter: VirtualAddress::new(self.ptrace.registers(pid)?.rip),
+            program_counter: VirtualAddress::new(native.rip),
+            registers: next_instruction_registers(&native),
         };
 
         let view = match query.range {
@@ -143,6 +147,31 @@ fn function_ranges(
     ))
 }
 
+/// The registers a stopped thread will execute its next instruction with,
+/// by DWARF number, including the FS and GS segment bases.
+///
+/// A thread stopped inside an interrupted system call that the kernel will
+/// restart before returning has no known `rax`: the restarted call replaces
+/// it.
+fn next_instruction_registers(native: &nix::libc::user_regs_struct) -> RegisterFile {
+    const ERESTARTSYS: i64 = 512;
+    const ERESTARTNOINTR: i64 = 513;
+    const ERESTARTNOHAND: i64 = 514;
+    const ERESTART_RESTARTBLOCK: i64 = 516;
+    let mut registers = x86_64_registers(native);
+    registers.set(58, native.fs_base);
+    registers.set(59, native.gs_base);
+    let in_system_call = native.orig_rax.cast_signed() >= 0;
+    let restarting = matches!(
+        native.rax.cast_signed().checked_neg(),
+        Some(ERESTARTSYS | ERESTARTNOINTR | ERESTARTNOHAND | ERESTART_RESTARTBLOCK)
+    );
+    if in_system_call && restarting {
+        registers.remove(0);
+    }
+    registers
+}
+
 /// The memory and module metadata of one stopped snapshot.
 struct TargetCode<'a, P> {
     ptrace: &'a P,
@@ -150,6 +179,8 @@ struct TargetCode<'a, P> {
     breakpoints: &'a BTreeMap<VirtualAddress, BreakpointSite>,
     modules: &'a [UnwindModule<'a>],
     program_counter: VirtualAddress,
+    /// The registers the instruction at the program counter executes with.
+    registers: RegisterFile,
 }
 
 impl<P: InspectionOps> CodeSource for TargetCode<'_, P> {
@@ -215,5 +246,9 @@ impl<P: InspectionOps> CodeSource for TargetCode<'_, P> {
     fn source_location(&self, address: VirtualAddress) -> Option<SourceLocation> {
         let (module, image_address) = unwind_module_for(self.modules, address)?;
         module.image.source_location(image_address)
+    }
+
+    fn registers(&self, address: VirtualAddress) -> Option<&RegisterFile> {
+        (address == self.program_counter).then_some(&self.registers)
     }
 }

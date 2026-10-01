@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use super::{BoundaryEvidence, CodeRead, CodeSource};
+use crate::unwind::RegisterFile;
 use crate::{
     AddressDescription, AddressRange, MemoryReadUnavailableReason, Result, SourceLocation,
     VirtualAddress,
@@ -16,6 +17,9 @@ pub struct FakeSource {
     /// Readable address ranges; every other address is unreadable.
     pub readable: Vec<AddressRange<u64>>,
     pub starts: BTreeMap<VirtualAddress, BoundaryEvidence>,
+    /// The address of the instruction the selected thread is about to
+    /// execute, with its registers.
+    pub stopped: Option<(VirtualAddress, RegisterFile)>,
 }
 
 impl FakeSource {
@@ -27,6 +31,7 @@ impl FakeSource {
             bytes,
             readable: vec![AddressRange { start: base, end }],
             starts: BTreeMap::new(),
+            stopped: None,
         }
     }
 
@@ -72,5 +77,12 @@ impl CodeSource for FakeSource {
 
     fn source_location(&self, _address: VirtualAddress) -> Option<SourceLocation> {
         None
+    }
+
+    fn registers(&self, address: VirtualAddress) -> Option<&RegisterFile> {
+        self.stopped
+            .as_ref()
+            .filter(|(stopped, _)| *stopped == address)
+            .map(|(_, registers)| registers)
     }
 }

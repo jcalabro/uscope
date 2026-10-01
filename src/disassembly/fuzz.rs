@@ -1,11 +1,13 @@
 //! Fuzzes decoding from known instruction starts over arbitrary bytes,
-//! known starts, and unreadable memory.
+//! known starts, unreadable memory, and a thread stopped at a known start.
 
 use super::fake::FakeSource;
 use super::{
-    AssemblySyntax, BlockCompletion, BoundaryEvidence, DisassemblyBlock, Engine,
-    InstructionContent, TargetBoundary, Window, decoder_for,
+    AssemblySyntax, BlockCompletion, BoundaryEvidence, ControlFlow, DisassemblyBlock, Engine,
+    IndirectTarget, InstructionContent, InstructionDecoder, RawDecode, RawIndirect, TargetBoundary,
+    Window, decoder_for,
 };
+use crate::unwind::RegisterFile;
 use crate::{
     AddressRange, Architecture, ByteOrder, PointerWidth, TargetDescription, VirtualAddress,
 };
@@ -46,10 +48,11 @@ pub fn run(data: &[u8]) {
             BoundaryEvidence::FunctionRange,
             BoundaryEvidence::CodeSymbol,
         ][usize::from(pair[1] % 3)];
-        source = source.start(
-            BASE + offset(u16::from(pair[0]) << 2 | u16::from(pair[1])),
-            evidence,
-        );
+        let address = BASE + offset(u16::from(pair[0]) << 2 | u16::from(pair[1]));
+        source = source.start(address, evidence);
+        if evidence == BoundaryEvidence::ProgramCounter {
+            source.stopped = Some((VirtualAddress::new(address), registers(code, header[4])));
+        }
     }
     let syntax = if header[4] & 1 == 0 {
         AssemblySyntax::Intel
@@ -74,6 +77,7 @@ pub fn run(data: &[u8]) {
         panic!("one range yields one block");
     };
     check_block(&source, block, true);
+    check_indirect(&source, decoder.as_mut(), block);
 
     let address = VirtualAddress::new(BASE + offset(u16::from(header[6]) << 4));
     let before = u32::from(header[7] % 16);
@@ -82,7 +86,109 @@ pub fn run(data: &[u8]) {
         .window(address, before, after)
         .expect("fake reads never fail");
     check_block(&source, &window.block, false);
+    check_indirect(&source, decoder.as_mut(), &window.block);
     check_window(&source, address, before, after, &window);
+}
+
+/// Registers that mostly address the code itself, so that operands computed
+/// from them reach readable and unreadable bytes alike. Without `rax`, the
+/// stopped thread is inside a system call the kernel will restart.
+fn registers(code: &[u8], flags: u8) -> RegisterFile {
+    let length = code.len() as u64;
+    let value = |register: u16| {
+        let index = usize::from(register) * 2;
+        let raw = u16::from_le_bytes([code[index % code.len()], code[(index + 1) % code.len()]]);
+        BASE + u64::from(raw) % (length + 16)
+    };
+    let mut registers =
+        RegisterFile::new((0..16).chain([58, 59]).map(|dwarf| (dwarf, value(dwarf))));
+    if flags & 2 != 0 {
+        registers.remove(0);
+    }
+    registers
+}
+
+/// Checks that exactly indirect branches have targets, that targets loaded
+/// from memory are the bytes there, and that registers are used only at the
+/// stopped instruction, where a target that does not need them is the one
+/// found without them.
+fn check_indirect(
+    source: &FakeSource,
+    architecture: &mut dyn InstructionDecoder,
+    block: &DisassemblyBlock,
+) {
+    for instruction in block.instructions.iter() {
+        let InstructionContent::Decoded(decoded) = &instruction.content else {
+            continue;
+        };
+        let indirect = matches!(
+            decoded.flow,
+            ControlFlow::IndirectJump | ControlFlow::IndirectCall | ControlFlow::Return
+        );
+        assert_eq!(
+            decoded.indirect_target.is_some(),
+            indirect,
+            "{instruction:?}"
+        );
+        let stopped = source
+            .stopped
+            .as_ref()
+            .filter(|(address, _)| *address == instruction.address);
+        match decoded.indirect_target.as_deref() {
+            Some(IndirectTarget::Memory { slot, target }) => {
+                let bytes = (0..8)
+                    .map(|offset| source.byte(slot.address.get().checked_add(offset)?))
+                    .collect::<Option<Vec<_>>>()
+                    .expect("a loaded target is readable");
+                let value = u64::from_le_bytes(bytes.try_into().expect("eight bytes"));
+                assert_eq!(value, target.address.get(), "{instruction:?}");
+            }
+            Some(IndirectTarget::Unreadable { slot, address, .. }) => {
+                let (slot, address) = (slot.address.get(), address.get());
+                assert!(slot <= address && address - slot < 8, "{instruction:?}");
+                assert!((slot..address).all(|byte| source.byte(byte).is_some()));
+                assert_eq!(source.byte(address), None, "{instruction:?}");
+            }
+            Some(IndirectTarget::Register { .. }) => {
+                assert!(stopped.is_some(), "{instruction:?}");
+            }
+            Some(IndirectTarget::NeedsRegisters) => {
+                assert!(
+                    stopped.is_none_or(|(_, registers)| registers.get(0).is_none()),
+                    "{instruction:?}"
+                );
+            }
+            Some(IndirectTarget::Unsupported) | None => {}
+        }
+        if stopped.is_none() {
+            continue;
+        }
+        let RawDecode::Instruction { indirect, .. } =
+            architecture.decode(instruction.address.get(), &instruction.bytes, None)
+        else {
+            panic!("{instruction:?} decoded differently");
+        };
+        match indirect {
+            Some(RawIndirect::Load { address, .. }) => assert!(
+                matches!(
+                    decoded.indirect_target.as_deref(),
+                    Some(IndirectTarget::Memory { slot, .. } | IndirectTarget::Unreadable { slot, .. })
+                        if slot.address.get() == address
+                ),
+                "{instruction:?}"
+            ),
+            Some(RawIndirect::Unsupported) => {
+                assert_eq!(
+                    decoded.indirect_target.as_deref(),
+                    Some(&IndirectTarget::Unsupported)
+                );
+            }
+            Some(RawIndirect::NeedsRegisters) => {}
+            Some(RawIndirect::Value(_)) | None => {
+                assert!(indirect.is_none(), "{instruction:?} needs no registers");
+            }
+        }
+    }
 }
 
 /// Checks that instructions are ordered, faithful to memory, and tile their

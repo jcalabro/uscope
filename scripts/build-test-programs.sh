@@ -154,14 +154,15 @@ build_symbols_library() {
 }
 
 # Builds the disassembly fixture from its C program and hand-written code.
+# Lazy binding keeps procedure linkage table slots unresolved until first use.
 build_disassembly_fixture() {
     local compiler="$1"
     local output="$2"
     shift 2
     local source_dir="$c_fixtures_dir/disassembly"
     local -a command=(
-        "$compiler" -std=c17 -Wall -Wextra -Werror -g3 -gdwarf-5 "$@"
-        "$source_dir/main.c" "$source_dir/layout.S" -o "$output"
+        "$compiler" -std=c17 -Wall -Wextra -Werror -g3 -gdwarf-5 -Wl,-z,lazy "$@"
+        "$source_dir/main.c" "$source_dir/layout.S" "$source_dir/indirect.S" -o "$output"
     )
     read_dash_version "$compiler"
     run_cached_build "$source_dir" "$output" \
@@ -518,6 +519,8 @@ build_fixture gcc "$c_fixtures_dir/attach.c" "$output_dir/attach" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/attach-threads.c" "$output_dir/attach-threads" \
     -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/attach-restart.c" "$output_dir/attach-restart" \
+    -O0 -g3 -fPIE -pie
 build_c_fixture_directory gcc "$c_fixtures_dir/pointer-memory" \
     "$output_dir/pointer-memory-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
