@@ -39,3 +39,11 @@
 - [ ] Add richer breakpoint management and inspection commands.
 - [ ] Improve source navigation and stop presentation.
 - [ ] Document the public debugger API and supported feature matrix.
+
+## Larger Next-Steps
+
+- [ ] OTEL collector
+- [ ] Prometheus collector
+- [ ] Sampling profiler
+- [ ] Instrumented profiler
+- [ ] Rich web ui
