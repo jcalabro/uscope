@@ -1258,3 +1258,64 @@ async fn core_sessions_coexist_with_each_other_and_a_live_session() {
     first.shutdown().await;
     live.shutdown().await;
 }
+
+/// File-backed memory ends where a segment's file contents end, which need
+/// not be a word boundary: reads keep every backed byte up to there.
+#[tokio::test]
+async fn core_reads_keep_backed_bytes_that_end_inside_a_word() {
+    let scenario = open_core("elf-symbols-gcc-o0.core");
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    let library = modules
+        .modules
+        .iter()
+        .find(|record| record.path.ends_with("libelf-symbols-gcc.so"))
+        .expect("library loaded");
+    let image = scenario
+        .operation(
+            "image",
+            scenario.handle().loaded_module_image(library.module.id),
+        )
+        .await;
+    // .fini ends the executable segment, whose file contents end with it.
+    let fini = image
+        .sections()
+        .iter()
+        .find(|section| section.name.as_ref() == ".fini")
+        .expect(".fini")
+        .range;
+    let end = library.module.load_bias + fini.end.get();
+    assert_ne!(end % 8, 0, "the segment must end inside a word");
+
+    let whole = scenario
+        .operation(
+            "read to the end",
+            scenario
+                .handle()
+                .read_memory(VirtualAddress::new(end - 5), 5),
+        )
+        .await;
+    assert_eq!(whole.completion, MemoryReadCompletion::Complete);
+    let data = fs::read(Scenario::fixture("libelf-symbols-gcc.so")).expect("read library");
+    let offset = usize::try_from(fini.end.get()).expect("offset") - 5;
+    assert_eq!(*whole.bytes, data[offset..offset + 5]);
+
+    let past = scenario
+        .operation(
+            "read past the end",
+            scenario
+                .handle()
+                .read_memory(VirtualAddress::new(end - 3), 8),
+        )
+        .await;
+    assert_eq!(*past.bytes, data[offset + 2..offset + 5]);
+    assert_eq!(
+        past.completion,
+        MemoryReadCompletion::Incomplete {
+            next_address: VirtualAddress::new(end),
+            reason: uscope::MemoryReadUnavailableReason::Inaccessible,
+        }
+    );
+    scenario.shutdown().await;
+}
