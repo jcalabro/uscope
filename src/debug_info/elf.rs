@@ -77,7 +77,7 @@ fn collect_embedded(
     object: &object::File<'_>,
     section: &object::Section<'_, '_>,
     sections: &[CodeSection<'_>],
-    raw: &mut BTreeMap<(Arc<str>, u64), RawSymbol>,
+    raw: &mut BTreeMap<(Box<[u8]>, u64), RawSymbol>,
 ) -> EmbeddedSymbolTable {
     let data = match section
         .data()
@@ -164,7 +164,7 @@ fn collect<'data, S>(
     symbols: impl Iterator<Item = S>,
     image_sections: &[CodeSection<'_>],
     exported: bool,
-    raw: &mut BTreeMap<(Arc<str>, u64), RawSymbol>,
+    raw: &mut BTreeMap<(Box<[u8]>, u64), RawSymbol>,
 ) where
     S: ObjectSymbol<'data>,
 {
@@ -206,8 +206,10 @@ fn collect<'data, S>(
             .and_then(|section| code_section(&section))
             .filter(|section| image_sections.contains(section))
             .map(|section| (section.start, section.end));
+        // Symbols are keyed by their name bytes so that names which are not
+        // UTF-8 stay distinct.
         let entry = raw
-            .entry((Arc::from(String::from_utf8_lossy(name)), symbol.address()))
+            .entry((Box::from(name), symbol.address()))
             .or_insert_with(|| RawSymbol {
                 kind,
                 binding,
@@ -220,7 +222,7 @@ fn collect<'data, S>(
 }
 
 fn normalize(
-    raw: BTreeMap<(Arc<str>, u64), RawSymbol>,
+    raw: BTreeMap<(Box<[u8]>, u64), RawSymbol>,
     unwind_functions: &[AddressRange<ImageAddress>],
 ) -> Vec<SymbolInfo> {
     let code_starts = raw
@@ -242,15 +244,18 @@ fn normalize(
             let extent = symbol.section.and_then(|section| {
                 extent(address, symbol.size, section, &code_starts, &unwind_ends)
             });
-            (name, address, symbol, extent)
+            let spelling = Arc::<str>::from(String::from_utf8_lossy(&name));
+            (address, spelling, name, symbol, extent)
         })
         .collect::<Vec<_>>();
-    symbols.sort_by(|left, right| (left.1, &left.0).cmp(&(right.1, &right.0)));
+    // Lossily spelled names may repeat at one address, so their bytes break
+    // the tie and keep the order deterministic.
+    symbols.sort_by(|left, right| (left.0, &left.1, &left.2).cmp(&(right.0, &right.1, &right.2)));
 
     symbols
         .into_iter()
         .enumerate()
-        .map(|(index, (name, address, symbol, extent))| SymbolInfo {
+        .map(|(index, (address, name, _, symbol, extent))| SymbolInfo {
             id: SymbolId::new(u32::try_from(index).expect("symbol count fits in u32")),
             name,
             address: ImageAddress::new(address),
@@ -343,11 +348,12 @@ pub(super) fn fuzz(data: &[u8]) {
         }));
     }
     assert!(
-        table
-            .symbols
-            .windows(2)
-            .all(|pair| (pair[0].address, &pair[0].name) < (pair[1].address, &pair[1].name)),
-        "the catalog is ordered and free of duplicates"
+        table.symbols.windows(2).all(|pair| {
+            let left = (pair[0].address, &pair[0].name);
+            let right = (pair[1].address, &pair[1].name);
+            left < right || (left == right && pair[0].name.contains(char::REPLACEMENT_CHARACTER))
+        }),
+        "the catalog is ordered and only lossily spelled names repeat"
     );
 
     let symbols = table.symbols.clone();
@@ -433,7 +439,16 @@ fn fuzz_lookups(image: &crate::ModuleImage, symbols: &[SymbolInfo], data: &[u8])
 fn fuzz_object(data: &[u8]) -> (Vec<u8>, Vec<AddressRange<ImageAddress>>) {
     use object::write;
 
-    const NAMES: [&str; 6] = ["a", "b", "_a", "__b", "main", "_ZN3foo3barEv"];
+    const NAMES: [&[u8]; 8] = [
+        b"a",
+        b"b",
+        b"_a",
+        b"__b",
+        b"main",
+        b"_ZN3foo3barEv",
+        b"\xffa",
+        b"\xfea",
+    ];
     let mut object = write::Object::new(
         object::BinaryFormat::Elf,
         object::Architecture::X86_64,
@@ -473,9 +488,7 @@ fn fuzz_object(data: &[u8]) -> (Vec<u8>, Vec<AddressRange<ImageAddress>>) {
             _ => write::SymbolSection::Absolute,
         };
         object.add_symbol(write::Symbol {
-            name: NAMES[usize::from(record[5]) % NAMES.len()]
-                .as_bytes()
-                .to_vec(),
+            name: NAMES[usize::from(record[5]) % NAMES.len()].to_vec(),
             value,
             size: if record[0] & 0x40 != 0 {
                 u64::MAX - size
@@ -508,7 +521,7 @@ mod tests {
 
     /// One symbol of a synthesized relocatable object.
     struct Spec {
-        name: &'static str,
+        name: &'static [u8],
         value: u64,
         size: u64,
         st_type: u8,
@@ -518,6 +531,10 @@ mod tests {
 
     impl Spec {
         fn new(name: &'static str, section: write::SymbolSection) -> Self {
+            Self::named(name.as_bytes(), section)
+        }
+
+        const fn named(name: &'static [u8], section: write::SymbolSection) -> Self {
             Self {
                 name,
                 value: 0,
@@ -574,7 +591,7 @@ mod tests {
         }
         for spec in symbols(&sections) {
             object.add_symbol(write::Symbol {
-                name: spec.name.as_bytes().to_vec(),
+                name: spec.name.to_vec(),
                 value: spec.value,
                 size: spec.size,
                 kind: object::SymbolKind::Unknown,
@@ -728,6 +745,33 @@ mod tests {
         assert_eq!(summary(&table)[9].3, Some((0x3c, 0x3e)));
         let table = load(&data, &[(0x0, 0x10), (0x18, 0x20)]);
         assert_eq!(summary(&table)[3].3, Some((0x10, 0x18)));
+    }
+
+    #[test]
+    fn names_that_are_not_utf8_stay_distinct_when_their_spellings_collide() {
+        use SymbolBinding::{Global, Local};
+        use SymbolKind::Function;
+        use write::SymbolSection::Section;
+
+        let data = object(
+            Architecture::X86_64,
+            |sections| {
+                vec![
+                    Spec::named(b"\xffa", Section(sections.text))
+                        .at(0x0, 0x10)
+                        .typed(elf::STT_FUNC, elf::STB_LOCAL),
+                    Spec::named(b"\xfea", Section(sections.text)).at(0x0, 0x10),
+                ]
+            },
+            &[],
+        );
+        assert_eq!(
+            summary(&load(&data, &[])),
+            [
+                ("\u{fffd}a", Function, Global, Some((0x0, 0x10))),
+                ("\u{fffd}a", Function, Local, Some((0x0, 0x10))),
+            ]
+        );
     }
 
     #[test]
