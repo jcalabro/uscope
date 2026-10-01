@@ -5,9 +5,9 @@ use tokio::sync::oneshot;
 use crate::model::numeric_id;
 
 use crate::{
-    Backtrace, BreakpointLocation, CodeInstanceId, DereferenceReference, DereferencedValue,
-    ExecutionLocation, GlobalVariablePage, GlobalVariableReference, LineNumber, LoadedModule,
-    LoadedModuleSnapshot, RegisterSnapshot, Result, ThreadId, ValueChildPage,
+    AddressDescription, Backtrace, BreakpointLocation, CodeInstanceId, DereferenceReference,
+    DereferencedValue, ExecutionLocation, GlobalVariablePage, GlobalVariableReference, LineNumber,
+    LoadedModule, LoadedModuleSnapshot, RegisterSnapshot, Result, ThreadId, ValueChildPage,
     ValueChildrenReference, VariableSnapshot, VirtualAddress,
 };
 
@@ -844,6 +844,11 @@ pub enum Request {
     ModuleImage {
         module: crate::ModuleId,
         reply: Reply<Arc<crate::ModuleImage>>,
+    },
+    DescribeAddress {
+        stop_id: StopId,
+        address: VirtualAddress,
+        reply: Reply<AddressDescription>,
     },
     StoppedLocation {
         stop_id: StopId,

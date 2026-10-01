@@ -477,6 +477,45 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
 }
 
 #[test]
+fn info_symbol_names_code_data_and_unnamed_addresses_by_section_and_module() {
+    let executable = fixture("build/test-programs/variables-gcc-nopie");
+    let main = symbol_address(&executable, "main");
+    let data = symbol_address(&executable, "pointer_parameter_value");
+    // _dl_relocate_static_pie is five bytes long and followed by padding.
+    let padding = symbol_address(&executable, "_dl_relocate_static_pie") + 8;
+    let commands = [
+        format!("info symbol {:#x}", main + 4),
+        format!("info symbol {:#x}", data + 2),
+        format!("info symbol {padding:#x}"),
+        "info symbol 0x8".to_owned(),
+    ];
+    let mut arguments = vec!["--batch", "--eval", "break main", "--eval", "run"];
+    for command in &commands {
+        arguments.extend(["--eval", command]);
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args(arguments)
+        .arg(&executable)
+        .output()
+        .expect("run info symbol");
+    let stdout = assert_success(output);
+    let path = executable.canonicalize().expect("canonical fixture path");
+    let path = path.display();
+
+    for expected in [
+        format!("main+0x4 in section .text of {path}"),
+        format!("pointer_parameter_value+0x2 in section .data of {path}"),
+        format!("no symbol contains {padding:#x} in section .text of {path}"),
+        "no loaded module contains 0x8".to_owned(),
+    ] {
+        assert!(
+            stdout.lines().any(|line| line == expected),
+            "missing {expected:?} in:\n{stdout}"
+        );
+    }
+}
+
+#[test]
 fn x_renders_a_bounded_hex_and_ascii_memory_view() {
     let executable = fixture("build/test-programs/variables-gcc-nopie");
     let address = symbol_address(&executable, "pointer_parameter_value");
@@ -914,7 +953,7 @@ fn command_argument_errors_use_the_registered_canonical_usage() {
 
     let missing = Command::new(env!("CARGO_BIN_EXE_uscope"))
         .args(["--batch", "--eval", "break"])
-        .arg(executable)
+        .arg(&executable)
         .output()
         .expect("run uscope");
     let stderr = String::from_utf8(missing.stderr).expect("UTF-8 error output");
@@ -923,6 +962,21 @@ fn command_argument_errors_use_the_registered_canonical_usage() {
         stderr.contains("usage: break <function|0xaddress|file:line|file:function>"),
         "{stderr}"
     );
+
+    // Only `info symbol` takes an address, and it requires one.
+    for command in ["info symbol", "info breakpoints 0x10"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .args(["--batch", "--eval", command])
+            .arg(&executable)
+            .output()
+            .expect("run uscope");
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 error output");
+        assert!(!output.status.success(), "{command}");
+        assert!(
+            stderr.contains("usage: info breakpoints|watchpoints|core|symbol [0xaddress]"),
+            "{command}: {stderr}"
+        );
+    }
 }
 
 #[test]

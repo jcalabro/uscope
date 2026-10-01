@@ -69,6 +69,12 @@ impl<A: Copy + Ord> AddressRange<A> {
     pub fn contains(self, address: A) -> bool {
         self.start <= address && address < self.end
     }
+
+    /// Returns whether the range contains no address.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.end <= self.start
+    }
 }
 
 macro_rules! id_type {
@@ -157,6 +163,10 @@ id_type!(
 id_type!(
     SymbolId,
     "Identifies a linker symbol within a module image."
+);
+id_type!(
+    SectionId,
+    "Identifies an allocated section within a module image."
 );
 id_type!(
     GlobalVariableId,
@@ -1971,6 +1981,11 @@ pub struct SymbolInfo {
     /// The code the symbol names, for a code symbol whose extent lies within
     /// one executable section.
     pub extent: Option<SymbolExtent>,
+    /// The storage a data symbol names, for a data symbol defined in an
+    /// allocated, non-thread-local section whose declared size fits within
+    /// it. The range is empty for an unsized symbol, which names only its own
+    /// address.
+    pub storage: Option<AddressRange<ImageAddress>>,
 }
 
 /// Records which symbol tables a module image provided.
@@ -2009,16 +2024,19 @@ pub enum EmbeddedSymbolTable {
     },
 }
 
-/// The code symbol whose extent contains an address.
+/// The symbol whose code extent or data storage contains an address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolLocation {
     /// The symbol's identifier within its module image.
     pub symbol: SymbolId,
     /// The linker-visible symbol name.
     pub name: Arc<str>,
+    /// What the symbol names.
+    pub kind: SymbolKind,
     /// The distance from the symbol's address to the described address.
     pub offset: u64,
-    /// How the end of the symbol's extent was determined.
+    /// How the end of the symbol's extent or storage was determined. An
+    /// unsized data symbol named at its own address is `Inferred`.
     pub provenance: SymbolExtentProvenance,
 }
 
@@ -2029,6 +2047,68 @@ impl SymbolLocation {
     pub fn demangled_name(&self) -> Option<String> {
         crate::demangle::demangle(&self.name)
     }
+}
+
+/// An allocated section of a module image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionInfo {
+    /// The section's identifier within its module image.
+    pub id: SectionId,
+    /// The section name recorded by the object file.
+    pub name: Arc<str>,
+    /// The non-empty image-address range the section occupies.
+    pub range: AddressRange<ImageAddress>,
+    /// Whether the section holds machine code.
+    pub executable: bool,
+    /// Whether the section is writable at run time.
+    pub writable: bool,
+}
+
+/// The section containing an address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionLocation {
+    /// The section's identifier within its module image.
+    pub section: SectionId,
+    /// The section name.
+    pub name: Arc<str>,
+    /// The distance from the section's start to the described address.
+    pub offset: u64,
+    /// Whether the section holds machine code.
+    pub executable: bool,
+}
+
+/// What a module image's static metadata says about one image address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageAddressDescription {
+    /// The address that was described.
+    pub address: ImageAddress,
+    /// The allocated section containing the address, when the image records
+    /// section headers.
+    pub section: Option<SectionLocation>,
+    /// The code symbol whose extent contains the address or, failing that,
+    /// the data symbol whose declared storage contains it.
+    pub symbol: Option<SymbolLocation>,
+}
+
+/// A process address resolved to the loaded module containing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleAddress {
+    /// The loaded module containing the address.
+    pub module: ModuleId,
+    /// The path of the module's image.
+    pub path: Arc<PathBuf>,
+    /// The image's description of the corresponding image address.
+    pub image: ImageAddressDescription,
+}
+
+/// A process address resolved against the loaded modules of one stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddressDescription {
+    /// The described process virtual address.
+    pub address: VirtualAddress,
+    /// The module containing the address, or `None` when no loaded module's
+    /// image covers it.
+    pub module: Option<ModuleAddress>,
 }
 
 /// A resolved source and function location in a module image.
@@ -2342,6 +2422,7 @@ pub struct ModuleMetadata {
     pub source_files: Vec<SourceFile>,
     pub statements: Vec<StatementRow>,
     pub lines: Vec<LineEntry>,
+    pub sections: Vec<SectionInfo>,
 }
 
 #[derive(Debug)]
@@ -2634,6 +2715,26 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
                 "symbol extents are non-empty code ranges beginning at the symbol"
             );
         }
+        if let Some(storage) = symbol.storage {
+            assert!(
+                symbol.kind == SymbolKind::Data
+                    && symbol.extent.is_none()
+                    && storage.start == symbol.address
+                    && storage.start <= storage.end,
+                "symbol storage is a data range beginning at the symbol"
+            );
+        }
+    }
+    for (index, section) in metadata.sections.iter().enumerate() {
+        assert_eq!(
+            section.id.index(),
+            index,
+            "section IDs are dense and ordered"
+        );
+        assert!(
+            section.range.start < section.range.end,
+            "sections are non-empty"
+        );
     }
     for (index, global) in metadata.globals.iter().enumerate() {
         assert_eq!(global.id.index(), index, "global IDs are dense and ordered");
@@ -2658,6 +2759,7 @@ pub struct ModuleImage {
     code_instances: Arc<[CodeInstanceInfo]>,
     symbols: Arc<[SymbolInfo]>,
     symbol_sources: SymbolTableSources,
+    sections: Arc<[SectionInfo]>,
     globals: Arc<[GlobalVariableInfo]>,
     types: Arc<[TypeNode]>,
     source_files: Arc<[SourceFile]>,
@@ -2674,6 +2776,10 @@ pub struct ModuleImage {
     code_range_index: RangeIndex<CodeInstanceId>,
     line_range_index: RangeIndex<u32>,
     symbol_range_index: RangeIndex<SymbolId>,
+    storage_range_index: RangeIndex<SymbolId>,
+    /// Unsized data symbols, each indexed by its one-byte address.
+    unsized_data_index: RangeIndex<SymbolId>,
+    section_range_index: RangeIndex<SectionId>,
 }
 
 impl ModuleImage {
@@ -2706,6 +2812,28 @@ impl ModuleImage {
                 .iter()
                 .filter_map(|symbol| Some((symbol.extent?.range, symbol.id))),
         );
+        let storage_range_index = RangeIndex::new(
+            metadata
+                .symbols
+                .iter()
+                .filter_map(|symbol| Some((symbol.storage?, symbol.id))),
+        );
+        let unsized_data_index = RangeIndex::new(metadata.symbols.iter().filter_map(|symbol| {
+            let storage = symbol.storage?;
+            (storage.start == storage.end).then_some((
+                AddressRange {
+                    start: storage.start,
+                    end: ImageAddress::new(storage.start.get().checked_add(1)?),
+                },
+                symbol.id,
+            ))
+        }));
+        let section_range_index = RangeIndex::new(
+            metadata
+                .sections
+                .iter()
+                .map(|section| (section.range, section.id)),
+        );
 
         Self {
             id: ModuleImageId::new(0),
@@ -2716,6 +2844,7 @@ impl ModuleImage {
             code_instances: metadata.code_instances.into(),
             symbols: metadata.symbols.into(),
             symbol_sources: metadata.symbol_sources,
+            sections: metadata.sections.into(),
             globals: metadata.globals.into(),
             types: metadata.types,
             source_files: metadata.source_files.into(),
@@ -2732,6 +2861,9 @@ impl ModuleImage {
             code_range_index,
             line_range_index,
             symbol_range_index,
+            storage_range_index,
+            unsized_data_index,
+            section_range_index,
         }
     }
 
@@ -2754,6 +2886,10 @@ impl ModuleImage {
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn path_arc(&self) -> Arc<PathBuf> {
+        Arc::clone(&self.path)
     }
 
     /// Returns the properties of this image's target.
@@ -2799,6 +2935,34 @@ impl ModuleImage {
         self.symbols.get(id.index())
     }
 
+    /// Returns the image's allocated sections, ordered by address.
+    #[must_use]
+    pub fn sections(&self) -> &[SectionInfo] {
+        &self.sections
+    }
+
+    /// Looks up an allocated section by identifier.
+    #[must_use]
+    pub fn section(&self, id: SectionId) -> Option<&SectionInfo> {
+        self.sections.get(id.index())
+    }
+
+    /// Finds the allocated section containing an image address. Should
+    /// malformed sections overlap, the innermost one wins.
+    #[must_use]
+    pub fn section_containing(&self, address: ImageAddress) -> Option<&SectionInfo> {
+        self.section_range_index
+            .containing(address)
+            .filter_map(|id| self.section(id))
+            .min_by_key(|section| {
+                (
+                    std::cmp::Reverse(section.range.start),
+                    section.range.end,
+                    section.id,
+                )
+            })
+    }
+
     /// Returns which symbol tables this image provided.
     #[must_use]
     pub const fn symbol_sources(&self) -> &SymbolTableSources {
@@ -2825,9 +2989,63 @@ impl ModuleImage {
         Some(SymbolLocation {
             symbol: symbol.id,
             name: Arc::clone(&symbol.name),
+            kind: symbol.kind,
             offset: address.get() - symbol.address.get(),
             provenance: extent.provenance,
         })
+    }
+
+    /// Finds the data symbol naming an image address: the one whose declared
+    /// storage contains it, choosing among overlapping storage as
+    /// [`Self::symbolize`] chooses among code extents, or otherwise an
+    /// unsized data symbol at exactly that address. An address inside no
+    /// declared storage is never attributed to the nearest preceding object.
+    #[must_use]
+    pub fn symbolize_data(&self, address: ImageAddress) -> Option<SymbolLocation> {
+        let symbol = self
+            .storage_range_index
+            .containing(address)
+            .filter_map(|id| self.symbol(id))
+            .min_by_key(|symbol| storage_preference(symbol))
+            .or_else(|| {
+                self.unsized_data_index
+                    .containing(address)
+                    .filter_map(|id| self.symbol(id))
+                    .min_by_key(|symbol| storage_preference(symbol))
+            })?;
+        let storage = symbol.storage.expect("indexed symbols have storage");
+
+        Some(SymbolLocation {
+            symbol: symbol.id,
+            name: Arc::clone(&symbol.name),
+            kind: symbol.kind,
+            offset: address.get() - symbol.address.get(),
+            provenance: if storage.start < storage.end {
+                SymbolExtentProvenance::Declared
+            } else {
+                SymbolExtentProvenance::Inferred
+            },
+        })
+    }
+
+    /// Describes an image address by its section and by the code symbol, or
+    /// otherwise the data symbol, containing it.
+    #[must_use]
+    pub fn describe(&self, address: ImageAddress) -> ImageAddressDescription {
+        ImageAddressDescription {
+            address,
+            section: self
+                .section_containing(address)
+                .map(|section| SectionLocation {
+                    section: section.id,
+                    name: Arc::clone(&section.name),
+                    offset: address.get() - section.range.start.get(),
+                    executable: section.executable,
+                }),
+            symbol: self
+                .symbolize(address)
+                .or_else(|| self.symbolize_data(address)),
+        }
     }
 
     /// Returns every global catalog entry in deterministic source order.
@@ -3190,6 +3408,21 @@ fn symbol_preference(symbol: &SymbolInfo) -> impl Ord + '_ {
     )
 }
 
+/// Orders the data symbols naming one address, preferring the innermost
+/// storage and then the names [`symbol_preference`] prefers.
+fn storage_preference(symbol: &SymbolInfo) -> impl Ord + '_ {
+    let storage = symbol.storage.expect("indexed symbols have storage");
+    (
+        std::cmp::Reverse(storage.start),
+        storage.end.get() - storage.start.get(),
+        symbol.binding,
+        !symbol.exported,
+        symbol.name.bytes().take_while(|byte| *byte == b'_').count(),
+        symbol.name.as_ref(),
+        symbol.id,
+    )
+}
+
 /// Matches an absolute path exactly and a relative path as a suffix of whole
 /// components, ignoring `.` components such as a leading `./`.
 fn path_matches(candidate: &Path, requested: &Path) -> bool {
@@ -3337,6 +3570,7 @@ mod tests {
                 ],
                 statements: Vec::new(),
                 lines: Vec::new(),
+                sections: Vec::new(),
             },
         )
     }
@@ -3433,6 +3667,7 @@ mod tests {
                 source_files: Vec::new(),
                 statements: Vec::new(),
                 lines: Vec::new(),
+                sections: Vec::new(),
             },
         )
         .with_id(image_id);
@@ -3551,6 +3786,7 @@ mod tests {
                 source_files: Vec::new(),
                 statements: Vec::new(),
                 lines: Vec::new(),
+                sections: Vec::new(),
             },
         )
     }
@@ -3676,6 +3912,7 @@ mod tests {
                 source_files: Vec::new(),
                 statements: boundary_test_rows(),
                 lines: Vec::new(),
+                sections: Vec::new(),
             },
         )
     }
@@ -3868,6 +4105,29 @@ mod tests {
     );
 
     fn symbol_test_image(symbols: &[TestSymbol]) -> ModuleImage {
+        sectioned_symbol_test_image(symbols, &[])
+    }
+
+    /// Builds an image of symbols and sections, each section given by name,
+    /// start, end, and whether it is executable.
+    fn sectioned_symbol_test_image(
+        symbols: &[TestSymbol],
+        sections: &[(&'static str, u64, u64, bool)],
+    ) -> ModuleImage {
+        let sections = sections
+            .iter()
+            .enumerate()
+            .map(|(index, &(name, start, end, executable))| SectionInfo {
+                id: SectionId::new(u32::try_from(index).expect("test section count")),
+                name: name.into(),
+                range: AddressRange {
+                    start: ImageAddress::new(start),
+                    end: ImageAddress::new(end),
+                },
+                executable,
+                writable: !executable,
+            })
+            .collect();
         let symbols = symbols
             .iter()
             .enumerate()
@@ -3879,12 +4139,16 @@ mod tests {
                     kind,
                     binding,
                     exported,
-                    extent: (start < end).then_some(SymbolExtent {
+                    extent: (start < end && kind != SymbolKind::Data).then_some(SymbolExtent {
                         range: AddressRange {
                             start: ImageAddress::new(start),
                             end: ImageAddress::new(end),
                         },
                         provenance,
+                    }),
+                    storage: (kind == SymbolKind::Data).then_some(AddressRange {
+                        start: ImageAddress::new(start),
+                        end: ImageAddress::new(end),
                     }),
                 },
             )
@@ -3910,6 +4174,7 @@ mod tests {
                 source_files: Vec::new(),
                 statements: Vec::new(),
                 lines: Vec::new(),
+                sections,
             },
         )
     }
@@ -4001,5 +4266,79 @@ mod tests {
             ("alpha", 0x10, 0x20, Declared, Function, Global, true),
         ]);
         assert_eq!(symbolized(&tied, 0x10), Some(("alpha", 0)));
+    }
+
+    #[test]
+    fn descriptions_prefer_code_then_declared_storage_and_never_guess_a_neighbor() {
+        use SymbolBinding::{Global, Local};
+        use SymbolExtentProvenance::{Declared, Inferred};
+        use SymbolKind::{Data, Function};
+
+        let image = sectioned_symbol_test_image(
+            &[
+                ("function", 0x100, 0x140, Declared, Function, Global, true),
+                // A data object inside code never displaces the function.
+                ("table", 0x120, 0x130, Declared, Data, Global, true),
+                ("outer", 0x800, 0x840, Declared, Data, Global, true),
+                ("inner", 0x810, 0x818, Declared, Data, Local, false),
+                // Unsized data names only its own address.
+                ("label", 0x880, 0x880, Declared, Data, Global, true),
+                ("inside", 0x820, 0x820, Declared, Data, Global, true),
+            ],
+            &[
+                (".text", 0x100, 0x200, true),
+                (".data", 0x800, 0x900, false),
+                // A malformed overlapping section loses to the innermost one.
+                (".overlap", 0x7f0, 0x8f0, false),
+            ],
+        );
+        let described = |address: u64| {
+            let description = image.describe(ImageAddress::new(address));
+            (
+                description
+                    .section
+                    .map(|section| (section.name.to_string(), section.offset)),
+                description.symbol.map(|symbol| {
+                    (
+                        symbol.name.to_string(),
+                        symbol.kind,
+                        symbol.offset,
+                        symbol.provenance,
+                    )
+                }),
+            )
+        };
+        let text = |offset| Some((".text".to_owned(), offset));
+        let data = |offset| Some((".data".to_owned(), offset));
+        let symbol = |name: &str, kind, offset, provenance| {
+            Some((name.to_owned(), kind, offset, provenance))
+        };
+
+        assert_eq!(
+            described(0x124),
+            (text(0x24), symbol("function", Function, 0x24, Declared))
+        );
+        assert_eq!(described(0x150), (text(0x50), None));
+        assert_eq!(
+            described(0x814),
+            (data(0x14), symbol("inner", Data, 4, Declared))
+        );
+        assert_eq!(
+            described(0x818),
+            (data(0x18), symbol("outer", Data, 0x18, Declared))
+        );
+        // Sized storage wins over an unsized label at the same address.
+        assert_eq!(
+            described(0x820),
+            (data(0x20), symbol("outer", Data, 0x20, Declared))
+        );
+        assert_eq!(described(0x840), (data(0x40), None));
+        assert_eq!(
+            described(0x880),
+            (data(0x80), symbol("label", Data, 0, Inferred))
+        );
+        assert_eq!(described(0x881), (data(0x81), None));
+        assert_eq!(described(0x7f8), (Some((".overlap".to_owned(), 8)), None));
+        assert_eq!(described(0x900), (None, None));
     }
 }

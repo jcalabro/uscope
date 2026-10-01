@@ -850,6 +850,13 @@ impl<P: InspectionOps> Controller<P> {
                         .ok_or(Error::ModuleNotLoaded(module)),
                 );
             }
+            Request::DescribeAddress {
+                stop_id,
+                address,
+                reply,
+            } => {
+                let _ = reply.send(self.describe_address(stop_id, address));
+            }
             Request::StoppedLocation {
                 stop_id,
                 thread_id,

@@ -5,12 +5,12 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use uscope::{
-    Backtrace, Breakpoint, BreakpointLocation, ByteOrder, CoreDumpInfo, CoreModuleState,
-    ExitStatus, FunctionInfo, GlobalVariablePage, InvalidatedWatchpoint, LoadedModuleSnapshot,
-    MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage, PointerWidth,
-    RegisterRole, RegisterSnapshot, SourceContext, StateSnapshot, StepKind, StopReason,
-    SymbolExtentProvenance, SymbolLocation, ThreadState, WatchScope, Watchpoint, WatchpointHit,
-    WatchpointInvalidation,
+    AddressDescription, Backtrace, Breakpoint, BreakpointLocation, ByteOrder, CoreDumpInfo,
+    CoreModuleState, ExitStatus, FunctionInfo, GlobalVariablePage, InvalidatedWatchpoint,
+    LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage,
+    PointerWidth, RegisterRole, RegisterSnapshot, SourceContext, StateSnapshot, StepKind,
+    StopReason, SymbolExtentProvenance, SymbolLocation, ThreadState, WatchScope, Watchpoint,
+    WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec};
@@ -620,6 +620,46 @@ pub fn code_name(function: Option<&FunctionInfo>, symbol: Option<&SymbolLocation
         name.push_str(" (unsized symbol)");
     }
     name
+}
+
+/// Renders what contains an address: its symbol and offset, its section, and
+/// its module. A data symbol names only bytes within its declared size.
+pub fn address_description(description: &AddressDescription, renderer: Renderer) -> String {
+    let Some(module) = &description.module else {
+        return format!(
+            "no loaded module contains {}",
+            renderer.paint(Role::Metadata, description.address)
+        );
+    };
+    let place = module.image.section.as_ref().map_or_else(
+        || {
+            format!(
+                "of {}",
+                renderer.paint(Role::Metadata, module.path.display())
+            )
+        },
+        |section| {
+            format!(
+                "in section {} of {}",
+                renderer.paint(Role::Metadata, &section.name),
+                renderer.paint(Role::Metadata, module.path.display())
+            )
+        },
+    );
+    module.image.symbol.as_ref().map_or_else(
+        || {
+            format!(
+                "no symbol contains {} {place}",
+                renderer.paint(Role::Metadata, description.address)
+            )
+        },
+        |symbol| {
+            format!(
+                "{} {place}",
+                renderer.paint(Role::Name, code_name(None, Some(symbol)))
+            )
+        },
+    )
 }
 
 /// Returns the file name of a loaded module's image.

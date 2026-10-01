@@ -22,31 +22,33 @@ use protocol::Request;
 pub use error::{Error, Result};
 pub use expression::parse_value_expression;
 pub use model::{
-    Accessibility, AddressRange, AddressValue, Architecture, ArrayDimension, Backtrace, BaseClass,
-    BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry, BreakpointLocation,
-    ByteOrder, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
-    ColumnNumber, DereferenceReference, DereferenceState, DereferenceUnavailableReason,
-    DereferencedValue, EmbeddedSymbolTable, EntryProvenance, EnumerationOrigin, Enumerator,
-    ExecutionLocation, FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate,
-    GlobalVariableId, GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference,
-    GlobalVariableType, GlobalVariableVisibility, ImageAddress, ImageLocation, InlineChain,
-    InlineFrameLookup, InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit,
-    InspectionLimits, InspectionUsage, IntegerValue, LineNumber, LineSequenceId,
-    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead,
-    MemoryReadCompletion, MemoryReadUnavailableReason, ModuleId, ModuleImage, ModuleImageId,
+    Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArrayDimension,
+    Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry,
+    BreakpointLocation, ByteOrder, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo,
+    CodeInstanceKind, ColumnNumber, DereferenceReference, DereferenceState,
+    DereferenceUnavailableReason, DereferencedValue, EmbeddedSymbolTable, EntryProvenance,
+    EnumerationOrigin, Enumerator, ExecutionLocation, FloatValue, FrameKind, FunctionId,
+    FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
+    GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
+    ImageAddress, ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup,
+    InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits,
+    InspectionUsage, IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo,
+    LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
+    MemoryReadUnavailableReason, ModuleAddress, ModuleId, ModuleImage, ModuleImageId,
     NamedTypeRelationship, OptimizedOutReason, ParsedValueExpression, PointerWidth, RecordKind,
     RecordMember, RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, ScalarValue, SourceContext, SourceFile, SourceFileId,
-    SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow,
-    SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind,
-    SymbolLocation, SymbolTableSources, TargetDescription, ThreadId, TlsUnavailableReason, TypeId,
-    TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature,
-    UnwindTermination, ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
-    ValueChildRelationship, ValueChildren, ValueChildrenReference, ValueExpression,
-    ValueIndexRange, ValuePageCompletion, ValuePathStep, Variable, VariableInvalidReason,
-    VariableKind, VariableMalformedKind, VariableMalformedReason, VariableSnapshot, VariableState,
-    VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
-    VariantSelection, VariantSelector, VariantStorageKind, VirtualAddress,
+    RegisterSnapshot, RegisterValue, ScalarValue, SectionId, SectionInfo, SectionLocation,
+    SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId,
+    StatementFlags, StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId,
+    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, ThreadId,
+    TlsUnavailableReason, TypeId, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
+    UnsupportedVariableFeature, UnwindTermination, ValueAccessUnavailableReason, ValueBitRange,
+    ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
+    ValueExpression, ValueIndexRange, ValuePageCompletion, ValuePathStep, Variable,
+    VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
+    VariableSnapshot, VariableState, VariableUnavailableReason, VariableValue, VariableValueSource,
+    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
+    VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, CoreDumpInfo, CoreDumpOptions, CoreModule,
@@ -530,6 +532,23 @@ impl DebuggerHandle {
         let loaded = self.loaded_module().await?;
 
         loaded.virtual_address(image_address)
+    }
+
+    /// Describes a process address by the loaded module, section, and symbol
+    /// containing it at the current stop.
+    ///
+    /// A code address is named by the symbol whose extent contains it, and a
+    /// data address only by a symbol whose declared storage contains it; the
+    /// nearest preceding symbol is never substituted.
+    pub async fn describe_address(&self, address: VirtualAddress) -> Result<AddressDescription> {
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::DescribeAddress {
+            stop_id: selection.stop,
+            address,
+            reply,
+        })
+        .await
     }
 
     /// Resolves the current stop address to normalized function and source metadata.

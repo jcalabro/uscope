@@ -11,9 +11,9 @@ use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, RegisterFile, collect_backtrace,
 };
 use crate::{
-    Backtrace, CodeInstanceId, CodeInstanceKind, Error, ExecutionLocation, FrameKind, ImageAddress,
-    ImageLocation, InlineFrameLookup, LoadedModule, ModuleImage, Result, SourceLocation,
-    StackFrame, UnwindTermination, VirtualAddress,
+    AddressDescription, Backtrace, CodeInstanceId, CodeInstanceKind, Error, ExecutionLocation,
+    FrameKind, ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, ModuleAddress,
+    ModuleImage, Result, SourceLocation, StackFrame, UnwindTermination, VirtualAddress,
 };
 
 use super::breakpoints::runtime_breakpoint_address;
@@ -196,6 +196,19 @@ impl<P: InspectionOps> Controller<P> {
             address,
             image,
         })
+    }
+
+    /// Describes a process address against the modules loaded at a stop.
+    pub(super) fn describe_address(
+        &self,
+        stop_id: StopId,
+        address: VirtualAddress,
+    ) -> Result<AddressDescription> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_image_current(inferior)?;
+        let modules = self.unwind_modules(inferior);
+        Ok(describe_address(&modules, address))
     }
 
     pub(super) fn backtrace(&self, stop_id: StopId, pid: Pid) -> Result<Backtrace> {
@@ -639,6 +652,21 @@ pub(super) fn unwind_module_for<'a>(
             .filter(|image_address| module.image.contains_address(*image_address))
             .map(|image_address| (*module, image_address))
     })
+}
+
+/// Describes a process address by the module whose image covers it.
+pub(super) fn describe_address(
+    modules: &[UnwindModule<'_>],
+    address: VirtualAddress,
+) -> AddressDescription {
+    AddressDescription {
+        address,
+        module: unwind_module_for(modules, address).map(|(module, image_address)| ModuleAddress {
+            module: module.loaded.id,
+            path: module.image.path_arc(),
+            image: module.image.describe(image_address),
+        }),
+    }
 }
 
 pub(super) struct DwarfCallerProvider<'a> {

@@ -243,6 +243,7 @@ fn load_debug_info(
                 source_files,
                 statements,
                 lines,
+                sections: super::elf::load_sections(&object),
             },
         )
         .with_id(image_id),
