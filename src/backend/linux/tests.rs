@@ -206,6 +206,43 @@ fn logical_memory_reads_return_the_prefix_before_inaccessible_memory() {
 }
 
 #[test]
+fn logical_memory_reads_keep_the_readable_bytes_of_a_partial_word() {
+    // Readable memory ends three bytes into the second word.
+    let read = |address, size| {
+        read_logical_memory_with(
+            VirtualAddress::new(address),
+            size,
+            &BTreeMap::new(),
+            |current| {
+                let word = u64::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7]);
+                if current == 0x1008 {
+                    Err(MemoryAccessError::Partial { word, readable: 3 })
+                } else {
+                    Ok(word)
+                }
+            },
+        )
+        .expect("partial words are typed partial results")
+    };
+    let incomplete = |next| MemoryReadCompletion::Incomplete {
+        next_address: VirtualAddress::new(next),
+        reason: MemoryReadUnavailableReason::Inaccessible,
+    };
+
+    let spanning = read(0x1006, 8);
+    assert_eq!(spanning.bytes, [6, 7, 0, 1, 2]);
+    assert_eq!(spanning.completion, incomplete(0x100b));
+    // A read that ends within the readable bytes is complete.
+    let within = read(0x1009, 2);
+    assert_eq!(within.bytes, [1, 2]);
+    assert_eq!(within.completion, MemoryReadCompletion::Complete);
+    // A read that begins after them returns nothing.
+    let after = read(0x100c, 2);
+    assert!(after.bytes.is_empty());
+    assert_eq!(after.completion, incomplete(0x100c));
+}
+
+#[test]
 fn logical_memory_reads_do_not_disguise_operational_failures_as_inaccessible() {
     let result = read_logical_memory_with(VirtualAddress::new(0x1000), 8, &BTreeMap::new(), |_| {
         Err(MemoryAccessError::Fatal(Error::RequestCancelled))

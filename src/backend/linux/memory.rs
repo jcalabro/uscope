@@ -127,6 +127,12 @@ pub(super) struct LogicalMemoryRead {
 
 pub(super) enum MemoryAccessError {
     Inaccessible,
+    /// Only the first `readable` bytes of the word are accessible, such as
+    /// where a core dump's file-backed memory ends inside a word.
+    Partial {
+        word: u64,
+        readable: usize,
+    },
     Fatal(Error),
 }
 
@@ -168,23 +174,13 @@ pub(super) fn read_logical_memory_with(
     let word_size = u64::try_from(std::mem::size_of::<u64>()).expect("word size fits u64");
     let mut current = address.get() & !(word_size - 1);
     while current < end {
-        let mut word = match read_word(current) {
-            Ok(word) => word.to_le_bytes(),
-            Err(MemoryAccessError::Inaccessible) => {
-                let returned = u64::try_from(bytes.len()).expect("memory read length fits u64");
-                let next_address = address
-                    .get()
-                    .checked_add(returned)
-                    .map(VirtualAddress::new)
-                    .ok_or(Error::AddressOverflow)?;
-                return Ok(LogicalMemoryRead {
-                    bytes,
-                    completion: MemoryReadCompletion::Incomplete {
-                        next_address,
-                        reason: MemoryReadUnavailableReason::Inaccessible,
-                    },
-                });
-            }
+        let (mut word, readable) = match read_word(current) {
+            Ok(word) => (word.to_le_bytes(), word_size),
+            Err(MemoryAccessError::Partial { word, readable }) => (
+                word.to_le_bytes(),
+                u64::try_from(readable.min(7)).expect("word offset fits u64"),
+            ),
+            Err(MemoryAccessError::Inaccessible) => (0_u64.to_le_bytes(), 0),
             Err(MemoryAccessError::Fatal(error)) => return Err(error),
         };
         let last_word_address = current.saturating_add(word_size - 1);
@@ -196,12 +192,23 @@ pub(super) fn read_logical_memory_with(
                 word[usize::try_from(offset).expect("word offset fits usize")] = site.original_byte;
             }
         }
-        let word_end = current.saturating_add(word_size);
+        let readable_end = current.saturating_add(readable);
         let selected_start = address.get().max(current);
-        let selected_end = end.min(word_end);
-        let start = usize::try_from(selected_start - current).expect("word offset fits usize");
-        let selected_end = usize::try_from(selected_end - current).expect("word offset fits usize");
-        bytes.extend_from_slice(&word[start..selected_end]);
+        let selected_end = end.min(readable_end);
+        if selected_start < selected_end {
+            let start = usize::try_from(selected_start - current).expect("word offset fits usize");
+            let stop = usize::try_from(selected_end - current).expect("word offset fits usize");
+            bytes.extend_from_slice(&word[start..stop]);
+        }
+        if readable < word_size && readable_end < end {
+            return Ok(LogicalMemoryRead {
+                completion: MemoryReadCompletion::Incomplete {
+                    next_address: VirtualAddress::new(address.get().max(readable_end)),
+                    reason: MemoryReadUnavailableReason::Inaccessible,
+                },
+                bytes,
+            });
+        }
         if current.saturating_add(word_size) >= end {
             break;
         }
