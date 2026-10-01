@@ -935,6 +935,98 @@ mod tests {
     }
 
     #[test]
+    fn data_symbols_name_storage_only_within_allocated_non_thread_local_sections() {
+        use write::SymbolSection::Section;
+
+        let mut object =
+            write::Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let text = object.add_section(Vec::new(), b".text".to_vec(), object::SectionKind::Text);
+        let data = object.add_section(Vec::new(), b".data".to_vec(), object::SectionKind::Data);
+        let tdata = object.add_section(Vec::new(), b".tdata".to_vec(), object::SectionKind::Tls);
+        let tbss = object.add_section(
+            Vec::new(),
+            b".tbss".to_vec(),
+            object::SectionKind::UninitializedTls,
+        );
+        let note = object.add_section(Vec::new(), b".note".to_vec(), object::SectionKind::Other);
+        object.append_section_data(text, &[0xcc; 0x10], 16);
+        object.append_section_data(data, &[0; 0x10], 8);
+        object.append_section_data(tdata, &[0; 0x10], 8);
+        object.append_section_bss(tbss, 0x10, 8);
+        object.append_section_data(note, &[0; 0x10], 1);
+        for (name, section, value, size) in [
+            ("object", data, 0x8, 0x8),
+            ("unsized", data, 0x4, 0),
+            ("overflowing", data, 0xc, 0x8),
+            ("at_end", data, 0x10, 0),
+            ("thread_template", tdata, 0x0, 0x8),
+            ("unallocated", note, 0x0, 0x8),
+        ] {
+            object.add_symbol(write::Symbol {
+                name: name.as_bytes().to_vec(),
+                value,
+                size,
+                kind: object::SymbolKind::Unknown,
+                scope: object::SymbolScope::Dynamic,
+                weak: false,
+                section: Section(section),
+                flags: object::SymbolFlags::Elf {
+                    st_info: (elf::STB_GLOBAL << 4) | elf::STT_OBJECT,
+                    st_other: 0,
+                },
+            });
+        }
+        let bytes = object.write().expect("write test object");
+        let object = object::File::parse(bytes.as_slice()).expect("parse test object");
+
+        let storage = load_symbols(&object, &[])
+            .symbols
+            .into_iter()
+            .map(|symbol| {
+                (
+                    symbol.name.to_string(),
+                    symbol
+                        .storage
+                        .map(|range| (range.start.get(), range.end.get())),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let expected = [
+            ("at_end", None),
+            ("object", Some((0x8, 0x10))),
+            ("overflowing", None),
+            ("thread_template", None),
+            ("unallocated", None),
+            ("unsized", Some((0x4, 0x4))),
+        ]
+        .map(|(name, range)| (name.to_owned(), range));
+        assert_eq!(storage, BTreeMap::from(expected));
+
+        // Relocatable sections all begin at zero; only the thread-local
+        // template that occupies no addresses and the unallocated note are
+        // left out.
+        let sections = load_sections(&object)
+            .into_iter()
+            .map(|section| {
+                (
+                    section.name.to_string(),
+                    section.range.end.get(),
+                    section.executable,
+                    section.writable,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sections,
+            [
+                (".data".to_owned(), 0x10, false, true),
+                (".tdata".to_owned(), 0x10, false, true),
+                (".text".to_owned(), 0x10, true, false),
+            ]
+        );
+    }
+
+    #[test]
     fn names_that_are_not_utf8_stay_distinct_when_their_spellings_collide() {
         use SymbolBinding::{Global, Local};
         use SymbolKind::Function;
