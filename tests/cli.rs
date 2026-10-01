@@ -1106,6 +1106,43 @@ fn breakpoint_stops_print_source_context_from_any_working_directory() {
 }
 
 #[test]
+fn source_maps_read_sources_recorded_under_another_directory() {
+    let executable = fixture("build/test-programs/basic-relocated");
+    let arguments = [
+        "--batch",
+        "--eval",
+        "break breakpoint_target",
+        "--eval",
+        "run",
+    ];
+    let unmapped = assert_success(uscope_batch(&arguments[1..], &executable));
+    assert!(
+        unmapped.contains(
+            "source unavailable: source file /nonexistent/uscope/tests/fixtures/c/basic.c does not exist"
+        ),
+        "{unmapped}"
+    );
+
+    let repository = env!("CARGO_MANIFEST_DIR");
+    let mut mapped = arguments[1..].to_vec();
+    mapped.extend(["--source-map", "/nonexistent/uscope", repository]);
+    let stdout = assert_success(uscope_batch(&mapped, &executable));
+    assert!(
+        stdout.contains(&format!("{repository}/tests/fixtures/c/basic.c:6")),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("=> 6 |     return uscope_value;"),
+        "{stdout}"
+    );
+
+    assert_failure(
+        &uscope(&["build/test-programs/basic", "--source-map", "/nonexistent"]),
+        "2 values required for '--source-map <FROM> <TO>'",
+    );
+}
+
+#[test]
 fn list_command_prints_the_current_source_context() {
     let executable = fixture("build/test-programs/basic");
     assert!(

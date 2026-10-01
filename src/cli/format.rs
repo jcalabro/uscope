@@ -502,7 +502,7 @@ pub fn source_context(context: &SourceContext, renderer: Renderer) -> String {
         .map_or(1, |line| line.number.to_string().len());
     let mut output = format!(
         "{}:{}",
-        renderer.paint(Role::Metadata, context.file.path.display()),
+        renderer.paint(Role::Metadata, context.path.display()),
         renderer.paint(Role::Current, context.location.line)
     );
     for line in context.lines.iter() {

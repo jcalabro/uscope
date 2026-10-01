@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use uscope::{CoreDumpOptions, Debugger, ProcessId};
+use uscope::{CoreDumpOptions, Debugger, ProcessId, SourcePathMap};
 
 use cli::terminal::{ColorChoice, Role};
 use cli::{Cli, DisassemblySyntax, Renderers};
@@ -38,6 +38,11 @@ struct Args {
     /// not matching the dump, by file name and then by build-id. May be repeated.
     #[arg(long = "module-path", value_name = "DIR", requires = "core")]
     module_paths: Vec<PathBuf>,
+
+    /// Read source files recorded under FROM from TO instead, such as for a
+    /// program built elsewhere. May be repeated; earlier rules are tried first.
+    #[arg(long, num_args = 2, value_names = ["FROM", "TO"])]
+    source_map: Vec<PathBuf>,
 
     /// Use module files that cannot be proven to match the core dump.
     #[arg(long, requires = "core")]
@@ -84,8 +89,15 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: &Args, renderers: Renderers) -> Result<()> {
+    let mut source_paths = SourcePathMap::new();
+    for [from, to] in args.source_map.as_chunks::<2>().0 {
+        source_paths
+            .push(from, to)
+            .context("invalid --source-map rule")?;
+    }
     let debugger = open_debugger(args).await?;
-    let result = Cli::new(debugger.handle(), renderers, args.disassembly_syntax.into())
+    let handle = debugger.handle().with_source_paths(source_paths);
+    let result = Cli::new(handle, renderers, args.disassembly_syntax.into())
         .run(args)
         .await;
     let shutdown = debugger

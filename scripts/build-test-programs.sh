@@ -565,6 +565,10 @@ printf '%s\n' "$signature" >"${suite_stamp}.tmp"
 
 build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic" \
     -O0 -g3 -fPIE -pie
+# Built as if elsewhere: its debug information names sources under a
+# directory that does not exist here.
+build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic-relocated" \
+    -O0 -g3 -fPIE -pie "-ffile-prefix-map=${PWD}=/nonexistent/uscope"
 build_fixture gcc "$c_fixtures_dir/attach.c" "$output_dir/attach" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/attach-threads.c" "$output_dir/attach-threads" \
