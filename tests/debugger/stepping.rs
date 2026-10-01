@@ -1584,3 +1584,110 @@ async fn step_into_crosses_library_calls_without_line_info() {
     );
     scenario.shutdown().await;
 }
+
+/// Stops at the `syscall` instruction of the C library's `getpid`, found by
+/// disassembling the function its ELF symbol names.
+async fn stop_at_getpid_system_call(scenario: &mut Scenario) -> VirtualAddress {
+    scenario.add_breakpoint("call_libc").await;
+    scenario.run_to_stop().await;
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    let libc = modules
+        .modules
+        .iter()
+        .find(|record| {
+            record
+                .path
+                .file_name()
+                .is_some_and(|name| name == "libc.so.6")
+        })
+        .expect("libc is loaded");
+    let image = scenario
+        .operation(
+            "libc image",
+            scenario.handle().loaded_module_image(libc.module.id),
+        )
+        .await;
+    let getpid = image
+        .symbols()
+        .iter()
+        .find(|symbol| symbol.name.as_ref() == "getpid")
+        .expect("libc defines getpid");
+    let disassembly = scenario
+        .operation(
+            "disassemble getpid",
+            scenario.handle().disassemble(uscope::DisassemblyQuery {
+                range: uscope::DisassemblyRange::Function(VirtualAddress::new(
+                    libc.module.load_bias + getpid.address.get(),
+                )),
+                syntax: uscope::AssemblySyntax::Intel,
+            }),
+        )
+        .await;
+    let uscope::DisassemblyView::Function { blocks, .. } = disassembly.view else {
+        panic!("a function query returned a window");
+    };
+    let syscall = blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .find(|instruction| {
+            matches!(
+                &instruction.content,
+                uscope::InstructionContent::Decoded(decoded)
+                    if decoded.mnemonic() == Some("syscall")
+            )
+        })
+        .expect("getpid issues a system call")
+        .address;
+    scenario
+        .add_breakpoint_spec(BreakpointSpec::Address(syscall))
+        .await;
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { address: syscall }
+    );
+    syscall
+}
+
+#[tokio::test]
+async fn instruction_steps_and_breakpoint_repairs_cross_system_calls() {
+    // Linux reports a single step across `syscall` from the system call's
+    // exit path, with a different trap code than other steps.
+    let mut scenario = Scenario::new("step syscall", Scenario::fixture("step-over-libc"));
+    let syscall = stop_at_getpid_system_call(&mut scenario).await;
+    assert_eq!(
+        scenario.step_to_stop(StepKind::Instruction).await,
+        StopReason::Step {
+            kind: StepKind::Instruction
+        }
+    );
+    let registers = scenario
+        .operation("registers", scenario.handle().registers())
+        .await;
+    assert_eq!(
+        register_u64(&registers, RegisterRole::ProgramCounter),
+        syscall.get() + 2
+    );
+    let rax = registers
+        .registers
+        .iter()
+        .find(|value| value.register.name.as_ref() == "rax")
+        .expect("rax");
+    assert_eq!(*rax.bytes, registers.thread.get().to_le_bytes());
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+
+    // Resuming from a breakpoint on the system call steps over it the same
+    // way before running on.
+    let mut scenario = Scenario::new("repair syscall", Scenario::fixture("step-over-libc"));
+    stop_at_getpid_system_call(&mut scenario).await;
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}

@@ -1232,6 +1232,18 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
         ),
         ClassifiedStop::Trace { ref watch } if watch.is_empty()
     ));
+    // A step across a system call completes from the call's exit path.
+    assert!(matches!(
+        classify(
+            NixSignal::SIGTRAP,
+            metadata(libc::TRAP_BRKPT),
+            &ExpectedStop::UserStep {
+                kind: StepKind::Instruction
+            },
+            None,
+        ),
+        ClassifiedStop::Trace { ref watch } if watch.is_empty()
+    ));
     assert!(matches!(
         classify(
             NixSignal::SIGTRAP,
