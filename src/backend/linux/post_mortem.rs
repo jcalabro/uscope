@@ -357,10 +357,10 @@ fn examine(
 /// Without a saved header only ELF candidates count, since a mapped data
 /// file is no module.
 ///
-/// A different file at the recorded path is an error unless mismatches are
-/// allowed, since it means this machine or sysroot holds another build. A
-/// file that searching found merely shares a name, so unless mismatches are
-/// allowed it counts only once proven.
+/// When no candidate is proven, a different file at the recorded path is an
+/// error unless mismatches are allowed, since it means this machine or
+/// sysroot holds another build. A file that searching found merely shares a
+/// name, so unless mismatches are allowed it counts only once proven.
 fn resolve_image(
     core: &CoreDump,
     image: &ImageMappings,

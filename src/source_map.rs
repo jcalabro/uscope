@@ -43,6 +43,7 @@ impl SourcePathMap {
             .rules
             .iter()
             .filter_map(|(from, to)| Some(to.join(recorded.strip_prefix(from).ok()?)))
+            .filter(|candidate| candidate != recorded)
             .collect::<Vec<_>>();
         candidates.push(recorded.to_owned());
         candidates.dedup();
@@ -83,12 +84,18 @@ mod tests {
             [Path::new("/tmp/build/x.c"), Path::new("build/../x.c")]
         );
         assert_eq!(candidates("build/x.c"), [Path::new("build/x.c")]);
-        // A rule mapping a prefix to itself does not repeat the path.
+        // A rule mapping a prefix to itself does not repeat the path, which
+        // stays last.
         let mut identity = SourcePathMap::new();
         identity.push("/src", "/src").unwrap();
         assert_eq!(
             identity.candidates(Path::new("/src/a.c")),
             [Path::new("/src/a.c")]
+        );
+        identity.push("/src", "/tmp").unwrap();
+        assert_eq!(
+            identity.candidates(Path::new("/src/a.c")),
+            [Path::new("/tmp/a.c"), Path::new("/src/a.c")]
         );
         assert!(matches!(
             SourcePathMap::new().push("", "/x"),
