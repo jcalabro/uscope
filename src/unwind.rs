@@ -127,7 +127,6 @@ mod tests {
             },
             None,
             context.instruction,
-            None,
         )
     }
 

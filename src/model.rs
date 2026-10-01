@@ -1892,7 +1892,52 @@ impl CodeInstanceInfo {
     }
 }
 
-/// A linker symbol exported by a module image.
+/// The kind of entity a linker symbol names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SymbolKind {
+    /// Machine code entered by calling the symbol's address.
+    Function,
+    /// An indirect function's resolver, which selects the implementation
+    /// that calls through the symbol reach.
+    IndirectFunction,
+    /// A data object.
+    Data,
+    /// The object file does not describe what the symbol names.
+    Unknown,
+}
+
+/// The linkage visibility of a symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SymbolBinding {
+    /// Visible to other objects and preferred during linking.
+    Global,
+    /// Visible to other objects but overridable by a global definition.
+    Weak,
+    /// Private to the object that defines it.
+    Local,
+}
+
+/// Explains how the end of a code symbol's extent was determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SymbolExtentProvenance {
+    /// The symbol table declared the symbol's size.
+    Declared,
+    /// The symbol declared no size, so its extent ends at the first evidence
+    /// of other code: the next symbol, the next unwind-table function, or
+    /// the end of its section.
+    Inferred,
+}
+
+/// The machine code named by a code symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SymbolExtent {
+    /// The non-empty image-address range beginning at the symbol's address.
+    pub range: AddressRange<ImageAddress>,
+    /// How the end of the range was determined.
+    pub provenance: SymbolExtentProvenance,
+}
+
+/// A linker symbol defined by a module image.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolInfo {
     /// The symbol's session-scoped identifier.
@@ -1901,6 +1946,73 @@ pub struct SymbolInfo {
     pub name: Arc<str>,
     /// The symbol's image address.
     pub address: ImageAddress,
+    /// What the symbol names.
+    pub kind: SymbolKind,
+    /// The symbol's linkage visibility.
+    pub binding: SymbolBinding,
+    /// Whether the module's dynamic symbol table exports the symbol.
+    pub exported: bool,
+    /// The code the symbol names, for a code symbol whose extent lies within
+    /// one executable section.
+    pub extent: Option<SymbolExtent>,
+}
+
+/// Records which symbol tables a module image provided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolTableSources {
+    /// Whether the image has a static symbol table.
+    pub static_table: bool,
+    /// Whether the image has a dynamic symbol table.
+    pub dynamic_table: bool,
+    /// The state of the image's embedded compressed symbol table.
+    pub embedded_table: EmbeddedSymbolTable,
+}
+
+impl Default for SymbolTableSources {
+    fn default() -> Self {
+        Self {
+            static_table: false,
+            dynamic_table: false,
+            embedded_table: EmbeddedSymbolTable::Absent,
+        }
+    }
+}
+
+/// The state of a symbol table embedded in compressed form (on ELF, the
+/// `.gnu_debugdata` `MiniDebugInfo` section).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbeddedSymbolTable {
+    /// The image embeds no symbol table.
+    Absent,
+    /// The embedded symbol table was read.
+    Loaded,
+    /// The embedded symbol table could not be read, so its symbols are absent.
+    Unusable {
+        /// Why the table could not be read.
+        reason: Arc<str>,
+    },
+}
+
+/// The code symbol whose extent contains an address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolLocation {
+    /// The symbol's identifier within its module image.
+    pub symbol: SymbolId,
+    /// The linker-visible symbol name.
+    pub name: Arc<str>,
+    /// The distance from the symbol's address to the described address.
+    pub offset: u64,
+    /// How the end of the symbol's extent was determined.
+    pub provenance: SymbolExtentProvenance,
+}
+
+impl SymbolLocation {
+    /// Returns the source-level spelling of a Rust or C++ mangled name, or
+    /// `None` when the name is not mangled in a recognized scheme.
+    #[must_use]
+    pub fn demangled_name(&self) -> Option<String> {
+        crate::demangle::demangle(&self.name)
+    }
 }
 
 /// A resolved source and function location in a module image.
@@ -1916,6 +2028,8 @@ pub struct ImageLocation {
     pub inline_frames: InlineFrameLookup,
     /// The corresponding source location, when known.
     pub source: Option<SourceLocation>,
+    /// The code symbol containing the address, when known.
+    pub symbol: Option<SymbolLocation>,
 }
 
 /// An ordered set of active inline instances, from outermost to innermost.
@@ -1986,12 +2100,17 @@ pub struct StackFrame {
     pub function: Option<FunctionInfo>,
     /// The corresponding source location, when known.
     pub source: Option<SourceLocation>,
+    /// The code symbol containing a physical or signal frame's code, with
+    /// its offset measured to [`Self::instruction`]. Inline frames carry no
+    /// symbol because they are source-level expansions within one.
+    pub symbol: Option<SymbolLocation>,
 }
 
 pub struct FrameMetadata {
     pub code_instance: Option<CodeInstanceId>,
     pub function: Option<FunctionInfo>,
     pub source: Option<SourceLocation>,
+    pub symbol: Option<SymbolLocation>,
 }
 
 impl StackFrame {
@@ -2000,12 +2119,7 @@ impl StackFrame {
         kind: FrameKind,
         module: Option<ModuleId>,
         instruction: VirtualAddress,
-        location: Option<ImageLocation>,
     ) -> Self {
-        let (function, source) = location.map_or((None, None), |location| {
-            (location.function, location.source)
-        });
-
         Self::from_parts(
             level,
             kind,
@@ -2013,8 +2127,9 @@ impl StackFrame {
             instruction,
             FrameMetadata {
                 code_instance: None,
-                function,
-                source,
+                function: None,
+                source: None,
+                symbol: None,
             },
         )
     }
@@ -2035,6 +2150,7 @@ impl StackFrame {
             code_instance: metadata.code_instance,
             function: metadata.function,
             source: metadata.source,
+            symbol: metadata.symbol,
         }
     }
 }
@@ -2173,6 +2289,7 @@ pub struct ModuleMetadata {
     pub functions: Vec<FunctionInfo>,
     pub code_instances: Vec<CodeInstanceInfo>,
     pub symbols: Vec<SymbolInfo>,
+    pub symbol_sources: SymbolTableSources,
     pub globals: Vec<GlobalVariableInfo>,
     pub types: Arc<[TypeNode]>,
     pub source_files: Vec<SourceFile>,
@@ -2460,6 +2577,23 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
             "source file IDs are dense and ordered"
         );
     }
+    for (index, symbol) in metadata.symbols.iter().enumerate() {
+        assert_eq!(
+            usize::try_from(symbol.id.0).expect("symbol ID fits usize"),
+            index,
+            "symbol IDs are dense and ordered"
+        );
+        if let Some(extent) = symbol.extent {
+            assert!(
+                matches!(
+                    symbol.kind,
+                    SymbolKind::Function | SymbolKind::IndirectFunction
+                ) && extent.range.start == symbol.address
+                    && extent.range.start < extent.range.end,
+                "symbol extents are non-empty code ranges beginning at the symbol"
+            );
+        }
+    }
     for (index, global) in metadata.globals.iter().enumerate() {
         assert_eq!(
             usize::try_from(global.id.0).expect("global ID fits usize"),
@@ -2486,6 +2620,7 @@ pub struct ModuleImage {
     functions: Arc<[FunctionInfo]>,
     code_instances: Arc<[CodeInstanceInfo]>,
     symbols: Arc<[SymbolInfo]>,
+    symbol_sources: SymbolTableSources,
     globals: Arc<[GlobalVariableInfo]>,
     types: Arc<[TypeNode]>,
     source_files: Arc<[SourceFile]>,
@@ -2501,6 +2636,7 @@ pub struct ModuleImage {
     recommended_entries_by_instance: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
     code_range_index: RangeIndex<CodeInstanceId>,
     line_range_index: RangeIndex<u32>,
+    symbol_range_index: RangeIndex<SymbolId>,
 }
 
 impl ModuleImage {
@@ -2527,6 +2663,12 @@ impl ModuleImage {
                     u32::try_from(index).expect("line entry count fits u32"),
                 )
             }));
+        let symbol_range_index = RangeIndex::new(
+            metadata
+                .symbols
+                .iter()
+                .filter_map(|symbol| Some((symbol.extent?.range, symbol.id))),
+        );
 
         Self {
             id: ModuleImageId::new(0),
@@ -2536,6 +2678,7 @@ impl ModuleImage {
             functions: metadata.functions.into(),
             code_instances: metadata.code_instances.into(),
             symbols: metadata.symbols.into(),
+            symbol_sources: metadata.symbol_sources,
             globals: metadata.globals.into(),
             types: metadata.types,
             source_files: metadata.source_files.into(),
@@ -2551,6 +2694,7 @@ impl ModuleImage {
             recommended_entries_by_instance: indexes.recommended_entries_by_instance,
             code_range_index,
             line_range_index,
+            symbol_range_index,
         }
     }
 
@@ -2605,10 +2749,48 @@ impl ModuleImage {
         &self.code_instances
     }
 
-    /// Returns all linker symbols described by this image.
+    /// Returns all linker symbols described by this image, ordered by
+    /// address and then name.
     #[must_use]
     pub fn symbols(&self) -> &[SymbolInfo] {
         &self.symbols
+    }
+
+    /// Looks up a linker symbol by identifier.
+    #[must_use]
+    pub fn symbol(&self, id: SymbolId) -> Option<&SymbolInfo> {
+        self.symbols.get(usize::try_from(id.0).ok()?)
+    }
+
+    /// Returns which symbol tables this image provided.
+    #[must_use]
+    pub const fn symbol_sources(&self) -> &SymbolTableSources {
+        &self.symbol_sources
+    }
+
+    /// Finds the code symbol whose extent contains an image address.
+    ///
+    /// Declared extents take precedence over inferred ones. Among the
+    /// remaining candidates the innermost extent wins, then a function over an
+    /// indirect-function resolver, then global over weak over local binding,
+    /// then an exported symbol, then the name with the fewest leading
+    /// underscores, then the bytewise-smallest name. An address that no extent
+    /// contains has no symbol; the nearest preceding symbol is never guessed.
+    #[must_use]
+    pub fn symbolize(&self, address: ImageAddress) -> Option<SymbolLocation> {
+        let symbol = self
+            .symbol_range_index
+            .containing(address)
+            .filter_map(|id| self.symbol(id))
+            .min_by_key(|symbol| symbol_preference(symbol))?;
+        let extent = symbol.extent.expect("indexed symbols have extents");
+
+        Some(SymbolLocation {
+            symbol: symbol.id,
+            name: Arc::clone(&symbol.name),
+            offset: address.get() - symbol.address.get(),
+            provenance: extent.provenance,
+        })
     }
 
     /// Returns every global catalog entry in deterministic source order.
@@ -2832,9 +3014,7 @@ impl ModuleImage {
         };
 
         Ok(self
-            .symbols
-            .iter()
-            .find(|candidate| candidate.id == *symbol)
+            .symbol(*symbol)
             .expect("name index references a symbol"))
     }
 
@@ -2872,6 +3052,7 @@ impl ModuleImage {
             physical_instance: physical.map(|instance| instance.id),
             inline_frames,
             source,
+            symbol: self.symbolize(address),
         }
     }
 
@@ -2956,6 +3137,23 @@ impl ModuleImage {
     pub fn source_file(&self, id: SourceFileId) -> Option<&SourceFile> {
         self.source_files.get(usize::try_from(id.0).ok()?)
     }
+}
+
+/// Orders the code symbols containing one address from most to least
+/// preferred; see [`ModuleImage::symbolize`].
+fn symbol_preference(symbol: &SymbolInfo) -> impl Ord + '_ {
+    let extent = symbol.extent.expect("indexed symbols have extents");
+    (
+        extent.provenance,
+        std::cmp::Reverse(extent.range.start),
+        extent.range.end.get() - extent.range.start.get(),
+        symbol.kind,
+        symbol.binding,
+        !symbol.exported,
+        symbol.name.bytes().take_while(|byte| *byte == b'_').count(),
+        symbol.name.as_ref(),
+        symbol.id,
+    )
 }
 
 fn path_matches(candidate: &Path, requested: &Path) -> bool {
@@ -3127,6 +3325,7 @@ mod tests {
                 functions: Vec::new(),
                 code_instances: Vec::new(),
                 symbols: Vec::new(),
+                symbol_sources: crate::model::SymbolTableSources::default(),
                 globals,
                 types: Arc::default(),
                 source_files: vec![
@@ -3218,6 +3417,7 @@ mod tests {
                 functions: Vec::new(),
                 code_instances: Vec::new(),
                 symbols: Vec::new(),
+                symbol_sources: crate::model::SymbolTableSources::default(),
                 globals: Vec::new(),
                 types: Arc::from([
                     TypeNode::Resolved(TypeInfo {
@@ -3345,6 +3545,7 @@ mod tests {
                 functions,
                 code_instances,
                 symbols: Vec::new(),
+                symbol_sources: crate::model::SymbolTableSources::default(),
                 globals: Vec::new(),
                 types: Arc::default(),
                 source_files: Vec::new(),
@@ -3469,6 +3670,7 @@ mod tests {
                 functions,
                 code_instances: boundary_test_instances(),
                 symbols: Vec::new(),
+                symbol_sources: crate::model::SymbolTableSources::default(),
                 globals: Vec::new(),
                 types: Arc::default(),
                 source_files: Vec::new(),
@@ -3651,5 +3853,153 @@ mod tests {
             panic!("overlapping siblings were not reported as ambiguous")
         };
         assert_eq!(chains.len(), 2);
+    }
+
+    /// One test symbol: name, start, end (equal for a symbol without an
+    /// extent), provenance, kind, binding, and whether it is exported.
+    type TestSymbol = (
+        &'static str,
+        u64,
+        u64,
+        SymbolExtentProvenance,
+        SymbolKind,
+        SymbolBinding,
+        bool,
+    );
+
+    fn symbol_test_image(symbols: &[TestSymbol]) -> ModuleImage {
+        let symbols = symbols
+            .iter()
+            .enumerate()
+            .map(
+                |(index, &(name, start, end, provenance, kind, binding, exported))| SymbolInfo {
+                    id: SymbolId::new(u32::try_from(index).expect("test symbol count")),
+                    name: name.into(),
+                    address: ImageAddress::new(start),
+                    kind,
+                    binding,
+                    exported,
+                    extent: (start < end).then_some(SymbolExtent {
+                        range: AddressRange {
+                            start: ImageAddress::new(start),
+                            end: ImageAddress::new(end),
+                        },
+                        provenance,
+                    }),
+                },
+            )
+            .collect();
+        ModuleImage::new(
+            PathBuf::from("/test/symbols"),
+            TargetDescription {
+                architecture: Architecture::X86_64,
+                byte_order: ByteOrder::Little,
+                pointer_width: PointerWidth::Bits64,
+            },
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(0x1000),
+            },
+            ModuleMetadata {
+                functions: Vec::new(),
+                code_instances: Vec::new(),
+                symbols,
+                symbol_sources: SymbolTableSources::default(),
+                globals: Vec::new(),
+                types: Arc::default(),
+                source_files: Vec::new(),
+                statements: Vec::new(),
+                lines: Vec::new(),
+            },
+        )
+    }
+
+    fn symbolized(image: &ModuleImage, address: u64) -> Option<(&str, u64)> {
+        image.symbolize(ImageAddress::new(address)).map(|location| {
+            (
+                image.symbol(location.symbol).expect("known").name.as_ref(),
+                location.offset,
+            )
+        })
+    }
+
+    #[test]
+    fn symbolization_uses_only_containing_extents_and_prefers_declared_innermost_code() {
+        use SymbolBinding::{Global, Local};
+        use SymbolExtentProvenance::{Declared, Inferred};
+        use SymbolKind::{Data, Function};
+
+        let image = symbol_test_image(&[
+            ("outer", 0x100, 0x200, Declared, Function, Global, true),
+            ("inner", 0x140, 0x160, Declared, Function, Local, false),
+            // An unsized label inside a sized function never displaces it.
+            ("label", 0x180, 0x190, Inferred, Function, Global, true),
+            ("tail", 0x300, 0x340, Inferred, Function, Local, false),
+            // Symbols without an extent never name code.
+            ("object", 0x240, 0x240, Declared, Data, Global, true),
+        ]);
+
+        assert_eq!(symbolized(&image, 0xff), None);
+        assert_eq!(symbolized(&image, 0x100), Some(("outer", 0)));
+        assert_eq!(symbolized(&image, 0x13f), Some(("outer", 0x3f)));
+        assert_eq!(symbolized(&image, 0x140), Some(("inner", 0)));
+        assert_eq!(symbolized(&image, 0x15f), Some(("inner", 0x1f)));
+        assert_eq!(symbolized(&image, 0x160), Some(("outer", 0x60)));
+        assert_eq!(symbolized(&image, 0x185), Some(("outer", 0x85)));
+        assert_eq!(symbolized(&image, 0x1ff), Some(("outer", 0xff)));
+        // No nearest preceding symbol is guessed for unnamed code.
+        assert_eq!(symbolized(&image, 0x200), None);
+        assert_eq!(symbolized(&image, 0x240), None);
+        assert_eq!(symbolized(&image, 0x33f), Some(("tail", 0x3f)));
+        assert_eq!(
+            image
+                .symbolize(ImageAddress::new(0x300))
+                .map(|location| location.provenance),
+            Some(Inferred)
+        );
+        assert_eq!(symbolized(&image, 0x340), None);
+    }
+
+    #[test]
+    fn same_extent_aliases_resolve_by_kind_binding_export_and_spelling() {
+        use SymbolBinding::{Global, Local, Weak};
+        use SymbolExtentProvenance::Declared;
+        use SymbolKind::{Function, IndirectFunction};
+
+        // Each row adds a candidate that outranks every earlier one by
+        // exactly one rule and sorts after them by name, so only that rule
+        // can select it.
+        let ladder: [TestSymbol; 6] = [
+            (
+                "_a_resolver",
+                0x10,
+                0x20,
+                Declared,
+                IndirectFunction,
+                Global,
+                true,
+            ),
+            ("_b_local", 0x10, 0x20, Declared, Function, Local, false),
+            ("_c_weak", 0x10, 0x20, Declared, Function, Weak, false),
+            ("_d_hidden", 0x10, 0x20, Declared, Function, Global, false),
+            ("_e_exported", 0x10, 0x20, Declared, Function, Global, true),
+            ("f_exported", 0x10, 0x20, Declared, Function, Global, true),
+        ];
+        for count in 1..=ladder.len() {
+            let image = symbol_test_image(&ladder[..count]);
+            assert_eq!(
+                symbolized(&image, 0x18).map(|(name, _)| name),
+                Some(ladder[count - 1].0),
+                "{count} candidates"
+            );
+        }
+
+        // With every rule tied, the bytewise-smallest name wins regardless
+        // of catalog order.
+        let tied = symbol_test_image(&[
+            ("beta", 0x10, 0x20, Declared, Function, Global, true),
+            ("alpha", 0x10, 0x20, Declared, Function, Global, true),
+        ]);
+        assert_eq!(symbolized(&tied, 0x10), Some(("alpha", 0)));
     }
 }

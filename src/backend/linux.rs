@@ -4767,9 +4767,14 @@ impl<P: InspectionOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let registers = self.ptrace.registers(pid)?;
         let instruction = VirtualAddress::new(registers.rip);
-        // An instruction below the main image's bias cannot be described by
-        // it, so its presentation is the physical frame.
-        let Ok(image_address) = inferior.loaded_module.image_address(instruction) else {
+        // Presentations describe inline frames of the main image only; an
+        // instruction elsewhere is presented as its physical frame.
+        let Some(image_address) = inferior
+            .loaded_module
+            .image_address(instruction)
+            .ok()
+            .filter(|address| self.module_image.contains_address(*address))
+        else {
             return Ok(FramePresentation {
                 instruction,
                 frame: PresentedFrame::Physical,
@@ -4885,13 +4890,18 @@ impl<P: InspectionOps> Controller<P> {
         validate_stopped_thread(inferior, pid)?;
         let registers = self.ptrace.registers(pid)?;
         let address = VirtualAddress::new(registers.rip);
-        let image_address = inferior.loaded_module.image_address(address)?;
-        let mut image = self.module_image.locate(image_address);
-        let presentation = self.presentation_for_stopped_thread(pid)?;
-        apply_presentation(&self.module_image, &mut image, &presentation)?;
+        let modules = self.unwind_modules(inferior);
+        let (module, image_address) =
+            unwind_module_for(&modules, address).ok_or(Error::AddressOutsideModule)?;
+        let mut image = module.image.locate(image_address);
+        // The stop presentation describes inline frames of the main image only.
+        if module.loaded.id == inferior.loaded_module.id {
+            let presentation = self.presentation_for_stopped_thread(pid)?;
+            apply_presentation(&self.module_image, &mut image, &presentation)?;
+        }
 
         Ok(ExecutionLocation {
-            module: inferior.loaded_module.id,
+            module: module.loaded.id,
             address,
             image,
         })
@@ -5046,8 +5056,8 @@ impl<P: InspectionOps> Controller<P> {
             initial,
             &mut provider,
             |level, context| {
-                let located = frame_lookup_address(level, context)
-                    .and_then(|lookup| unwind_module_for(&modules, lookup));
+                // Module and symbol metadata are resolved by the inline
+                // expansion, which sees every physical frame.
                 StackFrame::new(
                     level,
                     if context.signal_frame {
@@ -5055,9 +5065,8 @@ impl<P: InspectionOps> Controller<P> {
                     } else {
                         FrameKind::Physical
                     },
-                    located.as_ref().map(|(module, _)| module.loaded.id),
+                    None,
                     context.instruction,
-                    located.map(|(module, address)| module.image.locate(address)),
                 )
             },
             DEFAULT_MAX_FRAMES,
@@ -6544,16 +6553,15 @@ fn expand_inline_backtrace(
             cfa: None,
             signal_frame: physical_frame.kind == FrameKind::Signal,
         };
-        let located = frame_lookup_address(physical_frame.level, &context)
-            .and_then(|address| unwind_module_for(modules, address));
-        let Some((frame_module, image_address)) = located else {
+        let lookup = frame_lookup_address(physical_frame.level, &context);
+        let located = lookup.and_then(|address| unwind_module_for(modules, address));
+        let (Some(lookup), Some((frame_module, image_address))) = (lookup, located) else {
             let level = u32::try_from(frames.len()).expect("frame count fits in u32");
             frames.push(StackFrame::new(
                 level,
                 physical_frame.kind,
                 None,
                 physical_frame.instruction,
-                None,
             ));
             continue;
         };
@@ -6598,6 +6606,7 @@ fn expand_inline_backtrace(
                         code_instance: Some(instance.id),
                         function,
                         source,
+                        symbol: None,
                     },
                 ));
                 source = match &instance.kind {
@@ -6627,6 +6636,12 @@ fn expand_inline_backtrace(
                 code_instance: physical_instance.map(|instance| instance.id),
                 function,
                 source: physical_source,
+                // A caller is looked up just before its return address, but
+                // its offset describes the frame's own instruction.
+                symbol: location.symbol.clone().map(|mut symbol| {
+                    symbol.offset += physical_frame.instruction.get() - lookup.get();
+                    symbol
+                }),
             },
         ));
     }
@@ -8907,6 +8922,7 @@ mod tests {
                 functions: Vec::new(),
                 code_instances: Vec::new(),
                 symbols: Vec::new(),
+                symbol_sources: crate::model::SymbolTableSources::default(),
                 globals: Vec::new(),
                 types: Arc::default(),
                 source_files: Vec::new(),
@@ -9344,6 +9360,7 @@ mod tests {
                     },
                 ],
                 symbols: Vec::new(),
+                symbol_sources: crate::model::SymbolTableSources::default(),
                 globals: Vec::new(),
                 types: Arc::default(),
                 source_files: Vec::new(),

@@ -18,8 +18,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
     Breakpoint, BreakpointId, BreakpointLocation, BreakpointSpec, ByteOrder, CoreDumpInfo,
     CoreDumpOptions, CoreModuleState, Debugger, DebuggerHandle, Error, ExitStatus, FloatValue,
-    LineNumber, ModuleIdentity, RegisterSnapshot, ScalarValue, SourceContext, StateSnapshot,
-    StepKind, StopReason, ThreadId, ThreadState, Variable, VariableSnapshot, VariableState,
+    FunctionInfo, LineNumber, ModuleId, ModuleIdentity, RegisterRole, RegisterSnapshot,
+    ScalarValue, SourceContext, StateSnapshot, StepKind, StopReason, SymbolExtentProvenance,
+    SymbolLocation, ThreadId, ThreadState, Variable, VariableSnapshot, VariableState,
     VirtualAddress, WatchAccess, WatchScope, Watchpoint, WatchpointHit, WatchpointId,
     WatchpointSpec,
 };
@@ -1112,32 +1113,93 @@ async fn execute_address<'a>(
 }
 
 async fn execute_where(debugger: &DebuggerHandle, renderer: Renderer) -> uscope::Result<Control> {
-    let location = debugger.current_location().await?;
-    let function = location
-        .image
-        .function
-        .as_ref()
-        .map_or("<unknown>", |function| function.name.as_ref());
-    let source = location.image.source.as_ref().and_then(|source| {
-        debugger
-            .module_image()
+    let location = match debugger.current_location().await {
+        Ok(location) => location,
+        // No loaded module describes the instruction, such as one in the vDSO.
+        Err(Error::AddressOutsideModule) => {
+            let registers = debugger.registers().await?;
+            let pc = registers
+                .registers
+                .iter()
+                .find(|value| value.register.role == Some(RegisterRole::ProgramCounter))
+                .map(|value| format_register_bytes(&value.bytes, registers.target.byte_order))
+                .ok_or(Error::LocationUnavailable)?;
+            return Ok(Control::Continue(format!(
+                "{} at {} outside every loaded module",
+                renderer.paint(Role::Name, "<unknown>"),
+                renderer.paint(Role::Metadata, pc)
+            )));
+        }
+        Err(error) => return Err(error),
+    };
+    let name = code_name(
+        location.image.function.as_ref(),
+        location.image.symbol.as_ref(),
+    );
+    let source = match &location.image.source {
+        Some(source) => debugger
+            .loaded_module_image(location.module)
+            .await?
             .source_file(source.file)
-            .map(|file| format!("{}:{}", file.path.display(), source.line))
-    });
+            .map(|file| format!("{}:{}", file.path.display(), source.line)),
+        None => None,
+    };
 
     Ok(Control::Continue(match source {
         Some(source) => format!(
             "{} at {} ({})",
-            renderer.paint(Role::Name, function),
+            renderer.paint(Role::Name, name),
             renderer.paint(Role::Metadata, source),
             renderer.paint(Role::Metadata, location.address)
         ),
         None => format!(
-            "{} at {}",
-            renderer.paint(Role::Name, function),
-            renderer.paint(Role::Metadata, location.address)
+            "{} at {} from {}",
+            renderer.paint(Role::Name, name),
+            renderer.paint(Role::Metadata, location.address),
+            renderer.paint(
+                Role::Metadata,
+                module_name(debugger, location.module)
+                    .await?
+                    .unwrap_or_else(|| "<unknown module>".to_owned())
+            )
         ),
     }))
+}
+
+/// Names the code at a location: the debug-info function when known,
+/// otherwise the containing linker symbol and offset, demangled when possible.
+fn code_name(function: Option<&FunctionInfo>, symbol: Option<&SymbolLocation>) -> String {
+    if let Some(function) = function {
+        return function.name.to_string();
+    }
+    let Some(symbol) = symbol else {
+        return "<unknown>".to_owned();
+    };
+    let mut name = symbol
+        .demangled_name()
+        .unwrap_or_else(|| symbol.name.to_string());
+    if symbol.offset != 0 {
+        write!(name, "+{:#x}", symbol.offset).expect("writing to a String cannot fail");
+    }
+    if symbol.provenance == SymbolExtentProvenance::Inferred {
+        name.push_str(" (unsized symbol)");
+    }
+    name
+}
+
+/// Returns the file name of a loaded module's image.
+async fn module_name(
+    debugger: &DebuggerHandle,
+    module: ModuleId,
+) -> uscope::Result<Option<String>> {
+    Ok(debugger
+        .loaded_modules()
+        .await?
+        .modules
+        .iter()
+        .find(|record| record.module.id == module)
+        .and_then(|record| record.path.file_name())
+        .map(|name| name.to_string_lossy().into_owned()))
 }
 
 async fn execute_print<'a>(
@@ -1749,12 +1811,29 @@ async fn format_backtrace(
     let mut lines = Vec::with_capacity(trace.frames.len() + 1);
     // Source files are identified within their owning module's image.
     let mut images = BTreeMap::new();
+    let modules = if trace
+        .frames
+        .iter()
+        .any(|frame| frame.module.is_some() && frame.source.is_none())
+    {
+        Some(debugger.loaded_modules().await?)
+    } else {
+        None
+    };
 
     for frame in trace.frames.iter() {
-        let name = frame
-            .function
-            .as_ref()
-            .map_or("<unknown>", |function| function.name.as_ref());
+        let name = code_name(frame.function.as_ref(), frame.symbol.as_ref());
+        let module = frame
+            .module
+            .zip(modules.as_ref())
+            .and_then(|(module, modules)| {
+                modules
+                    .modules
+                    .iter()
+                    .find(|record| record.module.id == module)
+            })
+            .and_then(|record| record.path.file_name())
+            .map(|name| name.to_string_lossy().into_owned());
         let image = match (frame.module, &frame.source) {
             (Some(module), Some(_)) => {
                 if let std::collections::btree_map::Entry::Vacant(entry) = images.entry(module) {
@@ -1785,10 +1864,11 @@ async fn format_backtrace(
             ),
             renderer.paint(Role::Metadata, format_args!("{:#018x}", frame.instruction)),
             renderer.paint(Role::Name, name),
-            source.map_or_else(String::new, |source| format!(
-                " at {}",
-                renderer.paint(Role::Metadata, source)
-            ))
+            match (source, module) {
+                (Some(source), _) => format!(" at {}", renderer.paint(Role::Metadata, source)),
+                (None, Some(module)) => format!(" from {}", renderer.paint(Role::Metadata, module)),
+                (None, None) => String::new(),
+            }
         ));
     }
     lines.push(format!(

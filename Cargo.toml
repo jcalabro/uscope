@@ -10,7 +10,8 @@ keywords = ["debugger", "dwarf", "linux", "ptrace"]
 categories = ["command-line-utilities", "development-tools::debugging"]
 
 [features]
-fuzzing = []
+# Fuzz harnesses synthesize object files from structured input.
+fuzzing = ["object/write"]
 
 [lints.rust]
 future_incompatible = { level = "deny", priority = -1 }
@@ -42,13 +43,19 @@ thiserror = "2.0"
 tokio = { version = "1.52", features = ["fs", "io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+cpp_demangle = "0.5"
 gimli = "0.34"
 iced-x86 = { version = "1.21", default-features = false, features = ["decoder", "instr_info", "std"] }
+lzma-rs = "0.3"
 nix = { version = "0.31", features = ["ptrace", "process", "signal", "uio"] }
 object = { version = "0.39", features = ["read"] }
+rustc-demangle = "0.1"
 
 [dev-dependencies]
 expectrl = "0.9"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+object = { version = "0.39", features = ["read", "write"] }
 
 # Debug-info normalization is deliberately CPU-heavy. A small amount of
 # optimization keeps the full behavioral matrix fast without the compile cost

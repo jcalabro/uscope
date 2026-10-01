@@ -3,12 +3,19 @@ compile_error!("uscope currently supports debug information only on Linux");
 
 #[cfg(target_os = "linux")]
 mod dwarf;
+#[cfg(target_os = "linux")]
+mod elf;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod x86_64;
 
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_dwarf_expression(data: &[u8]) {
     dwarf::fuzz_expression(data);
+}
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_elf_symbols(data: &[u8]) {
+    elf::fuzz(data);
 }
 
 use std::path::Path;
