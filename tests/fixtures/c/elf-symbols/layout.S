@@ -177,4 +177,33 @@ asm_after_noreturn:
     .cfi_endproc
     .size asm_after_noreturn, . - asm_after_noreturn
 
+// Data objects that address descriptions name only within declared sizes: a
+// sized object containing a smaller one, an object without a size, and
+// zero-initialized storage.
+    .data
+    .p2align 4
+    .globl asm_data_outer
+    .type asm_data_outer, @object
+asm_data_outer:
+    .quad 1
+    .globl asm_data_inner
+    .type asm_data_inner, @object
+asm_data_inner:
+    .quad 2
+    .size asm_data_inner, . - asm_data_inner
+    .quad 3
+    .size asm_data_outer, . - asm_data_outer
+    .globl asm_data_unsized
+    .type asm_data_unsized, @object
+asm_data_unsized:
+    .quad 4
+
+    .bss
+    .p2align 4
+    .globl asm_bss_object
+    .type asm_bss_object, @object
+asm_bss_object:
+    .zero 32
+    .size asm_bss_object, . - asm_bss_object
+
     .section .note.GNU-stack, "", @progbits

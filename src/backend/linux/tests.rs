@@ -589,6 +589,7 @@ fn launch_controller() -> LaunchHarness {
             source_files: Vec::new(),
             statements: Vec::new(),
             lines: Vec::new(),
+            sections: Vec::new(),
         },
     ));
     let (controller, event_receiver) = test_controller(
@@ -1005,6 +1006,7 @@ fn virtual_step_image() -> Arc<ModuleImage> {
             source_files: Vec::new(),
             statements: Vec::new(),
             lines: Vec::new(),
+            sections: Vec::new(),
         },
     ))
 }

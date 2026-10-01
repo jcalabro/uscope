@@ -120,8 +120,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Info,
         "info",
         [],
-        "info breakpoints|watchpoints|core",
-        "Show debugger information"
+        "info breakpoints|watchpoints|core|symbol [0xaddress]",
+        "Show debugger information, or the symbol and section containing an address"
     ),
     command!(
         Delete,
@@ -313,13 +313,17 @@ impl Cli {
                 format::breakpoint(&breakpoint, renderer)
             }
             Command::Breakpoints => self.list_breakpoints().await?,
-            Command::Info => match arguments[0] {
-                "breakpoints" | "break" => self.list_breakpoints().await?,
-                "watchpoints" | "watch" => self.list_watchpoints().await?,
-                "core" => debugger
+            Command::Info => match (arguments[0], arguments.get(1)) {
+                ("breakpoints" | "break", None) => self.list_breakpoints().await?,
+                ("watchpoints" | "watch", None) => self.list_watchpoints().await?,
+                ("core", None) => debugger
                     .core_dump()
                     .map(|core| format::core_dump(core, renderer))
                     .ok_or_else(|| anyhow!("no core dump is open"))?,
+                ("symbol", Some(address)) => format::address_description(
+                    &debugger.describe_address(parse_address(address)?).await?,
+                    renderer,
+                ),
                 _ => return Err(spec.usage_error()),
             },
             Command::Delete => self.delete_breakpoints(arguments[0], spec).await?,
@@ -750,7 +754,7 @@ mod tests {
         }
         assert_eq!(spec(Command::Run).arity(), (0, 0));
         assert_eq!(spec(Command::Break).arity(), (1, 1));
-        assert_eq!(spec(Command::Info).arity(), (1, 1));
+        assert_eq!(spec(Command::Info).arity(), (1, 2));
         assert_eq!(spec(Command::Print).arity(), (0, 1));
         assert_eq!(spec(Command::Examine).arity(), (1, 2));
         assert!(spec(Command::Next).repeatable);

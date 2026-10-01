@@ -8,7 +8,7 @@ use support::Scenario;
 use uscope::{
     Backtrace, CoreDumpOptions, EmbeddedSymbolTable, Error, ImageAddress, LoadedModuleSnapshot,
     ModuleImage, StackFrame, StopReason, SymbolBinding, SymbolExtentProvenance, SymbolInfo,
-    SymbolKind, SymbolLocation, UnwindTermination,
+    SymbolKind, SymbolLocation, UnwindTermination, VirtualAddress,
 };
 
 /// Each executable of the ELF symbol fixture and the library it loads. The
@@ -581,6 +581,9 @@ struct Oracle {
 
 struct OracleFile {
     executable_sections: BTreeMap<u32, (u64, u64)>,
+    /// Every allocated section that occupies addresses, by section index:
+    /// its name, range, and whether it is thread-local.
+    allocated_sections: BTreeMap<u32, (String, u64, u64, bool)>,
     symbols: Vec<OracleSymbol>,
     /// The code range of every call-frame entry.
     unwind: Vec<(u64, u64)>,
@@ -646,6 +649,7 @@ impl OracleFile {
         let text = fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         let mut executable_sections = BTreeMap::new();
+        let mut allocated_sections = BTreeMap::new();
         let mut symbols = Vec::new();
         let mut unwind = Vec::new();
         let mut dynamic = false;
@@ -673,10 +677,25 @@ impl OracleFile {
             {
                 // Name Type Address Off Size ES [Flg] Lk Inf Al
                 let fields = rest.split_whitespace().collect::<Vec<_>>();
-                if fields.len() == 10 && fields[6].contains('A') && fields[6].contains('X') {
+                if fields.len() == 10 && fields[6].contains('A') {
                     let start = u64::from_str_radix(fields[2], 16).expect("section address");
                     let size = u64::from_str_radix(fields[4], 16).expect("section size");
-                    executable_sections.insert(index, (start, start + size));
+                    if fields[6].contains('X') {
+                        executable_sections.insert(index, (start, start + size));
+                    }
+                    // A thread-local NOBITS section only describes a template.
+                    let template = fields[6].contains('T') && fields[1] == "NOBITS";
+                    if size != 0 && !template {
+                        allocated_sections.insert(
+                            index,
+                            (
+                                fields[0].to_owned(),
+                                start,
+                                start + size,
+                                fields[6].contains('T'),
+                            ),
+                        );
+                    }
                 }
                 continue;
             }
@@ -721,6 +740,7 @@ impl OracleFile {
         }
         Self {
             executable_sections,
+            allocated_sections,
             symbols,
             unwind,
         }
@@ -777,6 +797,55 @@ fn assert_catalog_matches_oracle(image: &ModuleImage, oracle: &Oracle, context: 
         );
     }
     assert_code_extents_match_oracle(image, oracle, &catalog, context);
+    assert_data_storage_matches_oracle(oracle, &catalog, context);
+}
+
+/// Checks that exactly the data symbols readelf places in allocated,
+/// non-thread-local sections name storage, sized as declared or empty.
+fn assert_data_storage_matches_oracle(
+    oracle: &Oracle,
+    catalog: &BTreeMap<(String, u64), &SymbolInfo>,
+    context: &str,
+) {
+    let mut expected = BTreeMap::new();
+    for (file, symbol) in oracle.symbols() {
+        if symbol.kind != Some(SymbolKind::Data) || symbol.binding.is_none() {
+            continue;
+        }
+        let storage = symbol
+            .section
+            .and_then(|section| file.allocated_sections.get(&section))
+            .filter(|(_, start, end, thread_local)| {
+                !thread_local
+                    && *start <= symbol.address
+                    && symbol.address < *end
+                    && symbol.address + symbol.size <= *end
+            })
+            .map(|_| (symbol.address, symbol.address + symbol.size));
+        expected
+            .entry((symbol.name.clone(), symbol.address))
+            .or_insert(storage);
+    }
+    let (mut sized, mut unsized_count) = (0_usize, 0_usize);
+    for (key, symbol) in catalog {
+        let storage = symbol
+            .storage
+            .map(|range| (range.start.get(), range.end.get()));
+        match expected.get(key) {
+            Some(expected) => assert_eq!(storage, *expected, "{context}: {symbol:?}"),
+            None => assert_eq!(storage, None, "{context}: {symbol:?}"),
+        }
+        match storage {
+            Some((start, end)) if start < end => sized += 1,
+            Some(_) => unsized_count += 1,
+            None => {}
+        }
+    }
+    assert!(sized > 0, "{context}: no sized data symbols were compared");
+    assert!(
+        unsized_count > 0 || !context.contains("libelf-symbols"),
+        "{context}: no unsized data symbols were compared"
+    );
 }
 
 /// Checks every code symbol's extent against the sizes, sections, and
@@ -1066,5 +1135,321 @@ async fn instructions_outside_every_module_have_no_location() {
             "{trace:#?}"
         );
         scenario.shutdown().await;
+    }
+}
+
+/// What readelf's tables say about one image address.
+#[derive(Debug)]
+struct ExpectedDescription {
+    /// The innermost allocated section containing the address.
+    section: Option<String>,
+    /// The data symbols, by name and address, that may name the address
+    /// when no code symbol does: those with the innermost declared storage
+    /// containing it or, failing that, unsized ones at exactly the address.
+    data: Vec<(String, u64)>,
+    /// Whether the data symbols are unsized.
+    unsized_data: bool,
+}
+
+impl Oracle {
+    fn describe(&self, address: u64) -> ExpectedDescription {
+        let section = self.files[0]
+            .allocated_sections
+            .values()
+            .filter(|(_, start, end, _)| (*start..*end).contains(&address))
+            .min_by_key(|(_, start, end, _)| (std::cmp::Reverse(*start), *end))
+            .map(|(name, ..)| name.clone());
+
+        // Data symbols defined in allocated, non-thread-local sections.
+        let data = self
+            .symbols()
+            .filter(|(_, symbol)| symbol.kind == Some(SymbolKind::Data) && symbol.binding.is_some())
+            .filter_map(|(file, symbol)| {
+                let (_, start, end, thread_local) =
+                    file.allocated_sections.get(&symbol.section?)?;
+                (!thread_local && *start <= symbol.address && symbol.address < *end)
+                    .then_some((symbol, *end))
+            })
+            .collect::<Vec<_>>();
+        let sized = data
+            .iter()
+            .filter(|(symbol, section_end)| {
+                symbol.size != 0
+                    && symbol.address + symbol.size <= *section_end
+                    && (symbol.address..symbol.address + symbol.size).contains(&address)
+            })
+            .map(|(symbol, _)| *symbol)
+            .collect::<Vec<_>>();
+        let innermost = sized
+            .iter()
+            .map(|symbol| (std::cmp::Reverse(symbol.address), symbol.size))
+            .min();
+        let (data, unsized_data) = if innermost.is_some() {
+            (
+                sized
+                    .iter()
+                    .filter(|symbol| {
+                        Some((std::cmp::Reverse(symbol.address), symbol.size)) == innermost
+                    })
+                    .map(|symbol| (symbol.name.clone(), symbol.address))
+                    .collect(),
+                false,
+            )
+        } else {
+            (
+                data.iter()
+                    .filter(|(symbol, _)| symbol.size == 0 && symbol.address == address)
+                    .map(|(symbol, _)| (symbol.name.clone(), symbol.address))
+                    .collect(),
+                true,
+            )
+        };
+        ExpectedDescription {
+            section,
+            data,
+            unsized_data,
+        }
+    }
+
+    /// Returns the addresses at and around every symbol and section boundary.
+    fn boundary_probes(&self) -> BTreeSet<u64> {
+        let symbols = self.symbols().flat_map(|(_, symbol)| {
+            let end = symbol.address.saturating_add(symbol.size);
+            [
+                symbol.address.saturating_sub(1),
+                symbol.address,
+                symbol.address.saturating_add(1),
+                end.saturating_sub(1),
+                end,
+            ]
+        });
+        let sections = self.files[0]
+            .allocated_sections
+            .values()
+            .flat_map(|(_, start, end, _)| [start.saturating_sub(1), *start, end - 1, *end]);
+        symbols.chain(sections).collect()
+    }
+}
+
+/// Describes every boundary address of one module through the public
+/// request path, at the runtime address the loader chose, and checks the
+/// section and symbol against readelf: a code symbol whose extent contains
+/// the address wins, and otherwise only declared storage, or an unsized data
+/// symbol at exactly the address, names it.
+async fn assert_module_descriptions(
+    scenario: &Scenario,
+    modules: &Modules,
+    file_name: &str,
+    oracle: &Oracle,
+    context: &str,
+) -> usize {
+    let (module, image) = modules.named(file_name);
+    let bias = modules.bias(module);
+    let mut described = 0;
+    for probe in oracle.boundary_probes() {
+        let Some(address) = bias.checked_add(probe) else {
+            continue;
+        };
+        let description = scenario
+            .operation(
+                "describe address",
+                scenario
+                    .handle()
+                    .describe_address(VirtualAddress::new(address)),
+            )
+            .await;
+        let context = format!("{context}: {file_name}+{probe:#x}");
+        assert_eq!(description.address.get(), address, "{context}");
+        let expected = oracle.describe(probe);
+        let Some(found) = description
+            .module
+            .as_ref()
+            .filter(|found| found.module == module)
+        else {
+            assert!(
+                expected.section.is_none(),
+                "{context}: {expected:?} but described {description:?}"
+            );
+            continue;
+        };
+        assert!(found.path.ends_with(file_name), "{context}: {found:?}");
+        assert_eq!(found.image.address.get(), probe, "{context}");
+        assert_eq!(
+            found
+                .image
+                .section
+                .as_ref()
+                .map(|section| section.name.to_string()),
+            expected.section,
+            "{context}"
+        );
+        if let Some(section) = &found.image.section {
+            let info = image.section(section.section).expect("cataloged section");
+            assert_eq!(info.range.start.get() + section.offset, probe, "{context}");
+            assert_eq!(info.executable, section.executable, "{context}");
+        }
+
+        let code = image.symbolize(ImageAddress::new(probe));
+        match (&found.image.symbol, code) {
+            (Some(symbol), Some(code)) => assert_eq!(*symbol, code, "{context}"),
+            (None, Some(code)) => panic!("{context}: code symbol {code:?} was not described"),
+            (Some(symbol), None) => {
+                let info = image.symbol(symbol.symbol).expect("catalog symbol");
+                assert_eq!(symbol.kind, SymbolKind::Data, "{context}");
+                assert!(
+                    expected
+                        .data
+                        .contains(&(symbol.name.to_string(), info.address.get())),
+                    "{context}: {symbol:?} is not among {expected:?}"
+                );
+                assert_eq!(symbol.offset, probe - info.address.get(), "{context}");
+                assert_eq!(
+                    symbol.provenance,
+                    if expected.unsized_data {
+                        SymbolExtentProvenance::Inferred
+                    } else {
+                        SymbolExtentProvenance::Declared
+                    },
+                    "{context}"
+                );
+            }
+            (None, None) => assert!(
+                expected.data.is_empty(),
+                "{context}: no symbol, but readelf expects one of {expected:?}"
+            ),
+        }
+        described += 1;
+    }
+    described
+}
+
+/// Checks the layout cases the fixture's data objects exist for.
+async fn assert_data_object_descriptions(
+    scenario: &Scenario,
+    modules: &Modules,
+    executable: &str,
+    library: &str,
+) {
+    use SymbolExtentProvenance::{Declared, Inferred};
+
+    let describe = async |file_name: &str, name: &str, offset: u64| {
+        let (module, image) = modules.named(file_name);
+        let address = modules.bias(module) + symbol_named(image, name).address.get() + offset;
+        let description = scenario
+            .operation(
+                "describe address",
+                scenario
+                    .handle()
+                    .describe_address(VirtualAddress::new(address)),
+            )
+            .await
+            .module
+            .unwrap_or_else(|| panic!("{executable}: {name}+{offset} is in no module"));
+        assert_eq!(description.module, module);
+        (
+            description
+                .image
+                .section
+                .map(|section| section.name.to_string()),
+            description
+                .image
+                .symbol
+                .map(|symbol| (symbol.name.to_string(), symbol.offset, symbol.provenance)),
+        )
+    };
+    let named = |section: &str, name: &str, offset, provenance| {
+        (
+            Some(section.to_owned()),
+            Some((name.to_owned(), offset, provenance)),
+        )
+    };
+    assert_eq!(
+        describe(library, "asm_data_outer", 4).await,
+        named(".data", "asm_data_outer", 4, Declared)
+    );
+    // The innermost storage wins, and the outer object resumes after it.
+    assert_eq!(
+        describe(library, "asm_data_inner", 7).await,
+        named(".data", "asm_data_inner", 7, Declared)
+    );
+    assert_eq!(
+        describe(library, "asm_data_inner", 8).await,
+        named(".data", "asm_data_outer", 0x10, Declared)
+    );
+    // An unsized object names only its own address.
+    assert_eq!(
+        describe(library, "asm_data_unsized", 0).await,
+        named(".data", "asm_data_unsized", 0, Inferred)
+    );
+    assert_eq!(
+        describe(library, "asm_data_unsized", 1).await,
+        (Some(".data".to_owned()), None)
+    );
+    assert_eq!(
+        describe(library, "asm_bss_object", 31).await,
+        named(".bss", "asm_bss_object", 31, Declared)
+    );
+    assert_eq!(
+        describe(library, "asm_nested_outer", 9).await,
+        named(".text", "asm_nested_outer", 9, Declared)
+    );
+    assert_eq!(
+        describe(executable, "symbols_sink", 3).await,
+        named(".bss", "symbols_sink", 3, Declared)
+    );
+
+    // Nothing is mapped at the null page.
+    let description = scenario
+        .operation(
+            "describe address",
+            scenario.handle().describe_address(VirtualAddress::new(8)),
+        )
+        .await;
+    assert_eq!(description.module, None, "{executable}");
+}
+
+#[tokio::test]
+async fn addresses_are_described_by_module_section_and_symbol_like_readelf() {
+    for (index, (executable, library)) in VARIANTS.into_iter().enumerate() {
+        let mut live = Scenario::launch(executable);
+        assert!(matches!(
+            live.handle().describe_address(VirtualAddress::new(8)).await,
+            Err(Error::NotRunning)
+        ));
+        live.add_breakpoint("chain_nested_site").await;
+        live.run_to_stop().await;
+        let core = open_core(executable);
+
+        for (scenario, kind) in [(&live, "live"), (&core, "core")] {
+            let context = format!("{executable} ({kind})");
+            let modules = Modules::load(scenario).await;
+            assert_data_object_descriptions(scenario, &modules, executable, library).await;
+
+            let mut checked = vec![(executable, vec![executable])];
+            let embedded = format!("{library}.embedded");
+            checked.push(if library == "libelf-symbols-minidebug.so" {
+                (library, vec![library, embedded.as_str()])
+            } else {
+                (library, vec![library])
+            });
+            // The shared C library and loader are checked once.
+            if index == 0 {
+                checked.push(("libc.so.6", vec!["libc.so.6"]));
+                checked.push(("ld-linux-x86-64.so.2", vec!["ld-linux-x86-64.so.2"]));
+            }
+            for (file_name, oracles) in checked {
+                let described = assert_module_descriptions(
+                    scenario,
+                    &modules,
+                    file_name,
+                    &Oracle::read(&oracles),
+                    &context,
+                )
+                .await;
+                assert!(described > 16, "{context}: {file_name}: {described}");
+            }
+        }
+        core.shutdown().await;
+        live.shutdown().await;
     }
 }
