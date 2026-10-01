@@ -1,6 +1,7 @@
 mod backend;
 mod debug_info;
 mod demangle;
+mod disassembly;
 mod error;
 mod expression;
 mod inspection;
@@ -19,6 +20,14 @@ use tokio::time::timeout;
 use backend::ControllerMessage;
 use protocol::Request;
 
+pub use disassembly::{
+    AssemblySyntax, BlockCompletion, BoundaryConflict, BoundaryEvidence, ContextShortfall,
+    ControlFlow, DecodedInstruction, DisassembledFunction, DisassembledInstruction, Disassembly,
+    DisassemblyBlock, DisassemblyQuery, DisassemblyRange, DisassemblyView, FunctionOrigin,
+    InstructionContent, InstructionReference, InstructionReferenceKind, InstructionToken,
+    InstructionTokenKind, MAX_BACKWARD_DISTANCE, MAX_FUNCTION_INSTRUCTIONS, MAX_WINDOW_AFTER,
+    MAX_WINDOW_BEFORE, TargetBoundary,
+};
 pub use error::{Error, Result};
 pub use expression::parse_value_expression;
 pub use model::{
@@ -80,6 +89,14 @@ pub fn fuzz_debug_register_plan(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_elf_symbols(data: &[u8]) {
     debug_info::fuzz_elf_symbols(data);
+}
+
+/// Exercises disassembly boundary and decoding invariants for the fuzz
+/// harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_disassembly(data: &[u8]) {
+    disassembly::fuzz(data);
 }
 
 /// Exercises bounded DWARF-expression parsing for the fuzz harness.
@@ -546,6 +563,25 @@ impl DebuggerHandle {
         self.request(|reply| Request::DescribeAddress {
             stop_id: selection.stop,
             address,
+            reply,
+        })
+        .await
+    }
+
+    /// Disassembles code at the current stop as the selected thread sees it.
+    ///
+    /// Bytes come from the stopped process or core dump with debugger
+    /// breakpoint traps hidden. Instructions are decoded only forward from
+    /// proven instruction starts, among them the selected thread's program
+    /// counter; see [`Disassembly`] for how unproven, unreadable, and
+    /// conflicting code is reported.
+    pub async fn disassemble(&self, query: DisassemblyQuery) -> Result<Disassembly> {
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::Disassemble {
+            query,
+            stop_id: selection.stop,
+            thread_id: selection.thread,
             reply,
         })
         .await

@@ -153,6 +153,22 @@ build_symbols_library() {
         "${command[@]}"
 }
 
+# Builds the disassembly fixture from its C program and hand-written code.
+build_disassembly_fixture() {
+    local compiler="$1"
+    local output="$2"
+    shift 2
+    local source_dir="$c_fixtures_dir/disassembly"
+    local -a command=(
+        "$compiler" -std=c17 -Wall -Wextra -Werror -g3 -gdwarf-5 "$@"
+        "$source_dir/main.c" "$source_dir/layout.S" -o "$output"
+    )
+    read_dash_version "$compiler"
+    run_cached_build "$source_dir" "$output" \
+        "compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=${compiler}" \
+        "${command[@]}"
+}
+
 # Derives a library with only a dynamic symbol table from one with full
 # symbol tables. With an embedded table, the result also carries a
 # MiniDebugInfo section built the way Fedora's find-debuginfo does: the
@@ -617,6 +633,10 @@ for variant in "${symbols_variants[@]}"; do
         exit 1
     fi
 done
+build_disassembly_fixture gcc "$output_dir/disassembly-gcc-o0" \
+    -O0 -fno-omit-frame-pointer -fPIE -pie
+build_disassembly_fixture clang "$output_dir/disassembly-clang-o2-nopie" \
+    -O2 -fomit-frame-pointer -no-pie
 build_fixture gcc "$c_fixtures_dir/null-call.c" "$output_dir/null-call" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-gcc" \
@@ -1009,6 +1029,40 @@ for variant in "${symbols_variants[@]}"; do
         "$program $output_dir/libelf-symbols-${library}.so" "$program"
     generate_backtrace_oracle "$program" "${program}.core"
 done
+
+# GNU objdump's decoding of every executable section, which differential tests
+# compare against uscope's disassembly. -z keeps the zero-filled runs objdump
+# otherwise elides.
+readonly disassembly_oracle_dir="$output_dir/disassembly-oracles"
+mkdir -p "$disassembly_oracle_dir"
+
+generate_disassembly_oracle() {
+    local elf="$1"
+    local oracle="$disassembly_oracle_dir/${elf##*/}.objdump"
+    local header
+    header="uscope-disassembly-oracle-v1 $(readlink -f "$elf")"
+    rebuilt_outputs["$oracle"]=false
+    if [[ -s "$oracle" && "$oracle" -nt "$elf" && "$(head -n 1 "$oracle")" == "$header" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    {
+        printf '%s\n' "$header"
+        objdump -d -z -w "$elf"
+    } >"${oracle}.tmp"
+    mv "${oracle}.tmp" "$oracle"
+}
+
+for program in crash-gcc-o0 crash-gcc-o2-nopie crash-clang-o2 crash-rust-o0 crash-zig-o0 \
+    crash-go-o0 libcrash.so elf-symbols-gcc-o0 libelf-symbols-gcc.so \
+    libelf-symbols-stripped.so; do
+    generate_disassembly_oracle "$output_dir/$program"
+done
+while read -r library; do
+    generate_disassembly_oracle "$library"
+done < <(ldd "$output_dir/crash-gcc-o0" | awk '/=> \// { print $3 } /^\t\// { print $1 }' \
+    | grep -E '/(libc\.so|ld-linux)')
 
 printf '%s\n' "${!rebuilt_outputs[@]}" >"${suite_outputs}.tmp"
 mv "${suite_outputs}.tmp" "$suite_outputs"

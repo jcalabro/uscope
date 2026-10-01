@@ -179,6 +179,17 @@ pub enum Error {
     #[error("cannot watch this value: {0}")]
     WatchTargetUnsupported(Arc<str>),
 
+    #[error("disassembly is unsupported for {0:?} targets")]
+    DisassemblyUnsupported(crate::Architecture),
+    #[error(
+        "a disassembly window needs at most {max_before} instructions before its address, at most {max_after} from it, and at least one in all; {before} and {after} were requested",
+        max_before = crate::disassembly::MAX_WINDOW_BEFORE,
+        max_after = crate::disassembly::MAX_WINDOW_AFTER
+    )]
+    InvalidDisassemblyWindow { before: u32, after: u32 },
+    #[error("no function or code symbol contains {0}")]
+    NoFunctionContainsAddress(crate::VirtualAddress),
+
     #[error("debugger backend thread panicked")]
     BackendThreadPanicked,
     #[error("debugger request was cancelled")]

@@ -2780,6 +2780,8 @@ pub struct ModuleImage {
     /// Unsized data symbols, each indexed by its one-byte address.
     unsized_data_index: RangeIndex<SymbolId>,
     section_range_index: RangeIndex<SectionId>,
+    /// Known instruction starts in address order, one per address.
+    instruction_starts: Arc<[(ImageAddress, crate::BoundaryEvidence)]>,
 }
 
 impl ModuleImage {
@@ -2828,6 +2830,7 @@ impl ModuleImage {
                 symbol.id,
             ))
         }));
+        let instruction_starts = instruction_starts(&metadata);
         let section_range_index = RangeIndex::new(
             metadata
                 .sections
@@ -2864,6 +2867,7 @@ impl ModuleImage {
             storage_range_index,
             unsized_data_index,
             section_range_index,
+            instruction_starts,
         }
     }
 
@@ -3026,6 +3030,33 @@ impl ModuleImage {
                 SymbolExtentProvenance::Inferred
             },
         })
+    }
+
+    /// Returns the addresses within `range` that are known to begin an
+    /// instruction: the start of every range of an out-of-line function
+    /// instance, of every code symbol with an extent, and of every
+    /// executable section. Line
+    /// table rows are deliberately excluded: some producers emit rows inside
+    /// instructions, such as Go after a `LOCK` prefix.
+    pub fn instruction_starts(
+        &self,
+        range: AddressRange<ImageAddress>,
+    ) -> impl Iterator<Item = (ImageAddress, crate::BoundaryEvidence)> + '_ {
+        let first = self
+            .instruction_starts
+            .partition_point(|(address, _)| *address < range.start);
+        self.instruction_starts[first..]
+            .iter()
+            .take_while(move |(address, _)| *address < range.end)
+            .copied()
+    }
+
+    /// Returns the source line containing an image address, when the line
+    /// table describes it.
+    #[must_use]
+    pub fn source_location(&self, address: ImageAddress) -> Option<SourceLocation> {
+        self.line_entry_containing(address)
+            .map(|entry| entry.location.clone())
     }
 
     /// Describes an image address by its section and by the code symbol, or
@@ -3406,6 +3437,35 @@ fn symbol_preference(symbol: &SymbolInfo) -> impl Ord + '_ {
         symbol.name.as_ref(),
         symbol.id,
     )
+}
+
+/// Collects the addresses debug information and code symbols prove begin
+/// instructions, keeping the strongest evidence for each address.
+fn instruction_starts(metadata: &ModuleMetadata) -> Arc<[(ImageAddress, crate::BoundaryEvidence)]> {
+    let mut starts = BTreeMap::new();
+    let functions = metadata
+        .code_instances
+        .iter()
+        .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        .flat_map(|instance| instance.ranges.iter())
+        .map(|range| (range.start, crate::BoundaryEvidence::FunctionRange));
+    let symbols = metadata
+        .symbols
+        .iter()
+        .filter_map(|symbol| symbol.extent)
+        .map(|extent| (extent.range.start, crate::BoundaryEvidence::CodeSymbol));
+    let sections = metadata
+        .sections
+        .iter()
+        .filter(|section| section.executable)
+        .map(|section| (section.range.start, crate::BoundaryEvidence::SectionStart));
+    for (address, evidence) in functions.chain(symbols).chain(sections) {
+        starts
+            .entry(address)
+            .and_modify(|current: &mut crate::BoundaryEvidence| *current = (*current).min(evidence))
+            .or_insert(evidence);
+    }
+    starts.into_iter().collect()
 }
 
 /// Orders the data symbols naming one address, preferring the innermost
@@ -3789,6 +3849,114 @@ mod tests {
                 sections: Vec::new(),
             },
         )
+    }
+
+    #[test]
+    fn instruction_starts_come_from_out_of_line_ranges_code_symbols_and_code_sections() {
+        use crate::BoundaryEvidence::{CodeSymbol, FunctionRange, SectionStart};
+
+        let code_symbol = |id, name: &str, start, end| SymbolInfo {
+            id: SymbolId::new(id),
+            name: name.into(),
+            address: ImageAddress::new(start),
+            kind: SymbolKind::Function,
+            binding: SymbolBinding::Global,
+            exported: true,
+            extent: Some(SymbolExtent {
+                range: AddressRange {
+                    start: ImageAddress::new(start),
+                    end: ImageAddress::new(end),
+                },
+                provenance: SymbolExtentProvenance::Declared,
+            }),
+            storage: None,
+        };
+        let section = |id, name: &str, start, end, executable| SectionInfo {
+            id: SectionId::new(id),
+            name: name.into(),
+            range: AddressRange {
+                start: ImageAddress::new(start),
+                end: ImageAddress::new(end),
+            },
+            executable,
+            writable: !executable,
+        };
+        let image = ModuleImage::new(
+            PathBuf::from("/test/starts"),
+            TargetDescription {
+                architecture: Architecture::X86_64,
+                byte_order: ByteOrder::Little,
+                pointer_width: PointerWidth::Bits64,
+            },
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(0x100),
+            },
+            ModuleMetadata {
+                functions: vec![FunctionInfo {
+                    id: FunctionId::new(0),
+                    name: "split".into(),
+                    linkage_name: None,
+                    declaration: None,
+                }],
+                code_instances: vec![
+                    // A function split into two ranges, and an inline
+                    // expansion whose start proves nothing on its own.
+                    instance(
+                        0,
+                        0,
+                        None,
+                        CodeInstanceKind::OutOfLine,
+                        &[(0x20, 0x30), (0x60, 0x68)],
+                    ),
+                    instance(
+                        1,
+                        0,
+                        Some(0),
+                        CodeInstanceKind::Inline { call_site: None },
+                        &[(0x24, 0x28)],
+                    ),
+                ],
+                // A symbol at a function's start is weaker evidence than
+                // the function itself.
+                symbols: vec![
+                    code_symbol(0, "split", 0x20, 0x30),
+                    code_symbol(1, "symbol_only", 0x40, 0x48),
+                ],
+                symbol_sources: SymbolTableSources::default(),
+                globals: Vec::new(),
+                types: Arc::default(),
+                source_files: Vec::new(),
+                statements: Vec::new(),
+                lines: Vec::new(),
+                sections: vec![
+                    section(0, ".text", 0x10, 0x70, true),
+                    section(1, ".data", 0x80, 0x90, false),
+                ],
+            },
+        );
+        let starts = |start, end| {
+            image
+                .instruction_starts(AddressRange {
+                    start: ImageAddress::new(start),
+                    end: ImageAddress::new(end),
+                })
+                .map(|(address, evidence)| (address.get(), evidence))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            starts(0, 0x100),
+            [
+                (0x10, SectionStart),
+                (0x20, FunctionRange),
+                (0x40, CodeSymbol),
+                (0x60, FunctionRange),
+            ]
+        );
+        assert_eq!(
+            starts(0x20, 0x60),
+            [(0x20, FunctionRange), (0x40, CodeSymbol)]
+        );
     }
 
     fn boundary_test_instances() -> Vec<CodeInstanceInfo> {

@@ -845,6 +845,12 @@ pub enum Request {
         module: crate::ModuleId,
         reply: Reply<Arc<crate::ModuleImage>>,
     },
+    Disassemble {
+        query: crate::DisassemblyQuery,
+        stop_id: StopId,
+        thread_id: ThreadId,
+        reply: Reply<crate::Disassembly>,
+    },
     DescribeAddress {
         stop_id: StopId,
         address: VirtualAddress,

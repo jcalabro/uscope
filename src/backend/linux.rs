@@ -56,6 +56,7 @@ mod breakpoints;
 mod classify;
 mod core_dump;
 mod debug_registers;
+mod disassembly;
 mod frames;
 mod inspection;
 mod lifecycle;
@@ -848,6 +849,16 @@ impl<P: InspectionOps> Controller<P> {
                         .get(&module)
                         .map(|module| Arc::clone(&module.image))
                         .ok_or(Error::ModuleNotLoaded(module)),
+                );
+            }
+            Request::Disassemble {
+                query,
+                stop_id,
+                thread_id,
+                reply,
+            } => {
+                let _ = reply.send(
+                    debug_pid(thread_id).and_then(|pid| self.disassemble(stop_id, pid, query)),
                 );
             }
             Request::DescribeAddress {

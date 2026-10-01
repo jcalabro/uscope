@@ -40,6 +40,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "disassembly"
+path = "fuzz_targets/disassembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "elf-symbols"
 path = "fuzz_targets/elf_symbols.rs"
 test = false
