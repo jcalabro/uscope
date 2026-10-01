@@ -4,6 +4,7 @@ use crate::{Backtrace, StackFrame, ThreadId, UnwindTermination, VirtualAddress};
 
 pub const DEFAULT_MAX_FRAMES: usize = 256;
 
+/// What the unwinder knows about one frame.
 #[derive(Debug, Clone)]
 pub struct FrameContext {
     pub instruction: VirtualAddress,
@@ -36,8 +37,10 @@ impl RegisterFile {
     }
 }
 
+/// Reads target memory for unwind rules.
 pub trait MemoryReader {
-    fn read_u64(&mut self, address: VirtualAddress) -> Result<u64, ()>;
+    /// Reads one native word, or `None` when the address is unreadable.
+    fn read_u64(&mut self, address: VirtualAddress) -> Option<u64>;
 }
 
 pub struct UnwindStep {
@@ -66,36 +69,25 @@ pub fn collect_backtrace(
     let mut visited = HashSet::new();
     let mut current = initial;
 
-    loop {
+    let termination = loop {
+        // A repeated frame state would repeat every frame after it.
+        if !visited.insert((current.cfa, current.instruction)) {
+            break UnwindTermination::CycleDetected;
+        }
         let level = u32::try_from(frames.len()).expect("frame limit fits in u32");
         frames.push(make_frame(level, &current));
-
         if frames.len() >= max_frames {
-            return Backtrace {
-                thread,
-                frames: frames.into(),
-                termination: UnwindTermination::DepthLimit,
-            };
+            break UnwindTermination::DepthLimit;
         }
-
-        if !visited.insert((current.cfa, current.instruction)) {
-            return Backtrace {
-                thread,
-                frames: frames.into(),
-                termination: UnwindTermination::CycleDetected,
-            };
-        }
-
         match provider.caller(&current) {
             CallerResult::Caller(caller) => current = caller,
-            CallerResult::Finished(termination) => {
-                return Backtrace {
-                    thread,
-                    frames: frames.into(),
-                    termination,
-                };
-            }
+            CallerResult::Finished(termination) => break termination,
         }
+    };
+    Backtrace {
+        thread,
+        frames: frames.into(),
+        termination,
     }
 }
 
@@ -177,6 +169,11 @@ mod tests {
             callers: vec![context.clone(), context.clone()],
         };
         let trace = collect_backtrace(ThreadId::new(1), context.clone(), &mut cyclic, frame, 16);
+        assert_eq!(
+            trace.frames.len(),
+            1,
+            "the repeated frame is not shown twice"
+        );
         assert_eq!(trace.termination, UnwindTermination::CycleDetected);
 
         let mut deep = SequenceProvider {

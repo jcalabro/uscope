@@ -203,13 +203,18 @@ pub trait VariableInfo: Send + Sync {
     ) -> Result<ValueChildPage>;
 }
 
+/// Call-frame information for one module image. Instruction addresses are
+/// image addresses; registers and memory belong to the stopped process.
 pub trait UnwindInfo: Send + Sync {
+    /// Computes the canonical frame address of the frame executing `address`.
     fn cfa(
         &self,
         address: ImageAddress,
         registers: &RegisterFile,
+        memory: &mut dyn MemoryReader,
     ) -> std::result::Result<VirtualAddress, UnwindTermination>;
 
+    /// Reconstructs the caller of the frame executing `address`.
     fn unwind(
         &self,
         address: ImageAddress,

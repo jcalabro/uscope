@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
-use object::{Object, ObjectSection, ObjectSymbol, SectionFlags, SymbolFlags, SymbolSection, elf};
+use object::{
+    Object, ObjectSection, ObjectSegment, ObjectSymbol, SectionFlags, SegmentFlags, SymbolFlags,
+    SymbolSection, elf,
+};
 
 use crate::{
     AddressRange, EmbeddedSymbolTable, ImageAddress, SymbolBinding, SymbolExtent,
@@ -101,6 +104,31 @@ fn unusable(reason: &str) -> EmbeddedSymbolTable {
     EmbeddedSymbolTable::Unusable {
         reason: reason.into(),
     }
+}
+
+/// Returns the address ranges of an image's executable sections, or of its
+/// executable segments when it has no section headers.
+pub(super) fn executable_ranges(object: &object::File<'_>) -> Vec<AddressRange<ImageAddress>> {
+    let range = |start: u64, size: u64| {
+        Some(AddressRange {
+            start: ImageAddress::new(start),
+            end: ImageAddress::new(start.checked_add(size)?),
+        })
+    };
+    let sections = code_sections(object)
+        .into_iter()
+        .filter_map(|section| range(section.start, section.end - section.start))
+        .collect::<Vec<_>>();
+    if !sections.is_empty() {
+        return sections;
+    }
+    object
+        .segments()
+        .filter(|segment| {
+            matches!(segment.flags(), SegmentFlags::Elf { p_flags } if p_flags & elf::PF_X != 0)
+        })
+        .filter_map(|segment| range(segment.address(), segment.size()))
+        .collect()
 }
 
 fn code_sections<'data>(object: &object::File<'data>) -> Vec<CodeSection<'data>> {

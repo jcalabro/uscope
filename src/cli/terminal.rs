@@ -25,7 +25,7 @@ pub struct ColorEnvironment {
 }
 
 impl ColorEnvironment {
-    pub(crate) fn current() -> Self {
+    pub fn current() -> Self {
         Self {
             term: std::env::var_os("TERM"),
             no_color: anstyle_query::no_color(),
@@ -94,15 +94,15 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub(crate) const fn new(color: bool) -> Self {
+    pub const fn new(color: bool) -> Self {
         Self { color }
     }
 
-    pub(crate) const fn is_colored(self) -> bool {
+    pub const fn is_colored(self) -> bool {
         self.color
     }
 
-    pub(crate) fn paint<T>(self, role: Role, value: T) -> Painted<T> {
+    pub fn paint<T>(self, role: Role, value: T) -> Painted<T> {
         Painted {
             style: self.color.then(|| style(role)),
             value,
@@ -126,33 +126,18 @@ impl<T: fmt::Display> fmt::Display for Painted<T> {
 }
 
 fn style(role: Role) -> Style {
+    let color = |color: AnsiColor| Style::new().fg_color(Some(color.into()));
     match role {
-        Role::Prompt | Role::Muted => return Style::new().dimmed(),
-        Role::Command => {
-            return Style::new()
-                .fg_color(Some(AnsiColor::BrightBlue.into()))
-                .bold();
-        }
-        _ => {}
-    }
-
-    let color = match role {
-        Role::Name => AnsiColor::BrightCyan,
-        Role::Alias => AnsiColor::BrightBlue,
-        Role::Type => AnsiColor::BrightMagenta,
-        Role::Metadata => AnsiColor::Cyan,
-        Role::Current | Role::Warning => AnsiColor::BrightYellow,
-        Role::Value | Role::Success => AnsiColor::BrightGreen,
-        Role::Error => AnsiColor::BrightRed,
-        Role::Prompt | Role::Command | Role::Muted => {
-            unreachable!("non-color style returned above")
-        }
-    };
-
-    let style = Style::new().fg_color(Some(color.into()));
-    match role {
-        Role::Current | Role::Error => style.bold(),
-        _ => style,
+        Role::Prompt | Role::Muted => Style::new().dimmed(),
+        Role::Command => color(AnsiColor::BrightBlue).bold(),
+        Role::Alias => color(AnsiColor::BrightBlue),
+        Role::Name => color(AnsiColor::BrightCyan),
+        Role::Type => color(AnsiColor::BrightMagenta),
+        Role::Metadata => color(AnsiColor::Cyan),
+        Role::Current => color(AnsiColor::BrightYellow).bold(),
+        Role::Warning => color(AnsiColor::BrightYellow),
+        Role::Value | Role::Success => color(AnsiColor::BrightGreen),
+        Role::Error => color(AnsiColor::BrightRed).bold(),
     }
 }
 

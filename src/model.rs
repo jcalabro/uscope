@@ -81,6 +81,18 @@ macro_rules! id_type {
             pub(crate) const fn new(value: u32) -> Self {
                 Self(value)
             }
+
+            /// Returns the dense index within the owning collection.
+            #[must_use]
+            pub const fn get(self) -> u32 {
+                self.0
+            }
+
+            /// Returns the dense index as a `usize` for indexing.
+            #[allow(dead_code, reason = "not every identifier indexes a slice")]
+            pub(crate) const fn index(self) -> usize {
+                self.0 as usize
+            }
         }
 
         impl fmt::Display for $name {
@@ -90,6 +102,36 @@ macro_rules! id_type {
         }
     };
 }
+
+/// Defines a public `u64` identifier with numeric conversions and `Display`.
+macro_rules! numeric_id {
+    ($name:ident, $description:literal) => {
+        #[doc = $description]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct $name(u64);
+
+        impl $name {
+            /// Creates an identifier from its numeric representation.
+            #[must_use]
+            pub const fn new(value: u64) -> Self {
+                Self(value)
+            }
+
+            /// Returns the numeric representation of this identifier.
+            #[must_use]
+            pub const fn get(self) -> u64 {
+                self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    };
+}
+pub(crate) use numeric_id;
 
 id_type!(
     ModuleImageId,
@@ -125,22 +167,6 @@ id_type!(
     "Identifies a normalized type within a module image."
 );
 
-impl GlobalVariableId {
-    /// Returns the dense index within the containing module image.
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-}
-
-impl TypeId {
-    /// Returns the dense index within the containing module image.
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.0
-    }
-}
-
 id_type!(
     StackFrameId,
     "Identifies a stack frame within one stop revision."
@@ -150,29 +176,10 @@ id_type!(
     "Identifies a register within a target architecture."
 );
 
-/// Identifies a thread within a debug session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ThreadId(u64);
-
-impl ThreadId {
-    /// Creates a thread identifier from its platform value.
-    #[must_use]
-    pub const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    /// Returns the platform value of this identifier.
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-}
-
-impl fmt::Display for ThreadId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
+numeric_id!(
+    ThreadId,
+    "Identifies a thread within a debug session by its platform value."
+);
 
 /// The architecture-independent purpose of a distinguished register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -746,8 +753,6 @@ pub enum InspectionLimit {
     AggregateDepth,
     /// Maximum debug-expression work.
     ExpressionWork,
-    /// Maximum rendered output bytes.
-    OutputBytes,
 }
 
 /// Resource ceilings for one logical inspection operation.
@@ -765,8 +770,6 @@ pub struct InspectionLimits {
     pub memory_bytes: u64,
     /// Conservatively reserved debug-expression work units.
     pub expression_work: u64,
-    /// Bytes emitted by a client renderer.
-    pub output_bytes: u64,
 }
 
 impl Default for InspectionLimits {
@@ -778,7 +781,6 @@ impl Default for InspectionLimits {
             memory_reads: 64,
             memory_bytes: 1_024,
             expression_work: 5_120_000,
-            output_bytes: 64 * 1_024,
         }
     }
 }
@@ -794,7 +796,6 @@ impl InspectionLimits {
             memory_reads: self.memory_reads.saturating_sub(usage.memory_reads),
             memory_bytes: self.memory_bytes.saturating_sub(usage.memory_bytes),
             expression_work: self.expression_work.saturating_sub(usage.expression_work),
-            output_bytes: self.output_bytes.saturating_sub(usage.output_bytes),
         }
     }
 }
@@ -814,8 +815,6 @@ pub struct InspectionUsage {
     pub memory_bytes: u64,
     /// Conservatively reserved debug-expression work units.
     pub expression_work: u64,
-    /// Bytes emitted by a client renderer.
-    pub output_bytes: u64,
 }
 
 /// The exact attempted reservation that exhausted an inspection resource.
@@ -1137,8 +1136,6 @@ pub enum OptimizedOutReason {
 pub enum CallFrameUnavailableReason {
     /// The instruction has no usable module-relative context.
     NoInstructionContext,
-    /// The call-frame information uses an unsupported CFA expression.
-    CfaExpression,
     /// Unwinding terminated without producing a CFA.
     UnwindTerminated(Arc<str>),
 }
@@ -1280,9 +1277,6 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::CallFrameUnavailable(CallFrameUnavailableReason::NoInstructionContext) => {
                 formatter.write_str("the instruction has no call-frame context")
-            }
-            Self::CallFrameUnavailable(CallFrameUnavailableReason::CfaExpression) => {
-                formatter.write_str("CFA expressions are unsupported")
             }
             Self::CallFrameUnavailable(CallFrameUnavailableReason::UnwindTerminated(reason)) => {
                 write!(formatter, "the call-frame address is unavailable: {reason}")
@@ -1458,6 +1452,28 @@ pub enum ValuePathStep {
 pub struct ValueExpression {
     /// Operations in evaluation order, beginning with at least one name.
     pub steps: Arc<[ValuePathStep]>,
+}
+
+/// Renders the expression in source syntax, parenthesizing each dereference.
+impl fmt::Display for ValueExpression {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use fmt::Write as _;
+
+        let mut output = String::new();
+        for step in self.steps.iter() {
+            match step {
+                ValuePathStep::Named(name) => {
+                    if !output.is_empty() {
+                        output.push('.');
+                    }
+                    output.push_str(name);
+                }
+                ValuePathStep::Index(index) => write!(output, "[{index}]")?,
+                ValuePathStep::Dereference => output = format!("(*{output})"),
+            }
+        }
+        formatter.write_str(&output)
+    }
 }
 
 /// One half-open source-index range selected from a one-dimensional array or slice.
@@ -2180,6 +2196,37 @@ pub enum UnwindTermination {
     DepthLimit,
 }
 
+impl fmt::Display for UnwindTermination {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Complete => formatter.write_str("the outermost frame has no caller"),
+            Self::NoUnwindInfo { address } => {
+                write!(formatter, "no unwind information covers {address}")
+            }
+            Self::ModuleNotFound { address } => {
+                write!(formatter, "no loaded module contains {address}")
+            }
+            Self::UnsupportedUnwindInfo { feature } => {
+                write!(formatter, "unsupported unwind feature: {feature}")
+            }
+            Self::CorruptUnwindInfo { description } => {
+                write!(formatter, "malformed unwind information: {description}")
+            }
+            Self::RegisterUnavailable { register } => {
+                write!(formatter, "register {register} is unavailable")
+            }
+            Self::MemoryReadFailed { address } => {
+                write!(formatter, "unwind memory is unreadable at {address}")
+            }
+            Self::InvalidCaller { description } => {
+                write!(formatter, "invalid unwind caller: {description}")
+            }
+            Self::CycleDetected => formatter.write_str("unwind metadata produced a frame cycle"),
+            Self::DepthLimit => formatter.write_str("unwind depth limit reached"),
+        }
+    }
+}
+
 /// A backtrace and the reason its reconstruction ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Backtrace {
@@ -2410,9 +2457,7 @@ fn build_module_indexes(
             global_selectors.push((Arc::clone(linkage_name), global.id));
         }
         if let Some(declaration) = &global.declaration
-            && let Some(source) = metadata
-                .source_files
-                .get(usize::try_from(declaration.file.0).expect("source file ID fits usize"))
+            && let Some(source) = metadata.source_files.get(declaration.file.index())
         {
             let path = source.path.to_string_lossy();
             global_selectors.push((
@@ -2500,9 +2545,9 @@ fn build_control_boundary_indexes(
                 code_range_index
                     .containing(row.address)
                     .filter(|id| {
-                        usize::try_from(id.0)
-                            .ok()
-                            .and_then(|index| metadata.code_instances.get(index))
+                        metadata
+                            .code_instances
+                            .get(id.index())
                             .is_some_and(|instance| {
                                 matches!(instance.kind, CodeInstanceKind::OutOfLine)
                             })
@@ -2558,31 +2603,27 @@ fn build_control_boundary_indexes(
 fn validate_dense_ids(metadata: &ModuleMetadata) {
     for (index, function) in metadata.functions.iter().enumerate() {
         assert_eq!(
-            usize::try_from(function.id.0).expect("function ID fits usize"),
+            function.id.index(),
             index,
             "function IDs are dense and ordered"
         );
     }
     for (index, instance) in metadata.code_instances.iter().enumerate() {
         assert_eq!(
-            usize::try_from(instance.id.0).expect("code instance ID fits usize"),
+            instance.id.index(),
             index,
             "code instance IDs are dense and ordered"
         );
     }
     for (index, source_file) in metadata.source_files.iter().enumerate() {
         assert_eq!(
-            usize::try_from(source_file.id.0).expect("source file ID fits usize"),
+            source_file.id.index(),
             index,
             "source file IDs are dense and ordered"
         );
     }
     for (index, symbol) in metadata.symbols.iter().enumerate() {
-        assert_eq!(
-            usize::try_from(symbol.id.0).expect("symbol ID fits usize"),
-            index,
-            "symbol IDs are dense and ordered"
-        );
+        assert_eq!(symbol.id.index(), index, "symbol IDs are dense and ordered");
         if let Some(extent) = symbol.extent {
             assert!(
                 matches!(
@@ -2595,11 +2636,7 @@ fn validate_dense_ids(metadata: &ModuleMetadata) {
         }
     }
     for (index, global) in metadata.globals.iter().enumerate() {
-        assert_eq!(
-            usize::try_from(global.id.0).expect("global ID fits usize"),
-            index,
-            "global IDs are dense and ordered"
-        );
+        assert_eq!(global.id.index(), index, "global IDs are dense and ordered");
     }
     for (index, node) in metadata.types.iter().enumerate() {
         assert_eq!(
@@ -2740,7 +2777,7 @@ impl ModuleImage {
     /// Looks up a source-level function by identifier.
     #[must_use]
     pub fn function(&self, id: FunctionId) -> Option<&FunctionInfo> {
-        self.functions.get(usize::try_from(id.0).ok()?)
+        self.functions.get(id.index())
     }
 
     /// Returns all concrete code instances described by this image.
@@ -2759,7 +2796,7 @@ impl ModuleImage {
     /// Looks up a linker symbol by identifier.
     #[must_use]
     pub fn symbol(&self, id: SymbolId) -> Option<&SymbolInfo> {
-        self.symbols.get(usize::try_from(id.0).ok()?)
+        self.symbols.get(id.index())
     }
 
     /// Returns which symbol tables this image provided.
@@ -2802,7 +2839,7 @@ impl ModuleImage {
     /// Looks up a global catalog entry by identifier.
     #[must_use]
     pub fn global(&self, id: GlobalVariableId) -> Option<&GlobalVariableInfo> {
-        self.globals.get(usize::try_from(id.0).ok()?)
+        self.globals.get(id.index())
     }
 
     /// Returns the reachable, normalized type graph in stable identifier order.
@@ -2818,7 +2855,7 @@ impl ModuleImage {
             return None;
         }
         self.types
-            .get(usize::try_from(reference.id.get()).ok()?)
+            .get(reference.id.index())
             .filter(|node| node.reference() == reference)
     }
 
@@ -2960,7 +2997,7 @@ impl ModuleImage {
     /// Looks up a concrete code instance by identifier.
     #[must_use]
     pub fn code_instance(&self, id: CodeInstanceId) -> Option<&CodeInstanceInfo> {
-        self.code_instances.get(usize::try_from(id.0).ok()?)
+        self.code_instances.get(id.index())
     }
 
     /// Returns the concrete instances of one source-level function.
@@ -3036,12 +3073,9 @@ impl ModuleImage {
             .and_then(|instance| self.code_instance(instance))
             .map(|instance| instance.function)
             .or_else(|| physical.map(|instance| instance.function));
-        let function = function_id.and_then(|function_id| {
-            self.functions
-                .iter()
-                .find(|function| function.id == function_id)
-                .cloned()
-        });
+        let function = function_id
+            .and_then(|function_id| self.function(function_id))
+            .cloned();
         let source = self
             .line_entry_containing(address)
             .map(|entry| entry.location.clone());
@@ -3135,7 +3169,7 @@ impl ModuleImage {
     /// Looks up a source file by its identifier.
     #[must_use]
     pub fn source_file(&self, id: SourceFileId) -> Option<&SourceFile> {
-        self.source_files.get(usize::try_from(id.0).ok()?)
+        self.source_files.get(id.index())
     }
 }
 
@@ -3156,14 +3190,20 @@ fn symbol_preference(symbol: &SymbolInfo) -> impl Ord + '_ {
     )
 }
 
+/// Matches an absolute path exactly and a relative path as a suffix of whole
+/// components, ignoring `.` components such as a leading `./`.
 fn path_matches(candidate: &Path, requested: &Path) -> bool {
+    fn significant(path: &Path) -> Vec<std::path::Component<'_>> {
+        path.components()
+            .filter(|component| *component != std::path::Component::CurDir)
+            .collect()
+    }
+
     if requested.is_absolute() {
         return candidate == requested;
     }
-    let candidate = candidate.components().collect::<Vec<_>>();
-    let requested = requested.components().collect::<Vec<_>>();
-    requested.len() <= candidate.len()
-        && candidate[candidate.len() - requested.len()..] == requested[..]
+    let (candidate, requested) = (significant(candidate), significant(requested));
+    !requested.is_empty() && candidate.ends_with(&requested)
 }
 
 /// A module image mapped into a running process.
@@ -3225,49 +3265,6 @@ impl LoadedModule {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn inspection_limits_report_exact_usage_and_exhaustion() {
-        let limits = InspectionLimits {
-            variables: 2,
-            value_nodes: 3,
-            aggregate_depth: 4,
-            memory_reads: 5,
-            memory_bytes: 6,
-            expression_work: 7,
-            output_bytes: 64,
-        };
-        let usage = InspectionUsage {
-            variables: 2,
-            value_nodes: 3,
-            aggregate_depth: 4,
-            memory_reads: 5,
-            memory_bytes: 6,
-            expression_work: 7,
-            output_bytes: 8,
-        };
-        let exhaustion = InspectionExhaustion {
-            resource: InspectionLimit::MemoryBytes,
-            limit: limits.memory_bytes,
-            used: usage.memory_bytes,
-            requested: 1,
-        };
-
-        assert_eq!(
-            InspectionCompletion::Truncated(exhaustion).exhaustion(),
-            Some(exhaustion)
-        );
-        assert_eq!(
-            limits.remaining_after(usage).memory_bytes,
-            0,
-            "usage must subtract without wrapping"
-        );
-        assert_eq!(
-            limits.remaining_after(usage).aggregate_depth,
-            0,
-            "composed inspection must retain only unused path depth"
-        );
-    }
 
     fn global_test_image() -> ModuleImage {
         let scalar = || {
@@ -3481,6 +3478,9 @@ mod tests {
         let candidate = Path::new("/build/project/src/main.c");
         assert!(path_matches(candidate, Path::new("main.c")));
         assert!(path_matches(candidate, Path::new("src/main.c")));
+        assert!(path_matches(candidate, Path::new("./main.c")));
+        assert!(path_matches(candidate, Path::new("src/./main.c")));
+        assert!(!path_matches(candidate, Path::new(".")));
         assert!(path_matches(candidate, candidate));
         assert!(!path_matches(candidate, Path::new("rc/main.c")));
         assert!(!path_matches(candidate, Path::new("other/main.c")));

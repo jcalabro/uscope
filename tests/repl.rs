@@ -284,7 +284,9 @@ fn interactive_empty_lines_repeat_the_last_session_command() {
         .expect("empty line before any command is a no-op");
 
     session.send_line("break main").expect("set breakpoint");
-    session.expect("breakpoint set").expect("breakpoint reply");
+    session
+        .expect("breakpoint 1 set")
+        .expect("breakpoint reply");
     session
         .expect("(uscope) ")
         .expect("prompt after breakpoint");
@@ -323,7 +325,9 @@ fn interactive_repeated_next_crosses_an_inline_return_without_killing_the_inferi
     let mut session = repl(&fixture("stepping-boundaries-clang-o0"), &state.0);
 
     session.send_line("break main").expect("set breakpoint");
-    session.expect("breakpoint set").expect("breakpoint reply");
+    session
+        .expect("breakpoint 1 set")
+        .expect("breakpoint reply");
     session
         .expect("(uscope) ")
         .expect("prompt after breakpoint");

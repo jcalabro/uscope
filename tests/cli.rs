@@ -230,7 +230,7 @@ fn batch_mode_streams_commands_from_stdin() {
         .expect("write commands");
     let stdout = assert_success(child.wait_with_output().expect("wait for uscope"));
 
-    assert!(stdout.contains("breakpoint set"));
+    assert!(stdout.contains("breakpoint 1 set"));
     assert!(stdout.contains("stopped at breakpoint"));
 }
 
@@ -341,7 +341,7 @@ fn help_and_clear_are_generated_from_the_command_registry() {
         "{stdout}"
     );
     assert!(
-        !stdout.contains("break <function|address|file:line|file:function> (b)"),
+        !stdout.contains("break <function|0xaddress|file:line|file:function> (b)"),
         "overview should omit detailed usage: {stdout}"
     );
     assert!(stdout.contains("delete <id|all>"), "{stdout}");
@@ -356,7 +356,7 @@ fn help_and_clear_are_generated_from_the_command_registry() {
     );
     assert!(
         stdout.contains(
-            "  Set a breakpoint\n  aliases: b\n  usage: break <function|address|file:line|file:function>"
+            "  Set a breakpoint\n  aliases: b\n  usage: break <function|0xaddress|file:line|file:function>"
         ),
         "{stdout}"
     );
@@ -437,7 +437,7 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
             "--eval",
             "help p",
             "--eval",
-            "help pause",
+            "help where",
             "--eval",
             "break variables.c:108",
             "--eval",
@@ -454,12 +454,13 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
 
     assert!(stdout.contains("print [value-path]\n"), "{stdout}");
     assert!(stdout.contains("aliases: p"), "{stdout}");
-    assert!(stdout.contains("  Pause execution"), "{stdout}");
-    assert!(!stdout.contains("usage: pause"), "{stdout}");
-    assert!(!stdout.contains("print\n  Print one"), "{stdout}");
-    assert!(!stdout.contains("pause\n  Pause execution"), "{stdout}");
     assert!(
-        !stdout.contains("  Pause execution\n  aliases:"),
+        stdout.contains("  Show the current execution location"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("usage: where"), "{stdout}");
+    assert!(
+        !stdout.contains("  Show the current execution location\n  aliases:"),
         "{stdout}"
     );
     assert_eq!(stdout.matches("(int) signed_int = -1234567").count(), 2);
@@ -895,7 +896,7 @@ fn batch_mode_reports_command_context() {
     assert!(!output.status.success());
     assert!(stderr.contains("\x1b[1m\x1b[91merror\x1b[0m"), "{stderr:?}");
     assert!(stderr.contains("--eval #1"));
-    assert!(stderr.contains("invalid command: invalid"));
+    assert!(stderr.contains("unknown command 'invalid'"), "{stderr}");
 }
 
 #[test]
@@ -909,7 +910,7 @@ fn command_argument_errors_use_the_registered_canonical_usage() {
         .expect("run uscope");
     let stderr = String::from_utf8(extra.stderr).expect("UTF-8 error output");
     assert!(!extra.status.success());
-    assert!(stderr.contains("invalid command: run"), "{stderr}");
+    assert!(stderr.contains("usage: run"), "{stderr}");
 
     let missing = Command::new(env!("CARGO_BIN_EXE_uscope"))
         .args(["--batch", "--eval", "break"])
@@ -919,7 +920,7 @@ fn command_argument_errors_use_the_registered_canonical_usage() {
     let stderr = String::from_utf8(missing.stderr).expect("UTF-8 error output");
     assert!(!missing.status.success());
     assert!(
-        stderr.contains("invalid command: break <function|address|file:line|file:function>"),
+        stderr.contains("usage: break <function|0xaddress|file:line|file:function>"),
         "{stderr}"
     );
 }
@@ -1127,7 +1128,7 @@ fn plain_repl_reports_errors_and_continues() {
     let stderr = String::from_utf8(output.stderr.clone()).expect("UTF-8 error output");
 
     assert_success(output);
-    assert!(stderr.contains("invalid command: invalid"));
+    assert!(stderr.contains("unknown command 'invalid'"), "{stderr}");
 }
 
 #[test]
@@ -1212,6 +1213,18 @@ fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
         !PathBuf::from(format!("/proc/{inferior_pid}")).exists(),
         "inferior {inferior_pid} survived debugger shutdown"
     );
+}
+
+#[test]
+fn continuing_past_a_sigint_stop_discards_the_interrupt() {
+    // A terminal Ctrl-C signals the inferior as well as uscope. Like gdb, the
+    // CLI must not deliver that SIGINT, which would terminate the inferior.
+    let stdout = assert_success(uscope_batch(
+        &["-e", "run", "-e", "continue"],
+        &fixture("build/test-programs/interrupt"),
+    ));
+    assert!(stdout.contains("stopped by SIGINT"), "{stdout}");
+    assert!(stdout.contains("inferior exited with status 0"), "{stdout}");
 }
 
 fn wait_for_child_process(parent: u32) -> Option<u32> {
@@ -1307,7 +1320,10 @@ fn core_dumps_are_inspected_in_batch_mode_without_executing() {
     assert!(stdout.starts_with("crash_segv at "), "{stdout}");
     assert!(stdout.contains("#1 "), "{stdout}");
     assert!(stdout.contains("in main at "), "{stdout}");
-    assert!(stdout.contains("unwind stopped: Complete"), "{stdout}");
+    assert!(
+        stdout.contains("unwind stopped: the outermost frame has no caller"),
+        "{stdout}"
+    );
     assert_eq!(
         stdout
             .matches("process terminated by SIGSEGV (SEGV_MAPERR) at 0x0 (0xb)")
@@ -1334,7 +1350,6 @@ fn core_dumps_are_inspected_in_batch_mode_without_executing() {
         "next",
         "finish",
         "stepi",
-        "pause",
         "break main",
     ] {
         assert_failure(
@@ -1359,15 +1374,17 @@ fn core_banner_reports_the_signal_and_every_unproven_module() {
     );
     assert!(!stdout.contains("warning"), "{stdout}");
 
-    let missing = assert_success(uscope(&[
+    // Warnings go to stderr, keeping stdout clean.
+    let missing = uscope(&[
         "--core",
         "build/test-programs/core-missing-library/crash.core",
-    ]));
+    ]);
+    let stderr = String::from_utf8_lossy(&missing.stderr).into_owned();
     assert!(
-        missing.contains("core-missing-library/libcrash.so is missing; its frames and unsaved memory are unavailable"),
-        "{missing}"
+        stderr.contains("core-missing-library/libcrash.so is missing; its frames and unsaved memory are unavailable"),
+        "{stderr}"
     );
-    // Batch output stays clean; warnings move to stderr.
+    assert!(!assert_success(missing).contains("warning"));
     let batch = uscope(&[
         "--core",
         "build/test-programs/core-missing-library/crash.core",
@@ -1680,17 +1697,17 @@ fn watch_command_failures_explain_themselves() {
         ),
         (
             &["break scalar_stores", "run", "watch watch_array[0..2]"][..],
-            "watch <value-path|address:byte-count>",
+            "cannot watch a range",
         ),
         (
             &["break scalar_stores", "run", "watch 0x1000:many"][..],
-            "watch <value-path|address:byte-count>",
+            "watch <value-path|0xaddress:byte-count>",
         ),
         (
             &["break scalar_stores", "run", "unwatch 9"][..],
             "watchpoint 9 was not found",
         ),
-        (&["watch"][..], "watch <value-path|address:byte-count>"),
+        (&["watch"][..], "watch <value-path|0xaddress:byte-count>"),
     ] {
         let arguments = commands
             .iter()

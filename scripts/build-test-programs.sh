@@ -753,6 +753,12 @@ build_fixture gcc "$c_fixtures_dir/signals.c" "$output_dir/signals" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/fatal-signal.c" "$output_dir/fatal-signal" \
     -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/interrupt.c" "$output_dir/interrupt" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/memfd-exec.c" "$output_dir/memfd-exec" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/fork.c" "$output_dir/fork" \
+    -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/job-control.c" "$output_dir/job-control" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/thread-exec.c" "$output_dir/thread-exec" \

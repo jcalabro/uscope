@@ -2,22 +2,26 @@
 
 //! Narrow glibc `libthread_db` boundary for ABI-correct TLS lookup.
 //!
-//! `libthread_db` is deliberately the only unsafe boundary in uscope. Its C
+//! This FFI boundary holds most of uscope's unsafe code. Its C
 //! process-service callbacks are synchronous, read-only, and bounded. Each
 //! agent carries the [`ProcessServices`] that answer them: a live process
 //! owned by the ptrace controller, or a post-mortem core dump.
+//!
+//! `libthread_db` keeps a process-wide agent list without synchronization,
+//! so every agent is created, used, and deleted under [`THREAD_DB`]. Sessions
+//! run on separate controller threads and may look up TLS concurrently.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::io::IoSliceMut;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use nix::libc;
 use nix::sys::ptrace;
 use nix::sys::uio::{RemoteIoVec, process_vm_readv};
 use nix::unistd::Pid;
-use object::{Object, ObjectSymbol};
+use object::{Object, ObjectSymbol, SymbolKind};
 
 use super::{mapped_module_load_bias, module_mappings};
 use crate::VirtualAddress;
@@ -28,6 +32,11 @@ const PS_ERR: c_int = 1;
 const PS_BADLID: c_int = 3;
 const PS_NOSYM: c_int = 5;
 const X86_64_GREG_COUNT: usize = 27;
+/// The `<sys/reg.h>` index of FS, the only thread area x86-64 glibc queries.
+const X86_64_FS_INDEX: c_int = 25;
+
+/// Serializes all use of `libthread_db`; see the module documentation.
+static THREAD_DB: Mutex<()> = Mutex::new(());
 
 /// Read-only process state that `libthread_db` queries through callbacks.
 pub(super) trait ProcessServices {
@@ -99,14 +108,16 @@ impl<'a> Agent<'a> {
             services,
         });
         let mut raw = ptr::null_mut();
-        // SAFETY: `process` is boxed before its stable address is passed to
-        // libthread_db and remains owned by `Agent` until after td_ta_delete.
+        // SAFETY: td_init takes no arguments and only initializes
+        // libthread_db's own state; callers hold `THREAD_DB`.
         let initialized = unsafe { td_init() };
         if initialized != TD_OK {
             return Err(format!("libthread_db initialization failed with {initialized}").into());
         }
         // SAFETY: both pointers are valid for writes for the duration of the
-        // call; libthread_db retains only the stable boxed process pointer.
+        // call. libthread_db retains the process pointer, which stays valid
+        // because the box's heap allocation does not move and `Agent` owns it
+        // until after td_ta_delete.
         let created = unsafe { td_ta_new((&raw mut *process).cast(), &raw mut raw) };
         if created != TD_OK || raw.is_null() {
             return Err(format!("libthread_db agent creation failed with {created}").into());
@@ -134,6 +145,7 @@ pub(super) fn tls_address(
     offset: u64,
 ) -> Result<VirtualAddress, Arc<str>> {
     let offset = usize::try_from(offset).map_err(|_| Arc::from("TLS offset exceeds usize"))?;
+    let _serialized = THREAD_DB.lock().unwrap_or_else(PoisonError::into_inner);
     let agent = Agent::new(process, services)?;
     let mut handle = ThreadHandle {
         agent: ptr::null_mut(),
@@ -192,9 +204,13 @@ unsafe extern "C" fn ps_pdread(
     output: *mut c_void,
     size: usize,
 ) -> c_int {
+    if size == 0 {
+        return PS_OK;
+    }
     with_process(process, |_, services| {
         // SAFETY: libthread_db supplies a writable buffer of exactly `size`
-        // bytes for the duration of this synchronous callback.
+        // bytes for the duration of this synchronous callback, and a nonzero
+        // size rules out a null buffer.
         let output = unsafe { std::slice::from_raw_parts_mut(output.cast::<u8>(), size) };
         if services.read(address.addr() as u64, output) {
             PS_OK
@@ -236,10 +252,16 @@ fn lookup_symbol(pid: Pid, requested_object: &str, requested_symbol: &str) -> Op
         let Ok(object) = object::File::parse(data.as_slice()) else {
             continue;
         };
+        // Undefined symbols have no address here, and a TLS symbol's value
+        // is an offset rather than an address.
         let Some(symbol) = object
             .dynamic_symbols()
             .chain(object.symbols())
-            .find(|symbol| symbol.name().ok() == Some(requested_symbol))
+            .find(|symbol| {
+                symbol.is_definition()
+                    && symbol.kind() != SymbolKind::Tls
+                    && symbol.name().ok() == Some(requested_symbol)
+            })
         else {
             continue;
         };
@@ -340,9 +362,12 @@ unsafe extern "C" fn ps_lgetregs(
 unsafe extern "C" fn ps_get_thread_area(
     process: *mut c_void,
     lwp: c_int,
-    _index: c_int,
+    index: c_int,
     address: *mut *mut c_void,
 ) -> c_int {
+    if index != X86_64_FS_INDEX {
+        return PS_ERR;
+    }
     with_process(process, |_, services| {
         let Some(registers) = services.registers(Pid::from_raw(lwp)) else {
             return PS_BADLID;

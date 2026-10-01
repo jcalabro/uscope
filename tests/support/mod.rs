@@ -1,5 +1,17 @@
+//! The shared harness for debugger scenarios.
+//!
+//! A [`Scenario`] drives the public request and event API, records every
+//! request, reply, and event in a transcript that it prints on failure,
+//! bounds every wait with a deadline, checks that event revisions never move
+//! backward, and verifies at shutdown that the inferior was reaped.
+
+#![allow(dead_code, reason = "each test crate uses a subset of the harness")]
+
 use std::future::Future;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus as ProcessExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::broadcast;
@@ -12,8 +24,127 @@ use uscope::{
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A uniquely named temporary directory, removed with its contents on drop,
+/// even when the test panics.
+pub struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    pub fn new(name: &str) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "uscope-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).expect("create scratch directory");
+        Self(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 // Event delivery depends on waiter and controller OS threads being scheduled.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A fixture process for attach tests, killed and reaped when dropped, even
+/// when the test panics.
+pub struct ExternalProcess {
+    child: Option<Child>,
+    ready: String,
+}
+
+impl ExternalProcess {
+    /// Spawns a fixture and waits for the line it prints, beginning with
+    /// `READY`, once it can be attached to.
+    pub fn spawn(path: &Path) -> Self {
+        let child = Command::new(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn {}: {error}", path.display()));
+        // Owned before reading, so a failed handshake still kills the child.
+        let mut process = Self {
+            child: Some(child),
+            ready: String::new(),
+        };
+        let stdout = process
+            .child
+            .as_mut()
+            .and_then(|child| child.stdout.as_mut());
+        let mut ready = String::new();
+        BufReader::new(stdout.expect("fixture stdout"))
+            .read_line(&mut ready)
+            .expect("read fixture readiness");
+        assert!(ready.starts_with("READY"), "unexpected readiness {ready:?}");
+        process.ready = ready.trim_end().to_owned();
+        process
+    }
+
+    /// Spawns a fixture that runs without a readiness handshake.
+    pub fn spawn_running(path: &Path) -> Self {
+        let child = Command::new(path)
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn {}: {error}", path.display()));
+        Self {
+            child: Some(child),
+            ready: String::new(),
+        }
+    }
+
+    /// Returns the readiness line, without its newline.
+    pub fn ready_line(&self) -> &str {
+        &self.ready
+    }
+
+    pub fn process_id(&self) -> ProcessId {
+        ProcessId::new(u64::from(self.child.as_ref().expect("live child").id()))
+    }
+
+    /// Attaches a debugger to the process within the event deadline.
+    pub async fn attach(&self) -> Debugger {
+        timeout(EVENT_TIMEOUT, Debugger::attach(self.process_id()))
+            .await
+            .expect("attach timed out")
+            .expect("attach debugger")
+    }
+
+    /// Writes the byte a READY fixture waits for before continuing.
+    pub fn release(&mut self) {
+        self.child
+            .as_mut()
+            .expect("live child")
+            .stdin
+            .as_mut()
+            .expect("fixture stdin")
+            .write_all(b"x")
+            .expect("release fixture");
+    }
+
+    pub fn wait(mut self) -> ProcessExitStatus {
+        self.child
+            .take()
+            .expect("live child")
+            .wait()
+            .expect("reap fixture")
+    }
+}
+
+impl Drop for ExternalProcess {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 pub struct Scenario {
     name: String,
@@ -39,8 +170,12 @@ impl Scenario {
         Self::from_debugger(name, debugger)
     }
 
+    /// Launches the named fixture under a scenario of the same name.
+    pub fn launch(fixture: &str) -> Self {
+        Self::new(fixture, Self::fixture(fixture))
+    }
+
     /// Opens a post-mortem core dump through the public API.
-    #[allow(dead_code, reason = "only post-mortem scenarios open core dumps")]
     pub fn open_core(name: impl Into<String>, options: &CoreDumpOptions) -> Self {
         let name = name.into();
         assert!(
@@ -177,22 +312,31 @@ impl Scenario {
         self.wait_for_request(task, operation).await
     }
 
+    /// Waits for a run-control request's stop or exit. A request that fails
+    /// before running reports its error rather than an event timeout.
     async fn wait_for_request(
         &mut self,
-        task: JoinHandle<Result<StopReason>>,
+        mut task: JoinHandle<Result<StopReason>>,
         operation: &str,
     ) -> StopReason {
-        let event = self
-            .wait_for(|event| {
-                matches!(
-                    event,
-                    DebuggerEvent::InferiorStopped { .. } | DebuggerEvent::InferiorExited { .. }
-                )
-            })
-            .await;
-        let reply = join_request(task).await.unwrap_or_else(|error| {
-            self.fail(&format!("{operation} request failed: {error}"));
-        });
+        let is_terminal = |event: &DebuggerEvent| {
+            matches!(
+                event,
+                DebuggerEvent::InferiorStopped { .. } | DebuggerEvent::InferiorExited { .. }
+            )
+        };
+        let (event, reply) = tokio::select! {
+            event = self.wait_for(is_terminal) => (event, join_request(task).await),
+            joined = &mut task => {
+                let reply = joined.expect("debugger task panicked");
+                if let Err(error) = &reply {
+                    self.fail(&format!("{operation} request failed: {error}"));
+                }
+                (self.wait_for(is_terminal).await, reply)
+            }
+        };
+        let reply = reply
+            .unwrap_or_else(|error| self.fail(&format!("{operation} request failed: {error}")));
         self.transcript.push(format!("reply: {reply:?}"));
         self.assert_terminal_event(&event, &reply);
         reply
@@ -243,10 +387,22 @@ impl Scenario {
         self.drain_events();
     }
 
+    /// Runs one request that must succeed within the request deadline.
     pub async fn operation<T>(&self, name: &str, future: impl Future<Output = Result<T>>) -> T {
-        within(future)
+        self.attempt(name, future)
             .await
             .unwrap_or_else(|error| self.fail(&format!("{name} failed: {error}")))
+    }
+
+    /// Runs one request that may fail, within the request deadline.
+    pub async fn attempt<T>(
+        &self,
+        name: &str,
+        future: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        timeout(REQUEST_TIMEOUT, future)
+            .await
+            .unwrap_or_else(|_| self.fail(&format!("{name} timed out")))
     }
 
     pub async fn shutdown(mut self) -> Option<ExitStatus> {
@@ -282,22 +438,7 @@ impl Scenario {
     fn record_event(&mut self, event: &DebuggerEvent) {
         self.transcript.push(format!("event: {event:?}"));
 
-        let revision = match event {
-            DebuggerEvent::StateChanged { revision }
-            | DebuggerEvent::BreakpointsChanged { revision }
-            | DebuggerEvent::WatchpointsChanged { revision }
-            | DebuggerEvent::WatchpointsInvalidated { revision, .. }
-            | DebuggerEvent::InferiorLaunched { revision, .. }
-            | DebuggerEvent::InferiorAttached { revision, .. }
-            | DebuggerEvent::InferiorContinued { revision, .. }
-            | DebuggerEvent::InferiorStopped { revision, .. }
-            | DebuggerEvent::ThreadStarted { revision, .. }
-            | DebuggerEvent::ThreadExited { revision, .. }
-            | DebuggerEvent::ModuleLoaded { revision, .. }
-            | DebuggerEvent::ModuleUnloaded { revision, .. }
-            | DebuggerEvent::InferiorExited { revision, .. }
-            | DebuggerEvent::InferiorDetached { revision, .. } => *revision,
-        };
+        let revision = event.revision();
         if revision < self.last_revision {
             self.fail(&format!(
                 "event revision moved backward from {} to {revision}",

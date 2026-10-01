@@ -1,12 +1,7 @@
-#[allow(
-    dead_code,
-    reason = "post-mortem scenarios use a subset of the shared harness"
-)]
 mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use object::read::elf::{FileHeader as _, ProgramHeader as _};
 use object::{Endianness, elf};
@@ -18,7 +13,7 @@ use uscope::{
     VariableValue, VirtualAddress,
 };
 
-use support::Scenario;
+use support::{Scenario, ScratchDir};
 
 const MATRIX: [&str; 3] = ["gcc-o0", "clang-o2", "gcc-o2-nopie"];
 const WORKERS: u64 = 3;
@@ -40,17 +35,6 @@ fn options(core_name: &str, executable: Option<&str>, allow: bool) -> CoreDumpOp
 }
 
 /// A fresh directory for one test's modified copies of read-only fixtures.
-fn scratch_dir(test: &str) -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let directory = std::env::temp_dir().join(format!(
-        "uscope-post-mortem-{}-{test}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::create_dir_all(&directory).expect("create scratch directory");
-    directory
-}
-
 fn crash_source_line(needle: &str) -> u64 {
     let source = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/crash/main.c"),
@@ -189,13 +173,11 @@ async fn stopped(scenario: &mut Scenario) -> (StoppedCore, uscope::StateSnapshot
         process_id,
         stop_id,
         thread_id,
-        all_threads_stopped,
         reason,
     } = snapshot.inferior.clone()
     else {
         panic!("a core is always stopped: {snapshot:?}");
     };
-    assert!(all_threads_stopped);
     assert_eq!(snapshot.stop_id, Some(stop_id));
     (
         StoppedCore {
@@ -535,7 +517,7 @@ async fn every_dumped_thread_keeps_its_own_registers_stack_and_tls() {
             .handle()
             .select_thread(uscope::ThreadId::new(1))
             .await,
-        Err(Error::NotRunning)
+        Err(Error::UnknownThread(thread)) if thread.get() == 1
     ));
     scenario.shutdown().await;
 }
@@ -829,13 +811,15 @@ async fn missing_files_are_reported_and_leave_their_images_unavailable() {
     explicit.shutdown().await;
 }
 
-/// Edits a copy of a core's ELF header or program headers.
-fn edited_core(test: &str, source: &str, edit: impl FnOnce(&mut Vec<u8>)) -> PathBuf {
+/// Edits a copy of a core's ELF header or program headers. The copy lives
+/// until the returned directory is dropped.
+fn edited_core(test: &str, source: &str, edit: impl FnOnce(&mut Vec<u8>)) -> (ScratchDir, PathBuf) {
     let mut bytes = fs::read(core(source)).expect("read core fixture");
     edit(&mut bytes);
-    let path = scratch_dir(test).join("edited.core");
+    let directory = ScratchDir::new(&format!("post-mortem-{test}"));
+    let path = directory.path().join("edited.core");
     fs::write(&path, bytes).expect("write edited core");
-    path
+    (directory, path)
 }
 
 /// Returns the file offset of each `PT_LOAD` header and the address range it maps.
@@ -909,7 +893,7 @@ async fn unsaved_and_truncated_memory_stays_unavailable_rather_than_guessed() {
         }),
     ];
     for (name, edit) in edits {
-        let path = edited_core(name, "crash-gcc-o0-segv.core", |bytes| {
+        let (_scratch, path) = edited_core(name, "crash-gcc-o0-segv.core", |bytes| {
             let (header, _, _) = load_headers(bytes)
                 .into_iter()
                 .find(|&(_, start, end)| (start..end).contains(&stack))
@@ -1010,7 +994,7 @@ async fn modified_file_pages_missing_from_a_dump_are_never_read_from_the_file() 
     // header records that the producer saved those bytes, so the file cannot
     // stand in for them. gcore writes notes last, so the segment's data is
     // moved to end at the counter instead of truncating the file itself.
-    let path = edited_core("truncated-data", "crash-gcc-o0-segv.core", |bytes| {
+    let (_scratch, path) = edited_core("truncated-data", "crash-gcc-o0-segv.core", |bytes| {
         let (header, start, _) = load_headers(bytes)
             .into_iter()
             .find(|&(_, start, end)| (start..end).contains(&counter.get()))
@@ -1034,12 +1018,14 @@ async fn modified_file_pages_missing_from_a_dump_are_never_read_from_the_file() 
 const PHDR_VADDR: usize = 16;
 
 /// Writes a copy of the gcc -O0 crash executable with edited program headers.
-fn edited_executable(test: &str, edit: impl FnOnce(&mut Vec<u8>)) -> PathBuf {
+/// The copy lives until the returned directory is dropped.
+fn edited_executable(test: &str, edit: impl FnOnce(&mut Vec<u8>)) -> (ScratchDir, PathBuf) {
     let mut bytes = fs::read(Scenario::fixture("crash-gcc-o0")).expect("read executable");
     edit(&mut bytes);
-    let path = scratch_dir(test).join("crash-gcc-o0");
+    let directory = ScratchDir::new(&format!("post-mortem-{test}"));
+    let path = directory.path().join("crash-gcc-o0");
     fs::write(&path, bytes).expect("write edited executable");
-    path
+    (directory, path)
 }
 
 fn with_executable(executable: &Path, allow: bool) -> CoreDumpOptions {
@@ -1063,7 +1049,7 @@ async fn allowed_mismatches_keep_the_recorded_placement_or_refuse_to_relocate() 
 
     // A segment extending past the end of the file proves a different file,
     // but the recorded mapping still places it.
-    let oversized = edited_executable("oversized", |bytes| {
+    let (_oversized_scratch, oversized) = edited_executable("oversized", |bytes| {
         let (header, _, _) = *load_headers(bytes).last().expect("a load segment");
         let past_end = u64::try_from(bytes.len()).unwrap() + 1;
         bytes[header + PHDR_FILESZ..header + PHDR_FILESZ + 8]
@@ -1089,7 +1075,7 @@ async fn allowed_mismatches_keep_the_recorded_placement_or_refuse_to_relocate() 
 
     // Linked above the recorded image, the file has no load bias that places
     // it there. Relocating it anywhere would be a guess.
-    let unplaceable = edited_executable("unplaceable", |bytes| {
+    let (_unplaceable_scratch, unplaceable) = edited_executable("unplaceable", |bytes| {
         for (header, _, _) in load_headers(bytes) {
             let address = u64::from_le_bytes(
                 bytes[header + PHDR_VADDR..header + PHDR_VADDR + 8]
@@ -1115,7 +1101,8 @@ async fn allowed_mismatches_keep_the_recorded_placement_or_refuse_to_relocate() 
 
 #[tokio::test]
 async fn invalid_core_files_fail_with_typed_errors() {
-    let directory = scratch_dir("invalid");
+    let scratch = ScratchDir::new("post-mortem-invalid");
+    let directory = scratch.path();
     let open = |path: PathBuf| Debugger::open_core(&CoreDumpOptions::new(path));
     let invalid = |result: uscope::Result<Debugger>, expected: &str| match result {
         Err(Error::InvalidCoreDump(message)) => {
@@ -1154,28 +1141,33 @@ async fn invalid_core_files_fail_with_typed_errors() {
     invalid(open(headless), "note segment is malformed");
 
     invalid(
-        open(edited_core("machine", "crash-gcc-o0-segv.core", |bytes| {
-            bytes[18..20].copy_from_slice(&elf::EM_AARCH64.to_le_bytes());
-        })),
+        open(
+            edited_core("machine", "crash-gcc-o0-segv.core", |bytes| {
+                bytes[18..20].copy_from_slice(&elf::EM_AARCH64.to_le_bytes());
+            })
+            .1,
+        ),
         "only x86-64",
     );
     invalid(
-        open(edited_core("overlap", "crash-gcc-o0-segv.core", |bytes| {
-            let headers = load_headers(bytes);
-            let (_, second_start, _) = headers[1];
-            let (first, _, _) = headers[0];
-            // Grow the first segment's memory size over the second.
-            let start = u64::from_le_bytes(bytes[first + 16..first + 24].try_into().unwrap());
-            let size = second_start - start + 4096;
-            bytes[first + 40..first + 48].copy_from_slice(&size.to_le_bytes());
-        })),
+        open(
+            edited_core("overlap", "crash-gcc-o0-segv.core", |bytes| {
+                let headers = load_headers(bytes);
+                let (_, second_start, _) = headers[1];
+                let (first, _, _) = headers[0];
+                // Grow the first segment's memory size over the second.
+                let start = u64::from_le_bytes(bytes[first + 16..first + 24].try_into().unwrap());
+                let size = second_start - start + 4096;
+                bytes[first + 40..first + 48].copy_from_slice(&size.to_le_bytes());
+            })
+            .1,
+        ),
         "overlap",
     );
     assert!(matches!(
         Debugger::open_core(&options("crash-gcc-o0-segv.core", Some("absent-executable"), false)),
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
     ));
-    fs::remove_dir_all(directory).ok();
 }
 
 /// A core file, its innermost expected functions, and selected locals.

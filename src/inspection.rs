@@ -3,6 +3,7 @@ use crate::{
     VariableUnavailableReason,
 };
 
+/// The largest limits a client may request for one operation.
 pub const MAX_INSPECTION_LIMITS: InspectionLimits = InspectionLimits {
     variables: 4_096,
     value_nodes: 4_096,
@@ -10,9 +11,12 @@ pub const MAX_INSPECTION_LIMITS: InspectionLimits = InspectionLimits {
     memory_reads: 1_024,
     memory_bytes: 1024 * 1024,
     expression_work: 10_240_000,
-    output_bytes: 1024 * 1024,
 };
 
+/// Tracks the resources one inspection operation has used against its limits.
+///
+/// Exhaustion is sticky: once any reservation fails, every later one fails
+/// with the same exhaustion, so a truncated result reports its first cause.
 #[derive(Debug)]
 pub struct InspectionBudget {
     limits: InspectionLimits,
@@ -37,7 +41,6 @@ impl InspectionBudget {
                 memory_reads: 0,
                 memory_bytes: 0,
                 expression_work: 0,
-                output_bytes: 0,
             },
             exhaustion: None,
         }
@@ -77,125 +80,93 @@ impl InspectionBudget {
     }
 
     pub fn consume_variable_value(&mut self) -> Result<(), InspectionExhaustion> {
-        self.can_consume(
-            InspectionLimit::Variables,
-            self.limits.variables,
-            self.usage.variables,
-            1,
-        )?;
-        self.can_consume(
-            InspectionLimit::ValueNodes,
-            self.limits.value_nodes,
-            self.usage.value_nodes,
-            1,
-        )?;
-        self.usage.variables += 1;
-        self.usage.value_nodes += 1;
-        Ok(())
+        self.reserve(&[
+            (InspectionLimit::Variables, 1),
+            (InspectionLimit::ValueNodes, 1),
+        ])
     }
 
     pub fn consume_value_nodes(&mut self, amount: u64) -> Result<(), InspectionExhaustion> {
-        Self::consume(
-            &mut self.exhaustion,
-            InspectionLimit::ValueNodes,
-            self.limits.value_nodes,
-            &mut self.usage.value_nodes,
-            amount,
-        )
+        self.reserve(&[(InspectionLimit::ValueNodes, amount)])
     }
 
+    pub fn consume_memory(&mut self, bytes: usize) -> Result<(), InspectionExhaustion> {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.reserve(&[
+            (InspectionLimit::MemoryReads, 1),
+            (InspectionLimit::MemoryBytes, bytes),
+        ])
+    }
+
+    pub fn consume_expression_work(&mut self, amount: u64) -> Result<(), InspectionExhaustion> {
+        self.reserve(&[(InspectionLimit::ExpressionWork, amount)])
+    }
+
+    /// Records the deepest aggregate level reached, which is a high-water
+    /// mark rather than a sum.
     pub fn observe_aggregate_depth(&mut self, depth: u64) -> Result<(), InspectionExhaustion> {
         if let Some(exhaustion) = self.exhaustion {
             return Err(exhaustion);
         }
         if depth > self.limits.aggregate_depth {
-            let exhaustion = InspectionExhaustion {
-                resource: InspectionLimit::AggregateDepth,
-                limit: self.limits.aggregate_depth,
-                used: self.usage.aggregate_depth,
-                requested: depth,
-            };
-            self.exhaustion = Some(exhaustion);
-            return Err(exhaustion);
+            return Err(self.exhaust(InspectionLimit::AggregateDepth, depth));
         }
         self.usage.aggregate_depth = self.usage.aggregate_depth.max(depth);
         Ok(())
     }
 
-    pub fn consume_memory(&mut self, bytes: usize) -> Result<(), InspectionExhaustion> {
-        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-        self.can_consume(
-            InspectionLimit::MemoryReads,
-            self.limits.memory_reads,
-            self.usage.memory_reads,
-            1,
-        )?;
-        self.can_consume(
-            InspectionLimit::MemoryBytes,
-            self.limits.memory_bytes,
-            self.usage.memory_bytes,
-            bytes,
-        )?;
-        self.usage.memory_reads += 1;
-        self.usage.memory_bytes += bytes;
-        Ok(())
-    }
-
-    pub fn consume_expression_work(&mut self, amount: u64) -> Result<(), InspectionExhaustion> {
-        Self::consume(
-            &mut self.exhaustion,
-            InspectionLimit::ExpressionWork,
-            self.limits.expression_work,
-            &mut self.usage.expression_work,
-            amount,
-        )
-    }
-
-    fn can_consume(
-        &mut self,
-        resource: InspectionLimit,
-        limit: u64,
-        used: u64,
-        requested: u64,
-    ) -> Result<(), InspectionExhaustion> {
+    /// Reserves every request or, if any would exceed its limit, none.
+    fn reserve(&mut self, requests: &[(InspectionLimit, u64)]) -> Result<(), InspectionExhaustion> {
         if let Some(exhaustion) = self.exhaustion {
             return Err(exhaustion);
         }
-        if used.checked_add(requested).is_none_or(|next| next > limit) {
-            let exhaustion = InspectionExhaustion {
-                resource,
-                limit,
-                used,
-                requested,
-            };
-            self.exhaustion = Some(exhaustion);
-            return Err(exhaustion);
+        for &(resource, requested) in requests {
+            let (limit, used) = self.resource(resource);
+            if used.checked_add(requested).is_none_or(|next| next > limit) {
+                return Err(self.exhaust(resource, requested));
+            }
+        }
+        for &(resource, requested) in requests {
+            *self.used_mut(resource) += requested;
         }
         Ok(())
     }
 
-    fn consume(
-        exhaustion: &mut Option<InspectionExhaustion>,
-        resource: InspectionLimit,
-        limit: u64,
-        used: &mut u64,
-        requested: u64,
-    ) -> Result<(), InspectionExhaustion> {
-        if let Some(exhaustion) = *exhaustion {
-            return Err(exhaustion);
-        }
-        let Some(next) = used.checked_add(requested).filter(|next| *next <= limit) else {
-            let value = InspectionExhaustion {
-                resource,
-                limit,
-                used: *used,
-                requested,
-            };
-            *exhaustion = Some(value);
-            return Err(value);
+    const fn exhaust(&mut self, resource: InspectionLimit, requested: u64) -> InspectionExhaustion {
+        let (limit, used) = self.resource(resource);
+        let exhaustion = InspectionExhaustion {
+            resource,
+            limit,
+            used,
+            requested,
         };
-        *used = next;
-        Ok(())
+        self.exhaustion = Some(exhaustion);
+        exhaustion
+    }
+
+    /// Returns a resource's limit and current usage.
+    const fn resource(&self, resource: InspectionLimit) -> (u64, u64) {
+        let (limits, usage) = (&self.limits, &self.usage);
+        match resource {
+            InspectionLimit::Variables => (limits.variables, usage.variables),
+            InspectionLimit::ValueNodes => (limits.value_nodes, usage.value_nodes),
+            InspectionLimit::AggregateDepth => (limits.aggregate_depth, usage.aggregate_depth),
+            InspectionLimit::MemoryReads => (limits.memory_reads, usage.memory_reads),
+            InspectionLimit::MemoryBytes => (limits.memory_bytes, usage.memory_bytes),
+            InspectionLimit::ExpressionWork => (limits.expression_work, usage.expression_work),
+        }
+    }
+
+    const fn used_mut(&mut self, resource: InspectionLimit) -> &mut u64 {
+        let usage = &mut self.usage;
+        match resource {
+            InspectionLimit::Variables => &mut usage.variables,
+            InspectionLimit::ValueNodes => &mut usage.value_nodes,
+            InspectionLimit::AggregateDepth => &mut usage.aggregate_depth,
+            InspectionLimit::MemoryReads => &mut usage.memory_reads,
+            InspectionLimit::MemoryBytes => &mut usage.memory_bytes,
+            InspectionLimit::ExpressionWork => &mut usage.expression_work,
+        }
     }
 }
 
@@ -217,7 +188,6 @@ mod tests {
             memory_reads: 2,
             memory_bytes: 4,
             expression_work: 2,
-            output_bytes: 64,
         }
     }
 

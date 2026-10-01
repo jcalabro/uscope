@@ -1,7 +1,3 @@
-#[allow(
-    dead_code,
-    reason = "watchpoint scenarios use a subset of the shared harness"
-)]
 mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -167,7 +163,7 @@ fn watch_events(
 #[tokio::test]
 async fn write_watchpoints_report_every_store_after_its_instruction() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "scalar_stores").await;
         let mut events = scenario.handle().subscribe();
 
@@ -217,7 +213,6 @@ async fn write_watchpoints_report_every_store_after_its_instruction() {
             assert!(matches!(
                 snapshot.inferior,
                 InferiorState::Stopped {
-                    all_threads_stopped: true,
                     reason: StopReason::Watchpoint { .. },
                     ..
                 }
@@ -274,7 +269,7 @@ async fn write_watchpoints_report_every_store_after_its_instruction() {
 #[tokio::test]
 async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "size_stores").await;
         let capabilities = scenario.handle().watchpoint_capabilities();
         assert_eq!(capabilities.slots, 4);
@@ -381,7 +376,7 @@ async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
 #[tokio::test]
 async fn one_store_reports_every_watchpoint_it_touches() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "paired_store").await;
 
         let first = watch(&scenario, "watch_pair.first", WatchAccess::Write).await;
@@ -436,7 +431,7 @@ async fn one_store_reports_every_watchpoint_it_touches() {
 #[tokio::test]
 async fn accesses_that_do_not_change_the_value_are_still_reported() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "failed_exchange").await;
         let watchpoint = watch(&scenario, "watch_u64", WatchAccess::Write).await;
         let reason = scenario.resume_to_stop().await;
@@ -465,7 +460,7 @@ async fn accesses_that_do_not_change_the_value_are_still_reported() {
 #[tokio::test]
 async fn repeated_string_stores_report_each_iteration_at_the_string_instruction() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "repeated_store").await;
         let watchpoint = watch(&scenario, "watch_wide.words[1]", WatchAccess::Write).await;
 
@@ -500,7 +495,7 @@ async fn repeated_string_stores_report_each_iteration_at_the_string_instruction(
 #[tokio::test]
 async fn access_watchpoints_report_loads_and_read_only_watches_are_refused() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "read_access").await;
 
         let address = symbol(&scenario, "watch_i32").await;
@@ -552,7 +547,7 @@ async fn access_watchpoints_report_loads_and_read_only_watches_are_refused() {
 #[tokio::test]
 async fn expression_watchpoints_keep_watching_the_location_they_resolved() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "retarget_pointer").await;
 
         let target = scenario
@@ -597,7 +592,7 @@ async fn expression_watchpoints_keep_watching_the_location_they_resolved() {
 #[tokio::test]
 async fn kernel_writes_are_invisible_so_previous_is_the_last_observed_value() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "kernel_write").await;
         let watchpoint = watch(&scenario, "watch_u64", WatchAccess::Write).await;
 
@@ -624,7 +619,7 @@ async fn kernel_writes_are_invisible_so_previous_is_the_last_observed_value() {
 #[tokio::test]
 async fn debugger_writes_are_not_reported_but_refresh_the_previous_value() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "scalar_stores").await;
         let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
@@ -655,7 +650,7 @@ async fn debugger_writes_are_not_reported_but_refresh_the_previous_value() {
 #[tokio::test]
 async fn signal_handler_writes_are_reported_inside_the_handler() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "handler_write").await;
         let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
@@ -684,7 +679,7 @@ async fn signal_handler_writes_are_reported_inside_the_handler() {
 #[tokio::test]
 async fn a_handler_run_before_a_breakpoint_repair_reports_its_write() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "await_signal").await;
         let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
         let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
@@ -724,7 +719,7 @@ async fn a_handler_run_before_a_breakpoint_repair_reports_its_write() {
 #[tokio::test]
 async fn forked_children_do_not_inherit_watchpoints() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "fork_write").await;
         let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
@@ -750,7 +745,7 @@ async fn forked_children_do_not_inherit_watchpoints() {
 #[tokio::test]
 async fn vdso_writes_are_reported_in_user_mode() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "vdso_write").await;
         let watchpoint = watch(&scenario, "watch_time", WatchAccess::Write).await;
         assert_eq!(watchpoint.byte_size, 16);
@@ -798,7 +793,7 @@ async fn vdso_writes_are_reported_in_user_mode() {
 async fn a_breakpoint_right_after_a_watched_store_is_still_reported() {
     for fixture in MATRIX {
         for step_instead in [false, true] {
-            let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+            let mut scenario = Scenario::launch(fixture);
             run_to(&mut scenario, "store_then_breakpoint").await;
             let after = symbol(&scenario, "after_watched_store").await;
             scenario
@@ -827,7 +822,7 @@ async fn a_breakpoint_right_after_a_watched_store_is_still_reported() {
 async fn stepping_over_a_breakpoint_on_a_watched_store_reports_the_store() {
     for fixture in MATRIX {
         for kind in [None, Some(StepKind::Instruction)] {
-            let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+            let mut scenario = Scenario::launch(fixture);
             // The function entry is the store itself, so the address
             // breakpoint is installed from the preceding phase.
             run_to(&mut scenario, "store_then_breakpoint").await;
@@ -869,7 +864,7 @@ async fn stepping_over_a_breakpoint_on_a_watched_store_reports_the_store() {
 #[tokio::test]
 async fn source_steps_end_at_a_watched_store_and_leave_no_plan_behind() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "step_over_writer").await;
         let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
@@ -895,7 +890,7 @@ async fn source_steps_end_at_a_watched_store_and_leave_no_plan_behind() {
 #[tokio::test]
 async fn finish_ends_at_a_watched_store_before_the_frame_returns() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "scalar_stores").await;
         let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
         assert_single_hit(
@@ -922,7 +917,7 @@ async fn finish_ends_at_a_watched_store_before_the_frame_returns() {
 #[tokio::test]
 async fn static_locals_are_watched_as_static_storage() {
     for fixture in MATRIX {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "static_local_counter").await;
         let watchpoint = watch(&scenario, "calls", WatchAccess::Write).await;
         assert!(
@@ -1023,13 +1018,7 @@ async fn every_write_from_every_thread_is_reported_exactly_once() {
             other => panic!("unexpected stop while counting: {other:?}"),
         }
         let snapshot = scenario.snapshot().await;
-        assert!(matches!(
-            snapshot.inferior,
-            InferiorState::Stopped {
-                all_threads_stopped: true,
-                ..
-            }
-        ));
+        assert!(matches!(snapshot.inferior, InferiorState::Stopped { .. }));
         for hit in thread_hits(&mut scenario).await {
             assert!(hit.changed() || hit.watchpoint == racing.id);
             if hit.watchpoint == locked.id {
@@ -1245,7 +1234,7 @@ async fn hits_until_invalidated(
 #[tokio::test]
 async fn frame_watchpoints_end_when_their_activation_returns() {
     for fixture in LOCALS {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "leaf_local").await;
         let watchpoint = watch_local(&mut scenario, "local").await;
         scenario
@@ -1283,7 +1272,7 @@ async fn frame_watchpoints_end_when_their_activation_returns() {
 #[tokio::test]
 async fn recursive_activations_keep_their_own_frame_watchpoint() {
     for fixture in LOCALS {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "recurse").await;
         scenario
             .operation(
@@ -1305,7 +1294,7 @@ async fn recursive_activations_keep_their_own_frame_watchpoint() {
 #[tokio::test]
 async fn block_watchpoints_end_when_execution_leaves_the_block() {
     for fixture in LOCALS {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         scenario
             .add_source_breakpoint("watch-locals.c", locals_line("inner += 1;"))
             .await;
@@ -1329,7 +1318,7 @@ async fn block_watchpoints_end_when_execution_leaves_the_block() {
 #[tokio::test]
 async fn a_tail_call_replacing_the_activation_ends_its_watchpoints() {
     for fixture in LOCALS {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "tail_caller").await;
         let watchpoint = watch_local(&mut scenario, "mine").await;
         // The callee runs at the replaced activation's frame address.
@@ -1345,7 +1334,7 @@ async fn a_tail_call_replacing_the_activation_ends_its_watchpoints() {
 #[tokio::test]
 async fn longjmp_past_an_activation_ends_its_watchpoints() {
     for fixture in LOCALS {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         scenario
             .add_source_breakpoint("watch-locals.c", locals_line("doomed += 1;"))
             .await;
@@ -1366,7 +1355,7 @@ async fn longjmp_past_an_activation_ends_its_watchpoints() {
 #[tokio::test]
 async fn a_frame_watchpoint_ends_with_its_owner_thread() {
     for fixture in LOCALS {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         scenario
             .add_source_breakpoint("watch-locals.c", locals_line("owned += 1;"))
             .await;
@@ -1470,87 +1459,33 @@ async fn arming_rolls_back_every_thread_when_a_later_thread_has_no_capacity() {
 
 /// A process launched outside the debugger that announces the address of the
 /// word it writes once released.
+/// The watch-attach fixture, which reports the address it watches.
 struct AttachTarget {
-    child: Option<std::process::Child>,
+    process: support::ExternalProcess,
     watched: u64,
 }
 
 impl AttachTarget {
     fn spawn() -> Self {
-        use std::io::BufRead as _;
-        let mut child = std::process::Command::new(Scenario::fixture("watch-attach"))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn attach target");
-        let mut line = String::new();
-        std::io::BufReader::new(child.stdout.as_mut().expect("target stdout"))
-            .read_line(&mut line)
-            .expect("read readiness");
-        let watched = line
-            .trim()
+        let process = support::ExternalProcess::spawn(&Scenario::fixture("watch-attach"));
+        let watched = process
+            .ready_line()
             .strip_prefix("READY 0x")
             .and_then(|address| u64::from_str_radix(address, 16).ok())
-            .unwrap_or_else(|| panic!("unexpected readiness line {line:?}"));
-        Self {
-            child: Some(child),
-            watched,
-        }
-    }
-
-    fn process_id(&self) -> uscope::ProcessId {
-        uscope::ProcessId::new(u64::from(self.child.as_ref().expect("live target").id()))
+            .unwrap_or_else(|| panic!("unexpected readiness {:?}", process.ready_line()));
+        Self { process, watched }
     }
 
     /// Arms DR0 on the target from a tracer that then exits without
     /// detaching, as a crashed debugger would.
     fn orphan_watchpoint(&self) {
         let status = std::process::Command::new(Scenario::fixture("watch-orphaner"))
-            .arg(self.process_id().get().to_string())
+            .arg(self.process.process_id().get().to_string())
             .arg(format!("{:x}", self.watched))
             .status()
             .expect("run orphaning tracer");
         assert!(status.success(), "orphaning tracer failed: {status}");
     }
-
-    fn release(&mut self) {
-        use std::io::Write as _;
-        self.child
-            .as_mut()
-            .expect("live target")
-            .stdin
-            .as_mut()
-            .expect("target stdin")
-            .write_all(b"x")
-            .expect("release target");
-    }
-
-    fn wait(mut self) -> std::process::ExitStatus {
-        self.child
-            .take()
-            .expect("live target")
-            .wait()
-            .expect("reap target")
-    }
-}
-
-impl Drop for AttachTarget {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-async fn attach(target: &AttachTarget) -> uscope::Debugger {
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        uscope::Debugger::attach(target.process_id()),
-    )
-    .await
-    .expect("attach timed out")
-    .expect("attach")
 }
 
 #[tokio::test]
@@ -1561,9 +1496,9 @@ async fn attaching_clears_watchpoints_a_dead_tracer_left_armed() {
     // the scenario below cannot pass vacuously.
     let mut unattended = AttachTarget::spawn();
     unattended.orphan_watchpoint();
-    unattended.release();
+    unattended.process.release();
     assert_eq!(
-        unattended.wait().signal(),
+        unattended.process.wait().signal(),
         Some(5),
         "SIGTRAP kills the target"
     );
@@ -1571,17 +1506,17 @@ async fn attaching_clears_watchpoints_a_dead_tracer_left_armed() {
     // Detaching immediately must leave the target able to write.
     let mut target = AttachTarget::spawn();
     target.orphan_watchpoint();
-    let debugger = attach(&target).await;
+    let debugger = target.process.attach().await;
     debugger.shutdown().await.expect("detach");
-    target.release();
-    assert_eq!(target.wait().code(), Some(0));
+    target.process.release();
+    assert_eq!(target.process.wait().code(), Some(0));
 
     // While attached, the foreign registers must already be clear: a hit
     // in a slot no watchpoint owns would be an unclassifiable stop.
     let mut target = AttachTarget::spawn();
     target.orphan_watchpoint();
-    let debugger = attach(&target).await;
-    target.release();
+    let debugger = target.process.attach().await;
+    target.process.release();
     assert_eq!(
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -1602,7 +1537,7 @@ async fn detaching_disarms_watchpoints_even_while_they_are_being_hit() {
     // the interrupt, or a register left armed, is caught reliably.
     for _ in 0..8 {
         let mut target = AttachTarget::spawn();
-        let debugger = attach(&target).await;
+        let debugger = target.process.attach().await;
         let handle = debugger.handle();
         let watchpoint = handle
             .watch(expression("attach_watched"), WatchAccess::Write)
@@ -1610,7 +1545,7 @@ async fn detaching_disarms_watchpoints_even_while_they_are_being_hit() {
             .expect("watch attached global");
         assert_eq!(watchpoint.address.get(), target.watched);
 
-        target.release();
+        target.process.release();
         for expected in 1..=3_u64 {
             let reason = tokio::time::timeout(std::time::Duration::from_secs(5), handle.resume())
                 .await
@@ -1644,7 +1579,7 @@ async fn detaching_disarms_watchpoints_even_while_they_are_being_hit() {
             std::iter::from_fn(|| events.try_recv().ok())
                 .any(|event| matches!(event, DebuggerEvent::InferiorDetached { .. }))
         );
-        let status = target.wait();
+        let status = target.process.wait();
         assert_eq!(
             status.code(),
             Some(0),
@@ -1661,7 +1596,7 @@ async fn watchpoints_work_across_the_rust_and_zig_matrix() {
         ("watch-zig-o0", "watchReady", "watch.watched"),
         ("watch-zig-o2", "watchReady", "watch.watched"),
     ] {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, function).await;
         let watchpoint = watch(&scenario, global, WatchAccess::Write).await;
         assert!(
@@ -1689,7 +1624,7 @@ async fn watchpoints_work_across_the_rust_and_zig_matrix() {
 #[tokio::test]
 async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_objects() {
     for fixture in ["watch-go-o0", "watch-go-o2"] {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         scenario.add_breakpoint("main.watchReady").await;
         let mut reason = scenario.run_to_stop().await;
         while matches!(&reason, StopReason::Exception(exception) if exception.code == 23) {
@@ -1758,7 +1693,7 @@ async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_obje
 #[tokio::test]
 async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
     let fixture = "watch-gcc-o0";
-    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    let mut scenario = Scenario::launch(fixture);
     let location = |address, byte_size| WatchpointSpec::Location { address, byte_size };
 
     // No process exists yet.
@@ -1854,7 +1789,7 @@ async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
 #[tokio::test]
 async fn stale_targets_and_running_processes_cannot_be_armed() {
     let fixture = "watch-gcc-o0";
-    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    let mut scenario = Scenario::launch(fixture);
     let location = |address, byte_size| WatchpointSpec::Location { address, byte_size };
     run_to(&mut scenario, "scalar_stores").await;
 
@@ -1909,7 +1844,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
             "unavailable",
         ),
     ] {
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         scenario
             .add_source_breakpoint("variables-parameters.c", 22)
             .await;
@@ -1937,7 +1872,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
 
     // A bit-field member is extracted from its storage, not addressable.
     let fixture = "records-c-gcc-o0";
-    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    let mut scenario = Scenario::launch(fixture);
     run_to(&mut scenario, "inspect_records").await;
     let result = scenario
         .handle()
@@ -1974,7 +1909,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
 
     // A debug-information constant has no storage.
     let fixture = "globals-cpp-gcc-o0";
-    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    let mut scenario = Scenario::launch(fixture);
     run_to(&mut scenario, "inspect_globals").await;
     let result = scenario
         .handle()
@@ -2026,7 +1961,7 @@ async fn post_mortem_targets_refuse_watchpoints() {
 async fn repeated_sessions_with_armed_watchpoints_leave_no_processes_behind() {
     for iteration in 0..4 {
         let fixture = MATRIX[iteration % MATRIX.len()];
-        let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+        let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "scalar_stores").await;
         watch(&scenario, "watch_i32", WatchAccess::Write).await;
         watch(&scenario, "watch_u64", WatchAccess::ReadWrite).await;
@@ -2042,7 +1977,7 @@ async fn repeated_sessions_with_armed_watchpoints_leave_no_processes_behind() {
 #[tokio::test]
 async fn unloading_a_module_ends_watchpoints_on_its_static_storage() {
     let fixture = "globals-shared";
-    let mut scenario = Scenario::new(fixture, Scenario::fixture(fixture));
+    let mut scenario = Scenario::launch(fixture);
     run_to(&mut scenario, "after_load").await;
     let library = scenario
         .operation("list modules", scenario.handle().loaded_modules())
@@ -2095,7 +2030,7 @@ async fn unloading_a_module_ends_watchpoints_on_its_static_storage() {
 #[tokio::test]
 async fn attached_processes_arm_threads_they_create_later() {
     let mut target = AttachTarget::spawn();
-    let debugger = attach(&target).await;
+    let debugger = target.process.attach().await;
     let handle = debugger.handle();
     let main = handle
         .snapshot()
@@ -2107,7 +2042,7 @@ async fn attached_processes_arm_threads_they_create_later() {
         .watch(expression("attach_watched"), WatchAccess::Write)
         .await
         .expect("watch attached global");
-    target.release();
+    target.process.release();
 
     let mut values = Vec::new();
     let mut writers = BTreeSet::new();
