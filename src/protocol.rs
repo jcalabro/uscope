@@ -173,7 +173,9 @@ pub struct CoreDumpOptions {
     /// Use module files that the dump cannot prove match its recorded images.
     ///
     /// Such modules contribute debug metadata only: their file contents never
-    /// substitute for memory the dump did not save.
+    /// substitute for memory the dump did not save. A file that cannot be
+    /// placed at its recorded image is still refused, since relocating it
+    /// would be a guess.
     pub allow_module_mismatch: bool,
 }
 

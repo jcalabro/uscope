@@ -140,6 +140,8 @@ pub enum Error {
         "the core dump saved nothing that verifies {path}; allow module mismatches to use it anyway"
     )]
     CoreModuleUnverified { path: PathBuf },
+    #[error("{path} cannot be placed at the image recorded in the core dump: {detail}")]
+    CoreModuleUnplaceable { path: PathBuf, detail: String },
     #[error("a post-mortem core dump cannot execute, be modified, or hold breakpoints")]
     PostMortemTarget,
 

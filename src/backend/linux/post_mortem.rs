@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io;
+use std::ops::Range;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,8 +21,8 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::core_dump::{
     AT_ENTRY, AT_PHDR, CoreDump, CoreError, CoreMemory, CoreMemoryError, CoreSignal, CoreThread,
-    FileBacking, ImageEvidence, ImageMappings, SavedHeader, image_mappings, is_elf, saved_header,
-    verify_image,
+    FileBacking, ImageEvidence, ImageMappings, ImageVerification, SavedHeader, image_mappings,
+    is_elf, saved_header, verify_image,
 };
 use super::thread_db::{self, ProcessServices};
 use super::{
@@ -173,6 +174,8 @@ struct ImageFile {
     data: Arc<[u8]>,
     load_bias: u64,
     identity: ModuleIdentity,
+    /// Dump-time addresses whose file bytes are the process's memory.
+    read_only: Vec<Range<u64>>,
 }
 
 /// Applies the identity policy: proven files are always used; mismatched or
@@ -206,8 +209,22 @@ fn read_image_file(
 ) -> Result<ImageFile> {
     let data: Arc<[u8]> = fs::read(path)?.into();
     let path = path.canonicalize()?;
-    let verification = verify_image(core, image, &data).map_err(core_error)?;
-    let mut evidence = verification.evidence;
+    let (load_bias, mut evidence, read_only) =
+        match verify_image(core, image, &data).map_err(core_error)? {
+            ImageVerification::Placed {
+                load_bias,
+                evidence,
+                read_only,
+            } => (load_bias, evidence, read_only),
+            // Allowing a mismatch permits using a file's metadata, not
+            // relocating it to a guessed address.
+            ImageVerification::Unplaced(detail) if allow => {
+                return Err(Error::CoreModuleUnplaceable { path, detail });
+            }
+            ImageVerification::Unplaced(detail) => {
+                return Err(Error::CoreModuleMismatch { path, detail });
+            }
+        };
     // The kernel records where execution began; a different entry point is
     // proof of a different executable even when no other evidence survives.
     if let Some(recorded) = entry
@@ -215,7 +232,7 @@ fn read_image_file(
     {
         // Verification already proved the file parses as an ELF image.
         let declared = object::File::parse(data.as_ref()).map_or(0, |object| object.entry());
-        if verification.load_bias.checked_add(declared) != Some(recorded) {
+        if load_bias.checked_add(declared) != Some(recorded) {
             evidence = ImageEvidence::Mismatch(format!(
                 "the recorded entry point {recorded:#x} differs from the file's"
             ));
@@ -225,8 +242,9 @@ fn read_image_file(
     Ok(ImageFile {
         path,
         data,
-        load_bias: verification.load_bias,
+        load_bias,
         identity,
+        read_only,
     })
 }
 
@@ -255,6 +273,7 @@ impl ResolvedModules {
             backings.extend(FileBacking::for_image(
                 &self.main_image,
                 &self.main_file.data,
+                &self.main_file.read_only,
             ));
         }
         for library in self
@@ -262,7 +281,11 @@ impl ResolvedModules {
             .iter()
             .filter(|library| library.file.identity.is_verified())
         {
-            backings.extend(FileBacking::for_image(&library.image, &library.file.data));
+            backings.extend(FileBacking::for_image(
+                &library.image,
+                &library.file.data,
+                &library.file.read_only,
+            ));
         }
         backings
     }

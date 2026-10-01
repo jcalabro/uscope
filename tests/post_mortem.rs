@@ -948,6 +948,171 @@ async fn unsaved_and_truncated_memory_stays_unavailable_rather_than_guessed() {
     }
 }
 
+/// Reads `length` bytes and returns them only when the read completed.
+async fn complete_read(
+    scenario: &Scenario,
+    address: VirtualAddress,
+    length: u64,
+) -> Option<Vec<u8>> {
+    let read = scenario
+        .operation("read", scenario.handle().read_memory(address, length))
+        .await;
+    if read.completion == MemoryReadCompletion::Complete {
+        Some(read.bytes.to_vec())
+    } else {
+        assert!(read.bytes.is_empty(), "{read:?}");
+        None
+    }
+}
+
+#[tokio::test]
+async fn modified_file_pages_missing_from_a_dump_are_never_read_from_the_file() {
+    let message_bytes = b"post-mortem read-only message\0";
+    // Each core is a separate randomized run with its own load addresses.
+    let addresses = async |scenario: &Scenario| {
+        let handle = scenario.handle();
+        (
+            scenario
+                .operation("counter", handle.runtime_address("crash_counter"))
+                .await,
+            scenario
+                .operation("message", handle.runtime_address("crash_message"))
+                .await,
+        )
+    };
+    let reference = open_core("crash-gcc-o0-segv.core");
+    let (counter, message) = addresses(&reference).await;
+    assert_eq!(
+        complete_read(&reference, counter, 4).await,
+        Some(8_i32.to_le_bytes().to_vec()),
+        "the dump saved the incremented counter"
+    );
+    reference.shutdown().await;
+
+    // A dump that saved only header pages omits the modified .data page too.
+    // The file still holds the counter's initial value, which is not the
+    // process's memory.
+    let headers_only = open_core("crash-gcc-o0-headers-only.core");
+    assert_eq!(
+        loaded_identity(&core_info(&headers_only), "crash-gcc-o0"),
+        &ModuleIdentity::BuildId
+    );
+    let (headers_counter, headers_message) = addresses(&headers_only).await;
+    assert_eq!(
+        complete_read(&headers_only, headers_message, message_bytes.len() as u64).await,
+        Some(message_bytes.to_vec()),
+        "read-only pages are recovered from the verified file"
+    );
+    assert_eq!(complete_read(&headers_only, headers_counter, 4).await, None);
+    headers_only.shutdown().await;
+
+    // A dump cut short inside the saved .data segment loses the counter. Its
+    // header records that the producer saved those bytes, so the file cannot
+    // stand in for them. gcore writes notes last, so the segment's data is
+    // moved to end at the counter instead of truncating the file itself.
+    let path = edited_core("truncated-data", "crash-gcc-o0-segv.core", |bytes| {
+        let (header, start, _) = load_headers(bytes)
+            .into_iter()
+            .find(|&(_, start, end)| (start..end).contains(&counter.get()))
+            .expect("a load segment holds the counter");
+        let cut = u64::try_from(bytes.len()).unwrap() - (counter.get() - start);
+        bytes[header + PHDR_OFFSET..header + PHDR_OFFSET + 8].copy_from_slice(&cut.to_le_bytes());
+    });
+    let truncated = Scenario::open_core("truncated data", &CoreDumpOptions::new(path));
+    assert_eq!(
+        loaded_identity(&core_info(&truncated), "crash-gcc-o0"),
+        &ModuleIdentity::BuildId
+    );
+    assert_eq!(
+        complete_read(&truncated, message, message_bytes.len() as u64).await,
+        Some(message_bytes.to_vec())
+    );
+    assert_eq!(complete_read(&truncated, counter, 4).await, None);
+    truncated.shutdown().await;
+}
+
+const PHDR_VADDR: usize = 16;
+
+/// Writes a copy of the gcc -O0 crash executable with edited program headers.
+fn edited_executable(test: &str, edit: impl FnOnce(&mut Vec<u8>)) -> PathBuf {
+    let mut bytes = fs::read(Scenario::fixture("crash-gcc-o0")).expect("read executable");
+    edit(&mut bytes);
+    let path = scratch_dir(test).join("crash-gcc-o0");
+    fs::write(&path, bytes).expect("write edited executable");
+    path
+}
+
+fn with_executable(executable: &Path, allow: bool) -> CoreDumpOptions {
+    CoreDumpOptions {
+        core: core("crash-gcc-o0-segv.core"),
+        executable: Some(executable.to_owned()),
+        allow_module_mismatch: allow,
+    }
+}
+
+#[tokio::test]
+async fn allowed_mismatches_keep_the_recorded_placement_or_refuse_to_relocate() {
+    let reference = open_core("crash-gcc-o0-segv.core");
+    let message = reference
+        .operation(
+            "message",
+            reference.handle().runtime_address("crash_message"),
+        )
+        .await;
+    reference.shutdown().await;
+
+    // A segment extending past the end of the file proves a different file,
+    // but the recorded mapping still places it.
+    let oversized = edited_executable("oversized", |bytes| {
+        let (header, _, _) = *load_headers(bytes).last().expect("a load segment");
+        let past_end = u64::try_from(bytes.len()).unwrap() + 1;
+        bytes[header + PHDR_FILESZ..header + PHDR_FILESZ + 8]
+            .copy_from_slice(&past_end.to_le_bytes());
+    });
+    assert!(matches!(
+        Debugger::open_core(&with_executable(&oversized, false)),
+        Err(Error::CoreModuleMismatch { detail, .. }) if detail.contains("outside")
+    ));
+    let allowed = Scenario::open_core("oversized", &with_executable(&oversized, true));
+    assert!(matches!(
+        loaded_identity(&core_info(&allowed), "crash-gcc-o0"),
+        ModuleIdentity::Mismatched { detail } if detail.contains("outside")
+    ));
+    assert_eq!(
+        allowed
+            .operation("message", allowed.handle().runtime_address("crash_message"))
+            .await,
+        message,
+        "the module is relocated to its recorded mapping"
+    );
+    allowed.shutdown().await;
+
+    // Linked above the recorded image, the file has no load bias that places
+    // it there. Relocating it anywhere would be a guess.
+    let unplaceable = edited_executable("unplaceable", |bytes| {
+        for (header, _, _) in load_headers(bytes) {
+            let address = u64::from_le_bytes(
+                bytes[header + PHDR_VADDR..header + PHDR_VADDR + 8]
+                    .try_into()
+                    .unwrap(),
+            );
+            bytes[header + PHDR_VADDR..header + PHDR_VADDR + 8]
+                .copy_from_slice(&(address + 0x7f00_0000_0000).to_le_bytes());
+        }
+    });
+    assert!(matches!(
+        Debugger::open_core(&with_executable(&unplaceable, false)),
+        Err(Error::CoreModuleMismatch { .. })
+    ));
+    let refused = Debugger::open_core(&with_executable(&unplaceable, true));
+    assert!(
+        matches!(&refused, Err(Error::CoreModuleUnplaceable { path, detail })
+            if path.ends_with("crash-gcc-o0") && detail.contains("no loadable segment")),
+        "{:?}",
+        refused.err()
+    );
+}
+
 #[tokio::test]
 async fn invalid_core_files_fail_with_typed_errors() {
     let directory = scratch_dir("invalid");

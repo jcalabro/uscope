@@ -313,9 +313,16 @@ generate_core() {
         -ex "gcore ${temporary}" \
         -ex 'kill' \
         --args "$@" 2>&1) || true
-    if ! grep -Fx "uscope-signal=${signal}" <<<"$log" >/dev/null || [[ ! -s "$temporary" ]]; then
+    if ! grep -Fx "uscope-signal=${signal}" <<<"$log" >/dev/null; then
         printf 'error: %s did not stop with signal %s for a core dump:\n%s\n' \
             "$1" "$signal" "$log" >&2
+        rm -f "$temporary"
+        exit 1
+    fi
+    # gdb's batch status reflects only its last command, so gcore's own
+    # completion message is the evidence that the core was fully written.
+    if ! grep -Fx "Saved corefile ${temporary}" <<<"$log" >/dev/null || [[ ! -s "$temporary" ]]; then
+        printf 'error: gcore did not write %s:\n%s\n' "$temporary" "$log" >&2
         rm -f "$temporary"
         exit 1
     fi
@@ -654,10 +661,12 @@ build_zig_fixture "$zig_fixtures_dir/crash.zig" "$output_dir/crash-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 
 # Post-mortem cores. 0x33 is the kernel's default coredump_filter; 0x23 omits
-# ELF header pages, and 0 saves no memory at all, leaving nothing that can
+# ELF header pages, 0x10 saves only ELF header pages so modified file-backed
+# pages are omitted too, and 0 saves no memory at all, leaving nothing that can
 # verify a module file.
 readonly default_core_filter=0x33
 readonly headerless_core_filter=0x23
+readonly headers_only_core_filter=0x10
 readonly memoryless_core_filter=0x0
 for variant in gcc-o0 clang-o2 gcc-o2-nopie; do
     program="$output_dir/crash-${variant}"
@@ -668,6 +677,8 @@ for variant in gcc-o0 clang-o2 gcc-o2-nopie; do
         "$inputs" "$program" abort
 done
 generate_core "$output_dir/crash-gcc-o0-headerless.core" 11 "$headerless_core_filter" \
+    "$output_dir/crash-gcc-o0 $output_dir/libcrash.so" "$output_dir/crash-gcc-o0" segv
+generate_core "$output_dir/crash-gcc-o0-headers-only.core" 11 "$headers_only_core_filter" \
     "$output_dir/crash-gcc-o0 $output_dir/libcrash.so" "$output_dir/crash-gcc-o0" segv
 generate_core "$output_dir/crash-gcc-o0-memoryless.core" 11 "$memoryless_core_filter" \
     "$output_dir/crash-gcc-o0 $output_dir/libcrash.so" "$output_dir/crash-gcc-o0" segv

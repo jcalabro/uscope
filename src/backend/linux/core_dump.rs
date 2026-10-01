@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
+use std::ops::Range;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
@@ -129,14 +130,14 @@ pub(super) struct CoreFileMapping {
     pub(super) path: PathBuf,
 }
 
-/// One `PT_LOAD` segment. Only the first `saved` bytes are present in the
-/// file; producers omit unmodified file-backed pages, and truncation can
-/// remove the rest.
+/// One `PT_LOAD` segment. The producer saved the first `recorded` bytes and
+/// omitted the rest; truncation can leave only the first `saved` of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CoreSegment {
     start: u64,
     end: u64,
     file_offset: u64,
+    recorded: u64,
     saved: u64,
 }
 
@@ -221,6 +222,16 @@ impl CoreDump {
         (offset < segment.saved).then(|| (segment.file_offset + offset, segment.saved - offset))
     }
 
+    /// Whether the producer saved `address` but truncation lost it. Only the
+    /// dumped process held those bytes; no file may stand in for them.
+    fn truncated(&self, address: u64) -> bool {
+        self.segment_index(address).is_some_and(|index| {
+            let segment = &self.segments[index];
+            let offset = address - segment.start;
+            segment.saved <= offset && offset < segment.recorded
+        })
+    }
+
     /// Reads bytes the dump itself saved, never substituting file contents.
     pub(super) fn read_saved(
         &self,
@@ -300,6 +311,7 @@ fn parse<'data, R: ReadRef<'data>>(data: R, len: u64) -> Result<Metadata, CoreEr
                     start,
                     end,
                     file_offset,
+                    recorded: file_size,
                     saved,
                 });
             }
@@ -720,9 +732,17 @@ pub(super) enum ImageEvidence {
 
 /// A candidate file's placement and identity evidence for one dumped image.
 #[derive(Debug)]
-pub(super) struct ImageVerification {
-    pub(super) load_bias: u64,
-    pub(super) evidence: ImageEvidence,
+pub(super) enum ImageVerification {
+    /// The file's segments are placed at the dumped image by `load_bias`.
+    Placed {
+        load_bias: u64,
+        evidence: ImageEvidence,
+        /// Dump-time addresses of the file's read-only, file-backed bytes.
+        read_only: Vec<Range<u64>>,
+    },
+    /// No load bias places the file at the dumped image, which proves it is
+    /// a different file.
+    Unplaced(String),
 }
 
 /// The file's loadable segments, normalized from its program headers.
@@ -744,28 +764,28 @@ pub(super) fn verify_image(
     image: &ImageMappings,
     file: &[u8],
 ) -> Result<ImageVerification, CoreError> {
-    let mismatch = |detail: String| {
-        Ok(ImageVerification {
-            load_bias: 0,
-            evidence: ImageEvidence::Mismatch(detail),
-        })
-    };
     // The dump recorded an ELF image here; a file that no longer parses as
     // one, or whose segments lie outside it, is a different file.
     let object = match ElfFile64::<LittleEndian>::parse(file) {
         Ok(object) => object,
-        Err(error) => return mismatch(format!("the file is not a 64-bit ELF image: {error}")),
+        Err(error) => {
+            return Ok(ImageVerification::Unplaced(format!(
+                "the file is not a 64-bit ELF image: {error}"
+            )));
+        }
     };
     let endian = LittleEndian;
     let mut segments = Vec::new();
     let mut notes = Vec::new();
+    let mut outside = false;
     for header in object.elf_program_headers() {
         let file_offset = header.p_offset(endian);
         let file_size = header.p_filesz(endian);
         if matches!(header.p_type(endian), elf::PT_LOAD | elf::PT_NOTE)
             && file_range(file, file_offset, file_size).is_err()
         {
-            return mismatch("a segment of the file lies outside it".to_owned());
+            outside = true;
+            continue;
         }
         match header.p_type(endian) {
             elf::PT_LOAD => segments.push(FileSegment {
@@ -788,16 +808,24 @@ pub(super) fn verify_image(
                 .checked_sub(segment.address & !(PAGE_SIZE - 1))
         })
     else {
-        return mismatch(
+        return Ok(ImageVerification::Unplaced(
             "no loadable segment of the file is placed at the dumped image".to_owned(),
-        );
+        ));
     };
     let verified = |evidence| {
-        Ok(ImageVerification {
+        Ok(ImageVerification::Placed {
             load_bias,
             evidence,
+            read_only: read_only_ranges(&segments, load_bias),
         })
     };
+    // Mismatched files may still supply metadata, so they keep the placement
+    // the recorded mapping implies.
+    if outside {
+        return verified(ImageEvidence::Mismatch(
+            "a segment of the file lies outside it".to_owned(),
+        ));
+    }
     if let Some(detail) = placement_mismatch(image, &segments, load_bias) {
         return verified(ImageEvidence::Mismatch(detail));
     }
@@ -814,6 +842,19 @@ pub(super) fn verify_image(
         Ok(compared) => ImageEvidence::SavedContent { compared },
     };
     verified(evidence)
+}
+
+/// Writable segments are excluded: the process may have modified them, and a
+/// dump can omit modified pages when its filter or truncation drops them.
+fn read_only_ranges(segments: &[FileSegment], load_bias: u64) -> Vec<Range<u64>> {
+    segments
+        .iter()
+        .filter(|segment| !segment.writable)
+        .filter_map(|segment| {
+            let start = load_bias.checked_add(segment.address)?;
+            Some(start..start.checked_add(segment.file_size)?)
+        })
+        .collect()
 }
 
 /// Protection changes such as RELRO split one segment into several mappings,
@@ -955,8 +996,8 @@ fn compare_read_only_content(
 }
 
 /// Bytes of a verified image file mapped at dump time, used for memory the
-/// producer did not save. Private file mappings are only omitted from a dump
-/// while unmodified, so these bytes are exactly the process's memory.
+/// producer did not save. Only read-only segments qualify: a dump may omit
+/// modified writable pages, whose file contents are then stale.
 #[derive(Clone)]
 pub(super) struct FileBacking {
     start: u64,
@@ -966,15 +1007,26 @@ pub(super) struct FileBacking {
 }
 
 impl FileBacking {
-    pub(super) fn for_image(image: &ImageMappings, data: &Arc<[u8]>) -> Vec<Self> {
+    /// Backs each part of the image's mappings that lies in `read_only`.
+    pub(super) fn for_image(
+        image: &ImageMappings,
+        data: &Arc<[u8]>,
+        read_only: &[Range<u64>],
+    ) -> Vec<Self> {
         image
             .mappings
             .iter()
-            .map(|mapping| Self {
-                start: mapping.start,
-                end: mapping.end,
-                file_offset: mapping.file_offset,
-                data: Arc::clone(data),
+            .flat_map(|mapping| {
+                read_only.iter().filter_map(move |range| {
+                    let start = mapping.start.max(range.start);
+                    let end = mapping.end.min(range.end);
+                    (start < end).then(|| Self {
+                        start,
+                        end,
+                        file_offset: mapping.file_offset.saturating_add(start - mapping.start),
+                        data: Arc::clone(data),
+                    })
+                })
             })
             .collect()
     }
@@ -1010,6 +1062,8 @@ impl CoreMemory {
                     .read_exact_at(&mut buffer[done..done + count], offset)
                     .map_err(CoreMemoryError::Io)?;
                 count
+            } else if self.core.truncated(current) {
+                return Err(CoreMemoryError::Unavailable);
             } else {
                 // Unsaved bytes end where the next saved segment begins.
                 let limit = self.core.next_segment_start(current) - current;
@@ -1060,9 +1114,13 @@ pub(super) fn fuzz(data: &[u8]) {
         return;
     };
     let images = image_mappings(&core.files);
+    let data: Arc<[u8]> = Arc::from(data);
+    let mut backings = Vec::new();
     for image in &images {
         let _ = saved_header(&core, image);
-        let _ = verify_image(&core, image, data);
+        if let Ok(ImageVerification::Placed { read_only, .. }) = verify_image(&core, image, &data) {
+            backings.extend(FileBacking::for_image(image, &data, &read_only));
+        }
     }
     let addresses = core
         .segments
@@ -1072,14 +1130,11 @@ pub(super) fn fuzz(data: &[u8]) {
                 segment.start,
                 segment.end.saturating_sub(1),
                 segment.start + segment.saved,
+                segment.start.saturating_add(segment.recorded),
             ]
         })
         .chain(core.files.iter().map(|file| file.start))
         .collect::<Vec<_>>();
-    let backings = images
-        .iter()
-        .flat_map(|image| FileBacking::for_image(image, &Arc::from(data)))
-        .collect();
     let memory = CoreMemory::new(Arc::new(core), backings);
     for address in addresses {
         let mut buffer = [0; 64];
@@ -1627,14 +1682,26 @@ mod tests {
             .collect();
         let image = ImageMappings {
             path: "/bin/app".into(),
-            mappings: vec![CoreFileMapping {
-                start: 0x10000,
-                end: 0x15000,
-                file_offset: 0,
-                path: "/bin/app".into(),
-            }],
+            mappings: vec![
+                CoreFileMapping {
+                    start: 0x10000,
+                    end: 0x15000,
+                    file_offset: 0,
+                    path: "/bin/app".into(),
+                },
+                // The file could supply the truncated segment's lost tail.
+                CoreFileMapping {
+                    start: 0x20000,
+                    end: 0x21000,
+                    file_offset: 0x3000,
+                    path: "/bin/app".into(),
+                },
+            ],
         };
-        let memory = CoreMemory::new(Arc::clone(&core), FileBacking::for_image(&image, &file));
+        let memory = CoreMemory::new(
+            Arc::clone(&core),
+            FileBacking::for_image(&image, &file, &[0x10000..0x15000, 0x20000..0x21000]),
+        );
         let unbacked = CoreMemory::new(Arc::clone(&core), Vec::new());
         let read = |memory: &CoreMemory, address: u64, size: usize| {
             let mut buffer = vec![0; size];
@@ -1683,8 +1750,12 @@ mod tests {
         );
         assert!(
             matches!(read(&memory, 0x207fc, 8), Err(CoreMemoryError::Unavailable)),
-            "and loses the rest"
+            "and loses the rest, which the producer saved and the file cannot replace"
         );
+        assert!(matches!(
+            read(&memory, 0x20ffc, 4),
+            Err(CoreMemoryError::Unavailable)
+        ));
         assert!(
             matches!(
                 read(&memory, u64::MAX - 3, 8),
@@ -1701,6 +1772,20 @@ mod tests {
             ),
             "no file, no bytes"
         );
+        // Only read-only segment bytes are backed, at their own file offsets.
+        let clipped = CoreMemory::new(
+            Arc::clone(&core),
+            FileBacking::for_image(&image, &file, std::slice::from_ref(&(0x12000..0x12800))),
+        );
+        assert_eq!(read(&clipped, 0x127fc, 4).unwrap(), [3; 4]);
+        assert!(matches!(
+            read(&clipped, 0x127fe, 4),
+            Err(CoreMemoryError::Unavailable)
+        ));
+        assert!(matches!(
+            read(&clipped, 0x11000, 1),
+            Err(CoreMemoryError::Unavailable)
+        ));
         // An NT_FILE offset near the top of the address space cannot wrap
         // around into the start of the file.
         let wrapping = CoreMemory::new(
