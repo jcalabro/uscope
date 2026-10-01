@@ -114,7 +114,9 @@ const fn honestly_unavailable(reason: &VariableUnavailableReason) -> bool {
 /// `frames_leaf` runs, when the program determines it.
 fn truth(function: &str, name: &str, recursion: Option<i128>, argc: i128) -> Option<i128> {
     match (function, name) {
-        ("frames_leaf", "token") | ("frames_inlined", "doubled") => Some(12),
+        ("frames_leaf", "token") | ("frames_relay", "value") | ("frames_inlined", "doubled") => {
+            Some(12)
+        }
         ("frames_leaf", "leaf_local") => Some(120),
         ("frames_inlined", "base") => Some(6),
         ("frames_keep" | "frames_recurse", "seed") => Some(5),
@@ -134,6 +136,7 @@ fn required(variant: &str) -> &'static [(&'static str, &'static str)] {
         "gcc-o0" | "clang-o0" => &[
             ("frames_leaf", "token"),
             ("frames_leaf", "leaf_local"),
+            ("frames_relay", "value"),
             ("frames_inlined", "base"),
             ("frames_inlined", "doubled"),
             ("frames_keep", "seed"),
@@ -165,7 +168,8 @@ fn required(variant: &str) -> &'static [(&'static str, &'static str)] {
 /// position the program determines.
 fn call_line(function: &str, recursion: Option<i128>) -> Option<u64> {
     match (function, recursion) {
-        ("frames_inlined", _) => Some(frames_line("int64_t result = frames_leaf(doubled);")),
+        ("frames_relay", _) => Some(frames_line("int64_t result = frames_leaf(value);")),
+        ("frames_inlined", _) => Some(frames_line("int64_t result = frames_relay(doubled);")),
         ("frames_keep", _) => Some(frames_line("int64_t result = frames_inlined(seed + 1);")),
         ("frames_recurse", Some(0)) => Some(frames_line("return frames_keep(seed) + level;")),
         ("frames_recurse", Some(_)) => Some(frames_line(
@@ -322,6 +326,43 @@ async fn caller_frames_show_their_own_values_live_across_the_compiler_matrix() {
         }
         scenario.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn go_caller_frames_refuse_registers_go_callees_overwrite() {
+    let mut scenario = Scenario::launch("frames-go-o2");
+    scenario.add_breakpoint("main.leaf").await;
+    let mut reason = scenario.run_to_stop().await;
+    // The Go runtime preempts goroutines with SIGURG.
+    while matches!(&reason, StopReason::Exception(exception) if exception.code == 23) {
+        reason = scenario.resume_to_stop().await;
+    }
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{reason:?}"
+    );
+    assert_eq!(integer_variable(&scenario, "y").await, 2000);
+
+    let frames = backtrace(&scenario).await;
+    select(&mut scenario, level_of(&frames, "main.held", 0)).await;
+    // held's arguments are described in rax and rbx through its call, which
+    // Go callees overwrite without saving: rbx holds leaf's 2000, not 12.
+    for (name, register) in [("a", "rax"), ("b", "rbx")] {
+        let variable = scenario
+            .operation(name, scenario.handle().variable(name))
+            .await;
+        assert_eq!(
+            variable.state,
+            VariableState::Unavailable(VariableUnavailableReason::RegisterNotSaved(
+                register.into()
+            )),
+            "{name}"
+        );
+    }
+    // A value kept on the stack across the call is still the caller's.
+    select(&mut scenario, level_of(&frames, "main.spilled", 0)).await;
+    assert_eq!(integer_variable(&scenario, "seed").await, 10);
+    scenario.shutdown().await;
 }
 
 #[tokio::test]

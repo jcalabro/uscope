@@ -935,6 +935,8 @@ build_go_fixture "$go_fixtures_dir/watch" "$output_dir/watch-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/watch" "$output_dir/watch-go-o2" \
     -buildmode=pie
+build_go_fixture "$go_fixtures_dir/frames" "$output_dir/frames-go-o2" \
+    -buildmode=pie
 
 build_shared_fixture gcc "$c_fixtures_dir/crash/library.c" "$output_dir/libcrash.so" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -Wl,--build-id
