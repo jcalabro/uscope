@@ -6234,6 +6234,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(())
     }
 
+    /// Releases an attached process. A disarm failure does not keep it
+    /// traced: the tracer is exiting, and the kernel would release the
+    /// threads with breakpoints still installed. The failure is reported in
+    /// the shutdown reply after the detach is published.
     fn detach_inferior(&mut self) -> Result<()> {
         let disarmed = self.disarm_for_detach();
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
@@ -6266,13 +6270,6 @@ impl<P: LinuxTraceOps> Controller<P> {
         if had_watchpoints {
             self.publish_watchpoints_changed();
         }
-        if let Err(error) = disarmed {
-            if let Some(reply) = self.shutdown_reply.take() {
-                let _ = reply.send(Err(error));
-            }
-            self.reset_runtime_modules();
-            return Ok(());
-        }
         self.reset_runtime_modules();
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::InferiorDetached {
@@ -6280,7 +6277,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             process_id,
         });
         if let Some(reply) = self.shutdown_reply.take() {
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(disarmed);
         }
         Ok(())
     }
@@ -10556,6 +10553,43 @@ mod tests {
                 "no signal is delivered on detach: {actions:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_failed_disarm_still_detaches_and_publishes_the_detach() {
+        let mut harness = watch_harness(2);
+        harness.add(0xf000, 8).expect("arm");
+        harness
+            .controller
+            .inferior
+            .as_mut()
+            .expect("inferior")
+            .origin = InferiorOrigin::Attached;
+        let [first, second] = harness.threads[..] else {
+            unreachable!("two threads");
+        };
+        harness.trace().fail_after(first, 7, 0, Errno::EPERM);
+        harness.trace().take_actions();
+        while harness.events.try_recv().is_ok() {}
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        harness.controller.begin_shutdown(Some(reply));
+        let result = result.blocking_recv().expect("shutdown reply");
+        assert!(result.is_err(), "the disarm failure is reported");
+
+        // Keeping the process traced would not help: the tracer is exiting.
+        let actions = harness.trace().take_actions();
+        for pid in [first, second] {
+            assert!(
+                actions.contains(&format!("detach {pid} None")),
+                "{actions:?}"
+            );
+        }
+        assert!(harness.controller.inferior.is_none());
+        let detached = std::iter::from_fn(|| harness.events.try_recv().ok())
+            .filter(|event| matches!(event, DebuggerEvent::InferiorDetached { .. }))
+            .count();
+        assert_eq!(detached, 1, "clients learn the process is gone");
     }
 
     #[test]
