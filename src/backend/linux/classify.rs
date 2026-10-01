@@ -248,8 +248,14 @@ pub(super) fn classify_stop_evidence(
     }
 }
 
+/// Returns whether a SIGTRAP reports a completed single step. x86 Linux
+/// reports a step across a `syscall` instruction from the system call's exit
+/// path as `TRAP_BRKPT`; an `int3` reports `SI_KERNEL` instead.
 pub(super) const fn is_single_step_trap(metadata: &SignalMetadata) -> bool {
-    metadata.code == libc::TRAP_TRACE || metadata.code == TRAP_UNKNOWN
+    matches!(
+        metadata.code,
+        libc::TRAP_TRACE | libc::TRAP_BRKPT | TRAP_UNKNOWN
+    )
 }
 
 pub(super) fn format_raw_stop(raw: &RawStopRecord) -> String {
