@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -1222,18 +1223,32 @@ async fn format_backtrace(
 ) -> uscope::Result<Control> {
     let trace = debugger.backtrace().await?;
     let mut lines = Vec::with_capacity(trace.frames.len() + 1);
+    // Source files are identified within their owning module's image.
+    let mut images = BTreeMap::new();
 
     for frame in trace.frames.iter() {
         let name = frame
             .function
             .as_ref()
             .map_or("<unknown>", |function| function.name.as_ref());
-        let source = frame.source.as_ref().and_then(|source| {
-            debugger
-                .module_image()
-                .source_file(source.file)
-                .map(|file| format!("{}:{}", file.path.display(), source.line))
-        });
+        let image = match (frame.module, &frame.source) {
+            (Some(module), Some(_)) => {
+                if let std::collections::btree_map::Entry::Vacant(entry) = images.entry(module) {
+                    entry.insert(debugger.loaded_module_image(module).await?);
+                }
+                images.get(&module)
+            }
+            _ => None,
+        };
+        let source = frame
+            .source
+            .as_ref()
+            .zip(image)
+            .and_then(|(source, image)| {
+                image
+                    .source_file(source.file)
+                    .map(|file| format!("{}:{}", file.path.display(), source.line))
+            });
         lines.push(format!(
             "{} {} in {}{}",
             renderer.paint(

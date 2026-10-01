@@ -360,6 +360,17 @@ build_shared_fixture gcc "$c_fixtures_dir/shared/library.c" "$output_dir/libglob
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
 build_fixture gcc "$c_fixtures_dir/shared/main.c" "$output_dir/globals-shared" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -ldl
+build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" "$output_dir/libmodule-frames.so" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
+build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie \
+    "-L$output_dir" -lmodule-frames '-Wl,-rpath,$ORIGIN'
+build_fixture clang "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie \
+    "-L$output_dir" -lmodule-frames '-Wl,-rpath,$ORIGIN'
+build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-nopie" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie \
+    "-L$output_dir" -lmodule-frames '-Wl,-rpath,$ORIGIN'
 build_fixture gcc "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-gcc" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_fixture clang "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-clang" \
