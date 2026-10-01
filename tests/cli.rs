@@ -1,3 +1,6 @@
+mod support;
+
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -1473,9 +1476,15 @@ fn core_identity_mismatches_require_the_explicit_override() {
         stderr.contains("crash-gcc-o0-rebuilt does not match the dump (the build-id note differs); using its metadata anyway"),
         "{stderr}"
     );
+    // The line names the file used when it is not at the recorded path.
     let stdout = assert_success(allowed);
+    let rebuilt = fs::canonicalize(fixture("build/test-programs/crash-gcc-o0-rebuilt"))
+        .expect("canonical fixture");
     assert!(
-        stdout.contains("module 0 mismatched: the build-id note differs"),
+        stdout.contains(&format!(
+            "crash-gcc-o0 module 0 from {} mismatched: the build-id note differs",
+            rebuilt.display()
+        )),
         "{stdout}"
     );
 
@@ -1491,6 +1500,84 @@ fn core_identity_mismatches_require_the_explicit_override() {
         &uscope(&["--core", "build/test-programs/crash-gcc-o0", "--batch"]),
         "invalid core dump: the ELF file is not a core dump",
     );
+}
+
+#[test]
+fn core_module_searches_name_the_files_they_use_and_those_still_missing() {
+    const FOREIGN_CORE: &str = "build/test-programs/core-foreign/crash.core";
+    for option in ["--sysroot", "--module-path"] {
+        assert_failure(
+            &uscope(&[option, "/", "build/test-programs/basic"]),
+            "--core <CORE>",
+        );
+    }
+    assert_failure(
+        &uscope(&["--core", FOREIGN_CORE, "--module-path", "absent", "--batch"]),
+        "cannot search absent for core dump modules: No such file or directory",
+    );
+
+    // Without the C library, its recorded build-id says what to supply.
+    let directory = support::ScratchDir::new("cli-module-path");
+    for name in ["crash-gcc-o0", "libcrash.so"] {
+        fs::copy(
+            fixture(&format!("build/test-programs/{name}")),
+            directory.path().join(name),
+        )
+        .expect("copy module");
+    }
+    let module_path = directory.path().to_str().expect("UTF-8 scratch path");
+    let partial = uscope(&[
+        "--core",
+        FOREIGN_CORE,
+        "--module-path",
+        module_path,
+        "--batch",
+        "--eval",
+        "info core",
+    ]);
+    let stderr = String::from_utf8_lossy(&partial.stderr).into_owned();
+    let stdout = assert_success(partial);
+    let libc = object::File::parse(
+        fs::read(fixture("build/test-programs/libc-foreign.so.6"))
+            .expect("read foreign C library")
+            .as_slice(),
+    )
+    .expect("parse foreign C library")
+    .build_id()
+    .expect("read build-id")
+    .expect("build-id note")
+    .iter()
+    .fold(String::new(), |mut text, byte| {
+        write!(text, "{byte:02x}").expect("writing to a String cannot fail");
+        text
+    });
+    assert!(
+        stderr.contains(&format!(
+            "core-foreign/libc.so.6 is missing; its frames and unsaved memory are unavailable (build-id {libc})"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        stdout.contains(&format!("core-foreign/libc.so.6 missing (build-id {libc})")),
+        "{stdout}"
+    );
+    let canonical = directory
+        .path()
+        .canonicalize()
+        .expect("canonical scratch path");
+    for name in ["crash-gcc-o0", "libcrash.so"] {
+        let line = stdout
+            .lines()
+            .find(|line| line.contains(&format!("core-foreign/{name} module")))
+            .unwrap_or_else(|| panic!("no {name} line:\n{stdout}"));
+        assert!(
+            line.ends_with(&format!(
+                " from {} verified by build-id",
+                canonical.join(name).display()
+            )),
+            "{line}"
+        );
+    }
 }
 
 #[test]

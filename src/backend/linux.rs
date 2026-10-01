@@ -55,6 +55,7 @@ use registers::Fxsave;
 mod breakpoints;
 mod classify;
 mod core_dump;
+mod core_files;
 mod debug_registers;
 mod disassembly;
 mod frames;

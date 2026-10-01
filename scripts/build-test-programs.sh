@@ -170,6 +170,56 @@ build_disassembly_fixture() {
         "${command[@]}"
 }
 
+# Derives a C library standing in for another machine's build: the version
+# that libthread_db checks and the build-id each differ in one byte, while the
+# code stays the toolchain's own so the fixture runs against its loader.
+derive_foreign_libc() {
+    local input="$1"
+    local output="$2"
+    local script
+    # shellcheck disable=SC2016
+    script='
+        set -euo pipefail
+        input="$1"; output="$2"
+        # Converts a virtual address to its file offset through the load
+        # segment containing it.
+        file_offset() {
+            readelf -lW "$input" | awk -v address=$(( $1 )) "
+                \$1 == \"LOAD\" && address >= strtonum(\$3) && address < strtonum(\$3) + strtonum(\$5) {
+                    print address - strtonum(\$3) + strtonum(\$2); exit
+                }"
+        }
+        byte_at() { od -An -tu1 -j "$1" -N1 "$output" | tr -d " "; }
+        put_byte() { printf "\\$(printf %03o "$2")" | dd of="$output" bs=1 seek="$1" conv=notrunc status=none; }
+        read -r version_address version_size < <(readelf -W --dyn-syms "$input" \
+            | awk "\$8 ~ /^__nptl_version@/ { print \"0x\" \$2, \$3; exit }")
+        version=$(file_offset "$version_address")
+        # Section numbers are bracketed and padded, so they are removed first.
+        note=$(readelf -SW "$input" | sed "s/^ *\\[ *[0-9]*\\]//" \
+            | awk "\$1 == \".note.gnu.build-id\" { print \"0x\" \$4; exit }")
+        if [[ -z "$version" || -z "$note" ]]; then
+            printf "error: %s has no __nptl_version or build-id note\n" "$input" >&2
+            exit 1
+        fi
+        cp "$input" "$output.tmp"
+        chmod u+w "$output.tmp"
+        output="$output.tmp"
+        if [[ "$(dd if="$output" bs=1 skip="$version" count="$version_size" status=none | tr -d "\0")" != [0-9]*.* ]]; then
+            printf "error: %s does not hold a version at __nptl_version\n" "$input" >&2
+            exit 1
+        fi
+        # The major version becomes 9, or 8 when it already is 9.
+        major=$(byte_at "$version")
+        put_byte "$version" $(( major == 57 ? 56 : 57 ))
+        # The build-id descriptor follows the 12-byte note header and "GNU".
+        identifier=$(( note + 16 ))
+        put_byte "$identifier" $(( $(byte_at "$identifier") ^ 255 ))
+        mv "$output" "${output%.tmp}"
+    '
+    run_cached_build "$input" "$output" "derivation=foreign-libc-v1" \
+        bash -c "$script" _ "$input" "$output"
+}
+
 # Derives a library with only a dynamic symbol table from one with full
 # symbol tables. With an embedded table, the result also carries a
 # MiniDebugInfo section built the way Fedora's find-debuginfo does: the
@@ -872,6 +922,8 @@ build_go_fixture "$go_fixtures_dir/watch" "$output_dir/watch-go-o2" \
 
 build_shared_fixture gcc "$c_fixtures_dir/crash/library.c" "$output_dir/libcrash.so" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -Wl,--build-id
+build_shared_fixture gcc "$c_fixtures_dir/crash/library.c" "$output_dir/libcrash-rebuilt.so" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -Wl,--build-id -DCRASH_REBUILT
 build_fixture gcc "$c_fixtures_dir/crash/main.c" "$output_dir/crash-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread -Wl,--build-id \
     "-L$output_dir" -lcrash '-Wl,-rpath,$ORIGIN'
@@ -942,6 +994,29 @@ generate_core_without() {
 }
 generate_core_without library libcrash.so
 generate_core_without executable crash-gcc-o0
+
+# A core from another machine. Its program ran beside its own build of the C
+# library; afterwards the executable and library at its recorded paths are
+# replaced by different builds and the C library is removed, so only a
+# sysroot or module path holding the originals can supply them.
+toolchain_libc=$(ldd "$output_dir/crash-gcc-o0" | awk '$1 == "libc.so.6" { print $3 }')
+derive_foreign_libc "$toolchain_libc" "$output_dir/libc-foreign.so.6"
+generate_foreign_core() {
+    local directory="$output_dir/core-foreign"
+    local core="$directory/crash.core"
+    local inputs="$output_dir/crash-gcc-o0 $output_dir/libcrash.so $output_dir/libc-foreign.so.6"
+    mkdir -p "$directory"
+    if ! core_is_current "$core" "$(core_signature 11 "$default_core_filter" \
+        "$inputs" "$directory/crash-gcc-o0" segv)"; then
+        cp "$output_dir/crash-gcc-o0" "$output_dir/libcrash.so" "$directory/"
+        cp "$output_dir/libc-foreign.so.6" "$directory/libc.so.6"
+    fi
+    generate_core "$core" 11 "$default_core_filter" "$inputs" "$directory/crash-gcc-o0" segv
+    cp "$output_dir/crash-gcc-o0-rebuilt" "$directory/crash-gcc-o0"
+    cp "$output_dir/libcrash-rebuilt.so" "$directory/libcrash.so"
+    rm -f "$directory/libc.so.6"
+}
+generate_foreign_core
 
 # Cores of programs whose code ELF symbols alone describe. The Go runtime's
 # arenas would make a full core enormous, and frame 0 needs only registers.

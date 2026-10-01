@@ -25,6 +25,9 @@ just dev --command cargo run -- --attach PID
 
 # open a post-mortem core dump; uscope uses the executable recorded in the dump
 just dev --command cargo run -- --core CORE
+
+# open a core dump from another machine with a copy of its files
+just dev --command cargo run -- --core CORE --sysroot DIR --module-path DIR
 ```
 
 Use `--attach PID` or `-p PID` to attach to an existing process. `uscope` reads the
@@ -35,7 +38,9 @@ alongside `--attach`.
 
 Use `--core CORE` to open an ELF core dump written by the Linux kernel or by gdb's `gcore`. The dump is presented as one permanent stop at the thread that triggered it, with the terminating signal, its `si_code`, and the faulting address or sending process. Backtraces, registers, variables, globals, TLS, memory reads, and thread selection work as they do at a live stop; execution control, memory writes, and breakpoints fail explicitly. `info core` lists the process, signal, and every recorded module. Compressed dumps from `systemd-coredump` must first be extracted with `coredumpctl dump -o FILE`.
 
-Each executable and shared library recorded by the dump is matched to its file on disk before use: by GNU build-id when the dump saved the note, and otherwise by comparing every saved byte of the file's read-only segments. Memory the dump did not save, such as unmodified code and read-only data, is read only from a proven file. A file that differs from the dump, or that nothing saved can verify, is a hard error. Pass `--allow-module-mismatch` to use its debug metadata anyway; its contents still never stand in for unsaved memory, and every such module is reported as a warning. A module whose file no longer exists is reported and its frames and unsaved memory stay unavailable. If the executable has moved, pass its path as the positional `EXECUTABLE` argument alongside `--core`.
+Each executable and shared library recorded by the dump is matched to its file on disk before use: by GNU build-id when the dump saved the note, and otherwise by comparing every saved byte of the file's read-only segments. Memory the dump did not save, such as unmodified code and read-only data, is read only from a proven file. A file that differs from the dump, or that nothing saved can verify, is a hard error. Pass `--allow-module-mismatch` to use its debug metadata anyway; its contents still never stand in for unsaved memory, and every such module is reported as a warning. A module whose file no longer exists is reported, with the build-id the dump recorded for it, and its frames and unsaved memory stay unavailable. If the executable has moved, pass its path as the positional `EXECUTABLE` argument alongside `--core`.
+
+To debug a core dump from another machine or a container, pass `--sysroot DIR`, a copy of that machine's files such as an extracted container image: every recorded path is then looked up inside `DIR` instead of on this machine, and resolves as if `DIR` were `/`, so absolute symbolic links and `..` never reach this machine's files. Pass `--module-path DIR`, repeatably, to search directories for files missing from their recorded paths or not matching the dump, first by the recorded file name and then by build-id, which finds renamed copies such as a library saved under its soname. A file found by searching is used only when proven to match, unless mismatches are allowed, while a different file at the recorded path remains an error. `info core` names the file used for each module that was not found at its recorded path. A C library of a different version than the debugger's `libthread_db`, as another machine's often is, leaves TLS unavailable with that reason.
 
 At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
 Addresses are always written in `0x`-prefixed hexadecimal, so `break add` names a function rather than address 0xadd.

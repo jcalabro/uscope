@@ -170,8 +170,11 @@ impl Debugger {
     /// Opens a post-mortem core dump as one permanent stopped snapshot.
     ///
     /// Every recorded module file must be proven to match the dump unless
-    /// [`CoreDumpOptions::allow_module_mismatch`] is set. Execution control,
-    /// memory writes, and breakpoints fail with [`Error::PostMortemTarget`].
+    /// [`CoreDumpOptions::allow_module_mismatch`] is set. The files of a dump
+    /// written on another machine are found through
+    /// [`CoreDumpOptions::sysroot`] and [`CoreDumpOptions::module_paths`].
+    /// Execution control, memory writes, and breakpoints fail with
+    /// [`Error::PostMortemTarget`].
     pub fn open_core(options: &CoreDumpOptions) -> Result<Self> {
         Self::start(|channels| {
             let session = backend::open_core(options, channels)?;

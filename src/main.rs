@@ -29,6 +29,16 @@ struct Args {
     #[arg(long, value_name = "CORE")]
     core: Option<PathBuf>,
 
+    /// Look up the core dump's recorded module paths inside DIR, a copy of the
+    /// files of the machine that wrote it, instead of on this machine.
+    #[arg(long, value_name = "DIR", requires = "core")]
+    sysroot: Option<PathBuf>,
+
+    /// Search DIR for core dump modules missing from their recorded paths or
+    /// not matching the dump, by file name and then by build-id. May be repeated.
+    #[arg(long = "module-path", value_name = "DIR", requires = "core")]
+    module_paths: Vec<PathBuf>,
+
     /// Use module files that cannot be proven to match the core dump.
     #[arg(long, requires = "core")]
     allow_module_mismatch: bool,
@@ -92,6 +102,8 @@ async fn open_debugger(args: &Args) -> Result<Debugger> {
         return Debugger::open_core(&CoreDumpOptions {
             core: core.clone(),
             executable: args.executable.clone(),
+            sysroot: args.sysroot.clone(),
+            module_paths: args.module_paths.clone(),
             allow_module_mismatch: args.allow_module_mismatch,
         })
         .with_context(|| format!("failed to open core dump {}", core.display()));
