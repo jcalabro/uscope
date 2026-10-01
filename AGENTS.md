@@ -36,13 +36,7 @@ Run all project commands inside the pinned Nix environment. Do not run `cargo`,
 non-interactive use, wrap the command with `just dev --command`, for example
 `just dev --command just`.
 
-Enter the pinned Nix environment:
-
-```sh
-just dev
-```
-
-From that environment, run the complete local gate (default recipe):
+From the nix environment (activated via direnv), run the complete local gate (default recipe):
 
 ```sh
 just
@@ -51,8 +45,8 @@ just
 Useful focused commands:
 
 ```sh
-just test                          # incrementally build fixtures, then run tests
-just build-test-programs           # build only native fixtures
+just build-test-programs           # build native fixtures
+just test                          # run the tests
 cargo nextest run --test debugger  # run real debugger scenarios
 just run build/test-programs/basic
 ```

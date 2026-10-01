@@ -9,6 +9,8 @@ readonly cpp_fixtures_dir="${fixtures_dir}/cpp"
 readonly go_fixtures_dir="${fixtures_dir}/go"
 readonly rust_fixtures_dir="${fixtures_dir}/rust"
 readonly zig_fixtures_dir="${fixtures_dir}/zig"
+readonly suite_stamp="${output_dir}/.suite.stamp"
+readonly suite_outputs="${output_dir}/.suite.outputs"
 
 declare -A dash_version_by_tool=()
 declare -A rebuilt_outputs=()
@@ -246,7 +248,43 @@ require_dwarf_operation() {
     record_validation "$stamp" "$signature"
 }
 
+# Nix store paths identify each toolchain, so their resolved paths and mtimes
+# change with compiler versions without spawning version probes.
+suite_signature() {
+    local -a paths=()
+    local tool path
+    for tool in gcc g++ clang clang++ rustc go zig objdump; do
+        if path=$(type -P "$tool"); then
+            paths+=("$path")
+        fi
+    done
+    printf 'suite-v1\nGOOS=%s GOARCH=%s\n' "${GOOS-}" "${GOARCH-}"
+    stat -L --format='%n %Y' "${paths[@]}"
+}
+
+# Skips every per-fixture probe when no fixture source, this script, or tool
+# changed and every previously built output still exists.
+suite_is_current() {
+    local signature="$1"
+    [[ -f "$suite_stamp" && -f "$suite_outputs" ]] || return 1
+    [[ "$(<"$suite_stamp")" == "$signature" ]] || return 1
+    [[ -z "$(find "$fixtures_dir" "${BASH_SOURCE[0]}" -newer "$suite_stamp" -print -quit)" ]] \
+        || return 1
+    local output
+    while IFS= read -r output; do
+        [[ -x "$output" ]] || return 1
+    done <"$suite_outputs"
+}
+
 mkdir -p "$output_dir"
+signature=$(suite_signature)
+if suite_is_current "$signature"; then
+    printf '[cached] %s\n' "$output_dir"
+    exit 0
+fi
+# Written before building so sources edited during this run are newer than the
+# stamp that the final rename publishes.
+printf '%s\n' "$signature" >"${suite_stamp}.tmp"
 
 build_fixture gcc "$c_fixtures_dir/basic.c" "$output_dir/basic" \
     -O0 -g3 -fPIE -pie
@@ -504,3 +542,7 @@ build_fixture gcc "$c_fixtures_dir/inline-threads.c" "$output_dir/inline-threads
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread
 build_fixture clang "$c_fixtures_dir/inline-threads.c" "$output_dir/inline-threads-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread
+
+printf '%s\n' "${!rebuilt_outputs[@]}" >"${suite_outputs}.tmp"
+mv "${suite_outputs}.tmp" "$suite_outputs"
+mv "${suite_stamp}.tmp" "$suite_stamp"

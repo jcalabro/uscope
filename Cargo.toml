@@ -56,3 +56,9 @@ expectrl = "0.9"
 [profile.test]
 opt-level = 1
 debug = 1
+
+# Generating debuginfo for this crate more than doubles the incremental rebuild
+# after an edit. Dependencies keep theirs since they are rarely rebuilt. Pass
+# `--config 'profile.test.package.uscope.debug=1'` when stepping through a test.
+[profile.test.package.uscope]
+debug = 0

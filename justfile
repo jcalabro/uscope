@@ -21,13 +21,15 @@ build: build-test-programs
     cargo build
 
 # Builds uscope and runs it with the supplied arguments.
-run *ARGS="": build
+run *ARGS: build
     ./target/debug/uscope "$@"
 
-# Builds the native test fixtures and runs the Rust test suite.
-test: build-test-programs
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; cargo nextest run --all-targets --test-threads "$test_threads"
-    cargo test --doc
+# Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
+# Doc tests only run with the full suite.
+[doc("Builds the native test fixtures and runs the Rust test suite.")]
+test *ARGS: build-test-programs
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; cargo nextest run --test-threads "$test_threads" "$@"
+    if (( $# == 0 )); then cargo test --doc; fi
 
 # Fuzzes the bounded structural value-expression parser.
 fuzz-value-expression *ARGS="":
@@ -37,9 +39,10 @@ fuzz-value-expression *ARGS="":
 fuzz-dwarf-expression *ARGS="":
     cargo fuzz run dwarf-expression -- "$@"
 
-# Checks formatting, runs Clippy, and runs the complete test suite.
-check: build-test-programs
+# Checks formatting and runs Clippy.
+lint:
     cargo fmt --check
     cargo clippy --all-targets --all-features -- -D warnings
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; cargo nextest run --all-targets --test-threads "$test_threads"
-    cargo test --doc
+
+# Checks formatting, runs Clippy, and runs the complete test suite.
+check: lint test
