@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{Read as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -1183,7 +1183,7 @@ fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
     );
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .arg(executable)
+        .arg(&executable)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1194,7 +1194,7 @@ fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
 
     let debugger_pid = child.id();
     let inferior_pid = wait_for_child_process(debugger_pid).expect("debugger launched inferior");
-    wait_for_running_process(inferior_pid);
+    wait_for_running_executable(inferior_pid, &executable);
     kill(
         Pid::from_raw(i32::try_from(debugger_pid).expect("debugger PID fits i32")),
         Signal::SIGINT,
@@ -1234,17 +1234,24 @@ fn wait_for_child_process(parent: u32) -> Option<u32> {
     }
 }
 
-fn wait_for_running_process(pid: u32) {
+/// Waits until `pid` has exec'd `executable` and is no longer stopped.
+///
+/// A freshly forked child is also running before it execs, and a pause there
+/// completes at the launch's exec stop instead of interrupting running code.
+fn wait_for_running_executable(pid: u32, executable: &Path) {
     let status = PathBuf::from(format!("/proc/{pid}/status"));
+    let exe = PathBuf::from(format!("/proc/{pid}/exe"));
+    let executable = executable.canonicalize().expect("canonical fixture path");
     let deadline = Instant::now() + Duration::from_secs(2);
 
     loop {
+        let execed = fs::read_link(&exe).is_ok_and(|path| path == executable);
         let contents = fs::read_to_string(&status).expect("read inferior status");
         let stopped = contents
             .lines()
             .find_map(|line| line.strip_prefix("State:"))
             .is_some_and(|state| state.trim_start().starts_with(['T', 't']));
-        if !stopped {
+        if execed && !stopped {
             return;
         }
         assert!(Instant::now() < deadline, "inferior did not start running");
