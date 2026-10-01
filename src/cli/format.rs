@@ -8,12 +8,12 @@ use uscope::{
     AddressDescription, Backtrace, BlockCompletion, BoundaryConflict, BoundaryEvidence, Breakpoint,
     BreakpointLocation, ByteOrder, ContextShortfall, CoreDumpInfo, CoreModuleState,
     DecodedInstruction, DisassembledInstruction, Disassembly, DisassemblyBlock, DisassemblyView,
-    ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, InstructionContent,
-    InstructionReferenceKind, InstructionTokenKind, InvalidatedWatchpoint, LoadedModuleSnapshot,
-    MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage, PointerWidth,
-    RegisterRole, RegisterSnapshot, SourceContext, StateSnapshot, StepKind, StopReason,
-    SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState, VirtualAddress,
-    WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
+    ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, IndirectTarget,
+    InstructionContent, InstructionReferenceKind, InstructionTokenKind, InvalidatedWatchpoint,
+    LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage,
+    PointerWidth, RegisterRole, RegisterSnapshot, SourceContext, StateSnapshot, StepKind,
+    StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState,
+    VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec};
@@ -830,6 +830,7 @@ fn disassembly_block(
         let text = match &instruction.content {
             InstructionContent::Decoded(decoded) => instruction_text(
                 decoded,
+                Some(instruction.address) == program_counter,
                 module.map(|module| module.module),
                 modules,
                 renderer,
@@ -903,6 +904,7 @@ fn instruction_bytes(bytes: &[u8]) -> String {
 /// Renders an instruction's text with each encoded address named.
 fn instruction_text(
     decoded: &DecodedInstruction,
+    stopped: bool,
     module: Option<ModuleId>,
     modules: &LoadedModuleSnapshot,
     renderer: Renderer,
@@ -921,7 +923,19 @@ fn instruction_text(
         }
         .expect("writing to a String cannot fail");
     }
+    let slot = match decoded.indirect_target.as_deref() {
+        Some(IndirectTarget::Memory { slot, .. } | IndirectTarget::Unreadable { slot, .. }) => {
+            Some(slot.address)
+        }
+        _ => None,
+    };
     for reference in decoded.references.iter() {
+        // The indirect target below names the memory holding it.
+        if reference.kind == InstructionReferenceKind::MemoryOperand
+            && Some(reference.address) == slot
+        {
+            continue;
+        }
         let Some(name) = reference_name(&reference.description, module, modules) else {
             continue;
         };
@@ -936,7 +950,79 @@ fn instruction_text(
         }
         .expect("writing to a String cannot fail");
     }
+    if let Some(target) = decoded.indirect_target.as_deref() {
+        indirect_target_text(&mut text, target, stopped, module, modules, renderer);
+    }
     text
+}
+
+/// Appends where an indirect branch transfers control at the stop: `# slot
+/// <name> -> target <name>` for a target loaded from memory, and `# ->
+/// target <name>` for one held in a register. A target that needs registers
+/// is noted only at the stopped instruction, since every return elsewhere
+/// needs them.
+fn indirect_target_text(
+    text: &mut String,
+    target: &IndirectTarget,
+    stopped: bool,
+    module: Option<ModuleId>,
+    modules: &LoadedModuleSnapshot,
+    renderer: Renderer,
+) {
+    let described = |description: &AddressDescription| {
+        let mut text = renderer.paint(Role::Muted, description.address).to_string();
+        if let Some(name) = reference_name(description, module, modules) {
+            write!(text, " {}", renderer.paint(Role::Name, format!("<{name}>")))
+                .expect("writing to a String cannot fail");
+        }
+        text
+    };
+    let arrow = renderer.paint(Role::Muted, "->");
+    match target {
+        IndirectTarget::Register { target } => {
+            write!(
+                text,
+                "  {} {arrow} {}",
+                renderer.paint(Role::Muted, "#"),
+                described(target)
+            )
+        }
+        IndirectTarget::Memory { slot, target } => write!(
+            text,
+            "  {} {} {arrow} {}",
+            renderer.paint(Role::Muted, "#"),
+            described(slot),
+            described(target)
+        ),
+        IndirectTarget::Unreadable {
+            slot,
+            address,
+            reason,
+        } => write!(
+            text,
+            "  {} {} {arrow} {}",
+            renderer.paint(Role::Muted, "#"),
+            described(slot),
+            renderer.paint(Role::Warning, format!("{reason} at {address}"))
+        ),
+        IndirectTarget::NeedsRegisters if stopped => write!(
+            text,
+            "  {} {arrow} {}",
+            renderer.paint(Role::Muted, "#"),
+            renderer.paint(
+                Role::Warning,
+                "unknown: a restarted system call replaces a register it uses"
+            )
+        ),
+        IndirectTarget::Unsupported => write!(
+            text,
+            "  {} {arrow} {}",
+            renderer.paint(Role::Muted, "#"),
+            renderer.paint(Role::Warning, "not computed for this form of branch")
+        ),
+        _ => Ok(()),
+    }
+    .expect("writing to a String cannot fail");
 }
 
 /// Names an encoded address by its symbol or, failing that, its section,

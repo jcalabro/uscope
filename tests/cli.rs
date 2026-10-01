@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use object::{Object, ObjectSymbol};
+use object::{Object, ObjectSection, ObjectSymbol};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
@@ -1812,7 +1812,7 @@ fn disassemble_renders_the_stopped_function_with_named_targets_and_source_lines(
         "{listing}"
     );
     assert!(
-        lines[stopped - 1].ends_with("tests/fixtures/c/disassembly/main.c:16"),
+        lines[stopped - 1].ends_with("tests/fixtures/c/disassembly/main.c:17"),
         "{listing}"
     );
     for expected in [
@@ -1870,6 +1870,156 @@ fn disassemble_reports_data_inside_code_and_unproven_addresses() {
             "missing {expected:?} in:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
+    let executable = fixture("build/test-programs/disassembly-clang-o2-nopie");
+    let address = |name| symbol_address(&executable, name);
+    let data = fs::read(&executable).expect("read fixture");
+    let object = object::File::parse(data.as_slice()).expect("parse fixture");
+    let section = |name| {
+        object
+            .section_by_name(name)
+            .unwrap_or_else(|| panic!("no section {name}"))
+            .address()
+    };
+    let (plt, got_plt) = (section(".plt"), section(".got.plt"));
+    let commands = [
+        format!("break {:#x}", address("disasm_call_method")),
+        format!("break {:#x}", address("disasm_call_register")),
+        format!("break {:#x}", address("disasm_return")),
+        "run\ndisassemble".to_owned(),
+        format!("disassemble {:#x} 1", plt + 0x10),
+        format!(
+            "continue\ndisassemble {:#x} 1",
+            address("disasm_call_register")
+        ),
+        format!("continue\ndisassemble {:#x} 1", address("disasm_return")),
+        "disassemble disasm_indirect_forms".to_owned(),
+    ];
+    let commands = commands
+        .iter()
+        .flat_map(|command| command.lines())
+        .collect::<Vec<_>>();
+    let stdout = batch("disassembly-clang-o2-nopie", &[], &commands);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let find = |needle: &str, stopped: bool| {
+        lines
+            .iter()
+            .find(|line| line.contains(needle) && line.starts_with("=> ") == stopped)
+            .unwrap_or_else(|| panic!("no line with {needle:?} in:\n{stdout}"))
+            .to_owned()
+    };
+    // At the stop, registers hold the target or address its slot.
+    assert!(
+        find("call qword ptr [rax+8]", true).ends_with(&format!(
+            "  # {:#x} <disasm_methods+0x8> -> {:#x} <disasm_target_two>",
+            address("disasm_methods") + 8,
+            address("disasm_target_two")
+        )),
+        "{stdout}"
+    );
+    assert!(
+        find("call rcx", true).ends_with(&format!(
+            "call rcx  # -> {:#x} <disasm_target_four>",
+            address("disasm_target_four")
+        )),
+        "{stdout}"
+    );
+    let ret = find("ret  # ", true);
+    assert!(ret.contains(" <main+0x"), "{ret}");
+    // Away from the stop, only slots the instruction addresses are read.
+    assert!(find("call rcx", false).ends_with("call rcx"), "{stdout}");
+    assert!(
+        find(
+            &format!("# {:#x} <disasm_slot>", address("disasm_slot")),
+            false
+        )
+        .ends_with(&format!(
+            "-> {:#x} <disasm_target_one>",
+            address("disasm_target_one")
+        )),
+        "{stdout}"
+    );
+    let got = find(" <.got+0x", false);
+    assert!(
+        got.contains(" -> 0x7") && got.ends_with(" in libc.so.6>"),
+        "{got}"
+    );
+    // Lazy binding has not yet filled the stub's slot, which is named once.
+    let stub = find("jmp qword ptr [rip+", false);
+    assert!(
+        stub.ends_with(&format!(
+            "jmp qword ptr [rip+{:#x}]  # {:#x} <.got.plt+0x18> -> {:#x} <.plt+0x16>",
+            got_plt + 0x18 - (plt + 0x16),
+            got_plt + 0x18,
+            plt + 0x16
+        )),
+        "{stub}"
+    );
+    assert!(
+        find("jmp qword ptr [0]", false).ends_with("  # 0x0 -> memory inaccessible at 0x0"),
+        "{stdout}"
+    );
+    // Far transfers, interrupt returns, and branches whose operand size
+    // differs between Intel and AMD processors say they are not computed.
+    for form in ["jmp far fword ptr [rax]", "jmp rax", "iretq"] {
+        assert!(
+            find(form, false).ends_with(&format!(
+                "{form}  # -> not computed for this form of branch"
+            )),
+            "{stdout}"
+        );
+    }
+    assert_no_sgr(&stdout);
+}
+
+#[test]
+fn disassemble_says_when_a_restarted_system_call_hides_a_stopped_target() {
+    let mut target = Command::new(fixture("build/test-programs/attach-restart"))
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn attach target");
+    let mut ready = [0_u8; 6];
+    let ready = target
+        .stdout
+        .as_mut()
+        .expect("target stdout")
+        .read_exact(&mut ready)
+        .map(|()| ready);
+    // Attaching must interrupt pause(2).
+    let syscall = format!("/proc/{}/syscall", target.id());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_to_string(&syscall).is_ok_and(|text| !text.starts_with("34 "))
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(1));
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .args([
+            "--batch",
+            "--eval",
+            "disassemble",
+            "--attach",
+            &target.id().to_string(),
+        ])
+        .output()
+        .expect("attach uscope by PID");
+    target.kill().expect("kill attach target");
+    target.wait().expect("reap attach target");
+    assert_eq!(ready.expect("wait for target readiness"), *b"READY\n");
+    let stdout = assert_success(output);
+    let stopped = stdout
+        .lines()
+        .find(|line| line.starts_with("=> "))
+        .unwrap_or_else(|| panic!("no stopped instruction in:\n{stdout}"));
+    assert!(
+        stopped.ends_with(
+            "jmp rax  # -> unknown: a restarted system call replaces a register it uses"
+        ),
+        "{stdout}"
+    );
 }
 
 #[test]

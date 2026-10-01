@@ -387,7 +387,8 @@ fn instructions_render_in_either_syntax_and_report_encoded_addresses() {
                 tokens,
                 flow: decoded_flow,
                 references: decoded_references,
-            } = x86(syntax).decode(BASE, bytes)
+                ..
+            } = x86(syntax).decode(BASE, bytes, None)
             else {
                 panic!("{bytes:x?} did not decode");
             };
@@ -403,7 +404,7 @@ fn instructions_render_in_either_syntax_and_report_encoded_addresses() {
 
     // Tokens classify the text for clients that color it.
     let RawDecode::Instruction { tokens, .. } =
-        x86(AssemblySyntax::Intel).decode(BASE, &[0xe8, 0x0b, 0x00, 0x00, 0x00])
+        x86(AssemblySyntax::Intel).decode(BASE, &[0xe8, 0x0b, 0x00, 0x00, 0x00], None)
     else {
         panic!("call did not decode");
     };
@@ -425,12 +426,144 @@ fn instructions_render_in_either_syntax_and_report_encoded_addresses() {
 fn incomplete_and_invalid_encodings_are_told_apart() {
     let mut decoder = x86(AssemblySyntax::Intel);
     assert!(matches!(
-        decoder.decode(BASE, &[0x48, 0xb8, 1, 2]),
+        decoder.decode(BASE, &[0x48, 0xb8, 1, 2], None),
         RawDecode::Incomplete
     ));
-    assert!(matches!(decoder.decode(BASE, &[]), RawDecode::Incomplete));
     assert!(matches!(
-        decoder.decode(BASE, &[0x06, 0x90]),
+        decoder.decode(BASE, &[], None),
+        RawDecode::Incomplete
+    ));
+    assert!(matches!(
+        decoder.decode(BASE, &[0x06, 0x90], None),
         RawDecode::Invalid
     ));
+}
+
+/// Decodes one instruction at `BASE`, with a thread stopped there when
+/// `registers` are given. Pointer slots follow at 0x2000: an address at
+/// 0x2000, 0x1010 at 0x2008, and four readable bytes at 0x2010.
+fn indirect_target(code: &[u8], registers: Option<&RegisterFile>) -> Option<IndirectTarget> {
+    let mut bytes = vec![0; 0x1018];
+    bytes[..code.len()].copy_from_slice(code);
+    bytes[0x1000..0x1008].copy_from_slice(&0x1234_5678_9abc_def0_u64.to_le_bytes());
+    bytes[0x1008..0x1010].copy_from_slice(&0x1010_u64.to_le_bytes());
+    let mut source = FakeSource::new(BASE, bytes);
+    source.readable[0].end = 0x2014;
+    source.stopped = registers.map(|registers| (VirtualAddress::new(BASE), registers.clone()));
+    let (_, _, block) = window(&mut source, BASE, 0, 1);
+    match &block.instructions[0].content {
+        InstructionContent::Decoded(decoded) => decoded.indirect_target.as_deref().cloned(),
+        other => panic!("{code:x?} did not decode: {other:?}"),
+    }
+}
+
+#[test]
+fn indirect_targets_are_read_from_the_stopped_state() {
+    let at = |address| AddressDescription {
+        address: VirtualAddress::new(address),
+        module: None,
+    };
+    let memory = |slot, target| {
+        Some(IndirectTarget::Memory {
+            slot: at(slot),
+            target: at(target),
+        })
+    };
+    let unreadable = |slot, address| {
+        Some(IndirectTarget::Unreadable {
+            slot: at(slot),
+            address: VirtualAddress::new(address),
+            reason: MemoryReadUnavailableReason::Inaccessible,
+        })
+    };
+    let registers = RegisterFile::new([
+        (0, 0x1_0000_2008), // rax
+        (7, 0x2008),        // rsp
+        (58, 0x1ff0),       // fs base
+    ]);
+    let needs = Some(IndirectTarget::NeedsRegisters);
+    // Bytes, the target away from the stop, and the target at it.
+    let cases: [(&[u8], _, _); 12] = [
+        // Program-counter-relative and absolute slots hold everywhere.
+        (
+            &[0xff, 0x25, 0xfa, 0x0f, 0, 0], // jmp [rip+0xffa]
+            memory(0x2000, 0x1234_5678_9abc_def0),
+            memory(0x2000, 0x1234_5678_9abc_def0),
+        ),
+        (
+            &[0xff, 0x14, 0x25, 0x08, 0x20, 0, 0], // call [0x2008]
+            memory(0x2008, 0x1010),
+            memory(0x2008, 0x1010),
+        ),
+        (
+            &[0xff, 0x25, 0x0a, 0x10, 0, 0], // jmp [rip+0x100a]
+            unreadable(0x2010, 0x2014),
+            unreadable(0x2010, 0x2014),
+        ),
+        // Registers are known only at the stop, including the FS base and
+        // a 32-bit address computation.
+        (
+            &[0xff, 0xd0], // call rax
+            needs.clone(),
+            Some(IndirectTarget::Register {
+                target: at(0x1_0000_2008),
+            }),
+        ),
+        (
+            &[0xff, 0x50, 0x08], // call [rax+8]
+            needs.clone(),
+            unreadable(0x1_0000_2010, 0x1_0000_2010),
+        ),
+        (&[0x67, 0xff, 0x20], needs.clone(), memory(0x2008, 0x1010)), // jmp [eax]
+        (
+            &[0x64, 0xff, 0x14, 0x25, 0x10, 0, 0, 0], // call fs:[0x10]
+            needs.clone(),
+            memory(0x2000, 0x1234_5678_9abc_def0),
+        ),
+        (
+            &[0xff, 0x24, 0xc5, 0x08, 0x20, 0, 0], // jmp [rax*8+0x2008]
+            needs.clone(),
+            unreadable(0x8_0001_2048, 0x8_0001_2048),
+        ),
+        (&[0xc3], needs.clone(), memory(0x2008, 0x1010)), // ret
+        (&[0xc2, 0x08, 0], needs.clone(), memory(0x2008, 0x1010)), // ret 8
+        // Other instructions have no indirect target.
+        (&[0xe8, 0, 0, 0, 0], None, None), // call 0x1005
+        (&[0x90], None, None),
+    ];
+    for (code, away, stopped) in cases {
+        assert_eq!(indirect_target(code, None), away, "{code:x?}");
+        assert_eq!(
+            indirect_target(code, Some(&registers)),
+            stopped,
+            "{code:x?}"
+        );
+    }
+
+    // Far transfers, returns from interrupts, and branches whose operand
+    // size differs between Intel and AMD processors.
+    for code in [
+        &[0x66, 0xff, 0xe0][..], // jmp rax, or jmp ax on AMD
+        &[0x66, 0xc3],           // ret, or retw on AMD
+        &[0xff, 0x28],           // jmp far [rax]
+        &[0x48, 0xcf],           // iretq
+        &[0xcb],                 // retf
+    ] {
+        for registers in [None, Some(&registers)] {
+            assert_eq!(
+                indirect_target(code, registers),
+                Some(IndirectTarget::Unsupported),
+                "{code:x?}"
+            );
+        }
+    }
+
+    // A register the stop does not determine is never guessed.
+    let mut unknown = registers;
+    unknown.remove(0);
+    assert_eq!(indirect_target(&[0xff, 0xd0], Some(&unknown)), needs);
+    assert_eq!(
+        indirect_target(&[0xff, 0x24, 0xc5, 0x08, 0x20, 0, 0], Some(&unknown)),
+        needs
+    );
 }

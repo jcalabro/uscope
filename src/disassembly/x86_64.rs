@@ -1,14 +1,16 @@
 //! The x86-64 instruction decoder and renderer, built on iced-x86.
 
 use iced_x86::{
-    DecoderError, DecoderOptions, FlowControl, Formatter, FormatterOutput, FormatterTextKind,
+    Code, DecoderError, DecoderOptions, FlowControl, Formatter, FormatterOutput, FormatterTextKind,
     GasFormatter, Instruction, IntelFormatter, OpKind, Register,
 };
 
 use super::{
     AssemblySyntax, ControlFlow, InstructionReferenceKind, InstructionToken, InstructionTokenKind,
-    RawDecode,
+    RawDecode, RawIndirect,
 };
+use crate::ByteOrder;
+use crate::unwind::RegisterFile;
 
 /// The longest x86-64 instruction encoding the architecture permits.
 const MAX_INSTRUCTION_LENGTH: usize = 15;
@@ -42,7 +44,16 @@ impl super::InstructionDecoder for Decoder {
         MAX_INSTRUCTION_LENGTH
     }
 
-    fn decode(&mut self, address: u64, bytes: &[u8]) -> RawDecode {
+    fn byte_order(&self) -> ByteOrder {
+        ByteOrder::Little
+    }
+
+    fn decode(
+        &mut self,
+        address: u64,
+        bytes: &[u8],
+        registers: Option<&RegisterFile>,
+    ) -> RawDecode {
         let mut decoder = iced_x86::Decoder::with_ip(64, bytes, address, DecoderOptions::NONE);
         let instruction = decoder.decode();
         if instruction.is_invalid() {
@@ -58,6 +69,7 @@ impl super::InstructionDecoder for Decoder {
             tokens: tokens.0,
             flow: flow(&instruction),
             references: references(&instruction),
+            indirect: indirect(&instruction, bytes, registers),
         }
     }
 }
@@ -143,4 +155,100 @@ fn references(instruction: &Instruction) -> Vec<(InstructionReferenceKind, u64)>
         }
     }
     references
+}
+
+/// Returns a register's value, read by its x86-64 psABI DWARF number. A
+/// segment register stands for its base address, which is zero in 64-bit
+/// mode except for FS and GS.
+fn register_value(registers: &RegisterFile, register: Register) -> Option<u64> {
+    let dwarf = match register {
+        Register::ES | Register::CS | Register::SS | Register::DS => return Some(0),
+        Register::FS => return registers.get(58),
+        Register::GS => return registers.get(59),
+        _ => match register.full_register() {
+            Register::RAX => 0,
+            Register::RDX => 1,
+            Register::RCX => 2,
+            Register::RBX => 3,
+            Register::RSI => 4,
+            Register::RDI => 5,
+            Register::RBP => 6,
+            Register::RSP => 7,
+            Register::R8 => 8,
+            Register::R9 => 9,
+            Register::R10 => 10,
+            Register::R11 => 11,
+            Register::R12 => 12,
+            Register::R13 => 13,
+            Register::R14 => 14,
+            Register::R15 => 15,
+            _ => return None,
+        },
+    };
+    let value = registers.get(dwarf)?;
+    Some(match register.size() {
+        8 => value,
+        bytes => value & ((1 << (bytes * 8)) - 1),
+    })
+}
+
+/// Returns where an indirect jump, call, or return finds its target: memory
+/// whose address the instruction alone determines, or, given the registers
+/// it will execute with, any register or memory operand.
+fn indirect(
+    instruction: &Instruction,
+    bytes: &[u8],
+    registers: Option<&RegisterFile>,
+) -> Option<RawIndirect> {
+    if !matches!(
+        instruction.flow_control(),
+        FlowControl::IndirectBranch | FlowControl::IndirectCall | FlowControl::Return
+    ) {
+        return None;
+    }
+    // In 64-bit mode Intel processors ignore an operand-size prefix on a near
+    // branch, while AMD processors narrow its target to 16 bits.
+    let amd = iced_x86::Decoder::with_ip(
+        64,
+        &bytes[..instruction.len()],
+        instruction.ip(),
+        DecoderOptions::AMD,
+    )
+    .decode();
+    if amd.code() != instruction.code() {
+        return Some(RawIndirect::Unsupported);
+    }
+    Some(match (instruction.code(), instruction.op0_kind()) {
+        (Code::Jmp_rm64 | Code::Call_rm64, OpKind::Register) => registers
+            .and_then(|registers| register_value(registers, instruction.op0_register()))
+            .map_or(RawIndirect::NeedsRegisters, RawIndirect::Value),
+        (Code::Jmp_rm64 | Code::Call_rm64, OpKind::Memory) => {
+            let size = instruction.memory_size().size();
+            // An address without registers holds at every instruction.
+            let static_address = instruction.virtual_address(0, 0, |register, _, _| {
+                matches!(
+                    register,
+                    Register::ES | Register::CS | Register::SS | Register::DS
+                )
+                .then_some(0)
+            });
+            static_address
+                .or_else(|| {
+                    let registers = registers?;
+                    instruction
+                        .virtual_address(0, 0, |register, _, _| register_value(registers, register))
+                })
+                .map_or(RawIndirect::NeedsRegisters, |address| RawIndirect::Load {
+                    address,
+                    size,
+                })
+        }
+        (Code::Retnq | Code::Retnq_imm16, _) => registers
+            .and_then(|registers| register_value(registers, Register::RSP))
+            .map_or(RawIndirect::NeedsRegisters, |address| RawIndirect::Load {
+                address,
+                size: 8,
+            }),
+        _ => RawIndirect::Unsupported,
+    })
 }

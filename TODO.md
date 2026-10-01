@@ -5,7 +5,7 @@
 - [x] Add watchpoints.
 - [x] Symbolize frames in modules without DWARF from their ELF symbol tables.
 - [x] Add disassembly support, with an `info symbol <address>` command built on the same address resolution.
-- [ ] Name indirect branch targets by reading their memory operand at the stop, such as GOT slots.
+- [x] Name indirect branch targets by reading their memory operand at the stop, such as GOT slots.
 - [ ] Support core dumps from other machines with a sysroot or library search path.
 - [ ] Add caller-frame selection for variables and source context, especially for core dumps.
 - [ ] Add hit-count breakpoints by evaluating hits at an internal stop and resuming transparently.
