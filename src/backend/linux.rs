@@ -1264,15 +1264,26 @@ impl<P: LinuxTraceOps> Controller<P> {
             install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
         }
 
-        self.ptrace.continue_execution(pid, None)?;
+        let execution_id = inferior.active.as_ref().expect("launch is active").id;
+        let process_id = process_id(inferior.tgid);
+        let pause_requested = inferior.barrier.is_some();
         let thread = inferior
             .threads
             .get_mut(&pid)
             .expect("initial thread exists");
-        thread.state = NativeThreadState::Running;
         thread.expected = ExpectedStop::None;
-        let execution_id = inferior.active.as_ref().expect("launch is active").id;
-        let process_id = process_id(inferior.tgid);
+        if pause_requested {
+            // A pause requested during launch completes at this stop instead
+            // of letting the new image run first.
+            thread.state = NativeThreadState::Stopped;
+            if let Some(reply) = self.launch_reply.take() {
+                let _ = reply.send(Ok(execution_id));
+            }
+            return self.finish_barrier_if_ready();
+        }
+
+        self.ptrace.continue_execution(pid, None)?;
+        thread.state = NativeThreadState::Running;
         self.bump_revision();
         if let Some(reply) = self.launch_reply.take() {
             let _ = reply.send(Ok(execution_id));
@@ -1562,11 +1573,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(execution_id);
         }
 
+        // A launching thread has no stop to request: its initial exec stop
+        // completes the barrier.
         let triggering_thread = inferior
             .threads
             .iter()
             .find_map(|(&pid, thread)| {
-                matches!(thread.state, NativeThreadState::Running).then_some(pid)
+                (matches!(thread.state, NativeThreadState::Running)
+                    || matches!(thread.expected, ExpectedStop::InitialExec))
+                .then_some(pid)
             })
             .ok_or(Error::NotStopped)?;
         inferior.next_barrier = inferior.next_barrier.wrapping_add(1);
@@ -7130,8 +7145,38 @@ mod tests {
             Self::unexpected("step")
         }
 
-        fn registers(&self, _pid: Pid) -> Result<libc::user_regs_struct> {
-            Self::unexpected("registers")
+        fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
+            assert_eq!(pid, self.pid);
+            self.record("registers");
+            Ok(libc::user_regs_struct {
+                r15: 0,
+                r14: 0,
+                r13: 0,
+                r12: 0,
+                rbp: 0,
+                rbx: 0,
+                r11: 0,
+                r10: 0,
+                r9: 0,
+                r8: 0,
+                rax: 0,
+                rcx: 0,
+                rdx: 0,
+                rsi: 0,
+                rdi: 0,
+                orig_rax: 0,
+                rip: 0x5000,
+                cs: 0,
+                eflags: 0,
+                rsp: 0,
+                ss: 0,
+                fs_base: 0,
+                gs_base: 0,
+                ds: 0,
+                es: 0,
+                fs: 0,
+                gs: 0,
+            })
         }
 
         fn set_registers(&self, _pid: Pid, _registers: libc::user_regs_struct) -> Result<()> {
@@ -7278,8 +7323,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn controller_lifecycle_is_driven_through_the_linux_effect_boundary() {
+    struct LaunchHarness {
+        controller: Controller<RecordingTrace>,
+        events: broadcast::Receiver<DebuggerEvent>,
+        actions: Rc<RefCell<Vec<&'static str>>>,
+        pid: Pid,
+    }
+
+    fn launch_controller() -> LaunchHarness {
         let actions = Rc::new(RefCell::new(Vec::new()));
         let pid = Pid::from_raw(4242);
         let trace = RecordingTrace {
@@ -7309,12 +7360,12 @@ mod tests {
             },
         ));
         let (message_sender, messages) = mpsc::channel(8);
-        let (events, _) = broadcast::channel(8);
-        let mut controller = Controller::new(
+        let (events, event_receiver) = broadcast::channel(8);
+        let controller = Controller::new(
             SessionLease::acquire().expect("acquire test session"),
             ExecutableSource {
                 display_path: Arc::new(PathBuf::from("/test/program")),
-                data: Arc::from([]),
+                data: sectionless_elf(),
                 identity: FileIdentity { inode: 0 },
                 process_start_time: None,
             },
@@ -7328,6 +7379,50 @@ mod tests {
             },
             trace,
         );
+
+        LaunchHarness {
+            controller,
+            events: event_receiver,
+            actions,
+            pid,
+        }
+    }
+
+    /// An ELF header without sections, so loader rendezvous discovery finds no
+    /// dynamic section to read through the fake.
+    fn sectionless_elf() -> Arc<[u8]> {
+        let mut header = vec![0x7f, b'E', b'L', b'F', 2, 1, 1];
+        header.resize(16, 0);
+        // e_type through e_shstrndx: a little-endian x86-64 shared object with
+        // no program or section headers.
+        for (value, width) in [
+            (3_u64, 2),
+            (62, 2),
+            (1, 4),
+            (0, 8),
+            (0, 8),
+            (0, 8),
+            (0, 4),
+            (64, 2),
+            (56, 2),
+            (0, 2),
+            (64, 2),
+            (0, 2),
+            (0, 2),
+        ] {
+            header.extend_from_slice(&value.to_le_bytes()[..width]);
+        }
+        header.into()
+    }
+
+    #[test]
+    fn controller_lifecycle_is_driven_through_the_linux_effect_boundary() {
+        let LaunchHarness {
+            mut controller,
+            actions,
+            pid,
+            ..
+        } = launch_controller();
         let (launch_reply, launch_result) = tokio::sync::oneshot::channel();
 
         controller.launch(launch_reply);
@@ -7365,6 +7460,65 @@ mod tests {
                 "continue",
                 "kill",
             ]
+        );
+    }
+
+    #[test]
+    fn pause_during_launch_completes_at_the_initial_exec_stop() {
+        let LaunchHarness {
+            mut controller,
+            mut events,
+            actions,
+            pid,
+        } = launch_controller();
+        let (launch_reply, launch_result) = tokio::sync::oneshot::channel();
+        controller.launch(launch_reply);
+
+        assert_eq!(
+            controller
+                .begin_pause(process_id(pid))
+                .expect("a launching inferior accepts a pause"),
+            ExecutionId::new(1)
+        );
+        controller
+            .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
+            .expect("process initial stop");
+
+        assert_eq!(
+            launch_result
+                .blocking_recv()
+                .expect("launch reply")
+                .expect("launch success"),
+            ExecutionId::new(1)
+        );
+        let published = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| !matches!(event, DebuggerEvent::StateChanged { .. }))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                published.as_slice(),
+                [
+                    DebuggerEvent::InferiorLaunched { .. },
+                    DebuggerEvent::InferiorStopped {
+                        execution_id: Some(execution),
+                        all_threads_stopped: true,
+                        reason: StopReason::Pause,
+                        ..
+                    },
+                ] if *execution == ExecutionId::new(1)
+            ),
+            "the paused launch must stop without first resuming: {published:?}"
+        );
+        assert_eq!(
+            actions.borrow().as_slice(),
+            [
+                "spawn",
+                "spawn_waiter",
+                "set_options",
+                "load_bias",
+                "registers"
+            ],
+            "the initial thread must stop without a native stop request or resume"
         );
     }
 

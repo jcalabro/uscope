@@ -323,6 +323,9 @@ impl DebuggerHandle {
     }
 
     /// Pauses a running process and waits for a coherent all-stop snapshot.
+    ///
+    /// A process that is still launching stops at its initial exec stop
+    /// instead of running first.
     pub async fn pause(&self) -> Result<StopReason> {
         let snapshot = self.snapshot().await?;
         let InferiorState::Running { process_id, .. } = snapshot.inferior else {

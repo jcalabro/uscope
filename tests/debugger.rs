@@ -8844,6 +8844,39 @@ async fn stale_stop_tokens_allow_exactly_one_client_to_resume() {
 }
 
 #[tokio::test]
+async fn pause_during_launch_ends_the_launch_execution_in_a_coherent_stop() {
+    let mut scenario = Scenario::new("pause during launch", Scenario::fixture("spin"));
+    let run = scenario.start_launching().await;
+
+    // The initial exec stop may be processed before or after this request;
+    // either order must end the launch execution in one inspectable pause.
+    let reason = timeout(Duration::from_secs(2), scenario.handle().pause())
+        .await
+        .expect("pause timed out")
+        .expect("pause failed");
+    assert_eq!(reason, StopReason::Pause);
+    let launched = timeout(Duration::from_secs(2), run)
+        .await
+        .expect("run timed out")
+        .expect("run task panicked")
+        .expect("run failed");
+    assert_eq!(launched, StopReason::Pause);
+    assert!(matches!(
+        scenario.snapshot().await.inferior,
+        InferiorState::Stopped {
+            all_threads_stopped: true,
+            reason: StopReason::Pause,
+            ..
+        }
+    ));
+    scenario
+        .operation("read paused registers", scenario.handle().registers())
+        .await;
+
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
 async fn pause_cancels_an_active_source_execution_plan() {
     let mut scenario = Scenario::new("pause source plan", Scenario::fixture("step"));
     scenario.add_breakpoint("step_forever").await;

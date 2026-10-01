@@ -189,6 +189,17 @@ impl Scenario {
         task
     }
 
+    /// Starts running and returns as soon as the inferior exists, which may be
+    /// before its initial exec stop has been processed.
+    pub async fn start_launching(&mut self) -> JoinHandle<Result<StopReason>> {
+        self.transcript.push("request: run".to_owned());
+        let handle = self.handle.clone();
+        let task = tokio::spawn(async move { handle.run().await });
+        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorLaunched { .. }))
+            .await;
+        task
+    }
+
     pub async fn start_resuming(&mut self) -> JoinHandle<Result<StopReason>> {
         self.transcript.push("request: continue".to_owned());
         let handle = self.handle.clone();
