@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::debug_info::{UnwindInfo, VariableInfo};
-use crate::protocol::{DebuggerEvent, Request};
+use crate::protocol::{CoreDumpOptions, DebuggerEvent, Request};
 use crate::{ModuleImage, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,4 +95,21 @@ pub fn spawn_controller(
         messages,
         events,
     )
+}
+
+pub use linux::PostMortemSession;
+
+/// Opens a core dump and starts the controller serving its stopped snapshot.
+pub fn open_core(
+    options: &CoreDumpOptions,
+    message_sender: mpsc::Sender<ControllerMessage>,
+    messages: mpsc::Receiver<ControllerMessage>,
+    events: broadcast::Sender<DebuggerEvent>,
+) -> Result<PostMortemSession> {
+    linux::open_core(options, message_sender, messages, events)
+}
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_core_dump(data: &[u8]) {
+    linux::fuzz_core_dump(data);
 }

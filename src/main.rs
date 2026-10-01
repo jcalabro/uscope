@@ -16,10 +16,11 @@ use rustyline::error::ReadlineError;
 use rustyline::{ColorMode, DefaultEditor};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use uscope::{
-    Breakpoint, BreakpointId, BreakpointLocation, BreakpointSpec, ByteOrder, Debugger,
-    DebuggerHandle, Error, ExitStatus, FloatValue, LineNumber, RegisterSnapshot, ScalarValue,
-    SourceContext, StateSnapshot, StepKind, StopReason, ThreadId, ThreadState, Variable,
-    VariableSnapshot, VariableState, VirtualAddress,
+    Breakpoint, BreakpointId, BreakpointLocation, BreakpointSpec, ByteOrder, CoreDumpInfo,
+    CoreDumpOptions, CoreModuleState, Debugger, DebuggerHandle, Error, ExitStatus, FloatValue,
+    LineNumber, ModuleIdentity, RegisterSnapshot, ScalarValue, SourceContext, StateSnapshot,
+    StepKind, StopReason, ThreadId, ThreadState, Variable, VariableSnapshot, VariableState,
+    VirtualAddress,
 };
 
 mod terminal;
@@ -36,13 +37,22 @@ const HEX_DUMP_BYTES_PER_LINE: usize = 16;
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
-    /// Native executable to launch, or an attach fallback when used with --attach.
-    #[arg(value_name = "EXECUTABLE", required_unless_present = "attach")]
+    /// Native executable to launch, or the executable for --attach or --core
+    /// when automatic discovery is unavailable.
+    #[arg(value_name = "EXECUTABLE", required_unless_present_any = ["attach", "core"])]
     executable: Option<PathBuf>,
 
     /// Attach to an existing process. The executable is discovered through /proc by default.
-    #[arg(short = 'p', long, value_name = "PID")]
+    #[arg(short = 'p', long, value_name = "PID", conflicts_with = "core")]
     attach: Option<u64>,
+
+    /// Open a post-mortem core dump. The executable recorded in the dump is used by default.
+    #[arg(long, value_name = "CORE")]
+    core: Option<PathBuf>,
+
+    /// Use module files that cannot be proven to match the core dump.
+    #[arg(long, requires = "core")]
+    allow_module_mismatch: bool,
 
     /// Execute commands from a file. May be repeated.
     #[arg(short = 'c', long = "command", value_name = "FILE")]
@@ -130,7 +140,7 @@ const COMMANDS: &[CommandSpec] = &[
         Info,
         "info",
         [],
-        "info breakpoints",
+        "info breakpoints|core",
         "Show debugger information"
     ),
     command!(
@@ -268,7 +278,14 @@ async fn main() -> ExitCode {
 }
 
 async fn run_debugger(args: &Args, renderers: Renderers) -> Result<()> {
-    let debugger = if let Some(pid) = args.attach {
+    let debugger = if let Some(core) = &args.core {
+        Debugger::open_core(&CoreDumpOptions {
+            core: core.clone(),
+            executable: args.executable.clone(),
+            allow_module_mismatch: args.allow_module_mismatch,
+        })
+        .with_context(|| format!("failed to open core dump {}", core.display()))?
+    } else if let Some(pid) = args.attach {
         let process = uscope::ProcessId::new(pid);
         match args.executable.as_ref() {
             Some(executable) => Debugger::attach_with_executable(process, executable).await,
@@ -320,7 +337,9 @@ async fn run_with_interrupts(
                 signal.context("failed to listen for Ctrl-C")?;
                 match debugger.pause().await {
                     Ok(_) => {}
-                    Err(Error::NotRunning | Error::NotStopped) => return Ok(()),
+                    Err(Error::NotRunning | Error::NotStopped | Error::PostMortemTarget) => {
+                        return Ok(());
+                    }
                     Err(error) => return Err(error).context("failed to pause inferior"),
                 }
             }
@@ -329,7 +348,9 @@ async fn run_with_interrupts(
 }
 
 async fn run(debugger: &DebuggerHandle, args: &Args, renderers: Renderers) -> Result<()> {
-    if !args.batch {
+    if let Some(core) = debugger.core_dump() {
+        report_core_dump(core, args.batch, renderers)?;
+    } else if !args.batch {
         let action = if args.attach.is_some() {
             "attached to"
         } else {
@@ -405,6 +426,119 @@ async fn run(debugger: &DebuggerHandle, args: &Args, renderers: Renderers) -> Re
     } else {
         repl(debugger, renderers).await
     }
+}
+
+/// Announces an opened core dump. Modules whose files are not proven to match
+/// the dump are always reported, on stderr in batch mode.
+fn report_core_dump(core: &CoreDumpInfo, batch: bool, renderers: Renderers) -> Result<()> {
+    if !batch {
+        println!(
+            "{} {} of {} (process {})",
+            renderers.stdout.paint(Role::Success, "opened core dump"),
+            renderers.stdout.paint(Role::Metadata, core.path.display()),
+            renderers.stdout.paint(Role::Name, &core.process_name),
+            core.process_id
+        );
+        println!(
+            "{}",
+            format_stop(
+                StopReason::CoreDump {
+                    exception: core.exception.clone()
+                },
+                renderers.stdout
+            )
+        );
+        io::stdout().flush()?;
+    }
+    for warning in core_module_warnings(core) {
+        let line = format!(
+            "{}: {warning}",
+            renderers.stderr.paint(Role::Warning, "warning")
+        );
+        if batch {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
+fn format_core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
+    let mut lines = vec![
+        format!(
+            "{} {}",
+            renderer.paint(Role::Metadata, "core:"),
+            core.path.display()
+        ),
+        format!(
+            "{} {} (process {}): {}",
+            renderer.paint(Role::Metadata, "process:"),
+            renderer.paint(Role::Name, &core.process_name),
+            core.process_id,
+            core.arguments
+        ),
+        format!(
+            "{} {}",
+            renderer.paint(Role::Metadata, "signal:"),
+            core.exception
+                .as_ref()
+                .map_or("none recorded", |exception| exception.description.as_ref())
+        ),
+    ];
+    for module in core.modules.iter() {
+        let state = match &module.state {
+            CoreModuleState::Loaded { module, identity } => {
+                let identity = match identity {
+                    ModuleIdentity::BuildId => "verified by build-id".to_owned(),
+                    ModuleIdentity::SavedContent { compared_bytes } => {
+                        format!("verified by {compared_bytes} saved bytes")
+                    }
+                    ModuleIdentity::Mismatched { detail } => renderer
+                        .paint(Role::Warning, format!("mismatched: {detail}"))
+                        .to_string(),
+                    ModuleIdentity::Unverified => {
+                        renderer.paint(Role::Warning, "unverified").to_string()
+                    }
+                };
+                format!("module {} {identity}", module.module.id)
+            }
+            CoreModuleState::Missing => renderer.paint(Role::Warning, "missing").to_string(),
+        };
+        lines.push(format!(
+            "  {} {} {state}",
+            renderer.paint(Role::Metadata, module.start),
+            module.recorded_path.display()
+        ));
+    }
+    lines.join("\n")
+}
+
+fn core_module_warnings(core: &CoreDumpInfo) -> Vec<String> {
+    core.modules
+        .iter()
+        .filter_map(|module| match &module.state {
+            CoreModuleState::Missing => Some(format!(
+                "{} is missing; its frames and unsaved memory are unavailable",
+                module.recorded_path.display()
+            )),
+            CoreModuleState::Loaded {
+                module: loaded,
+                identity: ModuleIdentity::Mismatched { detail },
+            } => Some(format!(
+                "{} does not match the dump ({detail}); using its metadata anyway",
+                loaded.path.display()
+            )),
+            CoreModuleState::Loaded {
+                module: loaded,
+                identity: ModuleIdentity::Unverified,
+            } => Some(format!(
+                "{} could not be verified against the dump; using its metadata anyway",
+                loaded.path.display()
+            )),
+            CoreModuleState::Loaded { .. } => None,
+        })
+        .collect()
 }
 
 async fn run_lines<'a>(
@@ -740,13 +874,14 @@ async fn execute(
             execute_break(debugger, argument, renderer).await
         }
         Command::Breakpoints => execute_list_breakpoints(debugger, renderer).await,
-        Command::Info => {
-            let argument = one_argument(&mut words, spec.usage)?;
-            if argument != "breakpoints" && argument != "break" {
-                return Err(Error::InvalidCommand(spec.usage.to_owned()));
-            }
-            execute_list_breakpoints(debugger, renderer).await
-        }
+        Command::Info => match one_argument(&mut words, spec.usage)? {
+            "breakpoints" | "break" => execute_list_breakpoints(debugger, renderer).await,
+            "core" => debugger
+                .core_dump()
+                .map(|core| Control::Continue(format_core_dump(core, renderer)))
+                .ok_or_else(|| Error::InvalidCommand("no core dump is open".to_owned())),
+            _ => Err(Error::InvalidCommand(spec.usage.to_owned())),
+        },
         Command::Delete => {
             let argument = one_argument(&mut words, spec.usage)?;
             execute_delete_breakpoint(debugger, argument, spec.usage, renderer).await
@@ -2153,6 +2288,22 @@ fn format_stop(reason: StopReason, renderer: Renderer) -> String {
                 format_exit_status(status, renderer)
             )
         }
+        StopReason::CoreDump { exception } => exception.map_or_else(
+            || {
+                format!(
+                    "{} without a recorded signal",
+                    renderer.paint(Role::Warning, "dumped")
+                )
+            },
+            |exception| {
+                format!(
+                    "process {} by {} ({:#x})",
+                    renderer.paint(Role::Error, "terminated"),
+                    renderer.paint(Role::Error, exception.description),
+                    exception.code
+                )
+            },
+        ),
         StopReason::Unclassifiable { description } => {
             format!(
                 "inferior {} for an unclassifiable reason: {description}",

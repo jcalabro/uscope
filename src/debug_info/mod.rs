@@ -179,3 +179,15 @@ pub fn load_bytes(path: &Path, data: &[u8]) -> Result<DebugInfo> {
 pub(crate) fn load_module(path: &Path, id: crate::ModuleImageId) -> Result<DebugInfo> {
     dwarf::load(path, id)
 }
+
+#[expect(
+    clippy::redundant_pub_crate,
+    reason = "the private debug-info edge is shared by sibling backend modules"
+)]
+pub(crate) fn load_module_bytes(
+    path: &Path,
+    data: &[u8],
+    id: crate::ModuleImageId,
+) -> Result<DebugInfo> {
+    dwarf::load_bytes(path, data, id)
+}

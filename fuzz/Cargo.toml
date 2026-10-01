@@ -24,3 +24,10 @@ path = "fuzz_targets/dwarf_expression.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "core-dump"
+path = "fuzz_targets/core_dump.rs"
+test = false
+doc = false
+bench = false

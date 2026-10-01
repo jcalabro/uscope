@@ -22,6 +22,9 @@ just run build/test-programs/basic
 
 # attach to a running process; uscope discovers its executable through /proc
 just dev --command cargo run -- --attach PID
+
+# open a post-mortem core dump; uscope uses the executable recorded in the dump
+just dev --command cargo run -- --core CORE
 ```
 
 Use `--attach PID` or `-p PID` to attach to an existing process. `uscope` reads the
@@ -29,6 +32,10 @@ running executable through `/proc/PID/exe`, stops every native thread, and detac
 without terminating the process when the debugger exits. If automatic executable
 discovery is unavailable, pass its path as the positional `EXECUTABLE` argument
 alongside `--attach`.
+
+Use `--core CORE` to open an ELF core dump written by the Linux kernel or by gdb's `gcore`. The dump is presented as one permanent stop at the thread that triggered it, with the terminating signal, its `si_code`, and the faulting address or sending process. Backtraces, registers, variables, globals, TLS, memory reads, and thread selection work as they do at a live stop; execution control, memory writes, and breakpoints fail explicitly. `info core` lists the process, signal, and every recorded module. Compressed dumps from `systemd-coredump` must first be extracted with `coredumpctl dump -o FILE`.
+
+Each executable and shared library recorded by the dump is matched to its file on disk before use: by GNU build-id when the dump saved the note, and otherwise by comparing every saved byte of the file's read-only segments. Memory the dump did not save, such as unmodified code and read-only data, is read only from a proven file. A file that differs from the dump, or that nothing saved can verify, is a hard error. Pass `--allow-module-mismatch` to use its debug metadata anyway; its contents still never stand in for unsaved memory, and every such module is reported as a warning. A module whose file no longer exists is reported and its frames and unsaved memory stay unavailable. If the executable has moved, pass its path as the positional `EXECUTABLE` argument alongside `--core`.
 
 At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
 Use `x <runtime-address> [byte-count]` to display a bounded target-memory range as hexadecimal bytes and printable ASCII. The default is 64 bytes and the CLI accepts at most 8192 bytes per command. Reads return the readable contiguous prefix and identify the first inaccessible address instead of discarding bytes read before a mapping boundary.
