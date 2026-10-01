@@ -1183,8 +1183,12 @@ fn register(registers: &uscope::RegisterSnapshot, name: &str) -> u64 {
         .iter()
         .find(|value| value.register.name.as_ref() == name)
         .unwrap_or_else(|| panic!("no register {name}"));
+    let value = value
+        .bytes
+        .as_deref()
+        .expect("innermost registers are saved");
     let mut bytes = [0; 8];
-    bytes[..value.bytes.len()].copy_from_slice(&value.bytes);
+    bytes[..value.len()].copy_from_slice(value);
     u64::from_le_bytes(bytes)
 }
 

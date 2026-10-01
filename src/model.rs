@@ -226,11 +226,14 @@ pub struct RegisterDescriptor {
 pub struct RegisterValue {
     /// The register represented by this value.
     pub register: RegisterDescriptor,
-    /// The register bytes in the target's byte order.
-    pub bytes: Arc<[u8]>,
+    /// The register bytes in the target's byte order, or `None` in a caller's
+    /// frame when a callee may have overwritten the register without saving
+    /// it, so its value in that frame is unknown.
+    pub bytes: Option<Arc<[u8]>>,
 }
 
-/// The general register set of a stopped thread at one debugger revision.
+/// The general register set of one frame of a stopped thread at one
+/// debugger revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterSnapshot {
     /// The debugger revision at which these values were read.

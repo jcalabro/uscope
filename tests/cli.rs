@@ -2560,3 +2560,32 @@ fn run_starts_the_program_with_the_command_line_arguments_directory_and_environm
         "cannot be used with",
     );
 }
+
+#[test]
+fn registers_show_the_selected_frames_own_values() {
+    let stdout = assert_success(uscope(&[
+        "--core",
+        "build/test-programs/frames-gcc-o0.core",
+        "--batch",
+        "--eval",
+        "registers",
+        "--eval",
+        "frame 5",
+        "--eval",
+        "registers",
+    ]));
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let innermost = line_index(&lines, 0, |line| line.starts_with("rdi "));
+    assert!(!lines[innermost].contains("<not saved>"), "{stdout}");
+    let selected = line_index(&lines, innermost, |line| line.starts_with("#5 "));
+    // A callee may overwrite rdi without saving it, so frame 5's value is
+    // unknown, while its instruction pointer is its own return address.
+    let rdi = line_index(&lines, selected, |line| line.starts_with("rdi "));
+    assert!(lines[rdi].ends_with("<not saved>"), "{stdout}");
+    let rip = line_index(&lines, selected, |line| line.starts_with("rip "));
+    let frame_address = lines[selected]
+        .split_whitespace()
+        .find(|word| word.starts_with("0x"))
+        .expect("frame address");
+    assert!(lines[rip].ends_with(frame_address), "{stdout}");
+}

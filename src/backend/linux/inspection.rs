@@ -31,16 +31,31 @@ use super::{
 };
 
 impl<P: InspectionOps> Controller<P> {
-    pub(super) fn registers(&self, stop_id: StopId, pid: Pid) -> Result<RegisterSnapshot> {
+    pub(super) fn registers(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        frame: StackFrameId,
+    ) -> Result<RegisterSnapshot> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
         let native = self.ptrace.registers(pid)?;
+        let resolved = if frame == StackFrameId::INNERMOST {
+            None
+        } else {
+            Some(self.resolve_frame(inferior, pid, frame)?)
+        };
+        let caller = match resolved.as_ref().map(|frame| &frame.registers) {
+            Some(FrameRegisters::Caller(registers)) => Some(registers),
+            Some(FrameRegisters::Thread(_)) | None => None,
+        };
         Ok(x86_64_register_snapshot(
             self.revision,
             pid,
             self.module_image.target(),
             &native,
+            caller,
         ))
     }
 

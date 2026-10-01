@@ -297,6 +297,27 @@ async fn check_unsaved_register(scenario: &mut Scenario) {
         doubled.state,
         VariableState::Unavailable(VariableUnavailableReason::RegisterNotSaved("rdi".into()))
     );
+    // The frame's registers say the same, while those the unwinder recovered
+    // are the frame's own.
+    let registers = scenario
+        .operation("caller registers", scenario.handle().registers())
+        .await;
+    let register = |name: &str| {
+        registers
+            .registers
+            .iter()
+            .find(|register| &*register.register.name == name)
+            .unwrap_or_else(|| panic!("no register {name}"))
+            .bytes
+            .clone()
+    };
+    assert_eq!(register("rdi"), None);
+    assert_eq!(register("orig_rax"), None);
+    assert_eq!(
+        register("rip").as_deref(),
+        Some(&frames[inlined].instruction.get().to_le_bytes()[..])
+    );
+    assert!(register("rsp").is_some() && register("fs_base").is_some());
     // The innermost frame still reads the live register.
     select(scenario, 0).await;
     let registers = scenario
@@ -307,7 +328,10 @@ async fn check_unsaved_register(scenario: &mut Scenario) {
         .iter()
         .find(|register| &*register.register.name == "rdi")
         .expect("rdi");
-    assert_eq!(&rdi.bytes[..], &0x5ca1_ab1e_u64.to_le_bytes());
+    assert_eq!(
+        rdi.bytes.as_deref(),
+        Some(&0x5ca1_ab1e_u64.to_le_bytes()[..])
+    );
 }
 
 #[tokio::test]
@@ -688,7 +712,8 @@ async fn frame_selection_lasts_until_the_next_stop() {
         "selection keeps the stop"
     );
     assert_eq!(integer_variable(&scenario, "depth").await, 0);
-    // The backtrace and registers describe the thread, whatever is selected.
+    // The backtrace describes the thread, whatever is selected, while the
+    // registers are the selected frame's own.
     assert_eq!(backtrace(&scenario).await, frames);
     assert_eq!(
         scenario
@@ -697,8 +722,8 @@ async fn frame_selection_lasts_until_the_next_stop() {
             .registers
             .iter()
             .find(|register| &*register.register.name == "rip")
-            .map(|register| register.bytes.clone()),
-        Some(frames[0].instruction.get().to_le_bytes().into())
+            .and_then(|register| register.bytes.clone()),
+        Some(frames[recursion].instruction.get().to_le_bytes().into())
     );
 
     let outermost = frames.last().expect("frames").id;
@@ -729,6 +754,97 @@ async fn frame_selection_lasts_until_the_next_stop() {
         Some(StackFrameId::INNERMOST),
         "a failed selection keeps the selected frame"
     );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn explicit_contexts_inspect_any_frame_without_selecting_it() {
+    use uscope::StopContext;
+
+    let mut scenario = stop_in_leaf("gcc-o0").await;
+    let snapshot = scenario.snapshot().await;
+    let stop = snapshot.stop_id.expect("stopped");
+    let thread = snapshot.selected_thread.expect("selected thread");
+    let frames = backtrace(&scenario).await;
+    let recursion = level_of(&frames, "frames_recurse", 0);
+    let handle = scenario.handle().clone();
+    let view = handle.at(StopContext {
+        stop,
+        thread,
+        frame: frames[recursion].id,
+    });
+
+    let location = scenario.operation("location", view.location()).await;
+    assert_eq!(
+        location
+            .image
+            .function
+            .map(|function| function.name.to_string()),
+        Some("frames_recurse".to_owned())
+    );
+    let depth = scenario
+        .operation("variables", view.variables())
+        .await
+        .variables
+        .iter()
+        .find(|variable| &*variable.name == "depth")
+        .and_then(available_integer);
+    assert_eq!(depth, Some(0));
+    let registers = scenario.operation("registers", view.registers()).await;
+    assert!(registers.registers.iter().any(|register| {
+        &*register.register.name == "rip"
+            && register.bytes.as_deref()
+                == Some(&frames[recursion].instruction.get().to_le_bytes()[..])
+    }));
+    assert_eq!(
+        scenario
+            .operation("backtrace", view.backtrace())
+            .await
+            .frames[..],
+        frames[..]
+    );
+    let source = scenario.operation("source", view.source_context(0)).await;
+    assert_eq!(
+        source.location.line.get(),
+        frames[recursion]
+            .source
+            .as_ref()
+            .expect("source")
+            .line
+            .get()
+    );
+
+    // The view leaves the selection alone.
+    assert_eq!(
+        scenario.snapshot().await.selected_frame,
+        Some(StackFrameId::INNERMOST)
+    );
+    assert_eq!(integer_variable(&scenario, "leaf_local").await, 120);
+
+    assert!(matches!(
+        scenario
+            .handle()
+            .at(StopContext {
+                stop,
+                thread: ThreadId::new(u64::from(u32::MAX)),
+                frame: StackFrameId::INNERMOST,
+            })
+            .backtrace()
+            .await,
+        Err(Error::UnknownThread(_))
+    ));
+
+    // Every request through a view of an earlier stop fails.
+    scenario
+        .add_source_breakpoint("frames.c", frames_line("frames_sink = total;"))
+        .await;
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert!(matches!(view.variables().await, Err(Error::StaleStop)));
+    assert!(matches!(view.registers().await, Err(Error::StaleStop)));
+    assert!(matches!(view.location().await, Err(Error::StaleStop)));
     scenario.shutdown().await;
 }
 

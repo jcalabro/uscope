@@ -780,7 +780,7 @@ impl Cli {
             .registers
             .iter()
             .find(|value| value.register.role == Some(RegisterRole::ProgramCounter))
-            .and_then(|value| <[u8; 8]>::try_from(value.bytes.as_ref()).ok())
+            .and_then(|value| <[u8; 8]>::try_from(value.bytes.as_deref()?).ok())
             .map(|bytes| {
                 VirtualAddress::new(match registers.target.byte_order {
                     ByteOrder::Little => u64::from_le_bytes(bytes),

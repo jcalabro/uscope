@@ -1122,6 +1122,7 @@ pub enum Request {
     Registers {
         stop_id: StopId,
         thread_id: ThreadId,
+        frame: StackFrameId,
         reply: Reply<RegisterSnapshot>,
     },
     Variables {

@@ -1131,7 +1131,8 @@ fn register_u64(registers: &uscope::RegisterSnapshot, role: RegisterRole) -> u64
         .unwrap_or_else(|| panic!("missing {role:?} register"));
     let bytes: [u8; 8] = value
         .bytes
-        .as_ref()
+        .as_deref()
+        .unwrap_or_else(|| panic!("{} was not saved", value.register.name))
         .try_into()
         .unwrap_or_else(|_| panic!("{} was not 64 bits", value.register.name));
 
@@ -1191,7 +1192,9 @@ fn assert_register_snapshot(
     assert_ne!(register_u64(registers, RegisterRole::StackPointer), 0);
     assert_ne!(register_u64(registers, RegisterRole::FramePointer), 0);
     assert!(registers.registers.iter().any(|value| {
-        value.register.name.as_ref() == "rax" && value.register.bits == 64 && value.bytes.len() == 8
+        value.register.name.as_ref() == "rax"
+            && value.register.bits == 64
+            && value.bytes.as_ref().is_some_and(|bytes| bytes.len() == 8)
     }));
 }
 
