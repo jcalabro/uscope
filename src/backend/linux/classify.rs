@@ -139,7 +139,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 /// or completed step. Unsafe state transitions outrank ordinary control stops.
 pub(super) const fn visible_stop_priority(reason: &StopReason) -> u8 {
     match reason {
-        StopReason::Attach | StopReason::Pause => 0,
+        StopReason::Attach | StopReason::Entry | StopReason::Pause => 0,
         StopReason::Exception(_) => 1,
         StopReason::Breakpoint { .. }
         | StopReason::Watchpoint { .. }

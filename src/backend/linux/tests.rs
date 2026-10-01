@@ -1,6 +1,7 @@
 use crate::CodeInstanceKind;
 use crate::ExceptionDisposition;
 use crate::InlineFrameLookup;
+use crate::LaunchOptions;
 use crate::MemoryReadCompletion;
 use crate::MemoryReadUnavailableReason;
 use crate::Path;
@@ -315,7 +316,7 @@ impl InspectionOps for RecordingTrace {
 }
 
 impl LinuxTraceOps for RecordingTrace {
-    fn spawn(&self, _executable: &Path) -> Result<Pid> {
+    fn spawn(&self, _executable: &Path, _options: LaunchOptions) -> Result<Pid> {
         self.record("spawn");
         Ok(self.pid)
     }
@@ -691,7 +692,7 @@ fn controller_lifecycle_is_driven_through_the_linux_effect_boundary() {
     } = launch_controller();
     let (launch_reply, launch_result) = tokio::sync::oneshot::channel();
 
-    controller.launch(launch_reply);
+    controller.launch(LaunchOptions::default(), launch_reply);
     controller
         .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
         .expect("process initial stop");
@@ -736,7 +737,7 @@ fn pause_during_launch_completes_at_the_initial_exec_stop() {
         pid,
     } = launch_controller();
     let (launch_reply, launch_result) = tokio::sync::oneshot::channel();
-    controller.launch(launch_reply);
+    controller.launch(LaunchOptions::default(), launch_reply);
 
     assert_eq!(
         controller
@@ -1380,7 +1381,7 @@ impl InspectionOps for DebugRegisterTrace {
 }
 
 impl LinuxTraceOps for DebugRegisterTrace {
-    fn spawn(&self, _executable: &Path) -> Result<Pid> {
+    fn spawn(&self, _executable: &Path, _options: LaunchOptions) -> Result<Pid> {
         RecordingTrace::unexpected("spawn")
     }
     fn spawn_waiter(&self, _messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {

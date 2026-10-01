@@ -16,10 +16,10 @@ use std::sync::Arc;
 
 use uscope::{
     Architecture, BreakpointLocation, BreakpointSpec, ByteOrder, CodeInstanceKind, Debugger,
-    EntryProvenance, Error, ExitStatus, InferiorState, InlineFrameLookup, ModuleImage,
-    PointerWidth, ProcessId, RegisterRole, ScalarValue, SourceContext, SourceFile, SourceLocation,
-    StepKind, StopReason, ThreadState, UnwindTermination, VariableKind, VariableState,
-    VariableUnavailableReason, VirtualAddress,
+    EntryProvenance, Error, ExitStatus, InferiorState, InlineFrameLookup, LaunchOptions,
+    ModuleImage, PointerWidth, ProcessId, RegisterRole, ScalarValue, SourceContext, SourceFile,
+    SourceLocation, StepKind, StopReason, ThreadState, UnwindTermination, VariableKind,
+    VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
 use nix::sys::signal::{Signal, kill};

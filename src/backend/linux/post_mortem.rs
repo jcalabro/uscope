@@ -803,7 +803,7 @@ impl Controller<CoreTarget> {
                     reject(reply);
                 }
                 Request::RemoveAllWatchpoints { reply } => reject(reply),
-                Request::Launch { reply }
+                Request::Launch { reply, .. }
                 | Request::Continue { reply, .. }
                 | Request::Step { reply, .. }
                 | Request::Pause { reply, .. } => reject(reply),

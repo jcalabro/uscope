@@ -299,6 +299,7 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
     let stopped = |role| renderer.paint(role, "stopped");
     match reason {
         StopReason::Attach => format!("{} after attaching", stopped(Role::Current)),
+        StopReason::Entry => format!("{} at the program entry", stopped(Role::Current)),
         StopReason::Breakpoint { address, hits } => format!(
             "{} at {} {} at {}",
             stopped(Role::Current),

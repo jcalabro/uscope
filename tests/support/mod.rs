@@ -19,8 +19,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uscope::{
     Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
-    DebuggerHandle, ExceptionDisposition, ExitStatus, LineNumber, ProcessId, Result, StateSnapshot,
-    StepKind, StopReason, VirtualAddress,
+    DebuggerHandle, ExceptionDisposition, ExitStatus, LaunchOptions, LineNumber, ProcessId, Result,
+    StateSnapshot, StepKind, StopReason, VirtualAddress,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -283,6 +283,14 @@ impl Scenario {
 
     pub async fn run_to_stop(&mut self) -> StopReason {
         self.run_request(true).await
+    }
+
+    /// Launches with explicit options and waits for that launch's stop or exit.
+    pub async fn run_with_to_stop(&mut self, options: LaunchOptions) -> StopReason {
+        self.transcript.push(format!("request: run {options:?}"));
+        let handle = self.handle.clone();
+        let task = tokio::spawn(async move { handle.run_with(options).await });
+        self.wait_for_request(task, "run").await
     }
 
     pub async fn resume_to_stop(&mut self) -> StopReason {
