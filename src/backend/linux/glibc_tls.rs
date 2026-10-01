@@ -196,10 +196,13 @@ impl Glibc<'_> {
                 return Err(failed("the loader's TLS slotinfo lists form a cycle"));
             }
             let entries_here = self.fetch(length, list, 0)?;
-            if module < first.saturating_add(entries_here) {
+            let end = first
+                .checked_add(entries_here)
+                .ok_or_else(|| failed("the loader's TLS slotinfo list lengths overflow"))?;
+            if module < end {
                 return entries.address(list, module - first);
             }
-            first = first.saturating_add(entries_here);
+            first = end;
             list = self.fetch(next, list, 0)?;
         }
         Err(failed(format!(
@@ -462,6 +465,9 @@ mod tests {
         cyclic.word(SECOND_LIST + 0x8, FIRST_LIST);
         cyclic.word(LINK_MAP + 0x430, 300);
         assert!(failure(&cyclic).contains("cycle"));
+        let mut overflowing = Process::new(70, 0x5555_0000, 0x80);
+        overflowing.word(SECOND_LIST + 0x10, u64::MAX);
+        assert!(failure(&overflowing).contains("slotinfo list lengths overflow"));
         let mut unloaded = Process::new(3, 0x5555_0000, 0x80);
         unloaded.slotinfo(3, 2, 0);
         assert!(failure(&unloaded).contains("TLS module 3 is not loaded"));
