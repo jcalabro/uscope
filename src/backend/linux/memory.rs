@@ -178,7 +178,7 @@ pub(super) fn read_logical_memory_with(
             Ok(word) => (word.to_le_bytes(), word_size),
             Err(MemoryAccessError::Partial { word, readable }) => (
                 word.to_le_bytes(),
-                u64::try_from(readable.min(7)).expect("word offset fits u64"),
+                u64::try_from(readable).unwrap_or(u64::MAX).min(word_size),
             ),
             Err(MemoryAccessError::Inaccessible) => (0_u64.to_le_bytes(), 0),
             Err(MemoryAccessError::Fatal(error)) => return Err(error),

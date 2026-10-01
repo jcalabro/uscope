@@ -164,7 +164,11 @@ impl<P: InspectionOps> CodeSource for TargetCode<'_, P> {
             size.min(room),
         )?;
         let unreadable = match read.completion {
-            crate::MemoryReadCompletion::Complete => None,
+            // No read can end past the final byte of the address space, so
+            // a clamped read reports that byte as unreadable.
+            crate::MemoryReadCompletion::Complete => {
+                (size > room).then_some(crate::MemoryReadUnavailableReason::Inaccessible)
+            }
             crate::MemoryReadCompletion::Incomplete { reason, .. } => Some(reason),
         };
         Ok(CodeRead {
