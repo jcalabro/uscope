@@ -125,6 +125,13 @@ pub enum Error {
     LocationUnavailable,
     #[error("the active inline frame is ambiguous")]
     AmbiguousInlineFrame,
+    #[error("frame {frame} does not exist; the backtrace has {frames} frames")]
+    FrameNotFound {
+        frame: crate::StackFrameId,
+        frames: u32,
+    },
+    #[error("cannot step from the selected frame: {0}")]
+    FrameStepUnsupported(Arc<str>),
     #[error("no source location is available for the stopped instruction")]
     SourceLocationUnavailable,
     #[error("failed to read source file {path}: {error}")]

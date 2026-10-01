@@ -335,14 +335,15 @@ impl DebuggerHandle {
         backend::watchpoint_capabilities()
     }
 
-    /// Resolves an expression in the selected thread's selected logical frame
-    /// to the memory it occupies and the lifetime of that storage.
+    /// Resolves an expression in the selected thread's selected frame to the
+    /// memory it occupies and the lifetime of that storage.
     pub async fn resolve_watch_target(&self, expression: ValueExpression) -> Result<WatchTarget> {
         let selection = self.stopped_selection().await?;
         self.request(|reply| Request::ResolveWatchTarget {
             expression,
             stop_id: selection.stop,
             thread_id: selection.thread,
+            frame: selection.frame,
             reply,
         })
         .await
@@ -453,10 +454,14 @@ impl DebuggerHandle {
     }
 
     /// Starts a thread-specific stepping operation.
+    ///
+    /// [`StepKind::Out`] runs until `frame` returns to its caller; every
+    /// other kind steps from the innermost frame, which `frame` must be.
     pub async fn start_step(
         &self,
         stop_id: StopId,
         thread_id: ThreadId,
+        frame: StackFrameId,
         kind: StepKind,
         exception: ExceptionDisposition,
     ) -> Result<ExecutionId> {
@@ -466,6 +471,7 @@ impl DebuggerHandle {
             process_id,
             stop_id,
             thread_id,
+            frame,
             kind,
             exception,
             reply,
@@ -474,6 +480,9 @@ impl DebuggerHandle {
     }
 
     /// Steps the selected thread and waits until the operation stops or exits.
+    ///
+    /// Stepping out leaves the selected frame; every other step begins at
+    /// the innermost frame, whichever frame is selected.
     pub async fn step(&self, kind: StepKind) -> Result<StopReason> {
         self.step_with_exception(kind, ExceptionDisposition::Pass)
             .await
@@ -486,9 +495,14 @@ impl DebuggerHandle {
         exception: ExceptionDisposition,
     ) -> Result<StopReason> {
         let selection = self.stopped_selection().await?;
+        let frame = if kind == StepKind::Out {
+            selection.frame
+        } else {
+            StackFrameId::INNERMOST
+        };
         let mut events = self.subscribe();
         let execution = self
-            .start_step(selection.stop, selection.thread, kind, exception)
+            .start_step(selection.stop, selection.thread, frame, kind, exception)
             .await?;
 
         self.wait_for_execution(&mut events, execution).await
@@ -612,13 +626,15 @@ impl DebuggerHandle {
         .await
     }
 
-    /// Resolves the current stop address to normalized function and source metadata.
+    /// Resolves the selected frame's location to normalized function and
+    /// source metadata: where execution stopped in the innermost frame, and
+    /// the call in progress in an outer one.
     pub async fn current_location(&self) -> Result<ExecutionLocation> {
         self.stopped_location().await
     }
 
-    /// Lazily reads source lines surrounding the stopped instruction, from
-    /// the first place this handle's [`SourcePathMap`] finds the file.
+    /// Lazily reads source lines surrounding the selected frame's location,
+    /// from the first place this handle's [`SourcePathMap`] finds the file.
     pub async fn source_context(&self, radius: u32) -> Result<SourceContext> {
         let execution = self.current_location().await?;
         let location = execution
@@ -627,7 +643,7 @@ impl DebuggerHandle {
             .ok_or(Error::SourceLocationUnavailable)?;
 
         // Source files are identified within the image of the module that
-        // contains the stopped instruction.
+        // contains the frame's code.
         let file = self
             .loaded_module_image(execution.module)
             .await?
@@ -703,7 +719,7 @@ impl DebuggerHandle {
         self.request(|reply| Request::Snapshot { reply }).await
     }
 
-    /// Reconstructs the stopped thread's stack frames.
+    /// Reconstructs the selected thread's stack frames.
     pub async fn backtrace(&self) -> Result<Backtrace> {
         let selection = self.stopped_selection().await?;
 
@@ -727,7 +743,7 @@ impl DebuggerHandle {
         .await
     }
 
-    /// Inspects every visible parameter and local variable in the selected logical frame.
+    /// Inspects every visible parameter and local variable in the selected frame.
     pub async fn variables(&self) -> Result<VariableSnapshot> {
         self.variables_with_limits(InspectionLimits::default())
             .await
@@ -765,7 +781,7 @@ impl DebuggerHandle {
     }
 
     /// Atomically inspects one structural value expression in the selected
-    /// logical frame of the current stopped thread.
+    /// frame of the selected stopped thread.
     pub async fn inspect(&self, expression: ValueExpression) -> Result<InspectedValue> {
         self.inspect_with_limits(expression, InspectionLimits::default())
             .await
@@ -783,6 +799,7 @@ impl DebuggerHandle {
             limits,
             stop_id: selection.stop,
             thread_id: selection.thread,
+            frame: selection.frame,
             reply,
         })
         .await
@@ -813,6 +830,7 @@ impl DebuggerHandle {
             limits,
             stop_id: selection.stop,
             thread_id: selection.thread,
+            frame: selection.frame,
             reply,
         })
         .await
@@ -946,6 +964,29 @@ impl DebuggerHandle {
             limits,
             stop_id: selection.stop,
             thread_id: selection.thread,
+            frame: selection.frame,
+            reply,
+        })
+        .await
+    }
+
+    /// Selects a frame of the selected thread, numbered as
+    /// [`Self::backtrace`] presents it, for implicit inspection commands:
+    /// variables, expressions, watch targets, the current location and its
+    /// source, and stepping out. Every new stop selects the innermost frame.
+    ///
+    /// Values in an outer frame come from the registers its callees saved.
+    /// A register a callee may overwrite without saving it is unknown there,
+    /// so a value held in one is
+    /// [unavailable](VariableUnavailableReason::RegisterNotSaved) rather
+    /// than read from the stopped thread.
+    pub async fn select_frame(&self, frame: StackFrameId) -> Result<StackFrame> {
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::SelectFrame {
+            stop_id: selection.stop,
+            thread_id: selection.thread,
+            frame,
             reply,
         })
         .await
@@ -973,6 +1014,7 @@ impl DebuggerHandle {
         self.request(|reply| Request::StoppedLocation {
             stop_id: selection.stop,
             thread_id: selection.thread,
+            frame: selection.frame,
             reply,
         })
         .await
@@ -981,6 +1023,7 @@ impl DebuggerHandle {
     async fn stopped_selection(&self) -> Result<StoppedSelection> {
         let snapshot = self.snapshot().await?;
         let selected_thread = snapshot.selected_thread;
+        let selected_frame = snapshot.selected_frame;
         let InferiorState::Stopped {
             process_id,
             stop_id,
@@ -999,6 +1042,7 @@ impl DebuggerHandle {
             process: process_id,
             stop: stop_id,
             thread: selected_thread.unwrap_or(thread_id),
+            frame: selected_frame.unwrap_or(StackFrameId::INNERMOST),
         })
     }
 
@@ -1060,4 +1104,5 @@ struct StoppedSelection {
     process: ProcessId,
     stop: StopId,
     thread: ThreadId,
+    frame: StackFrameId,
 }

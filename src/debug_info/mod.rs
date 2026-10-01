@@ -25,15 +25,18 @@ use crate::inspection::InspectionBudget;
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
-    InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StopId,
-    ThreadId, UnwindTermination, ValueChildPage, ValueChildrenReference, ValuePathStep, Variable,
-    VariableQuery, VariableUnavailableReason, VirtualAddress,
+    InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StackFrameId,
+    StopId, ThreadId, UnwindTermination, ValueChildPage, ValueChildrenReference, ValuePathStep,
+    Variable, VariableQuery, VariableUnavailableReason, VirtualAddress,
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct VariableContext {
     pub stop_id: StopId,
     pub thread: ThreadId,
+    /// The backtrace frame whose registers and call-frame address evaluate
+    /// the values, which every capability they produce keeps.
+    pub frame: StackFrameId,
     pub module: ModuleId,
     pub image: ModuleImageId,
     pub address: Option<ImageAddress>,

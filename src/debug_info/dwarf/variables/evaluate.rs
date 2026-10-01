@@ -249,6 +249,16 @@ pub(super) fn evaluate_dynamic_aggregate_address(
     Ok(VirtualAddress::new(address))
 }
 
+/// The location an expression with no operations describes: an object the
+/// compiler did not keep (DWARF 5 section 2.6.1.1.1).
+fn empty_location<'expression>() -> Vec<gimli::Piece<Reader<'expression>>> {
+    vec![gimli::Piece {
+        size_in_bits: None,
+        bit_offset: None,
+        location: Location::Empty,
+    }]
+}
+
 pub(super) fn evaluate_with_object<'expression>(
     expression: &'expression Expression,
     endian: RunTimeEndian,
@@ -259,6 +269,10 @@ pub(super) fn evaluate_with_object<'expression>(
     object_address: Option<VirtualAddress>,
 ) -> std::result::Result<Vec<gimli::Piece<Reader<'expression>>>, EvaluateError> {
     budget.consume_expression_work(u64::from(MAX_EVALUATION_ITERATIONS))?;
+    // gimli rejects an expression with no operations as a stack underflow.
+    if expression.bytes.is_empty() {
+        return Ok(empty_location());
+    }
     let reader = gimli::EndianSlice::new(&expression.bytes, endian);
     let mut evaluation = gimli::Expression(reader).evaluation(expression.encoding);
     if let Some(address) = object_address {

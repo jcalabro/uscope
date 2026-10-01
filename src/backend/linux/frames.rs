@@ -2,21 +2,24 @@
 
 use std::collections::BTreeSet;
 
+use nix::libc;
 use nix::unistd::Pid;
 
-use crate::debug_info::UnwindInfo;
+use crate::debug_info::{UnwindInfo, VariableRuntimeError};
 use crate::model::FrameMetadata;
 use crate::protocol::{FramePresentation, PresentedFrame, StepKind, StopId, StopReason};
 use crate::unwind::{
-    CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, RegisterFile, collect_backtrace,
+    CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, RegisterFile, collect_frames,
 };
 use crate::{
-    AddressDescription, Backtrace, CodeInstanceId, CodeInstanceKind, Error, ExecutionLocation,
-    FrameKind, ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, ModuleAddress,
-    ModuleImage, Result, SourceLocation, StackFrame, UnwindTermination, VirtualAddress,
+    AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceKind,
+    Error, ExecutionLocation, FrameKind, ImageAddress, ImageLocation, InlineFrameLookup,
+    LoadedModule, ModuleAddress, ModuleId, ModuleImage, Result, SourceLocation, StackFrame,
+    StackFrameId, UnwindTermination, VariableUnavailableReason, VirtualAddress,
 };
 
 use super::breakpoints::runtime_breakpoint_address;
+use super::inspection::variable_cfa_error;
 use super::memory::PtraceMemory;
 use super::native::InspectionOps;
 use super::registers::x86_64_registers;
@@ -174,11 +177,19 @@ impl<P: InspectionOps> Controller<P> {
         Ok(instances)
     }
 
-    pub(super) fn stopped_location(&self, stop_id: StopId, pid: Pid) -> Result<ExecutionLocation> {
+    pub(super) fn stopped_location(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        frame: StackFrameId,
+    ) -> Result<ExecutionLocation> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
         validate_image_current(inferior)?;
+        if frame.get() != 0 {
+            return self.outer_frame_location(inferior, pid, frame);
+        }
         let registers = self.ptrace.registers(pid)?;
         let address = VirtualAddress::new(registers.rip);
         let modules = self.unwind_modules(inferior);
@@ -217,47 +228,201 @@ impl<P: InspectionOps> Controller<P> {
         validate_stopped_thread(inferior, pid)?;
         validate_image_current(inferior)?;
         let presentation = self.presentation_for_stopped_thread(pid)?;
+        let stack = self.physical_stack(inferior, pid, DEFAULT_MAX_FRAMES)?;
+        let modules = self.unwind_modules(inferior);
 
+        expand_inline_backtrace(stack.backtrace(pid), &modules, &presentation)
+    }
+
+    /// Unwinds at most `max_frames` physical activations of a stopped
+    /// thread, keeping the registers the unwinder reconstructed for each.
+    pub(super) fn physical_stack(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+        max_frames: usize,
+    ) -> Result<PhysicalStack> {
         let native = self.ptrace.registers(pid)?;
-        let registers = x86_64_registers(&native);
         let initial = FrameContext {
             instruction: VirtualAddress::new(native.rip),
             cfa: None,
             signal_frame: false,
         };
-        let modules = self.unwind_modules(inferior);
         let mut provider = DwarfCallerProvider {
-            modules: modules.clone(),
-            registers,
+            modules: self.unwind_modules(inferior),
+            registers: x86_64_registers(&native),
             memory: PtraceMemory {
                 ptrace: &self.ptrace,
                 pid,
             },
             first: true,
         };
-
-        let physical = collect_backtrace(
-            debug_thread_id(pid),
+        let (frames, termination) = collect_frames(
             initial,
             &mut provider,
-            |level, context| {
-                // Module and symbol metadata are resolved by the inline
-                // expansion, which sees every physical frame.
-                StackFrame::new(
-                    level,
-                    if context.signal_frame {
-                        FrameKind::Signal
-                    } else {
-                        FrameKind::Physical
-                    },
-                    None,
-                    context.instruction,
-                )
+            |_, context, provider| PhysicalFrame {
+                context: context.clone(),
+                registers: provider.registers.clone(),
             },
-            DEFAULT_MAX_FRAMES,
+            max_frames,
         );
 
-        expand_inline_backtrace(physical, &modules, &presentation)
+        Ok(PhysicalStack {
+            native,
+            frames,
+            termination,
+        })
+    }
+
+    /// Finds one logical frame of a stopped thread, numbered as
+    /// [`Self::backtrace`] presents it, and the state that evaluates its
+    /// variables. Only the activations up to that frame are unwound.
+    pub(super) fn resolve_frame(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+        frame: StackFrameId,
+    ) -> Result<ResolvedFrame> {
+        let presentation = self.presentation_for_stopped_thread(pid)?;
+        let level = usize::try_from(frame.get()).expect("u32 fits usize");
+        // Every activation presents at least one logical frame, so unwinding
+        // one activation per level always reaches the requested frame.
+        let max_frames = level.saturating_add(1).min(DEFAULT_MAX_FRAMES);
+        let stack = self.physical_stack(inferior, pid, max_frames)?;
+        let modules = self.unwind_modules(inferior);
+
+        // An innermost frame without one compatible inline chain still has
+        // registers and code, but no single source scope or backtrace frame.
+        if level == 0 && matches!(presentation.frame, PresentedFrame::Ambiguous(_)) {
+            let innermost = &stack.frames[0];
+            let code = unwind_module_for(&modules, innermost.context.instruction)
+                .map(|(module, address)| (module.loaded.id, address));
+            return Ok(ResolvedFrame {
+                id: frame,
+                presented: presentation.frame,
+                frame: None,
+                code,
+                scope: FrameScope::Unavailable,
+                registers: FrameRegisters::Thread(stack.native),
+                cfa: self.frame_cfa(pid, &modules, code, &innermost.registers),
+                activation: 0,
+            });
+        }
+
+        let trace = expand_inline_backtrace(stack.backtrace(pid), &modules, &presentation)?;
+        let Some(selected) = trace.frames.get(level).cloned() else {
+            return Err(Error::FrameNotFound {
+                frame,
+                frames: u32::try_from(trace.frames.len()).expect("frame count fits u32"),
+            });
+        };
+        // Inline frames precede the physical frame of their activation.
+        let activation = trace.frames[..level]
+            .iter()
+            .filter(|frame| frame.kind != FrameKind::Inline)
+            .count();
+        let physical = &stack.frames[activation];
+        let code = frame_lookup_address(
+            u32::try_from(activation).expect("frame count fits u32"),
+            &physical.context,
+        )
+        .and_then(|lookup| unwind_module_for(&modules, lookup))
+        .map(|(module, address)| (module.loaded.id, address));
+        let presented = match selected.kind {
+            FrameKind::Inline => PresentedFrame::Inline(
+                selected
+                    .code_instance
+                    .expect("inline frames name their code instance"),
+            ),
+            FrameKind::Physical | FrameKind::Signal => PresentedFrame::Physical,
+        };
+        // Only code a function describes has a source scope.
+        let scope = match (selected.kind, selected.code_instance) {
+            (_, None) => FrameScope::Unavailable,
+            (FrameKind::Inline, Some(instance)) => FrameScope::Inline(instance),
+            (FrameKind::Physical | FrameKind::Signal, Some(_)) => FrameScope::Function,
+        };
+
+        Ok(ResolvedFrame {
+            id: frame,
+            presented,
+            frame: Some(selected),
+            code,
+            scope,
+            registers: if activation == 0 {
+                FrameRegisters::Thread(stack.native)
+            } else {
+                FrameRegisters::Caller(physical.registers.clone())
+            },
+            cfa: self.frame_cfa(pid, &modules, code, &physical.registers),
+            activation,
+        })
+    }
+
+    /// Computes the canonical frame address of the activation executing
+    /// `code` with `registers`.
+    fn frame_cfa(
+        &self,
+        pid: Pid,
+        modules: &[UnwindModule<'_>],
+        code: Option<(ModuleId, ImageAddress)>,
+        registers: &RegisterFile,
+    ) -> std::result::Result<VirtualAddress, VariableRuntimeError> {
+        let Some((module, address)) = code.and_then(|(id, address)| {
+            modules
+                .iter()
+                .find(|module| module.loaded.id == id)
+                .map(|module| (module, address))
+        }) else {
+            return Err(VariableRuntimeError::Unavailable(
+                VariableUnavailableReason::CallFrameUnavailable(
+                    CallFrameUnavailableReason::NoInstructionContext,
+                ),
+            ));
+        };
+        module
+            .unwind
+            .cfa(
+                address,
+                registers,
+                &mut PtraceMemory {
+                    ptrace: &self.ptrace,
+                    pid,
+                },
+            )
+            .map_err(|termination| variable_cfa_error(&termination))
+    }
+
+    /// Locates a frame other than the innermost one as the backtrace
+    /// describes it.
+    fn outer_frame_location(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+        frame: StackFrameId,
+    ) -> Result<ExecutionLocation> {
+        let resolved = self.resolve_frame(inferior, pid, frame)?;
+        let selected = resolved.frame.ok_or(Error::AmbiguousInlineFrame)?;
+        let (module, address) = resolved.code.ok_or(Error::AddressOutsideModule)?;
+        let module = self
+            .modules
+            .get(&module)
+            .ok_or(Error::ModuleNotLoaded(module))?;
+        let mut location = module.image.locate(address);
+        location.function = selected.function;
+        location.source = selected.source;
+        // A caller is located just before its return address, but its
+        // symbol offset describes the frame's own instruction.
+        let lookup = module.loaded.virtual_address(address)?;
+        if let Some(symbol) = &mut location.symbol {
+            symbol.offset += selected.instruction.get() - lookup.get();
+        }
+
+        Ok(ExecutionLocation {
+            module: module.loaded.id,
+            address: selected.instruction,
+            image: location,
+        })
     }
 
     /// The main executable's unwind context, used by stepping plans that are
@@ -288,6 +453,31 @@ impl<P: InspectionOps> Controller<P> {
 }
 
 impl<P: InspectionOps> Controller<P> {
+    pub(super) fn select_frame(
+        &mut self,
+        stop_id: StopId,
+        pid: Pid,
+        frame: StackFrameId,
+    ) -> Result<StackFrame> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_stopped_thread(inferior, pid)?;
+        validate_image_current(inferior)?;
+        let selected = self
+            .resolve_frame(inferior, pid, frame)?
+            .frame
+            .ok_or(Error::AmbiguousInlineFrame)?;
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        inferior
+            .public_stop
+            .as_mut()
+            .expect("public stop was validated")
+            .selected_frames
+            .insert(pid, frame);
+        self.bump_revision();
+        Ok(selected)
+    }
+
     pub(super) fn select_thread(&mut self, stop_id: StopId, pid: Pid) -> Result<()> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
@@ -634,6 +824,90 @@ pub(super) struct UnwindModule<'a> {
     pub(super) loaded: LoadedModule,
     pub(super) image: &'a ModuleImage,
     pub(super) unwind: &'a dyn UnwindInfo,
+}
+
+/// One physical activation and the registers it held: the thread's own
+/// for the innermost activation, otherwise those the unwinder reconstructed.
+pub(super) struct PhysicalFrame {
+    pub(super) context: FrameContext,
+    pub(super) registers: RegisterFile,
+}
+
+/// A stopped thread's physical activations, innermost first.
+pub(super) struct PhysicalStack {
+    pub(super) native: libc::user_regs_struct,
+    pub(super) frames: Vec<PhysicalFrame>,
+    pub(super) termination: UnwindTermination,
+}
+
+impl PhysicalStack {
+    /// Describes the activations as physical backtrace frames, whose module
+    /// and symbol metadata the inline expansion resolves.
+    fn backtrace(&self, pid: Pid) -> Backtrace {
+        Backtrace {
+            thread: debug_thread_id(pid),
+            frames: self
+                .frames
+                .iter()
+                .enumerate()
+                .map(|(level, frame)| {
+                    StackFrame::new(
+                        u32::try_from(level).expect("frame count fits u32"),
+                        if frame.context.signal_frame {
+                            FrameKind::Signal
+                        } else {
+                            FrameKind::Physical
+                        },
+                        None,
+                        frame.context.instruction,
+                    )
+                })
+                .collect(),
+            termination: self.termination.clone(),
+        }
+    }
+}
+
+/// The registers a logical frame's values are read from.
+pub(super) enum FrameRegisters {
+    /// The thread's own registers, which every logical frame of the
+    /// innermost activation shares.
+    Thread(libc::user_regs_struct),
+    /// The registers the unwinder reconstructed for a caller's activation.
+    /// Registers a callee could overwrite without saving are absent.
+    Caller(RegisterFile),
+}
+
+/// The source scope whose variables a frame shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FrameScope {
+    /// No single function scope applies: the code has no debug information,
+    /// or an innermost frame has no single compatible inline chain.
+    Unavailable,
+    /// The physical function's own scope.
+    Function,
+    /// One inline instance's scope.
+    Inline(CodeInstanceId),
+}
+
+/// One logical frame of a stopped thread and the state that evaluates its
+/// variables.
+pub(super) struct ResolvedFrame {
+    pub(super) id: StackFrameId,
+    /// The logical frame whose source scope the frame's variables follow.
+    pub(super) presented: PresentedFrame,
+    /// The frame as the backtrace describes it; absent for an innermost
+    /// frame whose inline presentation is ambiguous.
+    pub(super) frame: Option<StackFrame>,
+    /// The module describing the frame's code, and the frame's address in
+    /// its image: the instruction itself for the innermost activation and
+    /// signal frames, otherwise the byte before the return address.
+    pub(super) code: Option<(ModuleId, ImageAddress)>,
+    pub(super) scope: FrameScope,
+    pub(super) registers: FrameRegisters,
+    pub(super) cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
+    /// The index of the physical activation containing the frame.
+    pub(super) activation: usize,
 }
 
 /// Finds the module whose image describes `address`.

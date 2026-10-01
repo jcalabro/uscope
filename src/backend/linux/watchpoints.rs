@@ -10,6 +10,7 @@ use nix::unistd::Pid;
 
 use crate::backend::linux::debug_registers;
 use crate::debug_info::StorageClass;
+use crate::debug_info::VariableRuntimeError;
 use crate::inspection::InspectionBudget;
 use crate::protocol::{
     DebuggerEvent, FrameScopeEvidence, InvalidatedWatchpoint, StopId, StopReason, WatchAccess,
@@ -18,8 +19,8 @@ use crate::protocol::{
 };
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
 use crate::{
-    AddressRange, Error, InspectedValue, MemoryReadCompletion, Result, UnwindTermination,
-    ValueExpression, VariableValueSource, VirtualAddress,
+    AddressRange, Error, InspectedValue, MemoryReadCompletion, Result, StackFrameId,
+    UnwindTermination, ValueExpression, VariableValueSource, VirtualAddress,
 };
 
 use super::debug_registers::{DebugRegisterPlan, SlotAccess};
@@ -601,10 +602,11 @@ impl<P: InspectionOps> Controller<P> {
         &self,
         stop_id: StopId,
         pid: Pid,
+        frame: StackFrameId,
         expression: &ValueExpression,
     ) -> Result<WatchTarget> {
         let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
-        let (value, root) = self.inspect_with_root(stop_id, pid, expression, &mut budget)?;
+        let (value, root) = self.inspect_with_root(stop_id, pid, frame, expression, &mut budget)?;
         let (address, byte_size) = watchable_storage(&value)?;
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
 
@@ -618,7 +620,7 @@ impl<P: InspectionOps> Controller<P> {
             };
             let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
             let (root_value, _) =
-                self.inspect_with_root(stop_id, pid, &root_expression, &mut budget)?;
+                self.inspect_with_root(stop_id, pid, frame, &root_expression, &mut budget)?;
             watchable_storage(&root_value).is_ok_and(|(root_address, root_size)| {
                 let end = address.get().checked_add(byte_size);
                 let root_end = root_address.get().checked_add(root_size);
@@ -629,7 +631,7 @@ impl<P: InspectionOps> Controller<P> {
             })
         };
         let (scope, frame) = if contained {
-            self.root_watch_scope(inferior, pid, &root)?
+            self.root_watch_scope(inferior, pid, frame, &root)?
         } else {
             (WatchScope::Location, None)
         };
@@ -649,17 +651,22 @@ impl<P: InspectionOps> Controller<P> {
         &self,
         inferior: &Inferior,
         pid: Pid,
+        frame: StackFrameId,
         root: &ExpressionRoot,
     ) -> Result<(WatchScope, Option<FrameScopeEvidence>)> {
         let (storage, module) = match &root.kind {
             ExpressionRootKind::Local {
                 name,
+                module,
                 address,
                 selected,
             } => (
-                self.variable_info
+                self.modules
+                    .get(module)
+                    .ok_or(Error::ModuleNotLoaded(*module))?
+                    .variables
                     .local_storage(*address, *selected, name)?,
-                inferior.loaded_module.id,
+                *module,
             ),
             ExpressionRootKind::Global(global) => {
                 let module = self
@@ -699,32 +706,31 @@ impl<P: InspectionOps> Controller<P> {
                         "a frame-relative global has no owning activation".into(),
                     ));
                 };
-                let native = self.ptrace.registers(pid)?;
-                let activation = self
-                    .unwind_info
-                    .cfa(
-                        *address,
-                        &x86_64_registers(&native),
-                        &mut PtraceMemory {
-                            ptrace: &self.ptrace,
-                            pid,
-                        },
+                let image = &self
+                    .modules
+                    .get(&module)
+                    .ok_or(Error::ModuleNotLoaded(module))?
+                    .image;
+                let activation =
+                    self.resolve_frame(inferior, pid, frame)?
+                        .cfa
+                        .map_err(|error| {
+                            let reason: Arc<str> = match error {
+                                VariableRuntimeError::Unavailable(reason) => {
+                                    reason.to_string().into()
+                                }
+                                VariableRuntimeError::Malformed(reason)
+                                | VariableRuntimeError::Fatal(reason) => reason,
+                            };
+                            Error::WatchTargetUnsupported(
+                                format!("the declaring activation is unavailable: {reason}").into(),
+                            )
+                        })?;
+                let function = image.locate(*address).physical_instance.ok_or_else(|| {
+                    Error::WatchTargetUnsupported(
+                        "no function describes the declaring activation".into(),
                     )
-                    .map_err(|termination| {
-                        Error::WatchTargetUnsupported(
-                            format!("the declaring activation is unavailable: {termination}")
-                                .into(),
-                        )
-                    })?;
-                let function = self
-                    .module_image
-                    .locate(*address)
-                    .physical_instance
-                    .ok_or_else(|| {
-                        Error::WatchTargetUnsupported(
-                            "no function describes the declaring activation".into(),
-                        )
-                    })?;
+                })?;
                 Ok((
                     WatchScope::Frame {
                         thread: debug_thread_id(pid),
@@ -732,7 +738,7 @@ impl<P: InspectionOps> Controller<P> {
                     },
                     Some(FrameScopeEvidence {
                         module,
-                        image: inferior.loaded_module.image,
+                        image: image.id(),
                         function,
                         ranges: storage.ranges,
                     }),

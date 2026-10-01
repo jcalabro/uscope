@@ -124,8 +124,8 @@ struct Scope {
     ranges: Arc<[AddressRange<ImageAddress>]>,
     lexical_depth: u32,
     frame_base: Metadata<LocationDescription>,
-    /// True for subprograms and inlined subroutines, whose direct children
-    /// may include formal parameters.
+    /// True within subprograms and inlined subroutines, whose formal
+    /// parameters some producers, such as Zig, nest in lexical blocks.
     routine: bool,
     function: usize,
     /// The innermost containing inline instance, or `None` when the scope
@@ -246,7 +246,7 @@ pub(super) fn load_variable_info<'data>(
                         ranges,
                         lexical_depth: parent.lexical_depth.saturating_add(1),
                         frame_base: parent.frame_base.clone(),
-                        routine: false,
+                        routine: parent.routine,
                         function: parent.function,
                         instance: parent.instance,
                         malformed: malformed.or_else(|| parent.malformed.clone()),

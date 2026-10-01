@@ -11,7 +11,7 @@ use crate::protocol::{
     DebuggerEvent, ExceptionDisposition, ExecutionId, ProcessId, Reply, ResumeScope, StepKind,
     StopId, StopReason, WatchpointId,
 };
-use crate::{Error, Result, VirtualAddress};
+use crate::{Error, Result, StackFrameId, VirtualAddress};
 
 use super::breakpoints::remove_breakpoint_owner_from;
 use super::classify::{format_raw_stop, visible_stop_priority};
@@ -38,11 +38,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.reply_execution(result, scope, reply);
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a step request names its stop, thread, frame, kind, and exception disposition"
+    )]
     pub(super) fn step(
         &mut self,
         process_id: ProcessId,
         stop_id: StopId,
         pid: Pid,
+        frame: StackFrameId,
         kind: StepKind,
         exception: ExceptionDisposition,
         reply: Reply<ExecutionId>,
@@ -57,7 +62,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 validate_process(inferior, process_id)?;
                 validate_public_stop(inferior, Some(stop_id))?;
                 validate_resumable(inferior)?;
-                validate_stopped_thread(inferior, pid)
+                validate_stopped_thread(inferior, pid)?;
+                if frame.get() != 0 && kind != StepKind::Out {
+                    return Err(Error::FrameStepUnsupported(
+                        "only stepping out applies to an outer frame; other steps begin at the innermost frame"
+                            .into(),
+                    ));
+                }
+                Ok(())
             });
         if let Err(error) = valid {
             let _ = reply.send(Err(error));
@@ -76,7 +88,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Ok(None) => {}
         }
-        let result = self.step_start(pid, kind).and_then(|start| {
+        let result = self.step_start(pid, kind, frame).and_then(|start| {
             self.begin_execution(
                 process_id,
                 stop_id,
@@ -854,6 +866,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             triggering_thread: barrier.triggering_thread,
             reason: barrier.reason.clone(),
             presentations: BTreeMap::from([(triggering_thread, presentation)]),
+            selected_frames: BTreeMap::new(),
         });
         inferior.selected_thread = Some(barrier.triggering_thread);
         inferior.active = None;

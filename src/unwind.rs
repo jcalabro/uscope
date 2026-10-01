@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 
-use crate::{Backtrace, StackFrame, ThreadId, UnwindTermination, VirtualAddress};
+use crate::{UnwindTermination, VirtualAddress};
 
 pub const DEFAULT_MAX_FRAMES: usize = 256;
 
@@ -58,13 +58,15 @@ pub trait CallerProvider {
     fn caller(&mut self, current: &FrameContext) -> CallerResult;
 }
 
-pub fn collect_backtrace(
-    thread: ThreadId,
+/// Unwinds from `initial` until the provider finishes, a frame repeats, or
+/// `max_frames` frames are collected. `make_frame` sees each frame with the
+/// provider that reconstructed it, so it can capture the frame's registers.
+pub fn collect_frames<P: CallerProvider, F>(
     initial: FrameContext,
-    provider: &mut impl CallerProvider,
-    mut make_frame: impl FnMut(u32, &FrameContext) -> StackFrame,
+    provider: &mut P,
+    mut make_frame: impl FnMut(u32, &FrameContext, &P) -> F,
     max_frames: usize,
-) -> Backtrace {
+) -> (Vec<F>, UnwindTermination) {
     let mut frames = Vec::new();
     let mut visited = HashSet::new();
     let mut current = initial;
@@ -75,7 +77,7 @@ pub fn collect_backtrace(
             break UnwindTermination::CycleDetected;
         }
         let level = u32::try_from(frames.len()).expect("frame limit fits in u32");
-        frames.push(make_frame(level, &current));
+        frames.push(make_frame(level, &current, provider));
         if frames.len() >= max_frames {
             break UnwindTermination::DepthLimit;
         }
@@ -84,17 +86,13 @@ pub fn collect_backtrace(
             CallerResult::Finished(termination) => break termination,
         }
     };
-    Backtrace {
-        thread,
-        frames: frames.into(),
-        termination,
-    }
+    (frames, termination)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FrameKind;
+    use crate::{FrameKind, StackFrame};
 
     struct SequenceProvider {
         callers: Vec<FrameContext>,
@@ -109,7 +107,7 @@ mod tests {
         }
     }
 
-    fn frame(level: u32, context: &FrameContext) -> StackFrame {
+    fn frame<P>(level: u32, context: &FrameContext, _provider: &P) -> StackFrame {
         StackFrame::new(
             level,
             if context.signal_frame {
@@ -144,18 +142,17 @@ mod tests {
             ],
         };
 
-        let trace = collect_backtrace(ThreadId::new(7), initial, &mut provider, frame, 16);
+        let (frames, termination) = collect_frames(initial, &mut provider, frame, 16);
 
         assert_eq!(
-            trace
-                .frames
+            frames
                 .iter()
                 .map(|frame| frame.instruction.get())
                 .collect::<Vec<_>>(),
             [3, 2, 1]
         );
-        assert_eq!(trace.frames[1].kind, FrameKind::Signal);
-        assert_eq!(trace.termination, UnwindTermination::Complete);
+        assert_eq!(frames[1].kind, FrameKind::Signal);
+        assert_eq!(termination, UnwindTermination::Complete);
     }
 
     #[test]
@@ -168,20 +165,16 @@ mod tests {
         let mut cyclic = SequenceProvider {
             callers: vec![context.clone(), context.clone()],
         };
-        let trace = collect_backtrace(ThreadId::new(1), context.clone(), &mut cyclic, frame, 16);
-        assert_eq!(
-            trace.frames.len(),
-            1,
-            "the repeated frame is not shown twice"
-        );
-        assert_eq!(trace.termination, UnwindTermination::CycleDetected);
+        let (frames, termination) = collect_frames(context.clone(), &mut cyclic, frame, 16);
+        assert_eq!(frames.len(), 1, "the repeated frame is not shown twice");
+        assert_eq!(termination, UnwindTermination::CycleDetected);
 
         let mut deep = SequenceProvider {
             callers: vec![context.clone(), context.clone()],
         };
-        let trace = collect_backtrace(ThreadId::new(1), context, &mut deep, frame, 1);
-        assert_eq!(trace.frames.len(), 1);
-        assert_eq!(trace.termination, UnwindTermination::DepthLimit);
+        let (frames, termination) = collect_frames(context, &mut deep, frame, 1);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(termination, UnwindTermination::DepthLimit);
     }
 
     #[test]
@@ -201,11 +194,11 @@ mod tests {
             cfa: None,
             signal_frame: false,
         };
-        let trace = collect_backtrace(ThreadId::new(1), initial, &mut FailingProvider, frame, 16);
+        let (frames, termination) = collect_frames(initial, &mut FailingProvider, frame, 16);
 
-        assert_eq!(trace.frames.len(), 1);
+        assert_eq!(frames.len(), 1);
         assert_eq!(
-            trace.termination,
+            termination,
             UnwindTermination::NoUnwindInfo {
                 address: VirtualAddress::new(0x1234)
             }

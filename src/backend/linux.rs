@@ -41,7 +41,8 @@ use crate::protocol::{
 };
 use crate::{
     CodeInstanceId, Error, GlobalVariableReference, ImageAddress, LoadedModule, ModuleImage,
-    Result, SourceLocation, ThreadId as DebugThreadId, UnwindTermination, VirtualAddress,
+    Result, SourceLocation, StackFrameId, ThreadId as DebugThreadId, UnwindTermination,
+    VirtualAddress,
 };
 
 use super::{ControllerChannels, ControllerMessage, ExecutableSource, FileIdentity};
@@ -376,9 +377,12 @@ struct ExpressionRoot {
 }
 
 enum ExpressionRootKind {
-    /// A local or parameter of the selected logical frame in the main image.
+    /// A local or parameter of the inspected logical frame.
     Local {
         name: String,
+        /// The module describing the frame's function.
+        module: crate::ModuleId,
+        /// The frame's address in the module's image.
         address: ImageAddress,
         selected: Option<CodeInstanceId>,
     },
@@ -390,6 +394,9 @@ struct PublicStop {
     triggering_thread: Pid,
     reason: StopReason,
     presentations: BTreeMap<Pid, FramePresentation>,
+    /// Frames selected by clients; an absent thread has its innermost
+    /// frame selected.
+    selected_frames: BTreeMap<Pid, StackFrameId>,
 }
 
 /// Allocates stop identifiers that are unique for the whole process lifetime.
@@ -647,7 +654,6 @@ struct Controller<P: InspectionOps> {
     expected_process_start_time: Option<u64>,
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
-    variable_info: Arc<dyn VariableInfo>,
     modules: BTreeMap<crate::ModuleId, RuntimeModule>,
     /// The canonical path and load bias computed for each mapping, so known
     /// modules are not re-read from disk at every stop.
@@ -702,7 +708,7 @@ impl<P: InspectionOps> Controller<P> {
             loaded: LoadedModule::main(module_image.id(), 0),
             image: Arc::clone(&module_image),
             unwind: Arc::clone(&unwind_info),
-            variables: Arc::clone(&variable_info),
+            variables: variable_info,
             link_map: None,
         };
         Self {
@@ -713,7 +719,6 @@ impl<P: InspectionOps> Controller<P> {
             expected_process_start_time: executable.process_start_time,
             module_image,
             unwind_info,
-            variable_info,
             modules: BTreeMap::from([(main.loaded.id, main)]),
             mapped_modules: BTreeMap::new(),
             next_module_id: 1,
@@ -788,11 +793,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 process_id,
                 stop_id,
                 thread_id,
+                frame,
                 kind,
                 exception,
                 reply,
             } => match debug_pid(thread_id) {
-                Ok(pid) => self.step(process_id, stop_id, pid, kind, exception, reply),
+                Ok(pid) => self.step(process_id, stop_id, pid, frame, kind, exception, reply),
                 Err(error) => {
                     let _ = reply.send(Err(error));
                 }
@@ -879,10 +885,12 @@ impl<P: InspectionOps> Controller<P> {
             Request::StoppedLocation {
                 stop_id,
                 thread_id,
+                frame,
                 reply,
             } => {
-                let _ = reply
-                    .send(debug_pid(thread_id).and_then(|pid| self.stopped_location(stop_id, pid)));
+                let _ = reply.send(
+                    debug_pid(thread_id).and_then(|pid| self.stopped_location(stop_id, pid, frame)),
+                );
             }
             Request::Snapshot { reply } => {
                 let _ = reply.send(Ok(self.snapshot()));
@@ -908,11 +916,12 @@ impl<P: InspectionOps> Controller<P> {
                 limits,
                 stop_id,
                 thread_id,
+                frame,
                 reply,
             } => {
                 let _ = reply.send(
                     debug_pid(thread_id)
-                        .and_then(|pid| self.variables(stop_id, pid, &query, limits)),
+                        .and_then(|pid| self.variables(stop_id, pid, frame, &query, limits)),
                 );
             }
             Request::Inspect {
@@ -920,12 +929,14 @@ impl<P: InspectionOps> Controller<P> {
                 limits,
                 stop_id,
                 thread_id,
+                frame,
                 reply,
             } => {
-                let _ = reply.send(
-                    debug_pid(thread_id)
-                        .and_then(|pid| self.inspect(stop_id, pid, &expression, limits)),
-                );
+                let _ =
+                    reply
+                        .send(debug_pid(thread_id).and_then(|pid| {
+                            self.inspect(stop_id, pid, frame, &expression, limits)
+                        }));
             }
             Request::InspectRange {
                 expression,
@@ -933,12 +944,12 @@ impl<P: InspectionOps> Controller<P> {
                 limits,
                 stop_id,
                 thread_id,
+                frame,
                 reply,
             } => {
-                let _ =
-                    reply.send(debug_pid(thread_id).and_then(|pid| {
-                        self.inspect_range(stop_id, pid, &expression, range, limits)
-                    }));
+                let _ = reply.send(debug_pid(thread_id).and_then(|pid| {
+                    self.inspect_range(stop_id, pid, frame, &expression, range, limits)
+                }));
             }
             Request::Dereference {
                 reference,
@@ -966,16 +977,27 @@ impl<P: InspectionOps> Controller<P> {
                 let result = debug_pid(thread_id).and_then(|pid| self.select_thread(stop_id, pid));
                 let _ = reply.send(result);
             }
+            Request::SelectFrame {
+                stop_id,
+                thread_id,
+                frame,
+                reply,
+            } => {
+                let result =
+                    debug_pid(thread_id).and_then(|pid| self.select_frame(stop_id, pid, frame));
+                let _ = reply.send(result);
+            }
             Request::ResolveWatchTarget {
                 expression,
                 stop_id,
                 thread_id,
+                frame,
                 reply,
             } => {
-                let _ = reply.send(
-                    debug_pid(thread_id)
-                        .and_then(|pid| self.resolve_watch_target(stop_id, pid, &expression)),
-                );
+                let _ =
+                    reply.send(debug_pid(thread_id).and_then(|pid| {
+                        self.resolve_watch_target(stop_id, pid, frame, &expression)
+                    }));
             }
             Request::AddBreakpoint { .. }
             | Request::RemoveBreakpoint { .. }
@@ -1108,6 +1130,7 @@ impl<P: InspectionOps> Controller<P> {
                 inferior: InferiorState::NotRunning,
                 stop_id: None,
                 selected_thread: None,
+                selected_frame: None,
                 threads: Arc::from([]),
                 presentation: None,
                 breakpoints: self.breakpoints.clone().into(),
@@ -1148,6 +1171,13 @@ impl<P: InspectionOps> Controller<P> {
             inferior: state,
             stop_id: inferior.public_stop.as_ref().map(|stop| stop.id),
             selected_thread: inferior.selected_thread.map(debug_thread_id),
+            selected_frame: inferior.public_stop.as_ref().map(|stop| {
+                let thread = inferior.selected_thread.unwrap_or(stop.triggering_thread);
+                stop.selected_frames
+                    .get(&thread)
+                    .copied()
+                    .unwrap_or(StackFrameId::INNERMOST)
+            }),
             threads,
             presentation: inferior.selected_thread.and_then(|pid| {
                 inferior
