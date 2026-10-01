@@ -923,10 +923,11 @@ impl<P: InspectionOps> Controller<P> {
             Request::Registers {
                 stop_id,
                 thread_id,
+                frame,
                 reply,
             } => {
-                let _ =
-                    reply.send(debug_pid(thread_id).and_then(|pid| self.registers(stop_id, pid)));
+                let _ = reply
+                    .send(debug_pid(thread_id).and_then(|pid| self.registers(stop_id, pid, frame)));
             }
             Request::Variables {
                 query,

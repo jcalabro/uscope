@@ -109,7 +109,12 @@ async fn program_counter(scenario: &Scenario) -> u64 {
         .find(|register| register.register.role == Some(RegisterRole::ProgramCounter))
         .map(|register| {
             let mut word = [0_u8; 8];
-            word.copy_from_slice(&register.bytes[..8]);
+            word.copy_from_slice(
+                &register
+                    .bytes
+                    .as_ref()
+                    .expect("innermost registers are saved")[..8],
+            );
             u64::from_le_bytes(word)
         })
         .expect("program counter is readable")

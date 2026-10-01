@@ -83,7 +83,14 @@ fn register(registers: &uscope::RegisterSnapshot, role: RegisterRole) -> u64 {
         .iter()
         .find(|value| value.register.role == Some(role))
         .unwrap_or_else(|| panic!("missing {role:?} register"));
-    u64::from_le_bytes(value.bytes.as_ref().try_into().expect("64-bit register"))
+    u64::from_le_bytes(
+        value
+            .bytes
+            .as_deref()
+            .expect("innermost registers are saved")
+            .try_into()
+            .expect("64-bit register"),
+    )
 }
 
 /// Names each frame by its owning module's file name and its function.

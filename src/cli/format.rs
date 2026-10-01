@@ -452,9 +452,14 @@ pub fn registers(registers: &RegisterSnapshot, renderer: Renderer) -> String {
                     Role::Name,
                     format_args!("{:<name_width$}", value.register.name)
                 ),
-                renderer.paint(
-                    Role::Value,
-                    register_bytes(&value.bytes, registers.target.byte_order)
+                value.bytes.as_ref().map_or_else(
+                    || renderer.paint(Role::Muted, "<not saved>").to_string(),
+                    |bytes| renderer
+                        .paint(
+                            Role::Value,
+                            register_bytes(bytes, registers.target.byte_order)
+                        )
+                        .to_string()
                 )
             )
         })

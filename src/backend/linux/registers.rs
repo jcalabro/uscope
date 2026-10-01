@@ -161,11 +161,17 @@ pub(super) fn x86_64_xmm_variable_register(registers: &Fxsave, dwarf: u16) -> Va
     }
 }
 
+/// Describes a frame's general registers: the thread's own for the
+/// innermost activation, or the registers the unwinder reconstructed for a
+/// caller's. A caller's register that a callee may have overwritten without
+/// saving it has no value; the segment and thread-pointer registers are the
+/// same in every frame, and the system-call register belongs to the thread.
 pub(super) fn x86_64_register_snapshot(
     revision: u64,
     pid: Pid,
     target: crate::TargetDescription,
     native: &libc::user_regs_struct,
+    caller: Option<&RegisterFile>,
 ) -> RegisterSnapshot {
     let general = [
         (0, native.rax),
@@ -188,28 +194,28 @@ pub(super) fn x86_64_register_snapshot(
         (49, native.eflags),
     ];
     let special = [
-        ("cs", 16, None, native.cs),
-        ("ss", 16, None, native.ss),
-        ("ds", 16, None, native.ds),
-        ("es", 16, None, native.es),
-        ("fs", 16, None, native.fs),
-        ("gs", 16, None, native.gs),
-        ("fs_base", 64, None, native.fs_base),
-        ("gs_base", 64, None, native.gs_base),
-        ("orig_rax", 64, None, native.orig_rax),
+        ("cs", 16, true, native.cs),
+        ("ss", 16, true, native.ss),
+        ("ds", 16, true, native.ds),
+        ("es", 16, true, native.es),
+        ("fs", 16, true, native.fs),
+        ("gs", 16, true, native.gs),
+        ("fs_base", 64, true, native.fs_base),
+        ("gs_base", 64, true, native.gs_base),
+        ("orig_rax", 64, false, native.orig_rax),
     ];
-    let registers = general
-        .into_iter()
-        .map(|(dwarf, value)| RegisterValue {
-            register: x86_64_general_register_descriptor(dwarf)
-                .expect("snapshot uses supported DWARF registers"),
-            bytes: Arc::from(value.to_le_bytes()),
-        })
-        .chain(
-            special
-                .into_iter()
-                .enumerate()
-                .map(|(offset, (name, bits, role, value))| {
+    let registers =
+        general
+            .into_iter()
+            .map(|(dwarf, value)| RegisterValue {
+                register: x86_64_general_register_descriptor(dwarf)
+                    .expect("snapshot uses supported DWARF registers"),
+                bytes: caller
+                    .map_or(Some(value), |file| file.get(dwarf))
+                    .map(|value| Arc::from(value.to_le_bytes())),
+            })
+            .chain(special.into_iter().enumerate().map(
+                |(offset, (name, bits, every_frame, value))| {
                     let bytes = value.to_le_bytes();
                     let byte_count = usize::from(bits / 8);
                     RegisterValue {
@@ -219,14 +225,15 @@ pub(super) fn x86_64_register_snapshot(
                             ),
                             name: name.into(),
                             bits,
-                            role,
+                            role: None,
                         },
-                        bytes: Arc::from(&bytes[..byte_count]),
+                        bytes: (caller.is_none() || every_frame)
+                            .then(|| Arc::from(&bytes[..byte_count])),
                     }
-                }),
-        )
-        .collect::<Vec<_>>()
-        .into();
+                },
+            ))
+            .collect::<Vec<_>>()
+            .into();
     RegisterSnapshot {
         revision,
         thread: debug_thread_id(pid),

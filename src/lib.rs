@@ -378,15 +378,10 @@ impl DebuggerHandle {
     /// Resolves an expression in the selected thread's selected frame to the
     /// memory it occupies and the lifetime of that storage.
     pub async fn resolve_watch_target(&self, expression: ValueExpression) -> Result<WatchTarget> {
-        let selection = self.stopped_selection().await?;
-        self.request(|reply| Request::ResolveWatchTarget {
-            expression,
-            stop_id: selection.stop,
-            thread_id: selection.thread,
-            frame: selection.frame,
-            reply,
-        })
-        .await
+        self.selected()
+            .await?
+            .resolve_watch_target(expression)
+            .await
     }
 
     /// Arms a hardware watchpoint on every thread of the stopped process.
@@ -671,28 +666,28 @@ impl DebuggerHandle {
     /// conflicting code is reported. Indirect branches name the targets the
     /// stopped state gives them; see [`IndirectTarget`].
     pub async fn disassemble(&self, query: DisassemblyQuery) -> Result<Disassembly> {
-        let selection = self.stopped_selection().await?;
-
-        self.request(|reply| Request::Disassemble {
-            query,
-            stop_id: selection.stop,
-            thread_id: selection.thread,
-            reply,
-        })
-        .await
+        self.selected().await?.disassemble(query).await
     }
 
     /// Resolves the selected frame's location to normalized function and
     /// source metadata: where execution stopped in the innermost frame, and
     /// the call in progress in an outer one.
     pub async fn current_location(&self) -> Result<ExecutionLocation> {
-        self.stopped_location().await
+        self.selected().await?.location().await
     }
 
     /// Lazily reads source lines surrounding the selected frame's location,
     /// from the first place this handle's [`SourcePathMap`] finds the file.
     pub async fn source_context(&self, radius: u32) -> Result<SourceContext> {
-        let execution = self.current_location().await?;
+        self.selected().await?.source_context(radius).await
+    }
+
+    /// Reads source lines surrounding a frame's location.
+    async fn source_context_at(
+        &self,
+        execution: ExecutionLocation,
+        radius: u32,
+    ) -> Result<SourceContext> {
         let location = execution
             .image
             .source
@@ -777,26 +772,12 @@ impl DebuggerHandle {
 
     /// Reconstructs the selected thread's stack frames.
     pub async fn backtrace(&self) -> Result<Backtrace> {
-        let selection = self.stopped_selection().await?;
-
-        self.request(|reply| Request::Backtrace {
-            stop_id: selection.stop,
-            thread_id: selection.thread,
-            reply,
-        })
-        .await
+        self.selected().await?.backtrace().await
     }
 
-    /// Reads the general register set of the stopped thread.
+    /// Reads the general register set of the selected frame.
     pub async fn registers(&self) -> Result<RegisterSnapshot> {
-        let selection = self.stopped_selection().await?;
-
-        self.request(|reply| Request::Registers {
-            stop_id: selection.stop,
-            thread_id: selection.thread,
-            reply,
-        })
-        .await
+        self.selected().await?.registers().await
     }
 
     /// Inspects every visible parameter and local variable in the selected frame.
@@ -849,16 +830,10 @@ impl DebuggerHandle {
         expression: ValueExpression,
         limits: InspectionLimits,
     ) -> Result<InspectedValue> {
-        let selection = self.stopped_selection().await?;
-        self.request(|reply| Request::Inspect {
-            expression,
-            limits,
-            stop_id: selection.stop,
-            thread_id: selection.thread,
-            frame: selection.frame,
-            reply,
-        })
-        .await
+        self.selected()
+            .await?
+            .inspect_with_limits(expression, limits)
+            .await
     }
 
     /// Inspects a one-dimensional array or slice expression and returns one
@@ -879,17 +854,10 @@ impl DebuggerHandle {
         range: ValueIndexRange,
         limits: InspectionLimits,
     ) -> Result<ValueChildPage> {
-        let selection = self.stopped_selection().await?;
-        self.request(|reply| Request::InspectRange {
-            expression,
-            range,
-            limits,
-            stop_id: selection.stop,
-            thread_id: selection.thread,
-            frame: selection.frame,
-            reply,
-        })
-        .await
+        self.selected()
+            .await?
+            .inspect_range_with_limits(expression, range, limits)
+            .await
     }
 
     /// Inspects one exact global catalog entry owned by the main executable
@@ -1014,16 +982,7 @@ impl DebuggerHandle {
         query: VariableQuery,
         limits: InspectionLimits,
     ) -> Result<VariableSnapshot> {
-        let selection = self.stopped_selection().await?;
-        self.request(|reply| Request::Variables {
-            query,
-            limits,
-            stop_id: selection.stop,
-            thread_id: selection.thread,
-            frame: selection.frame,
-            reply,
-        })
-        .await
+        self.selected().await?.variable_query(query, limits).await
     }
 
     /// Selects a frame of the selected thread, numbered as
@@ -1064,16 +1023,26 @@ impl DebuggerHandle {
         self.request(|reply| Request::LoadedModule { reply }).await
     }
 
-    async fn stopped_location(&self) -> Result<ExecutionLocation> {
+    /// Returns a view of the selected frame of the selected thread at the
+    /// current stop.
+    async fn selected(&self) -> Result<StopView<'_>> {
         let selection = self.stopped_selection().await?;
-
-        self.request(|reply| Request::StoppedLocation {
-            stop_id: selection.stop,
-            thread_id: selection.thread,
+        Ok(self.at(StopContext {
+            stop: selection.stop,
+            thread: selection.thread,
             frame: selection.frame,
-            reply,
-        })
-        .await
+        }))
+    }
+
+    /// Inspects one frame of one thread at one stop, independently of the
+    /// selected thread and frame. Every request through the view fails with
+    /// [`Error::StaleStop`] once execution has left that stop.
+    #[must_use]
+    pub const fn at(&self, context: StopContext) -> StopView<'_> {
+        StopView {
+            handle: self,
+            context,
+        }
     }
 
     async fn stopped_selection(&self) -> Result<StoppedSelection> {
@@ -1152,6 +1121,207 @@ impl DebuggerHandle {
             .map_err(|_| Error::RequestQueueClosed)?;
 
         receive.await.map_err(|_| Error::RequestCancelled)?
+    }
+}
+
+/// Names one frame of one thread at one stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StopContext {
+    /// The stop the frame belongs to.
+    pub stop: StopId,
+    /// The thread whose stack holds the frame.
+    pub thread: ThreadId,
+    /// The frame, numbered as [`DebuggerHandle::backtrace`] presents it.
+    pub frame: StackFrameId,
+}
+
+/// Inspects one explicit frame of one stopped thread; see
+/// [`DebuggerHandle::at`].
+///
+/// Values in an outer frame come from the registers its callees saved, as
+/// for [`DebuggerHandle::select_frame`].
+#[derive(Clone, Copy)]
+pub struct StopView<'a> {
+    handle: &'a DebuggerHandle,
+    context: StopContext,
+}
+
+impl StopView<'_> {
+    /// Returns the frame this view inspects.
+    #[must_use]
+    pub const fn context(&self) -> StopContext {
+        self.context
+    }
+
+    /// Reconstructs the thread's stack frames; the view's frame does not
+    /// limit them.
+    pub async fn backtrace(&self) -> Result<Backtrace> {
+        let context = self.context;
+        self.handle
+            .request(|reply| Request::Backtrace {
+                stop_id: context.stop,
+                thread_id: context.thread,
+                reply,
+            })
+            .await
+    }
+
+    /// Reads the frame's general registers.
+    pub async fn registers(&self) -> Result<RegisterSnapshot> {
+        let context = self.context;
+        self.handle
+            .request(|reply| Request::Registers {
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Resolves the frame's location to function and source metadata.
+    pub async fn location(&self) -> Result<ExecutionLocation> {
+        let context = self.context;
+        self.handle
+            .request(|reply| Request::StoppedLocation {
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Lazily reads source lines surrounding the frame's location through
+    /// the handle's [`SourcePathMap`].
+    pub async fn source_context(&self, radius: u32) -> Result<SourceContext> {
+        let location = self.location().await?;
+        self.handle.source_context_at(location, radius).await
+    }
+
+    /// Inspects every visible parameter and local variable of the frame.
+    pub async fn variables(&self) -> Result<VariableSnapshot> {
+        self.variables_with_limits(InspectionLimits::default())
+            .await
+    }
+
+    /// Inspects the frame's variables under explicit resource limits.
+    pub async fn variables_with_limits(
+        &self,
+        limits: InspectionLimits,
+    ) -> Result<VariableSnapshot> {
+        self.variable_query(VariableQuery::All, limits).await
+    }
+
+    /// Inspects one exact global as the frame's thread sees it, such as its
+    /// instance of a thread-local variable.
+    pub async fn global_with_limits(
+        &self,
+        global: GlobalVariableReference,
+        limits: InspectionLimits,
+    ) -> Result<Variable> {
+        let snapshot = self
+            .variable_query(VariableQuery::Global(global), limits)
+            .await?;
+        snapshot
+            .variables
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::VariableNotFound(global.variable.to_string()))
+    }
+
+    async fn variable_query(
+        &self,
+        query: VariableQuery,
+        limits: InspectionLimits,
+    ) -> Result<VariableSnapshot> {
+        let context = self.context;
+        self.handle
+            .request(|reply| Request::Variables {
+                query,
+                limits,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Atomically inspects one structural value expression in the frame.
+    pub async fn inspect(&self, expression: ValueExpression) -> Result<InspectedValue> {
+        self.inspect_with_limits(expression, InspectionLimits::default())
+            .await
+    }
+
+    /// Inspects one structural expression under explicit resource limits.
+    pub async fn inspect_with_limits(
+        &self,
+        expression: ValueExpression,
+        limits: InspectionLimits,
+    ) -> Result<InspectedValue> {
+        let context = self.context;
+        self.handle
+            .request(|reply| Request::Inspect {
+                expression,
+                limits,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Inspects one bounded range of a one-dimensional array or slice
+    /// expression under explicit resource limits.
+    pub async fn inspect_range_with_limits(
+        &self,
+        expression: ValueExpression,
+        range: ValueIndexRange,
+        limits: InspectionLimits,
+    ) -> Result<ValueChildPage> {
+        let context = self.context;
+        self.handle
+            .request(|reply| Request::InspectRange {
+                expression,
+                range,
+                limits,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Resolves an expression in the frame to the memory it occupies and
+    /// the lifetime of that storage.
+    pub async fn resolve_watch_target(&self, expression: ValueExpression) -> Result<WatchTarget> {
+        let context = self.context;
+        self.handle
+            .request(|reply| Request::ResolveWatchTarget {
+                expression,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Disassembles code as the thread sees it at the stop; see
+    /// [`DebuggerHandle::disassemble`].
+    pub async fn disassemble(&self, query: DisassemblyQuery) -> Result<Disassembly> {
+        let context = self.context;
+        self.handle
+            .request(|reply| Request::Disassemble {
+                query,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                reply,
+            })
+            .await
     }
 }
 
