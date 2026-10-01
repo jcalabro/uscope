@@ -116,6 +116,241 @@ pub struct Breakpoint {
     pub locations: Arc<[ResolvedBreakpointLocation]>,
 }
 
+/// Identifies one watchpoint within a debug session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WatchpointId(u64);
+
+impl WatchpointId {
+    /// Creates a watchpoint identifier from its numeric representation.
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric representation of this identifier.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for WatchpointId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// The memory accesses that trigger a watchpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WatchAccess {
+    /// Stores to any watched byte.
+    Write,
+    /// Loads from any watched byte, without stores.
+    Read,
+    /// Loads from or stores to any watched byte.
+    ReadWrite,
+}
+
+impl fmt::Display for WatchAccess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Write => "write",
+            Self::Read => "read",
+            Self::ReadWrite => "read/write",
+        })
+    }
+}
+
+/// What the debugger's hardware watchpoint support can arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchpointCapabilities {
+    /// Hardware slots per thread, shared by every watchpoint. Other users of
+    /// the debug hardware, such as perf breakpoints, can leave fewer.
+    pub slots: u32,
+    /// The widest naturally aligned span one slot covers. Other spans use
+    /// several slots.
+    pub max_slot_bytes: u64,
+    /// The access kinds the hardware can report exactly.
+    pub access: Arc<[WatchAccess]>,
+}
+
+/// The storage lifetime that bounds a watched object.
+///
+/// A scoped watchpoint is invalidated once its storage may belong to a
+/// different object, instead of reporting accesses to unrelated data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchScope {
+    /// An explicit address, or storage reached through a pointer. The
+    /// debugger cannot know when it is reused and never invalidates it.
+    Location,
+    /// Static storage owned by a loaded module.
+    Static {
+        /// The module whose unload invalidates the watchpoint.
+        module: crate::ModuleId,
+    },
+    /// One thread's instance of thread-local storage.
+    ThreadLocal {
+        /// The thread whose exit invalidates the watchpoint.
+        thread: ThreadId,
+    },
+    /// A local variable or parameter of one function activation.
+    Frame {
+        /// The thread executing the activation.
+        thread: ThreadId,
+        /// The activation's canonical frame address.
+        activation: VirtualAddress,
+    },
+}
+
+/// Debugger-internal evidence used to decide whether a frame-scoped object
+/// is still live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameScopeEvidence {
+    pub module: crate::ModuleId,
+    pub image: crate::ModuleImageId,
+    pub function: CodeInstanceId,
+    pub ranges: Arc<[crate::AddressRange<crate::ImageAddress>]>,
+}
+
+/// An opaque capability for one watchable memory object resolved at one
+/// stopped snapshot.
+///
+/// The address is fixed when the target is resolved, so watching an
+/// expression that passes through a pointer keeps watching the original
+/// pointee after the pointer changes. The target can only be armed at the
+/// stop that resolved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchTarget {
+    pub(crate) stop_id: StopId,
+    pub(crate) expression: crate::ValueExpression,
+    pub(crate) address: VirtualAddress,
+    pub(crate) byte_size: u64,
+    pub(crate) type_info: Option<crate::TypeInfo>,
+    pub(crate) scope: WatchScope,
+    pub(crate) frame: Option<FrameScopeEvidence>,
+}
+
+impl WatchTarget {
+    /// Returns the stopped snapshot that resolved this target.
+    #[must_use]
+    pub const fn stop_id(&self) -> StopId {
+        self.stop_id
+    }
+
+    /// Returns the expression that named the object.
+    #[must_use]
+    pub const fn expression(&self) -> &crate::ValueExpression {
+        &self.expression
+    }
+
+    /// Returns the first watched byte.
+    #[must_use]
+    pub const fn address(&self) -> VirtualAddress {
+        self.address
+    }
+
+    /// Returns the number of watched bytes.
+    #[must_use]
+    pub const fn byte_size(&self) -> u64 {
+        self.byte_size
+    }
+
+    /// Returns the object's resolved type.
+    #[must_use]
+    pub const fn type_info(&self) -> Option<&crate::TypeInfo> {
+        self.type_info.as_ref()
+    }
+
+    /// Returns the lifetime that bounds the object's storage.
+    #[must_use]
+    pub const fn scope(&self) -> &WatchScope {
+        &self.scope
+    }
+}
+
+/// What a new watchpoint observes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchpointSpec {
+    /// An object resolved at the current stop.
+    Target(Box<WatchTarget>),
+    /// Explicit bytes of the process address space.
+    Location {
+        /// The first watched byte.
+        address: VirtualAddress,
+        /// The number of watched bytes.
+        byte_size: u64,
+    },
+}
+
+/// An armed hardware watchpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Watchpoint {
+    /// The watchpoint's session-scoped identifier.
+    pub id: WatchpointId,
+    /// The accesses it reports.
+    pub access: WatchAccess,
+    /// The expression that named the object, absent for explicit locations.
+    pub expression: Option<crate::ValueExpression>,
+    /// The first watched byte.
+    pub address: VirtualAddress,
+    /// The number of watched bytes.
+    pub byte_size: u64,
+    /// The watched object's type, when it was resolved from an expression.
+    pub type_info: Option<crate::TypeInfo>,
+    /// The lifetime that bounds the watched storage.
+    pub scope: WatchScope,
+    /// The naturally aligned hardware spans that exactly cover the bytes.
+    pub coverage: Arc<[crate::AddressRange<VirtualAddress>]>,
+}
+
+/// One watchpoint reported by one thread's access.
+///
+/// Hardware reports that an access happened, not what it changed: a store of
+/// an identical value is reported with equal bytes. Accesses made by the
+/// kernel on the process's behalf, such as `read(2)` filling a watched
+/// buffer, are never reported, so `previous` is the value last observed by
+/// the debugger rather than necessarily the value immediately before this
+/// access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchpointHit {
+    /// The watchpoint that reported the access.
+    pub watchpoint: WatchpointId,
+    /// The thread whose instruction made the access.
+    pub thread: ThreadId,
+    /// The watched bytes last observed by the debugger, when readable.
+    pub previous: Option<Arc<[u8]>>,
+    /// The watched bytes once every thread stopped, when readable.
+    pub current: Option<Arc<[u8]>>,
+}
+
+impl WatchpointHit {
+    /// Whether the watched bytes differ from the last observed bytes.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.previous != self.current
+    }
+}
+
+/// Why a scoped watchpoint stopped watching its storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchpointInvalidation {
+    /// The function activation or lexical block owning the object ended.
+    ScopeExited,
+    /// The thread owning the object exited.
+    OwnerThreadExited,
+    /// The module owning the object was unloaded.
+    ModuleUnloaded,
+}
+
+/// A watchpoint that was removed because its storage's lifetime ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidatedWatchpoint {
+    /// The removed watchpoint.
+    pub watchpoint: Watchpoint,
+    /// Why its storage is no longer watched.
+    pub reason: WatchpointInvalidation,
+}
+
 /// The logical frame selected for presentation at a stopped instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresentedFrame {
@@ -376,6 +611,28 @@ pub enum StopReason {
     Attach,
     /// Execution reached an installed breakpoint.
     Breakpoint { address: VirtualAddress },
+    /// A thread accessed watched memory. The thread stops after the
+    /// accessing instruction, or within a repeated string instruction that
+    /// has more iterations left.
+    Watchpoint {
+        /// Every watchpoint this thread's access reported.
+        hits: Arc<[WatchpointHit]>,
+    },
+    /// Watched memory was accessed after the watched object's lifetime ended,
+    /// so the affected watchpoints were removed instead of reporting
+    /// accesses to unrelated data.
+    WatchpointInvalidated {
+        /// The removed watchpoints.
+        invalidated: Arc<[InvalidatedWatchpoint]>,
+    },
+    /// A new thread could not be armed with the process's watchpoints. It
+    /// was stopped before running so it never executes unwatched.
+    WatchpointArmFailed {
+        /// The unarmed thread.
+        thread_id: ThreadId,
+        /// Why arming failed.
+        description: Arc<str>,
+    },
     /// A stepping operation completed.
     Step { kind: StepKind },
     /// Execution stopped at the user's request.
@@ -470,6 +727,8 @@ pub struct StateSnapshot {
     pub presentation: Option<FramePresentation>,
     /// The logical breakpoints requested by clients.
     pub breakpoints: Arc<[Breakpoint]>,
+    /// The watchpoints armed in the current process.
+    pub watchpoints: Arc<[Watchpoint]>,
 }
 
 /// A state or lifecycle event emitted by the debugger.
@@ -538,6 +797,16 @@ pub enum DebuggerEvent {
     BreakpointsChanged {
         revision: u64,
     },
+    /// The set of armed watchpoints changed.
+    WatchpointsChanged {
+        revision: u64,
+    },
+    /// Scoped watchpoints were removed because their storage's lifetime
+    /// ended. A following `WatchpointsChanged` publishes the new set.
+    WatchpointsInvalidated {
+        revision: u64,
+        invalidated: Arc<[InvalidatedWatchpoint]>,
+    },
 }
 
 pub type Reply<T> = oneshot::Sender<Result<T>>;
@@ -553,6 +822,24 @@ pub enum Request {
     },
     RemoveAllBreakpoints {
         reply: Reply<Arc<[Breakpoint]>>,
+    },
+    ResolveWatchTarget {
+        expression: crate::ValueExpression,
+        stop_id: StopId,
+        thread_id: ThreadId,
+        reply: Reply<WatchTarget>,
+    },
+    AddWatchpoint {
+        spec: WatchpointSpec,
+        access: WatchAccess,
+        reply: Reply<Watchpoint>,
+    },
+    RemoveWatchpoint {
+        id: WatchpointId,
+        reply: Reply<Watchpoint>,
+    },
+    RemoveAllWatchpoints {
+        reply: Reply<Arc<[Watchpoint]>>,
     },
     Launch {
         reply: Reply<ExecutionId>,

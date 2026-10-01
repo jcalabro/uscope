@@ -43,6 +43,10 @@ fuzz-dwarf-expression *ARGS="":
 fuzz-core-dump *ARGS="":
     cargo fuzz run core-dump -- "$@"
 
+# Fuzzes watchpoint debug-register planning and hit attribution invariants.
+fuzz-debug-register-plan *ARGS="":
+    cargo fuzz run debug-register-plan -- "$@"
+
 # Checks formatting and runs Clippy.
 lint:
     cargo fmt --check

@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -10,7 +10,10 @@ use super::{
     die_reference_with_signatures, is_type_unit, source_file_id, source_path,
     type_unit_source_file_id,
 };
-use crate::debug_info::{VariableContext, VariableInfo, VariableRuntime, VariableRuntimeError};
+use crate::debug_info::{
+    ObjectStorage, StorageClass, VariableContext, VariableInfo, VariableRuntime,
+    VariableRuntimeError,
+};
 use crate::inspection::InspectionBudget;
 use crate::model::{ArrayDimension, ValueStorage};
 use crate::{
@@ -127,8 +130,19 @@ struct Expression {
     indexed_addresses: Arc<HashMap<usize, u64>>,
 }
 
+/// Operation families that determine where an object's storage lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ExpressionUse {
+    ThreadLocal,
+    Dereference,
+    Frame,
+    RegisterValue,
+    Computed,
+}
+
 struct EvaluationUnit {
     base_types: HashMap<usize, gimli::ValueType>,
+    language: Option<gimli::DwLang>,
 }
 
 #[derive(Clone)]
@@ -2187,8 +2201,17 @@ fn load_evaluation_units(
         .iter()
         .map(|unit| {
             let mut base_types = HashMap::new();
+            let mut language = None;
             let mut entries = unit.entries();
             while let Some(entry) = entries.next_dfs()? {
+                if entry.tag() == gimli::DW_TAG_compile_unit {
+                    if let Some(gimli::AttributeValue::Language(value)) =
+                        entry.attr_value(gimli::DW_AT_language)
+                    {
+                        language = Some(value);
+                    }
+                    continue;
+                }
                 if entry.tag() != gimli::DW_TAG_base_type {
                     continue;
                 }
@@ -2206,7 +2229,10 @@ fn load_evaluation_units(
                     base_types.insert(entry.offset().0, value_type);
                 }
             }
-            Ok(EvaluationUnit { base_types })
+            Ok(EvaluationUnit {
+                base_types,
+                language,
+            })
         })
         .collect()
 }
@@ -5346,6 +5372,24 @@ impl VariableInfo for DwarfVariableInfo {
         self.evaluate_path(object, plan, Some(address), context, runtime, budget)
     }
 
+    fn local_storage(
+        &self,
+        address: ImageAddress,
+        selected: Option<CodeInstanceId>,
+        root: &str,
+    ) -> Result<ObjectStorage> {
+        Ok(self.object_storage(self.visible_object(address, selected, root)?))
+    }
+
+    fn global_storage(&self, id: GlobalVariableId) -> Result<ObjectStorage> {
+        let global_index = usize::try_from(id.get()).expect("u32 fits usize");
+        let object_index = *self
+            .globals
+            .get(global_index)
+            .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
+        Ok(self.object_storage(&self.objects[object_index]))
+    }
+
     fn inspect_global(
         &self,
         id: GlobalVariableId,
@@ -6275,6 +6319,89 @@ fn value_shape_from<T: TypeMetadataEntry>(
 }
 
 impl DwarfVariableInfo {
+    /// Classifies an object's storage from the operations of its location
+    /// expressions. Thread-local and indirect forms dominate frame-relative
+    /// ones, which dominate static addresses.
+    fn object_storage(&self, object: &CatalogDataObject) -> ObjectStorage {
+        let ranges = Arc::clone(&object.ranges);
+        let Metadata::Value(ValueDescription::Location(location)) = &object.value else {
+            return ObjectStorage {
+                class: StorageClass::NotMemory,
+                ranges,
+            };
+        };
+        let mut uses = BTreeSet::new();
+        for entry in location.entries.iter() {
+            if self.expression_uses(&entry.expression, &mut uses).is_err() {
+                return ObjectStorage {
+                    class: StorageClass::NotMemory,
+                    ranges,
+                };
+            }
+        }
+        let class = if uses.contains(&ExpressionUse::ThreadLocal) {
+            StorageClass::ThreadLocal
+        } else if uses.contains(&ExpressionUse::Dereference) {
+            StorageClass::Indirect
+        } else if uses.contains(&ExpressionUse::RegisterValue)
+            || uses.contains(&ExpressionUse::Computed)
+            || location.entries.is_empty()
+        {
+            StorageClass::NotMemory
+        } else if uses.contains(&ExpressionUse::Frame) {
+            let single_location = location
+                .entries
+                .iter()
+                .all(|entry| entry.expression.bytes == location.entries[0].expression.bytes);
+            let single_frame_base = match &object.frame_base {
+                Metadata::Value(frame_base) => frame_base
+                    .entries
+                    .iter()
+                    .all(|entry| entry.expression.bytes == frame_base.entries[0].expression.bytes),
+                Metadata::Absent(_) => true,
+                Metadata::Malformed(_) => false,
+            };
+            StorageClass::Frame {
+                stable: single_location && single_frame_base,
+                moving_stack: location.entries.iter().any(|entry| {
+                    self.evaluation_units
+                        .get(entry.expression.unit)
+                        .and_then(|unit| unit.language)
+                        == Some(gimli::DW_LANG_Go)
+                }),
+            }
+        } else {
+            StorageClass::Static
+        };
+        ObjectStorage { class, ranges }
+    }
+
+    fn expression_uses(
+        &self,
+        expression: &Expression,
+        uses: &mut BTreeSet<ExpressionUse>,
+    ) -> std::result::Result<(), gimli::Error> {
+        let reader = gimli::EndianSlice::new(&expression.bytes, self.endian);
+        let mut operations = gimli::Expression(reader).operations(expression.encoding);
+        while let Some(operation) = operations.next()? {
+            uses.extend(match operation {
+                gimli::Operation::TLS => Some(ExpressionUse::ThreadLocal),
+                gimli::Operation::Deref { .. } => Some(ExpressionUse::Dereference),
+                gimli::Operation::FrameOffset { .. }
+                | gimli::Operation::RegisterOffset { .. }
+                | gimli::Operation::CallFrameCFA => Some(ExpressionUse::Frame),
+                gimli::Operation::Register { .. } => Some(ExpressionUse::RegisterValue),
+                gimli::Operation::StackValue
+                | gimli::Operation::ImplicitValue { .. }
+                | gimli::Operation::ImplicitPointer { .. }
+                | gimli::Operation::Piece { .. }
+                | gimli::Operation::EntryValue { .. } => Some(ExpressionUse::Computed),
+                _ => None,
+            });
+        }
+        Ok(())
+    }
+
     fn type_info(&self, id: TypeId) -> std::result::Result<&TypeInfo, Arc<str>> {
         type_info_from(&self.types, id)
     }
@@ -10139,6 +10266,7 @@ mod tests {
     ) -> Vec<EvaluationUnit> {
         vec![EvaluationUnit {
             base_types: base_types.into_iter().collect(),
+            language: None,
         }]
     }
 

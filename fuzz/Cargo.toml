@@ -31,3 +31,10 @@ path = "fuzz_targets/core_dump.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "debug-register-plan"
+path = "fuzz_targets/debug_register_plan.rs"
+test = false
+doc = false
+bench = false

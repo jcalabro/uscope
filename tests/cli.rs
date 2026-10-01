@@ -1464,3 +1464,165 @@ fn backtraces_name_source_files_from_each_frames_own_module() {
         "{library_frame}"
     );
 }
+
+fn uscope_batch(arguments: &[&str], executable: &Path) -> std::process::Output {
+    assert!(
+        executable.exists(),
+        "missing test fixture; run `just build-test-programs`"
+    );
+    Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .arg("--batch")
+        .args(arguments)
+        .arg(executable)
+        .output()
+        .expect("run uscope")
+}
+
+#[test]
+fn watch_script_reports_values_lists_and_deletes_watchpoints() {
+    let script = fixture("tests/fixtures/watch.uscope");
+    let output = uscope_batch(
+        &["-c", script.to_str().expect("UTF-8 path")],
+        &fixture("build/test-programs/watch-gcc-o0"),
+    );
+    let stdout = assert_success(output);
+    assert_no_sgr(&stdout);
+
+    let set = stdout
+        .lines()
+        .find(|line| line.starts_with("watchpoint 1 set on watch_i32: 4 bytes at 0x"))
+        .unwrap_or_else(|| panic!("missing set confirmation:\n{stdout}"));
+    assert!(set.ends_with("using 1 hardware slot"), "{set}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("1  write  watch_i32  4 bytes at 0x")),
+        "{stdout}"
+    );
+    for (old, new) in [(0, 1), (1, 2), (2, 42)] {
+        assert!(
+            stdout.contains(&format!("\n  old: {old}\n  new: {new}\n")),
+            "missing {old} -> {new}:\n{stdout}"
+        );
+    }
+    assert!(stdout.contains("\n  value: 2 (unchanged)\n"), "{stdout}");
+    assert_eq!(
+        stdout
+            .matches("stopped by watchpoint 1 (write) on watch_i32 in thread ")
+            .count(),
+        4
+    );
+    assert!(stdout.contains("deleted watchpoint 1"));
+    assert!(stdout.contains("no watchpoints"));
+    assert!(
+        stdout.contains("watch.c:"),
+        "watch stops show source:\n{stdout}"
+    );
+    assert!(stdout.contains("inferior exited with status 0"), "{stdout}");
+}
+
+#[test]
+fn access_and_location_watchpoints_render_their_kind_and_slots() {
+    let output = uscope_batch(
+        &[
+            "-e",
+            "break read_access",
+            "-e",
+            "run",
+            "-e",
+            "awatch watch_i32",
+            "-e",
+            "watch watch_packed.field",
+            "-e",
+            "info watchpoints",
+            "-e",
+            "continue",
+            "-e",
+            "unwatch all",
+        ],
+        &fixture("build/test-programs/watch-gcc-o0"),
+    );
+    let stdout = assert_success(output);
+    assert!(stdout.contains("1  read/write  watch_i32"), "{stdout}");
+    assert!(
+        stdout.contains("watchpoint 2 set on watch_packed.field: 4 bytes at 0x")
+            && stdout.contains("using 3 hardware slots"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("stopped by watchpoint 1 (read/write) on watch_i32"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\n  value: 42 (unchanged)\n"), "{stdout}");
+    assert!(stdout.contains("deleted 2 watchpoints"), "{stdout}");
+}
+
+#[test]
+fn signed_watched_values_render_with_their_sign() {
+    let output = uscope_batch(
+        &[
+            "-e",
+            "break read_access",
+            "-e",
+            "run",
+            "-e",
+            "watch watch_sink",
+            "-e",
+            "continue",
+            "-e",
+            "continue",
+        ],
+        &fixture("build/test-programs/watch-gcc-o0"),
+    );
+    let stdout = assert_success(output);
+    assert!(stdout.contains("\n  new: 42\n"), "{stdout}");
+    assert!(stdout.contains("\n  old: 42\n  new: -42\n"), "{stdout}");
+}
+
+#[test]
+fn watch_command_failures_explain_themselves() {
+    let executable = fixture("build/test-programs/watch-gcc-o0");
+    for (commands, expected) in [
+        (
+            &["watch watch_i32"][..],
+            "the inferior has not been launched",
+        ),
+        (
+            &["break scalar_stores", "run", "rwatch watch_i32"][..],
+            "read watchpoints are unsupported by this target's debug hardware",
+        ),
+        (
+            &["break scalar_stores", "run", "watch 0x1000:0"][..],
+            "cannot watch 0 bytes at 0x1000: a watchpoint must cover at least one byte",
+        ),
+        (
+            &["break scalar_stores", "run", "watch watch_oversized"][..],
+            "only 4 remain",
+        ),
+        (
+            &["break scalar_stores", "run", "watch watch_array[0..2]"][..],
+            "watch <value-path|address:byte-count>",
+        ),
+        (
+            &["break scalar_stores", "run", "watch 0x1000:many"][..],
+            "watch <value-path|address:byte-count>",
+        ),
+        (
+            &["break scalar_stores", "run", "unwatch 9"][..],
+            "watchpoint 9 was not found",
+        ),
+        (&["watch"][..], "watch <value-path|address:byte-count>"),
+    ] {
+        let arguments = commands
+            .iter()
+            .flat_map(|command| ["-e", command])
+            .collect::<Vec<_>>();
+        let output = uscope_batch(&arguments, &executable);
+        assert!(!output.status.success(), "{commands:?} should fail");
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+        assert!(
+            stderr.contains(expected),
+            "{commands:?}: expected {expected:?} in:\n{stderr}"
+        );
+    }
+}
