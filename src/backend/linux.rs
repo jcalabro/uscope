@@ -797,7 +797,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::RemoveAllWatchpoints { reply } => {
                 let _ = reply.send(self.remove_all_watchpoints());
             }
-            Request::Launch { reply } => self.launch(reply),
+            Request::Launch { options, reply } => self.launch(*options, reply),
             Request::Attach { process_id, reply } => self.attach(process_id, reply),
             Request::Continue {
                 process_id,

@@ -1179,6 +1179,123 @@ async fn stale_stop_tokens_allow_exactly_one_client_to_resume() {
 }
 
 #[tokio::test]
+async fn launch_options_start_the_program_with_its_arguments_environment_directory_and_streams() {
+    use std::io::Read as _;
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let directory = support::ScratchDir::new("launch-directory");
+    let (stdin_reader, mut stdin_writer) = std::io::pipe().expect("stdin pipe");
+    let (mut stdout_reader, stdout_writer) = std::io::pipe().expect("stdout pipe");
+    let (mut stderr_reader, stderr_writer) = std::io::pipe().expect("stderr pipe");
+    stdin_writer
+        .write_all(b"typed line\n")
+        .expect("write stdin");
+    drop(stdin_writer);
+
+    let mut scenario = Scenario::launch("process-environment");
+    let reason = scenario
+        .run_with_to_stop(LaunchOptions {
+            arguments: vec!["first".into(), "second word".into()],
+            environment: vec![
+                ("USCOPE_FIXTURE_VALUE".into(), Some("from launch".into())),
+                ("USCOPE_FIXTURE_REMOVED".into(), Some("set".into())),
+                ("USCOPE_FIXTURE_REMOVED".into(), None),
+            ],
+            working_directory: Some(directory.path().to_owned()),
+            stdin: Some(Stdio::from(stdin_reader)),
+            stdout: Some(Stdio::from(stdout_writer)),
+            stderr: Some(Stdio::from(stderr_writer)),
+            stop_at_entry: false,
+        })
+        .await;
+    // argc counts the program name and both arguments.
+    assert_eq!(reason, StopReason::Exited(ExitStatus::Code(3)));
+    scenario.shutdown().await;
+
+    let mut stdout = String::new();
+    stdout_reader
+        .read_to_string(&mut stdout)
+        .expect("read inferior stdout");
+    let mut stderr = String::new();
+    stderr_reader
+        .read_to_string(&mut stderr)
+        .expect("read inferior stderr");
+    let directory = directory
+        .path()
+        .canonicalize()
+        .expect("canonical scratch directory");
+    assert_eq!(
+        stdout,
+        format!(
+            "argument 1: first\nargument 2: second word\nvalue: from launch\nremoved: absent\ndirectory: {}\n",
+            directory.display()
+        )
+    );
+    assert_eq!(stderr, "input: typed line\n");
+}
+
+#[tokio::test]
+async fn stop_at_entry_ends_the_launch_before_the_loader_runs() {
+    let mut scenario = Scenario::launch("basic");
+    scenario.add_breakpoint("main").await;
+    let reason = scenario
+        .run_with_to_stop(LaunchOptions {
+            stop_at_entry: true,
+            ..LaunchOptions::default()
+        })
+        .await;
+    assert_eq!(reason, StopReason::Entry);
+
+    // The first instruction belongs to the dynamic loader, which has not
+    // mapped the program's libraries yet.
+    let registers = scenario
+        .operation("entry registers", scenario.handle().registers())
+        .await;
+    let pc = register_u64(&registers, RegisterRole::ProgramCounter);
+    let description = scenario
+        .operation(
+            "describe the entry instruction",
+            scenario.handle().describe_address(VirtualAddress::new(pc)),
+        )
+        .await;
+    let module = description
+        .module
+        .as_ref()
+        .expect("the entry is in a loaded module");
+    assert!(
+        module.path.to_string_lossy().contains("ld-linux"),
+        "the entry stop is not in the dynamic loader: {description:?}"
+    );
+    let modules = scenario
+        .operation("entry modules", scenario.handle().loaded_modules())
+        .await;
+    assert!(
+        !modules
+            .modules
+            .iter()
+            .any(|module| module.path.to_string_lossy().contains("libc.so")),
+        "the C library is mapped before the loader ran: {modules:?}"
+    );
+
+    // Execution from the entry stop reaches user breakpoints as usual.
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert_eq!(
+        scenario
+            .operation("main location", scenario.handle().current_location())
+            .await
+            .image
+            .function
+            .map(|function| function.name.to_string()),
+        Some("main".to_owned())
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
 async fn pause_during_launch_ends_the_launch_execution_in_a_coherent_stop() {
     let mut scenario = Scenario::new("pause during launch", Scenario::fixture("spin"));
     let run = scenario.start_launching().await;

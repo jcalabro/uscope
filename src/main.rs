@@ -2,6 +2,7 @@
 
 mod cli;
 
+use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,7 +12,7 @@ use clap::Parser;
 use uscope::{CoreDumpOptions, Debugger, ProcessId, SourcePathMap};
 
 use cli::terminal::{ColorChoice, Role};
-use cli::{Cli, DisassemblySyntax, Renderers};
+use cli::{Cli, DisassemblySyntax, LaunchSettings, Renderers};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -67,6 +68,26 @@ struct Args {
     /// The assembly syntax `disassemble` renders.
     #[arg(long, value_enum, default_value_t)]
     disassembly_syntax: DisassemblySyntax,
+
+    /// Run the launched program in DIR instead of the current directory.
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["attach", "core"])]
+    cwd: Option<PathBuf>,
+
+    /// Set NAME to VALUE in the launched program's environment. May be repeated.
+    #[arg(long = "env", value_name = "NAME=VALUE", value_parser = parse_environment_variable,
+          conflicts_with_all = ["attach", "core"])]
+    environment: Vec<(OsString, OsString)>,
+
+    /// Arguments passed to the launched program.
+    #[arg(last = true, value_name = "ARGS", conflicts_with_all = ["attach", "core"])]
+    arguments: Vec<OsString>,
+}
+
+fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsString), String> {
+    match text.split_once('=') {
+        Some((name, value)) if !name.is_empty() => Ok((name.into(), value.into())),
+        _ => Err(format!("expected NAME=VALUE, found '{text}'")),
+    }
 }
 
 #[tokio::main]
@@ -97,7 +118,16 @@ async fn run(args: &Args, renderers: Renderers) -> Result<()> {
     }
     let debugger = open_debugger(args).await?;
     let handle = debugger.handle().with_source_paths(source_paths);
-    let result = Cli::new(handle, renderers, args.disassembly_syntax.into())
+    let launch = LaunchSettings {
+        arguments: args.arguments.clone(),
+        environment: args
+            .environment
+            .iter()
+            .map(|(name, value)| (name.clone(), Some(value.clone())))
+            .collect(),
+        working_directory: args.cwd.clone(),
+    };
+    let result = Cli::new(handle, renderers, args.disassembly_syntax.into(), launch)
         .run(args)
         .await;
     let shutdown = debugger

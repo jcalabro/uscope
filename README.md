@@ -20,6 +20,9 @@ just
 # start the debugger
 just run build/test-programs/basic
 
+# pass arguments, a working directory, and environment variables to `run`
+just run --cwd /tmp --env NAME=VALUE build/test-programs/process-environment -- ARG...
+
 # attach to a running process; uscope discovers its executable through /proc
 just dev --command cargo run -- --attach PID
 

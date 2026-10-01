@@ -11,7 +11,8 @@ use nix::unistd::Pid;
 
 use crate::backend::process_start_time;
 use crate::protocol::{
-    DebuggerEvent, ExecutionId, ExitStatus, ProcessId, Reply, ResumeScope, StopId, StopReason,
+    DebuggerEvent, ExecutionId, ExitStatus, LaunchOptions, ProcessId, Reply, ResumeScope, StopId,
+    StopReason,
 };
 use crate::{Error, LoadedModule, Result};
 
@@ -24,13 +25,14 @@ use super::{
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
-    pub(super) fn launch(&mut self, reply: Reply<ExecutionId>) {
+    pub(super) fn launch(&mut self, options: LaunchOptions, reply: Reply<ExecutionId>) {
         if self.inferior.is_some() || self.launch_reply.is_some() {
             let _ = reply.send(Err(Error::AlreadyRunning));
             return;
         }
 
-        match self.ptrace.spawn(&self.executable) {
+        let stop_at_entry = options.stop_at_entry;
+        match self.ptrace.spawn(&self.executable, options) {
             Ok(pid) => {
                 let waiter = match self.ptrace.spawn_waiter(self.message_sender.clone()) {
                     Ok(waiter) => waiter,
@@ -52,6 +54,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                         resume_threads: BTreeSet::from([pid]),
                     }),
                     next_execution: 1,
+                    // Like a pause requested during launch, an entry stop
+                    // completes at the initial exec stop.
+                    barrier: stop_at_entry.then_some(StopBarrier {
+                        execution: Some(execution_id),
+                        triggering_thread: pid,
+                        reason: Some(StopReason::Entry),
+                    }),
                     ..Inferior::new(
                         InferiorOrigin::Launched,
                         pid,

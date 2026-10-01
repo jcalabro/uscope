@@ -64,10 +64,11 @@ pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, CoreDumpInfo, CoreDumpOptions,
     CoreModule, CoreModuleState, DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId,
     ExitStatus, FramePresentation, GlobalVariableQuery, HitComparison, HitCondition, InferiorState,
-    InvalidatedWatchpoint, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation,
-    ResumeScope, StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState,
-    ValueChildQuery, VariableQuery, WatchAccess, WatchScope, WatchTarget, Watchpoint,
-    WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
+    InvalidatedWatchpoint, LaunchOptions, ModuleIdentity, PresentedFrame, ProcessId,
+    ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
+    ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery, WatchAccess, WatchScope,
+    WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
+    WatchpointInvalidation, WatchpointSpec,
 };
 pub use source_map::SourcePathMap;
 
@@ -430,7 +431,17 @@ impl DebuggerHandle {
 
     /// Launches the inferior and acknowledges once native execution has started.
     pub async fn launch(&self) -> Result<ExecutionId> {
-        self.request(|reply| Request::Launch { reply }).await
+        self.launch_with(LaunchOptions::default()).await
+    }
+
+    /// Launches the inferior as `options` describe and acknowledges once
+    /// native execution has started, or once it stopped at its entry.
+    pub async fn launch_with(&self, options: LaunchOptions) -> Result<ExecutionId> {
+        self.request(|reply| Request::Launch {
+            options: Box::new(options),
+            reply,
+        })
+        .await
     }
 
     /// Attaches to an existing process and returns its coherent initial stop.
@@ -441,8 +452,14 @@ impl DebuggerHandle {
 
     /// Launches the inferior and waits until that execution stops or exits.
     pub async fn run(&self) -> Result<StopReason> {
+        self.run_with(LaunchOptions::default()).await
+    }
+
+    /// Launches the inferior as `options` describe and waits until that
+    /// execution stops or exits.
+    pub async fn run_with(&self, options: LaunchOptions) -> Result<StopReason> {
         let mut events = self.subscribe();
-        let execution = self.launch().await?;
+        let execution = self.launch_with(options).await?;
 
         self.wait_for_execution(&mut events, execution).await
     }

@@ -1,4 +1,4 @@
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::{ffi::OsString, fmt, path::PathBuf, process::Stdio, sync::Arc};
 
 use tokio::sync::oneshot;
 
@@ -535,6 +535,30 @@ numeric_id!(
     "Identifies an inferior process; local attach accepts an operating-system process ID."
 );
 
+/// How a launched inferior's process is started.
+///
+/// The default runs the program with no arguments, in the debugger's working
+/// directory and environment, sharing the debugger's standard streams.
+#[derive(Debug, Default)]
+pub struct LaunchOptions {
+    /// Arguments passed after the program name.
+    pub arguments: Vec<OsString>,
+    /// Changes to the inherited environment, applied in order: a value sets
+    /// the variable and `None` removes it.
+    pub environment: Vec<(OsString, Option<OsString>)>,
+    /// The inferior's working directory, instead of the debugger's.
+    pub working_directory: Option<PathBuf>,
+    /// The inferior's standard input, instead of the debugger's.
+    pub stdin: Option<Stdio>,
+    /// The inferior's standard output, instead of the debugger's.
+    pub stdout: Option<Stdio>,
+    /// The inferior's standard error, instead of the debugger's.
+    pub stderr: Option<Stdio>,
+    /// End the launch at the new process's first instruction, before the
+    /// dynamic loader runs, with [`StopReason::Entry`].
+    pub stop_at_entry: bool,
+}
+
 /// Selects a post-mortem core dump and how its module files are found and
 /// trusted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,6 +754,9 @@ pub enum ExitStatus {
 pub enum StopReason {
     /// The debugger established an initial coherent stop after attaching.
     Attach,
+    /// A launch requested with [`LaunchOptions::stop_at_entry`] stopped at
+    /// the new process's first instruction.
+    Entry,
     /// Execution reached an installed breakpoint.
     Breakpoint {
         address: VirtualAddress,
@@ -1008,6 +1035,7 @@ pub enum Request {
         reply: Reply<Arc<[Watchpoint]>>,
     },
     Launch {
+        options: Box<LaunchOptions>,
         reply: Reply<ExecutionId>,
     },
     Attach {

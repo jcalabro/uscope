@@ -2519,3 +2519,44 @@ fn disassemble_reads_code_from_core_dumps() {
     );
     assert!(stdout.contains(" <main.cold>: "), "{stdout}");
 }
+
+#[test]
+fn run_starts_the_program_with_the_command_line_arguments_directory_and_environment() {
+    let directory = support::ScratchDir::new("cli-launch-directory");
+    let directory_argument = directory.path().to_str().expect("UTF-8 scratch path");
+    let output = uscope(&[
+        "--batch",
+        "--eval",
+        "run",
+        "--cwd",
+        directory_argument,
+        "--env",
+        "USCOPE_FIXTURE_VALUE=a=b",
+        "build/test-programs/process-environment",
+        "--",
+        "--not-an-option",
+        "two words",
+    ]);
+    let stdout = assert_success(output);
+    let directory = directory
+        .path()
+        .canonicalize()
+        .expect("canonical scratch directory");
+    assert!(
+        stdout.contains(&format!(
+            "argument 1: --not-an-option\nargument 2: two words\nvalue: a=b\nremoved: absent\ndirectory: {}\n",
+            directory.display()
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.contains("exited with status 3"), "{stdout}");
+
+    assert_failure(
+        &uscope(&["--env", "novalue", "build/test-programs/basic"]),
+        "expected NAME=VALUE, found 'novalue'",
+    );
+    assert_failure(
+        &uscope(&["--core", SEGV_CORE, "--cwd", "/", "--batch"]),
+        "cannot be used with",
+    );
+}

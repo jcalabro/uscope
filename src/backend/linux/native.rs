@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 
 use crate::backend::linux::thread_db;
 use crate::backend::{ControllerMessage, FileIdentity};
+use crate::protocol::LaunchOptions;
 use crate::{Error, Result, VirtualAddress};
 
 use super::memory::MemoryAccessError;
@@ -61,7 +62,7 @@ pub(super) trait InspectionOps {
 }
 
 pub(super) trait LinuxTraceOps: InspectionOps {
-    fn spawn(&self, executable: &Path) -> Result<Pid>;
+    fn spawn(&self, executable: &Path, options: LaunchOptions) -> Result<Pid>;
     fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter>;
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>>;
     fn seize(&self, pid: Pid) -> Result<bool>;
@@ -293,9 +294,28 @@ impl LinuxTraceOps for LinuxPtrace {
         module_mappings(pid)
     }
 
-    fn spawn(&self, executable: &Path) -> Result<Pid> {
+    fn spawn(&self, executable: &Path, options: LaunchOptions) -> Result<Pid> {
         self.assert_owner_thread();
         let mut command = ProcessCommand::new(executable);
+        command.args(options.arguments);
+        for (name, value) in options.environment {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
+        if let Some(directory) = options.working_directory {
+            command.current_dir(directory);
+        }
+        if let Some(stdin) = options.stdin {
+            command.stdin(stdin);
+        }
+        if let Some(stdout) = options.stdout {
+            command.stdout(stdout);
+        }
+        if let Some(stderr) = options.stderr {
+            command.stderr(stderr);
+        }
         trace_child(&mut command);
         let child = command.spawn()?;
         Ok(Pid::from_raw(

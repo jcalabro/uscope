@@ -826,6 +826,8 @@ build_fixture gcc "$c_fixtures_dir/spin.c" "$output_dir/spin" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/threads.c" "$output_dir/threads" \
     -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/process-environment.c" "$output_dir/process-environment" \
+    -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/signals.c" "$output_dir/signals" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/fatal-signal.c" "$output_dir/fatal-signal" \

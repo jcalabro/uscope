@@ -9,15 +9,18 @@ mod repl;
 pub mod terminal;
 mod value;
 
+use std::ffi::OsString;
 use std::fmt::Display;
 use std::fs;
 use std::io::{self, IsTerminal as _, Write as _};
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::ValueEnum;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use uscope::{
-    AssemblySyntax, DebuggerHandle, Error, ExceptionDisposition, StopReason, ThreadState,
+    AssemblySyntax, DebuggerHandle, Error, ExceptionDisposition, LaunchOptions, StopReason,
+    ThreadState,
 };
 
 use crate::Args;
@@ -97,10 +100,31 @@ enum OnError {
     Report,
 }
 
+/// How `run` starts the inferior.
+#[derive(Clone, Debug, Default)]
+pub struct LaunchSettings {
+    pub arguments: Vec<OsString>,
+    pub environment: Vec<(OsString, Option<OsString>)>,
+    pub working_directory: Option<PathBuf>,
+}
+
+impl LaunchSettings {
+    /// The options for one launch, sharing the debugger's standard streams.
+    fn options(&self) -> LaunchOptions {
+        LaunchOptions {
+            arguments: self.arguments.clone(),
+            environment: self.environment.clone(),
+            working_directory: self.working_directory.clone(),
+            ..LaunchOptions::default()
+        }
+    }
+}
+
 pub struct Cli {
     debugger: DebuggerHandle,
     renderers: Renderers,
     syntax: AssemblySyntax,
+    launch: LaunchSettings,
 }
 
 impl Cli {
@@ -108,11 +132,13 @@ impl Cli {
         debugger: DebuggerHandle,
         renderers: Renderers,
         syntax: AssemblySyntax,
+        launch: LaunchSettings,
     ) -> Self {
         Self {
             debugger,
             renderers,
             syntax,
+            launch,
         }
     }
 

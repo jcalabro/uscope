@@ -392,7 +392,7 @@ impl Cli {
             Command::Watchpoints => self.list_watchpoints().await?,
             Command::Unwatch => self.delete_watchpoints(arguments[0], spec).await?,
             Command::Run => {
-                let reason = debugger.run().await?;
+                let reason = debugger.run_with(self.launch.options()).await?;
                 self.stop_with_source(&reason).await
             }
             Command::Continue => {
