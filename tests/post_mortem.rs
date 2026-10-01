@@ -10,8 +10,8 @@ use uscope::{
     Backtrace, CoreDumpInfo, CoreDumpOptions, CoreModuleState, Debugger, Error,
     ExceptionDisposition, InferiorState, LoadedModuleSnapshot, MemoryReadCompletion,
     ModuleIdentity, ProcessId, RegisterRole, ResumeScope, ScalarValue, StepKind, StopId,
-    StopReason, ThreadState, TlsUnavailableReason, UnwindTermination, Variable, VariableState,
-    VariableUnavailableReason, VariableValue, VirtualAddress,
+    StopReason, ThreadState, UnwindTermination, Variable, VariableState, VariableUnavailableReason,
+    VariableValue, VariableValueSource, VirtualAddress,
 };
 
 use support::{Scenario, ScratchDir};
@@ -863,6 +863,31 @@ fn note_segment(bytes: &[u8]) -> (usize, usize) {
         .expect("a note segment")
 }
 
+/// The offset of the general registers in `NT_PRSTATUS`.
+const PRSTATUS_REGISTERS: usize = 112;
+
+/// The file offset of the first `NT_PRSTATUS` descriptor, the faulting
+/// thread's.
+fn first_prstatus(bytes: &[u8]) -> usize {
+    let (start, size) = note_segment(bytes);
+    let word = |offset: usize| {
+        usize::try_from(u32::from_le_bytes(
+            bytes[offset..offset + 4].try_into().unwrap(),
+        ))
+        .unwrap()
+    };
+    let mut note = start;
+    while note < start + size {
+        let (name, descriptor, kind) = (word(note), word(note + 4), word(note + 8));
+        let descriptor_start = note + 12 + name.next_multiple_of(4);
+        if kind == 1 && &bytes[note + 12..note + 16] == b"CORE" {
+            return descriptor_start;
+        }
+        note = descriptor_start + descriptor.next_multiple_of(4);
+    }
+    panic!("the core has no NT_PRSTATUS note");
+}
+
 const PHDR_OFFSET: usize = 8;
 /// Rewrites one program header, given the file offset of that header.
 type SegmentEdit = fn(&mut Vec<u8>, usize);
@@ -1505,15 +1530,9 @@ async fn cores_from_other_machines_load_every_module_from_a_sysroot() {
         .await;
     assert_eq!(read.completion, MemoryReadCompletion::Complete);
     assert_eq!(&*read.bytes, b"post-mortem read-only message");
-    // libthread_db reads the version of the other machine's C library from
-    // its sysroot file and refuses it, which must be reported as such.
-    let tls = variable(&scenario, "crash_tls").await;
-    assert!(
-        matches!(&tls.state, VariableState::Unavailable(
-            VariableUnavailableReason::TlsUnavailable(TlsUnavailableReason::LookupFailed(reason))
-        ) if reason.contains("TD_VERSION")),
-        "{tls:?}"
-    );
+    // libthread_db refuses the other machine's C library as another
+    // version, whose own layout descriptors then locate its TLS.
+    assert_eq!(signed(&variable(&scenario, "crash_tls").await), 100);
     scenario.shutdown().await;
 }
 
@@ -1824,4 +1843,93 @@ async fn executables_found_nowhere_name_the_search_and_the_build_id_to_supply() 
         )
     );
     explicit.shutdown().await;
+}
+
+/// Each thread's TLS variables, with their addresses, ordered by value.
+async fn thread_tls(scenario: &Scenario) -> Vec<[(i128, u64); 2]> {
+    let snapshot = scenario
+        .operation("snapshot", scenario.handle().snapshot())
+        .await;
+    let mut threads = Vec::new();
+    for thread in snapshot.threads.iter() {
+        scenario
+            .operation("select", scenario.handle().select_thread(thread.id))
+            .await;
+        let mut located = [(0, 0); 2];
+        for (slot, name) in located.iter_mut().zip(["crash_tls", "crash_library_tls"]) {
+            let variable = variable(scenario, name).await;
+            let VariableState::Available {
+                source: VariableValueSource::Memory(address),
+                ..
+            } = variable.state
+            else {
+                panic!("{name} is not in memory: {variable:?}");
+            };
+            *slot = (signed(&variable), address.get());
+        }
+        threads.push(located);
+    }
+    threads.sort_unstable();
+    threads
+}
+
+fn tls_values(threads: &[[(i128, u64); 2]]) -> Vec<[i128; 2]> {
+    threads
+        .iter()
+        .map(|[(main, _), (library, _)]| [*main, *library])
+        .collect()
+}
+
+#[tokio::test]
+async fn core_tls_is_located_by_libthread_db_and_by_the_c_librarys_own_descriptors() {
+    let expected = [[100, 654], [101, 655], [102, 656], [103, 657]];
+    let scenario = open_core("crash-gcc-o0-segv.core");
+    let thread_library = thread_tls(&scenario).await;
+    uscope::force_internal_tls_lookup(true);
+    let descriptors = thread_tls(&scenario).await;
+    uscope::force_internal_tls_lookup(false);
+    assert_eq!(thread_library, descriptors);
+    assert_eq!(tls_values(&thread_library), expected);
+    scenario.shutdown().await;
+
+    // A thread whose thread pointer is unset has no TLS, which each way
+    // reports in its own words; forcing the descriptors bypasses
+    // libthread_db entirely.
+    let (_directory, path) =
+        edited_core("unset-thread-pointer", "crash-gcc-o0-segv.core", |bytes| {
+            let fs_base = first_prstatus(bytes) + PRSTATUS_REGISTERS + 21 * 8;
+            bytes[fs_base..fs_base + 8].fill(0);
+        });
+    let unset = Scenario::open_core("unset thread pointer", &CoreDumpOptions::new(path));
+    let reason = || async {
+        match variable(&unset, "crash_tls").await.state {
+            VariableState::Unavailable(reason) => reason.to_string(),
+            state => panic!("TLS without a thread pointer was available: {state:?}"),
+        }
+    };
+    let thread_library = reason().await;
+    assert!(thread_library.contains("libthread_db"), "{thread_library}");
+    uscope::force_internal_tls_lookup(true);
+    let described = reason().await;
+    uscope::force_internal_tls_lookup(false);
+    assert!(
+        described.ends_with("the thread has not allocated the module's TLS block")
+            && !described.contains("libthread_db"),
+        "{described}"
+    );
+    unset.shutdown().await;
+
+    // Another machine's C library is refused by libthread_db, so only its
+    // descriptors locate every thread's blocks.
+    let modules = foreign_modules().await;
+    let originals = ScratchDir::new("foreign-tls");
+    for name in ["crash-gcc-o0", "libcrash.so", "libc.so.6"] {
+        fs::copy(named(&modules, name).1, originals.path().join(name)).unwrap();
+    }
+    let foreign_scenario = Scenario::open_core(
+        "foreign TLS",
+        &foreign(|options| options.module_paths = vec![originals.path().to_owned()]),
+    );
+    assert_eq!(tls_values(&thread_tls(&foreign_scenario).await), expected);
+    foreign_scenario.shutdown().await;
 }

@@ -815,3 +815,85 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
     }
 }
+
+/// The address and value of a TLS variable in the selected thread.
+fn tls_location(variable: &uscope::Variable) -> (u64, i128) {
+    match &variable.state {
+        VariableState::Available {
+            value: uscope::VariableValue::Scalar(ScalarValue::Signed(value)),
+            source: uscope::VariableValueSource::Memory(address),
+            ..
+        } => (address.get(), *value),
+        state => panic!("{} was not available in memory: {state:?}", variable.name),
+    }
+}
+
+/// Reads the variable with `libthread_db` and then with glibc's own layout
+/// descriptors, which must agree.
+async fn tls_location_both_ways(scenario: &Scenario, name: &str) -> (u64, i128) {
+    uscope::force_internal_tls_lookup(false);
+    let thread_library = tls_location(
+        &scenario
+            .operation("TLS through libthread_db", scenario.handle().variable(name))
+            .await,
+    );
+    uscope::force_internal_tls_lookup(true);
+    let descriptors = tls_location(
+        &scenario
+            .operation("TLS through descriptors", scenario.handle().variable(name))
+            .await,
+    );
+    uscope::force_internal_tls_lookup(false);
+    assert_eq!(thread_library, descriptors, "{name}");
+    thread_library
+}
+
+#[tokio::test]
+async fn glibc_descriptor_tls_lookup_agrees_with_libthread_db_and_the_program() {
+    for fixture in ["globals-tls-gcc", "globals-tls-clang"] {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_breakpoint("tls_stop").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let snapshot = scenario.snapshot().await;
+        let mut values = Vec::new();
+        for thread in snapshot.threads.iter() {
+            scenario
+                .operation("select thread", scenario.handle().select_thread(thread.id))
+                .await;
+            let (address, value) = tls_location_both_ways(&scenario, "tls_value").await;
+            // Each thread stored its own variable's address.
+            let pointer = scenario
+                .operation("TLS pointer", scenario.handle().variable("tls_pointer"))
+                .await;
+            let uscope::VariableValue::Address(pointer) = available_value(&pointer.state) else {
+                panic!("{fixture}: TLS pointer is not an address: {pointer:?}");
+            };
+            assert_eq!(pointer.address.get(), address, "{fixture}");
+            values.push(value);
+        }
+        values.sort_unstable();
+        assert_eq!(values, [300, 301, 302], "{fixture}");
+        scenario.shutdown().await;
+    }
+
+    // A library loaded at run time holds its TLS block in the DTV, or in
+    // static TLS space the loader set aside.
+    let mut scenario = Scenario::new("dlopen TLS", Scenario::fixture("globals-shared"));
+    scenario.add_breakpoint("after_load").await;
+    scenario.add_breakpoint("after_reload").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert_eq!(tls_location_both_ways(&scenario, "dso_tls").await.1, 213);
+    // Reloading reuses the module's TLS slot under a newer generation.
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert_eq!(tls_location_both_ways(&scenario, "dso_tls").await.1, 213);
+    scenario.shutdown().await;
+}
