@@ -1,0 +1,3 @@
+# A debugger test that hangs would otherwise block the run forever.
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 4 }
