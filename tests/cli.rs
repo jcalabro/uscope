@@ -1776,3 +1776,166 @@ fn watch_command_failures_explain_themselves() {
         );
     }
 }
+
+/// Runs batch commands against a fixture and returns its output.
+fn batch(fixture_name: &str, options: &[&str], commands: &[&str]) -> String {
+    let mut arguments = vec!["--batch"];
+    arguments.extend_from_slice(options);
+    for command in commands {
+        arguments.extend(["--eval", command]);
+    }
+    let executable = format!("build/test-programs/{fixture_name}");
+    arguments.push(&executable);
+    assert_success(uscope(&arguments))
+}
+
+#[test]
+fn disassemble_renders_the_stopped_function_with_named_targets_and_source_lines() {
+    let stdout = batch(
+        "disassembly-gcc-o0",
+        &[],
+        &["break main", "run", "disassemble"],
+    );
+    let listing = stdout
+        .split_once("function main in disassembly-gcc-o0:\n")
+        .unwrap_or_else(|| panic!("no function header in:\n{stdout}"))
+        .1;
+    let lines = listing.lines().collect::<Vec<_>>();
+    let stopped = lines
+        .iter()
+        .position(|line| line.starts_with("=> "))
+        .unwrap_or_else(|| panic!("no stopped instruction in:\n{listing}"));
+    // The stop follows the frame setup, under its source line.
+    assert!(lines[stopped].contains(" <main+0x4>: "), "{listing}");
+    assert!(
+        lines[stopped].ends_with(" <disasm_marked_data>") && lines[stopped].contains("call 0x"),
+        "{listing}"
+    );
+    assert!(
+        lines[stopped - 1].ends_with("tests/fixtures/c/disassembly/main.c:16"),
+        "{listing}"
+    );
+    for expected in [
+        "call 0x",
+        " <disasm_helper>",
+        "# 0x",
+        " <disasm_counter>",
+        " <.plt+0x",
+        "push rbp",
+    ] {
+        assert!(
+            listing.contains(expected),
+            "missing {expected:?} in:\n{listing}"
+        );
+    }
+    assert_no_sgr(&stdout);
+}
+
+#[test]
+fn disassemble_reports_data_inside_code_and_unproven_addresses() {
+    let executable = fixture("build/test-programs/disassembly-clang-o2-nopie");
+    let hidden = symbol_address(&executable, "disasm_hidden_data");
+    let inside = format!("disassemble {:#x} 2", hidden + 4);
+    let stdout = batch(
+        "disassembly-clang-o2-nopie",
+        &["--disassembly-syntax", "att"],
+        &[
+            "break main",
+            "run",
+            "disassemble disasm_marked_data",
+            "disassemble disasm_hidden_data",
+            &inside,
+        ],
+    );
+    for expected in [
+        format!(
+            "this instruction overlaps {:#x}, where ",
+            symbol_address(&executable, "disasm_marked_resume")
+        ),
+        "proves an instruction begins; decoding resumes there".to_owned(),
+        format!(
+            "this instruction extends past the end of the range at {:#x}",
+            hidden + 10
+        ),
+        format!(
+            "{:#x} lies inside the instruction at {:#x} when decoding from {hidden:#x}; it is probably not an instruction start",
+            hidden + 4,
+            hidden + 2
+        ),
+        "mov $1, %eax".to_owned(),
+        "movabs".to_owned(),
+    ] {
+        assert!(
+            stdout.contains(&expected),
+            "missing {expected:?} in:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn disassemble_shows_a_stop_outside_every_function_and_rejects_bad_requests() {
+    // A call through a null pointer stops where no module or function is.
+    let stdout = batch("null-call", &[], &["run", "disassemble"]);
+    assert!(
+        stdout.contains("memory inaccessible at 0x0"),
+        "missing unreadable stop in:\n{stdout}"
+    );
+
+    for (command, expected) in [
+        (
+            "disassemble 0x8",
+            "no function or code symbol contains 0x8; give an instruction count to disassemble from it",
+        ),
+        (
+            "disassemble main 0",
+            "instruction count must be between 1 and 4096",
+        ),
+        (
+            "disassemble main 4097",
+            "instruction count must be between 1 and 4096",
+        ),
+        (
+            "disassemble missing_function",
+            "no symbol named 'missing_function'",
+        ),
+    ] {
+        let output = uscope(&[
+            "--batch",
+            "--eval",
+            "break main",
+            "--eval",
+            "run",
+            "--eval",
+            command,
+            "build/test-programs/disassembly-gcc-o0",
+        ]);
+        assert_failure(&output, expected);
+    }
+}
+
+#[test]
+fn disassemble_reads_code_from_core_dumps() {
+    let stdout = assert_success(uscope(&[
+        "--batch",
+        "--core",
+        "build/test-programs/crash-gcc-o2-nopie-segv.core",
+        "--eval",
+        "disassemble",
+        "--eval",
+        "disassemble main",
+    ]));
+    assert!(
+        stdout.contains("function crash_segv in crash-gcc-o2-nopie:"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line.starts_with("=> 0x")),
+        "{stdout}"
+    );
+    // The optimized main has a cold range of its own.
+    assert!(
+        stdout.contains("range 1 of 2: 0x4010a0..0x4010a5"),
+        "{stdout}"
+    );
+    assert!(stdout.contains(" <main.cold>: "), "{stdout}");
+}

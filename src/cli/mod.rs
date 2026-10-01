@@ -14,8 +14,11 @@ use std::fs;
 use std::io::{self, IsTerminal as _, Write as _};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use clap::ValueEnum;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
-use uscope::{DebuggerHandle, Error, ExceptionDisposition, StopReason, ThreadState};
+use uscope::{
+    AssemblySyntax, DebuggerHandle, Error, ExceptionDisposition, StopReason, ThreadState,
+};
 
 use crate::Args;
 use terminal::{
@@ -58,6 +61,25 @@ impl Renderers {
     }
 }
 
+/// The assembly syntax `disassemble` renders.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum DisassemblySyntax {
+    /// Intel syntax: destination first, `qword ptr [rbp-0x8]`.
+    #[default]
+    Intel,
+    /// AT&T syntax as GNU tools print it: source first, `-0x8(%rbp)`.
+    Att,
+}
+
+impl From<DisassemblySyntax> for AssemblySyntax {
+    fn from(syntax: DisassemblySyntax) -> Self {
+        match syntax {
+            DisassemblySyntax::Intel => Self::Intel,
+            DisassemblySyntax::Att => Self::Att,
+        }
+    }
+}
+
 /// What the input loop does after a command.
 enum Control {
     /// Print the output, if any, and read the next command.
@@ -78,13 +100,19 @@ enum OnError {
 pub struct Cli {
     debugger: DebuggerHandle,
     renderers: Renderers,
+    syntax: AssemblySyntax,
 }
 
 impl Cli {
-    pub const fn new(debugger: DebuggerHandle, renderers: Renderers) -> Self {
+    pub const fn new(
+        debugger: DebuggerHandle,
+        renderers: Renderers,
+        syntax: AssemblySyntax,
+    ) -> Self {
         Self {
             debugger,
             renderers,
+            syntax,
         }
     }
 
