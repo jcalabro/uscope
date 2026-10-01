@@ -162,6 +162,104 @@ impl fmt::Display for ProcessId {
     }
 }
 
+/// Selects a post-mortem core dump and how its module files are trusted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreDumpOptions {
+    /// The ELF core file to open.
+    pub core: PathBuf,
+    /// The executable that produced the dump. By default the path recorded in
+    /// the dump is used.
+    pub executable: Option<PathBuf>,
+    /// Use module files that the dump cannot prove match its recorded images.
+    ///
+    /// Such modules contribute debug metadata only: their file contents never
+    /// substitute for memory the dump did not save.
+    pub allow_module_mismatch: bool,
+}
+
+impl CoreDumpOptions {
+    /// Opens `core` with its recorded executable and strict module identity.
+    pub fn new(core: impl Into<PathBuf>) -> Self {
+        Self {
+            core: core.into(),
+            executable: None,
+            allow_module_mismatch: false,
+        }
+    }
+}
+
+/// How a module file was matched to an image recorded in a core dump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModuleIdentity {
+    /// The dumped GNU build-id note equals the file's.
+    BuildId,
+    /// Every saved byte of the file's read-only segments equals the file.
+    SavedContent {
+        /// The number of saved bytes compared.
+        compared_bytes: u64,
+    },
+    /// The file differs from the dumped image; it was loaded only because
+    /// module mismatches were explicitly allowed.
+    Mismatched {
+        /// Why the file is known to differ.
+        detail: Arc<str>,
+    },
+    /// The dump saved nothing that could confirm the file; it was loaded only
+    /// because module mismatches were explicitly allowed.
+    Unverified,
+}
+
+impl ModuleIdentity {
+    /// Whether the file is proven to be the dumped image.
+    #[must_use]
+    pub const fn is_verified(&self) -> bool {
+        matches!(self, Self::BuildId | Self::SavedContent { .. })
+    }
+}
+
+/// The debugger's use of one image recorded in a core dump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoreModuleState {
+    /// A file was loaded for the image.
+    Loaded {
+        /// The loaded module and the file providing its metadata.
+        module: crate::LoadedModuleRecord,
+        /// The evidence that the file is the recorded image.
+        identity: ModuleIdentity,
+    },
+    /// No file exists at the recorded path; the image's frames and memory
+    /// outside the dump stay unavailable.
+    Missing,
+}
+
+/// One executable or shared-library image recorded in a core dump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreModule {
+    /// The image path recorded by the dump.
+    pub recorded_path: Arc<PathBuf>,
+    /// The image's lowest mapped address at dump time.
+    pub start: VirtualAddress,
+    /// Whether and how a file was loaded for the image.
+    pub state: CoreModuleState,
+}
+
+/// Immutable description of an opened post-mortem core dump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreDumpInfo {
+    /// The core file.
+    pub path: Arc<PathBuf>,
+    /// The process that produced the dump.
+    pub process_id: ProcessId,
+    /// The process name recorded by the dump.
+    pub process_name: Arc<str>,
+    /// The leading command-line arguments recorded by the dump.
+    pub arguments: Arc<str>,
+    /// The signal that terminated the process, when recorded.
+    pub exception: Option<ExceptionInfo>,
+    /// Recorded images, beginning with the main executable.
+    pub modules: Arc<[CoreModule]>,
+}
+
 /// Identifies an externally observable stopped snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StopId(u64);
@@ -298,6 +396,11 @@ pub enum StopReason {
     },
     /// The inferior exited.
     Exited(ExitStatus),
+    /// A post-mortem core dump was opened; execution can never resume.
+    CoreDump {
+        /// The signal that terminated the process, when the dump recorded one.
+        exception: Option<ExceptionInfo>,
+    },
 }
 
 /// The externally observable execution state of one live thread.

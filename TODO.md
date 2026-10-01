@@ -2,11 +2,13 @@
 
 ## Debugger core
 
-- [ ] Add core dump debugging.
 - [ ] Add remote debugging support.
 - [ ] Add watchpoints.
 - [ ] Add conditional and hit-count breakpoints.
 - [ ] Add disassembly support.
+- [ ] Add caller-frame selection for variables and source context, especially for core dumps.
+- [ ] Symbolize frames in modules without DWARF from their ELF symbol tables.
+- [ ] Support core dumps from other machines with a sysroot or library search path.
 - [ ] Expand expression evaluation beyond structural value inspection.
 - [ ] Improve support for advanced DWARF location expressions and composite locations.
 

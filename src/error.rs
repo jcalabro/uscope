@@ -128,6 +128,21 @@ pub enum Error {
     #[error("source line {line} is outside {path}")]
     SourceLineOutOfRange { path: PathBuf, line: u64 },
 
+    #[error("invalid core dump: {0}")]
+    InvalidCoreDump(String),
+    #[error("could not determine the core dump's executable: {0}")]
+    CoreExecutableUnavailable(String),
+    #[error(
+        "{path} does not match the image recorded in the core dump: {detail}; allow module mismatches to use it anyway"
+    )]
+    CoreModuleMismatch { path: PathBuf, detail: String },
+    #[error(
+        "the core dump saved nothing that verifies {path}; allow module mismatches to use it anyway"
+    )]
+    CoreModuleUnverified { path: PathBuf },
+    #[error("a post-mortem core dump cannot execute, be modified, or hold breakpoints")]
+    PostMortemTarget,
+
     #[error("debugger backend thread panicked")]
     BackendThreadPanicked,
     #[error("debugger request was cancelled")]

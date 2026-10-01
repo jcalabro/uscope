@@ -39,6 +39,10 @@ fuzz-value-expression *ARGS="":
 fuzz-dwarf-expression *ARGS="":
     cargo fuzz run dwarf-expression -- "$@"
 
+# Fuzzes core-dump parsing, module verification, and post-mortem memory reads.
+fuzz-core-dump *ARGS="":
+    cargo fuzz run core-dump -- "$@"
+
 # Checks formatting and runs Clippy.
 lint:
     cargo fmt --check

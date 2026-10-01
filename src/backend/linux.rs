@@ -19,8 +19,16 @@ use object::{Object, ObjectSection, ObjectSegment};
 use tokio::sync::{broadcast, mpsc};
 
 use super::{ControllerMessage, ExecutableSource, FileIdentity};
+mod core_dump;
+mod post_mortem;
 mod thread_db;
 
+pub use post_mortem::{PostMortemSession, open_core};
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_core_dump(data: &[u8]) {
+    core_dump::fuzz(data);
+}
 use crate::debug_info::{
     UnwindInfo, VariableContext, VariableInfo, VariableRegister, VariableRuntime,
     VariableRuntimeError,
@@ -109,7 +117,7 @@ impl SessionLease {
         })
     }
 
-    #[cfg(test)]
+    /// A lease for sessions that never trace, such as post-mortem core dumps.
     const fn detached() -> Self {
         Self {
             owns_global_lease: false,
@@ -353,6 +361,7 @@ impl Waiter {
 enum InferiorOrigin {
     Launched,
     Attached,
+    PostMortem,
 }
 
 struct RuntimeModule {
@@ -417,6 +426,10 @@ enum LinuxError {
     MemoryReadTooLarge { size: usize, maximum: usize },
     #[error("target memory is inaccessible at {address}")]
     MemoryInaccessible { address: VirtualAddress },
+    #[error("the core dump does not describe thread {0}")]
+    UnknownCoreThread(i32),
+    #[error("the core dump saved no floating-point registers for thread {0}")]
+    CoreFloatingRegistersUnsaved(i32),
 }
 
 struct Controller<P: InspectionOps> {
@@ -3410,7 +3423,7 @@ const fn visible_stop_priority(reason: &StopReason) -> u8 {
         | StopReason::ThreadExited { .. } => 2,
         StopReason::Exec => 3,
         StopReason::Unclassifiable { .. } => 4,
-        StopReason::Exited(_) => 5,
+        StopReason::Exited(_) | StopReason::CoreDump { .. } => 5,
     }
 }
 
@@ -3600,7 +3613,15 @@ impl<P: InspectionOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let registers = self.ptrace.registers(pid)?;
         let instruction = VirtualAddress::new(registers.rip);
-        let image_address = inferior.loaded_module.image_address(instruction)?;
+        // An instruction below the main image's bias cannot be described by
+        // it, so its presentation is the physical frame.
+        let Ok(image_address) = inferior.loaded_module.image_address(instruction) else {
+            return Ok(FramePresentation {
+                instruction,
+                frame: PresentedFrame::Physical,
+                hidden_inline_frames: 0,
+            });
+        };
         let location = self.module_image.locate(image_address);
 
         let InlineFrameLookup::Unique(chain) = &location.inline_frames else {
@@ -5461,7 +5482,7 @@ struct LinuxVariableRuntime<'a, P> {
     loaded_module: LoadedModule,
     breakpoints: &'a BTreeMap<VirtualAddress, BreakpointSite>,
     native: &'a libc::user_regs_struct,
-    floating: Option<std::result::Result<libc::user_fpregs_struct, Arc<str>>>,
+    floating: Option<std::result::Result<Fxsave, Arc<str>>>,
     cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
     link_map: Option<VirtualAddress>,
 }
@@ -5815,15 +5836,31 @@ fn x86_64_general_register_descriptor(dwarf: u16) -> Option<RegisterDescriptor> 
     })
 }
 
-fn x86_64_xmm_variable_register(
-    registers: &libc::user_fpregs_struct,
-    dwarf: u16,
-) -> VariableRegister {
-    let index = usize::from(dwarf - 17);
-    let mut bytes = Vec::with_capacity(16);
-    for word in &registers.xmm_space[index * 4..index * 4 + 4] {
+/// The 512-byte x86-64 FXSAVE image saved by ptrace and by `NT_FPREGSET`.
+type Fxsave = Arc<[u8; core_dump::FXSAVE_SIZE]>;
+
+const FXSAVE_XMM_OFFSET: usize = 160;
+
+fn native_fxsave(registers: &libc::user_fpregs_struct) -> Fxsave {
+    let mut bytes = Vec::with_capacity(core_dump::FXSAVE_SIZE);
+    for value in [registers.cwd, registers.swd, registers.ftw, registers.fop] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes.extend_from_slice(&registers.rip.to_le_bytes());
+    bytes.extend_from_slice(&registers.rdp.to_le_bytes());
+    bytes.extend_from_slice(&registers.mxcsr.to_le_bytes());
+    bytes.extend_from_slice(&registers.mxcr_mask.to_le_bytes());
+    for word in registers.st_space.iter().chain(&registers.xmm_space) {
         bytes.extend_from_slice(&word.to_le_bytes());
     }
+    bytes.resize(core_dump::FXSAVE_SIZE, 0);
+    Arc::new(bytes.try_into().expect("FXSAVE image has its fixed size"))
+}
+
+fn x86_64_xmm_variable_register(registers: &Fxsave, dwarf: u16) -> VariableRegister {
+    let index = usize::from(dwarf - 17);
+    let start = FXSAVE_XMM_OFFSET + index * 16;
+    let bytes = registers[start..start + 16].to_vec();
     VariableRegister {
         descriptor: RegisterDescriptor {
             id: RegisterId::new(27 + u32::try_from(index).expect("XMM index fits u32")),
@@ -5922,7 +5959,7 @@ trait InspectionOps {
             .map_err(MemoryAccessError::Fatal)
     }
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct>;
-    fn floating_registers(&self, _pid: Pid) -> Result<libc::user_fpregs_struct> {
+    fn floating_registers(&self, _pid: Pid) -> Result<Fxsave> {
         Err(backend_error(LinuxError::UnsupportedFloatingRegisters))
     }
     /// Resolves a module's thread-local block for one thread.
@@ -6034,9 +6071,10 @@ impl InspectionOps for LinuxPtrace {
         ptrace::getregs(pid).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
-    fn floating_registers(&self, pid: Pid) -> Result<libc::user_fpregs_struct> {
+    fn floating_registers(&self, pid: Pid) -> Result<Fxsave> {
         self.assert_owner_thread();
         ptrace::getregset::<ptrace::regset::NT_PRFPREG>(pid)
+            .map(|registers| native_fxsave(&registers))
             .map_err(|error| backend_error(LinuxError::System(error)))
     }
 
@@ -6047,7 +6085,13 @@ impl InspectionOps for LinuxPtrace {
         offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
         self.assert_owner_thread();
-        thread_db::tls_address(thread, thread, link_map, offset)
+        thread_db::tls_address(
+            &thread_db::LiveProcess { pid: thread },
+            thread,
+            thread,
+            link_map,
+            offset,
+        )
     }
 }
 

@@ -36,11 +36,19 @@ pub use model::{
     VariantSelection, VariantSelector, VariantStorageKind, VirtualAddress,
 };
 pub use protocol::{
-    Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
-    ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, InferiorState, PresentedFrame,
+    Breakpoint, BreakpointId, BreakpointSpec, CoreDumpInfo, CoreDumpOptions, CoreModule,
+    CoreModuleState, DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId, ExitStatus,
+    FramePresentation, GlobalVariableQuery, InferiorState, ModuleIdentity, PresentedFrame,
     ProcessId, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId,
     StopReason, ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery,
 };
+
+/// Exercises core-dump parsing and memory reads for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_core_dump(data: &[u8]) {
+    backend::fuzz_core_dump(data);
+}
 
 /// Exercises bounded DWARF-expression parsing for the fuzz harness.
 #[cfg(feature = "fuzzing")]
@@ -74,6 +82,7 @@ pub struct Debugger {
 pub struct DebuggerHandle {
     executable: Arc<PathBuf>,
     module_image: Arc<ModuleImage>,
+    core_dump: Option<Arc<CoreDumpInfo>>,
     requests: mpsc::Sender<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
 }
@@ -112,6 +121,33 @@ impl Debugger {
         Ok(debugger)
     }
 
+    /// Opens a post-mortem core dump as one permanent stopped snapshot.
+    ///
+    /// Every recorded module file must be proven to match the dump unless
+    /// [`CoreDumpOptions::allow_module_mismatch`] is set. Execution control,
+    /// memory writes, and breakpoints fail with [`Error::PostMortemTarget`].
+    pub fn open_core(options: &CoreDumpOptions) -> Result<Self> {
+        let (requests, receiver) = mpsc::channel(REQUEST_CAPACITY);
+        let shutdown_permit = requests
+            .clone()
+            .try_reserve_owned()
+            .expect("new request channel has shutdown capacity");
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let session = backend::open_core(options, requests.clone(), receiver, events.clone())?;
+
+        Ok(Self {
+            handle: DebuggerHandle {
+                executable: Arc::new(session.image.path().to_owned()),
+                module_image: session.image,
+                core_dump: Some(session.info),
+                requests,
+                events,
+            },
+            controller: Some(session.controller),
+            shutdown_permit: Some(shutdown_permit),
+        })
+    }
+
     fn from_executable_source(executable: backend::ExecutableSource) -> Result<Self> {
         let debug_info = debug_info::load_bytes(&executable.display_path, &executable.data)?;
         let module_image = Arc::clone(&debug_info.image);
@@ -135,6 +171,7 @@ impl Debugger {
             handle: DebuggerHandle {
                 executable: Arc::new(module_image.path().to_owned()),
                 module_image,
+                core_dump: None,
                 requests,
                 events,
             },
@@ -195,6 +232,12 @@ impl DebuggerHandle {
     #[must_use]
     pub const fn module_image(&self) -> &Arc<ModuleImage> {
         &self.module_image
+    }
+
+    /// Describes the opened core dump, or `None` for a live session.
+    #[must_use]
+    pub const fn core_dump(&self) -> Option<&Arc<CoreDumpInfo>> {
+        self.core_dump.as_ref()
     }
 
     #[must_use]
@@ -327,6 +370,9 @@ impl DebuggerHandle {
     /// A process that is still launching stops at its initial exec stop
     /// instead of running first.
     pub async fn pause(&self) -> Result<StopReason> {
+        if self.core_dump.is_some() {
+            return Err(Error::PostMortemTarget);
+        }
         let snapshot = self.snapshot().await?;
         let InferiorState::Running { process_id, .. } = snapshot.inferior else {
             return Err(if matches!(snapshot.inferior, InferiorState::NotRunning) {
