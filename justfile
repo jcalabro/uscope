@@ -32,9 +32,11 @@ test *ARGS: build-test-programs
     if (( $# == 0 )); then cargo test --doc; fi
 
 # Runs one fuzz target: value-expression, dwarf-expression, core-dump,
-# elf-symbols, or debug-register-plan. Arguments go to libFuzzer.
+# elf-symbols, disassembly, or debug-register-plan. Arguments go to libFuzzer.
+# iced-x86 builds its formatter tables once and never frees them, which
+# LeakSanitizer would report as a failure when the disassembly target exits.
 fuzz TARGET *ARGS="":
-    cargo fuzz run "$1" -- "${@:2}"
+    if [[ "$1" == disassembly ]]; then set -- "$@" -detect_leaks=0; fi; cargo fuzz run "$1" -- "${@:2}"
 
 # Checks formatting and runs Clippy.
 lint:
