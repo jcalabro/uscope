@@ -1281,3 +1281,110 @@ async fn pause_cancels_an_active_source_execution_plan() {
     );
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }
+
+#[tokio::test]
+async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
+    use std::path::{Path, PathBuf};
+    use support::ScratchDir;
+    use uscope::{Error, SourcePathMap};
+
+    let mut scenario = Scenario::launch("basic-relocated");
+    scenario.add_source_breakpoint("basic.c", 11).await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let recorded = PathBuf::from("/nonexistent/uscope/tests/fixtures/c/basic.c");
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let map = |rules: &[(&Path, &Path)]| {
+        let mut map = SourcePathMap::new();
+        for (from, to) in rules {
+            map.push(from, to).unwrap();
+        }
+        scenario.handle().clone().with_source_paths(map)
+    };
+
+    // Unmapped, the recorded path names nothing on this machine.
+    assert!(matches!(
+        scenario.handle().source_context(0).await,
+        Err(Error::SourceFileMissing { path, tried }) if path == recorded && tried == [recorded.clone()]
+    ));
+
+    // The first rewrite that exists is read and reported; the debug
+    // information keeps naming the recorded file.
+    let copy = ScratchDir::new("source-map");
+    let copied = copy.path().join("tests/fixtures/c/basic.c");
+    fs::create_dir_all(copied.parent().unwrap()).unwrap();
+    let source = fs::read_to_string(repository.join("tests/fixtures/c/basic.c")).unwrap();
+    fs::write(
+        &copied,
+        source.replace(
+            "first = breakpoint_target();",
+            "first = breakpoint_target(); /* copy */",
+        ),
+    )
+    .unwrap();
+    let absent = copy.path().join("absent");
+    let handle = map(&[
+        (
+            Path::new("/nonexistent/uscope/tests/fixtures/c/basic.c/x"),
+            &absent,
+        ),
+        (Path::new("/nonexistent/uscope"), &absent),
+        (
+            Path::new("/nonexistent/uscope/tests"),
+            &copy.path().join("tests"),
+        ),
+        (Path::new("/nonexistent"), repository.parent().unwrap()),
+    ]);
+    let context = scenario
+        .operation("mapped source", handle.source_context(1))
+        .await;
+    assert_eq!(*context.path, copied);
+    assert_eq!(*context.file.path, recorded);
+    assert_eq!(context.location.line.get(), 11);
+    assert_eq!(
+        &*context.lines[0].text,
+        "    uint64_t first = breakpoint_target(); /* copy */"
+    );
+
+    // Rules match whole leading components, and a missing source names
+    // every place it was looked for.
+    let handle = map(&[
+        (Path::new("/nonexist"), repository),
+        (Path::new("/nonexistent/uscope"), &absent),
+    ]);
+    assert!(matches!(
+        handle.source_context(0).await,
+        Err(Error::SourceFileMissing { path, tried })
+            if path == recorded && tried == [absent.join("tests/fixtures/c/basic.c"), recorded.clone()]
+    ));
+
+    // A candidate that exists but cannot be read is reported, not skipped.
+    let unreadable = copy.path().join("unreadable");
+    fs::create_dir_all(unreadable.join("tests/fixtures/c/basic.c")).unwrap();
+    let handle = map(&[
+        (Path::new("/nonexistent/uscope"), &unreadable),
+        (Path::new("/nonexistent/uscope"), repository),
+    ]);
+    assert!(matches!(
+        handle.source_context(0).await,
+        Err(Error::SourceFileRead { path, .. }) if path == unreadable.join("tests/fixtures/c/basic.c")
+    ));
+
+    // Each handle keeps its own map.
+    let mapped = map(&[(Path::new("/nonexistent/uscope"), repository)]);
+    assert_eq!(
+        *scenario
+            .operation("repository source", mapped.source_context(0))
+            .await
+            .path,
+        repository.join("tests/fixtures/c/basic.c")
+    );
+    assert!(scenario.handle().source_context(0).await.is_err());
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(uscope::ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}

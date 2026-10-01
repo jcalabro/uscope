@@ -1838,8 +1838,11 @@ pub struct SourceLine {
 /// Source lines surrounding an execution location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceContext {
-    /// The source file that was read.
+    /// The source file the debug information names.
     pub file: SourceFile,
+    /// The file that was read: the recorded path, or where a source path
+    /// map found it.
+    pub path: Arc<PathBuf>,
     /// The execution location within the file.
     pub location: SourceLocation,
     /// Contiguous source lines ordered by line number.

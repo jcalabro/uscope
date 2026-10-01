@@ -7,9 +7,10 @@ mod expression;
 mod inspection;
 pub(crate) mod model;
 mod protocol;
+mod source_map;
 mod unwind;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -68,6 +69,7 @@ pub use protocol::{
     WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
     WatchpointInvalidation, WatchpointSpec,
 };
+pub use source_map::SourcePathMap;
 
 /// Exercises core-dump parsing and memory reads for the fuzz harness.
 #[cfg(feature = "fuzzing")]
@@ -129,6 +131,7 @@ pub struct Debugger {
 pub struct DebuggerHandle {
     module_image: Arc<ModuleImage>,
     core_dump: Option<Arc<CoreDumpInfo>>,
+    source_paths: Arc<SourcePathMap>,
     requests: mpsc::Sender<ControllerMessage>,
     events: broadcast::Sender<DebuggerEvent>,
 }
@@ -215,6 +218,7 @@ impl Debugger {
             handle: DebuggerHandle {
                 module_image,
                 core_dump,
+                source_paths: Arc::default(),
                 requests,
                 events,
             },
@@ -266,6 +270,14 @@ impl Drop for Debugger {
 }
 
 impl DebuggerHandle {
+    /// Returns this handle reading source files through `source_paths`.
+    /// Other handles of the same debugger keep their own maps.
+    #[must_use]
+    pub fn with_source_paths(mut self, source_paths: SourcePathMap) -> Self {
+        self.source_paths = Arc::new(source_paths);
+        self
+    }
+
     /// Returns the canonical path of the executable being debugged.
     #[must_use]
     pub fn executable(&self) -> &Path {
@@ -596,7 +608,8 @@ impl DebuggerHandle {
         self.stopped_location().await
     }
 
-    /// Lazily reads source lines surrounding the stopped instruction.
+    /// Lazily reads source lines surrounding the stopped instruction, from
+    /// the first place this handle's [`SourcePathMap`] finds the file.
     pub async fn source_context(&self, radius: u32) -> Result<SourceContext> {
         let execution = self.current_location().await?;
         let location = execution
@@ -613,12 +626,7 @@ impl DebuggerHandle {
             .cloned()
             .ok_or(Error::SourceLocationUnavailable)?;
 
-        let contents = tokio::fs::read_to_string(file.path.as_ref())
-            .await
-            .map_err(|error| Error::SourceFileRead {
-                path: file.path.as_ref().clone(),
-                error,
-            })?;
+        let (path, contents) = self.read_source(&file.path).await?;
 
         let all_lines: Vec<_> = contents.lines().collect();
         let line = location.line.get();
@@ -627,7 +635,7 @@ impl DebuggerHandle {
             .and_then(|line| line.checked_sub(1))
             .filter(|line| *line < all_lines.len())
             .ok_or_else(|| Error::SourceLineOutOfRange {
-                path: file.path.as_ref().clone(),
+                path: path.clone(),
                 line,
             })?;
 
@@ -653,8 +661,31 @@ impl DebuggerHandle {
 
         Ok(SourceContext {
             file,
+            path: Arc::new(path),
             location,
             lines,
+        })
+    }
+
+    /// Reads the first candidate for a recorded source path that exists. A
+    /// file that exists but cannot be read is an error rather than skipped.
+    async fn read_source(&self, recorded: &Path) -> Result<(PathBuf, String)> {
+        let candidates = self.source_paths.candidates(recorded);
+        for candidate in &candidates {
+            match tokio::fs::read_to_string(candidate).await {
+                Ok(contents) => return Ok((candidate.clone(), contents)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(Error::SourceFileRead {
+                        path: candidate.clone(),
+                        error,
+                    });
+                }
+            }
+        }
+        Err(Error::SourceFileMissing {
+            path: recorded.to_owned(),
+            tried: candidates,
         })
     }
 

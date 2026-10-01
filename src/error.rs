@@ -132,6 +132,10 @@ pub enum Error {
         path: PathBuf,
         error: std::io::Error,
     },
+    #[error("source file {path} does not exist{}", missing_source_detail(.tried))]
+    SourceFileMissing { path: PathBuf, tried: Vec<PathBuf> },
+    #[error("a source path rule needs a nonempty prefix to replace")]
+    EmptySourcePathPrefix,
     #[error("source line {line} is outside {path}")]
     SourceLineOutOfRange { path: PathBuf, line: u64 },
 
@@ -223,4 +227,18 @@ impl Error {
     pub(crate) fn backend(error: impl StdError + Send + Sync + 'static) -> Self {
         Self::Backend(Box::new(error))
     }
+}
+
+/// Names the mapped locations tried for a missing source file, which follow
+/// the recorded path itself.
+fn missing_source_detail(tried: &[PathBuf]) -> String {
+    let mapped = &tried[..tried.len().saturating_sub(1)];
+    if mapped.is_empty() {
+        return String::new();
+    }
+    let paths = mapped
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    format!(", nor do its mapped paths {}", paths.join(", "))
 }
