@@ -3,7 +3,8 @@
 ## Debugger core
 
 - [ ] Add remote debugging support.
-- [ ] Add watchpoints.
+- [x] Add watchpoints.
+- [ ] Add value-change-only watchpoints by evaluating hits at an internal stop and resuming transparently, shared with conditional breakpoints.
 - [ ] Add conditional and hit-count breakpoints.
 - [ ] Add disassembly support.
 - [ ] Add caller-frame selection for variables and source context, especially for core dumps.

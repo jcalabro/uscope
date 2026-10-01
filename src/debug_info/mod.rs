@@ -37,6 +37,36 @@ pub struct VariableRegister {
     pub bytes: Arc<[u8]>,
 }
 
+/// Where a data object's storage lives, which bounds how long its address
+/// identifies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageClass {
+    /// The value is not held in addressable memory (a constant, a register,
+    /// a computed value, or no location at all).
+    NotMemory,
+    /// Static storage at a module-relative address.
+    Static,
+    /// One thread's instance of thread-local storage.
+    ThreadLocal,
+    /// Storage addressed relative to a function activation.
+    Frame {
+        /// One location expression applies throughout the object's scope, so
+        /// its address cannot move while the activation lives.
+        stable: bool,
+        /// The language runtime may move the stack holding the object.
+        moving_stack: bool,
+    },
+    /// The address is computed from memory read during evaluation.
+    Indirect,
+}
+
+/// The storage of one data object and the instructions where it is in scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectStorage {
+    pub class: StorageClass,
+    pub ranges: Arc<[crate::AddressRange<ImageAddress>]>,
+}
+
 pub struct DebugInfo {
     pub image: Arc<ModuleImage>,
     pub unwind: Arc<dyn UnwindInfo>,
@@ -105,6 +135,19 @@ pub trait VariableInfo: Send + Sync {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<InspectedValue>;
+
+    /// Classifies the storage of the local or parameter that `root` names in
+    /// the selected logical frame, using the same visibility rules as
+    /// [`Self::inspect_path`].
+    fn local_storage(
+        &self,
+        address: ImageAddress,
+        selected: Option<CodeInstanceId>,
+        root: &str,
+    ) -> Result<ObjectStorage>;
+
+    /// Classifies the storage of one cataloged global.
+    fn global_storage(&self, id: GlobalVariableId) -> Result<ObjectStorage>;
 
     /// Evaluates one cataloged global at the selected thread's current stop.
     ///

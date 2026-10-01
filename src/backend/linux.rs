@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::{ControllerMessage, ExecutableSource, FileIdentity};
 mod core_dump;
+mod debug_registers;
 mod post_mortem;
 mod thread_db;
 
@@ -29,37 +30,57 @@ pub use post_mortem::{PostMortemSession, open_core};
 pub fn fuzz_core_dump(data: &[u8]) {
     core_dump::fuzz(data);
 }
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_debug_register_plan(data: &[u8]) {
+    debug_registers::fuzz(data);
+}
+
+/// x86-64 debug registers report writes or any access, but never reads alone.
+pub fn watchpoint_capabilities() -> WatchpointCapabilities {
+    WatchpointCapabilities {
+        slots: u32::try_from(debug_registers::SLOT_COUNT).expect("slot count fits u32"),
+        max_slot_bytes: debug_registers::MAX_SLOT_BYTES,
+        access: Arc::from([WatchAccess::Write, WatchAccess::ReadWrite]),
+    }
+}
 use crate::debug_info::{
-    UnwindInfo, VariableContext, VariableInfo, VariableRegister, VariableRuntime,
+    StorageClass, UnwindInfo, VariableContext, VariableInfo, VariableRegister, VariableRuntime,
     VariableRuntimeError,
 };
 use crate::inspection::{InspectionBudget, MAX_INSPECTION_LIMITS};
 use crate::model::FrameMetadata;
 use crate::protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExceptionDisposition, ExceptionInfo,
-    ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, InferiorState, PresentedFrame,
-    ProcessId, Reply, Request, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind,
-    StopId, StopReason, ThreadSnapshot, ThreadState as ObservableThreadState, VariableQuery,
+    ExecutionId, ExitStatus, FramePresentation, FrameScopeEvidence, GlobalVariableQuery,
+    InferiorState, InvalidatedWatchpoint, PresentedFrame, ProcessId, Reply, Request,
+    ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
+    ThreadSnapshot, ThreadState as ObservableThreadState, VariableQuery, WatchAccess, WatchScope,
+    WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
+    WatchpointInvalidation, WatchpointSpec,
 };
 use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, MemoryReader, RegisterFile,
     collect_backtrace,
 };
 use crate::{
-    Backtrace, BreakpointLocation, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceKind,
-    Error, ExecutionLocation, FrameKind, GlobalVariablePage, GlobalVariableReference, ImageAddress,
-    ImageLocation, InlineFrameLookup, InspectedValue, LoadedGlobalVariableInfo, LoadedModule,
-    LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
-    MemoryReadUnavailableReason, ModuleImage, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame, ThreadId as DebugThreadId,
-    TlsUnavailableReason, UnwindTermination, ValueExpression, ValueIndexRange, ValuePathStep,
-    VariableSnapshot, VariableUnavailableReason, VirtualAddress,
+    AddressRange, Backtrace, BreakpointLocation, CallFrameUnavailableReason, CodeInstanceId,
+    CodeInstanceKind, Error, ExecutionLocation, FrameKind, GlobalVariablePage,
+    GlobalVariableReference, ImageAddress, ImageLocation, InlineFrameLookup, InspectedValue,
+    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead,
+    MemoryReadCompletion, MemoryReadUnavailableReason, ModuleImage, RegisterDescriptor, RegisterId,
+    RegisterRole, RegisterSnapshot, RegisterValue, Result, SourceLocation, StackFrame,
+    ThreadId as DebugThreadId, TlsUnavailableReason, UnwindTermination, ValueExpression,
+    ValueIndexRange, ValuePathStep, VariableSnapshot, VariableUnavailableReason,
+    VariableValueSource, VirtualAddress,
 };
+use debug_registers::{DebugRegisterPlan, SlotAccess};
 
 const CONTROLLER_THREAD_NAME: &str = "uscope-controller";
 const WAITER_THREAD_NAME: &str = "uscope-waitpid";
 const BREAKPOINT_OPCODE: u8 = 0xcc;
 const TRAP_UNKNOWN: i32 = 5;
+const TRAP_HARDWARE_BREAKPOINT: i32 = 4;
 const MAX_LOGICAL_MEMORY_READ: usize = 1024 * 1024;
 const MAX_PUBLIC_MEMORY_READ: u64 = 64 * 1024;
 const MAX_VALUE_EXPRESSION_STEPS: usize = 64;
@@ -176,6 +197,11 @@ struct TraceThread {
     stopped_at_breakpoint: Option<VirtualAddress>,
     awaiting_breakpoint: Option<VirtualAddress>,
     debugger_stop_pending: bool,
+    /// The watch-plan generation programmed into this thread's debug
+    /// registers. `None` means the debugger never programmed them.
+    armed: Option<u64>,
+    /// Watchpoints whose slots this thread hit since its last public stop.
+    watch_hits: BTreeSet<WatchpointId>,
 }
 
 impl TraceThread {
@@ -188,8 +214,26 @@ impl TraceThread {
             stopped_at_breakpoint: None,
             awaiting_breakpoint: None,
             debugger_stop_pending: false,
+            armed: None,
+            watch_hits: BTreeSet::new(),
         }
     }
+}
+
+/// The process-wide watchpoints and the debug-register plan every thread
+/// carries.
+#[derive(Default)]
+struct WatchState {
+    plan: DebugRegisterPlan,
+    generation: u64,
+    watchpoints: BTreeMap<WatchpointId, WatchRecord>,
+}
+
+struct WatchRecord {
+    watchpoint: Watchpoint,
+    frame: Option<FrameScopeEvidence>,
+    /// The watched bytes when the debugger last observed them.
+    observed: Option<Arc<[u8]>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,7 +261,11 @@ enum ClassifiedStop {
     SignalDelivery(PendingSignal),
     GroupStop(NixSignal),
     Breakpoint(VirtualAddress),
-    Trace,
+    Watch(BTreeSet<WatchpointId>),
+    Trace {
+        /// Watchpoints hit by the stepped instruction.
+        watch: BTreeSet<WatchpointId>,
+    },
     DebuggerRequested,
     Unclassifiable(RawStopRecord),
 }
@@ -285,6 +333,23 @@ struct StopBarrier {
     reason: StopReason,
 }
 
+/// The data object an expression's longest matching name prefix selected.
+struct ExpressionRoot {
+    /// How many leading named steps form the root's name.
+    components: usize,
+    kind: ExpressionRootKind,
+}
+
+enum ExpressionRootKind {
+    /// A local or parameter of the selected logical frame in the main image.
+    Local {
+        name: String,
+        address: ImageAddress,
+        selected: Option<CodeInstanceId>,
+    },
+    Global(GlobalVariableReference),
+}
+
 struct PublicStop {
     id: StopId,
     triggering_thread: Pid,
@@ -338,6 +403,7 @@ struct Inferior {
     next_execution: u64,
     next_barrier: u64,
     exec_unsupported: bool,
+    watch: WatchState,
 }
 
 struct Waiter {
@@ -412,6 +478,10 @@ enum LinuxError {
     BreakpointOwnerMissing(VirtualAddress),
     #[error("logical breakpoint identifiers were exhausted")]
     BreakpointIdExhausted,
+    #[error("watchpoint identifiers were exhausted")]
+    WatchpointIdExhausted,
+    #[error("watchpoint arming failed ({cause}) and rollback also failed ({recovery})")]
+    WatchpointArmRecovery { cause: String, recovery: String },
     #[error("loaded module identifiers were exhausted")]
     ModuleIdExhausted,
     #[error("module image identifiers were exhausted")]
@@ -451,6 +521,7 @@ struct Controller<P: InspectionOps> {
     inferior: Option<Inferior>,
     breakpoints: Vec<Breakpoint>,
     next_breakpoint_id: u64,
+    next_watchpoint_id: u64,
     launch_reply: Option<Reply<ExecutionId>>,
     attach_reply: Option<Reply<StopId>>,
     shutdown_reply: Option<Reply<()>>,
@@ -530,6 +601,7 @@ impl<P: InspectionOps> Controller<P> {
             inferior: None,
             breakpoints: Vec::new(),
             next_breakpoint_id: 1,
+            next_watchpoint_id: 1,
             launch_reply: None,
             attach_reply: None,
             shutdown_reply: None,
@@ -572,6 +644,19 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Request::RemoveAllBreakpoints { reply } => {
                 let _ = reply.send(self.remove_all_breakpoints());
+            }
+            Request::AddWatchpoint {
+                spec,
+                access,
+                reply,
+            } => {
+                let _ = reply.send(self.add_watchpoint(spec, access));
+            }
+            Request::RemoveWatchpoint { id, reply } => {
+                let _ = reply.send(self.remove_watchpoint(id));
+            }
+            Request::RemoveAllWatchpoints { reply } => {
+                let _ = reply.send(self.remove_all_watchpoints());
             }
             Request::Launch { reply } => self.launch(reply),
             Request::Attach { process_id, reply } => self.attach(process_id, reply),
@@ -744,9 +829,24 @@ impl<P: InspectionOps> Controller<P> {
                 let result = self.select_thread(stop_id, debug_pid(thread_id));
                 let _ = reply.send(result);
             }
+            Request::ResolveWatchTarget {
+                expression,
+                stop_id,
+                thread_id,
+                reply,
+            } => {
+                let _ = reply.send(self.resolve_watch_target(
+                    stop_id,
+                    debug_pid(thread_id),
+                    &expression,
+                ));
+            }
             Request::AddBreakpoint { .. }
             | Request::RemoveBreakpoint { .. }
             | Request::RemoveAllBreakpoints { .. }
+            | Request::AddWatchpoint { .. }
+            | Request::RemoveWatchpoint { .. }
+            | Request::RemoveAllWatchpoints { .. }
             | Request::Launch { .. }
             | Request::Attach { .. }
             | Request::Continue { .. }
@@ -789,7 +889,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .remove(&pid);
                 return Ok(());
             }
-            if matches!(status, WaitStatus::Stopped(..)) {
+            // A new thread's first stop can arrive before its parent's clone
+            // event: SIGSTOP for a launched process, PTRACE_EVENT_STOP for a
+            // seized one.
+            if matches!(
+                status,
+                WaitStatus::Stopped(..) | WaitStatus::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP)
+            ) {
                 self.inferior
                     .as_mut()
                     .expect("inferior exists")
@@ -820,6 +926,21 @@ impl<P: LinuxTraceOps> Controller<P> {
                         }) =>
             {
                 self.handle_initial_attach_stop(pid)
+            }
+            // Threads auto-attached to a seized process start with
+            // PTRACE_EVENT_STOP instead of SIGSTOP.
+            WaitStatus::PtraceEvent(pid, _, event)
+                if event == libc::PTRACE_EVENT_STOP
+                    && self
+                        .inferior
+                        .as_ref()
+                        .and_then(|inferior| inferior.threads.get(&pid))
+                        .is_some_and(|thread| {
+                            matches!(thread.state, NativeThreadState::Starting)
+                                && matches!(thread.expected, ExpectedStop::None)
+                        }) =>
+            {
+                self.handle_classified_stop(pid, ClassifiedStop::ThreadStart)
             }
             WaitStatus::PtraceEvent(pid, _, event)
                 if event == libc::PTRACE_EVENT_STOP
@@ -1107,6 +1228,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     next_execution: 1,
                     next_barrier: 0,
                     exec_unsupported: false,
+                    watch: WatchState::default(),
                 });
                 self.launch_reply = Some(reply);
                 self.bump_revision();
@@ -1221,6 +1343,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             next_execution: 0,
             next_barrier: 0,
             exec_unsupported: false,
+            watch: WatchState::default(),
         });
         self.attach_reply = Some(reply);
 
@@ -1315,11 +1438,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         let execution_id = inferior.active.as_ref().expect("launch is active").id;
         let process_id = process_id(inferior.tgid);
         let pause_requested = inferior.barrier.is_some();
+        let generation = inferior.watch.generation;
         let thread = inferior
             .threads
             .get_mut(&pid)
             .expect("initial thread exists");
         thread.expected = ExpectedStop::None;
+        // A freshly executed image starts with empty debug registers.
+        thread.armed = Some(generation);
         if pause_requested {
             // A pause requested during launch completes at this stop instead
             // of letting the new image run first.
@@ -1505,6 +1631,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         if inferior.exec_unsupported {
             return Err(backend_error(LinuxError::UnsupportedExec));
         }
+        scoped_threads(inferior, scope)?;
+        self.sync_debug_registers()?;
+        self.refresh_watch_baselines();
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
 
         let resume_threads = scoped_threads(inferior, scope)?;
         inferior.next_execution = inferior.next_execution.wrapping_add(1);
@@ -1865,9 +1995,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         }
         let signal = thread.pending_signal.map(|pending| pending.signal);
-        self.ptrace.continue_execution(pid, signal)?;
+        match self.ptrace.continue_execution(pid, signal) {
+            Ok(()) => thread.state = NativeThreadState::Running,
+            // Only SIGKILL takes a thread out of its ptrace-stop, typically
+            // because a sibling resumed just before it called `exit_group`.
+            // Its exit status is still delivered and retires it.
+            Err(error) if is_vanished_tracee(&error) => thread.state = NativeThreadState::Exiting,
+            Err(error) => return Err(error),
+        }
         thread.pending_signal = None;
-        thread.state = NativeThreadState::Running;
         thread.expected = ExpectedStop::None;
         thread.reason = None;
         Ok(())
@@ -1903,9 +2039,19 @@ impl<P: LinuxTraceOps> Controller<P> {
                 expected,
                 ExpectedStop::BreakpointRepair { .. } | ExpectedStop::UserStep { .. }
             );
-        let breakpoint = (signal == NixSignal::SIGTRAP && !expected_trace)
-            .then(|| self.normalize_breakpoint_pc(pid))
-            .flatten();
+        let code = siginfo.as_ref().ok().map(|metadata| metadata.code);
+        let watch = if signal == NixSignal::SIGTRAP {
+            self.watch_status(pid, code)
+        } else {
+            WatchStatus::Absent
+        };
+        // A watchpoint trap reports the instruction after the access; it must
+        // never be mistaken for an int3 and have its PC rewound.
+        let breakpoint = (signal == NixSignal::SIGTRAP
+            && !expected_trace
+            && code != Some(TRAP_HARDWARE_BREAKPOINT))
+        .then(|| self.normalize_breakpoint_pc(pid))
+        .flatten();
 
         classify_stop_evidence(
             signal,
@@ -1915,7 +2061,47 @@ impl<P: LinuxTraceOps> Controller<P> {
             starting,
             debugger_requested,
             breakpoint,
+            watch,
         )
+    }
+
+    /// Reads and consumes DR6 for stops raised by a debug exception.
+    ///
+    /// The kernel resets its virtual DR6 only on the next debug exception, so
+    /// at an int3, signal, or syscall-step stop it still describes an earlier
+    /// hit. Only hardware-breakpoint traps and single steps are consulted, and
+    /// the status is cleared once read.
+    fn watch_status(&self, pid: Pid, code: Option<i32>) -> WatchStatus {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return WatchStatus::Absent;
+        };
+        let consult = code == Some(TRAP_HARDWARE_BREAKPOINT)
+            || (code == Some(libc::TRAP_TRACE) && !inferior.watch.plan.is_empty());
+        if !consult {
+            return WatchStatus::Absent;
+        }
+        let status = match self
+            .ptrace
+            .read_debug_register(pid, debug_registers::STATUS_REGISTER)
+        {
+            Ok(status) => status,
+            Err(error) => return WatchStatus::Unknown(format!("reading DR6 failed: {error}")),
+        };
+        let _ = self.ptrace.write_debug_register(
+            pid,
+            debug_registers::STATUS_REGISTER,
+            debug_registers::STATUS_IDLE,
+        );
+        if !debug_registers::status_has_hits(status) {
+            return WatchStatus::Absent;
+        }
+        match inferior.watch.plan.owners_for_status(status) {
+            Ok(owners) => WatchStatus::Hits(owners),
+            Err(unknown) => WatchStatus::Unknown(format!(
+                "DR6 {:#x} reports a hit in a slot no watchpoint owns",
+                unknown.status
+            )),
+        }
     }
 
     fn normalize_breakpoint_pc(&self, pid: Pid) -> Option<VirtualAddress> {
@@ -1962,7 +2148,16 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
             ClassifiedStop::Breakpoint(address) => self.handle_breakpoint_stop(pid, address),
-            ClassifiedStop::Trace => self.handle_trace_stop(pid),
+            ClassifiedStop::Watch(owners) => {
+                let expected = self
+                    .inferior
+                    .as_ref()
+                    .and_then(|inferior| inferior.threads.get(&pid))
+                    .map(|thread| thread.expected.clone())
+                    .ok_or(Error::NotRunning)?;
+                self.finish_watched_instruction(pid, &expected, owners)
+            }
+            ClassifiedStop::Trace { watch } => self.handle_trace_stop(pid, watch),
             ClassifiedStop::SignalDelivery(pending) => self.handle_signal_stop(pid, pending),
             ClassifiedStop::GroupStop(signal) => {
                 self.begin_visible_stop(pid, StopReason::Exception(exception_info(signal)))
@@ -2060,13 +2255,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
-    fn handle_trace_stop(&mut self, pid: Pid) -> Result<()> {
+    fn handle_trace_stop(&mut self, pid: Pid, watch: BTreeSet<WatchpointId>) -> Result<()> {
         let expected = self
             .inferior
             .as_mut()
             .and_then(|inferior| inferior.threads.get_mut(&pid))
             .map(|thread| std::mem::replace(&mut thread.expected, ExpectedStop::None))
             .ok_or(Error::NotRunning)?;
+        if !watch.is_empty() {
+            return self.finish_watched_instruction(pid, &expected, watch);
+        }
 
         if self.pause_barrier_active() {
             return self.settle_trace_during_pause(pid, expected);
@@ -2082,6 +2280,47 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             ),
         }
+    }
+
+    /// Publishes a watchpoint stop for an instruction that accessed watched
+    /// memory. When the instruction was a breakpoint repair step it has
+    /// already executed, so its repair is complete; the site is reinstalled
+    /// when the stop is published. A thread awaiting its breakpoint after
+    /// signal delivery keeps that expectation for the next resume.
+    fn finish_watched_instruction(
+        &mut self,
+        pid: Pid,
+        expected: &ExpectedStop,
+        owners: BTreeSet<WatchpointId>,
+    ) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let thread = inferior.threads.get_mut(&pid).ok_or(Error::NotRunning)?;
+        if let ExpectedStop::BreakpointRepair { address } = *expected {
+            thread.stopped_at_breakpoint = None;
+            let group = inferior.repairs.front_mut().ok_or_else(|| {
+                backend_error(LinuxError::UnexpectedWait(
+                    "watched breakpoint repair without a repair group".to_owned(),
+                ))
+            })?;
+            if group.address != address || group.current != Some(pid) {
+                return Err(backend_error(LinuxError::UnexpectedWait(format!(
+                    "watched repair for {pid} at {address:?} did not match the active repair"
+                ))));
+            }
+            group.current = None;
+        }
+        inferior
+            .threads
+            .get_mut(&pid)
+            .expect("watched thread exists")
+            .watch_hits
+            .extend(owners);
+        self.begin_visible_stop(
+            pid,
+            StopReason::Watchpoint {
+                hits: Arc::from([]),
+            },
+        )
     }
 
     fn pause_barrier_active(&self) -> bool {
@@ -2194,6 +2433,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .is_some_and(|inferior| inferior.origin == InferiorOrigin::Launched);
         self.ptrace.set_options(pid, exit_kill)?;
+        let arm_failure = self.arm_new_thread(pid);
         let (process_id, barrier_active, should_resume) = {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             let thread = inferior.threads.get_mut(&pid).expect("new thread exists");
@@ -2215,6 +2455,17 @@ impl<P: LinuxTraceOps> Controller<P> {
             process_id,
             thread_id: debug_thread_id(pid),
         });
+        if let Some(error) = arm_failure {
+            // The new thread stays stopped: running it unarmed would silently
+            // miss accesses the user asked to watch.
+            return self.begin_visible_stop(
+                pid,
+                StopReason::WatchpointArmFailed {
+                    thread_id: debug_thread_id(pid),
+                    description: error.to_string().into(),
+                },
+            );
+        }
         if barrier_active {
             self.finish_barrier_if_ready()
         } else if should_resume {
@@ -3183,6 +3434,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !ready {
             return Ok(());
         }
+        if self.attach_reply.is_none() && self.drain_queued_traps()? {
+            return Ok(());
+        }
 
         if self.attach_reply.is_some() {
             self.initialize_attached_inferior()?;
@@ -3208,6 +3462,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !exec_replaced {
             self.refresh_modules()?;
         }
+        self.evaluate_watchpoints()?;
         let (triggering_thread, reason) = self
             .inferior
             .as_ref()
@@ -3269,7 +3524,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for breakpoint in &self.breakpoints {
             install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
         }
-        Ok(())
+        self.clear_attached_debug_registers()
     }
 
     fn handle_ptrace_event(&mut self, pid: Pid, event: i32) -> Result<()> {
@@ -3380,6 +3635,15 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.breakpoints.clear();
         inferior.repairs.clear();
         inferior.exec_unsupported = true;
+        // exec(2) flushes every debug register; the new image's addresses
+        // have no relation to the old watchpoints.
+        self.discard_watchpoints();
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let generation = inferior.watch.generation;
+        if let Some(thread) = inferior.threads.get_mut(&pid) {
+            thread.armed = Some(generation);
+            thread.watch_hits.clear();
+        }
         self.begin_visible_stop(pid, StopReason::Exec)
     }
 
@@ -3408,6 +3672,892 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 }
 
+impl<P: LinuxTraceOps> Controller<P> {
+    fn add_watchpoint(&mut self, spec: WatchpointSpec, access: WatchAccess) -> Result<Watchpoint> {
+        let slot_access = match access {
+            WatchAccess::Write => SlotAccess::Write,
+            WatchAccess::ReadWrite => SlotAccess::ReadWrite,
+            WatchAccess::Read => return Err(Error::UnsupportedWatchAccess(access)),
+        };
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, inferior.public_stop.as_ref().map(|stop| stop.id))?;
+        if inferior.exec_unsupported {
+            return Err(backend_error(LinuxError::UnsupportedExec));
+        }
+        let (expression, address, byte_size, type_info, scope, frame) = match spec {
+            WatchpointSpec::Target(target) => {
+                let target = *target;
+                validate_public_stop(inferior, Some(target.stop_id))?;
+                (
+                    Some(target.expression),
+                    target.address,
+                    target.byte_size,
+                    target.type_info,
+                    target.scope,
+                    target.frame,
+                )
+            }
+            WatchpointSpec::Location { address, byte_size } => {
+                (None, address, byte_size, None, WatchScope::Location, None)
+            }
+        };
+        let chunks = debug_registers::split_range(address.get(), byte_size).map_err(|error| {
+            watch_range_error(address, byte_size, error, inferior.watch.plan.free_slots())
+        })?;
+        let id = WatchpointId::new(self.next_watchpoint_id);
+        let next_id = self
+            .next_watchpoint_id
+            .checked_add(1)
+            .ok_or_else(|| backend_error(LinuxError::WatchpointIdExhausted))?;
+        let plan = inferior
+            .watch
+            .plan
+            .with_watchpoint(id, &chunks, slot_access)
+            .map_err(|error| Error::WatchpointCapacity {
+                required: u64::try_from(error.required).expect("slot count fits u64"),
+                available: u64::try_from(error.available).expect("slot count fits u64"),
+            })?;
+        self.arm_all_threads(plan)?;
+
+        let watchpoint = Watchpoint {
+            id,
+            access,
+            expression,
+            address,
+            byte_size,
+            type_info,
+            scope,
+            coverage: chunks
+                .iter()
+                .map(|chunk| AddressRange {
+                    start: VirtualAddress::new(chunk.address),
+                    end: VirtualAddress::new(chunk.end()),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        let observed = self.read_watched_bytes(address, byte_size);
+        self.inferior
+            .as_mut()
+            .expect("armed inferior exists")
+            .watch
+            .watchpoints
+            .insert(
+                id,
+                WatchRecord {
+                    watchpoint: watchpoint.clone(),
+                    frame,
+                    observed,
+                },
+            );
+        self.next_watchpoint_id = next_id;
+        self.publish_watchpoints_changed();
+        Ok(watchpoint)
+    }
+
+    fn remove_watchpoint(&mut self, id: WatchpointId) -> Result<Watchpoint> {
+        let inferior = self
+            .inferior
+            .as_ref()
+            .filter(|inferior| inferior.watch.watchpoints.contains_key(&id))
+            .ok_or(Error::WatchpointNotFound(id.get()))?;
+        validate_public_stop(inferior, None)?;
+        let plan = inferior.watch.plan.without_watchpoint(id);
+        self.arm_all_threads(plan)?;
+        let record = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.watch.watchpoints.remove(&id))
+            .expect("removed watchpoint was recorded");
+        self.publish_watchpoints_changed();
+        Ok(record.watchpoint)
+    }
+
+    fn remove_all_watchpoints(&mut self) -> Result<Arc<[Watchpoint]>> {
+        let Some(inferior) = self
+            .inferior
+            .as_ref()
+            .filter(|inferior| !inferior.watch.watchpoints.is_empty())
+        else {
+            return Ok(Arc::from([]));
+        };
+        validate_public_stop(inferior, None)?;
+        self.arm_all_threads(DebugRegisterPlan::default())?;
+        let removed = std::mem::take(
+            &mut self
+                .inferior
+                .as_mut()
+                .expect("disarmed inferior exists")
+                .watch
+                .watchpoints,
+        );
+        self.publish_watchpoints_changed();
+        Ok(removed
+            .into_values()
+            .map(|record| record.watchpoint)
+            .collect::<Vec<_>>()
+            .into())
+    }
+
+    fn publish_watchpoints_changed(&mut self) {
+        self.bump_revision();
+        let _ = self.events.send(DebuggerEvent::WatchpointsChanged {
+            revision: self.revision,
+        });
+    }
+
+    /// Installs `plan` on every stopped thread or on none of them.
+    ///
+    /// A thread that has already begun exiting is skipped; its exit is
+    /// processed normally. Rolling a thread back only rewrites slots the plan
+    /// it previously carried already reserved, so rollback needs no new
+    /// kernel capacity.
+    fn arm_all_threads(&mut self, plan: DebugRegisterPlan) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let previous = inferior.watch.plan.clone();
+        let threads = inferior
+            .threads
+            .iter()
+            .filter_map(|(&pid, thread)| {
+                matches!(thread.state, NativeThreadState::Stopped).then_some(pid)
+            })
+            .collect::<Vec<_>>();
+        let mut programmed = Vec::with_capacity(threads.len());
+        for pid in threads {
+            match program_debug_registers(&self.ptrace, pid, &plan) {
+                Ok(()) => programmed.push(pid),
+                Err(ArmFailure::ThreadGone) => {}
+                Err(failure) => {
+                    let cause = arm_error(pid, &failure);
+                    // The failing thread may have been partly rewritten, so it
+                    // is restored along with every thread already armed.
+                    for &armed in std::iter::once(&pid).chain(programmed.iter().rev()) {
+                        match program_debug_registers(&self.ptrace, armed, &previous) {
+                            Ok(()) | Err(ArmFailure::ThreadGone) => {}
+                            Err(recovery) => {
+                                let _ = self.ptrace.kill(inferior.tgid, NixSignal::SIGKILL);
+                                return Err(backend_error(LinuxError::WatchpointArmRecovery {
+                                    cause: cause.to_string(),
+                                    recovery: arm_error(armed, &recovery).to_string(),
+                                }));
+                            }
+                        }
+                    }
+                    return Err(cause);
+                }
+            }
+        }
+        inferior.watch.generation = inferior.watch.generation.wrapping_add(1);
+        inferior.watch.plan = plan;
+        let generation = inferior.watch.generation;
+        for pid in programmed {
+            inferior
+                .threads
+                .get_mut(&pid)
+                .expect("programmed thread exists")
+                .armed = Some(generation);
+        }
+        Ok(())
+    }
+
+    /// Programs any stopped thread whose registers do not carry the current
+    /// plan, so no thread ever runs unwatched. Failure leaves the inferior
+    /// stopped.
+    fn sync_debug_registers(&mut self) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let generation = inferior.watch.generation;
+        let stale = inferior
+            .threads
+            .iter()
+            .filter(|(_, thread)| {
+                matches!(thread.state, NativeThreadState::Stopped)
+                    && thread.armed != Some(generation)
+            })
+            .map(|(&pid, _)| pid)
+            .collect::<Vec<_>>();
+        for pid in stale {
+            match program_debug_registers(&self.ptrace, pid, &inferior.watch.plan) {
+                Ok(()) => {
+                    inferior
+                        .threads
+                        .get_mut(&pid)
+                        .expect("stale thread exists")
+                        .armed = Some(generation);
+                }
+                Err(ArmFailure::ThreadGone) => {}
+                Err(failure) => return Err(arm_error(pid, &failure)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Arms a newly started thread before it executes. Returns the failure
+    /// to publish when it cannot be armed.
+    fn arm_new_thread(&mut self, pid: Pid) -> Option<Error> {
+        let inferior = self.inferior.as_mut()?;
+        let generation = inferior.watch.generation;
+        // Debug registers are never inherited, so an unarmed thread already
+        // matches an empty plan.
+        let result = if inferior.watch.plan.is_empty() {
+            Ok(())
+        } else {
+            program_debug_registers(&self.ptrace, pid, &inferior.watch.plan)
+        };
+        match result {
+            Ok(()) => {
+                inferior.threads.get_mut(&pid)?.armed = Some(generation);
+                None
+            }
+            Err(ArmFailure::ThreadGone) => None,
+            Err(failure) => Some(arm_error(pid, &failure)),
+        }
+    }
+
+    /// Clears debug-register state a previous tracer may have left armed in
+    /// an attached process, which would otherwise kill it with SIGTRAP.
+    fn clear_attached_debug_registers(&mut self) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let generation = inferior.watch.generation;
+        let empty = DebugRegisterPlan::default();
+        for (&pid, thread) in &mut inferior.threads {
+            match program_debug_registers(&self.ptrace, pid, &empty) {
+                Ok(()) => thread.armed = Some(generation),
+                Err(ArmFailure::ThreadGone) => {}
+                Err(failure) => return Err(arm_error(pid, &failure)),
+            }
+        }
+        Ok(())
+    }
+
+    /// Collects SIGTRAPs an attached thread queued before it was interrupted.
+    ///
+    /// `PTRACE_INTERRUPT` stops a thread before it dequeues signals, so a
+    /// watchpoint or breakpoint trap raised just before the interrupt is still
+    /// queued at the stop. Publishing that stop would report the trap only
+    /// after a later resume, possibly after its watchpoint was removed, and
+    /// detaching would deliver it to an untraced process. Resuming such a
+    /// thread without a signal makes it dequeue the trap into an ordinary
+    /// signal-delivery stop before running any instruction. Returns whether
+    /// any thread was resumed.
+    fn drain_queued_traps(&mut self) -> Result<bool> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        if inferior.origin != InferiorOrigin::Attached {
+            // Launched threads stop with SIGSTOP, which the kernel dequeues
+            // only after synchronous signals such as SIGTRAP.
+            return Ok(false);
+        }
+        let candidates = inferior
+            .threads
+            .iter()
+            .filter(|(_, thread)| {
+                matches!(thread.state, NativeThreadState::Stopped)
+                    && thread.pending_signal.is_none()
+            })
+            .map(|(&pid, _)| pid)
+            .collect::<Vec<_>>();
+        let mut resumed = false;
+        for pid in candidates {
+            if !self.ptrace.queued_trap(pid)? {
+                continue;
+            }
+            self.ptrace.continue_execution(pid, None)?;
+            inferior
+                .threads
+                .get_mut(&pid)
+                .expect("candidate thread exists")
+                .state = NativeThreadState::Running;
+            resumed = true;
+        }
+        Ok(resumed)
+    }
+
+    /// Disarms every thread before the process leaves debugger control. The
+    /// kernel keeps debug registers armed across `PTRACE_DETACH`, and an
+    /// untraced hit would kill the process with SIGTRAP. Every thread is
+    /// attempted even if one fails.
+    fn disarm_for_detach(&mut self) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let empty = DebugRegisterPlan::default();
+        let mut first_error = None;
+        for (&pid, thread) in &inferior.threads {
+            if thread.armed.is_none() && inferior.watch.plan.is_empty() {
+                continue;
+            }
+            match program_debug_registers(&self.ptrace, pid, &empty) {
+                Ok(()) | Err(ArmFailure::ThreadGone) => {}
+                Err(failure) => {
+                    first_error.get_or_insert_with(|| arm_error(pid, &failure));
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Records the watched bytes just before execution resumes so the next
+    /// hit reports what the access changed since the debugger last looked,
+    /// including the debugger's own writes.
+    fn refresh_watch_baselines(&mut self) {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return;
+        };
+        let observed = inferior
+            .watch
+            .watchpoints
+            .iter()
+            .map(|(&id, record)| {
+                (
+                    id,
+                    self.read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size),
+                )
+            })
+            .collect::<Vec<_>>();
+        let inferior = self.inferior.as_mut().expect("inferior exists");
+        for (id, bytes) in observed {
+            inferior
+                .watch
+                .watchpoints
+                .get_mut(&id)
+                .expect("watchpoint exists")
+                .observed = bytes;
+        }
+    }
+
+    /// Resolves the pending watch evidence of every stopped thread once the
+    /// whole process is stopped: invalidates scoped watchpoints whose storage
+    /// ended, reports hits on the remaining ones, and publishes the result
+    /// as each thread's stop reason.
+    fn evaluate_watchpoints(&mut self) -> Result<()> {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return Ok(());
+        };
+        if inferior.watch.watchpoints.is_empty()
+            && inferior
+                .threads
+                .values()
+                .all(|thread| thread.watch_hits.is_empty())
+        {
+            return Ok(());
+        }
+
+        let mut invalid = BTreeMap::new();
+        for (&id, record) in &inferior.watch.watchpoints {
+            if let Some(reason) = self.watch_invalidation(inferior, record)? {
+                invalid.insert(id, reason);
+            }
+        }
+        let hit = inferior
+            .threads
+            .values()
+            .flat_map(|thread| thread.watch_hits.iter().copied())
+            .filter(|id| !invalid.contains_key(id))
+            .collect::<BTreeSet<_>>();
+        let current = hit
+            .iter()
+            .filter_map(|id| {
+                inferior
+                    .watch
+                    .watchpoints
+                    .get(id)
+                    .map(|record| (*id, record))
+            })
+            .map(|(id, record)| {
+                (
+                    id,
+                    self.read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let invalidated = invalid
+            .iter()
+            .map(|(id, reason)| InvalidatedWatchpoint {
+                watchpoint: inferior.watch.watchpoints[id].watchpoint.clone(),
+                reason: *reason,
+            })
+            .collect::<Vec<_>>();
+
+        let inferior = self.inferior.as_mut().expect("inferior exists");
+        for (&pid, thread) in &mut inferior.threads {
+            let owners = std::mem::take(&mut thread.watch_hits);
+            if owners.is_empty() {
+                continue;
+            }
+            let hits = owners
+                .iter()
+                .filter_map(|id| {
+                    let record = inferior.watch.watchpoints.get(id)?;
+                    current.get(id).map(|bytes| WatchpointHit {
+                        watchpoint: *id,
+                        thread: debug_thread_id(pid),
+                        previous: record.observed.clone(),
+                        current: bytes.clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let reason = if hits.is_empty() {
+                StopReason::WatchpointInvalidated {
+                    invalidated: invalidated
+                        .iter()
+                        .filter(|entry| owners.contains(&entry.watchpoint.id))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .into(),
+                }
+            } else {
+                StopReason::Watchpoint { hits: hits.into() }
+            };
+            if let Some(barrier) = inferior.barrier.as_mut()
+                && barrier.triggering_thread == pid
+                && matches!(barrier.reason, StopReason::Watchpoint { .. })
+            {
+                barrier.reason = reason.clone();
+            }
+            thread.reason = Some(reason);
+        }
+        for (id, bytes) in current {
+            if let Some(record) = inferior.watch.watchpoints.get_mut(&id) {
+                record.observed = bytes;
+            }
+        }
+        self.remove_invalidated_watchpoints(invalidated)
+    }
+
+    /// Disarms and publishes watchpoints whose storage's lifetime ended.
+    fn remove_invalidated_watchpoints(
+        &mut self,
+        invalidated: Vec<InvalidatedWatchpoint>,
+    ) -> Result<()> {
+        if invalidated.is_empty() {
+            return Ok(());
+        }
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let plan = invalidated
+            .iter()
+            .fold(inferior.watch.plan.clone(), |plan, entry| {
+                plan.without_watchpoint(entry.watchpoint.id)
+            });
+        self.arm_all_threads(plan)?;
+        let inferior = self.inferior.as_mut().expect("inferior exists");
+        for entry in &invalidated {
+            inferior.watch.watchpoints.remove(&entry.watchpoint.id);
+        }
+        self.bump_revision();
+        let _ = self.events.send(DebuggerEvent::WatchpointsInvalidated {
+            revision: self.revision,
+            invalidated: invalidated.into(),
+        });
+        self.publish_watchpoints_changed();
+        Ok(())
+    }
+
+    /// Discards the watchpoints of a process that no longer exists or whose
+    /// image was replaced.
+    fn discard_watchpoints(&mut self) {
+        let Some(inferior) = self.inferior.as_mut() else {
+            return;
+        };
+        let had_watchpoints = !inferior.watch.watchpoints.is_empty();
+        inferior.watch.watchpoints.clear();
+        inferior.watch.plan = DebugRegisterPlan::default();
+        inferior.watch.generation = inferior.watch.generation.wrapping_add(1);
+        if had_watchpoints {
+            self.publish_watchpoints_changed();
+        }
+    }
+}
+
+impl<P: InspectionOps> Controller<P> {
+    /// Reads the current watched bytes through any stopped thread, hiding
+    /// software-breakpoint bytes. Unreadable memory is reported as `None`.
+    fn read_watched_bytes(&self, address: VirtualAddress, byte_size: u64) -> Option<Arc<[u8]>> {
+        let inferior = self.inferior.as_ref()?;
+        let pid = inferior
+            .threads
+            .iter()
+            .find(|(_, thread)| matches!(thread.state, NativeThreadState::Stopped))
+            .map(|(&pid, _)| pid)?;
+        let size = usize::try_from(byte_size).ok()?;
+        let read =
+            read_logical_memory(&self.ptrace, pid, &inferior.breakpoints, address, size).ok()?;
+        matches!(read.completion, MemoryReadCompletion::Complete).then(|| read.bytes.into())
+    }
+
+    fn watch_invalidation(
+        &self,
+        inferior: &Inferior,
+        record: &WatchRecord,
+    ) -> Result<Option<WatchpointInvalidation>> {
+        Ok(match &record.watchpoint.scope {
+            WatchScope::Location => None,
+            WatchScope::Static { module } => (!self.modules.contains_key(module))
+                .then_some(WatchpointInvalidation::ModuleUnloaded),
+            WatchScope::ThreadLocal { thread } => {
+                (!inferior.threads.contains_key(&debug_pid(*thread)))
+                    .then_some(WatchpointInvalidation::OwnerThreadExited)
+            }
+            WatchScope::Frame { thread, activation } => {
+                let pid = debug_pid(*thread);
+                if inferior.threads.contains_key(&pid) {
+                    let evidence = record
+                        .frame
+                        .as_ref()
+                        .expect("frame-scoped watchpoints carry scope evidence");
+                    (!self.frame_scope_is_live(inferior, pid, *activation, evidence)?)
+                        .then_some(WatchpointInvalidation::ScopeExited)
+                } else {
+                    Some(WatchpointInvalidation::OwnerThreadExited)
+                }
+            }
+        })
+    }
+
+    /// Whether the owner thread still executes the activation that declared
+    /// a frame-scoped object, inside the object's lexical scope.
+    ///
+    /// The activation is found by unwinding the owner's stack to the frame
+    /// whose canonical frame address matches. A frame at that address running
+    /// a different function means a tail call replaced the activation; a
+    /// frame outside the object's scope ranges means its block ended. When
+    /// unwinding fails before reaching the activation, the stack pointer
+    /// still proves a return on x86-64's downward-growing stack.
+    fn frame_scope_is_live(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+        activation: VirtualAddress,
+        evidence: &FrameScopeEvidence,
+    ) -> Result<bool> {
+        let Some(module) = self
+            .modules
+            .get(&evidence.module)
+            .filter(|module| module.loaded.image == evidence.image)
+        else {
+            return Ok(false);
+        };
+        let native = self.ptrace.registers(pid)?;
+        let mut provider = DwarfCallerProvider {
+            modules: self.unwind_modules(inferior),
+            registers: x86_64_registers(&native),
+            memory: PtraceMemory {
+                ptrace: &self.ptrace,
+                pid,
+            },
+            first: true,
+        };
+        let mut context = FrameContext {
+            instruction: VirtualAddress::new(native.rip),
+            cfa: None,
+            signal_frame: false,
+        };
+        let unproven = !x86_64_activation_has_returned(native.rsp, activation);
+        for level in 0..DEFAULT_MAX_FRAMES {
+            let caller = match provider.caller(&context) {
+                CallerResult::Caller(caller) => caller,
+                CallerResult::Finished(UnwindTermination::Complete) => return Ok(false),
+                CallerResult::Finished(_) => return Ok(unproven),
+            };
+            if caller.cfa == Some(activation) {
+                let level = u32::try_from(level).expect("frame limit fits u32");
+                let Some(image_address) = frame_lookup_address(level, &context)
+                    .and_then(|address| module.loaded.image_address(address).ok())
+                    .filter(|address| module.image.contains_address(*address))
+                else {
+                    return Ok(false);
+                };
+                let location = module.image.locate(image_address);
+                return Ok(location.physical_instance == Some(evidence.function)
+                    && evidence
+                        .ranges
+                        .iter()
+                        .any(|range| range.contains(image_address)));
+            }
+            if caller.cfa.is_some_and(|cfa| cfa > activation) {
+                return Ok(false);
+            }
+            context = caller;
+        }
+        Ok(unproven)
+    }
+
+    /// Resolves an expression at the stop to the memory it occupies and the
+    /// lifetime of that storage.
+    fn resolve_watch_target(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        expression: &ValueExpression,
+    ) -> Result<WatchTarget> {
+        let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
+        let (value, root) = self.inspect_with_root(stop_id, pid, expression, &mut budget)?;
+        let (address, byte_size) = watchable_storage(&value)?;
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+
+        // A path that leaves the root object, through a pointer or a slice's
+        // data, watches wherever that storage happened to be.
+        let contained = if root.components == expression.steps.len() {
+            true
+        } else {
+            let root_expression = ValueExpression {
+                steps: expression.steps[..root.components].into(),
+            };
+            let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
+            let (root_value, _) =
+                self.inspect_with_root(stop_id, pid, &root_expression, &mut budget)?;
+            watchable_storage(&root_value).is_ok_and(|(root_address, root_size)| {
+                let end = address.get().checked_add(byte_size);
+                let root_end = root_address.get().checked_add(root_size);
+                matches!(
+                    (end, root_end),
+                    (Some(end), Some(root_end)) if address >= root_address && end <= root_end
+                )
+            })
+        };
+        let (scope, frame) = if contained {
+            self.root_watch_scope(inferior, pid, &root)?
+        } else {
+            (WatchScope::Location, None)
+        };
+
+        Ok(WatchTarget {
+            stop_id,
+            expression: expression.clone(),
+            address,
+            byte_size,
+            type_info: value.type_info,
+            scope,
+            frame,
+        })
+    }
+
+    fn root_watch_scope(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+        root: &ExpressionRoot,
+    ) -> Result<(WatchScope, Option<FrameScopeEvidence>)> {
+        let (storage, module) = match &root.kind {
+            ExpressionRootKind::Local {
+                name,
+                address,
+                selected,
+            } => (
+                self.variable_info
+                    .local_storage(*address, *selected, name)?,
+                inferior.loaded_module.id,
+            ),
+            ExpressionRootKind::Global(global) => {
+                let module = self
+                    .modules
+                    .get(&global.module)
+                    .filter(|module| module.loaded.image == global.image)
+                    .ok_or(Error::StaleModuleImage)?;
+                (
+                    module.variables.global_storage(global.variable)?,
+                    global.module,
+                )
+            }
+        };
+        match storage.class {
+            StorageClass::Static => Ok((WatchScope::Static { module }, None)),
+            StorageClass::ThreadLocal => Ok((
+                WatchScope::ThreadLocal {
+                    thread: debug_thread_id(pid),
+                },
+                None,
+            )),
+            StorageClass::Indirect => Ok((WatchScope::Location, None)),
+            StorageClass::NotMemory | StorageClass::Frame { stable: false, .. } => {
+                Err(Error::WatchTargetUnsupported(
+                    "the object's location changes within its scope".into(),
+                ))
+            }
+            StorageClass::Frame {
+                moving_stack: true, ..
+            } => Err(Error::WatchTargetUnsupported(
+                "the language runtime may move this stack object; watch a heap or global object"
+                    .into(),
+            )),
+            StorageClass::Frame { .. } => {
+                let ExpressionRootKind::Local { address, .. } = &root.kind else {
+                    return Err(Error::WatchTargetUnsupported(
+                        "a frame-relative global has no owning activation".into(),
+                    ));
+                };
+                let native = self.ptrace.registers(pid)?;
+                let activation = self
+                    .unwind_info
+                    .cfa(*address, &x86_64_registers(&native))
+                    .map_err(|termination| {
+                        Error::WatchTargetUnsupported(
+                            format!("the declaring activation is unavailable: {termination:?}")
+                                .into(),
+                        )
+                    })?;
+                let function = self
+                    .module_image
+                    .locate(*address)
+                    .physical_instance
+                    .ok_or_else(|| {
+                        Error::WatchTargetUnsupported(
+                            "no function describes the declaring activation".into(),
+                        )
+                    })?;
+                Ok((
+                    WatchScope::Frame {
+                        thread: debug_thread_id(pid),
+                        activation,
+                    },
+                    Some(FrameScopeEvidence {
+                        module,
+                        image: inferior.loaded_module.image,
+                        function,
+                        ranges: storage.ranges,
+                    }),
+                ))
+            }
+        }
+    }
+}
+
+/// The memory a resolved value occupies, or why it cannot be watched.
+fn watchable_storage(value: &InspectedValue) -> Result<(VirtualAddress, u64)> {
+    let source = match &value.state {
+        crate::VariableState::Available { source, .. }
+        | crate::VariableState::Invalid { source, .. } => source,
+        crate::VariableState::Unavailable(reason) => {
+            return Err(Error::WatchTargetUnavailable(reason.to_string().into()));
+        }
+        crate::VariableState::Malformed(reason) => {
+            return Err(Error::WatchTargetUnavailable(Arc::clone(
+                &reason.description,
+            )));
+        }
+    };
+    let address = match source {
+        VariableValueSource::Memory(address) => *address,
+        VariableValueSource::Register(register) => {
+            return Err(Error::WatchTargetNotInMemory(
+                format!("the value is held in register {}", register.name).into(),
+            ));
+        }
+        VariableValueSource::Constant => {
+            return Err(Error::WatchTargetNotInMemory(
+                "the value is a debug-information constant".into(),
+            ));
+        }
+        VariableValueSource::Computed => {
+            return Err(Error::WatchTargetNotInMemory(
+                "the value is computed, such as a bit-field or an optimized expression".into(),
+            ));
+        }
+        VariableValueSource::ImplicitPointer => {
+            return Err(Error::WatchTargetNotInMemory(
+                "optimization eliminated the pointer's address".into(),
+            ));
+        }
+    };
+    let byte_size = value
+        .type_info
+        .as_ref()
+        .and_then(|info| info.byte_size)
+        .filter(|size| *size > 0)
+        .ok_or_else(|| Error::WatchTargetUnsupported("the value's size is unknown".into()))?;
+    Ok((address, byte_size))
+}
+
+fn watch_range_error(
+    address: VirtualAddress,
+    byte_size: u64,
+    error: debug_registers::RangeError,
+    available: usize,
+) -> Error {
+    let reason = match error {
+        debug_registers::RangeError::Empty => "a watchpoint must cover at least one byte",
+        debug_registers::RangeError::Overflow => "the range wraps the address space",
+        debug_registers::RangeError::OutsideUserSpace => {
+            "the range reaches memory the kernel does not let user debuggers watch"
+        }
+        debug_registers::RangeError::TooLarge { required } => {
+            return Error::WatchpointCapacity {
+                required,
+                available: u64::try_from(available).expect("slot count fits u64"),
+            };
+        }
+    };
+    Error::InvalidWatchRange {
+        address,
+        byte_size,
+        reason: reason.into(),
+    }
+}
+
+/// Why one thread's debug registers could not be programmed.
+#[derive(Debug)]
+enum ArmFailure {
+    /// The thread is exiting.
+    ThreadGone,
+    /// Other hardware-breakpoint users hold the thread's slots.
+    Busy,
+    /// The kernel refused a value or the readback disagreed, as in sandboxes
+    /// that ignore debug-register writes.
+    Unsupported(String),
+    System(Errno),
+}
+
+fn arm_failure(error: Errno) -> ArmFailure {
+    match error {
+        Errno::ESRCH => ArmFailure::ThreadGone,
+        Errno::ENOSPC => ArmFailure::Busy,
+        Errno::EINVAL | Errno::EIO => {
+            ArmFailure::Unsupported(format!("the kernel refused a debug register: {error}"))
+        }
+        error => ArmFailure::System(error),
+    }
+}
+
+fn arm_error(pid: Pid, failure: &ArmFailure) -> Error {
+    match failure {
+        ArmFailure::ThreadGone => Error::NotRunning,
+        ArmFailure::Busy => Error::WatchpointHardwareBusy {
+            thread: debug_thread_id(pid),
+        },
+        ArmFailure::Unsupported(description) => {
+            Error::HardwareWatchpointsUnavailable(description.as_str().into())
+        }
+        ArmFailure::System(error) => backend_error(LinuxError::System(*error)),
+    }
+}
+
+/// Installs `plan` in one stopped thread's debug registers and reads it
+/// back. A readback mismatch means the target silently ignored the writes.
+fn program_debug_registers(
+    ptrace: &dyn LinuxTraceOps,
+    pid: Pid,
+    plan: &DebugRegisterPlan,
+) -> std::result::Result<(), ArmFailure> {
+    for (register, value) in plan.programming_sequence() {
+        ptrace
+            .write_debug_register(pid, register, value)
+            .map_err(arm_failure)?;
+    }
+    let expected = std::iter::once((debug_registers::CONTROL_REGISTER, plan.control())).chain(
+        plan.slots()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| slot.as_ref().map(|slot| (index, slot.chunk.address))),
+    );
+    for (register, value) in expected {
+        let actual = ptrace
+            .read_debug_register(pid, register)
+            .map_err(arm_failure)?;
+        if actual != value {
+            return Err(ArmFailure::Unsupported(format!(
+                "debug register {register} read back {actual:#x} after writing {value:#x}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Chooses the one primary reason published for coincident all-stop events.
 ///
 /// Lower-priority reasons remain attached to their native threads, including
@@ -3419,6 +4569,9 @@ const fn visible_stop_priority(reason: &StopReason) -> u8 {
         StopReason::Attach | StopReason::Pause => 0,
         StopReason::Exception(_) => 1,
         StopReason::Breakpoint { .. }
+        | StopReason::Watchpoint { .. }
+        | StopReason::WatchpointInvalidated { .. }
+        | StopReason::WatchpointArmFailed { .. }
         | StopReason::Step { .. }
         | StopReason::ThreadExited { .. } => 2,
         StopReason::Exec => 3,
@@ -3444,6 +4597,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
 
         if remaining == 0 {
+            self.discard_watchpoints();
             let mut inferior = self.inferior.take().expect("inferior exists");
             if let Some(waiter) = inferior.waiter.take() {
                 waiter.join()?;
@@ -3806,6 +4960,7 @@ impl<P: InspectionOps> Controller<P> {
                 threads: Arc::from([]),
                 presentation: None,
                 breakpoints: self.breakpoints.clone().into(),
+                watchpoints: Arc::from([]),
             };
         };
         let process_id = process_id(inferior.tgid);
@@ -3852,6 +5007,13 @@ impl<P: InspectionOps> Controller<P> {
                     .cloned()
             }),
             breakpoints: self.breakpoints.clone().into(),
+            watchpoints: inferior
+                .watch
+                .watchpoints
+                .values()
+                .map(|record| record.watchpoint.clone())
+                .collect::<Vec<_>>()
+                .into(),
         }
     }
 
@@ -4183,10 +5345,6 @@ impl<P: InspectionOps> Controller<P> {
         self.inspect_with_budget(stop_id, pid, expression, &mut budget)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "longest-prefix local/global lookup shares one validated stopped runtime"
-    )]
     fn inspect_with_budget(
         &self,
         stop_id: StopId,
@@ -4194,6 +5352,23 @@ impl<P: InspectionOps> Controller<P> {
         expression: &ValueExpression,
         budget: &mut InspectionBudget,
     ) -> Result<InspectedValue> {
+        self.inspect_with_root(stop_id, pid, expression, budget)
+            .map(|(value, _)| value)
+    }
+
+    /// Inspects an expression and reports which data object its longest
+    /// matching name prefix resolved to.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "longest-prefix local/global lookup shares one validated stopped runtime"
+    )]
+    fn inspect_with_root(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        expression: &ValueExpression,
+        budget: &mut InspectionBudget,
+    ) -> Result<(InspectedValue, ExpressionRoot)> {
         validate_value_expression(expression)?;
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
@@ -4269,19 +5444,38 @@ impl<P: InspectionOps> Controller<P> {
             let local = image_address.zip(selected_instance).map_or_else(
                 || Err(Error::VariableNotFound(root.clone())),
                 |(address, selected)| {
-                    self.variable_info.inspect_path(
-                        address,
-                        selected,
-                        &root,
-                        selectors,
-                        context,
-                        &mut runtime,
-                        budget,
-                    )
+                    self.variable_info
+                        .inspect_path(
+                            address,
+                            selected,
+                            &root,
+                            selectors,
+                            context,
+                            &mut runtime,
+                            budget,
+                        )
+                        .map(|value| {
+                            (
+                                value,
+                                ExpressionRootKind::Local {
+                                    name: root.clone(),
+                                    address,
+                                    selected,
+                                },
+                            )
+                        })
                 },
             );
             match local {
-                Ok(value) => return Ok(value),
+                Ok((value, kind)) => {
+                    return Ok((
+                        value,
+                        ExpressionRoot {
+                            components: root_components,
+                            kind,
+                        },
+                    ));
+                }
                 Err(Error::VariableNotFound(_)) => {}
                 Err(error) => return Err(error),
             }
@@ -4301,16 +5495,26 @@ impl<P: InspectionOps> Controller<P> {
             match matches.as_slice() {
                 [] => {}
                 [global] => {
-                    return self.inspect_loaded_global_path(
-                        inferior,
-                        pid,
-                        &native,
-                        instruction,
-                        &cfa,
-                        *global,
-                        selectors,
-                        budget,
-                    );
+                    return self
+                        .inspect_loaded_global_path(
+                            inferior,
+                            pid,
+                            &native,
+                            instruction,
+                            &cfa,
+                            *global,
+                            selectors,
+                            budget,
+                        )
+                        .map(|value| {
+                            (
+                                value,
+                                ExpressionRoot {
+                                    components: root_components,
+                                    kind: ExpressionRootKind::Global(*global),
+                                },
+                            )
+                        });
                 }
                 _ => {
                     return Err(Error::AmbiguousLoadedGlobalVariable {
@@ -4848,6 +6052,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .all(|thread| matches!(thread.state, NativeThreadState::Stopped))
             });
             if all_stopped {
+                // A drained thread's trap stop resumes the detach.
+                match self.drain_queued_traps() {
+                    Ok(true) => return,
+                    Ok(false) => {}
+                    Err(error) => {
+                        if let Some(reply) = self.shutdown_reply.take() {
+                            let _ = reply.send(Err(error));
+                        }
+                        return;
+                    }
+                }
                 if let Err(error) = self.detach_inferior()
                     && let Some(reply) = self.shutdown_reply.take()
                 {
@@ -4982,6 +6197,16 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .values()
                     .all(|thread| matches!(thread.state, NativeThreadState::Stopped))
         });
+        let ready = ready
+            && match self.drain_queued_traps() {
+                Ok(drained) => !drained,
+                Err(error) => {
+                    if let Some(reply) = self.shutdown_reply.take() {
+                        let _ = reply.send(Err(error));
+                    }
+                    return false;
+                }
+            };
         if ready && let Err(error) = self.detach_inferior() {
             if let Some(reply) = self.shutdown_reply.take() {
                 let _ = reply.send(Err(error));
@@ -5010,6 +6235,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     fn detach_inferior(&mut self) -> Result<()> {
+        let disarmed = self.disarm_for_detach();
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let installed = inferior
             .breakpoints
@@ -5032,7 +6258,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         for (pid, signal) in tids {
             self.ptrace.detach(pid, signal)?;
         }
+        let had_watchpoints = self
+            .inferior
+            .as_ref()
+            .is_some_and(|inferior| !inferior.watch.watchpoints.is_empty());
         self.inferior.take().expect("attached inferior exists");
+        if had_watchpoints {
+            self.publish_watchpoints_changed();
+        }
+        if let Err(error) = disarmed {
+            if let Some(reply) = self.shutdown_reply.take() {
+                let _ = reply.send(Err(error));
+            }
+            self.reset_runtime_modules();
+            return Ok(());
+        }
         self.reset_runtime_modules();
         self.bump_revision();
         let _ = self.events.send(DebuggerEvent::InferiorDetached {
@@ -6004,6 +7244,22 @@ trait LinuxTraceOps: InspectionOps {
     fn event_message(&self, pid: Pid) -> Result<libc::c_long>;
     fn signal_metadata(&self, pid: Pid) -> std::result::Result<SignalMetadata, Errno>;
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()>;
+    /// Whether a stopped thread's private pending set holds a deliverable
+    /// SIGTRAP that has not been reported yet.
+    fn queued_trap(&self, _pid: Pid) -> Result<bool> {
+        // Deterministic effect fakes report nothing queued. The production
+        // ptrace edge overrides this method.
+        Ok(false)
+    }
+    /// Reads one x86-64 debug register from a stopped thread's user area.
+    fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno>;
+    /// Writes one x86-64 debug register in a stopped thread's user area.
+    fn write_debug_register(
+        &self,
+        pid: Pid,
+        index: usize,
+        value: u64,
+    ) -> std::result::Result<(), Errno>;
     fn install_breakpoint(
         &self,
         pid: Pid,
@@ -6229,6 +7485,36 @@ impl LinuxTraceOps for LinuxPtrace {
         tgkill(process, thread, NixSignal::SIGSTOP)
     }
 
+    fn queued_trap(&self, pid: Pid) -> Result<bool> {
+        self.assert_owner_thread();
+        let status = match fs::read_to_string(format!("/proc/{pid}/status")) {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(queued_trap_in_status(&status))
+    }
+
+    fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno> {
+        self.assert_owner_thread();
+        ptrace::read_user(pid, debug_register_offset(index))
+            .map(|value| u64::from_ne_bytes(value.to_ne_bytes()))
+    }
+
+    fn write_debug_register(
+        &self,
+        pid: Pid,
+        index: usize,
+        value: u64,
+    ) -> std::result::Result<(), Errno> {
+        self.assert_owner_thread();
+        ptrace::write_user(
+            pid,
+            debug_register_offset(index),
+            libc::c_long::from_ne_bytes(value.to_ne_bytes()),
+        )
+    }
+
     fn install_breakpoint(
         &self,
         pid: Pid,
@@ -6300,6 +7586,37 @@ impl LinuxTraceOps for LinuxPtrace {
         site.installed = true;
         Ok(())
     }
+}
+
+/// Whether a ptrace request failed because the tracee left its ptrace-stop.
+fn is_vanished_tracee(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Backend(error)
+            if matches!(error.downcast_ref::<LinuxError>(), Some(LinuxError::System(Errno::ESRCH)))
+    )
+}
+
+/// Whether `/proc/<tid>/status` shows SIGTRAP pending for the thread itself
+/// and not blocked. A malformed mask is treated as nothing queued.
+fn queued_trap_in_status(status: &str) -> bool {
+    let mask = |field: &str| {
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix(field))
+            .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+            .unwrap_or(0)
+    };
+    let trap = 1 << (NixSignal::SIGTRAP as u32 - 1);
+    mask("SigPnd:") & trap != 0 && mask("SigBlk:") & trap == 0
+}
+
+/// The `struct user` offset of one debug register, as `PTRACE_PEEKUSER` and
+/// `PTRACE_POKEUSER` address it.
+fn debug_register_offset(index: usize) -> ptrace::AddressType {
+    assert!(index < 8, "x86-64 has eight debug registers");
+    (std::mem::offset_of!(libc::user, u_debugreg) + index * std::mem::size_of::<u64>())
+        as ptrace::AddressType
 }
 
 #[derive(Clone, Copy)]
@@ -6716,6 +8033,21 @@ const fn is_stopping_signal(signal: NixSignal) -> bool {
     )
 }
 
+/// DR6 evidence for one SIGTRAP stop.
+#[derive(Debug)]
+enum WatchStatus {
+    /// No debug exception reported a watchpoint slot.
+    Absent,
+    /// These watchpoints own the reported slots.
+    Hits(BTreeSet<WatchpointId>),
+    /// The status could not be read or names an unowned slot.
+    Unknown(String),
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the pure classifier receives every piece of native stop evidence explicitly"
+)]
 fn classify_stop_evidence(
     signal: NixSignal,
     status: String,
@@ -6724,6 +8056,7 @@ fn classify_stop_evidence(
     starting: bool,
     debugger_requested: bool,
     breakpoint: Option<VirtualAddress>,
+    watch: WatchStatus,
 ) -> ClassifiedStop {
     if signal == NixSignal::SIGSTOP && starting {
         return ClassifiedStop::ThreadStart;
@@ -6732,13 +8065,41 @@ fn classify_stop_evidence(
         return ClassifiedStop::DebuggerRequested;
     }
     if signal == NixSignal::SIGTRAP
+        && siginfo
+            .as_ref()
+            .is_ok_and(|metadata| metadata.code == TRAP_HARDWARE_BREAKPOINT)
+    {
+        return match watch {
+            WatchStatus::Hits(owners) if !owners.is_empty() => ClassifiedStop::Watch(owners),
+            WatchStatus::Unknown(description) => ClassifiedStop::Unclassifiable(RawStopRecord {
+                status: format!("{status}; {description}"),
+                siginfo,
+            }),
+            WatchStatus::Hits(_) | WatchStatus::Absent => {
+                ClassifiedStop::Unclassifiable(RawStopRecord {
+                    status: format!("{status}; hardware breakpoint trap without a reported slot"),
+                    siginfo,
+                })
+            }
+        };
+    }
+    if signal == NixSignal::SIGTRAP
         && siginfo.as_ref().is_ok_and(is_single_step_trap)
         && matches!(
             expected,
             ExpectedStop::BreakpointRepair { .. } | ExpectedStop::UserStep { .. }
         )
     {
-        return ClassifiedStop::Trace;
+        return match watch {
+            WatchStatus::Unknown(description) => ClassifiedStop::Unclassifiable(RawStopRecord {
+                status: format!("{status}; {description}"),
+                siginfo,
+            }),
+            WatchStatus::Hits(watch) => ClassifiedStop::Trace { watch },
+            WatchStatus::Absent => ClassifiedStop::Trace {
+                watch: BTreeSet::new(),
+            },
+        };
     }
     if let Some(address) = breakpoint {
         return ClassifiedStop::Breakpoint(address);
@@ -7369,6 +8730,19 @@ mod tests {
             Self::unexpected("request_stop")
         }
 
+        fn read_debug_register(&self, _pid: Pid, _index: usize) -> std::result::Result<u64, Errno> {
+            Self::unexpected("read_debug_register")
+        }
+
+        fn write_debug_register(
+            &self,
+            _pid: Pid,
+            _index: usize,
+            _value: u64,
+        ) -> std::result::Result<(), Errno> {
+            Self::unexpected("write_debug_register")
+        }
+
         fn install_breakpoint(
             &self,
             _pid: Pid,
@@ -7445,6 +8819,22 @@ mod tests {
             _budget: &mut InspectionBudget,
         ) -> Result<crate::InspectedValue> {
             panic!("unexpected variable path lookup")
+        }
+
+        fn local_storage(
+            &self,
+            _address: ImageAddress,
+            _selected: Option<crate::CodeInstanceId>,
+            _root: &str,
+        ) -> Result<crate::debug_info::ObjectStorage> {
+            panic!("unexpected local storage lookup")
+        }
+
+        fn global_storage(
+            &self,
+            _id: crate::GlobalVariableId,
+        ) -> Result<crate::debug_info::ObjectStorage> {
+            panic!("unexpected global storage lookup")
         }
 
         fn inspect_global(
@@ -7812,6 +9202,8 @@ mod tests {
                 stopped_at_breakpoint: None,
                 awaiting_breakpoint: None,
                 debugger_stop_pending: false,
+                armed: None,
+                watch_hits: BTreeSet::new(),
             },
         );
         inferior.threads.insert(
@@ -7824,6 +9216,8 @@ mod tests {
                 stopped_at_breakpoint: None,
                 awaiting_breakpoint: None,
                 debugger_stop_pending: true,
+                armed: None,
+                watch_hits: BTreeSet::new(),
             },
         );
         inferior.barrier = Some(StopBarrier {
@@ -8028,6 +9422,8 @@ mod tests {
                     stopped_at_breakpoint: None,
                     awaiting_breakpoint: None,
                     debugger_stop_pending: false,
+                    armed: None,
+                    watch_hits: BTreeSet::new(),
                 },
             )]),
             retired_threads: BTreeSet::new(),
@@ -8046,6 +9442,7 @@ mod tests {
             next_execution: 1,
             next_barrier: 0,
             exec_unsupported: false,
+            watch: WatchState::default(),
         }
     }
 
@@ -8151,6 +9548,33 @@ mod tests {
     }
 
     #[test]
+    fn queued_traps_are_read_from_the_threads_own_unblocked_pending_set() {
+        let status = |pending: &str, blocked: &str| {
+            format!(
+                "Name:\tworker\nShdPnd:\t0000000000000010\nSigPnd:\t{pending}\nSigBlk:\t{blocked}\n"
+            )
+        };
+        assert!(queued_trap_in_status(&status(
+            "0000000000000010",
+            "0000000000000000"
+        )));
+        assert!(queued_trap_in_status(&status(
+            "0000000000010110",
+            "0000000000000100"
+        )));
+        assert!(
+            !queued_trap_in_status(&status("0000000000000010", "0000000000000010")),
+            "a blocked trap cannot be dequeued by resuming"
+        );
+        assert!(
+            !queued_trap_in_status(&status("0000000000000000", "0000000000000000")),
+            "a process-wide trap is not the thread's own"
+        );
+        assert!(!queued_trap_in_status("SigPnd:\tnot-hex\n"));
+        assert!(!queued_trap_in_status(""));
+    }
+
+    #[test]
     fn raw_stop_format_preserves_siginfo_failure() {
         let record = RawStopRecord {
             status: "Stopped(7, SIGTRAP)".to_owned(),
@@ -8180,6 +9604,7 @@ mod tests {
                 false,
                 false,
                 breakpoint,
+                WatchStatus::Absent,
             )
         };
 
@@ -8192,7 +9617,7 @@ mod tests {
                 },
                 None,
             ),
-            ClassifiedStop::Trace
+            ClassifiedStop::Trace { ref watch } if watch.is_empty()
         ));
         assert!(matches!(
             classify(
@@ -8250,5 +9675,1142 @@ mod tests {
             ),
             ClassifiedStop::Breakpoint(address) if address == VirtualAddress::new(0x1234)
         ));
+    }
+
+    /// Models per-thread debug registers the way Linux exposes them, records
+    /// every native effect, and injects failures.
+    #[derive(Default)]
+    struct DebugRegisterTrace {
+        actions: RefCell<Vec<String>>,
+        registers: RefCell<BTreeMap<Pid, [u64; 8]>>,
+        /// Fails a write of `(thread, register)` after skipping that many
+        /// successful writes.
+        failures: RefCell<BTreeMap<(Pid, usize), (u32, Errno)>>,
+        /// Accepts writes without storing them, like gVisor.
+        discard_writes: bool,
+        siginfo: RefCell<BTreeMap<Pid, SignalMetadata>>,
+        program_counters: RefCell<BTreeMap<Pid, u64>>,
+        /// Threads holding a SIGTRAP queued behind an interrupt stop.
+        queued_traps: RefCell<BTreeSet<Pid>>,
+        /// Threads a sibling's `exit_group` killed out of their ptrace-stop.
+        vanished: RefCell<BTreeSet<Pid>>,
+        /// The child reported by the next clone event, in the process `tgid`.
+        clone: RefCell<Option<(Pid, Pid)>>,
+    }
+
+    impl DebugRegisterTrace {
+        fn record(&self, action: String) {
+            self.actions.borrow_mut().push(action);
+        }
+
+        fn take_actions(&self) -> Vec<String> {
+            std::mem::take(&mut *self.actions.borrow_mut())
+        }
+
+        fn registers_of(&self, pid: Pid) -> [u64; 8] {
+            self.registers.borrow().get(&pid).copied().unwrap_or([
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                debug_registers::STATUS_IDLE,
+                0,
+            ])
+        }
+
+        fn fail_after(&self, pid: Pid, register: usize, skips: u32, error: Errno) {
+            self.failures
+                .borrow_mut()
+                .insert((pid, register), (skips, error));
+        }
+    }
+
+    impl InspectionOps for DebugRegisterTrace {
+        fn read_word(&self, _pid: Pid, _address: u64) -> Result<u64> {
+            Ok(0)
+        }
+
+        fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
+            let mut registers = RecordingTrace {
+                actions: Rc::new(RefCell::new(Vec::new())),
+                pid,
+            }
+            .registers(pid)?;
+            if let Some(&rip) = self.program_counters.borrow().get(&pid) {
+                registers.rip = rip;
+            }
+            Ok(registers)
+        }
+    }
+
+    impl LinuxTraceOps for DebugRegisterTrace {
+        fn spawn(&self, _executable: &Path) -> Result<Pid> {
+            RecordingTrace::unexpected("spawn")
+        }
+        fn spawn_waiter(&self, _messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
+            Ok(Waiter {
+                stop: Arc::new(AtomicBool::new(false)),
+                thread: thread::spawn(|| {}),
+            })
+        }
+        fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
+            RecordingTrace::unexpected("process_threads")
+        }
+        fn seize(&self, _pid: Pid) -> Result<bool> {
+            RecordingTrace::unexpected("seize")
+        }
+        fn interrupt(&self, pid: Pid) -> Result<bool> {
+            self.record(format!("interrupt {pid}"));
+            Ok(true)
+        }
+        fn detach(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+            self.record(format!("detach {pid} {signal:?}"));
+            Ok(())
+        }
+        fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
+            self.record(format!("kill {pid} {signal}"));
+            Ok(())
+        }
+        fn reap(&self, _pid: Pid) -> Result<()> {
+            RecordingTrace::unexpected("reap")
+        }
+        fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
+            Ok(self.clone.borrow().expect("a clone is pending").1)
+        }
+        fn load_bias(
+            &self,
+            _pid: Pid,
+            _executable: &Path,
+            _executable_data: &[u8],
+            _identity: FileIdentity,
+        ) -> Result<u64> {
+            RecordingTrace::unexpected("load_bias")
+        }
+        fn write_word(&self, _pid: Pid, _address: u64, _value: u64) -> Result<()> {
+            RecordingTrace::unexpected("write_word")
+        }
+        fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+            self.record(format!("continue {pid} {signal:?}"));
+            if self.vanished.borrow().contains(&pid) {
+                return Err(backend_error(LinuxError::System(Errno::ESRCH)));
+            }
+            Ok(())
+        }
+        fn continue_during_shutdown(&self, _pid: Pid) -> Result<()> {
+            RecordingTrace::unexpected("continue_during_shutdown")
+        }
+        fn step(&self, pid: Pid, _signal: Option<NixSignal>) -> Result<()> {
+            self.record(format!("step {pid}"));
+            Ok(())
+        }
+        fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
+            self.record(format!("set_registers {pid} rip={:#x}", registers.rip));
+            Ok(())
+        }
+        fn set_options(&self, pid: Pid, _exit_kill: bool) -> Result<()> {
+            self.record(format!("set_options {pid}"));
+            Ok(())
+        }
+        fn event_message(&self, _pid: Pid) -> Result<libc::c_long> {
+            Ok(libc::c_long::from(
+                self.clone.borrow().expect("a clone is pending").0.as_raw(),
+            ))
+        }
+        fn signal_metadata(&self, pid: Pid) -> std::result::Result<SignalMetadata, Errno> {
+            self.siginfo
+                .borrow()
+                .get(&pid)
+                .copied()
+                .ok_or(Errno::EINVAL)
+        }
+        fn request_stop(&self, _process: Pid, thread: Pid) -> Result<()> {
+            self.record(format!("request_stop {thread}"));
+            Ok(())
+        }
+        fn queued_trap(&self, pid: Pid) -> Result<bool> {
+            Ok(self.queued_traps.borrow().contains(&pid))
+        }
+        fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno> {
+            self.record(format!("read {pid} dr{index}"));
+            Ok(self.registers_of(pid)[index])
+        }
+        fn write_debug_register(
+            &self,
+            pid: Pid,
+            index: usize,
+            value: u64,
+        ) -> std::result::Result<(), Errno> {
+            self.record(format!("write {pid} dr{index}={value:#x}"));
+            let mut failures = self.failures.borrow_mut();
+            if let Some((skips, error)) = failures.get_mut(&(pid, index)) {
+                if *skips == 0 {
+                    let error = *error;
+                    failures.remove(&(pid, index));
+                    return Err(error);
+                }
+                *skips -= 1;
+            }
+            drop(failures);
+            if !self.discard_writes {
+                let mut registers = self.registers_of(pid);
+                registers[index] = value;
+                self.registers.borrow_mut().insert(pid, registers);
+            }
+            Ok(())
+        }
+        fn install_breakpoint(
+            &self,
+            _pid: Pid,
+            _sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+            _address: VirtualAddress,
+            _owner: BreakpointOwner,
+        ) -> Result<()> {
+            RecordingTrace::unexpected("install_breakpoint")
+        }
+        fn remove_breakpoint(
+            &self,
+            _pid: Pid,
+            sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+            address: VirtualAddress,
+        ) -> Result<()> {
+            self.record(format!("remove_site {address}"));
+            sites.get_mut(&address).expect("known site").installed = false;
+            Ok(())
+        }
+        fn reinstall_breakpoint(
+            &self,
+            _pid: Pid,
+            sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+            address: VirtualAddress,
+        ) -> Result<()> {
+            self.record(format!("reinstall_site {address}"));
+            sites.get_mut(&address).expect("known site").installed = true;
+            Ok(())
+        }
+    }
+
+    struct WatchHarness {
+        controller: Controller<DebugRegisterTrace>,
+        events: broadcast::Receiver<DebuggerEvent>,
+        threads: Vec<Pid>,
+    }
+
+    impl WatchHarness {
+        fn trace(&self) -> &DebugRegisterTrace {
+            &self.controller.ptrace
+        }
+
+        fn add(&mut self, address: u64, byte_size: u64) -> Result<Watchpoint> {
+            self.controller.add_watchpoint(
+                WatchpointSpec::Location {
+                    address: VirtualAddress::new(address),
+                    byte_size,
+                },
+                WatchAccess::Write,
+            )
+        }
+
+        fn thread(&mut self, pid: Pid) -> &mut TraceThread {
+            self.controller
+                .inferior
+                .as_mut()
+                .and_then(|inferior| inferior.threads.get_mut(&pid))
+                .expect("harness thread exists")
+        }
+
+        fn watch_events(&mut self) -> usize {
+            std::iter::from_fn(|| self.events.try_recv().ok())
+                .filter(|event| matches!(event, DebuggerEvent::WatchpointsChanged { .. }))
+                .count()
+        }
+
+        /// Marks every thread running inside a process-wide continue.
+        fn start_continue(&mut self) {
+            let inferior = self.controller.inferior.as_mut().expect("inferior");
+            inferior.public_stop = None;
+            inferior.active = Some(ActiveExecution {
+                id: ExecutionId::new(2),
+                kind: ActiveKind::Continue,
+                scope: ResumeScope::Process(process_id(inferior.tgid)),
+                resume_threads: inferior.threads.keys().copied().collect(),
+            });
+            for thread in inferior.threads.values_mut() {
+                thread.state = NativeThreadState::Running;
+                thread.reason = None;
+            }
+        }
+
+        /// Delivers the SIGSTOP each still-running thread was asked for. A
+        /// thread that stopped for another reason keeps its SIGSTOP pending.
+        fn settle_requested_stops(&mut self) {
+            let requested = self
+                .controller
+                .inferior
+                .as_ref()
+                .expect("inferior")
+                .threads
+                .iter()
+                .filter(|(_, thread)| {
+                    thread.debugger_stop_pending
+                        && matches!(thread.state, NativeThreadState::StopRequested { .. })
+                })
+                .map(|(&pid, _)| pid)
+                .collect::<Vec<_>>();
+            for pid in requested {
+                self.trace().siginfo.borrow_mut().insert(
+                    pid,
+                    SignalMetadata {
+                        code: libc::SI_TKILL,
+                        sender: Some(i32::try_from(std::process::id()).expect("pid fits")),
+                    },
+                );
+                self.controller
+                    .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGSTOP))
+                    .expect("debugger stop");
+            }
+        }
+
+        /// Reports a SIGTRAP with `code` while DR6 holds `status`.
+        fn trap(&mut self, pid: Pid, code: i32, status: u64) -> Result<()> {
+            let mut registers = self.trace().registers_of(pid);
+            registers[debug_registers::STATUS_REGISTER] = status;
+            self.trace().registers.borrow_mut().insert(pid, registers);
+            self.trace()
+                .siginfo
+                .borrow_mut()
+                .insert(pid, SignalMetadata { code, sender: None });
+            self.controller
+                .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
+        }
+
+        fn public_reason(&self) -> Option<StopReason> {
+            self.controller
+                .inferior
+                .as_ref()
+                .and_then(|inferior| inferior.public_stop.as_ref())
+                .map(|stop| stop.reason.clone())
+        }
+    }
+
+    fn watch_harness(thread_count: i32) -> WatchHarness {
+        let threads = (0..thread_count)
+            .map(|offset| Pid::from_raw(5000 + offset))
+            .collect::<Vec<_>>();
+        let image = virtual_step_image();
+        let (message_sender, messages) = mpsc::channel(8);
+        let (events, event_receiver) = broadcast::channel(256);
+        let mut controller = Controller::new(
+            SessionLease::detached(),
+            ExecutableSource {
+                display_path: Arc::new(PathBuf::from("/test/watch")),
+                data: sectionless_elf(),
+                identity: FileIdentity { inode: 0 },
+                process_start_time: None,
+            },
+            Arc::clone(&image),
+            Arc::new(UnusedUnwindInfo),
+            Arc::new(UnusedVariableInfo),
+            ControllerChannels {
+                messages,
+                message_sender,
+                events,
+            },
+            DebugRegisterTrace::default(),
+        );
+        let mut inferior = virtual_step_inferior(threads[0], &image, StopId::new(1));
+        for &pid in &threads[1..] {
+            inferior
+                .threads
+                .insert(pid, TraceThread::starting(ExpectedStop::None));
+        }
+        for thread in inferior.threads.values_mut() {
+            thread.state = NativeThreadState::Stopped;
+            thread.armed = Some(0);
+        }
+        controller.inferior = Some(inferior);
+        WatchHarness {
+            controller,
+            events: event_receiver,
+            threads,
+        }
+    }
+
+    #[test]
+    fn arming_programs_each_thread_disabled_first_and_verifies_it() {
+        let mut harness = watch_harness(3);
+        let watchpoint = harness.add(0x6006, 4).expect("arm watchpoint");
+        assert_eq!(
+            watchpoint.coverage.as_ref(),
+            [
+                AddressRange {
+                    start: VirtualAddress::new(0x6006),
+                    end: VirtualAddress::new(0x6008),
+                },
+                AddressRange {
+                    start: VirtualAddress::new(0x6008),
+                    end: VirtualAddress::new(0x600a),
+                },
+            ]
+        );
+        let control = 0x0055_0005;
+        let expected = harness
+            .threads
+            .iter()
+            .flat_map(|pid| {
+                [
+                    format!("write {pid} dr7=0x0"),
+                    format!("write {pid} dr0=0x6006"),
+                    format!("write {pid} dr1=0x6008"),
+                    format!("write {pid} dr7={control:#x}"),
+                    format!("read {pid} dr7"),
+                    format!("read {pid} dr0"),
+                    format!("read {pid} dr1"),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(harness.trace().take_actions(), expected);
+        assert_eq!(harness.watch_events(), 1);
+        for pid in harness.threads.clone() {
+            assert_eq!(harness.thread(pid).armed, Some(1));
+            assert_eq!(harness.trace().registers_of(pid)[7], control);
+        }
+    }
+
+    #[test]
+    fn a_failure_on_any_thread_restores_every_thread_and_publishes_nothing() {
+        for failing_thread in 0..3 {
+            let mut harness = watch_harness(3);
+            let first = harness.add(0x7000, 8).expect("arm first watchpoint");
+            let armed = harness
+                .threads
+                .iter()
+                .map(|&pid| harness.trace().registers_of(pid))
+                .collect::<Vec<_>>();
+            harness.watch_events();
+            let failing = harness.threads[failing_thread];
+            harness.trace().fail_after(failing, 1, 0, Errno::ENOSPC);
+
+            let result = harness.add(0x8000, 8);
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::WatchpointHardwareBusy { thread }) if thread == debug_thread_id(failing)
+                ),
+                "{result:?}"
+            );
+            for (index, &pid) in harness.threads.clone().iter().enumerate() {
+                assert_eq!(
+                    harness.trace().registers_of(pid)[7],
+                    armed[index][7],
+                    "thread {index} keeps only the first watchpoint"
+                );
+                assert_eq!(harness.thread(pid).armed, Some(1));
+            }
+            assert_eq!(harness.watch_events(), 0);
+            let inferior = harness.controller.inferior.as_ref().expect("inferior");
+            assert_eq!(
+                inferior
+                    .watch
+                    .watchpoints
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                [first.id]
+            );
+            assert_eq!(inferior.watch.generation, 1);
+        }
+    }
+
+    #[test]
+    fn a_failed_rollback_kills_the_inferior_and_reports_both_failures() {
+        let mut harness = watch_harness(2);
+        let [first, second] = harness.threads[..] else {
+            unreachable!("two threads");
+        };
+        // The second thread refuses its address; restoring the first thread
+        // then fails on its third control write, the rollback's disable.
+        harness.trace().fail_after(second, 0, 0, Errno::ENOSPC);
+        harness.trace().fail_after(first, 7, 2, Errno::EPERM);
+
+        let result = harness.add(0x9000, 8);
+        assert!(
+            matches!(
+                &result,
+                Err(Error::Backend(error)) if matches!(
+                    error.downcast_ref::<LinuxError>(),
+                    Some(LinuxError::WatchpointArmRecovery { .. })
+                )
+            ),
+            "{result:?}"
+        );
+        assert!(
+            harness
+                .trace()
+                .take_actions()
+                .contains(&format!("kill {first} SIGKILL")),
+            "an inferior with unknown debug registers is not left running"
+        );
+        assert_eq!(harness.watch_events(), 0);
+    }
+
+    #[test]
+    fn readback_mismatches_report_unavailable_hardware_and_arm_nothing() {
+        let mut harness = watch_harness(2);
+        harness.controller.ptrace.discard_writes = true;
+        let result = harness.add(0xa000, 8);
+        assert!(
+            matches!(result, Err(Error::HardwareWatchpointsUnavailable(_))),
+            "{result:?}"
+        );
+        assert_eq!(harness.watch_events(), 0);
+        assert!(
+            harness
+                .controller
+                .inferior
+                .as_ref()
+                .expect("inferior")
+                .watch
+                .watchpoints
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_exiting_thread_is_skipped_and_armed_when_execution_resumes() {
+        let mut harness = watch_harness(3);
+        let exiting = harness.threads[1];
+        harness.trace().fail_after(exiting, 7, 0, Errno::ESRCH);
+        harness
+            .add(0xb000, 8)
+            .expect("arm despite an exiting thread");
+        assert_eq!(harness.thread(exiting).armed, Some(0));
+        assert_eq!(harness.thread(harness.threads[0]).armed, Some(1));
+        assert_eq!(harness.thread(harness.threads[2]).armed, Some(1));
+
+        // A thread that is still present is programmed before anything runs.
+        harness.trace().take_actions();
+        harness
+            .controller
+            .sync_debug_registers()
+            .expect("sync stale thread");
+        let actions = harness.trace().take_actions();
+        assert!(
+            actions
+                .iter()
+                .all(|action| action.contains(&exiting.to_string()))
+        );
+        assert_eq!(harness.thread(exiting).armed, Some(1));
+    }
+
+    #[test]
+    fn new_threads_are_armed_before_they_first_run() {
+        let mut harness = watch_harness(1);
+        harness.add(0xc000, 8).expect("arm");
+        harness.start_continue();
+        let child = Pid::from_raw(6000);
+        {
+            let inferior = harness.controller.inferior.as_mut().expect("inferior");
+            inferior
+                .threads
+                .insert(child, TraceThread::starting(ExpectedStop::None));
+            inferior
+                .active
+                .as_mut()
+                .expect("continue")
+                .resume_threads
+                .insert(child);
+        }
+        harness.trace().take_actions();
+        harness
+            .controller
+            .process_wait(WaitStatus::Stopped(child, NixSignal::SIGSTOP))
+            .expect("thread start");
+        let actions = harness.trace().take_actions();
+        let armed = actions
+            .iter()
+            .position(|action| action == &format!("write {child} dr7=0x90001"))
+            .expect("the child was armed");
+        let resumed = actions
+            .iter()
+            .position(|action| action == &format!("continue {child} None"))
+            .expect("the child was resumed");
+        assert!(armed < resumed, "{actions:?}");
+        assert_eq!(harness.thread(child).armed, Some(1));
+    }
+
+    #[test]
+    fn a_new_thread_that_cannot_be_armed_never_runs() {
+        let mut harness = watch_harness(1);
+        harness.add(0xc000, 8).expect("arm");
+        harness.start_continue();
+        let child = Pid::from_raw(6000);
+        harness
+            .controller
+            .inferior
+            .as_mut()
+            .expect("inferior")
+            .threads
+            .insert(child, TraceThread::starting(ExpectedStop::None));
+        harness.trace().fail_after(child, 0, 0, Errno::ENOSPC);
+        harness.trace().take_actions();
+        harness
+            .controller
+            .process_wait(WaitStatus::Stopped(child, NixSignal::SIGSTOP))
+            .expect("thread start");
+        harness.settle_requested_stops();
+
+        let reason = harness.public_reason().expect("a public stop");
+        assert!(
+            matches!(
+                &reason,
+                StopReason::WatchpointArmFailed { thread_id, .. } if *thread_id == debug_thread_id(child)
+            ),
+            "{reason:?}"
+        );
+        let actions = harness.trace().take_actions();
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action.starts_with(&format!("continue {child}"))),
+            "{actions:?}"
+        );
+
+        // Resuming retries the arming and refuses to run while it fails.
+        harness.trace().fail_after(child, 0, 0, Errno::ENOSPC);
+        let stop = harness
+            .controller
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.public_stop.as_ref())
+            .expect("stop")
+            .id;
+        let tgid = harness.threads[0];
+        let result = harness.controller.begin_execution(
+            process_id(tgid),
+            stop,
+            ResumeScope::Process(process_id(tgid)),
+            ActiveKind::Continue,
+            ExceptionDisposition::Pass,
+        );
+        assert!(
+            matches!(result, Err(Error::WatchpointHardwareBusy { thread }) if thread == debug_thread_id(child)),
+            "{result:?}"
+        );
+        assert!(
+            !harness
+                .trace()
+                .take_actions()
+                .iter()
+                .any(|action| action.starts_with("continue")),
+        );
+    }
+
+    #[test]
+    fn hits_are_attributed_from_dr6_without_rewinding_the_pc() {
+        let mut harness = watch_harness(1);
+        let pid = harness.threads[0];
+        let first = harness.add(0xd000, 8).expect("first");
+        let second = harness.add(0xd008, 8).expect("second");
+        // An installed site just before the reported PC must not turn the
+        // hardware trap into an int3.
+        harness
+            .trace()
+            .program_counters
+            .borrow_mut()
+            .insert(pid, 0x41);
+        harness
+            .controller
+            .inferior
+            .as_mut()
+            .expect("inferior")
+            .breakpoints
+            .insert(
+                VirtualAddress::new(0x40),
+                BreakpointSite {
+                    original_byte: 0x90,
+                    installed: true,
+                    owners: BTreeSet::from([BreakpointOwner::User(BreakpointId::new(1))]),
+                },
+            );
+        harness.start_continue();
+        harness.trace().take_actions();
+        harness
+            .trap(
+                pid,
+                TRAP_HARDWARE_BREAKPOINT,
+                debug_registers::STATUS_IDLE | 0b11,
+            )
+            .expect("watch trap");
+
+        let StopReason::Watchpoint { hits } = harness.public_reason().expect("stop") else {
+            panic!("expected a watchpoint stop");
+        };
+        assert_eq!(
+            hits.iter().map(|hit| hit.watchpoint).collect::<Vec<_>>(),
+            [first.id, second.id]
+        );
+        let actions = harness.trace().take_actions();
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action.starts_with("set_registers"))
+        );
+        let read = actions
+            .iter()
+            .position(|action| action == &format!("read {pid} dr6"))
+            .expect("DR6 was read");
+        assert_eq!(
+            actions[read + 1],
+            format!("write {pid} dr6={:#x}", debug_registers::STATUS_IDLE),
+            "DR6 is cleared once consumed"
+        );
+    }
+
+    #[test]
+    fn stale_status_is_never_consulted_outside_debug_exceptions() {
+        let mut harness = watch_harness(1);
+        let pid = harness.threads[0];
+        harness.add(0xd000, 8).expect("arm");
+        harness
+            .trace()
+            .program_counters
+            .borrow_mut()
+            .insert(pid, 0x41);
+        harness
+            .controller
+            .inferior
+            .as_mut()
+            .expect("inferior")
+            .breakpoints
+            .insert(
+                VirtualAddress::new(0x40),
+                BreakpointSite {
+                    original_byte: 0x90,
+                    installed: true,
+                    owners: BTreeSet::from([BreakpointOwner::User(BreakpointId::new(1))]),
+                },
+            );
+        harness.start_continue();
+        harness.trace().take_actions();
+        // An int3 stop while DR6 still records an earlier hit.
+        harness
+            .trap(pid, libc::SI_KERNEL, debug_registers::STATUS_IDLE | 0b1)
+            .expect("int3");
+        assert_eq!(
+            harness.public_reason(),
+            Some(StopReason::Breakpoint {
+                address: VirtualAddress::new(0x40)
+            })
+        );
+        assert!(
+            !harness
+                .trace()
+                .take_actions()
+                .iter()
+                .any(|action| action.contains("dr6")),
+            "DR6 is not read at an int3 stop"
+        );
+    }
+
+    #[test]
+    fn a_hit_in_an_unowned_slot_is_unclassifiable() {
+        let mut harness = watch_harness(1);
+        let pid = harness.threads[0];
+        harness.add(0xd000, 8).expect("arm");
+        harness.start_continue();
+        harness
+            .trap(
+                pid,
+                TRAP_HARDWARE_BREAKPOINT,
+                debug_registers::STATUS_IDLE | 0b100,
+            )
+            .expect("foreign trap");
+        assert!(matches!(
+            harness.public_reason(),
+            Some(StopReason::Unclassifiable { description }) if description.contains("no watchpoint owns")
+        ));
+
+        let mut harness = watch_harness(1);
+        let pid = harness.threads[0];
+        harness.start_continue();
+        harness
+            .trap(pid, TRAP_HARDWARE_BREAKPOINT, debug_registers::STATUS_IDLE)
+            .expect("trap without a slot");
+        assert!(matches!(
+            harness.public_reason(),
+            Some(StopReason::Unclassifiable { .. })
+        ));
+    }
+
+    #[test]
+    fn a_hit_while_stepping_over_a_breakpoint_completes_the_repair_and_stops() {
+        let mut harness = watch_harness(1);
+        let pid = harness.threads[0];
+        let watchpoint = harness.add(0xe000, 8).expect("arm");
+        let site = VirtualAddress::new(0x40);
+        {
+            let inferior = harness.controller.inferior.as_mut().expect("inferior");
+            inferior.breakpoints.insert(
+                site,
+                BreakpointSite {
+                    original_byte: 0x90,
+                    installed: false,
+                    owners: BTreeSet::from([BreakpointOwner::User(BreakpointId::new(1))]),
+                },
+            );
+            inferior.repairs = VecDeque::from([RepairGroup {
+                address: site,
+                remaining: VecDeque::new(),
+                current: Some(pid),
+                site_removed: true,
+            }]);
+        }
+        harness.start_continue();
+        harness.thread(pid).expected = ExpectedStop::BreakpointRepair { address: site };
+        harness.trace().take_actions();
+        harness
+            .trap(
+                pid,
+                libc::TRAP_TRACE,
+                debug_registers::STATUS_IDLE | 1 << 14 | 0b1,
+            )
+            .expect("watched repair step");
+
+        let StopReason::Watchpoint { hits } = harness.public_reason().expect("stop") else {
+            panic!("expected the repair step's hit");
+        };
+        assert_eq!(hits[0].watchpoint, watchpoint.id);
+        let inferior = harness.controller.inferior.as_ref().expect("inferior");
+        assert!(inferior.repairs.is_empty());
+        assert!(
+            inferior.breakpoints[&site].installed,
+            "the site is restored"
+        );
+        assert_eq!(inferior.threads[&pid].stopped_at_breakpoint, None);
+    }
+
+    #[test]
+    fn detaching_disarms_every_thread_first_and_never_redelivers_a_watch_trap() {
+        let mut harness = watch_harness(2);
+        harness.add(0xf000, 8).expect("arm");
+        {
+            let inferior = harness.controller.inferior.as_mut().expect("inferior");
+            inferior.origin = InferiorOrigin::Attached;
+        }
+        harness.start_continue();
+        // One thread reports a watch trap while the detach interrupts it.
+        let (reply, result) = tokio::sync::oneshot::channel();
+        harness.controller.begin_shutdown(Some(reply));
+        let [first, second] = harness.threads[..] else {
+            unreachable!("two threads");
+        };
+        let mut registers = harness.trace().registers_of(first);
+        registers[debug_registers::STATUS_REGISTER] = debug_registers::STATUS_IDLE | 0b1;
+        harness
+            .trace()
+            .registers
+            .borrow_mut()
+            .insert(first, registers);
+        harness.trace().siginfo.borrow_mut().insert(
+            first,
+            SignalMetadata {
+                code: TRAP_HARDWARE_BREAKPOINT,
+                sender: None,
+            },
+        );
+        assert!(
+            harness
+                .controller
+                .handle_detach_wait(WaitStatus::Stopped(first, NixSignal::SIGTRAP))
+        );
+        harness.trace().take_actions();
+        assert!(
+            !harness
+                .controller
+                .handle_detach_wait(WaitStatus::PtraceEvent(
+                    second,
+                    NixSignal::SIGTRAP,
+                    libc::PTRACE_EVENT_STOP
+                ))
+        );
+        result
+            .blocking_recv()
+            .expect("shutdown reply")
+            .expect("detached");
+
+        let actions = harness.trace().take_actions();
+        let first_detach = actions
+            .iter()
+            .position(|action| action.starts_with("detach"))
+            .expect("threads were detached");
+        for pid in [first, second] {
+            let disarm = actions
+                .iter()
+                .position(|action| action == &format!("write {pid} dr7=0x0"))
+                .expect("every thread is disarmed");
+            assert!(disarm < first_detach, "{actions:?}");
+            assert!(
+                actions.contains(&format!("detach {pid} None")),
+                "no signal is delivered on detach: {actions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_attached_stop_collects_traps_queued_behind_its_interrupt() {
+        let mut harness = watch_harness(2);
+        let watchpoint = harness.add(0x1_0000, 8).expect("arm");
+        let [first, second] = harness.threads[..] else {
+            unreachable!("two threads");
+        };
+        harness
+            .controller
+            .inferior
+            .as_mut()
+            .expect("inferior")
+            .origin = InferiorOrigin::Attached;
+        harness.start_continue();
+        harness.trace().queued_traps.borrow_mut().insert(second);
+        harness.trace().take_actions();
+
+        // The first thread hits; the second is interrupted with its own hit
+        // still queued.
+        harness
+            .trap(
+                first,
+                TRAP_HARDWARE_BREAKPOINT,
+                debug_registers::STATUS_IDLE | 1,
+            )
+            .expect("first hit");
+        assert!(
+            harness
+                .trace()
+                .take_actions()
+                .contains(&format!("interrupt {second}"))
+        );
+        harness
+            .controller
+            .process_wait(WaitStatus::PtraceEvent(
+                second,
+                NixSignal::SIGTRAP,
+                libc::PTRACE_EVENT_STOP,
+            ))
+            .expect("interrupt stop");
+        assert_eq!(
+            harness.public_reason(),
+            None,
+            "the queued trap is collected first"
+        );
+        assert_eq!(
+            harness.trace().take_actions(),
+            [format!("continue {second} None")]
+        );
+
+        harness.trace().queued_traps.borrow_mut().clear();
+        harness
+            .trap(
+                second,
+                TRAP_HARDWARE_BREAKPOINT,
+                debug_registers::STATUS_IDLE | 1,
+            )
+            .expect("queued hit");
+        assert!(matches!(
+            harness.public_reason(),
+            Some(StopReason::Watchpoint { ref hits }) if hits[0].watchpoint == watchpoint.id
+        ));
+        let inferior = harness.controller.inferior.as_ref().expect("inferior");
+        for pid in [first, second] {
+            assert!(matches!(
+                inferior.threads[&pid].reason,
+                Some(StopReason::Watchpoint { ref hits }) if hits[0].thread == debug_thread_id(pid)
+            ));
+        }
+    }
+
+    #[test]
+    fn detaching_collects_queued_traps_before_releasing_the_process() {
+        let mut harness = watch_harness(1);
+        harness.add(0x1_0000, 8).expect("arm");
+        let pid = harness.threads[0];
+        harness
+            .controller
+            .inferior
+            .as_mut()
+            .expect("inferior")
+            .origin = InferiorOrigin::Attached;
+        harness.trace().queued_traps.borrow_mut().insert(pid);
+        harness.trace().take_actions();
+
+        let (reply, result) = tokio::sync::oneshot::channel();
+        harness.controller.begin_shutdown(Some(reply));
+        assert_eq!(
+            harness.trace().take_actions(),
+            [format!("continue {pid} None")],
+            "detaching waits for the queued trap"
+        );
+
+        harness.trace().queued_traps.borrow_mut().clear();
+        let mut registers = harness.trace().registers_of(pid);
+        registers[debug_registers::STATUS_REGISTER] = debug_registers::STATUS_IDLE | 1;
+        harness
+            .trace()
+            .registers
+            .borrow_mut()
+            .insert(pid, registers);
+        harness.trace().siginfo.borrow_mut().insert(
+            pid,
+            SignalMetadata {
+                code: TRAP_HARDWARE_BREAKPOINT,
+                sender: None,
+            },
+        );
+        assert!(
+            !harness
+                .controller
+                .handle_detach_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
+        );
+        result
+            .blocking_recv()
+            .expect("shutdown reply")
+            .expect("detached");
+        let actions = harness.trace().take_actions();
+        assert!(
+            actions.contains(&format!("detach {pid} None")),
+            "the collected trap is not delivered: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn continuing_tolerates_threads_killed_by_a_siblings_exit() {
+        let mut harness = watch_harness(3);
+        let [first, second, third] = harness.threads[..] else {
+            unreachable!("three threads");
+        };
+        // The first thread runs exit_group as soon as it resumes, killing
+        // its siblings out of their stops.
+        harness
+            .trace()
+            .vanished
+            .borrow_mut()
+            .extend([second, third]);
+        let stop = harness
+            .controller
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.public_stop.as_ref())
+            .expect("stop")
+            .id;
+        harness
+            .controller
+            .begin_execution(
+                process_id(first),
+                stop,
+                ResumeScope::Process(process_id(first)),
+                ActiveKind::Continue,
+                ExceptionDisposition::Pass,
+            )
+            .expect("the continue succeeds");
+        assert_eq!(harness.thread(first).state, NativeThreadState::Running);
+        for pid in [second, third] {
+            assert_eq!(harness.thread(pid).state, NativeThreadState::Exiting);
+        }
+
+        // Their exits retire them, and the process exit ends the session.
+        for pid in [second, third, first] {
+            harness
+                .controller
+                .process_wait(WaitStatus::Exited(pid, 0))
+                .expect("exit");
+        }
+        assert!(harness.controller.inferior.is_none());
+    }
+
+    #[test]
+    fn a_hit_during_a_pause_outranks_the_pause() {
+        let mut harness = watch_harness(2);
+        let watchpoint = harness.add(0x1_1000, 8).expect("arm");
+        let [first, second] = harness.threads[..] else {
+            unreachable!("two threads");
+        };
+        harness.start_continue();
+        harness
+            .controller
+            .begin_pause(process_id(first))
+            .expect("pause");
+        // The first thread hits before its requested stop is delivered.
+        harness
+            .trap(
+                first,
+                TRAP_HARDWARE_BREAKPOINT,
+                debug_registers::STATUS_IDLE | 1,
+            )
+            .expect("hit during pause");
+        assert_eq!(
+            harness.public_reason(),
+            None,
+            "the second thread is running"
+        );
+        harness.settle_requested_stops();
+        let Some(StopReason::Watchpoint { hits }) = harness.public_reason() else {
+            panic!("the hit outranks the pause: {:?}", harness.public_reason());
+        };
+        assert_eq!(hits[0].watchpoint, watchpoint.id);
+        assert_eq!(hits[0].thread, debug_thread_id(first));
+        let inferior = harness.controller.inferior.as_ref().expect("inferior");
+        assert_eq!(inferior.threads[&second].reason, None);
+        assert!(
+            inferior.threads[&first].debugger_stop_pending,
+            "the first thread's requested stop is still outstanding"
+        );
+    }
+
+    #[test]
+    fn a_seized_thread_whose_start_precedes_its_clone_event_is_armed_before_running() {
+        let mut harness = watch_harness(1);
+        harness.add(0x1_2000, 8).expect("arm");
+        let parent = harness.threads[0];
+        harness
+            .controller
+            .inferior
+            .as_mut()
+            .expect("inferior")
+            .origin = InferiorOrigin::Attached;
+        harness.start_continue();
+        let child = Pid::from_raw(6100);
+        *harness.trace().clone.borrow_mut() = Some((child, parent));
+        harness.trace().take_actions();
+
+        // The child's first stop arrives before the debugger knows it exists.
+        harness
+            .controller
+            .process_wait(WaitStatus::PtraceEvent(
+                child,
+                NixSignal::SIGTRAP,
+                libc::PTRACE_EVENT_STOP,
+            ))
+            .expect("early child stop is retained");
+        assert!(harness.trace().take_actions().is_empty());
+        harness
+            .controller
+            .process_wait(WaitStatus::PtraceEvent(
+                parent,
+                NixSignal::SIGTRAP,
+                libc::PTRACE_EVENT_CLONE,
+            ))
+            .expect("clone event");
+
+        let actions = harness.trace().take_actions();
+        let armed = actions
+            .iter()
+            .position(|action| action == &format!("write {child} dr7=0x90001"))
+            .expect("the child was armed");
+        let resumed = actions
+            .iter()
+            .position(|action| action == &format!("continue {child} None"))
+            .expect("the child was resumed");
+        assert!(armed < resumed, "{actions:?}");
+        assert_eq!(harness.public_reason(), None, "no unclassifiable stop");
     }
 }

@@ -285,6 +285,8 @@ impl Scenario {
         let revision = match event {
             DebuggerEvent::StateChanged { revision }
             | DebuggerEvent::BreakpointsChanged { revision }
+            | DebuggerEvent::WatchpointsChanged { revision }
+            | DebuggerEvent::WatchpointsInvalidated { revision, .. }
             | DebuggerEvent::InferiorLaunched { revision, .. }
             | DebuggerEvent::InferiorAttached { revision, .. }
             | DebuggerEvent::InferiorContinued { revision, .. }

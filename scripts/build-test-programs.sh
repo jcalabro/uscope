@@ -229,6 +229,29 @@ require_tail_jump() {
     record_validation "$stamp" "$signature"
 }
 
+# Fails the build when a function no longer contains an instruction a test
+# depends on, such as a repeated string store or a 16-byte vector store.
+require_instruction() {
+    local output="$1"
+    local function="$2"
+    local pattern="$3"
+    local key=${pattern//[^a-zA-Z0-9]/_}
+    local stamp="${output}.validation-instruction-${function}-${key}"
+    local signature="validator=instruction-v1"$'\n'"function=${function}"$'\n'"pattern=${pattern}"
+    if validation_is_cached "$output" "$stamp" "$signature"; then
+        return
+    fi
+    # grep reads all input; see require_tail_jump.
+    if ! objdump -d --no-show-raw-insn "$output" \
+        | sed -n "/<${function}>:/,/^\$/p" \
+        | grep -E "$pattern" >/dev/null; then
+        printf 'error: %s function %s does not contain %s\n' \
+            "$output" "$function" "$pattern" >&2
+        exit 1
+    fi
+    record_validation "$stamp" "$signature"
+}
+
 # Fails the build when a fixture's DWARF stops exercising the operation a test
 # depends on, instead of letting the test pass without its coverage.
 require_dwarf_operation() {
@@ -637,6 +660,45 @@ build_fixture gcc "$c_fixtures_dir/inline-threads.c" "$output_dir/inline-threads
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread
 build_fixture clang "$c_fixtures_dir/inline-threads.c" "$output_dir/inline-threads-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread
+
+for variant in "gcc-o0 gcc -O0 -fno-omit-frame-pointer -fPIE -pie" \
+    "clang-o2 clang -O2 -fomit-frame-pointer -fPIE -pie" \
+    "gcc-o2-nopie gcc -O2 -fomit-frame-pointer -no-pie"; do
+    read -r name compiler flags <<<"$variant"
+    # shellcheck disable=SC2086
+    build_fixture "$compiler" "$c_fixtures_dir/watch.c" "$output_dir/watch-${name}" \
+        -g3 -gdwarf-5 $flags
+    require_instruction "$output_dir/watch-${name}" repeated_store 'rep stos'
+    require_instruction "$output_dir/watch-${name}" paired_store 'movdqu'
+    require_instruction "$output_dir/watch-${name}" failed_exchange 'lock cmpxchg'
+done
+build_fixture gcc "$c_fixtures_dir/watch-threads.c" "$output_dir/watch-threads" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/watch-locals.c" "$output_dir/watch-locals-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
+build_fixture clang "$c_fixtures_dir/watch-locals.c" "$output_dir/watch-locals-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
+require_tail_jump "$output_dir/watch-locals-gcc-o0" tail_caller tail_callee
+require_tail_jump "$output_dir/watch-locals-clang-o0" tail_caller tail_callee
+build_fixture gcc "$c_fixtures_dir/watch-slot-thief.c" "$output_dir/watch-slot-thief-main" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -pthread -DSTOLEN_SLOTS=3
+build_fixture gcc "$c_fixtures_dir/watch-slot-thief.c" "$output_dir/watch-slot-thief-worker" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -pthread -DSTOLEN_SLOTS=4 -DSTOLEN_BY_WORKER
+build_fixture gcc "$c_fixtures_dir/watch-attach.c" "$output_dir/watch-attach" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/watch-orphaner.c" "$output_dir/watch-orphaner" -O0 -g
+build_rust_fixture "$rust_fixtures_dir/watch.rs" "$output_dir/watch-rust-o0" \
+    -C opt-level=0 -C force-frame-pointers=yes
+build_rust_fixture "$rust_fixtures_dir/watch.rs" "$output_dir/watch-rust-o2" \
+    -C opt-level=2 -C force-frame-pointers=no
+build_zig_fixture "$zig_fixtures_dir/watch.zig" "$output_dir/watch-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/watch.zig" "$output_dir/watch-zig-o2" \
+    -O ReleaseFast -fPIE -fomit-frame-pointer
+build_go_fixture "$go_fixtures_dir/watch" "$output_dir/watch-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/watch" "$output_dir/watch-go-o2" \
+    -buildmode=pie
 
 build_shared_fixture gcc "$c_fixtures_dir/crash/library.c" "$output_dir/libcrash.so" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -Wl,--build-id

@@ -20,7 +20,8 @@ use uscope::{
     CoreDumpOptions, CoreModuleState, Debugger, DebuggerHandle, Error, ExitStatus, FloatValue,
     LineNumber, ModuleIdentity, RegisterSnapshot, ScalarValue, SourceContext, StateSnapshot,
     StepKind, StopReason, ThreadId, ThreadState, Variable, VariableSnapshot, VariableState,
-    VirtualAddress,
+    VirtualAddress, WatchAccess, WatchScope, Watchpoint, WatchpointHit, WatchpointId,
+    WatchpointSpec,
 };
 
 mod terminal;
@@ -93,6 +94,11 @@ enum Command {
     Breakpoints,
     Info,
     Delete,
+    Watch,
+    AccessWatch,
+    ReadWatch,
+    Watchpoints,
+    Unwatch,
     Run,
     Continue,
     Pause,
@@ -140,7 +146,7 @@ const COMMANDS: &[CommandSpec] = &[
         Info,
         "info",
         [],
-        "info breakpoints|core",
+        "info breakpoints|watchpoints|core",
         "Show debugger information"
     ),
     command!(
@@ -149,6 +155,41 @@ const COMMANDS: &[CommandSpec] = &[
         ["del", "d"],
         "delete <id|all>",
         "Delete logical breakpoints"
+    ),
+    command!(
+        Watch,
+        "watch",
+        [],
+        "watch <value-path|address:byte-count>",
+        "Stop when watched memory is written"
+    ),
+    command!(
+        AccessWatch,
+        "awatch",
+        [],
+        "awatch <value-path|address:byte-count>",
+        "Stop when watched memory is read or written"
+    ),
+    command!(
+        ReadWatch,
+        "rwatch",
+        [],
+        "rwatch <value-path|address:byte-count>",
+        "Stop when watched memory is read"
+    ),
+    command!(
+        Watchpoints,
+        "watchpoints",
+        [],
+        "watchpoints",
+        "List armed watchpoints"
+    ),
+    command!(
+        Unwatch,
+        "unwatch",
+        [],
+        "unwatch <id|all>",
+        "Delete watchpoints"
     ),
     command!(Run, "run", ["r"], "run", "Launch the inferior"),
     command!(
@@ -876,6 +917,7 @@ async fn execute(
         Command::Breakpoints => execute_list_breakpoints(debugger, renderer).await,
         Command::Info => match one_argument(&mut words, spec.usage)? {
             "breakpoints" | "break" => execute_list_breakpoints(debugger, renderer).await,
+            "watchpoints" | "watch" => execute_list_watchpoints(debugger, renderer).await,
             "core" => debugger
                 .core_dump()
                 .map(|core| Control::Continue(format_core_dump(core, renderer)))
@@ -885,6 +927,20 @@ async fn execute(
         Command::Delete => {
             let argument = one_argument(&mut words, spec.usage)?;
             execute_delete_breakpoint(debugger, argument, spec.usage, renderer).await
+        }
+        Command::Watch | Command::AccessWatch | Command::ReadWatch => {
+            let access = match spec.command {
+                Command::Watch => WatchAccess::Write,
+                Command::AccessWatch => WatchAccess::ReadWrite,
+                _ => WatchAccess::Read,
+            };
+            let argument = one_argument(&mut words, spec.usage)?;
+            execute_watch(debugger, argument, access, spec.usage, renderer).await
+        }
+        Command::Watchpoints => execute_list_watchpoints(debugger, renderer).await,
+        Command::Unwatch => {
+            let argument = one_argument(&mut words, spec.usage)?;
+            execute_unwatch(debugger, argument, spec.usage, renderer).await
         }
         Command::Run => Ok(Control::Continue(
             format_stop_with_source(debugger, debugger.run().await?, renderer).await,
@@ -1312,6 +1368,339 @@ async fn execute_delete_breakpoint(
         renderer.paint(Role::Success, "deleted"),
         renderer.paint(Role::Metadata, removed.id)
     )))
+}
+
+async fn execute_watch(
+    debugger: &DebuggerHandle,
+    argument: &str,
+    access: WatchAccess,
+    usage: &str,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
+    if !debugger.watchpoint_capabilities().access.contains(&access) {
+        return Err(Error::UnsupportedWatchAccess(access));
+    }
+    let watchpoint = if let Some(spec) = parse_watch_location(argument, usage)? {
+        debugger.add_watchpoint(spec, access).await?
+    } else {
+        let parsed = parse_value_expression(argument, usage)?;
+        if parsed.range.is_some() {
+            return Err(Error::InvalidCommand(usage.to_owned()));
+        }
+        debugger.watch(parsed.expression, access).await?
+    };
+    Ok(Control::Continue(format!(
+        "{} {} set on {}: {} byte{} at {} using {} hardware slot{}{}",
+        renderer.paint(Role::Success, "watchpoint"),
+        renderer.paint(Role::Metadata, watchpoint.id),
+        renderer.paint(Role::Name, format_watch_subject(&watchpoint)),
+        watchpoint.byte_size,
+        if watchpoint.byte_size == 1 { "" } else { "s" },
+        renderer.paint(Role::Metadata, watchpoint.address),
+        watchpoint.coverage.len(),
+        if watchpoint.coverage.len() == 1 {
+            ""
+        } else {
+            "s"
+        },
+        format_watch_scope_suffix(&watchpoint.scope),
+    )))
+}
+
+/// Parses `address:byte-count`; anything else is a value expression.
+fn parse_watch_location(argument: &str, usage: &str) -> uscope::Result<Option<WatchpointSpec>> {
+    let Some((address, byte_count)) = argument.split_once(':') else {
+        return Ok(None);
+    };
+    let address = parse_address(address).map_err(|_| Error::InvalidCommand(usage.to_owned()))?;
+    let byte_size = byte_count
+        .parse::<u64>()
+        .map_err(|_| Error::InvalidCommand(usage.to_owned()))?;
+    Ok(Some(WatchpointSpec::Location {
+        address: VirtualAddress::new(address),
+        byte_size,
+    }))
+}
+
+async fn execute_list_watchpoints(
+    debugger: &DebuggerHandle,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
+    let snapshot = debugger.snapshot().await?;
+    if snapshot.watchpoints.is_empty() {
+        return Ok(Control::Continue(
+            renderer.paint(Role::Metadata, "no watchpoints").to_string(),
+        ));
+    }
+    let mut output = String::new();
+    for (index, watchpoint) in snapshot.watchpoints.iter().enumerate() {
+        if index != 0 {
+            output.push('\n');
+        }
+        write!(
+            output,
+            "{}  {}  {}  {} byte{} at {}{}",
+            renderer.paint(Role::Metadata, watchpoint.id),
+            watchpoint.access,
+            renderer.paint(Role::Name, format_watch_subject(watchpoint)),
+            watchpoint.byte_size,
+            if watchpoint.byte_size == 1 { "" } else { "s" },
+            renderer.paint(Role::Metadata, watchpoint.address),
+            format_watch_scope_suffix(&watchpoint.scope),
+        )
+        .expect("writing to a String cannot fail");
+    }
+    Ok(Control::Continue(output))
+}
+
+async fn execute_unwatch(
+    debugger: &DebuggerHandle,
+    argument: &str,
+    usage: &str,
+    renderer: Renderer,
+) -> uscope::Result<Control> {
+    if argument == "all" {
+        let removed = debugger.remove_all_watchpoints().await?;
+        return Ok(Control::Continue(format!(
+            "{} {} watchpoint{}",
+            renderer.paint(Role::Success, "deleted"),
+            removed.len(),
+            if removed.len() == 1 { "" } else { "s" }
+        )));
+    }
+    let id = argument
+        .parse::<u64>()
+        .map_err(|_| Error::InvalidCommand(usage.to_owned()))?;
+    let removed = debugger.remove_watchpoint(WatchpointId::new(id)).await?;
+    Ok(Control::Continue(format!(
+        "{} watchpoint {}",
+        renderer.paint(Role::Success, "deleted"),
+        renderer.paint(Role::Metadata, removed.id)
+    )))
+}
+
+fn format_watch_subject(watchpoint: &Watchpoint) -> String {
+    watchpoint.expression.as_ref().map_or_else(
+        || format!("{}:{}", watchpoint.address, watchpoint.byte_size),
+        format_value_expression,
+    )
+}
+
+fn format_value_expression(expression: &uscope::ValueExpression) -> String {
+    let mut output = String::new();
+    for step in expression.steps.iter() {
+        match step {
+            uscope::ValuePathStep::Named(name) => {
+                if !output.is_empty() && !output.ends_with('*') {
+                    output.push('.');
+                }
+                output.push_str(name);
+            }
+            uscope::ValuePathStep::Index(index) => {
+                write!(output, "[{index}]").expect("writing to a String cannot fail");
+            }
+            uscope::ValuePathStep::Dereference => output = format!("(*{output})"),
+            _ => output.push_str("<?>"),
+        }
+    }
+    output
+}
+
+fn format_watch_scope_suffix(scope: &WatchScope) -> String {
+    match scope {
+        WatchScope::Location | WatchScope::Static { .. } => String::new(),
+        WatchScope::ThreadLocal { thread } => format!(" (thread {thread}'s instance)"),
+        WatchScope::Frame { thread, activation } => {
+            format!(" (frame {activation} of thread {thread})")
+        }
+    }
+}
+
+/// Summarizes a watchpoint stop on one line, without watched values.
+fn format_watch_stop(reason: StopReason, renderer: Renderer) -> String {
+    match reason {
+        StopReason::Watchpoint { hits } => format!(
+            "{} by watchpoint {}",
+            renderer.paint(Role::Current, "stopped"),
+            renderer.paint(
+                Role::Metadata,
+                hits.iter()
+                    .map(|hit| hit.watchpoint.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        ),
+        StopReason::WatchpointInvalidated { invalidated } => {
+            format_watchpoint_invalidations(&invalidated, renderer)
+        }
+        StopReason::WatchpointArmFailed {
+            thread_id,
+            description,
+        } => format!(
+            "{} new thread {} before it ran: watchpoints could not be armed: {description}",
+            renderer.paint(Role::Error, "stopped"),
+            renderer.paint(Role::Metadata, thread_id)
+        ),
+        _ => unreachable!("only watchpoint stops are formatted here"),
+    }
+}
+
+fn format_watchpoint_invalidations(
+    invalidated: &[uscope::InvalidatedWatchpoint],
+    renderer: Renderer,
+) -> String {
+    invalidated
+        .iter()
+        .map(|entry| {
+            format!(
+                "{} {} {}: {}",
+                renderer.paint(Role::Warning, "deleted"),
+                renderer.paint(
+                    Role::Metadata,
+                    format!("watchpoint {}", entry.watchpoint.id)
+                ),
+                renderer.paint(Role::Name, format_watch_subject(&entry.watchpoint)),
+                match entry.reason {
+                    uscope::WatchpointInvalidation::ScopeExited => {
+                        "its frame or block is no longer active"
+                    }
+                    uscope::WatchpointInvalidation::OwnerThreadExited => {
+                        "the thread owning it exited"
+                    }
+                    uscope::WatchpointInvalidation::ModuleUnloaded => {
+                        "the module owning it was unloaded"
+                    }
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_watchpoint_hits(
+    hits: &[WatchpointHit],
+    watchpoints: &[Watchpoint],
+    image: Option<&uscope::ModuleImage>,
+    renderer: Renderer,
+) -> String {
+    let mut output = String::new();
+    for (index, hit) in hits.iter().enumerate() {
+        if index != 0 {
+            output.push('\n');
+        }
+        let watchpoint = watchpoints
+            .iter()
+            .find(|watchpoint| watchpoint.id == hit.watchpoint);
+        write!(
+            output,
+            "{} by {}{} in thread {}",
+            renderer.paint(Role::Current, "stopped"),
+            renderer.paint(Role::Metadata, format!("watchpoint {}", hit.watchpoint)),
+            watchpoint.map_or_else(String::new, |watchpoint| format!(
+                " ({}) on {}",
+                watchpoint.access,
+                renderer.paint(Role::Name, format_watch_subject(watchpoint))
+            )),
+            renderer.paint(Role::Metadata, hit.thread),
+        )
+        .expect("writing to a String cannot fail");
+        let type_info = watchpoint.and_then(|watchpoint| watchpoint.type_info.as_ref());
+        let old = format_watched_bytes(hit.previous.as_deref(), type_info, image);
+        let new = format_watched_bytes(hit.current.as_deref(), type_info, image);
+        if hit.changed() {
+            write!(output, "\n  old: {old}\n  new: {new}")
+        } else {
+            write!(output, "\n  value: {new} (unchanged)")
+        }
+        .expect("writing to a String cannot fail");
+    }
+    output
+}
+
+/// Renders watched bytes as a scalar when the type resolves to one in the
+/// main image, and as little-endian hexadecimal otherwise.
+fn format_watched_bytes(
+    bytes: Option<&[u8]>,
+    type_info: Option<&uscope::TypeInfo>,
+    image: Option<&uscope::ModuleImage>,
+) -> String {
+    let Some(bytes) = bytes else {
+        return "<unreadable>".to_owned();
+    };
+    let base = type_info.and_then(|info| resolved_base_type(info, image));
+    let raw = || {
+        let mut word = [0_u8; 16];
+        let length = bytes.len().min(16);
+        word[..length].copy_from_slice(&bytes[..length]);
+        (u128::from_le_bytes(word), length)
+    };
+    match base {
+        Some(WatchedScalar::Integer { signed }) if bytes.len() <= 16 => {
+            let (value, length) = raw();
+            if signed && length > 0 {
+                let shift = 128 - 8 * length;
+                (i128::from_le_bytes(value.to_le_bytes()) << shift >> shift).to_string()
+            } else {
+                value.to_string()
+            }
+        }
+        Some(WatchedScalar::Boolean) if bytes.len() == 1 => (bytes[0] != 0).to_string(),
+        Some(WatchedScalar::Float) if bytes.len() == 4 => {
+            f32::from_le_bytes(bytes.try_into().expect("four bytes")).to_string()
+        }
+        Some(WatchedScalar::Float) if bytes.len() == 8 => {
+            f64::from_le_bytes(bytes.try_into().expect("eight bytes")).to_string()
+        }
+        Some(WatchedScalar::Address) if bytes.len() == 8 => format!("{:#x}", raw().0),
+        _ => format_register_bytes(bytes, ByteOrder::Little),
+    }
+}
+
+enum WatchedScalar {
+    Integer { signed: bool },
+    Boolean,
+    Float,
+    Address,
+}
+
+fn resolved_base_type(
+    type_info: &uscope::TypeInfo,
+    image: Option<&uscope::ModuleImage>,
+) -> Option<WatchedScalar> {
+    let mut current = type_info.clone();
+    for _ in 0..16 {
+        let next = match &current.kind {
+            uscope::TypeKind::Base(base)
+            | uscope::TypeKind::Enumeration {
+                representation: base,
+                ..
+            } => {
+                return Some(match base.encoding {
+                    uscope::BaseTypeEncoding::Boolean => WatchedScalar::Boolean,
+                    uscope::BaseTypeEncoding::Floating => WatchedScalar::Float,
+                    uscope::BaseTypeEncoding::Signed
+                    | uscope::BaseTypeEncoding::SignedCharacter => {
+                        WatchedScalar::Integer { signed: true }
+                    }
+                    _ => WatchedScalar::Integer { signed: false },
+                });
+            }
+            uscope::TypeKind::Pointer { .. } | uscope::TypeKind::Reference { .. } => {
+                return Some(WatchedScalar::Address);
+            }
+            uscope::TypeKind::Modified { target, .. }
+            | uscope::TypeKind::Named {
+                target: Some(target),
+                ..
+            } => *target,
+            _ => return None,
+        };
+        current = image
+            .filter(|image| image.id() == next.image)?
+            .type_info(next)?
+            .clone();
+    }
+    None
 }
 
 fn parse_breakpoint_spec(argument: &str) -> uscope::Result<BreakpointSpec> {
@@ -2050,9 +2439,19 @@ async fn format_stop_with_source(
 ) -> String {
     let has_source_context = matches!(
         reason,
-        StopReason::Breakpoint { .. } | StopReason::Step { .. }
+        StopReason::Breakpoint { .. } | StopReason::Step { .. } | StopReason::Watchpoint { .. }
     );
-    let mut output = format_stop(reason, renderer);
+    let mut output = match &reason {
+        StopReason::Watchpoint { hits } => {
+            let watchpoints = debugger
+                .snapshot()
+                .await
+                .map(|snapshot| snapshot.watchpoints)
+                .unwrap_or_default();
+            format_watchpoint_hits(hits, &watchpoints, Some(debugger.module_image()), renderer)
+        }
+        _ => format_stop(reason, renderer),
+    };
 
     if has_source_context {
         match debugger.source_context(3).await {
@@ -2251,24 +2650,19 @@ fn format_stop(reason: StopReason, renderer: Renderer) -> String {
                 renderer.paint(Role::Metadata, address)
             )
         }
-        StopReason::Step { kind } => match kind {
-            StepKind::Instruction => format!(
-                "{} after instruction step",
-                renderer.paint(Role::Current, "stopped")
-            ),
-            StepKind::IntoSource => format!(
-                "{} after source step",
-                renderer.paint(Role::Current, "stopped")
-            ),
-            StepKind::OverSource => format!(
-                "{} after source next",
-                renderer.paint(Role::Current, "stopped")
-            ),
-            StepKind::Out => format!(
-                "{} after frame return",
-                renderer.paint(Role::Current, "stopped")
-            ),
-        },
+        reason @ (StopReason::Watchpoint { .. }
+        | StopReason::WatchpointInvalidated { .. }
+        | StopReason::WatchpointArmFailed { .. }) => format_watch_stop(reason, renderer),
+        StopReason::Step { kind } => format!(
+            "{} after {}",
+            renderer.paint(Role::Current, "stopped"),
+            match kind {
+                StepKind::Instruction => "instruction step",
+                StepKind::IntoSource => "source step",
+                StepKind::OverSource => "source next",
+                StepKind::Out => "frame return",
+            }
+        ),
         StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
         StopReason::Exception(exception) => format!(
             "{} by {} ({:#x})",
@@ -2356,6 +2750,51 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn watch_locations_parse_hex_addresses_and_decimal_lengths() {
+        let usage = "watch usage";
+        assert_eq!(
+            parse_watch_location("0x10:8", usage).expect("location"),
+            Some(WatchpointSpec::Location {
+                address: VirtualAddress::new(0x10),
+                byte_size: 8
+            })
+        );
+        assert_eq!(
+            parse_watch_location("ff0:3", usage).expect("location"),
+            Some(WatchpointSpec::Location {
+                address: VirtualAddress::new(0xff0),
+                byte_size: 3
+            })
+        );
+        assert_eq!(parse_watch_location("counter", usage).expect("name"), None);
+        for invalid in ["0x10:", ":8", "0x10:-1", "zz:8", "0x10:0x8"] {
+            assert!(
+                matches!(
+                    parse_watch_location(invalid, usage),
+                    Err(Error::InvalidCommand(message)) if message == usage
+                ),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn watched_bytes_without_a_scalar_type_render_as_little_endian_hex() {
+        assert_eq!(
+            format_watched_bytes(Some(&[0x34, 0x12, 0, 0]), None, None),
+            "0x00001234"
+        );
+        assert_eq!(format_watched_bytes(None, None, None), "<unreadable>");
+        let expression = uscope::parse_value_expression("(*records[1].next).value")
+            .expect("expression")
+            .expression;
+        assert_eq!(
+            format_value_expression(&expression),
+            "(*records[1].next).value"
+        );
+    }
 
     #[test]
     fn command_registry_has_unique_names_and_aliases() {

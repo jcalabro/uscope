@@ -1,0 +1,15 @@
+# Watch a global across its stores, then let the inferior exit.
+break scalar_stores
+run
+watch watch_i32
+watchpoints
+continue
+continue
+continue
+continue
+unwatch 1
+watchpoints
+delete all
+continue
+continue
+continue

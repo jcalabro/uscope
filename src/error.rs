@@ -145,6 +145,33 @@ pub enum Error {
     #[error("a post-mortem core dump cannot execute, be modified, or hold breakpoints")]
     PostMortemTarget,
 
+    #[error("watchpoint {0} was not found")]
+    WatchpointNotFound(u64),
+    #[error("{0} watchpoints are unsupported by this target's debug hardware")]
+    UnsupportedWatchAccess(crate::WatchAccess),
+    #[error("cannot watch {byte_size} bytes at {address}: {reason}")]
+    InvalidWatchRange {
+        address: crate::VirtualAddress,
+        byte_size: u64,
+        reason: Arc<str>,
+    },
+    #[error(
+        "the watchpoint needs {required} hardware slots but only {available} remain; remove a watchpoint or watch fewer bytes"
+    )]
+    WatchpointCapacity { required: u64, available: u64 },
+    #[error(
+        "thread {thread} has no free debug registers; another hardware-breakpoint user such as perf holds them"
+    )]
+    WatchpointHardwareBusy { thread: crate::ThreadId },
+    #[error("hardware watchpoints are unavailable on this target: {0}")]
+    HardwareWatchpointsUnavailable(Arc<str>),
+    #[error("cannot watch a value that is not stored in memory: {0}")]
+    WatchTargetNotInMemory(Arc<str>),
+    #[error("cannot watch an unavailable value: {0}")]
+    WatchTargetUnavailable(Arc<str>),
+    #[error("cannot watch this value: {0}")]
+    WatchTargetUnsupported(Arc<str>),
+
     #[error("debugger backend thread panicked")]
     BackendThreadPanicked,
     #[error("debugger request was cancelled")]

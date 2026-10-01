@@ -38,9 +38,11 @@ pub use model::{
 pub use protocol::{
     Breakpoint, BreakpointId, BreakpointSpec, CoreDumpInfo, CoreDumpOptions, CoreModule,
     CoreModuleState, DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId, ExitStatus,
-    FramePresentation, GlobalVariableQuery, InferiorState, ModuleIdentity, PresentedFrame,
-    ProcessId, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId,
-    StopReason, ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery,
+    FramePresentation, GlobalVariableQuery, InferiorState, InvalidatedWatchpoint, ModuleIdentity,
+    PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind,
+    StopId, StopReason, ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery, WatchAccess,
+    WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
+    WatchpointInvalidation, WatchpointSpec,
 };
 
 /// Exercises core-dump parsing and memory reads for the fuzz harness.
@@ -48,6 +50,13 @@ pub use protocol::{
 #[doc(hidden)]
 pub fn fuzz_core_dump(data: &[u8]) {
     backend::fuzz_core_dump(data);
+}
+
+/// Exercises debug-register planning invariants for the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_debug_register_plan(data: &[u8]) {
+    backend::fuzz_debug_register_plan(data);
 }
 
 /// Exercises bounded DWARF-expression parsing for the fuzz harness.
@@ -261,6 +270,65 @@ impl DebuggerHandle {
     /// Removes every logical breakpoint and returns their prior definitions.
     pub async fn remove_all_breakpoints(&self) -> Result<Arc<[Breakpoint]>> {
         self.request(|reply| Request::RemoveAllBreakpoints { reply })
+            .await
+    }
+
+    /// Describes what this platform's debug hardware can watch.
+    #[must_use]
+    pub fn watchpoint_capabilities(&self) -> WatchpointCapabilities {
+        backend::watchpoint_capabilities()
+    }
+
+    /// Resolves an expression in the selected thread's selected logical frame
+    /// to the memory it occupies and the lifetime of that storage.
+    pub async fn resolve_watch_target(&self, expression: ValueExpression) -> Result<WatchTarget> {
+        let selection = self.stopped_selection().await?;
+        self.request(|reply| Request::ResolveWatchTarget {
+            expression,
+            stop_id: selection.stop,
+            thread_id: selection.thread,
+            reply,
+        })
+        .await
+    }
+
+    /// Arms a hardware watchpoint on every thread of the stopped process.
+    ///
+    /// Arming is atomic: on failure no thread is left armed and no event is
+    /// published.
+    pub async fn add_watchpoint(
+        &self,
+        spec: WatchpointSpec,
+        access: WatchAccess,
+    ) -> Result<Watchpoint> {
+        self.request(|reply| Request::AddWatchpoint {
+            spec,
+            access,
+            reply,
+        })
+        .await
+    }
+
+    /// Resolves an expression at the current stop and watches its memory.
+    pub async fn watch(
+        &self,
+        expression: ValueExpression,
+        access: WatchAccess,
+    ) -> Result<Watchpoint> {
+        let target = self.resolve_watch_target(expression).await?;
+        self.add_watchpoint(WatchpointSpec::Target(Box::new(target)), access)
+            .await
+    }
+
+    /// Disarms one watchpoint and returns its prior definition.
+    pub async fn remove_watchpoint(&self, id: WatchpointId) -> Result<Watchpoint> {
+        self.request(|reply| Request::RemoveWatchpoint { id, reply })
+            .await
+    }
+
+    /// Disarms every watchpoint and returns their prior definitions.
+    pub async fn remove_all_watchpoints(&self) -> Result<Arc<[Watchpoint]>> {
+        self.request(|reply| Request::RemoveAllWatchpoints { reply })
             .await
     }
 

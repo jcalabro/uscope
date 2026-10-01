@@ -113,3 +113,13 @@ pub fn open_core(
 pub fn fuzz_core_dump(data: &[u8]) {
     linux::fuzz_core_dump(data);
 }
+
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_debug_register_plan(data: &[u8]) {
+    linux::fuzz_debug_register_plan(data);
+}
+
+/// Describes the platform's hardware watchpoint support.
+pub fn watchpoint_capabilities() -> crate::WatchpointCapabilities {
+    linux::watchpoint_capabilities()
+}

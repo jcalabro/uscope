@@ -28,7 +28,7 @@ use super::thread_db::{self, ProcessServices};
 use super::{
     Controller, ControllerChannels, ExecutableSource, ExpectedStop, FileIdentity, Fxsave, Inferior,
     InferiorOrigin, InspectionOps, LinuxError, MemoryAccessError, NativeThreadState, PublicStop,
-    Reply, RuntimeModule, SessionLease, TraceThread, allocate_stop_id, backend_error,
+    Reply, RuntimeModule, SessionLease, TraceThread, WatchState, allocate_stop_id, backend_error,
     loader_link_maps,
 };
 use crate::backend::ControllerMessage;
@@ -596,6 +596,7 @@ impl Controller<CoreTarget> {
             next_execution: 0,
             next_barrier: 0,
             exec_unsupported: false,
+            watch: WatchState::default(),
         });
         let presentation = self.presentation_for_thread(selected, reason)?;
         self.inferior
@@ -622,6 +623,11 @@ impl Controller<CoreTarget> {
                     reject(reply);
                 }
                 Request::RemoveAllBreakpoints { reply } => reject(reply),
+                Request::ResolveWatchTarget { reply, .. } => reject(reply),
+                Request::AddWatchpoint { reply, .. } | Request::RemoveWatchpoint { reply, .. } => {
+                    reject(reply);
+                }
+                Request::RemoveAllWatchpoints { reply } => reject(reply),
                 Request::Launch { reply }
                 | Request::Continue { reply, .. }
                 | Request::Step { reply, .. }
