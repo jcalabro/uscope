@@ -31,30 +31,16 @@ test *ARGS: build-test-programs
     test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; cargo nextest run --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
-# Fuzzes the bounded structural value-expression parser.
-fuzz-value-expression *ARGS="":
-    cargo fuzz run value-expression -- "$@"
-
-# Fuzzes bounded DWARF location-expression parsing and evaluation.
-fuzz-dwarf-expression *ARGS="":
-    cargo fuzz run dwarf-expression -- "$@"
-
-# Fuzzes core-dump parsing, module verification, and post-mortem memory reads.
-fuzz-core-dump *ARGS="":
-    cargo fuzz run core-dump -- "$@"
-
-# Fuzzes ELF symbol-table normalization and symbol lookup invariants.
-fuzz-elf-symbols *ARGS="":
-    cargo fuzz run elf-symbols -- "$@"
-
-# Fuzzes watchpoint debug-register planning and hit attribution invariants.
-fuzz-debug-register-plan *ARGS="":
-    cargo fuzz run debug-register-plan -- "$@"
+# Runs one fuzz target: value-expression, dwarf-expression, core-dump,
+# elf-symbols, or debug-register-plan. Arguments go to libFuzzer.
+fuzz TARGET *ARGS="":
+    cargo fuzz run "$1" -- "${@:2}"
 
 # Checks formatting and runs Clippy.
 lint:
     cargo fmt --check
     cargo clippy --all-targets --all-features -- -D warnings
+    cargo check --quiet --manifest-path fuzz/Cargo.toml
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
 check: lint test
