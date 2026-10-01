@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::{ControllerMessage, ExecutableSource, FileIdentity};
 mod thread_db;
+
 use crate::debug_info::{
     UnwindInfo, VariableContext, VariableInfo, VariableRegister, VariableRuntime,
     VariableRuntimeError,
@@ -418,7 +419,7 @@ enum LinuxError {
     MemoryInaccessible { address: VirtualAddress },
 }
 
-struct Controller<P: LinuxTraceOps> {
+struct Controller<P: InspectionOps> {
     _lease: SessionLease,
     executable: Arc<PathBuf>,
     executable_data: Arc<[u8]>,
@@ -480,7 +481,7 @@ pub fn spawn_controller(
         })?)
 }
 
-impl<P: LinuxTraceOps> Controller<P> {
+impl<P: InspectionOps> Controller<P> {
     fn new(
         lease: SessionLease,
         executable: ExecutableSource,
@@ -522,7 +523,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             revision: 0,
         }
     }
+}
 
+impl<P: LinuxTraceOps> Controller<P> {
     fn run(mut self) {
         while let Some(message) = self.messages.blocking_recv() {
             let keep_running = match message {
@@ -546,10 +549,6 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the exhaustive request dispatcher keeps protocol routing in one place"
-    )]
     fn handle_request(&mut self, request: Request) -> bool {
         match request {
             Request::AddBreakpoint { spec, reply } => {
@@ -586,6 +585,36 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             ),
             Request::Pause { process_id, reply } => self.pause(process_id, reply),
+            Request::WriteWord {
+                process_id,
+                stop_id,
+                address,
+                value,
+                reply,
+            } => {
+                let result = self.write_word(process_id, stop_id, address, value);
+                let _ = reply.send(result);
+            }
+            Request::Shutdown { reply } => {
+                self.begin_shutdown(Some(reply));
+                return self.inferior.is_some();
+            }
+            request => self.handle_inspection_request(request),
+        }
+
+        true
+    }
+}
+
+impl<P: InspectionOps> Controller<P> {
+    /// Answers a read-only request against the current stopped snapshot.
+    /// Live and post-mortem sessions route every other request themselves.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exhaustive inspection dispatcher keeps protocol routing in one place"
+    )]
+    fn handle_inspection_request(&mut self, request: Request) {
+        match request {
             Request::ReadMemory {
                 process_id,
                 stop_id,
@@ -602,16 +631,6 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.read_word(process_id, stop_id, address));
-            }
-            Request::WriteWord {
-                process_id,
-                stop_id,
-                address,
-                value,
-                reply,
-            } => {
-                let result = self.write_word(process_id, stop_id, address, value);
-                let _ = reply.send(result);
             }
             Request::LoadedModule { reply } => {
                 let _ = reply.send(self.loaded_module());
@@ -712,13 +731,19 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let result = self.select_thread(stop_id, debug_pid(thread_id));
                 let _ = reply.send(result);
             }
-            Request::Shutdown { reply } => {
-                self.begin_shutdown(Some(reply));
-                return self.inferior.is_some();
+            Request::AddBreakpoint { .. }
+            | Request::RemoveBreakpoint { .. }
+            | Request::RemoveAllBreakpoints { .. }
+            | Request::Launch { .. }
+            | Request::Attach { .. }
+            | Request::Continue { .. }
+            | Request::Step { .. }
+            | Request::Pause { .. }
+            | Request::WriteWord { .. }
+            | Request::Shutdown { .. } => {
+                unreachable!("run-control requests are routed by the session dispatcher")
             }
         }
-
-        true
     }
 }
 
@@ -3454,7 +3479,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         Ok(())
     }
+}
 
+impl<P: InspectionOps> Controller<P> {
     fn read_word(
         &self,
         requested_process: ProcessId,
@@ -3513,7 +3540,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             completion: read.completion,
         })
     }
+}
 
+impl<P: LinuxTraceOps> Controller<P> {
     fn write_word(
         &mut self,
         requested_process: ProcessId,
@@ -3542,7 +3571,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.ptrace
             .write_word(pid, address.get(), u64::from_ne_bytes(physical_bytes))
     }
+}
 
+impl<P: InspectionOps> Controller<P> {
     fn presentation_for_stopped_thread(&self, pid: Pid) -> Result<FramePresentation> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, inferior.public_stop.as_ref().map(|stop| stop.id))?;
@@ -4656,7 +4687,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             variables,
         })
     }
+}
 
+impl<P: LinuxTraceOps> Controller<P> {
     fn refresh_modules(&mut self) -> Result<()> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let pid = inferior.tgid;
@@ -4751,7 +4784,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             .link_map = link_maps.get(&main_loaded.load_bias).copied();
         Ok(())
     }
+}
 
+impl<P: InspectionOps> Controller<P> {
     fn select_thread(&mut self, stop_id: StopId, pid: Pid) -> Result<()> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
@@ -4768,7 +4803,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.bump_revision();
         Ok(())
     }
+}
 
+impl<P: LinuxTraceOps> Controller<P> {
     fn begin_shutdown(&mut self, reply: Option<Reply<()>>) {
         self.shutdown_reply = reply;
         self.launch_reply
@@ -5012,7 +5049,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             let _ = self.kill_inferior();
         }
     }
+}
 
+impl<P: InspectionOps> Controller<P> {
     fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
         let _ = self.events.send(DebuggerEvent::StateChanged {
@@ -5342,7 +5381,7 @@ fn expand_inline_backtrace(
 }
 
 struct PtraceMemory<'a> {
-    ptrace: &'a dyn LinuxTraceOps,
+    ptrace: &'a dyn InspectionOps,
     pid: Pid,
 }
 
@@ -5427,7 +5466,7 @@ struct LinuxVariableRuntime<'a, P> {
     link_map: Option<VirtualAddress>,
 }
 
-impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
+impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
     fn register(
         &mut self,
         register: u16,
@@ -5470,9 +5509,13 @@ impl<P: LinuxTraceOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
             .ok_or(VariableUnavailableReason::TlsUnavailable(
                 TlsUnavailableReason::ModuleIdentityUnavailable,
             ))?;
-        thread_db::tls_address(self.pid, self.pid, link_map, offset).map_err(|reason| {
-            VariableUnavailableReason::TlsUnavailable(TlsUnavailableReason::LookupFailed(reason))
-        })
+        self.ptrace
+            .tls_address(self.pid, link_map, offset)
+            .map_err(|reason| {
+                VariableUnavailableReason::TlsUnavailable(TlsUnavailableReason::LookupFailed(
+                    reason,
+                ))
+            })
     }
 
     fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
@@ -5513,7 +5556,7 @@ enum MemoryAccessError {
 }
 
 fn read_logical_memory(
-    ptrace: &impl LinuxTraceOps,
+    ptrace: &impl InspectionOps,
     pid: Pid,
     breakpoints: &BTreeMap<VirtualAddress, BreakpointSite>,
     address: VirtualAddress,
@@ -5866,7 +5909,34 @@ fn x86_64_register_snapshot(
     }
 }
 
-trait LinuxTraceOps {
+/// Read-only access to a stopped target's registers, memory, and thread-local
+/// storage. Live tracing and post-mortem targets share every inspection path.
+trait InspectionOps {
+    fn read_word(&self, pid: Pid, address: u64) -> Result<u64>;
+    fn read_memory_word(
+        &self,
+        pid: Pid,
+        address: u64,
+    ) -> std::result::Result<u64, MemoryAccessError> {
+        self.read_word(pid, address)
+            .map_err(MemoryAccessError::Fatal)
+    }
+    fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct>;
+    fn floating_registers(&self, _pid: Pid) -> Result<libc::user_fpregs_struct> {
+        Err(backend_error(LinuxError::UnsupportedFloatingRegisters))
+    }
+    /// Resolves a module's thread-local block for one thread.
+    fn tls_address(
+        &self,
+        _thread: Pid,
+        _link_map: VirtualAddress,
+        _offset: u64,
+    ) -> std::result::Result<VirtualAddress, Arc<str>> {
+        Err("thread-local storage lookup is unsupported by this target".into())
+    }
+}
+
+trait LinuxTraceOps: InspectionOps {
     fn spawn(&self, executable: &Path) -> Result<Pid>;
     fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter>;
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>>;
@@ -5888,23 +5958,10 @@ trait LinuxTraceOps {
         // production ptrace edge overrides this method.
         Ok(Vec::new())
     }
-    fn read_word(&self, pid: Pid, address: u64) -> Result<u64>;
-    fn read_memory_word(
-        &self,
-        pid: Pid,
-        address: u64,
-    ) -> std::result::Result<u64, MemoryAccessError> {
-        self.read_word(pid, address)
-            .map_err(MemoryAccessError::Fatal)
-    }
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()>;
     fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()>;
     fn step(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
-    fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct>;
-    fn floating_registers(&self, _pid: Pid) -> Result<libc::user_fpregs_struct> {
-        Err(backend_error(LinuxError::UnsupportedFloatingRegisters))
-    }
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()>;
     fn set_options(&self, pid: Pid, exit_kill: bool) -> Result<()>;
     fn event_message(&self, pid: Pid) -> Result<libc::c_long>;
@@ -5946,6 +6003,51 @@ impl LinuxPtrace {
 
     fn assert_owner_thread(&self) {
         self.affinity.assert_owner();
+    }
+}
+
+impl InspectionOps for LinuxPtrace {
+    fn read_word(&self, pid: Pid, address: u64) -> Result<u64> {
+        self.assert_owner_thread();
+        let value = ptrace::read(pid, address as ptrace::AddressType)
+            .map_err(|error| backend_error(LinuxError::System(error)))?;
+        Ok(u64::from_ne_bytes(value.to_ne_bytes()))
+    }
+
+    fn read_memory_word(
+        &self,
+        pid: Pid,
+        address: u64,
+    ) -> std::result::Result<u64, MemoryAccessError> {
+        self.assert_owner_thread();
+        match ptrace::read(pid, address as ptrace::AddressType) {
+            Ok(value) => Ok(u64::from_ne_bytes(value.to_ne_bytes())),
+            Err(Errno::EFAULT | Errno::EIO) => Err(MemoryAccessError::Inaccessible),
+            Err(error) => Err(MemoryAccessError::Fatal(backend_error(LinuxError::System(
+                error,
+            )))),
+        }
+    }
+
+    fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
+        self.assert_owner_thread();
+        ptrace::getregs(pid).map_err(|error| backend_error(LinuxError::System(error)))
+    }
+
+    fn floating_registers(&self, pid: Pid) -> Result<libc::user_fpregs_struct> {
+        self.assert_owner_thread();
+        ptrace::getregset::<ptrace::regset::NT_PRFPREG>(pid)
+            .map_err(|error| backend_error(LinuxError::System(error)))
+    }
+
+    fn tls_address(
+        &self,
+        thread: Pid,
+        link_map: VirtualAddress,
+        offset: u64,
+    ) -> std::result::Result<VirtualAddress, Arc<str>> {
+        self.assert_owner_thread();
+        thread_db::tls_address(thread, thread, link_map, offset)
     }
 }
 
@@ -6032,28 +6134,6 @@ impl LinuxTraceOps for LinuxPtrace {
         ))
     }
 
-    fn read_word(&self, pid: Pid, address: u64) -> Result<u64> {
-        self.assert_owner_thread();
-        let value = ptrace::read(pid, address as ptrace::AddressType)
-            .map_err(|error| backend_error(LinuxError::System(error)))?;
-        Ok(u64::from_ne_bytes(value.to_ne_bytes()))
-    }
-
-    fn read_memory_word(
-        &self,
-        pid: Pid,
-        address: u64,
-    ) -> std::result::Result<u64, MemoryAccessError> {
-        self.assert_owner_thread();
-        match ptrace::read(pid, address as ptrace::AddressType) {
-            Ok(value) => Ok(u64::from_ne_bytes(value.to_ne_bytes())),
-            Err(Errno::EFAULT | Errno::EIO) => Err(MemoryAccessError::Inaccessible),
-            Err(error) => Err(MemoryAccessError::Fatal(backend_error(LinuxError::System(
-                error,
-            )))),
-        }
-    }
-
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()> {
         self.assert_owner_thread();
         let value = libc::c_long::from_ne_bytes(value.to_ne_bytes());
@@ -6077,17 +6157,6 @@ impl LinuxTraceOps for LinuxPtrace {
     fn step(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
         self.assert_owner_thread();
         ptrace::step(pid, signal).map_err(|error| backend_error(LinuxError::System(error)))
-    }
-
-    fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
-        self.assert_owner_thread();
-        ptrace::getregs(pid).map_err(|error| backend_error(LinuxError::System(error)))
-    }
-
-    fn floating_registers(&self, pid: Pid) -> Result<libc::user_fpregs_struct> {
-        self.assert_owner_thread();
-        ptrace::getregset::<ptrace::regset::NT_PRFPREG>(pid)
-            .map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
@@ -6766,7 +6835,7 @@ fn module_mappings(pid: Pid) -> Result<Vec<ModuleMapping>> {
 }
 
 fn loader_link_maps(
-    ptrace: &impl LinuxTraceOps,
+    ptrace: &impl InspectionOps,
     pid: Pid,
     executable_data: &[u8],
     main: LoadedModule,
@@ -6822,7 +6891,7 @@ fn loader_link_maps(
     Ok(result)
 }
 
-fn read_word_offset(ptrace: &impl LinuxTraceOps, pid: Pid, base: u64, offset: u64) -> Result<u64> {
+fn read_word_offset(ptrace: &impl InspectionOps, pid: Pid, base: u64, offset: u64) -> Result<u64> {
     ptrace.read_word(pid, base.checked_add(offset).ok_or(Error::AddressOverflow)?)
 }
 
@@ -7118,6 +7187,46 @@ mod tests {
         }
     }
 
+    impl InspectionOps for RecordingTrace {
+        fn read_word(&self, _pid: Pid, _address: u64) -> Result<u64> {
+            Self::unexpected("read_word")
+        }
+
+        fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
+            assert_eq!(pid, self.pid);
+            self.record("registers");
+            Ok(libc::user_regs_struct {
+                r15: 0,
+                r14: 0,
+                r13: 0,
+                r12: 0,
+                rbp: 0,
+                rbx: 0,
+                r11: 0,
+                r10: 0,
+                r9: 0,
+                r8: 0,
+                rax: 0,
+                rcx: 0,
+                rdx: 0,
+                rsi: 0,
+                rdi: 0,
+                orig_rax: 0,
+                rip: 0x5000,
+                cs: 0,
+                eflags: 0,
+                rsp: 0,
+                ss: 0,
+                fs_base: 0,
+                gs_base: 0,
+                ds: 0,
+                es: 0,
+                fs: 0,
+                gs: 0,
+            })
+        }
+    }
+
     impl LinuxTraceOps for RecordingTrace {
         fn spawn(&self, _executable: &Path) -> Result<Pid> {
             self.record("spawn");
@@ -7175,10 +7284,6 @@ mod tests {
             Ok(0x5000)
         }
 
-        fn read_word(&self, _pid: Pid, _address: u64) -> Result<u64> {
-            Self::unexpected("read_word")
-        }
-
         fn write_word(&self, _pid: Pid, _address: u64, _value: u64) -> Result<()> {
             Self::unexpected("write_word")
         }
@@ -7196,40 +7301,6 @@ mod tests {
 
         fn step(&self, _pid: Pid, _signal: Option<NixSignal>) -> Result<()> {
             Self::unexpected("step")
-        }
-
-        fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
-            assert_eq!(pid, self.pid);
-            self.record("registers");
-            Ok(libc::user_regs_struct {
-                r15: 0,
-                r14: 0,
-                r13: 0,
-                r12: 0,
-                rbp: 0,
-                rbx: 0,
-                r11: 0,
-                r10: 0,
-                r9: 0,
-                r8: 0,
-                rax: 0,
-                rcx: 0,
-                rdx: 0,
-                rsi: 0,
-                rdi: 0,
-                orig_rax: 0,
-                rip: 0x5000,
-                cs: 0,
-                eflags: 0,
-                rsp: 0,
-                ss: 0,
-                fs_base: 0,
-                gs_base: 0,
-                ds: 0,
-                es: 0,
-                fs: 0,
-                gs: 0,
-            })
         }
 
         fn set_registers(&self, _pid: Pid, _registers: libc::user_regs_struct) -> Result<()> {
