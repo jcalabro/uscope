@@ -6,9 +6,9 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uscope::{
-    Breakpoint, BreakpointId, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle,
-    ExceptionDisposition, ExitStatus, LineNumber, ProcessId, Result, StateSnapshot, StepKind,
-    StopReason,
+    Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
+    DebuggerHandle, ExceptionDisposition, ExitStatus, LineNumber, ProcessId, Result, StateSnapshot,
+    StepKind, StopReason,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -36,6 +36,28 @@ impl Scenario {
             fixture.display()
         );
         let debugger = Debugger::new(fixture).expect("initialize debugger scenario");
+        Self::from_debugger(name, debugger)
+    }
+
+    /// Opens a post-mortem core dump through the public API.
+    #[allow(dead_code, reason = "only post-mortem scenarios open core dumps")]
+    pub fn open_core(name: impl Into<String>, options: &CoreDumpOptions) -> Self {
+        let name = name.into();
+        assert!(
+            options.core.exists(),
+            "missing core fixture {}; run `just build-test-programs`",
+            options.core.display()
+        );
+        let debugger = Debugger::open_core(options).unwrap_or_else(|error| {
+            panic!(
+                "scenario '{name}' could not open {}: {error}",
+                options.core.display()
+            )
+        });
+        Self::from_debugger(name, debugger)
+    }
+
+    fn from_debugger(name: String, debugger: Debugger) -> Self {
         let handle = debugger.handle();
         let events = handle.subscribe();
 

@@ -15,6 +15,7 @@ readonly suite_outputs="${output_dir}/.suite.outputs"
 declare -A dash_version_by_tool=()
 declare -A rebuilt_outputs=()
 dash_version=""
+gdb_version=""
 go_version=""
 go_target=""
 zig_version=""
@@ -248,12 +249,88 @@ require_dwarf_operation() {
     record_validation "$stamp" "$signature"
 }
 
+# Records a post-mortem core of a fixture with gdb's gcore. The fixture must
+# stop with the expected signal first, so a fixture that stops crashing fails
+# the build instead of silently producing a different core. FILTER becomes the
+# inferior's coredump_filter, which gcore honors like the kernel.
+core_signature() {
+    local signal="$1"
+    local filter="$2"
+    local inputs="$3"
+    shift 3
+    if [[ -z "$gdb_version" ]]; then
+        gdb_version=$(gdb --version)
+        gdb_version=${gdb_version%%$'\n'*}
+    fi
+    local -a input_paths
+    read -r -a input_paths <<<"$inputs"
+    local command_text
+    printf -v command_text '%q ' "$@"
+    printf 'generator=gcore-v2\ngdb=%s\nsignal=%s\nfilter=%s\ncommand=%s\n' \
+        "$gdb_version" "$signal" "$filter" "$command_text"
+    stat -L --format='%n %Y %s' "${input_paths[@]}"
+}
+
+core_is_current() {
+    local core="$1"
+    local signature="$2"
+    [[ -s "$core" && -f "${core}.command" && "$(<"${core}.command")" == "$signature" ]]
+}
+
+generate_core() {
+    local core="$1"
+    local signal="$2"
+    local filter="$3"
+    local inputs="$4"
+    shift 4
+    local signature
+    signature=$(core_signature "$signal" "$filter" "$inputs" "$@")
+    local stamp="${core}.command"
+    if core_is_current "$core" "$signature"; then
+        rebuilt_outputs["$core"]=false
+        printf '[cached] %s\n' "$core"
+        return
+    fi
+
+    printf '[core]   %s\n' "$core"
+    local temporary="${core}.tmp"
+    rm -f "$temporary"
+    local log
+    # Randomized load addresses make every relocation path in the reader do
+    # real work. gdb only stops disabling randomization itself, so setarch also
+    # clears any ADDR_NO_RANDOMIZE personality inherited from the caller.
+    log=$(bash -c 'printf "%s\n" "$1" >/proc/self/coredump_filter && shift && exec "$@"' \
+        _ "$filter" \
+        setarch "$(uname -m)" \
+        gdb -nx -batch -q \
+        -iex 'set auto-load off' \
+        -iex 'set debuginfod enabled off' \
+        -ex 'set disable-randomization off' \
+        -ex 'set pagination off' \
+        -ex 'set confirm off' \
+        -ex 'run' \
+        -ex 'printf "uscope-signal=%d\n", $_siginfo.si_signo' \
+        -ex "gcore ${temporary}" \
+        -ex 'kill' \
+        --args "$@" 2>&1) || true
+    if ! grep -Fx "uscope-signal=${signal}" <<<"$log" >/dev/null || [[ ! -s "$temporary" ]]; then
+        printf 'error: %s did not stop with signal %s for a core dump:\n%s\n' \
+            "$1" "$signal" "$log" >&2
+        rm -f "$temporary"
+        exit 1
+    fi
+    mv "$temporary" "$core"
+    rebuilt_outputs["$core"]=true
+    printf '%s\n' "$signature" >"${stamp}.tmp"
+    mv "${stamp}.tmp" "$stamp"
+}
+
 # Nix store paths identify each toolchain, so their resolved paths and mtimes
 # change with compiler versions without spawning version probes.
 suite_signature() {
     local -a paths=()
     local tool path
-    for tool in gcc g++ clang clang++ rustc go zig objdump; do
+    for tool in gcc g++ clang clang++ rustc go zig objdump gdb setarch; do
         if path=$(type -P "$tool"); then
             paths+=("$path")
         fi
@@ -272,7 +349,7 @@ suite_is_current() {
         || return 1
     local output
     while IFS= read -r output; do
-        [[ -x "$output" ]] || return 1
+        [[ -e "$output" ]] || return 1
     done <"$suite_outputs"
 }
 
@@ -553,6 +630,69 @@ build_fixture gcc "$c_fixtures_dir/inline-threads.c" "$output_dir/inline-threads
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread
 build_fixture clang "$c_fixtures_dir/inline-threads.c" "$output_dir/inline-threads-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread
+
+build_shared_fixture gcc "$c_fixtures_dir/crash/library.c" "$output_dir/libcrash.so" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -Wl,--build-id
+build_fixture gcc "$c_fixtures_dir/crash/main.c" "$output_dir/crash-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread -Wl,--build-id \
+    "-L$output_dir" -lcrash '-Wl,-rpath,$ORIGIN'
+build_fixture gcc "$c_fixtures_dir/crash/main.c" "$output_dir/crash-gcc-o0-rebuilt" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread -Wl,--build-id \
+    -DCRASH_REBUILT "-L$output_dir" -lcrash '-Wl,-rpath,$ORIGIN'
+build_fixture clang "$c_fixtures_dir/crash/main.c" "$output_dir/crash-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie -pthread \
+    "-L$output_dir" -lcrash '-Wl,-rpath,$ORIGIN'
+require_dwarf_operation "$output_dir/crash-clang-o2" 'DW_OP_reg17 (xmm0)'
+build_fixture gcc "$c_fixtures_dir/crash/main.c" "$output_dir/crash-gcc-o2-nopie" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie -pthread \
+    "-L$output_dir" -lcrash '-Wl,-rpath,$ORIGIN'
+build_rust_fixture "$rust_fixtures_dir/crash.rs" "$output_dir/crash-rust-o0" \
+    -C opt-level=0 -C force-frame-pointers=yes
+build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_zig_fixture "$zig_fixtures_dir/crash.zig" "$output_dir/crash-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+
+# Post-mortem cores. 0x33 is the kernel's default coredump_filter; 0x23 omits
+# ELF header pages, and 0 saves no memory at all, leaving nothing that can
+# verify a module file.
+readonly default_core_filter=0x33
+readonly headerless_core_filter=0x23
+readonly memoryless_core_filter=0x0
+for variant in gcc-o0 clang-o2 gcc-o2-nopie; do
+    program="$output_dir/crash-${variant}"
+    inputs="$program $output_dir/libcrash.so"
+    generate_core "$output_dir/crash-${variant}-segv.core" 11 "$default_core_filter" \
+        "$inputs" "$program" segv
+    generate_core "$output_dir/crash-${variant}-abort.core" 6 "$default_core_filter" \
+        "$inputs" "$program" abort
+done
+generate_core "$output_dir/crash-gcc-o0-headerless.core" 11 "$headerless_core_filter" \
+    "$output_dir/crash-gcc-o0 $output_dir/libcrash.so" "$output_dir/crash-gcc-o0" segv
+generate_core "$output_dir/crash-gcc-o0-memoryless.core" 11 "$memoryless_core_filter" \
+    "$output_dir/crash-gcc-o0 $output_dir/libcrash.so" "$output_dir/crash-gcc-o0" segv
+for language in rust go zig; do
+    generate_core "$output_dir/crash-${language}-o0.core" 11 "$default_core_filter" \
+        "$output_dir/crash-${language}-o0" "$output_dir/crash-${language}-o0"
+done
+# Cores whose executable or shared library was deleted after the crash. The
+# copies are refreshed whenever a core itself must be regenerated.
+generate_core_without() {
+    local name="$1"
+    local deleted="$2"
+    local directory="$output_dir/core-missing-${name}"
+    local core="$directory/crash.core"
+    local inputs="$output_dir/crash-gcc-o0 $output_dir/libcrash.so"
+    mkdir -p "$directory"
+    if ! core_is_current "$core" "$(core_signature 11 "$default_core_filter" \
+        "$inputs" "$directory/crash-gcc-o0" segv)"; then
+        cp "$output_dir/crash-gcc-o0" "$output_dir/libcrash.so" "$directory/"
+    fi
+    generate_core "$core" 11 "$default_core_filter" "$inputs" "$directory/crash-gcc-o0" segv
+    rm -f "$directory/$deleted"
+}
+generate_core_without library libcrash.so
+generate_core_without executable crash-gcc-o0
 
 printf '%s\n' "${!rebuilt_outputs[@]}" >"${suite_outputs}.tmp"
 mv "${suite_outputs}.tmp" "$suite_outputs"

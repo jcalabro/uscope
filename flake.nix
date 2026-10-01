@@ -40,6 +40,7 @@
           goStable
           zig
           pkg-config
+          util-linux
         ];
       };
     };
