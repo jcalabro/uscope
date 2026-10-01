@@ -492,6 +492,18 @@ where
         .map_err(|error| cfi_error(error, address))?;
     let cfa = cfa_from_rule(row.cfa(), registers, section, encoding, memory)?;
     let mut caller = registers.clone();
+    // A callee may overwrite every register the ABI does not preserve across
+    // calls, so the caller's value survives only where the row says where
+    // it was saved. Keeping the callee's value would present it as the
+    // caller's.
+    for register in X86_64_CALL_CLOBBERED_REGISTERS {
+        if !row
+            .registers()
+            .any(|(described, _)| described.0 == register)
+        {
+            caller.remove(register);
+        }
+    }
 
     for &(register, ref rule) in row.registers() {
         apply_register_rule(&mut caller, registers, memory, cfa, register.0, rule)?;
@@ -508,6 +520,14 @@ where
         signal_frame,
     })
 }
+
+/// The DWARF numbers of the registers the x86-64 System V ABI lets a callee
+/// overwrite: rax, rdx, rcx, rsi, rdi, r8-r11, rflags, the SSE registers,
+/// and the x87 stack.
+const X86_64_CALL_CLOBBERED_REGISTERS: [u16; 34] = [
+    0, 1, 2, 4, 5, 8, 9, 10, 11, 49, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40,
+];
 
 fn cfa_from_rule<'data, S>(
     rule: &CfaRule<usize>,

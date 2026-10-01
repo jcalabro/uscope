@@ -1100,6 +1100,7 @@ fn virtual_step_inferior(pid: Pid, image: &ModuleImage, stop_id: StopId) -> Infe
             triggering_thread: pid,
             reason: StopReason::Pause,
             presentations: BTreeMap::from([(pid, presentation)]),
+            selected_frames: BTreeMap::new(),
         }),
         selected_thread: Some(pid),
         next_execution: 1,

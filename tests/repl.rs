@@ -320,6 +320,47 @@ fn interactive_empty_lines_repeat_the_last_session_command() {
 }
 
 #[test]
+fn interactive_empty_lines_keep_moving_up_the_stack() {
+    let state = TestStateDir::new("frames");
+    let mut session = repl(&fixture("frames-gcc-o0"), &state.0);
+
+    session
+        .send_line("break frames_keep")
+        .expect("set breakpoint");
+    session
+        .expect("(uscope) ")
+        .expect("prompt after breakpoint");
+    session.send_line("run").expect("run inferior");
+    session.expect("stopped at breakpoint").expect("leaf stop");
+    session.expect("(uscope) ").expect("prompt after run");
+
+    session.send_line("up").expect("select the caller");
+    session
+        .expect("#1  0x")
+        .expect("the innermost recursion frame");
+    session.expect("(uscope) ").expect("prompt after up");
+    for level in 2..=4 {
+        session.send_line("").expect("repeat up");
+        session
+            .expect(format!("#{level}  0x").as_str())
+            .expect("the next outer frame");
+        session
+            .expect("(uscope) ")
+            .expect("prompt after repeated up");
+    }
+    session
+        .send_line("print depth")
+        .expect("print the frame's depth");
+    session
+        .expect("depth = 3")
+        .expect("the outermost recursion");
+    session.expect("(uscope) ").expect("prompt after print");
+
+    session.send_line("quit").expect("quit repl");
+    session.expect(Eof).expect("repl exited");
+}
+
+#[test]
 fn interactive_repeated_next_crosses_an_inline_return_without_killing_the_inferior() {
     let state = TestStateDir::new("inline-repeat");
     let mut session = repl(&fixture("stepping-boundaries-clang-o0"), &state.0);

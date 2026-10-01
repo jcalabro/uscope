@@ -640,6 +640,32 @@ fn undefined_location_pieces_report_exact_destination_ranges() {
 }
 
 #[test]
+fn an_empty_location_expression_describes_an_optimized_out_value() {
+    let empty = expression(&[]);
+    let pieces = evaluate(
+        &empty,
+        RunTimeEndian::Little,
+        &mut FrameBase::Unsupported,
+        &units([]),
+        &mut Runtime {
+            registers: BTreeMap::new(),
+            cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: None,
+            memory_reads: 0,
+        },
+        &mut InspectionBudget::default(),
+    )
+    .expect("an empty expression is valid");
+
+    assert_eq!(
+        incomplete_piece_reason(&pieces, 64),
+        Ok(Some(VariableUnavailableReason::OptimizedOut(
+            crate::OptimizedOutReason::EmptyLocation
+        )))
+    );
+}
+
+#[test]
 fn deferred_operations_and_missing_types_have_stable_typed_reasons() {
     let mut runtime = Runtime {
         registers: BTreeMap::from([(0, 1)]),

@@ -9,7 +9,9 @@ use crate::protocol::{
     DebuggerEvent, ExecutionId, PresentedFrame, ProcessId, StepKind, StopId, StopReason,
 };
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
-use crate::{CodeInstanceKind, Error, ImageLocation, InlineFrameLookup, Result, VirtualAddress};
+use crate::{
+    CodeInstanceKind, Error, ImageLocation, InlineFrameLookup, Result, StackFrameId, VirtualAddress,
+};
 
 use super::frames::{
     DwarfCallerProvider, code_instance_is_active, frame_lookup_address, make_presentation,
@@ -85,6 +87,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .expect("public stop was validated");
         stop.id = next_stop_id;
         stop.triggering_thread = pid;
+        stop.selected_frames.clear();
         stop.reason = StopReason::Step { kind };
         stop.presentations.insert(pid, presentation);
         inferior.thread_mut(pid)?.reason = Some(StopReason::Step { kind });
@@ -744,13 +747,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         )
     }
 
-    pub(super) fn step_start(&self, pid: Pid, kind: StepKind) -> Result<StepStart> {
+    pub(super) fn step_start(
+        &self,
+        pid: Pid,
+        kind: StepKind,
+        frame: StackFrameId,
+    ) -> Result<StepStart> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let thread = inferior.thread(pid)?;
         if !matches!(thread.state, NativeThreadState::Stopped) {
             return Err(Error::NotStopped);
         }
         let registers = self.ptrace.registers(pid)?;
+        if frame.get() != 0 {
+            return self.outer_step_out_start(pid, &registers, frame);
+        }
         let location = self.image_location(VirtualAddress::new(registers.rip));
         let presentation = self.presentation_for_stopped_thread(pid)?;
         let code_instance = location
@@ -810,6 +821,79 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .as_ref()
                 .and_then(|location| location.physical_instance),
             activation,
+            plan_addresses,
+            epilogue_traversal: None,
+            return_traversal: None,
+        })
+    }
+
+    /// Plans running until a frame other than the innermost one returns.
+    ///
+    /// A logical frame of the innermost activation steps out like the
+    /// innermost frame does. An outer activation runs to its return
+    /// address, which recursion may reach first from deeper activations;
+    /// completion requires the selected activation itself to have returned.
+    fn outer_step_out_start(
+        &self,
+        pid: Pid,
+        registers: &libc::user_regs_struct,
+        frame: StackFrameId,
+    ) -> Result<StepStart> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let resolved = self.resolve_frame(inferior, pid, frame)?;
+        let selected = resolved.frame.as_ref().ok_or(Error::AmbiguousInlineFrame)?;
+        // Source stepping plans are limited to code the main image describes.
+        let Some((_, address)) = resolved
+            .code
+            .filter(|(module, _)| *module == inferior.loaded_module.id)
+        else {
+            return Err(Error::FrameStepUnsupported(
+                "stepping out applies only to frames of the main executable".into(),
+            ));
+        };
+        let location = self.module_image.locate(address);
+        let code_instance = match &resolved.presented {
+            PresentedFrame::Inline(instance) => Some(*instance),
+            PresentedFrame::Physical => location.physical_instance,
+            PresentedFrame::Ambiguous(_) => return Err(Error::AmbiguousInlineFrame),
+        }
+        .ok_or(Error::LocationUnavailable)?;
+        let selected_is_inline = matches!(resolved.presented, PresentedFrame::Inline(_));
+        let mut plan_addresses = BTreeSet::new();
+
+        let activation = if resolved.activation == 0 {
+            if !selected_is_inline {
+                plan_addresses.insert(self.caller_address(pid, registers)?);
+            }
+            self.top_activation(pid, registers)?
+        } else {
+            if selected_is_inline {
+                return Err(Error::FrameStepUnsupported(
+                    "stepping out of an inline frame is supported only in the innermost activation"
+                        .into(),
+                ));
+            }
+            let caller_unavailable = |reason| backend_error(LinuxError::CallerUnavailable(reason));
+            let activation = resolved.cfa.clone().map_err(|_| {
+                caller_unavailable(crate::UnwindTermination::InvalidCaller {
+                    description: "the frame's call-frame address is unavailable".into(),
+                })
+            })?;
+            let stack = self.physical_stack(inferior, pid, resolved.activation + 2)?;
+            let return_address = stack
+                .frames
+                .get(resolved.activation + 1)
+                .map(|caller| caller.context.instruction)
+                .ok_or_else(|| caller_unavailable(stack.termination.clone()))?;
+            plan_addresses.insert(return_address);
+            activation
+        };
+
+        Ok(StepStart {
+            source: selected.source.clone(),
+            code_instance: Some(code_instance),
+            physical_instance: location.physical_instance,
+            activation: Some(activation),
             plan_addresses,
             epilogue_traversal: None,
             return_traversal: None,

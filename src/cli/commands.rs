@@ -1,13 +1,14 @@
 //! The command table, argument parsing, and command handlers.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 use uscope::{
     BreakpointId, BreakpointSpec, ByteOrder, Disassembly, DisassemblyQuery, DisassemblyRange,
-    LineNumber, MAX_WINDOW_AFTER, RegisterRole, StepKind, ThreadId, VirtualAddress, WatchAccess,
-    WatchpointId, WatchpointSpec,
+    LineNumber, MAX_WINDOW_AFTER, RegisterRole, StackFrameId, StepKind, ThreadId, VirtualAddress,
+    WatchAccess, WatchpointId, WatchpointSpec,
 };
 
 use super::format::{self, plural};
@@ -47,6 +48,9 @@ pub enum Command {
     Where,
     List,
     Backtrace,
+    Frame,
+    Up,
+    Down,
     Registers,
     Threads,
     Thread,
@@ -223,7 +227,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "finish",
         ["fin", "f"],
         "finish",
-        "Run until the selected frame returns",
+        "Run until the selected frame returns to its caller",
         repeatable
     ),
     command!(
@@ -253,14 +257,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         "where",
         [],
         "where",
-        "Show the current execution location"
+        "Show the selected frame's execution location"
     ),
     command!(
         List,
         "list",
         ["l"],
         "list",
-        "Show source around the current location",
+        "Show source around the selected frame's location",
         repeatable
     ),
     command!(
@@ -269,6 +273,29 @@ pub const COMMANDS: &[CommandSpec] = &[
         ["bt"],
         "backtrace",
         "Show the selected thread's stack"
+    ),
+    command!(
+        Frame,
+        "frame",
+        ["fr"],
+        "frame [level]",
+        "Show the selected frame, or select a frame by its backtrace level"
+    ),
+    command!(
+        Up,
+        "up",
+        [],
+        "up [count]",
+        "Select an outer frame, toward the callers",
+        repeatable
+    ),
+    command!(
+        Down,
+        "down",
+        ["do"],
+        "down [count]",
+        "Select an inner frame, toward where execution stopped",
+        repeatable
     ),
     command!(
         Registers,
@@ -372,24 +399,17 @@ impl Cli {
                 let byte_count = parse_memory_byte_count(arguments.get(1).copied(), spec)?;
                 format::memory_read(&debugger.read_memory(address, byte_count).await?, renderer)
             }
-            Command::Disassemble => {
-                self.disassemble(first, arguments.get(1).copied(), spec)
-                    .await?
-            }
-            Command::Address => format!(
-                "{}: {}",
-                renderer.paint(Role::Name, arguments[0]),
-                renderer.paint(
-                    Role::Metadata,
-                    debugger.runtime_address(arguments[0]).await?
-                )
-            ),
+            Command::Disassemble => self.disassemble(first, arguments.get(1).copied()).await?,
+            Command::Address => self.address(arguments[0]).await?,
             Command::Where => self.location().await?,
             Command::List => format::source_context(
                 &debugger.source_context(SOURCE_CONTEXT_RADIUS).await?,
                 renderer,
             ),
             Command::Backtrace => self.backtrace().await?,
+            Command::Frame | Command::Up | Command::Down => {
+                self.frame(parse_frame_target(spec, first)?).await?
+            }
             Command::Registers => format::registers(&debugger.registers().await?, renderer),
             Command::Threads => format::threads(&debugger.snapshot().await?, renderer),
             Command::Thread => self.select_thread(arguments[0]).await?,
@@ -404,6 +424,15 @@ impl Cli {
             Command::Quit => return Ok(Control::Quit),
         };
         Ok(Control::Continue(output))
+    }
+
+    async fn address(&self, symbol: &str) -> Result<String> {
+        let renderer = self.renderers.stdout;
+        Ok(format!(
+            "{}: {}",
+            renderer.paint(Role::Name, symbol),
+            renderer.paint(Role::Metadata, self.debugger.runtime_address(symbol).await?)
+        ))
     }
 
     async fn delete_breakpoints(&self, argument: &str, spec: &CommandSpec) -> Result<String> {
@@ -542,13 +571,8 @@ impl Cli {
     /// Disassembles the function containing the stopped instruction, a named
     /// function, or the function containing an address; with a count,
     /// disassembles that many instructions from the address instead.
-    async fn disassemble(
-        &self,
-        target: Option<&str>,
-        count: Option<&str>,
-        spec: &CommandSpec,
-    ) -> Result<String> {
-        let program_counter = self.program_counter().await?;
+    async fn disassemble(&self, target: Option<&str>, count: Option<&str>) -> Result<String> {
+        let (code_address, marked) = self.selected_code().await?;
         let count = count
             .map(|count| {
                 parse_count(count)
@@ -560,7 +584,7 @@ impl Cli {
             })
             .transpose()?;
         let address = match target {
-            None => program_counter.ok_or_else(|| spec.usage_error())?,
+            None => code_address,
             Some(target) if target.starts_with("0x") => parse_address(target)?,
             Some(name) => self.debugger.runtime_address(name).await?,
         };
@@ -573,10 +597,10 @@ impl Cli {
         });
         let disassembly = match self.disassemble_query(range).await {
             // Code outside every function, such as a stop in the vDSO, is
-            // shown around the stopped instruction instead.
+            // shown around the frame's instruction instead.
             Err(uscope::Error::NoFunctionContainsAddress(_)) if target.is_none() => {
                 self.disassemble_query(DisassemblyRange::Window {
-                    address,
+                    address: marked,
                     before: DISASSEMBLY_CONTEXT_BEFORE,
                     after: DISASSEMBLY_CONTEXT_AFTER,
                 })
@@ -597,7 +621,7 @@ impl Cli {
         let modules = self.debugger.loaded_modules().await?;
         Ok(format::disassembly(
             &disassembly,
-            program_counter,
+            Some(marked),
             &modules,
             &images,
             self.renderers.stdout,
@@ -613,10 +637,52 @@ impl Cli {
             .await
     }
 
-    /// Returns the selected thread's program counter.
-    async fn program_counter(&self) -> Result<Option<VirtualAddress>> {
+    /// Returns the address of the selected frame's code, by which its
+    /// function is found, and its instruction. They differ in an outer
+    /// frame, whose instruction is a return address that can lie past the
+    /// end of a function ending in a call.
+    async fn selected_code(&self) -> Result<(VirtualAddress, VirtualAddress)> {
+        // The innermost frame's instruction is the program counter, known
+        // even where no module or single inline frame describes it.
+        if self.selected_level().await? == 0 {
+            let program_counter = self.selected_instruction().await?;
+            return Ok((program_counter, program_counter));
+        }
+        let location = match self.debugger.current_location().await {
+            Ok(location) => location,
+            Err(uscope::Error::AddressOutsideModule) => {
+                let instruction = self.selected_instruction().await?;
+                return Ok((instruction, instruction));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let modules = self.debugger.loaded_modules().await?;
+        let module = modules
+            .modules
+            .iter()
+            .find(|record| record.module.id == location.module)
+            .ok_or(uscope::Error::ModuleNotLoaded(location.module))?;
+        Ok((
+            module.module.virtual_address(location.image.address)?,
+            location.address,
+        ))
+    }
+
+    /// Returns the selected frame's instruction: the selected thread's
+    /// program counter in the innermost frame.
+    async fn selected_instruction(&self) -> Result<VirtualAddress> {
+        let level = self.selected_level().await?;
+        if level != 0 {
+            let trace = self.debugger.backtrace().await?;
+            return trace
+                .frames
+                .iter()
+                .find(|frame| frame.level == level)
+                .map(|frame| frame.instruction)
+                .ok_or_else(|| anyhow!("the selected frame {level} no longer exists"));
+        }
         let registers = self.debugger.registers().await?;
-        Ok(registers
+        registers
             .registers
             .iter()
             .find(|value| value.register.role == Some(RegisterRole::ProgramCounter))
@@ -626,22 +692,87 @@ impl Cli {
                     ByteOrder::Little => u64::from_le_bytes(bytes),
                     ByteOrder::Big => u64::from_be_bytes(bytes),
                 })
-            }))
+            })
+            .ok_or_else(|| uscope::Error::LocationUnavailable.into())
+    }
+
+    async fn selected_level(&self) -> Result<u32> {
+        Ok(self
+            .debugger
+            .snapshot()
+            .await?
+            .selected_frame
+            .unwrap_or(StackFrameId::INNERMOST)
+            .get())
+    }
+
+    /// Selects a frame and shows it with its source.
+    async fn frame(&self, target: FrameTarget) -> Result<String> {
+        let selected = u64::from(self.selected_level().await?);
+        let trace = self.debugger.backtrace().await?;
+        let outermost = trace.frames.len().saturating_sub(1) as u64;
+        let level = match target {
+            FrameTarget::Selected => selected,
+            FrameTarget::Level(level) if level > outermost => {
+                bail!(
+                    "frame {level} does not exist; the backtrace has {} frames",
+                    trace.frames.len()
+                )
+            }
+            FrameTarget::Level(level) => level,
+            FrameTarget::Outward(_) if selected >= outermost => {
+                bail!(
+                    "the outermost frame is selected (unwind stopped: {})",
+                    trace.termination
+                )
+            }
+            FrameTarget::Outward(count) => selected.saturating_add(count).min(outermost),
+            FrameTarget::Inward(_) if selected == 0 => bail!("the innermost frame is selected"),
+            FrameTarget::Inward(count) => selected.saturating_sub(count),
+        };
+        let frame = trace
+            .frames
+            .iter()
+            .find(|frame| u64::from(frame.level) == level)
+            .ok_or_else(|| anyhow!("the backtrace has no frame {level}"))?;
+        let frame = self.debugger.select_frame(frame.id).await?;
+
+        let renderer = self.renderers.stdout;
+        let modules = self.debugger.loaded_modules().await?;
+        let mut images = BTreeMap::new();
+        if let (Some(module), Some(_)) = (frame.module, &frame.source) {
+            images.insert(module, self.debugger.loaded_module_image(module).await?);
+        }
+        let mut output = format::stack_frame(&frame, Some(&modules), &images, true, renderer);
+        if frame.source.is_some() {
+            output.push('\n');
+            match self.debugger.source_context(SOURCE_CONTEXT_RADIUS).await {
+                Ok(context) => output.push_str(&format::source_context(&context, renderer)),
+                Err(error) => write!(
+                    output,
+                    "{}: {error}",
+                    renderer.paint(Role::Warning, "source unavailable")
+                )
+                .expect("writing to a String cannot fail"),
+            }
+        }
+        Ok(output)
     }
 
     async fn location(&self) -> Result<String> {
         let renderer = self.renderers.stdout;
         let location = match self.debugger.current_location().await {
             Ok(location) => location,
-            // No loaded module describes the instruction, such as one in the vDSO.
+            // No loaded module describes the frame's code, such as a stop in
+            // the vDSO.
             Err(uscope::Error::AddressOutsideModule) => {
-                let registers = self.debugger.registers().await?;
-                let pc = format::program_counter(&registers)
-                    .ok_or(uscope::Error::LocationUnavailable)?;
                 return Ok(format!(
                     "{} at {} outside every loaded module",
                     renderer.paint(Role::Name, "<unknown>"),
-                    renderer.paint(Role::Metadata, pc)
+                    renderer.paint(
+                        Role::Metadata,
+                        format_args!("{:#018x}", self.selected_instruction().await?)
+                    )
                 ));
             }
             Err(error) => return Err(error.into()),
@@ -681,6 +812,7 @@ impl Cli {
     }
 
     async fn backtrace(&self) -> Result<String> {
+        let selected = self.selected_level().await?;
         let trace = self.debugger.backtrace().await?;
         let modules = if trace
             .frames
@@ -705,6 +837,7 @@ impl Cli {
         }
         Ok(format::backtrace(
             &trace,
+            selected,
             modules.as_ref(),
             &images,
             self.renderers.stdout,
@@ -754,6 +887,33 @@ impl Cli {
         }
         output
     }
+}
+
+/// Which frame a frame command selects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameTarget {
+    /// The frame already selected.
+    Selected,
+    /// The frame at a backtrace level.
+    Level(u64),
+    /// A frame this many levels toward the callers, or the outermost.
+    Outward(u64),
+    /// A frame this many levels toward the stop, or the innermost.
+    Inward(u64),
+}
+
+/// Parses `frame [level]`, `up [count]`, or `down [count]`.
+fn parse_frame_target(spec: &CommandSpec, argument: Option<&str>) -> Result<FrameTarget> {
+    let number = argument
+        .map(|value| value.parse::<u64>().map_err(|_| spec.usage_error()))
+        .transpose()?;
+    Ok(match (spec.command, number) {
+        (Command::Frame, None) => FrameTarget::Selected,
+        (Command::Frame, Some(level)) => FrameTarget::Level(level),
+        (Command::Up, count) => FrameTarget::Outward(count.unwrap_or(1)),
+        (Command::Down, count) => FrameTarget::Inward(count.unwrap_or(1)),
+        _ => unreachable!("only frame commands select frames"),
+    })
 }
 
 /// Parses a `0x`-prefixed hexadecimal address. The prefix keeps addresses
@@ -867,6 +1027,23 @@ mod tests {
         assert_eq!(spec(Command::Disassemble).arity(), (0, 2));
         assert!(spec(Command::Next).repeatable);
         assert!(!spec(Command::Watch).repeatable);
+        assert_eq!(spec(Command::Frame).arity(), (0, 1));
+        assert!(spec(Command::Up).repeatable && spec(Command::Down).repeatable);
+        assert!(!spec(Command::Frame).repeatable);
+    }
+
+    #[test]
+    fn frame_commands_select_absolutely_or_relatively() {
+        let parse = |command, argument| parse_frame_target(spec(command), argument).map_err(|_| ());
+        assert_eq!(parse(Command::Frame, None), Ok(FrameTarget::Selected));
+        assert_eq!(parse(Command::Frame, Some("0")), Ok(FrameTarget::Level(0)));
+        assert_eq!(parse(Command::Up, None), Ok(FrameTarget::Outward(1)));
+        assert_eq!(parse(Command::Up, Some("3")), Ok(FrameTarget::Outward(3)));
+        assert_eq!(parse(Command::Down, None), Ok(FrameTarget::Inward(1)));
+        assert_eq!(parse(Command::Down, Some("2")), Ok(FrameTarget::Inward(2)));
+        for invalid in ["-1", "0x2", "one", ""] {
+            assert!(parse(Command::Frame, Some(invalid)).is_err(), "{invalid:?}");
+        }
     }
 
     #[test]

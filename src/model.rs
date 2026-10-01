@@ -179,12 +179,17 @@ id_type!(
 
 id_type!(
     StackFrameId,
-    "Identifies a stack frame within one stop revision."
+    "Identifies a frame of one thread's backtrace at one stop by its level."
 );
 id_type!(
     RegisterId,
     "Identifies a register within a target architecture."
 );
+
+impl StackFrameId {
+    /// The innermost frame of every stopped thread, where execution stopped.
+    pub const INNERMOST: Self = Self(0);
+}
 
 numeric_id!(
     ThreadId,
@@ -886,6 +891,7 @@ pub enum ValueStorage {
 pub struct ValueChildrenReference {
     pub(crate) stop_id: crate::StopId,
     pub(crate) thread: ThreadId,
+    pub(crate) frame: StackFrameId,
     pub(crate) module: ModuleId,
     pub(crate) image: ModuleImageId,
     pub(crate) context_address: Option<ImageAddress>,
@@ -1023,6 +1029,7 @@ pub enum DereferenceTarget {
 pub struct DereferenceReference {
     pub(crate) stop_id: crate::StopId,
     pub(crate) thread: ThreadId,
+    pub(crate) frame: StackFrameId,
     pub(crate) module: ModuleId,
     pub(crate) image: ModuleImageId,
     pub(crate) context_address: Option<ImageAddress>,
@@ -1218,6 +1225,9 @@ pub enum VariableUnavailableReason {
     },
     /// A required target register is unavailable.
     RegisterUnavailable(Arc<str>),
+    /// A caller frame's value of a register its callees may overwrite was
+    /// not saved, so the register's value in that frame is unknown.
+    RegisterNotSaved(Arc<str>),
     /// The selected frame cannot provide its call-frame address.
     CallFrameUnavailable(CallFrameUnavailableReason),
     /// Thread-local storage cannot be resolved for this value.
@@ -1285,6 +1295,10 @@ impl fmt::Display for VariableUnavailableReason {
             Self::RegisterUnavailable(register) => {
                 write!(formatter, "register {register} is unavailable")
             }
+            Self::RegisterNotSaved(register) => write!(
+                formatter,
+                "register {register} was not saved by the frame's callees"
+            ),
             Self::CallFrameUnavailable(CallFrameUnavailableReason::NoInstructionContext) => {
                 formatter.write_str("the instruction has no call-frame context")
             }
@@ -1657,6 +1671,8 @@ pub struct VariableSnapshot {
     pub stop_id: crate::StopId,
     /// The thread whose selected logical frame was inspected.
     pub thread: ThreadId,
+    /// The backtrace frame that was inspected.
+    pub stack_frame: StackFrameId,
     /// The logical frame whose source scope selected these variables.
     pub frame: crate::PresentedFrame,
     /// Target data representation used for decoding.
@@ -2163,9 +2179,12 @@ pub enum BreakpointLocation {
 pub struct ExecutionLocation {
     /// The loaded module containing the address.
     pub module: ModuleId,
-    /// The process virtual address.
+    /// The frame's instruction: where execution stopped in the innermost
+    /// frame, or the return address of an outer frame's call.
     pub address: VirtualAddress,
-    /// Static metadata resolved from the corresponding module image.
+    /// Static metadata resolved from the corresponding module image. An outer
+    /// frame's is resolved one byte before its return address, inside the
+    /// call it is making.
     pub image: ImageLocation,
 }
 

@@ -1179,6 +1179,7 @@ impl DwarfVariableInfo {
         Arc::new(ValueChildrenReference {
             stop_id: context.stop_id,
             thread: context.thread,
+            frame: context.frame,
             module: context.module,
             image: context.image,
             context_address: context.address,
@@ -1823,6 +1824,7 @@ impl DwarfVariableInfo {
                             DereferenceState::Available(DereferenceReference {
                                 stop_id: context.stop_id,
                                 thread: context.thread,
+                                frame: context.frame,
                                 module: context.module,
                                 image: context.image,
                                 context_address: context.address,
@@ -1861,6 +1863,7 @@ impl DwarfVariableInfo {
                                 DereferenceState::Available(DereferenceReference {
                                     stop_id: context.stop_id,
                                     thread: context.thread,
+                                    frame: context.frame,
                                     module: context.module,
                                     image: context.image,
                                     context_address: context.address,
@@ -2137,6 +2140,7 @@ impl DwarfVariableInfo {
         let context = VariableContext {
             stop_id: reference.stop_id,
             thread: reference.thread,
+            frame: reference.frame,
             module: reference.module,
             image: reference.image,
             address: reference.context_address,
@@ -2711,6 +2715,7 @@ impl DwarfVariableInfo {
         let context = VariableContext {
             stop_id: reference.stop_id,
             thread: reference.thread,
+            frame: reference.frame,
             module: reference.module,
             image: reference.image,
             address: reference.context_address,

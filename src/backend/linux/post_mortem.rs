@@ -768,6 +768,7 @@ impl Controller<CoreTarget> {
                 triggering_thread: selected,
                 reason: reason.clone(),
                 presentations: BTreeMap::new(),
+                selected_frames: BTreeMap::new(),
             }),
             selected_thread: Some(selected),
             ..Inferior::new(InferiorOrigin::PostMortem, tgid, main, trace_threads, None)

@@ -3,68 +3,34 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use nix::libc;
 use nix::unistd::Pid;
 
 use crate::debug_info::{VariableContext, VariableRegister, VariableRuntime, VariableRuntimeError};
 use crate::inspection::{InspectionBudget, MAX_INSPECTION_LIMITS};
-use crate::protocol::{GlobalVariableQuery, PresentedFrame, StopId, VariableQuery};
+use crate::protocol::{GlobalVariableQuery, StopId, VariableQuery};
 use crate::{
-    CallFrameUnavailableReason, Error, GlobalVariablePage, GlobalVariableReference, ImageAddress,
-    InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion, RegisterSnapshot,
-    Result, TlsUnavailableReason, UnwindTermination, ValueExpression, ValueIndexRange,
-    ValuePathStep, VariableSnapshot, VariableUnavailableReason, VirtualAddress,
+    CallFrameUnavailableReason, CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference,
+    ImageAddress, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion,
+    RegisterSnapshot, Result, StackFrameId, TlsUnavailableReason, UnwindTermination,
+    ValueExpression, ValueIndexRange, ValuePathStep, VariableSnapshot, VariableUnavailableReason,
+    VirtualAddress,
 };
 
-use super::memory::{PtraceMemory, read_logical_memory};
+use super::frames::{FrameRegisters, FrameScope, ResolvedFrame};
+use super::memory::read_logical_memory;
 use super::native::InspectionOps;
 use super::registers::{
-    Fxsave, x86_64_general_variable_register, x86_64_register_snapshot, x86_64_registers,
-    x86_64_xmm_variable_register,
+    Fxsave, x86_64_caller_variable_register, x86_64_general_variable_register,
+    x86_64_register_snapshot, x86_64_xmm_variable_register,
 };
 use super::{
     BreakpointSite, Controller, ExpressionRoot, ExpressionRootKind, Inferior,
     MAX_VALUE_CHILD_PAGE_LIMIT, MAX_VALUE_EXPRESSION_DEREFERENCES, MAX_VALUE_EXPRESSION_STEPS,
-    debug_pid, debug_thread_id, validate_image_current, validate_public_stop,
+    RuntimeModule, debug_pid, debug_thread_id, validate_image_current, validate_public_stop,
     validate_stopped_thread,
 };
 
 impl<P: InspectionOps> Controller<P> {
-    /// Reads a stopped thread's registers, main-image instruction context,
-    /// and call-frame address. Variables live only in the innermost frame.
-    pub(super) fn frame_state(&self, inferior: &Inferior, pid: Pid) -> Result<FrameState> {
-        let native = self.ptrace.registers(pid)?;
-        let image_address = inferior
-            .loaded_module
-            .image_address(VirtualAddress::new(native.rip))
-            .ok()
-            .filter(|address| self.module_image.contains_address(*address));
-        let cfa = image_address.map_or(
-            Err(VariableRuntimeError::Unavailable(
-                VariableUnavailableReason::CallFrameUnavailable(
-                    CallFrameUnavailableReason::NoInstructionContext,
-                ),
-            )),
-            |address| {
-                self.unwind_info
-                    .cfa(
-                        address,
-                        &x86_64_registers(&native),
-                        &mut PtraceMemory {
-                            ptrace: &self.ptrace,
-                            pid,
-                        },
-                    )
-                    .map_err(|termination| variable_cfa_error(&termination))
-            },
-        );
-        Ok(FrameState {
-            native,
-            image_address,
-            cfa,
-        })
-    }
-
     pub(super) fn registers(&self, stop_id: StopId, pid: Pid) -> Result<RegisterSnapshot> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
@@ -78,14 +44,48 @@ impl<P: InspectionOps> Controller<P> {
         ))
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "local-first lookup keeps one stopped-state validation and runtime context"
-    )]
+    /// Returns the module describing a frame's function, the frame's address
+    /// in its image, and the frame's source scope, or `None` when no single
+    /// function scope applies: code without debug information, or an
+    /// innermost frame with no single inline chain.
+    pub(super) fn frame_scope(
+        &self,
+        frame: &ResolvedFrame,
+    ) -> Option<(&RuntimeModule, ImageAddress, Option<CodeInstanceId>)> {
+        let (module, address) = frame.code?;
+        let selected = match frame.scope {
+            FrameScope::Unavailable => return None,
+            FrameScope::Function => None,
+            FrameScope::Inline(instance) => Some(instance),
+        };
+        Some((self.modules.get(&module)?, address, selected))
+    }
+
+    /// Reads a frame's registers and memory for values `module` describes.
+    pub(super) fn frame_runtime<'a>(
+        &'a self,
+        inferior: &'a Inferior,
+        pid: Pid,
+        frame: &'a ResolvedFrame,
+        module: &'a RuntimeModule,
+    ) -> LinuxVariableRuntime<'a, P> {
+        LinuxVariableRuntime {
+            ptrace: &self.ptrace,
+            pid,
+            loaded_module: module.loaded,
+            breakpoints: &inferior.breakpoints,
+            registers: &frame.registers,
+            floating: None,
+            cfa: frame.cfa.clone(),
+            link_map: module.link_map,
+        }
+    }
+
     pub(super) fn variables(
         &self,
         stop_id: StopId,
         pid: Pid,
+        frame: StackFrameId,
         query: &VariableQuery,
         limits: crate::InspectionLimits,
     ) -> Result<VariableSnapshot> {
@@ -100,79 +100,34 @@ impl<P: InspectionOps> Controller<P> {
         // produce a convincing but incorrect value, so refuse inspection in the
         // exec-replaced state exactly as run control does.
         validate_image_current(inferior)?;
-        // Source-level visibility follows the selected logical frame: an
-        // inline presentation scopes lookup to that instance's variables, a
-        // physical presentation to the containing function's own variables.
-        // An ambiguous presentation has no single active scope chain.
-        let presentation = self.presentation_for_stopped_thread(pid)?;
-        let frame = presentation.frame;
-        let selected_instance = match &frame {
-            PresentedFrame::Physical => Some(None),
-            PresentedFrame::Inline(instance) => Some(Some(*instance)),
-            PresentedFrame::Ambiguous(_) => None,
-        };
-        let FrameState {
-            native,
-            image_address,
-            cfa,
-        } = self.frame_state(inferior, pid)?;
-        let instruction = VirtualAddress::new(native.rip);
-        let mut runtime = LinuxVariableRuntime {
-            ptrace: &self.ptrace,
-            pid,
-            loaded_module: inferior.loaded_module,
-            breakpoints: &inferior.breakpoints,
-            native: &native,
-            floating: None,
-            cfa: cfa.clone(),
-            link_map: self
-                .modules
-                .get(&inferior.loaded_module.id)
-                .and_then(|module| module.link_map),
-        };
-        let context = VariableContext {
-            stop_id,
-            thread: debug_thread_id(pid),
-            module: inferior.loaded_module.id,
-            image: inferior.loaded_module.image,
-            address: image_address,
+        // Source-level visibility follows the frame's logical scope: an inline
+        // frame scopes lookup to that instance's variables, a physical frame
+        // to the containing function's own variables.
+        let resolved = self.resolve_frame(inferior, pid, frame)?;
+        let scope = self.frame_scope(&resolved);
+        let inspect_locals = |budget: &mut InspectionBudget| {
+            let (module, address, selected) = scope.ok_or(Error::VariableContextUnsupported)?;
+            let mut runtime = self.frame_runtime(inferior, pid, &resolved, module);
+            module.variables.inspect(
+                address,
+                selected,
+                query,
+                variable_context(stop_id, pid, frame, module, Some(address)),
+                &mut runtime,
+                budget,
+            )
         };
         let variables = match query {
-            VariableQuery::Global(global) => vec![self.inspect_loaded_global(
-                inferior,
-                pid,
-                &native,
-                instruction,
-                &cfa,
-                *global,
-                &mut budget,
-            )?],
-            VariableQuery::All => {
-                let image_address = image_address.ok_or(Error::VariableContextUnsupported)?;
-                let selected = selected_instance.ok_or(Error::VariableContextUnsupported)?;
-                self.variable_info.inspect(
-                    image_address,
-                    selected,
-                    query,
-                    context,
-                    &mut runtime,
-                    &mut budget,
-                )?
+            VariableQuery::Global(global) => {
+                vec![self.inspect_loaded_global(inferior, pid, &resolved, *global, &mut budget)?]
             }
+            VariableQuery::All => inspect_locals(&mut budget)?,
             VariableQuery::Name(name) => {
-                let local = image_address.zip(selected_instance).map_or_else(
-                    || Err(Error::VariableNotFound(name.clone())),
-                    |(address, selected)| {
-                        self.variable_info.inspect(
-                            address,
-                            selected,
-                            query,
-                            context,
-                            &mut runtime,
-                            &mut budget,
-                        )
-                    },
-                );
+                let local = if scope.is_some() {
+                    inspect_locals(&mut budget)
+                } else {
+                    Err(Error::VariableNotFound(name.clone()))
+                };
                 match local {
                     Ok(variables) => variables,
                     Err(Error::VariableNotFound(_)) => {
@@ -200,9 +155,7 @@ impl<P: InspectionOps> Controller<P> {
                         vec![self.inspect_loaded_global(
                             inferior,
                             pid,
-                            &native,
-                            instruction,
-                            &cfa,
+                            &resolved,
                             *global,
                             &mut budget,
                         )?]
@@ -215,7 +168,8 @@ impl<P: InspectionOps> Controller<P> {
             revision: self.revision,
             stop_id,
             thread: debug_thread_id(pid),
-            frame,
+            stack_frame: frame,
+            frame: resolved.presented,
             target: self.module_image.target(),
             variables: variables.into(),
             completion: budget.completion(),
@@ -223,17 +177,11 @@ impl<P: InspectionOps> Controller<P> {
         })
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "global evaluation shares one validated stopped runtime and request budget"
-    )]
     pub(super) fn inspect_loaded_global(
         &self,
         inferior: &Inferior,
         pid: Pid,
-        native: &libc::user_regs_struct,
-        instruction: VirtualAddress,
-        cfa: &std::result::Result<VirtualAddress, VariableRuntimeError>,
+        frame: &ResolvedFrame,
         global: GlobalVariableReference,
         budget: &mut InspectionBudget,
     ) -> Result<crate::Variable> {
@@ -244,39 +192,18 @@ impl<P: InspectionOps> Controller<P> {
         if module.loaded.image != global.image {
             return Err(Error::StaleModuleImage);
         }
-        // The instruction context selects range-gated location entries. When the
-        // stopped thread's PC does not fall within this module (common for a DSO
-        // global while stopped in the main executable), pass `None` so the debug
-        // provider refuses to guess rather than resolving against address zero.
-        let context_address = module
-            .loaded
-            .image_address(instruction)
-            .ok()
-            .filter(|address| module.image.contains_address(*address));
-        let mut runtime = LinuxVariableRuntime {
-            ptrace: &self.ptrace,
-            pid,
-            loaded_module: module.loaded,
-            breakpoints: &inferior.breakpoints,
-            native,
-            floating: None,
-            cfa: cfa.clone(),
-            link_map: module.link_map,
-        };
+        let context_address = global_context_address(frame, module);
+        let mut runtime = self.frame_runtime(inferior, pid, frame, module);
         let mut variable = module.variables.inspect_global(
             global.variable,
             context_address,
-            VariableContext {
-                stop_id: inferior
-                    .public_stop
-                    .as_ref()
-                    .expect("variable inspection validated a public stop")
-                    .id,
-                thread: debug_thread_id(pid),
-                module: module.loaded.id,
-                image: module.loaded.image,
-                address: context_address,
-            },
+            variable_context(
+                public_stop_id(inferior),
+                pid,
+                frame.id,
+                module,
+                context_address,
+            ),
             &mut runtime,
             budget,
         )?;
@@ -288,22 +215,24 @@ impl<P: InspectionOps> Controller<P> {
         &self,
         stop_id: StopId,
         pid: Pid,
+        frame: StackFrameId,
         expression: &ValueExpression,
         limits: crate::InspectionLimits,
     ) -> Result<InspectedValue> {
         validate_inspection_limits(limits)?;
         let mut budget = InspectionBudget::new(limits);
-        self.inspect_with_budget(stop_id, pid, expression, &mut budget)
+        self.inspect_with_budget(stop_id, pid, frame, expression, &mut budget)
     }
 
     pub(super) fn inspect_with_budget(
         &self,
         stop_id: StopId,
         pid: Pid,
+        frame: StackFrameId,
         expression: &ValueExpression,
         budget: &mut InspectionBudget,
     ) -> Result<InspectedValue> {
-        self.inspect_with_root(stop_id, pid, expression, budget)
+        self.inspect_with_root(stop_id, pid, frame, expression, budget)
             .map(|(value, _)| value)
     }
 
@@ -317,6 +246,7 @@ impl<P: InspectionOps> Controller<P> {
         &self,
         stop_id: StopId,
         pid: Pid,
+        frame: StackFrameId,
         expression: &ValueExpression,
         budget: &mut InspectionBudget,
     ) -> Result<(InspectedValue, ExpressionRoot)> {
@@ -326,38 +256,10 @@ impl<P: InspectionOps> Controller<P> {
         validate_stopped_thread(inferior, pid)?;
         validate_image_current(inferior)?;
 
-        let presentation = self.presentation_for_stopped_thread(pid)?;
-        let selected_instance = match presentation.frame {
-            PresentedFrame::Physical => Some(None),
-            PresentedFrame::Inline(instance) => Some(Some(instance)),
-            PresentedFrame::Ambiguous(_) => None,
-        };
-        let FrameState {
-            native,
-            image_address,
-            cfa,
-        } = self.frame_state(inferior, pid)?;
-        let instruction = VirtualAddress::new(native.rip);
-        let context = VariableContext {
-            stop_id,
-            thread: debug_thread_id(pid),
-            module: inferior.loaded_module.id,
-            image: inferior.loaded_module.image,
-            address: image_address,
-        };
-        let mut runtime = LinuxVariableRuntime {
-            ptrace: &self.ptrace,
-            pid,
-            loaded_module: inferior.loaded_module,
-            breakpoints: &inferior.breakpoints,
-            native: &native,
-            floating: None,
-            cfa: cfa.clone(),
-            link_map: self
-                .modules
-                .get(&inferior.loaded_module.id)
-                .and_then(|module| module.link_map),
-        };
+        let resolved = self.resolve_frame(inferior, pid, frame)?;
+        let scope = self.frame_scope(&resolved);
+        let mut runtime =
+            scope.map(|(module, ..)| self.frame_runtime(inferior, pid, &resolved, module));
 
         let named_prefix = expression
             .steps
@@ -374,31 +276,31 @@ impl<P: InspectionOps> Controller<P> {
                 .collect::<Vec<_>>()
                 .join(".");
             let selectors = &expression.steps[root_components..];
-            let local = image_address.zip(selected_instance).map_or_else(
-                || Err(Error::VariableNotFound(root.clone())),
-                |(address, selected)| {
-                    self.variable_info
-                        .inspect_path(
-                            address,
-                            selected,
-                            &root,
-                            selectors,
-                            context,
-                            &mut runtime,
-                            budget,
+            let local = match (scope, runtime.as_mut()) {
+                (Some((module, address, selected)), Some(runtime)) => module
+                    .variables
+                    .inspect_path(
+                        address,
+                        selected,
+                        &root,
+                        selectors,
+                        variable_context(stop_id, pid, frame, module, Some(address)),
+                        runtime,
+                        budget,
+                    )
+                    .map(|value| {
+                        (
+                            value,
+                            ExpressionRootKind::Local {
+                                name: root.clone(),
+                                module: module.loaded.id,
+                                address,
+                                selected,
+                            },
                         )
-                        .map(|value| {
-                            (
-                                value,
-                                ExpressionRootKind::Local {
-                                    name: root.clone(),
-                                    address,
-                                    selected,
-                                },
-                            )
-                        })
-                },
-            );
+                    }),
+                _ => Err(Error::VariableNotFound(root.clone())),
+            };
             match local {
                 Ok((value, kind)) => {
                     return Ok((
@@ -430,14 +332,7 @@ impl<P: InspectionOps> Controller<P> {
                 [global] => {
                     return self
                         .inspect_loaded_global_path(
-                            inferior,
-                            pid,
-                            &native,
-                            instruction,
-                            &cfa,
-                            *global,
-                            selectors,
-                            budget,
+                            inferior, pid, &resolved, *global, selectors, budget,
                         )
                         .map(|value| {
                             (
@@ -479,6 +374,7 @@ impl<P: InspectionOps> Controller<P> {
         &self,
         stop_id: StopId,
         pid: Pid,
+        frame: StackFrameId,
         expression: &ValueExpression,
         range: ValueIndexRange,
         limits: crate::InspectionLimits,
@@ -502,7 +398,7 @@ impl<P: InspectionOps> Controller<P> {
                 format!("a range may contain at most {MAX_VALUE_CHILD_PAGE_LIMIT} elements").into(),
             ));
         }
-        let inspected = self.inspect_with_budget(stop_id, pid, expression, &mut budget)?;
+        let inspected = self.inspect_with_budget(stop_id, pid, frame, expression, &mut budget)?;
         let type_name = inspected
             .type_info
             .as_ref()
@@ -604,17 +500,11 @@ impl<P: InspectionOps> Controller<P> {
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "global evaluation reuses the validated stop's native runtime context"
-    )]
     pub(super) fn inspect_loaded_global_path(
         &self,
         inferior: &Inferior,
         pid: Pid,
-        native: &libc::user_regs_struct,
-        instruction: VirtualAddress,
-        cfa: &std::result::Result<VirtualAddress, VariableRuntimeError>,
+        frame: &ResolvedFrame,
         global: GlobalVariableReference,
         selectors: &[ValuePathStep],
         budget: &mut InspectionBudget,
@@ -626,36 +516,19 @@ impl<P: InspectionOps> Controller<P> {
         if module.loaded.image != global.image {
             return Err(Error::StaleModuleImage);
         }
-        let context_address = module
-            .loaded
-            .image_address(instruction)
-            .ok()
-            .filter(|address| module.image.contains_address(*address));
-        let mut runtime = LinuxVariableRuntime {
-            ptrace: &self.ptrace,
-            pid,
-            loaded_module: module.loaded,
-            breakpoints: &inferior.breakpoints,
-            native,
-            floating: None,
-            cfa: cfa.clone(),
-            link_map: module.link_map,
-        };
+        let context_address = global_context_address(frame, module);
+        let mut runtime = self.frame_runtime(inferior, pid, frame, module);
         module.variables.inspect_global_path(
             global.variable,
             context_address,
             selectors,
-            VariableContext {
-                stop_id: inferior
-                    .public_stop
-                    .as_ref()
-                    .expect("expression inspection validated a public stop")
-                    .id,
-                thread: debug_thread_id(pid),
-                module: module.loaded.id,
-                image: module.loaded.image,
-                address: context_address,
-            },
+            variable_context(
+                public_stop_id(inferior),
+                pid,
+                frame.id,
+                module,
+                context_address,
+            ),
             &mut runtime,
             budget,
         )
@@ -681,17 +554,10 @@ impl<P: InspectionOps> Controller<P> {
         if module.loaded.image != reference.image {
             return Err(Error::StaleModuleImage);
         }
-        let FrameState { native, cfa, .. } = self.frame_state(inferior, pid)?;
-        let mut runtime = LinuxVariableRuntime {
-            ptrace: &self.ptrace,
-            pid,
-            loaded_module: module.loaded,
-            breakpoints: &inferior.breakpoints,
-            native: &native,
-            floating: None,
-            cfa,
-            link_map: module.link_map,
-        };
+        // The capability evaluates in the frame that produced it, whichever
+        // frame is selected now.
+        let frame = self.resolve_frame(inferior, pid, reference.frame)?;
+        let mut runtime = self.frame_runtime(inferior, pid, &frame, module);
         module
             .variables
             .dereference(reference, &mut runtime, &mut budget)
@@ -731,17 +597,8 @@ impl<P: InspectionOps> Controller<P> {
         if module.loaded.image != reference.image {
             return Err(Error::StaleModuleImage);
         }
-        let FrameState { native, cfa, .. } = self.frame_state(inferior, pid)?;
-        let mut runtime = LinuxVariableRuntime {
-            ptrace: &self.ptrace,
-            pid,
-            loaded_module: module.loaded,
-            breakpoints: &inferior.breakpoints,
-            native: &native,
-            floating: None,
-            cfa,
-            link_map: module.link_map,
-        };
+        let frame = self.resolve_frame(inferior, pid, reference.frame)?;
+        let mut runtime = self.frame_runtime(inferior, pid, &frame, module);
         module
             .variables
             .value_children(reference, query.offset, query.limit, &mut runtime, budget)
@@ -801,12 +658,39 @@ impl<P: InspectionOps> Controller<P> {
     }
 }
 
-/// A stopped thread's state as variable evaluation needs it.
-pub(super) struct FrameState {
-    pub(super) native: libc::user_regs_struct,
-    /// The instruction's address in the main image, when it lies there.
-    pub(super) image_address: Option<ImageAddress>,
-    pub(super) cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
+fn variable_context(
+    stop_id: StopId,
+    pid: Pid,
+    frame: StackFrameId,
+    module: &RuntimeModule,
+    address: Option<ImageAddress>,
+) -> VariableContext {
+    VariableContext {
+        stop_id,
+        thread: debug_thread_id(pid),
+        frame,
+        module: module.loaded.id,
+        image: module.loaded.image,
+        address,
+    }
+}
+
+const fn public_stop_id(inferior: &Inferior) -> StopId {
+    inferior
+        .public_stop
+        .as_ref()
+        .expect("inspection validated a public stop")
+        .id
+}
+
+/// The instruction context that selects a global's range-gated location
+/// entries. A frame executing another module gives none, so the provider
+/// refuses to guess rather than resolving against an unrelated address.
+fn global_context_address(frame: &ResolvedFrame, module: &RuntimeModule) -> Option<ImageAddress> {
+    frame
+        .code
+        .filter(|(code_module, _)| *code_module == module.loaded.id)
+        .map(|(_, address)| address)
 }
 
 pub(super) fn variable_cfa_error(termination: &UnwindTermination) -> VariableRuntimeError {
@@ -830,7 +714,7 @@ pub(super) struct LinuxVariableRuntime<'a, P> {
     pub(super) pid: Pid,
     pub(super) loaded_module: LoadedModule,
     pub(super) breakpoints: &'a BTreeMap<VirtualAddress, BreakpointSite>,
-    pub(super) native: &'a libc::user_regs_struct,
+    pub(super) registers: &'a FrameRegisters,
     pub(super) floating: Option<std::result::Result<Fxsave, Arc<str>>>,
     pub(super) cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
     pub(super) link_map: Option<VirtualAddress>,
@@ -841,7 +725,13 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         &mut self,
         register: u16,
     ) -> std::result::Result<VariableRegister, VariableRuntimeError> {
-        if let Some(value) = x86_64_general_variable_register(self.native, register) {
+        let native = match self.registers {
+            FrameRegisters::Thread(native) => native,
+            FrameRegisters::Caller(registers) => {
+                return x86_64_caller_variable_register(registers, register);
+            }
+        };
+        if let Some(value) = x86_64_general_variable_register(native, register) {
             return Ok(value);
         }
         if (17..=32).contains(&register) {

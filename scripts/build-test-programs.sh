@@ -872,6 +872,18 @@ build_fixture gcc "$c_fixtures_dir/unwind.c" "$output_dir/unwind-nopie" \
     -O2 -g3 -fomit-frame-pointer -no-pie
 build_fixture clang "$c_fixtures_dir/unwind.c" "$output_dir/unwind-clang-o2" \
     -O2 -g3 -fomit-frame-pointer -fPIE -pie
+# Caller frames whose values live in frame slots, in registers callees saved,
+# and in registers no callee saves.
+build_fixture gcc "$c_fixtures_dir/frames.c" "$output_dir/frames-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/frames.c" "$output_dir/frames-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/frames.c" "$output_dir/frames-gcc-o2-nopie" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie
+build_fixture clang "$c_fixtures_dir/frames.c" "$output_dir/frames-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture clang "$c_fixtures_dir/frames.c" "$output_dir/frames-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o1" \
     -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o2" \
@@ -980,6 +992,10 @@ for language in rust go zig; do
     generate_core "$output_dir/crash-${language}-o0.core" 11 "$default_core_filter" \
         "$output_dir/crash-${language}-o0" "$output_dir/crash-${language}-o0"
 done
+for variant in gcc-o0 gcc-o2 gcc-o2-nopie clang-o0 clang-o2; do
+    program="$output_dir/frames-${variant}"
+    generate_core "${program}.core" 11 "$default_core_filter" "$program" "$program" crash
+done
 # Cores whose executable or shared library was deleted after the crash. The
 # copies are refreshed whenever a core itself must be regenerated.
 generate_core_without() {
@@ -1087,6 +1103,44 @@ generate_backtrace_oracle() {
                END { for (i = 0; i < count; i++) print lines[i] }' >"${oracle}.tmp"
     mv "${oracle}.tmp" "$oracle"
 }
+
+# Records gdb's variables for every frame of every thread in a core.
+readonly frame_oracle_script=scripts/frame-variables-oracle.py
+generate_frame_oracle() {
+    local program="$1"
+    local core="$2"
+    local oracle="${core}.gdb-frame-variables"
+    rebuilt_outputs["$oracle"]=false
+    if [[ -s "$oracle" && "$oracle" -nt "$core" && "$oracle" -nt "$frame_oracle_script" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    local log
+    if ! log=$(USCOPE_FRAME_ORACLE="${oracle}.tmp" gdb -nx -batch -q \
+        -iex 'set auto-load off' \
+        -iex 'set debuginfod enabled off' \
+        -x "$frame_oracle_script" \
+        "$program" "$core" 2>&1) || [[ ! -s "${oracle}.tmp" ]]; then
+        printf 'error: gdb did not record frame variables for %s:\n%s\n' "$core" "$log" >&2
+        rm -f "${oracle}.tmp"
+        exit 1
+    fi
+    mv "${oracle}.tmp" "$oracle"
+}
+
+for variant in gcc-o0 gcc-o2 gcc-o2-nopie clang-o0 clang-o2; do
+    generate_frame_oracle "$output_dir/frames-${variant}" "$output_dir/frames-${variant}.core"
+done
+for variant in gcc-o0 clang-o2 gcc-o2-nopie; do
+    for kind in segv abort; do
+        generate_frame_oracle "$output_dir/crash-${variant}" \
+            "$output_dir/crash-${variant}-${kind}.core"
+    done
+done
+for language in rust go zig; do
+    generate_frame_oracle "$output_dir/crash-${language}-o0" "$output_dir/crash-${language}-o0.core"
+done
 
 for library in gcc clang stripped minidebug; do
     generate_symbol_oracle "$output_dir/libelf-symbols-${library}.so"

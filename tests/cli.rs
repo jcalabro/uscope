@@ -354,7 +354,7 @@ fn help_and_clear_are_generated_from_the_command_registry() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("  Run until the selected frame returns\n  aliases: fin, f"),
+        stdout.contains("  Run until the selected frame returns to its caller\n  aliases: fin, f"),
         "{stdout}"
     );
     assert!(
@@ -369,7 +369,7 @@ fn help_and_clear_are_generated_from_the_command_registry() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("  Show the current execution location"),
+        stdout.contains("  Show the selected frame's execution location"),
         "{stdout}"
     );
     assert!(!stdout.contains("usage: where"), "{stdout}");
@@ -458,12 +458,12 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
     assert!(stdout.contains("print [value-path]\n"), "{stdout}");
     assert!(stdout.contains("aliases: p"), "{stdout}");
     assert!(
-        stdout.contains("  Show the current execution location"),
+        stdout.contains("  Show the selected frame's execution location"),
         "{stdout}"
     );
     assert!(!stdout.contains("usage: where"), "{stdout}");
     assert!(
-        !stdout.contains("  Show the current execution location\n  aliases:"),
+        !stdout.contains("  Show the selected frame's execution location\n  aliases:"),
         "{stdout}"
     );
     assert_eq!(stdout.matches("(int) signed_int = -1234567").count(), 2);
@@ -1703,6 +1703,199 @@ fn backtraces_and_where_name_code_without_debug_info_by_symbol_and_module() {
         location.starts_with("lib_fault at 0x")
             && location.ends_with(" from libelf-symbols-stripped.so"),
         "{stdout}"
+    );
+}
+
+fn frames_line(needle: &str) -> usize {
+    fs::read_to_string(fixture("tests/fixtures/c/frames.c"))
+        .expect("read frames fixture")
+        .lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("frames.c has no line containing {needle:?}"))
+        + 1
+}
+
+/// Returns the index of the first output line at or after `from` that
+/// satisfies `predicate`.
+fn line_index(lines: &[&str], from: usize, predicate: impl Fn(&str) -> bool) -> usize {
+    lines[from..]
+        .iter()
+        .position(|line| predicate(line))
+        .map_or_else(
+            || panic!("no matching line after {from} in:\n{}", lines.join("\n")),
+            |index| from + index,
+        )
+}
+
+#[test]
+fn frame_commands_move_through_caller_frames_and_show_their_source() {
+    let stdout = assert_success(uscope(&[
+        "--core",
+        "build/test-programs/frames-gcc-o0.core",
+        "--batch",
+        "--eval",
+        "frame 4",
+        "--eval",
+        "print depth",
+        "--eval",
+        "up",
+        "--eval",
+        "print depth",
+        "--eval",
+        "where",
+        "--eval",
+        "down 2",
+        "--eval",
+        "list",
+        "--eval",
+        "frame",
+        "--eval",
+        "up 100",
+        "--eval",
+        "down",
+    ]));
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let recursive_call = format!(
+        "frames.c:{}",
+        frames_line("int64_t below = frames_recurse(depth - 1, seed);")
+    );
+    let innermost_call = frames_line("return frames_keep(seed) + level;");
+
+    let frame = line_index(&lines, 0, |line| {
+        line.starts_with("#4 ")
+            && line.contains(" in frames_recurse at ")
+            && line.ends_with(&recursive_call)
+    });
+    // The frame's source follows it, marking its call.
+    let marked = line_index(&lines, frame, |line| line.starts_with("=> "));
+    assert!(lines[marked].contains("frames_recurse(depth - 1, seed)"));
+    let depth = line_index(&lines, marked, |line| line == "(int64_t) depth = 1");
+    let up = line_index(&lines, depth, |line| line.starts_with("#5 "));
+    let depth = line_index(&lines, up, |line| line == "(int64_t) depth = 2");
+    let location = line_index(&lines, depth, |line| {
+        line.starts_with("frames_recurse at ") && line.contains(&format!("{recursive_call} (0x"))
+    });
+    let down = line_index(&lines, location, |line| {
+        line.starts_with("#3 ") && line.ends_with(&format!("frames.c:{innermost_call}"))
+    });
+    let listed = line_index(&lines, down + 1, |line| {
+        line.starts_with(&format!("=> {innermost_call} |"))
+    });
+    let shown = line_index(&lines, listed, |line| line.starts_with("#3 "));
+    let outermost = line_index(&lines, shown, |line| {
+        line.starts_with("#10 ") && line.contains(" in _start+0x")
+    });
+    line_index(&lines, outermost, |line| line.starts_with("#9 "));
+}
+
+#[test]
+fn frame_commands_report_the_ends_of_the_stack() {
+    for (commands, expected) in [
+        (&["down"][..], "the innermost frame is selected"),
+        (&["up 100", "up"], "the outermost frame is selected"),
+        (
+            &["frame 99"],
+            "frame 99 does not exist; the backtrace has 11 frames",
+        ),
+        (&["up x"], "usage: up [count]"),
+    ] {
+        let mut arguments = vec![
+            "--core",
+            "build/test-programs/frames-gcc-o0.core",
+            "--batch",
+        ];
+        for command in commands {
+            arguments.extend(["--eval", command]);
+        }
+        assert_failure(&uscope(&arguments), expected);
+    }
+}
+
+#[test]
+fn disassembly_and_finish_follow_the_selected_frame() {
+    // An outer frame's function is shown around its call, marking where
+    // execution returns.
+    let stdout = assert_success(uscope(&[
+        "--core",
+        "build/test-programs/frames-gcc-o0.core",
+        "--batch",
+        "--eval",
+        "frame 2",
+        "--eval",
+        "disassemble",
+    ]));
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let function = line_index(&lines, 0, |line| {
+        line == "function frames_keep in frames-gcc-o0:"
+    });
+    let marked = line_index(&lines, function, |line| line.starts_with("=> "));
+    assert!(
+        lines[marked - 1].contains("call") && lines[marked - 1].ends_with("<frames_leaf>"),
+        "{stdout}"
+    );
+
+    let stdout = assert_success(uscope(&[
+        "build/test-programs/frames-gcc-o0",
+        "--batch",
+        "--eval",
+        &format!(
+            "break frames.c:{}",
+            frames_line("frames_sink = leaf_local;")
+        ),
+        "--eval",
+        "run",
+        "--eval",
+        "frame 4",
+        "--eval",
+        "finish",
+        "--eval",
+        "print depth",
+        "--eval",
+        "backtrace",
+    ]));
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let finished = line_index(&lines, 0, |line| line == "(int64_t) depth = 2");
+    line_index(&lines, finished, |line| {
+        line.starts_with("#0 ") && line.contains(" in frames_recurse at ")
+    });
+    // Depths 2 and 3 remain below main.
+    line_index(&lines, finished, |line| {
+        line.starts_with("#2 ") && line.contains(" in main at ")
+    });
+}
+
+#[test]
+fn the_innermost_frame_disassembles_where_no_single_inline_frame_is_active() {
+    // A source breakpoint inside the inline body belongs to both the caller
+    // and the inline instance, so no backtrace exists, but the program
+    // counter does.
+    let stdout = assert_success(uscope(&[
+        "build/test-programs/variables-inline-gcc-o0",
+        "--batch",
+        "--eval",
+        "break variables-inline.c:6",
+        "--eval",
+        "run",
+        "--eval",
+        "disassemble",
+    ]));
+    assert!(
+        stdout.contains("function inline_caller in variables-inline-gcc-o0:")
+            && stdout.lines().any(|line| line.starts_with("=> 0x")),
+        "{stdout}"
+    );
+    assert_failure(
+        &uscope(&[
+            "build/test-programs/variables-inline-gcc-o0",
+            "--batch",
+            "--eval",
+            "break variables-inline.c:6",
+            "--eval",
+            "run",
+            "--eval",
+            "up",
+        ]),
+        "the active inline frame is ambiguous",
     );
 }
 

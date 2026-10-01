@@ -7,11 +7,11 @@ use crate::model::numeric_id;
 use crate::{
     AddressDescription, Backtrace, BreakpointLocation, CodeInstanceId, DereferenceReference,
     DereferencedValue, ExecutionLocation, GlobalVariablePage, GlobalVariableReference, LineNumber,
-    LoadedModule, LoadedModuleSnapshot, RegisterSnapshot, Result, ThreadId, ValueChildPage,
-    ValueChildrenReference, VariableSnapshot, VirtualAddress,
+    LoadedModule, LoadedModuleSnapshot, RegisterSnapshot, Result, StackFrame, StackFrameId,
+    ThreadId, ValueChildPage, ValueChildrenReference, VariableSnapshot, VirtualAddress,
 };
 
-/// Selects data objects to inspect in the stopped thread's selected logical frame.
+/// Selects data objects to inspect in one frame of a stopped thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariableQuery {
     /// Inspect every visible parameter and local declaration.
@@ -502,7 +502,7 @@ pub enum StepKind {
     IntoSource,
     /// Advance to a different source location without stopping in callees.
     OverSource,
-    /// Run until the selected frame returns.
+    /// Run until the selected frame returns to its caller.
     Out,
 }
 
@@ -658,6 +658,9 @@ pub struct StateSnapshot {
     pub stop_id: Option<StopId>,
     /// The thread selected for implicit inspection commands.
     pub selected_thread: Option<ThreadId>,
+    /// The selected thread's frame that implicit inspection commands use:
+    /// the innermost frame at each new stop, until a client selects another.
+    pub selected_frame: Option<StackFrameId>,
     /// All live threads known at this revision.
     pub threads: Arc<[ThreadSnapshot]>,
     /// Logical presentation for the selected thread at this stop.
@@ -796,6 +799,7 @@ pub enum Request {
         expression: crate::ValueExpression,
         stop_id: StopId,
         thread_id: ThreadId,
+        frame: StackFrameId,
         reply: Reply<WatchTarget>,
     },
     AddWatchpoint {
@@ -828,6 +832,9 @@ pub enum Request {
         process_id: ProcessId,
         stop_id: StopId,
         thread_id: ThreadId,
+        /// The frame whose return ends [`StepKind::Out`]; every other kind
+        /// steps the innermost frame and requires it.
+        frame: StackFrameId,
         kind: StepKind,
         exception: ExceptionDisposition,
         reply: Reply<ExecutionId>,
@@ -880,6 +887,7 @@ pub enum Request {
     StoppedLocation {
         stop_id: StopId,
         thread_id: ThreadId,
+        frame: StackFrameId,
         reply: Reply<ExecutionLocation>,
     },
     Snapshot {
@@ -900,6 +908,7 @@ pub enum Request {
         limits: crate::InspectionLimits,
         stop_id: StopId,
         thread_id: ThreadId,
+        frame: StackFrameId,
         reply: Reply<VariableSnapshot>,
     },
     Inspect {
@@ -907,6 +916,7 @@ pub enum Request {
         limits: crate::InspectionLimits,
         stop_id: StopId,
         thread_id: ThreadId,
+        frame: StackFrameId,
         reply: Reply<crate::InspectedValue>,
     },
     InspectRange {
@@ -915,6 +925,7 @@ pub enum Request {
         limits: crate::InspectionLimits,
         stop_id: StopId,
         thread_id: ThreadId,
+        frame: StackFrameId,
         reply: Reply<ValueChildPage>,
     },
     Dereference {
@@ -936,6 +947,12 @@ pub enum Request {
         stop_id: StopId,
         thread_id: ThreadId,
         reply: Reply<()>,
+    },
+    SelectFrame {
+        stop_id: StopId,
+        thread_id: ThreadId,
+        frame: StackFrameId,
+        reply: Reply<StackFrame>,
     },
     Shutdown {
         reply: Reply<()>,

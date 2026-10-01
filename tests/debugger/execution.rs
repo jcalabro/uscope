@@ -1236,6 +1236,7 @@ async fn pause_cancels_an_active_source_execution_plan() {
             scenario.handle().start_step(
                 stop,
                 thread,
+                uscope::StackFrameId::INNERMOST,
                 StepKind::Out,
                 uscope::ExceptionDisposition::Pass,
             ),

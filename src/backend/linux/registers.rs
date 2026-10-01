@@ -6,9 +6,12 @@ use nix::libc;
 use nix::unistd::Pid;
 
 use crate::backend::linux::core_dump;
-use crate::debug_info::VariableRegister;
+use crate::debug_info::{VariableRegister, VariableRuntimeError};
 use crate::unwind::RegisterFile;
-use crate::{RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue};
+use crate::{
+    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
+    UnsupportedVariableFeature, VariableUnavailableReason,
+};
 
 use super::debug_thread_id;
 
@@ -65,6 +68,31 @@ pub(super) fn x86_64_general_variable_register(
         descriptor,
         bytes: Arc::from(value.to_le_bytes()),
     })
+}
+
+/// Reads a register of a caller's activation from the registers the
+/// unwinder reconstructed for it.
+pub(super) fn x86_64_caller_variable_register(
+    registers: &RegisterFile,
+    dwarf: u16,
+) -> Result<VariableRegister, VariableRuntimeError> {
+    if let Some(descriptor) = x86_64_general_register_descriptor(dwarf) {
+        return match registers.get(dwarf) {
+            Some(value) => Ok(VariableRegister {
+                descriptor,
+                bytes: Arc::from(value.to_le_bytes()),
+            }),
+            None => Err(VariableUnavailableReason::RegisterNotSaved(descriptor.name).into()),
+        };
+    }
+    if (17..=32).contains(&dwarf) {
+        // Callees may overwrite every SSE register without saving it.
+        return Err(VariableUnavailableReason::RegisterNotSaved(
+            format!("xmm{}", dwarf - 17).into(),
+        )
+        .into());
+    }
+    Err(VariableUnavailableReason::Unsupported(UnsupportedVariableFeature::RegisterClass).into())
 }
 
 pub(super) fn x86_64_general_register_descriptor(dwarf: u16) -> Option<RegisterDescriptor> {

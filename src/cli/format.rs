@@ -11,9 +11,9 @@ use uscope::{
     ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, IndirectTarget,
     InstructionContent, InstructionReferenceKind, InstructionTokenKind, InvalidatedWatchpoint,
     LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage,
-    PointerWidth, RegisterRole, RegisterSnapshot, SourceContext, StateSnapshot, StepKind,
-    StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState,
-    VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
+    PointerWidth, RegisterSnapshot, SourceContext, StackFrame, StateSnapshot, StepKind, StopReason,
+    SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState, VirtualAddress,
+    WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec};
@@ -414,15 +414,6 @@ pub fn registers(registers: &RegisterSnapshot, renderer: Renderer) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Renders the program counter of a register snapshot.
-pub fn program_counter(registers: &RegisterSnapshot) -> Option<String> {
-    registers
-        .registers
-        .iter()
-        .find(|value| value.register.role == Some(RegisterRole::ProgramCounter))
-        .map(|value| register_bytes(&value.bytes, registers.target.byte_order))
 }
 
 /// Renders target-order bytes as one hexadecimal number.
@@ -1119,46 +1110,22 @@ pub fn module_name(modules: &LoadedModuleSnapshot, module: ModuleId) -> Option<S
 
 /// Renders frames with source locations from `images` and module names from
 /// `modules` for frames without source.
+/// Renders a backtrace, highlighting the selected frame's level.
 pub fn backtrace(
     trace: &Backtrace,
+    selected: u32,
     modules: Option<&LoadedModuleSnapshot>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
     renderer: Renderer,
 ) -> String {
     let mut lines = Vec::with_capacity(trace.frames.len() + 1);
     for frame in trace.frames.iter() {
-        let source = frame.source.as_ref().and_then(|source| {
-            images
-                .get(&frame.module?)?
-                .source_file(source.file)
-                .map(|file| format!("{}:{}", file.path.display(), source.line))
-        });
-        let place = source.map_or_else(
-            || {
-                frame
-                    .module
-                    .zip(modules)
-                    .and_then(|(module, modules)| module_name(modules, module))
-                    .map(|module| format!(" from {}", renderer.paint(Role::Metadata, module)))
-                    .unwrap_or_default()
-            },
-            |source| format!(" at {}", renderer.paint(Role::Metadata, source)),
-        );
-        lines.push(format!(
-            "{} {} in {}{place}",
-            renderer.paint(
-                if frame.level == 0 {
-                    Role::Current
-                } else {
-                    Role::Metadata
-                },
-                format_args!("#{:<2}", frame.level)
-            ),
-            renderer.paint(Role::Metadata, format_args!("{:#018x}", frame.instruction)),
-            renderer.paint(
-                Role::Name,
-                code_name(frame.function.as_ref(), frame.symbol.as_ref())
-            ),
+        lines.push(stack_frame(
+            frame,
+            modules,
+            images,
+            frame.level == selected,
+            renderer,
         ));
     }
     lines.push(format!(
@@ -1167,6 +1134,50 @@ pub fn backtrace(
         trace.termination
     ));
     lines.join("\n")
+}
+
+/// Renders one backtrace frame: its level, instruction, code, and source
+/// location or module.
+pub fn stack_frame(
+    frame: &StackFrame,
+    modules: Option<&LoadedModuleSnapshot>,
+    images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    selected: bool,
+    renderer: Renderer,
+) -> String {
+    let source = frame.source.as_ref().and_then(|source| {
+        images
+            .get(&frame.module?)?
+            .source_file(source.file)
+            .map(|file| format!("{}:{}", file.path.display(), source.line))
+    });
+    let place = source.map_or_else(
+        || {
+            frame
+                .module
+                .zip(modules)
+                .and_then(|(module, modules)| module_name(modules, module))
+                .map(|module| format!(" from {}", renderer.paint(Role::Metadata, module)))
+                .unwrap_or_default()
+        },
+        |source| format!(" at {}", renderer.paint(Role::Metadata, source)),
+    );
+    format!(
+        "{} {} in {}{place}",
+        renderer.paint(
+            if selected {
+                Role::Current
+            } else {
+                Role::Metadata
+            },
+            format_args!("#{:<2}", frame.level)
+        ),
+        renderer.paint(Role::Metadata, format_args!("{:#018x}", frame.instruction)),
+        renderer.paint(
+            Role::Name,
+            code_name(frame.function.as_ref(), frame.symbol.as_ref())
+        ),
+    )
 }
 
 pub fn globals(page: &GlobalVariablePage, renderer: Renderer) -> String {
