@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use uscope::{
-    Architecture, BreakpointLocation, ByteOrder, CodeInstanceKind, Debugger, EntryProvenance,
-    Error, ExceptionDisposition, ExitStatus, InferiorState, InlineFrameLookup, ModuleImage,
-    PointerWidth, ProcessId, RegisterRole, ResumeScope, ScalarValue, SourceContext, SourceFile,
-    SourceLocation, StepKind, StopReason, ThreadState, UnwindTermination, VariableKind,
+    Architecture, BreakpointLocation, BreakpointSpec, ByteOrder, CodeInstanceKind, Debugger,
+    EntryProvenance, Error, ExceptionDisposition, ExitStatus, InferiorState, InlineFrameLookup,
+    ModuleImage, PointerWidth, ProcessId, RegisterRole, ResumeScope, ScalarValue, SourceContext,
+    SourceFile, SourceLocation, StepKind, StopReason, ThreadState, UnwindTermination, VariableKind,
     VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
@@ -7547,6 +7547,24 @@ async fn backtraces_unwind_through_shared_libraries_and_libc() {
             sort > 1,
             "{fixture}: no libc frame was reconstructed: {frames:#?}"
         );
+        // libc has no debug information, so its symbol tables name every
+        // frame; so too the main image's start code, which has none either.
+        for frame in trace.frames.iter() {
+            assert!(
+                frame.function.is_some() || frame.symbol.is_some(),
+                "{fixture}: unnamed frame {frame:#?}"
+            );
+        }
+        let start = trace.frames.last().expect("frames");
+        assert_eq!(
+            frames.last().map(|(module, _)| module.as_str()),
+            Some(fixture)
+        );
+        assert_eq!(
+            start.symbol.as_ref().map(|symbol| symbol.name.as_ref()),
+            Some("_start"),
+            "{fixture}: {start:#?}"
+        );
         // glibc's entry code declares the return address undefined, so a
         // complete trace proves the walk crossed back through libc into _start.
         assert_eq!(
@@ -7617,6 +7635,31 @@ async fn backtraces_unwind_through_shared_libraries_and_libc() {
             caller < position_of(&frames, fixture, "main"),
             "{fixture}: {frames:#?}"
         );
+        assert_eq!(
+            trace.frames[caller - 1]
+                .symbol
+                .as_ref()
+                .map(|symbol| symbol.name.as_ref()),
+            Some("abort"),
+            "{fixture}: {trace:#?}"
+        );
+        // The stop location is described by the module that contains it.
+        let location = scenario
+            .operation("location", scenario.handle().current_location())
+            .await;
+        let libc = modules
+            .modules
+            .iter()
+            .find(|record| {
+                record
+                    .path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("libc.so"))
+            })
+            .expect("libc is loaded");
+        assert_eq!(location.module, libc.module.id, "{fixture}");
+        assert_eq!(location.image.symbol, trace.frames[0].symbol, "{fixture}");
+        assert!(location.image.function.is_none(), "{fixture}");
         assert!(
             frames[..caller]
                 .iter()
@@ -7627,6 +7670,72 @@ async fn backtraces_unwind_through_shared_libraries_and_libc() {
 
         scenario.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn stops_in_a_shared_library_show_that_librarys_own_source() {
+    let mut scenario = Scenario::new("library stop", Scenario::fixture("module-frames-gcc-o0"));
+    scenario.add_breakpoint("main").await;
+    scenario.run_to_stop().await;
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    let library = modules
+        .modules
+        .iter()
+        .find(|record| record.path.ends_with("libmodule-frames.so"))
+        .expect("library is loaded");
+    let image = scenario
+        .operation(
+            "library image",
+            scenario.handle().loaded_module_image(library.module.id),
+        )
+        .await;
+    let function = image.function_named("dso_apply").expect("dso_apply");
+    let entry = image
+        .instances_for_function(function.id)
+        .find_map(|instance| instance.breakpoint_entry)
+        .expect("dso_apply entry");
+    let address = library
+        .module
+        .virtual_address(entry.address)
+        .expect("relocated entry");
+    scenario
+        .add_breakpoint_spec(BreakpointSpec::Address(address))
+        .await;
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+
+    // Source-file identifiers belong to the library's image; resolving them
+    // in the main image would name main.c, or no file at all.
+    let location = scenario
+        .operation("location", scenario.handle().current_location())
+        .await;
+    assert_eq!(location.module, library.module.id);
+    assert_eq!(
+        location.image.function.map(|function| function.name),
+        Some(Arc::from("dso_apply"))
+    );
+    let context = scenario
+        .operation("source", scenario.handle().source_context(1))
+        .await;
+    assert!(
+        context
+            .file
+            .path
+            .ends_with("tests/fixtures/c/module-frames/library.c"),
+        "{context:#?}"
+    );
+    assert!(
+        context
+            .lines
+            .iter()
+            .any(|line| line.text.contains("callback(adjusted)")),
+        "{context:#?}"
+    );
+    scenario.shutdown().await;
 }
 
 #[tokio::test]

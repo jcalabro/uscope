@@ -9,7 +9,7 @@ use gimli::{
     EvaluationResult, Location, RegisterRule, RunTimeEndian, SectionId, UnwindContext,
     UnwindExpression, UnwindSection, Value,
 };
-use object::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
+use object::{Object, ObjectSection, ObjectSegment};
 
 use super::{DebugInfo, UnwindInfo};
 use crate::model::{LineEntry, ModuleMetadata};
@@ -18,8 +18,8 @@ use crate::{
     AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, ColumnNumber, EntryProvenance, Error, FunctionId, FunctionInfo, ImageAddress,
     LineNumber, LineSequenceId, ModuleImage, PointerWidth, Result, SourceFile, SourceFileId,
-    SourceLocation, StatementFlags, StatementRow, SymbolId, SymbolInfo, TargetDescription,
-    UnwindTermination, VirtualAddress,
+    SourceLocation, StatementFlags, StatementRow, TargetDescription, UnwindTermination,
+    VirtualAddress,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -169,6 +169,8 @@ fn load_debug_info(
         &mut source_files,
         &mut source_file_ids,
     )?;
+    let unwind = Arc::new(load_unwind_info(&object, target)?);
+    let symbols = super::elf::load_symbols(&object, &unwind.function_ranges());
     let image = Arc::new(
         ModuleImage::new(
             path.to_owned(),
@@ -177,7 +179,8 @@ fn load_debug_info(
             ModuleMetadata {
                 functions: function_metadata.functions,
                 code_instances: function_metadata.code_instances,
-                symbols: load_symbols(&object),
+                symbols: symbols.symbols,
+                symbol_sources: symbols.sources,
                 globals: variables.globals,
                 types: variables.types,
                 source_files,
@@ -187,7 +190,6 @@ fn load_debug_info(
         )
         .with_id(image_id),
     );
-    let unwind = Arc::new(load_unwind_info(&object, target)?);
 
     Ok(DebugInfo {
         image,
@@ -306,6 +308,49 @@ fn load_unwind_info(
         },
         bases,
     })
+}
+
+impl DwarfUnwindInfo {
+    /// Returns the code range of every function the call-frame information
+    /// describes. Enumeration stops at the first malformed entry, so the
+    /// result is evidence of function boundaries rather than a complete map.
+    fn function_ranges(&self) -> Vec<AddressRange<ImageAddress>> {
+        let mut ranges = Vec::new();
+        let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
+        eh_frame.set_address_size(self.address_size);
+        collect_function_ranges(&eh_frame, &self.bases, &mut ranges);
+        let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
+        debug_frame.set_address_size(self.address_size);
+        collect_function_ranges(&debug_frame, &self.bases, &mut ranges);
+        ranges
+    }
+}
+
+fn collect_function_ranges<'data, S>(
+    section: &S,
+    bases: &BaseAddresses,
+    ranges: &mut Vec<AddressRange<ImageAddress>>,
+) where
+    S: UnwindSection<Reader<'data>>,
+{
+    let mut entries = section.entries(bases);
+    while let Ok(Some(entry)) = entries.next() {
+        let gimli::CieOrFde::Fde(partial) = entry else {
+            continue;
+        };
+        let Ok(fde) = partial.parse(S::cie_from_offset) else {
+            continue;
+        };
+        let start = fde.initial_address();
+        if let Some(end) = start.checked_add(fde.len())
+            && start < end
+        {
+            ranges.push(AddressRange {
+                start: ImageAddress::new(start),
+                end: ImageAddress::new(end),
+            });
+        }
+    }
 }
 
 impl UnwindInfo for DwarfUnwindInfo {
@@ -1338,38 +1383,6 @@ fn object_bytes<'data>(
         return Ok(Some(bytes));
     }
     Ok(None)
-}
-
-fn load_symbols(object: &object::File<'_>) -> Vec<SymbolInfo> {
-    let mut symbols_by_name: HashMap<String, Vec<u64>> = HashMap::new();
-
-    for symbol in object.symbols().chain(object.dynamic_symbols()) {
-        if symbol.address() == 0 {
-            continue;
-        }
-        if let Ok(name) = symbol.name() {
-            let addresses = symbols_by_name.entry(name.to_owned()).or_default();
-
-            if !addresses.contains(&symbol.address()) {
-                addresses.push(symbol.address());
-            }
-        }
-    }
-
-    symbols_by_name
-        .into_iter()
-        .flat_map(|(name, addresses)| {
-            addresses
-                .into_iter()
-                .map(move |address| (name.clone(), address))
-        })
-        .enumerate()
-        .map(|(id, (name, address))| SymbolInfo {
-            id: SymbolId::new(u32::try_from(id).expect("symbol count fits in u32")),
-            name: name.into(),
-            address: ImageAddress::new(address),
-        })
-        .collect()
 }
 
 fn target_description(

@@ -3,8 +3,8 @@
 ## Debugger core
 
 - [x] Add watchpoints.
-- [ ] Symbolize frames in modules without DWARF from their ELF symbol tables.
-- [ ] Add disassembly support.
+- [x] Symbolize frames in modules without DWARF from their ELF symbol tables.
+- [ ] Add disassembly support, with an `info symbol <address>` command built on the same address resolution.
 - [ ] Support core dumps from other machines with a sysroot or library search path.
 - [ ] Add caller-frame selection for variables and source context, especially for core dumps.
 - [ ] Add hit-count breakpoints by evaluating hits at an internal stop and resuming transparently.
@@ -12,6 +12,12 @@
 - [ ] Expand expression evaluation beyond structural value inspection.
 - [ ] Add conditional breakpoints.
 - [ ] Improve support for advanced DWARF location expressions and composite locations.
+- [ ] Register the vDSO as a memory-backed module so backtraces unwind through it and name its frames.
+- [ ] Unwind through signal trampolines: evaluate CFI expression rules and present the trampoline frame itself as the signal frame.
+- [ ] Synthesize `name@plt` symbols for PLT stubs.
+- [ ] Set breakpoints by symbol name in modules without DWARF.
+- [ ] Show symbol versions where they distinguish otherwise identical names.
+- [ ] Load separate debug information through `.gnu_debuglink`, build-id directories, and debuginfod.
 
 ## Client interfaces
 

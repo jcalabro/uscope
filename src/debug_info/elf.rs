@@ -1,0 +1,810 @@
+//! ELF symbol tables, normalized into module-image symbols.
+//!
+//! The static (`.symtab`), dynamic (`.dynsym`), and embedded `MiniDebugInfo`
+//! (`.gnu_debugdata`) tables are merged into one catalog. Only defined code
+//! symbols in executable sections receive an extent, so only they can name
+//! machine code.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io;
+use std::sync::Arc;
+
+use object::{Object, ObjectSection, ObjectSymbol, SectionFlags, SymbolFlags, SymbolSection, elf};
+
+use crate::{
+    AddressRange, EmbeddedSymbolTable, ImageAddress, SymbolBinding, SymbolExtent,
+    SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolTableSources,
+};
+
+/// Bounds the decompressed size of an embedded symbol table so a malformed or
+/// hostile module cannot exhaust memory.
+const EMBEDDED_TABLE_LIMIT: usize = 64 << 20;
+
+pub struct SymbolTable {
+    pub symbols: Vec<SymbolInfo>,
+    pub sources: SymbolTableSources,
+}
+
+/// An executable section of the module image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodeSection<'data> {
+    name: &'data [u8],
+    start: u64,
+    end: u64,
+}
+
+struct RawSymbol {
+    kind: SymbolKind,
+    binding: SymbolBinding,
+    exported: bool,
+    size: u64,
+    /// The image's executable section that defines a code symbol.
+    section: Option<(u64, u64)>,
+}
+
+/// Loads every symbol table of an ELF image. `unwind_functions` are the code
+/// ranges the image's call-frame information describes; their starts bound
+/// the inferred extents of unsized symbols.
+pub fn load_symbols(
+    object: &object::File<'_>,
+    unwind_functions: &[AddressRange<ImageAddress>],
+) -> SymbolTable {
+    let sections = code_sections(object);
+    let mut raw = BTreeMap::new();
+
+    collect(object, object.symbols(), &sections, false, &mut raw);
+    let embedded_table = object
+        .section_by_name(".gnu_debugdata")
+        .map_or(EmbeddedSymbolTable::Absent, |section| {
+            collect_embedded(object, &section, &sections, &mut raw)
+        });
+    collect(object, object.dynamic_symbols(), &sections, true, &mut raw);
+
+    SymbolTable {
+        symbols: normalize(raw, unwind_functions),
+        sources: SymbolTableSources {
+            static_table: object.symbol_table().is_some(),
+            dynamic_table: object.dynamic_symbol_table().is_some(),
+            embedded_table,
+        },
+    }
+}
+
+/// Collects the symbols of a `MiniDebugInfo` section: an xz-compressed ELF
+/// object whose static symbol table holds the functions the dynamic table
+/// omits.
+fn collect_embedded(
+    object: &object::File<'_>,
+    section: &object::Section<'_, '_>,
+    sections: &[CodeSection<'_>],
+    raw: &mut BTreeMap<(Arc<str>, u64), RawSymbol>,
+) -> EmbeddedSymbolTable {
+    let data = match section
+        .data()
+        .map_err(|error| Arc::from(format!("the section is unreadable: {error}")))
+        .and_then(|compressed| decompress(compressed, EMBEDDED_TABLE_LIMIT))
+    {
+        Ok(data) => data,
+        Err(reason) => return EmbeddedSymbolTable::Unusable { reason },
+    };
+    match object::File::parse(data.as_slice()) {
+        Ok(embedded) if embedded.architecture() == object.architecture() => {
+            collect(&embedded, embedded.symbols(), sections, false, raw);
+            EmbeddedSymbolTable::Loaded
+        }
+        Ok(_) => unusable("the embedded object targets another architecture"),
+        Err(error) => unusable(&format!("the embedded object is malformed: {error}")),
+    }
+}
+
+fn unusable(reason: &str) -> EmbeddedSymbolTable {
+    EmbeddedSymbolTable::Unusable {
+        reason: reason.into(),
+    }
+}
+
+fn code_sections<'data>(object: &object::File<'data>) -> Vec<CodeSection<'data>> {
+    object
+        .sections()
+        .filter_map(|section| code_section(&section))
+        .collect()
+}
+
+fn code_section<'data>(section: &impl ObjectSection<'data>) -> Option<CodeSection<'data>> {
+    let SectionFlags::Elf { sh_flags } = section.flags() else {
+        return None;
+    };
+    let required = u64::from(elf::SHF_ALLOC | elf::SHF_EXECINSTR);
+    if sh_flags & required != required {
+        return None;
+    }
+    let start = section.address();
+    Some(CodeSection {
+        name: section.name_bytes().ok()?,
+        start,
+        end: start.checked_add(section.size())?,
+    })
+}
+
+/// Decompresses an xz stream into at most `limit` bytes.
+fn decompress(compressed: &[u8], limit: usize) -> Result<Vec<u8>, Arc<str>> {
+    struct Bounded {
+        data: Vec<u8>,
+        limit: usize,
+    }
+
+    impl io::Write for Bounded {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.data.len().saturating_add(bytes.len()) > self.limit {
+                return Err(io::Error::other(format!(
+                    "the decompressed table exceeds {} bytes",
+                    self.limit
+                )));
+            }
+            self.data.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut output = Bounded {
+        data: Vec::new(),
+        limit,
+    };
+    lzma_rs::xz_decompress(&mut io::BufReader::new(compressed), &mut output)
+        .map_err(|error| Arc::from(format!("the section is not a valid xz stream: {error}")))?;
+    Ok(output.data)
+}
+
+fn collect<'data, S>(
+    source: &object::File<'data>,
+    symbols: impl Iterator<Item = S>,
+    image_sections: &[CodeSection<'_>],
+    exported: bool,
+    raw: &mut BTreeMap<(Arc<str>, u64), RawSymbol>,
+) where
+    S: ObjectSymbol<'data>,
+{
+    for symbol in symbols {
+        // Undefined, absolute, and common symbols have no image address.
+        let SymbolSection::Section(index) = symbol.section() else {
+            continue;
+        };
+        let SymbolFlags::Elf { st_info, .. } = symbol.flags() else {
+            continue;
+        };
+        let kind = match st_info & 0xf {
+            elf::STT_FUNC => SymbolKind::Function,
+            elf::STT_GNU_IFUNC => SymbolKind::IndirectFunction,
+            elf::STT_OBJECT | elf::STT_COMMON => SymbolKind::Data,
+            elf::STT_NOTYPE => SymbolKind::Unknown,
+            // Section and file symbols name no entity, and a thread-local
+            // symbol's value is an offset into a TLS block, not an address.
+            _ => continue,
+        };
+        let binding = match st_info >> 4 {
+            elf::STB_GLOBAL | elf::STB_GNU_UNIQUE => SymbolBinding::Global,
+            elf::STB_WEAK => SymbolBinding::Weak,
+            elf::STB_LOCAL => SymbolBinding::Local,
+            _ => continue,
+        };
+        let Ok(name) = symbol.name_bytes() else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+
+        // A symbol from the embedded object refers to that object's copy of
+        // the section header table, so code sections are matched by identity.
+        let section = matches!(kind, SymbolKind::Function | SymbolKind::IndirectFunction)
+            .then(|| source.section_by_index(index).ok())
+            .flatten()
+            .and_then(|section| code_section(&section))
+            .filter(|section| image_sections.contains(section))
+            .map(|section| (section.start, section.end));
+        let entry = raw
+            .entry((Arc::from(String::from_utf8_lossy(name)), symbol.address()))
+            .or_insert_with(|| RawSymbol {
+                kind,
+                binding,
+                exported,
+                size: symbol.size(),
+                section,
+            });
+        entry.exported |= exported;
+    }
+}
+
+fn normalize(
+    raw: BTreeMap<(Arc<str>, u64), RawSymbol>,
+    unwind_functions: &[AddressRange<ImageAddress>],
+) -> Vec<SymbolInfo> {
+    let code_starts = raw
+        .iter()
+        .filter(|(_, symbol)| symbol.section.is_some())
+        .map(|((_, address), _)| *address)
+        .collect::<BTreeSet<_>>();
+    let mut unwind_ends = BTreeMap::<u64, u64>::new();
+    for range in unwind_functions {
+        let end = unwind_ends
+            .entry(range.start.get())
+            .or_insert_with(|| range.end.get());
+        *end = (*end).min(range.end.get());
+    }
+
+    let mut symbols = raw
+        .into_iter()
+        .map(|((name, address), symbol)| {
+            let extent = symbol.section.and_then(|section| {
+                extent(address, symbol.size, section, &code_starts, &unwind_ends)
+            });
+            (name, address, symbol, extent)
+        })
+        .collect::<Vec<_>>();
+    symbols.sort_by(|left, right| (left.1, &left.0).cmp(&(right.1, &right.0)));
+
+    symbols
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, address, symbol, extent))| SymbolInfo {
+            id: SymbolId::new(u32::try_from(index).expect("symbol count fits in u32")),
+            name,
+            address: ImageAddress::new(address),
+            kind: symbol.kind,
+            binding: symbol.binding,
+            exported: symbol.exported,
+            extent,
+        })
+        .collect()
+}
+
+/// Determines the code named by a symbol in the executable section
+/// `[section.0, section.1)`.
+///
+/// A declared extent must lie within the section. An unsized symbol extends
+/// to the first evidence of other code: the next code symbol, the next
+/// unwind-table function, or the section end. An unwind-table function that
+/// begins at the symbol also bounds it by its own end.
+fn extent(
+    address: u64,
+    size: u64,
+    (section_start, section_end): (u64, u64),
+    code_starts: &BTreeSet<u64>,
+    unwind_ends: &BTreeMap<u64, u64>,
+) -> Option<SymbolExtent> {
+    if address < section_start || address >= section_end {
+        return None;
+    }
+    let (end, provenance) = if size == 0 {
+        let after = address.checked_add(1)?;
+        let mut end = section_end;
+        end = end.min(code_starts.range(after..).next().copied().unwrap_or(end));
+        end = end.min(
+            unwind_ends
+                .range(after..)
+                .next()
+                .map_or(end, |(start, _)| *start),
+        );
+        end = end.min(unwind_ends.get(&address).copied().unwrap_or(end));
+        (end, SymbolExtentProvenance::Inferred)
+    } else {
+        let end = address.checked_add(size)?;
+        if end > section_end {
+            return None;
+        }
+        (end, SymbolExtentProvenance::Declared)
+    };
+
+    (address < end).then(|| SymbolExtent {
+        range: AddressRange {
+            start: ImageAddress::new(address),
+            end: ImageAddress::new(end),
+        },
+        provenance,
+    })
+}
+
+/// Normalizes the symbol tables of either a raw ELF file or an object
+/// synthesized from structured input, then checks catalog and lookup
+/// invariants at every symbol boundary and at input-chosen addresses.
+#[cfg(feature = "fuzzing")]
+pub(super) fn fuzz(data: &[u8]) {
+    let (bytes, unwind) = if data.starts_with(b"\x7fELF") {
+        (data.to_vec(), Vec::new())
+    } else {
+        fuzz_object(data)
+    };
+    let Ok(object) = object::File::parse(bytes.as_slice()) else {
+        return;
+    };
+    let table = load_symbols(&object, &unwind);
+    let sections = code_sections(&object);
+    for (index, symbol) in table.symbols.iter().enumerate() {
+        assert_eq!(
+            symbol.id,
+            SymbolId::new(u32::try_from(index).expect("count"))
+        );
+        let _ = crate::demangle::demangle(&symbol.name);
+        let Some(extent) = symbol.extent else {
+            continue;
+        };
+        assert!(matches!(
+            symbol.kind,
+            SymbolKind::Function | SymbolKind::IndirectFunction
+        ));
+        assert_eq!(extent.range.start, symbol.address);
+        assert!(extent.range.start < extent.range.end);
+        assert!(sections.iter().any(|section| {
+            section.start <= extent.range.start.get() && extent.range.end.get() <= section.end
+        }));
+    }
+    assert!(
+        table
+            .symbols
+            .windows(2)
+            .all(|pair| (pair[0].address, &pair[0].name) < (pair[1].address, &pair[1].name)),
+        "the catalog is ordered and free of duplicates"
+    );
+
+    let symbols = table.symbols.clone();
+    let image = crate::ModuleImage::new(
+        std::path::PathBuf::from("/fuzz"),
+        crate::TargetDescription {
+            architecture: crate::Architecture::X86_64,
+            byte_order: crate::ByteOrder::Little,
+            pointer_width: crate::PointerWidth::Bits64,
+        },
+        AddressRange {
+            start: ImageAddress::new(0),
+            end: ImageAddress::new(u64::MAX),
+        },
+        crate::model::ModuleMetadata {
+            functions: Vec::new(),
+            code_instances: Vec::new(),
+            symbols: table.symbols,
+            symbol_sources: table.sources,
+            globals: Vec::new(),
+            types: Arc::default(),
+            source_files: Vec::new(),
+            statements: Vec::new(),
+            lines: Vec::new(),
+        },
+    );
+    fuzz_lookups(&image, &symbols, data);
+}
+
+/// Checks lookups at every extent boundary and at input-chosen addresses: a
+/// result contains its address and outranks every other containing extent,
+/// and no address inside an extent goes unnamed.
+#[cfg(feature = "fuzzing")]
+fn fuzz_lookups(image: &crate::ModuleImage, symbols: &[SymbolInfo], data: &[u8]) {
+    let probes = symbols
+        .iter()
+        .filter_map(|symbol| symbol.extent)
+        .flat_map(|extent| {
+            let (start, end) = (extent.range.start.get(), extent.range.end.get());
+            [start, end - 1, end, start.wrapping_sub(1)]
+        })
+        .chain(
+            data.as_chunks::<8>()
+                .0
+                .iter()
+                .take(64)
+                .map(|chunk| u64::from_le_bytes(*chunk) % 0x200),
+        );
+    for address in probes {
+        let address = ImageAddress::new(address);
+        let containing = symbols
+            .iter()
+            .filter(|symbol| {
+                symbol
+                    .extent
+                    .is_some_and(|extent| extent.range.contains(address))
+            })
+            .collect::<Vec<_>>();
+        let Some(found) = image.symbolize(address) else {
+            assert!(containing.is_empty(), "an extent contains {address:#x}");
+            continue;
+        };
+        let found = image
+            .symbol(found.symbol)
+            .expect("found symbols are cataloged");
+        let extent = found.extent.expect("found symbols name code");
+        assert!(extent.range.contains(address));
+        for other in containing {
+            let other = other.extent.expect("containing");
+            assert!(
+                (extent.provenance, std::cmp::Reverse(extent.range.start))
+                    <= (other.provenance, std::cmp::Reverse(other.range.start)),
+                "{found:?} outranks {other:?} at {address:#x}"
+            );
+        }
+    }
+}
+
+/// Synthesizes a relocatable x86-64 object: one byte sizes the executable
+/// section, and each following six-byte record defines a symbol or a
+/// call-frame entry from a small pool of colliding names.
+#[cfg(feature = "fuzzing")]
+fn fuzz_object(data: &[u8]) -> (Vec<u8>, Vec<AddressRange<ImageAddress>>) {
+    use object::write;
+
+    const NAMES: [&str; 6] = ["a", "b", "_a", "__b", "main", "_ZN3foo3barEv"];
+    let mut object = write::Object::new(
+        object::BinaryFormat::Elf,
+        object::Architecture::X86_64,
+        object::Endianness::Little,
+    );
+    let text = object.add_section(Vec::new(), b".text".to_vec(), object::SectionKind::Text);
+    let data_section = object.add_section(Vec::new(), b".data".to_vec(), object::SectionKind::Data);
+    let text_size = usize::from(data.first().copied().unwrap_or(0)) * 2;
+    object.append_section_data(text, &vec![0xcc; text_size], 1);
+    object.append_section_data(data_section, &[0; 16], 1);
+
+    let mut unwind = Vec::new();
+    for record in data.get(1..).unwrap_or_default().as_chunks::<6>().0 {
+        let value = u64::from(u16::from_le_bytes([record[2], record[3]]) % 0x200);
+        let size = u64::from(record[4]) % 0x40;
+        if record[0] & 0x80 != 0 {
+            if let Some(end) = value.checked_add(size) {
+                unwind.push(AddressRange {
+                    start: ImageAddress::new(value),
+                    end: ImageAddress::new(end),
+                });
+            }
+            continue;
+        }
+        let st_type = [
+            elf::STT_FUNC,
+            elf::STT_GNU_IFUNC,
+            elf::STT_OBJECT,
+            elf::STT_NOTYPE,
+            elf::STT_TLS,
+        ][usize::from(record[1] % 5)];
+        let st_bind =
+            [elf::STB_GLOBAL, elf::STB_WEAK, elf::STB_LOCAL][usize::from(record[1] / 5 % 3)];
+        let section = match record[0] % 4 {
+            0 | 1 => write::SymbolSection::Section(text),
+            2 => write::SymbolSection::Section(data_section),
+            _ => write::SymbolSection::Absolute,
+        };
+        object.add_symbol(write::Symbol {
+            name: NAMES[usize::from(record[5]) % NAMES.len()]
+                .as_bytes()
+                .to_vec(),
+            value,
+            size: if record[0] & 0x40 != 0 {
+                u64::MAX - size
+            } else {
+                size
+            },
+            kind: object::SymbolKind::Unknown,
+            scope: if st_bind == elf::STB_LOCAL {
+                object::SymbolScope::Compilation
+            } else {
+                object::SymbolScope::Dynamic
+            },
+            weak: st_bind == elf::STB_WEAK,
+            section,
+            flags: object::SymbolFlags::Elf {
+                st_info: (st_bind << 4) | st_type,
+                st_other: 0,
+            },
+        });
+    }
+    (object.write().unwrap_or_default(), unwind)
+}
+
+#[cfg(test)]
+mod tests {
+    use object::write;
+    use object::{Architecture, BinaryFormat, Endianness};
+
+    use super::*;
+
+    /// One symbol of a synthesized relocatable object.
+    struct Spec {
+        name: &'static str,
+        value: u64,
+        size: u64,
+        st_type: u8,
+        st_bind: u8,
+        section: write::SymbolSection,
+    }
+
+    impl Spec {
+        fn new(name: &'static str, section: write::SymbolSection) -> Self {
+            Self {
+                name,
+                value: 0,
+                size: 0,
+                st_type: elf::STT_FUNC,
+                st_bind: elf::STB_GLOBAL,
+                section,
+            }
+        }
+
+        const fn at(mut self, value: u64, size: u64) -> Self {
+            self.value = value;
+            self.size = size;
+            self
+        }
+
+        const fn typed(mut self, st_type: u8, st_bind: u8) -> Self {
+            self.st_type = st_type;
+            self.st_bind = st_bind;
+            self
+        }
+    }
+
+    struct Sections {
+        text: write::SectionId,
+        data: write::SectionId,
+        tls: write::SectionId,
+    }
+
+    /// Writes an x86-64 relocatable object with a 0x40-byte executable
+    /// section, a data section, and a thread-local section. Relocatable
+    /// sections all begin at address zero.
+    fn object(
+        architecture: Architecture,
+        symbols: impl FnOnce(&Sections) -> Vec<Spec>,
+        extra: &[(&str, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut object = write::Object::new(BinaryFormat::Elf, architecture, Endianness::Little);
+        let sections = Sections {
+            text: object.add_section(Vec::new(), b".text".to_vec(), object::SectionKind::Text),
+            data: object.add_section(Vec::new(), b".data".to_vec(), object::SectionKind::Data),
+            tls: object.add_section(Vec::new(), b".tdata".to_vec(), object::SectionKind::Tls),
+        };
+        object.append_section_data(sections.text, &[0xcc; 0x40], 16);
+        object.append_section_data(sections.data, &[0; 0x10], 8);
+        object.append_section_data(sections.tls, &[0; 0x10], 8);
+        for (name, data) in extra {
+            let section = object.add_section(
+                Vec::new(),
+                name.as_bytes().to_vec(),
+                object::SectionKind::Other,
+            );
+            object.append_section_data(section, data, 1);
+        }
+        for spec in symbols(&sections) {
+            object.add_symbol(write::Symbol {
+                name: spec.name.as_bytes().to_vec(),
+                value: spec.value,
+                size: spec.size,
+                kind: object::SymbolKind::Unknown,
+                scope: if spec.st_bind == elf::STB_LOCAL {
+                    object::SymbolScope::Compilation
+                } else {
+                    object::SymbolScope::Dynamic
+                },
+                weak: spec.st_bind == elf::STB_WEAK,
+                section: spec.section,
+                flags: object::SymbolFlags::Elf {
+                    st_info: (spec.st_bind << 4) | spec.st_type,
+                    st_other: 0,
+                },
+            });
+        }
+        object.write().expect("write test object")
+    }
+
+    fn load(data: &[u8], unwind: &[(u64, u64)]) -> SymbolTable {
+        let object = object::File::parse(data).expect("parse test object");
+        let unwind = unwind
+            .iter()
+            .map(|&(start, end)| AddressRange {
+                start: ImageAddress::new(start),
+                end: ImageAddress::new(end),
+            })
+            .collect::<Vec<_>>();
+        load_symbols(&object, &unwind)
+    }
+
+    type Summary<'a> = (&'a str, SymbolKind, SymbolBinding, Option<(u64, u64)>);
+
+    fn summary(table: &SymbolTable) -> Vec<Summary<'_>> {
+        table
+            .symbols
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.name.as_ref(),
+                    symbol.kind,
+                    symbol.binding,
+                    symbol
+                        .extent
+                        .map(|extent| (extent.range.start.get(), extent.range.end.get())),
+                )
+            })
+            .collect()
+    }
+
+    fn xz(data: &[u8]) -> Vec<u8> {
+        let mut compressed = Vec::new();
+        lzma_rs::xz_compress(&mut io::BufReader::new(data), &mut compressed).expect("compress");
+        compressed
+    }
+
+    #[test]
+    fn only_addressable_symbols_are_cataloged_and_only_trustworthy_code_has_extents() {
+        use SymbolBinding::{Global, Local, Weak};
+        use SymbolKind::{Data, Function, IndirectFunction, Unknown};
+        use write::SymbolSection::{Absolute, Section, Undefined};
+
+        let data = object(
+            Architecture::X86_64,
+            |sections| {
+                let text = Section(sections.text);
+                vec![
+                    Spec::new("sized", text).at(0x00, 0x10),
+                    Spec::new("unsized", text).at(0x10, 0),
+                    // A label inside a function is cataloged but names no code.
+                    Spec::new("label", text)
+                        .at(0x18, 0)
+                        .typed(elf::STT_NOTYPE, elf::STB_LOCAL),
+                    Spec::new("local", text)
+                        .at(0x20, 0x08)
+                        .typed(elf::STT_FUNC, elf::STB_LOCAL),
+                    Spec::new("resolver", text)
+                        .at(0x28, 0x04)
+                        .typed(elf::STT_GNU_IFUNC, elf::STB_WEAK),
+                    Spec::new("overflowing", text).at(0x30, u64::MAX),
+                    Spec::new("past_section", text).at(0x38, 0x10),
+                    Spec::new("unsized_last", text).at(0x3c, 0),
+                    // A function symbol outside executable code names no code.
+                    Spec::new("misplaced", Section(sections.data)).at(0x0, 0x4),
+                    Spec::new("object", Section(sections.data))
+                        .at(0x8, 0x8)
+                        .typed(elf::STT_OBJECT, elf::STB_GNU_UNIQUE),
+                    // These have no image address.
+                    Spec::new("thread_local", Section(sections.tls))
+                        .at(0x8, 0x8)
+                        .typed(elf::STT_TLS, elf::STB_GLOBAL),
+                    Spec::new("undefined", Undefined).at(0x20, 0),
+                    Spec::new("absolute", Absolute)
+                        .at(0x20, 0)
+                        .typed(elf::STT_OBJECT, elf::STB_GLOBAL),
+                    Spec::new("section", text).typed(elf::STT_SECTION, elf::STB_LOCAL),
+                    Spec::new("file.c", Absolute).typed(elf::STT_FILE, elf::STB_LOCAL),
+                ]
+            },
+            &[],
+        );
+
+        let table = load(&data, &[]);
+        assert_eq!(
+            summary(&table),
+            [
+                ("misplaced", Function, Global, None),
+                ("sized", Function, Global, Some((0x00, 0x10))),
+                ("object", Data, Global, None),
+                // Unsized code ends at the next code symbol, not at a label.
+                ("unsized", Function, Global, Some((0x10, 0x20))),
+                ("label", Unknown, Local, None),
+                ("local", Function, Local, Some((0x20, 0x28))),
+                ("resolver", IndirectFunction, Weak, Some((0x28, 0x2c))),
+                ("overflowing", Function, Global, None),
+                ("past_section", Function, Global, None),
+                ("unsized_last", Function, Global, Some((0x3c, 0x40))),
+            ]
+        );
+        // Identifiers are dense in address-then-name order.
+        assert!(table.symbols.iter().enumerate().all(|(index, symbol)| {
+            symbol.id == SymbolId::new(u32::try_from(index).expect("test symbol count"))
+        }));
+        assert_eq!(
+            table.sources,
+            SymbolTableSources {
+                static_table: true,
+                dynamic_table: false,
+                embedded_table: EmbeddedSymbolTable::Absent,
+            }
+        );
+        let provenance = |name: &str| {
+            table
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name.as_ref() == name)
+                .and_then(|symbol| symbol.extent)
+                .map(|extent| extent.provenance)
+        };
+        assert_eq!(provenance("sized"), Some(SymbolExtentProvenance::Declared));
+        assert_eq!(
+            provenance("unsized"),
+            Some(SymbolExtentProvenance::Inferred)
+        );
+
+        // Call-frame entries are evidence of function boundaries: one that
+        // begins at an unsized symbol ends it, and one that begins later caps
+        // it even where no symbol names that code.
+        let table = load(&data, &[(0x10, 0x14), (0x3c, 0x3e)]);
+        assert_eq!(summary(&table)[3].3, Some((0x10, 0x14)));
+        assert_eq!(summary(&table)[9].3, Some((0x3c, 0x3e)));
+        let table = load(&data, &[(0x0, 0x10), (0x18, 0x20)]);
+        assert_eq!(summary(&table)[3].3, Some((0x10, 0x18)));
+    }
+
+    #[test]
+    fn embedded_symbol_tables_merge_or_explain_why_they_are_unusable() {
+        let embedded_text = |name: &'static str, architecture| {
+            object(
+                architecture,
+                |sections| {
+                    vec![
+                        Spec::new(name, write::SymbolSection::Section(sections.text))
+                            .at(0x20, 0x08)
+                            .typed(elf::STT_FUNC, elf::STB_LOCAL),
+                    ]
+                },
+                &[],
+            )
+        };
+        let with_embedded = |payload: Vec<u8>| {
+            object(
+                Architecture::X86_64,
+                |sections| {
+                    vec![
+                        Spec::new("exported", write::SymbolSection::Section(sections.text))
+                            .at(0x0, 0x10),
+                    ]
+                },
+                &[(".gnu_debugdata", payload)],
+            )
+        };
+
+        let table = load(
+            &with_embedded(xz(&embedded_text("hidden", Architecture::X86_64))),
+            &[],
+        );
+        assert_eq!(table.sources.embedded_table, EmbeddedSymbolTable::Loaded);
+        assert_eq!(
+            summary(&table),
+            [
+                (
+                    "exported",
+                    SymbolKind::Function,
+                    SymbolBinding::Global,
+                    Some((0x0, 0x10))
+                ),
+                (
+                    "hidden",
+                    SymbolKind::Function,
+                    SymbolBinding::Local,
+                    Some((0x20, 0x28))
+                ),
+            ]
+        );
+
+        let unusable = |payload: Vec<u8>| {
+            let table = load(&with_embedded(payload), &[]);
+            assert_eq!(
+                table.symbols.len(),
+                1,
+                "only the image's own symbol remains"
+            );
+            match table.sources.embedded_table {
+                EmbeddedSymbolTable::Unusable { reason } => reason,
+                other => panic!("expected an unusable table, got {other:?}"),
+            }
+        };
+        assert!(unusable(b"not xz".to_vec()).contains("xz stream"));
+        assert!(unusable(xz(b"not an object")).contains("malformed"));
+        assert!(
+            unusable(xz(&embedded_text("foreign", Architecture::Aarch64))).contains("architecture")
+        );
+
+        let large = vec![0_u8; 0x1000];
+        assert!(decompress(&xz(&large), large.len()).is_ok());
+        assert!(
+            decompress(&xz(&large), large.len() - 1)
+                .expect_err("over the limit")
+                .contains("exceeds")
+        );
+    }
+}

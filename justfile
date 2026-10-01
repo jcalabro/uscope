@@ -43,6 +43,10 @@ fuzz-dwarf-expression *ARGS="":
 fuzz-core-dump *ARGS="":
     cargo fuzz run core-dump -- "$@"
 
+# Fuzzes ELF symbol-table normalization and symbol lookup invariants.
+fuzz-elf-symbols *ARGS="":
+    cargo fuzz run elf-symbols -- "$@"
+
 # Fuzzes watchpoint debug-register planning and hit attribution invariants.
 fuzz-debug-register-plan *ARGS="":
     cargo fuzz run debug-register-plan -- "$@"

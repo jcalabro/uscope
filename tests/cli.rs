@@ -1465,6 +1465,85 @@ fn backtraces_name_source_files_from_each_frames_own_module() {
     );
 }
 
+#[test]
+fn backtraces_and_where_name_code_without_debug_info_by_symbol_and_module() {
+    let stdout = assert_success(uscope(&[
+        "--core",
+        "build/test-programs/elf-symbols-stripped.core",
+        "--batch",
+        "--eval",
+        "bt",
+        "--eval",
+        "where",
+    ]));
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let frame = |needle: &str| {
+        lines
+            .iter()
+            .find(|line| line.starts_with('#') && line.contains(needle))
+            .unwrap_or_else(|| panic!("no frame containing {needle:?}:\n{stdout}"))
+    };
+    // An unsized symbol says so; code no symbol names stays unknown, even
+    // where stripping removed a static function between named ones.
+    assert!(
+        frame(" in asm_unsized+0x6 ")
+            .ends_with(" (unsized symbol) from libelf-symbols-stripped.so"),
+        "{stdout}"
+    );
+    assert!(frame(" in asm_sized+0x6 ").ends_with(" from libelf-symbols-stripped.so"));
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.ends_with(" in <unknown> from libelf-symbols-stripped.so"))
+            .count(),
+        2,
+        "{stdout}"
+    );
+    assert!(!stdout.contains("lib_static_helper"), "{stdout}");
+    // Frames with source keep showing it instead of a module.
+    assert!(frame(" in chain_gap at ").ends_with("tests/fixtures/c/elf-symbols/main.c:69"));
+    assert!(frame(" in _start+0x").ends_with(" from elf-symbols-stripped"));
+    let location = lines.last().expect("where output");
+    assert!(
+        location.starts_with("lib_fault at 0x")
+            && location.ends_with(" from libelf-symbols-stripped.so"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn backtraces_demangle_rust_symbols() {
+    let stdout = assert_success(uscope(&[
+        "--core",
+        "build/test-programs/crash-rust-nodebug.core",
+        "--batch",
+        "--eval",
+        "bt",
+    ]));
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains(" in crash::crash_now+0x")
+                && line.ends_with(" from crash-rust-nodebug")),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn where_reports_instructions_outside_every_module_by_address() {
+    let stdout = assert_success(uscope(&[
+        "--core",
+        "build/test-programs/null-call.core",
+        "--batch",
+        "--eval",
+        "where",
+    ]));
+    assert_eq!(
+        stdout.trim_end(),
+        "<unknown> at 0x0000000000000000 outside every loaded module"
+    );
+}
+
 fn uscope_batch(arguments: &[&str], executable: &Path) -> std::process::Output {
     assert!(
         executable.exists(),

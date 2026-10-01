@@ -136,6 +136,109 @@ build_shared_fixture() {
         -std=c17 -Wall -Wextra -Werror -shared -fPIC "$@"
 }
 
+# Builds the library of the ELF symbol fixture without debug information, so
+# that only its symbol tables and call-frame information describe it.
+build_symbols_library() {
+    local compiler="$1"
+    local output="$2"
+    local soname="${3:-${output##*/}}"
+    local source_dir="$c_fixtures_dir/elf-symbols"
+    local -a command=(
+        "$compiler" -std=c17 -Wall -Wextra -Werror -shared -fPIC -O2
+        "-Wl,-soname,${soname}" "$source_dir/library.c" "$source_dir/layout.S" -o "$output"
+    )
+    read_dash_version "$compiler"
+    run_cached_build "$source_dir" "$output" \
+        "compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=${compiler}" \
+        "${command[@]}"
+}
+
+# Derives a library with only a dynamic symbol table from one with full
+# symbol tables. With an embedded table, the result also carries a
+# MiniDebugInfo section built the way Fedora's find-debuginfo does: the
+# compressed object keeps exactly the function symbols the dynamic table
+# omits. The uncompressed object is kept beside the library for oracles.
+derive_stripped_library() {
+    local input="$1"
+    local output="$2"
+    local embedded="$3"
+    local script
+    # shellcheck disable=SC2016
+    script='
+        set -euo pipefail
+        input="$1"; output="$2"; embedded="$3"
+        rm -f "$output" "$output.embedded" "$output.embedded.xz"
+        strip --strip-all -o "$output" "$input"
+        if [[ "$embedded" == yes ]]; then
+            nm -D "$input" --format=posix --defined-only | awk "{ print \$1 }" | sort >"$output.dynsyms"
+            nm "$input" --format=posix --defined-only \
+                | awk "{ if (\$2 == \"T\" || \$2 == \"t\" || \$2 == \"D\") print \$1 }" \
+                | sort >"$output.funcsyms"
+            comm -13 "$output.dynsyms" "$output.funcsyms" >"$output.keep"
+            objcopy --only-keep-debug "$input" "$output.embedded"
+            objcopy -S --remove-section .gdb_index --remove-section .comment \
+                "--keep-symbols=$output.keep" "$output.embedded"
+            xz --keep "$output.embedded"
+            objcopy --add-section ".gnu_debugdata=$output.embedded.xz" "$output"
+            rm -f "$output.dynsyms" "$output.funcsyms" "$output.keep" "$output.embedded.xz"
+        fi
+    '
+    run_cached_build "$input" "$output" \
+        "derivation=stripped-v1"$'\n'"embedded=${embedded}" \
+        bash -c "$script" _ "$input" "$output" "$embedded"
+}
+
+# Fails the build when the symbol fixture library no longer has the symbol
+# tables and layout the symbolization tests depend on. TABLES names which
+# tables must exist: full, dynamic, or embedded.
+require_symbols_layout() {
+    local library="$1"
+    local tables="$2"
+    local sections symbols
+    sections=$(readelf -SW "$library")
+    symbols=$(readelf -sW "$library")
+    fail() {
+        printf 'error: %s: %s\n' "$library" "$1" >&2
+        exit 1
+    }
+    if grep -F .debug_info <<<"$sections" >/dev/null; then
+        fail "has DWARF debug information"
+    fi
+    local has_symtab=no has_embedded=no
+    grep -F ' .symtab ' <<<"$sections" >/dev/null && has_symtab=yes
+    grep -F ' .gnu_debugdata ' <<<"$sections" >/dev/null && has_embedded=yes
+    case "$tables" in
+        full) [[ $has_symtab == yes && $has_embedded == no ]] || fail "lacks a static symbol table" ;;
+        dynamic) [[ $has_symtab == no && $has_embedded == no ]] || fail "is not stripped" ;;
+        embedded) [[ $has_symtab == no && $has_embedded == yes ]] || fail "lacks MiniDebugInfo" ;;
+    esac
+    local layout_symbols="$symbols"
+    if [[ "$tables" == embedded ]]; then
+        layout_symbols=$(readelf -sW "$library.embedded")
+        if ! grep -E ' FUNC +LOCAL .* lib_static_helper$' <<<"$layout_symbols" >/dev/null; then
+            fail "MiniDebugInfo lacks lib_static_helper"
+        fi
+        if grep -E ' asm_sized$' <<<"$layout_symbols" >/dev/null; then
+            fail "MiniDebugInfo repeats exported symbols"
+        fi
+    fi
+    if [[ "$tables" == dynamic || "$tables" == embedded ]] \
+        && grep -F lib_static_helper <<<"$symbols" >/dev/null; then
+        fail "still names lib_static_helper"
+    fi
+    # The return address of the call ending asm_noreturn_caller must be the
+    # first byte of asm_after_noreturn, and asm_nested_inner must lie strictly
+    # inside asm_nested_outer.
+    awk '
+        $8 == "asm_noreturn_caller" { caller_end = strtonum("0x" $2) + $3 }
+        $8 == "asm_after_noreturn" { after = strtonum("0x" $2) }
+        $8 == "asm_nested_outer" { outer = strtonum("0x" $2); outer_end = outer + $3 }
+        $8 == "asm_nested_inner" { inner = strtonum("0x" $2); inner_end = inner + $3 }
+        END {
+            exit !(caller_end == after && outer < inner && inner_end < outer_end)
+        }' <<<"$symbols" || fail "asm layout changed"
+}
+
 build_rust_fixture() {
     local source="$1"
     local output="$2"
@@ -478,6 +581,44 @@ build_fixture clang "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-f
 build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-nopie" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie \
     "-L$output_dir" -lmodule-frames '-Wl,-rpath,$ORIGIN'
+build_symbols_library gcc "$output_dir/libelf-symbols-gcc.so"
+build_symbols_library clang "$output_dir/libelf-symbols-clang.so"
+# Stripped libraries keep the soname they were linked with, so each derived
+# library starts from a full build that already carries its final soname.
+for library in stripped minidebug; do
+    build_symbols_library gcc "$output_dir/libelf-symbols-${library}.so.full" \
+        "libelf-symbols-${library}.so"
+done
+derive_stripped_library "$output_dir/libelf-symbols-stripped.so.full" \
+    "$output_dir/libelf-symbols-stripped.so" no
+derive_stripped_library "$output_dir/libelf-symbols-minidebug.so.full" \
+    "$output_dir/libelf-symbols-minidebug.so" yes
+require_symbols_layout "$output_dir/libelf-symbols-gcc.so" full
+require_symbols_layout "$output_dir/libelf-symbols-clang.so" full
+require_symbols_layout "$output_dir/libelf-symbols-stripped.so" dynamic
+require_symbols_layout "$output_dir/libelf-symbols-minidebug.so" embedded
+readonly symbols_variants=(
+    "gcc-o0 gcc gcc -O0 -fno-omit-frame-pointer -fPIE -pie"
+    "clang-o2 clang clang -O2 -fomit-frame-pointer -fPIE -pie"
+    "gcc-nopie gcc gcc -O2 -fomit-frame-pointer -no-pie"
+    "stripped stripped gcc -O0 -fno-omit-frame-pointer -fPIE -pie"
+    "minidebug minidebug gcc -O0 -fno-omit-frame-pointer -fPIE -pie"
+)
+for variant in "${symbols_variants[@]}"; do
+    read -r name library compiler flags <<<"$variant"
+    # shellcheck disable=SC2086
+    build_fixture "$compiler" "$c_fixtures_dir/elf-symbols/main.c" \
+        "$output_dir/elf-symbols-${name}" -g3 -gdwarf-5 $flags \
+        "-L$output_dir" "-lelf-symbols-${library}" '-Wl,-rpath,$ORIGIN'
+    if ! readelf -dW "$output_dir/elf-symbols-${name}" \
+        | grep -F "Shared library: [libelf-symbols-${library}.so]" >/dev/null; then
+        printf 'error: elf-symbols-%s does not load libelf-symbols-%s.so\n' \
+            "$name" "$library" >&2
+        exit 1
+    fi
+done
+build_fixture gcc "$c_fixtures_dir/null-call.c" "$output_dir/null-call" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-gcc" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_fixture clang "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-clang" \
@@ -717,8 +858,14 @@ build_fixture gcc "$c_fixtures_dir/crash/main.c" "$output_dir/crash-gcc-o2-nopie
     "-L$output_dir" -lcrash '-Wl,-rpath,$ORIGIN'
 build_rust_fixture "$rust_fixtures_dir/crash.rs" "$output_dir/crash-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
+# Later -C options override the debuginfo=2 default; stripping debug info
+# keeps the v0-mangled symbol table.
+build_rust_fixture "$rust_fixtures_dir/crash.rs" "$output_dir/crash-rust-nodebug" \
+    -C opt-level=0 -C debuginfo=0 -C strip=debuginfo
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-nodwarf" \
+    -buildmode=pie "-gcflags=all=-N -l" -ldflags=-w
 build_zig_fixture "$zig_fixtures_dir/crash.zig" "$output_dir/crash-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 
@@ -766,6 +913,93 @@ generate_core_without() {
 }
 generate_core_without library libcrash.so
 generate_core_without executable crash-gcc-o0
+
+# Cores of programs whose code ELF symbols alone describe. The Go runtime's
+# arenas would make a full core enormous, and frame 0 needs only registers.
+generate_core "$output_dir/crash-rust-nodebug.core" 11 "$default_core_filter" \
+    "$output_dir/crash-rust-nodebug" "$output_dir/crash-rust-nodebug"
+generate_core "$output_dir/crash-go-nodwarf.core" 11 "$headers_only_core_filter" \
+    "$output_dir/crash-go-nodwarf" "$output_dir/crash-go-nodwarf"
+
+generate_core "$output_dir/null-call.core" 11 "$default_core_filter" \
+    "$output_dir/null-call" "$output_dir/null-call"
+
+# Independent readings of the ELF symbol fixture by binutils and gdb, which
+# differential tests compare against uscope's symbol tables and backtraces.
+readonly symbol_oracle_dir="$output_dir/symbol-oracles"
+mkdir -p "$symbol_oracle_dir"
+
+# Records readelf's section and symbol tables and call-frame entries for one
+# ELF file. An embedded MiniDebugInfo object has no frame contents to dump.
+generate_symbol_oracle() {
+    local elf="$1"
+    local oracle="$symbol_oracle_dir/${2:-${elf##*/}}.readelf"
+    local frames="${3:-yes}"
+    local header="uscope-symbol-oracle-v2"
+    # Registered so that deleting an oracle invalidates the cached suite.
+    rebuilt_outputs["$oracle"]=false
+    if [[ -s "$oracle" && "$oracle" -nt "$elf" && "$(head -n 1 "$oracle")" == "$header" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    {
+        printf '%s\n' "$header"
+        readelf -SW "$elf"
+        readelf -sW "$elf"
+        if [[ "$frames" == yes ]]; then
+            readelf -wf "$elf"
+        fi
+    } >"${oracle}.tmp"
+    mv "${oracle}.tmp" "$oracle"
+}
+
+# Records gdb's complete backtrace of a core's crashing thread.
+generate_backtrace_oracle() {
+    local program="$1"
+    local core="$2"
+    local oracle="${core}.gdb-backtrace"
+    rebuilt_outputs["$oracle"]=false
+    if [[ -s "$oracle" && "$oracle" -nt "$core" ]]; then
+        printf '[cached] %s\n' "$oracle"
+        return
+    fi
+    printf '[oracle] %s\n' "$oracle"
+    gdb -nx -batch -q \
+        -iex 'set auto-load off' \
+        -iex 'set debuginfod enabled off' \
+        -ex 'set backtrace past-main on' \
+        -ex 'set backtrace past-entry on' \
+        -ex 'bt' \
+        "$program" "$core" 2>&1 \
+        | awk '/^#0 / { count = 0 } /^#/ { lines[count++] = $0 }
+               END { for (i = 0; i < count; i++) print lines[i] }' >"${oracle}.tmp"
+    mv "${oracle}.tmp" "$oracle"
+}
+
+for library in gcc clang stripped minidebug; do
+    generate_symbol_oracle "$output_dir/libelf-symbols-${library}.so"
+done
+generate_symbol_oracle "$output_dir/libelf-symbols-minidebug.so.embedded" \
+    libelf-symbols-minidebug.so.embedded no
+# The unstripped build locates code whose symbols stripping removed.
+generate_symbol_oracle "$output_dir/libelf-symbols-stripped.so.full"
+for variant in "${symbols_variants[@]}"; do
+    read -r name _ <<<"$variant"
+    generate_symbol_oracle "$output_dir/elf-symbols-${name}"
+done
+# The C library and loader every fixture runs against, as the loader resolves them.
+while read -r library; do
+    generate_symbol_oracle "$library"
+done < <(ldd "$output_dir/elf-symbols-gcc-o0" | awk '/=> \// { print $3 } /^\t\// { print $1 }' \
+    | grep -E '/(libc\.so|ld-linux)')
+for variant in "${symbols_variants[@]}"; do
+    read -r name library _ <<<"$variant"
+    program="$output_dir/elf-symbols-${name}"
+    generate_core "${program}.core" 4 "$default_core_filter" \
+        "$program $output_dir/libelf-symbols-${library}.so" "$program"
+    generate_backtrace_oracle "$program" "${program}.core"
+done
 
 printf '%s\n' "${!rebuilt_outputs[@]}" >"${suite_outputs}.tmp"
 mv "${suite_outputs}.tmp" "$suite_outputs"

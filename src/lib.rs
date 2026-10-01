@@ -1,5 +1,6 @@
 mod backend;
 mod debug_info;
+mod demangle;
 mod error;
 mod expression;
 mod inspection;
@@ -14,21 +15,22 @@ pub use model::{
     BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry, BreakpointLocation,
     ByteOrder, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
     ColumnNumber, DereferenceReference, DereferenceState, DereferenceUnavailableReason,
-    DereferencedValue, EntryProvenance, EnumerationOrigin, Enumerator, ExecutionLocation,
-    FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId,
-    GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference, GlobalVariableType,
-    GlobalVariableVisibility, ImageAddress, ImageLocation, InlineChain, InlineFrameLookup,
-    InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits,
-    InspectionUsage, IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo,
-    LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
-    MemoryReadUnavailableReason, ModuleId, ModuleImage, ModuleImageId, NamedTypeRelationship,
-    OptimizedOutReason, ParsedValueExpression, PointerWidth, RecordKind, RecordMember,
-    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
+    DereferencedValue, EmbeddedSymbolTable, EntryProvenance, EnumerationOrigin, Enumerator,
+    ExecutionLocation, FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate,
+    GlobalVariableId, GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference,
+    GlobalVariableType, GlobalVariableVisibility, ImageAddress, ImageLocation, InlineChain,
+    InlineFrameLookup, InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit,
+    InspectionLimits, InspectionUsage, IntegerValue, LineNumber, LineSequenceId,
+    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead,
+    MemoryReadCompletion, MemoryReadUnavailableReason, ModuleId, ModuleImage, ModuleImageId,
+    NamedTypeRelationship, OptimizedOutReason, ParsedValueExpression, PointerWidth, RecordKind,
+    RecordMember, RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
     RegisterSnapshot, RegisterValue, ScalarValue, SourceContext, SourceFile, SourceFileId,
-    SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolId,
-    SymbolInfo, TargetDescription, ThreadId, TlsUnavailableReason, TypeId, TypeInfo, TypeKind,
-    TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
-    ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
+    SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow,
+    SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind,
+    SymbolLocation, SymbolTableSources, TargetDescription, ThreadId, TlsUnavailableReason, TypeId,
+    TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature,
+    UnwindTermination, ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
     ValueChildRelationship, ValueChildren, ValueChildrenReference, ValueExpression,
     ValueIndexRange, ValuePageCompletion, ValuePathStep, Variable, VariableInvalidReason,
     VariableKind, VariableMalformedKind, VariableMalformedReason, VariableSnapshot, VariableState,
@@ -57,6 +59,14 @@ pub fn fuzz_core_dump(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_debug_register_plan(data: &[u8]) {
     backend::fuzz_debug_register_plan(data);
+}
+
+/// Exercises ELF symbol-table normalization and symbol lookup invariants for
+/// the fuzz harness.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_elf_symbols(data: &[u8]) {
+    debug_info::fuzz_elf_symbols(data);
 }
 
 /// Exercises bounded DWARF-expression parsing for the fuzz harness.
@@ -527,8 +537,11 @@ impl DebuggerHandle {
             .source
             .ok_or(Error::SourceLocationUnavailable)?;
 
+        // Source files are identified within the image of the module that
+        // contains the stopped instruction.
         let file = self
-            .module_image
+            .loaded_module_image(execution.module)
+            .await?
             .source_file(location.file)
             .cloned()
             .expect("source location references a known file");
