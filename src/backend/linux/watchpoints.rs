@@ -26,7 +26,7 @@ use crate::{
 use super::debug_registers::{DebugRegisterPlan, SlotAccess};
 use super::frames::{DwarfCallerProvider, frame_lookup_address};
 use super::memory::{PtraceMemory, read_logical_memory};
-use super::native::{InspectionOps, LinuxTraceOps};
+use super::native::{InspectionOps, LinuxTraceOps, is_vanished_tracee};
 use super::registers::x86_64_registers;
 use super::stepping::x86_64_activation_has_returned;
 use super::{
@@ -88,6 +88,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                 required: u64::try_from(error.required).expect("slot count fits u64"),
                 available: u64::try_from(error.available).expect("slot count fits u64"),
             })?;
+        // Read before arming, so a failed read leaves nothing armed.
+        let observed = self.read_watched_bytes(address, byte_size)?;
         self.arm_all_threads(plan)?;
 
         let watchpoint = Watchpoint {
@@ -107,7 +109,6 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .collect::<Vec<_>>()
                 .into(),
         };
-        let observed = self.read_watched_bytes(address, byte_size);
         self.inferior
             .as_mut()
             .expect("armed inferior exists")
@@ -315,21 +316,19 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Records the watched bytes just before execution resumes so the next
     /// hit reports what the access changed since the debugger last looked,
     /// including the debugger's own writes.
-    pub(super) fn refresh_watch_baselines(&mut self) {
+    pub(super) fn refresh_watch_baselines(&mut self) -> Result<()> {
         let Some(inferior) = self.inferior.as_ref() else {
-            return;
+            return Ok(());
         };
         let observed = inferior
             .watch
             .watchpoints
             .iter()
             .map(|(&id, record)| {
-                (
-                    id,
-                    self.read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size),
-                )
+                self.read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size)
+                    .map(|bytes| (id, bytes))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let inferior = self.inferior.as_mut().expect("inferior exists");
         for (id, bytes) in observed {
             inferior
@@ -339,6 +338,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .expect("watchpoint exists")
                 .observed = bytes;
         }
+        Ok(())
     }
 
     /// Resolves the pending watch evidence of every stopped thread once the
@@ -380,12 +380,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .map(|record| (*id, record))
             })
             .map(|(id, record)| {
-                (
-                    id,
-                    self.read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size),
-                )
+                self.read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size)
+                    .map(|bytes| (id, bytes))
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<Result<BTreeMap<_, _>>>()?;
         let invalidated = invalid
             .iter()
             .map(|(id, reason)| InvalidatedWatchpoint {
@@ -485,23 +483,33 @@ impl<P: LinuxTraceOps> Controller<P> {
 }
 
 impl<P: InspectionOps> Controller<P> {
-    /// Reads the current watched bytes through any stopped thread, hiding
-    /// software-breakpoint bytes. Unreadable memory is reported as `None`.
+    /// Reads the current watched bytes through a stopped thread, hiding
+    /// software-breakpoint bytes. Unreadable memory is reported as `None`, as
+    /// is memory no stopped thread can reach because each was killed out of
+    /// its ptrace-stop, as a sibling's `exit_group` does. Any other failure
+    /// is an error, never a value.
     pub(super) fn read_watched_bytes(
         &self,
         address: VirtualAddress,
         byte_size: u64,
-    ) -> Option<Arc<[u8]>> {
-        let inferior = self.inferior.as_ref()?;
-        let pid = inferior
+    ) -> Result<Option<Arc<[u8]>>> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let size = usize::try_from(byte_size).map_err(|_| Error::AddressOverflow)?;
+        let stopped = inferior
             .threads
             .iter()
-            .find(|(_, thread)| matches!(thread.state, NativeThreadState::Stopped))
-            .map(|(&pid, _)| pid)?;
-        let size = usize::try_from(byte_size).ok()?;
-        let read =
-            read_logical_memory(&self.ptrace, pid, &inferior.breakpoints, address, size).ok()?;
-        matches!(read.completion, MemoryReadCompletion::Complete).then(|| read.bytes.into())
+            .filter(|(_, thread)| matches!(thread.state, NativeThreadState::Stopped));
+        for (&pid, _) in stopped {
+            match read_logical_memory(&self.ptrace, pid, &inferior.breakpoints, address, size) {
+                Ok(read) => {
+                    return Ok(matches!(read.completion, MemoryReadCompletion::Complete)
+                        .then(|| read.bytes.into()));
+                }
+                Err(error) if is_vanished_tracee(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
     }
 
     /// The change watchpoints among `owners` whose watched bytes equal those
@@ -510,22 +518,24 @@ impl<P: InspectionOps> Controller<P> {
     pub(super) fn unchanged_watchpoints(
         &self,
         owners: impl IntoIterator<Item = WatchpointId>,
-    ) -> BTreeSet<WatchpointId> {
+    ) -> Result<BTreeSet<WatchpointId>> {
         let Some(inferior) = self.inferior.as_ref() else {
-            return BTreeSet::new();
+            return Ok(BTreeSet::new());
         };
-        owners
-            .into_iter()
-            .filter(|id| {
-                inferior.watch.watchpoints.get(id).is_some_and(|record| {
-                    record.watchpoint.access == WatchAccess::Change
-                        && self.read_watched_bytes(
-                            record.watchpoint.address,
-                            record.watchpoint.byte_size,
-                        ) == record.observed
-                })
-            })
-            .collect()
+        let mut unchanged = BTreeSet::new();
+        for id in owners {
+            let Some(record) = inferior.watch.watchpoints.get(&id) else {
+                continue;
+            };
+            if record.watchpoint.access == WatchAccess::Change
+                && self
+                    .read_watched_bytes(record.watchpoint.address, record.watchpoint.byte_size)?
+                    == record.observed
+            {
+                unchanged.insert(id);
+            }
+        }
+        Ok(unchanged)
     }
 
     /// The watchpoints among a thread's hit `owners` that report its
@@ -533,10 +543,10 @@ impl<P: InspectionOps> Controller<P> {
     pub(super) fn reportable_watch_hits(
         &self,
         mut owners: BTreeSet<WatchpointId>,
-    ) -> BTreeSet<WatchpointId> {
-        let unchanged = self.unchanged_watchpoints(owners.iter().copied());
+    ) -> Result<BTreeSet<WatchpointId>> {
+        let unchanged = self.unchanged_watchpoints(owners.iter().copied())?;
         owners.retain(|id| !unchanged.contains(id));
-        owners
+        Ok(owners)
     }
 
     pub(super) fn watch_invalidation(

@@ -12,7 +12,8 @@
 - [x] Add hit-count breakpoints by evaluating hits at an internal stop and resuming transparently.
 - [x] Add value-change-only watchpoints using the same internal evaluate-and-resume stop.
 - [ ] Expand expression evaluation beyond structural value inspection.
-- [ ] Add conditional breakpoints.
+- [x] Add conditional breakpoints.
+- [ ] Add conditions and hit conditions to watchpoints; DAP refuses them on data breakpoints today.
 - [ ] Improve support for advanced DWARF location expressions and composite locations.
 - [ ] Register the vDSO as a memory-backed module so backtraces unwind through it and name its frames.
 - [ ] Unwind through signal trampolines: evaluate CFI expression rules and present the trampoline frame itself as the signal frame.
@@ -23,7 +24,7 @@
 
 ## Client interfaces
 
-- [ ] Add a debugger protocol server, starting with DAP support.
+- [x] Add a debugger protocol server, starting with DAP support.
 - [ ] Add a richer interactive or TUI client.
 - [ ] Keep the public request/event model suitable for multiple clients.
 

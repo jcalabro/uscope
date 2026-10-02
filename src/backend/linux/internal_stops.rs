@@ -211,26 +211,26 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// change before every thread stopped. The barrier then publishes the
     /// next most important reason any thread of the execution recorded, or
     /// becomes internal when none did.
-    pub(super) fn settle_edited_reasons(&mut self) {
+    pub(super) fn settle_edited_reasons(&mut self) -> Result<()> {
         let unchanged = self.unchanged_watchpoints(
             self.inferior
                 .iter()
                 .flat_map(|inferior| inferior.threads.values())
                 .flat_map(|thread| thread.watch_hits.iter().copied()),
-        );
+        )?;
         // A stop holds a hit or two, so looking each up beats indexing every
         // breakpoint at every stop.
         let breakpoints = &self.breakpoints;
         let exists = |id| breakpoints.iter().any(|breakpoint| breakpoint.id == id);
         let Some(inferior) = self.inferior.as_mut() else {
-            return;
+            return Ok(());
         };
         let Some(resumed) = inferior
             .active
             .as_ref()
             .map(|active| active.resume_threads.clone())
         else {
-            return;
+            return Ok(());
         };
         for (pid, thread) in &mut inferior.threads {
             if !resumed.contains(pid) {
@@ -259,13 +259,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
         let Some(barrier) = inferior.barrier.as_mut() else {
-            return;
+            return Ok(());
         };
         if !matches!(
             barrier.reason,
             Some(StopReason::Breakpoint { .. } | StopReason::Watchpoint { .. })
         ) {
-            return;
+            return Ok(());
         }
         // A barrier publishes its triggering thread's own reason.
         barrier.reason = inferior
@@ -273,7 +273,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .get(&barrier.triggering_thread)
             .and_then(|thread| thread.reason.clone());
         if barrier.reason.is_some() {
-            return;
+            return Ok(());
         }
         // The published hit is gone; another thread's reason, if any, takes
         // its place, and a pause the hit outranked otherwise.
@@ -289,6 +289,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else if barrier.paused {
             barrier.reason = Some(StopReason::Pause);
         }
+        Ok(())
     }
 }
 
