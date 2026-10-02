@@ -150,7 +150,9 @@ impl LinuxPtrace {
     }
 
     /// Makes the waiter poll promptly for the status a request just caused,
-    /// instead of after its idle backoff.
+    /// instead of after its idle backoff. Requests wake it only after the
+    /// syscall, so the poll the wake triggers cannot run too early to see
+    /// the status and leave the waiter backing off.
     fn wake_waiter(&self) {
         if let Some(waiter) = self.waiter.borrow().as_ref() {
             waiter.unpark();
@@ -255,8 +257,9 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
         self.assert_owner_thread();
+        let result = signal::kill(pid, signal);
         self.wake_waiter();
-        match signal::kill(pid, signal) {
+        match result {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
             Err(error) => Err(backend_error(LinuxError::System(error))),
         }
@@ -309,14 +312,16 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
         self.assert_owner_thread();
+        ptrace::cont(pid, signal).map_err(|error| backend_error(LinuxError::System(error)))?;
         self.wake_waiter();
-        ptrace::cont(pid, signal).map_err(|error| backend_error(LinuxError::System(error)))
+        Ok(())
     }
 
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()> {
         self.assert_owner_thread();
+        let result = ptrace::cont(pid, Some(NixSignal::SIGKILL));
         self.wake_waiter();
-        match ptrace::cont(pid, Some(NixSignal::SIGKILL)) {
+        match result {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
             Err(error) => Err(backend_error(LinuxError::System(error))),
         }
@@ -324,8 +329,9 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn step(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
         self.assert_owner_thread();
+        ptrace::step(pid, signal).map_err(|error| backend_error(LinuxError::System(error)))?;
         self.wake_waiter();
-        ptrace::step(pid, signal).map_err(|error| backend_error(LinuxError::System(error)))
+        Ok(())
     }
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
@@ -351,8 +357,9 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()> {
         self.assert_owner_thread();
+        tgkill(process, thread, NixSignal::SIGSTOP)?;
         self.wake_waiter();
-        tgkill(process, thread, NixSignal::SIGSTOP)
+        Ok(())
     }
 
     fn queued_trap(&self, pid: Pid) -> Result<bool> {
