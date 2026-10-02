@@ -78,6 +78,61 @@ fn terminate_asks_the_program_to_end_whether_running_or_stopped() {
 }
 
 #[test]
+fn terminate_lets_a_program_end_by_raising_the_signal_again() {
+    // A program that cleans up after the debugger's SIGTERM and raises it
+    // again, as Go's runtime does, dies of the second without stopping.
+    let mut dap = Dap::start("terminate reraised");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("terminate"),
+        json!({"args": ["reraise"]}),
+        &Configuration {
+            functions: vec!["terminate_tick".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    dap.stopped(started.mark);
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    let terminated = dap.send("terminate", Value::Null);
+    dap.success(terminated);
+    assert_eq!(
+        dap.next_event(terminated.mark, &["stopped", "exited"]),
+        ("exited".to_owned(), json!({"exitCode": 128 + 15}))
+    );
+    dap.finish();
+
+    // Once the user has stopped in the handler, the program's own signal is
+    // its policy's again.
+    let mut dap = Dap::start("terminate reraised after a stop");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("terminate"),
+        json!({"args": ["reraise"]}),
+        &Configuration {
+            functions: vec!["terminate_tick".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    dap.stopped(started.mark);
+    dap.request(
+        "setFunctionBreakpoints",
+        json!({"breakpoints": [{"name": "request_termination"}]}),
+    );
+    let terminated = dap.send("terminate", Value::Null);
+    dap.success(terminated);
+    let handler = dap.stopped(terminated.mark);
+    assert_eq!(handler.reason, "function breakpoint");
+    let resumed = dap.send("continue", json!({"threadId": handler.thread}));
+    dap.success(resumed);
+    let reraised = dap.event(resumed.mark, "stopped", |_| true);
+    assert_eq!(
+        (&reraised["reason"], &reraised["text"]),
+        (&json!("exception"), &json!("SIGTERM"))
+    );
+    dap.finish();
+}
+
+#[test]
 fn pausing_before_the_program_runs_is_refused_and_right_after_it_starts_stops_it() {
     let mut dap = Dap::start("pause while launching");
     dap.initialize(Profile::Neovim);
