@@ -1,5 +1,6 @@
 //! The ptrace, waitpid, and /proc edge every controller operation goes through.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::marker::PhantomData;
@@ -9,7 +10,8 @@ use std::process::Command as ProcessCommand;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, ThreadId};
+use std::thread::{self, Thread, ThreadId};
+use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::libc;
@@ -129,6 +131,9 @@ pub(super) trait LinuxTraceOps: InspectionOps {
 pub(super) struct LinuxPtrace {
     pub(super) affinity: ThreadAffinity,
     pub(super) not_send_or_sync: PhantomData<Rc<()>>,
+    /// The current inferior's waiter, woken by every request that makes a
+    /// tracee report a new wait status.
+    waiter: RefCell<Option<Thread>>,
 }
 
 impl LinuxPtrace {
@@ -136,11 +141,20 @@ impl LinuxPtrace {
         Self {
             affinity: ThreadAffinity::new(),
             not_send_or_sync: PhantomData,
+            waiter: RefCell::new(None),
         }
     }
 
     pub(super) fn assert_owner_thread(&self) {
         self.affinity.assert_owner();
+    }
+
+    /// Makes the waiter poll promptly for the status a request just caused,
+    /// instead of after its idle backoff.
+    fn wake_waiter(&self) {
+        if let Some(waiter) = self.waiter.borrow().as_ref() {
+            waiter.unpark();
+        }
     }
 }
 
@@ -200,7 +214,9 @@ impl InspectionOps for LinuxPtrace {
 impl LinuxTraceOps for LinuxPtrace {
     fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
         self.assert_owner_thread();
-        spawn_waiter(messages)
+        let waiter = spawn_waiter(messages)?;
+        *self.waiter.borrow_mut() = Some(waiter.thread.thread().clone());
+        Ok(waiter)
     }
 
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>> {
@@ -220,7 +236,10 @@ impl LinuxTraceOps for LinuxPtrace {
     fn interrupt(&self, pid: Pid) -> Result<bool> {
         self.assert_owner_thread();
         match ptrace::interrupt(pid) {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                self.wake_waiter();
+                Ok(true)
+            }
             Err(Errno::ESRCH) => Ok(false),
             Err(error) => Err(backend_error(LinuxError::System(error))),
         }
@@ -236,6 +255,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
         self.assert_owner_thread();
+        self.wake_waiter();
         match signal::kill(pid, signal) {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
             Err(error) => Err(backend_error(LinuxError::System(error))),
@@ -289,11 +309,13 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
         self.assert_owner_thread();
+        self.wake_waiter();
         ptrace::cont(pid, signal).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()> {
         self.assert_owner_thread();
+        self.wake_waiter();
         match ptrace::cont(pid, Some(NixSignal::SIGKILL)) {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
             Err(error) => Err(backend_error(LinuxError::System(error))),
@@ -302,6 +324,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn step(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
         self.assert_owner_thread();
+        self.wake_waiter();
         ptrace::step(pid, signal).map_err(|error| backend_error(LinuxError::System(error)))
     }
 
@@ -328,6 +351,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()> {
         self.assert_owner_thread();
+        self.wake_waiter();
         tgkill(process, thread, NixSignal::SIGSTOP)
     }
 
@@ -486,12 +510,26 @@ impl ThreadAffinity {
     }
 }
 
+/// The first poll interval after a wake or a status. Single steps and
+/// breakpoint repairs complete within microseconds, so their stops are
+/// collected almost at once.
+const WAITER_MIN_POLL: Duration = Duration::from_micros(20);
+/// The longest poll interval while the inferior runs without reporting.
+const WAITER_MAX_POLL: Duration = Duration::from_millis(5);
+
+/// Spawns the thread that collects every tracee's wait statuses.
+///
+/// It polls without blocking so it can be stopped while other children of
+/// the debugger's process keep running. The interval doubles while nothing
+/// happens and drops to the minimum after each status and each wake from
+/// the controller, which wakes it whenever a request will cause a status.
 pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let thread = thread::Builder::new()
         .name(WAITER_THREAD_NAME.into())
         .spawn(move || {
+            let mut interval = WAITER_MIN_POLL;
             while !thread_stop.load(Ordering::Acquire) {
                 let status = match waitpid(
                     Pid::from_raw(-1),
@@ -502,9 +540,17 @@ pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<
                     Err(_) => break,
                 };
                 if status == WaitStatus::StillAlive {
-                    thread::park_timeout(std::time::Duration::from_millis(5));
+                    let parked = Instant::now();
+                    thread::park_timeout(interval);
+                    // Returning early means the controller woke the waiter.
+                    interval = if parked.elapsed() < interval {
+                        WAITER_MIN_POLL
+                    } else {
+                        interval.saturating_mul(2).min(WAITER_MAX_POLL)
+                    };
                     continue;
                 }
+                interval = WAITER_MIN_POLL;
                 if messages
                     .blocking_send(ControllerMessage::Wait(status))
                     .is_err()
