@@ -90,7 +90,7 @@ ln -s "$PWD/editors/vscode" ~/.vscode/extensions/uscope.uscope-0.1.0
 - **Attaching.** `"pid": "${command:pickProcess}"` picks one of your processes when the session starts. With `program` set as well, the picker lists only processes running it.
 - **Debugging the adapter.** Run `uscope dap --port 4711` and add `"debugServer": 4711` to the configuration.
 
-This repository's `.vscode/launch.json` debugs a few test programs: crashes in C, Go, and Rust, a C core dump, and a program that reads from the integrated terminal. Each builds uscope and the programs first, and `.vscode/settings.json` points `uscope.path` at the build.
+This repository's `.vscode/launch.json` debugs a few test programs: crashes in C, Go, and Rust, a C core dump, Rust variables of many types, and a program that reads from the integrated terminal. Each builds uscope and the programs first, and `.vscode/settings.json` points `uscope.path` at the build.
 
 ### Neovim (nvim-dap)
 
