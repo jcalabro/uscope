@@ -594,7 +594,6 @@ pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<
                     Err(_) => break,
                 };
                 interval = WAITER_MIN_POLL;
-                record!("{}", super::recorded::describe_wait(&status));
                 if messages
                     .blocking_send(ControllerMessage::Wait(status))
                     .is_err()
@@ -602,6 +601,7 @@ pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<
                     break;
                 }
             }
+            record!("exited");
         })?;
     Ok(Waiter { stop, thread })
 }
@@ -710,11 +710,19 @@ pub(super) fn wait_for(
 ) -> std::result::Result<Option<WaitEvent>, Errno> {
     let mut status = 0;
     // SAFETY: `status` is a writable c_int that outlives the call.
-    let child = Errno::result(unsafe { libc::waitpid(pid.as_raw(), &raw mut status, options) })?;
-    if child == 0 {
-        return Ok(None);
+    let child = Errno::result(unsafe { libc::waitpid(pid.as_raw(), &raw mut status, options) });
+    let event = match child {
+        Ok(0) => return Ok(None),
+        Ok(child) => WaitEvent::decode(Pid::from_raw(child), status),
+        Err(error) => Err(error),
+    };
+    // Every status is recorded where it is consumed, whichever thread waits.
+    #[cfg(debug_assertions)]
+    match &event {
+        Ok(event) => record!("{}", super::recorded::Described(event)),
+        Err(error) => record!("waitpid {pid} -> error {error}"),
     }
-    WaitEvent::decode(Pid::from_raw(child), status).map(Some)
+    event.map(Some)
 }
 
 /// Resumes or detaches a stopped tracee, delivering `signal` to it.

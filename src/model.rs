@@ -3629,7 +3629,7 @@ fn path_matches(candidate: &Path, requested: &Path) -> bool {
 }
 
 /// A module image mapped into a running process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct LoadedModule {
     /// The loaded module's session-scoped identifier.
     pub id: ModuleId,
@@ -3637,6 +3637,16 @@ pub struct LoadedModule {
     pub image: ModuleImageId,
     /// The load bias applied to image addresses.
     pub load_bias: u64,
+}
+
+impl fmt::Debug for LoadedModule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoadedModule")
+            .field("id", &self.id)
+            .field("image", &self.image)
+            .field("load_bias", &format_args!("{:#x}", self.load_bias))
+            .finish()
+    }
 }
 
 /// Public identity and path for one runtime module mapping.

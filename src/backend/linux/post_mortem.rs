@@ -664,6 +664,7 @@ pub fn open_core(
     let controller = thread::Builder::new()
         .name(POST_MORTEM_THREAD_NAME.into())
         .spawn(move || {
+            record!("started for {}", executable.display_path.display());
             let mut controller = Controller::new(
                 SessionLease::detached(),
                 executable,
@@ -677,11 +678,16 @@ pub fn open_core(
                 libraries,
                 &StopReason::CoreDump { exception },
             );
+            #[cfg(debug_assertions)]
+            if let Err(error) = &initialized {
+                record!("cannot open the core dump: {error}");
+            }
             let failed = initialized.is_err();
             let _ = ready_sender.send(initialized);
             if !failed {
                 controller.run_post_mortem();
             }
+            record!("exited");
         })?;
     match ready.recv() {
         Ok(Ok(())) => Ok(PostMortemSession {
@@ -789,6 +795,7 @@ impl Controller<CoreTarget> {
             let ControllerMessage::Request(request) = message else {
                 continue;
             };
+            record!("request {}", request.describe());
             match request {
                 Request::Shutdown { reply } => {
                     let _ = reply.send(Ok(()));

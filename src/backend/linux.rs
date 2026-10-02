@@ -21,6 +21,7 @@
 //! - [`post_mortem`]: serving the same views from a core dump.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -287,7 +288,7 @@ struct WatchRecord {
     observed: Option<Arc<[u8]>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct PendingSignal {
     signal: Signal,
     code: i32,
@@ -295,12 +296,45 @@ struct PendingSignal {
     fault_address: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct SignalMetadata {
     code: i32,
     sender: Option<i32>,
     /// The faulting address of a synchronous fault.
     fault_address: Option<u64>,
+}
+
+// Addresses print in hex, as `VirtualAddress` does.
+impl fmt::Debug for PendingSignal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingSignal")
+            .field("signal", &self.signal)
+            .field("code", &self.code)
+            .field("sender", &self.sender)
+            .field("fault_address", &HexAddress(self.fault_address))
+            .finish()
+    }
+}
+
+impl fmt::Debug for SignalMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SignalMetadata")
+            .field("code", &self.code)
+            .field("sender", &self.sender)
+            .field("fault_address", &HexAddress(self.fault_address))
+            .finish()
+    }
+}
+
+struct HexAddress(Option<u64>);
+
+impl fmt::Debug for HexAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(address) => write!(f, "Some({address:#x})"),
+            None => f.write_str("None"),
+        }
+    }
 }
 
 #[derive(Debug)]

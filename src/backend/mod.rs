@@ -104,10 +104,7 @@ impl EventSender {
         &self,
         event: DebuggerEvent,
     ) -> std::result::Result<usize, broadcast::error::SendError<DebuggerEvent>> {
-        // Every other event carries the revision a state change announces.
-        if !matches!(event, DebuggerEvent::StateChanged { .. }) {
-            record!("event {event:?}");
-        }
+        record!("event {event:?}");
         self.0.send(event)
     }
 }

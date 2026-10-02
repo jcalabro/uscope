@@ -1,12 +1,14 @@
 //! Records the native control calls a development build makes.
 //!
 //! [`Recorded`] wraps the ptrace edge and records every call that controls a
-//! tracee or reads how it stopped. Memory, register, and `/proc` reads are
-//! left out: they are frequent, change nothing, and would crowd the record of
-//! what the debugger did out of the ring.
+//! tracee or reads how it stopped. A breakpoint operation is one line, not
+//! the word writes it makes. Memory, register, and `/proc` reads are left
+//! out: they are frequent, change nothing, and would crowd the record of
+//! what the debugger did out of the ring. Wait statuses are recorded where
+//! they are consumed, in `native::wait_for`.
 
 use std::collections::BTreeMap;
-use std::fmt::{Arguments, Debug};
+use std::fmt::{self, Arguments, Debug, Display, Formatter};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -59,30 +61,36 @@ fn queried<T: Debug, E: Debug>(
 }
 
 /// Describes a wait status, naming its ptrace event.
-pub(super) fn describe_wait(status: &WaitEvent) -> String {
-    match *status {
-        WaitEvent::Exited(pid, code) => format!("{pid} exited {code}"),
-        WaitEvent::Signaled(pid, signal, core) => {
-            let core = if core { ", core dumped" } else { "" };
-            format!("{pid} killed by {signal}{core}")
+pub(super) struct Described<'a>(pub(super) &'a WaitEvent);
+
+impl Display for Described<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match *self.0 {
+            WaitEvent::Exited(pid, code) => write!(f, "{pid} exited {code}"),
+            WaitEvent::Signaled(pid, signal, core) => {
+                let core = if core { ", core dumped" } else { "" };
+                write!(f, "{pid} killed by {signal}{core}")
+            }
+            WaitEvent::Stopped(pid, signal) => write!(f, "{pid} stopped by {signal}"),
+            WaitEvent::PtraceEvent(pid, signal, event) => {
+                let name = match event {
+                    libc::PTRACE_EVENT_FORK => "FORK",
+                    libc::PTRACE_EVENT_VFORK => "VFORK",
+                    libc::PTRACE_EVENT_CLONE => "CLONE",
+                    libc::PTRACE_EVENT_EXEC => "EXEC",
+                    libc::PTRACE_EVENT_VFORK_DONE => "VFORK_DONE",
+                    libc::PTRACE_EVENT_EXIT => "EXIT",
+                    libc::PTRACE_EVENT_SECCOMP => "SECCOMP",
+                    libc::PTRACE_EVENT_STOP => "STOP",
+                    _ => {
+                        return write!(f, "{pid} stopped by ptrace event {event} with {signal}");
+                    }
+                };
+                write!(f, "{pid} PTRACE_EVENT_{name} with {signal}")
+            }
+            WaitEvent::PtraceSyscall(pid) => write!(f, "{pid} stopped at a syscall"),
+            WaitEvent::Continued(pid) => write!(f, "{pid} continued"),
         }
-        WaitEvent::Stopped(pid, signal) => format!("{pid} stopped by {signal}"),
-        WaitEvent::PtraceEvent(pid, signal, event) => {
-            let name = match event {
-                libc::PTRACE_EVENT_FORK => "FORK",
-                libc::PTRACE_EVENT_VFORK => "VFORK",
-                libc::PTRACE_EVENT_CLONE => "CLONE",
-                libc::PTRACE_EVENT_EXEC => "EXEC",
-                libc::PTRACE_EVENT_VFORK_DONE => "VFORK_DONE",
-                libc::PTRACE_EVENT_EXIT => "EXIT",
-                libc::PTRACE_EVENT_SECCOMP => "SECCOMP",
-                libc::PTRACE_EVENT_STOP => "STOP",
-                _ => return format!("{pid} stopped by ptrace event {event} with {signal}"),
-            };
-            format!("{pid} PTRACE_EVENT_{name} with {signal}")
-        }
-        WaitEvent::PtraceSyscall(pid) => format!("{pid} stopped at a syscall"),
-        WaitEvent::Continued(pid) => format!("{pid} continued"),
     }
 }
 
