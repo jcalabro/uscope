@@ -81,6 +81,7 @@ impl Profile {
             "supportsMemoryReferences": self == Self::VsCode,
             "supportsProgressReporting": self == Self::VsCode,
             "supportsInvalidatedEvent": self == Self::VsCode,
+            "supportsMemoryEvent": self == Self::VsCode,
             "supportsANSIStyling": false,
             "locale": "en",
         })

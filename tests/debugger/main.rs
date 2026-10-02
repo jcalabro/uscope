@@ -11,6 +11,7 @@ mod stepping;
 mod unwind;
 mod values;
 mod variables;
+mod writes;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

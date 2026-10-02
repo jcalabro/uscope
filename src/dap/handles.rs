@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use uscope::{
     DereferenceReference, StackFrameId, StopContext, ThreadId, ValueChildrenReference,
-    ValueExpression, ValueIndexRange, VariableKind,
+    ValueExpression, ValueIndexRange, ValuePathStep, VariableKind,
 };
 
 /// The largest reference DAP clients accept: references are 32-bit signed.
@@ -150,9 +150,58 @@ impl References {
         self.paths.insert((list, name), (context, path));
     }
 
-    /// The expression of a row of a variables list, with its frame.
+    /// The expression of a row of a variables list, with its frame: as it
+    /// was listed, or else as the list's kind names its rows.
     pub fn child_path(&self, list: i64, name: &str) -> Option<(StopContext, ValueExpression)> {
-        self.paths.get(&(list, name.to_owned())).cloned()
+        if let Some(recorded) = self.paths.get(&(list, name.to_owned())) {
+            return Some(recorded.clone());
+        }
+        let extended = |parent: &ValueExpression, steps: Vec<ValuePathStep>| ValueExpression {
+            steps: parent.steps.iter().cloned().chain(steps).collect(),
+        };
+        let row = |name: &str| -> Option<Vec<ValuePathStep>> {
+            if name.starts_with('[') {
+                name.strip_prefix('[')?
+                    .strip_suffix(']')?
+                    .split("][")
+                    .map(|index| index.parse().ok().map(ValuePathStep::Index))
+                    .collect()
+            } else {
+                Some(vec![ValuePathStep::Named(name.to_owned())])
+            }
+        };
+        match self.variables.get(&list)? {
+            Variables::Scope { context, .. } => Some((
+                *context,
+                ValueExpression {
+                    steps: [ValuePathStep::Named(name.to_owned())].into(),
+                },
+            )),
+            Variables::Children {
+                context,
+                path: Some(path),
+                ..
+            } => Some((*context, extended(path, row(name)?))),
+            Variables::Pointee {
+                context,
+                name: owner,
+                path: Some(path),
+                ..
+            } => {
+                let pointee = extended(path, vec![ValuePathStep::Dereference]);
+                if name == format!("*{owner}") {
+                    Some((*context, pointee))
+                } else {
+                    Some((*context, extended(&pointee, row(name)?)))
+                }
+            }
+            Variables::Range {
+                context,
+                expression,
+                ..
+            } => Some((*context, extended(expression, row(name)?))),
+            _ => None,
+        }
     }
 
     /// Drops every reference, as when the inferior resumes.

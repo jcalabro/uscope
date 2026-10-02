@@ -217,6 +217,7 @@ pub struct InitializeArguments {
     pub supports_memory_references: Option<bool>,
     pub supports_progress_reporting: Option<bool>,
     pub supports_invalidated_event: Option<bool>,
+    pub supports_memory_event: Option<bool>,
     #[serde(rename = "supportsANSIStyling")]
     pub supports_ansi_styling: Option<bool>,
 }
@@ -322,6 +323,33 @@ pub struct DataBreakpoint {
 #[serde(rename_all = "camelCase", default)]
 pub struct SetDataBreakpointsArguments {
     pub breakpoints: Vec<DataBreakpoint>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WriteMemoryArguments {
+    pub memory_reference: String,
+    pub offset: Option<i64>,
+    pub allow_partial: Option<bool>,
+    pub data: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetVariableArguments {
+    pub variables_reference: i64,
+    pub name: String,
+    pub value: String,
+    pub format: Option<ValueFormat>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetExpressionArguments {
+    pub expression: String,
+    pub value: String,
+    pub frame_id: Option<i64>,
+    pub format: Option<ValueFormat>,
 }
 
 #[derive(Debug, Default, Deserialize)]

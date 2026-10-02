@@ -10,7 +10,8 @@ use uscope::{
 use super::handles::{Exhausted, Variables};
 use super::protocol::{
     CompletionsArguments, ErrorBody, EvaluateArguments, ExceptionInfoArguments, ScopesArguments,
-    StackFrameFormat, StackTraceArguments, VariablesArguments,
+    SetExpressionArguments, SetVariableArguments, StackFrameFormat, StackTraceArguments,
+    VariablesArguments,
 };
 use super::session::{Session, error, parse, signal_text, thread_id};
 use super::values::{self, Item, Options};
@@ -797,6 +798,92 @@ impl Window {
 }
 
 impl Session {
+    pub(super) async fn set_variable(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<SetVariableArguments>(arguments, "setVariable arguments")?;
+        self.current_stop()?;
+        let (context, path) = self
+            .references
+            .child_path(arguments.variables_reference, &arguments.name)
+            .ok_or_else(|| {
+                ErrorBody::new(format!(
+                    "{} cannot be changed: it has no name the debugger can evaluate",
+                    arguments.name
+                ))
+            })?;
+        let hex = arguments
+            .format
+            .and_then(|format| format.hex)
+            .unwrap_or(false);
+        self.assign(context, &arguments.name, path, &arguments.value, hex)
+            .await
+    }
+
+    pub(super) async fn set_expression(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<SetExpressionArguments>(arguments, "setExpression arguments")?;
+        let stop = self.current_stop()?;
+        let context = match arguments.frame_id {
+            Some(frame) => self.frame_context(frame)?,
+            None => StopContext {
+                stop: stop.id,
+                thread: stop.thread,
+                frame: StackFrameId::INNERMOST,
+            },
+        };
+        let parsed = uscope::parse_value_expression(arguments.expression.trim()).map_err(error)?;
+        if parsed.range.is_some() {
+            return Err(ErrorBody::new("a range cannot be assigned"));
+        }
+        let hex = arguments
+            .format
+            .and_then(|format| format.hex)
+            .unwrap_or(false);
+        self.assign(
+            context,
+            arguments.expression.trim(),
+            parsed.expression,
+            &arguments.value,
+            hex,
+        )
+        .await
+    }
+
+    /// Assigns a value and presents the result as both requests answer.
+    async fn assign(
+        &mut self,
+        context: StopContext,
+        name: &str,
+        path: ValueExpression,
+        value: &str,
+        hex: bool,
+    ) -> Result<Value, ErrorBody> {
+        let handle = self.target_handle()?;
+        let assigned = handle
+            .at(context)
+            .assign(path.clone(), value)
+            .await
+            .map_err(error)?;
+        self.forget_reads();
+        let options = Options {
+            hex,
+            ..self.value_options()
+        };
+        let mut body = self.present(
+            Item {
+                name,
+                path: Some(path),
+                type_info: assigned.type_info.as_ref(),
+                state: &assigned.state,
+            },
+            context,
+            options,
+        )?;
+        for key in ["name", "evaluateName", "presentationHint"] {
+            body.remove(key);
+        }
+        self.invalidate_values().await;
+        Ok(Value::Object(body))
+    }
+
     pub(super) async fn completions(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<CompletionsArguments>(arguments, "completions arguments")?;
         // Columns count characters; a column past the text completes all of it.

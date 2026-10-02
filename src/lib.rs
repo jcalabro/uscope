@@ -1,3 +1,4 @@
+mod assign;
 mod backend;
 mod condition;
 mod debug_info;
@@ -746,6 +747,23 @@ impl DebuggerHandle {
         .await
     }
 
+    /// Writes bytes into a stopped inferior and returns how many were
+    /// written: all of them, or those before memory that cannot be written,
+    /// which fails when it is the first. Debugger breakpoint traps stay in
+    /// place, hiding the written bytes as they hid the old ones.
+    pub async fn write_memory(&self, address: VirtualAddress, bytes: &[u8]) -> Result<u64> {
+        let selection = self.stopped_selection().await?;
+
+        self.request(|reply| Request::WriteMemory {
+            process_id: selection.process,
+            stop_id: selection.stop,
+            address,
+            bytes: bytes.into(),
+            reply,
+        })
+        .await
+    }
+
     /// Resolves a linker symbol to its address in the running process.
     pub async fn runtime_address(&self, name: &str) -> Result<VirtualAddress> {
         let image_address = self.module_image.symbol_named(name)?.address;
@@ -959,6 +977,12 @@ impl DebuggerHandle {
     ) -> Result<ValueChildPage> {
         self.inspect_range_with_limits(expression, range, InspectionLimits::default())
             .await
+    }
+
+    /// Assigns a new value in the selected frame of the selected thread;
+    /// see [`StopView::assign`].
+    pub async fn assign(&self, expression: ValueExpression, value: &str) -> Result<InspectedValue> {
+        self.selected().await?.assign(expression, value).await
     }
 
     /// Inspects one bounded range under explicit resource limits.
@@ -1404,6 +1428,29 @@ impl StopView<'_> {
                 stop_id: context.stop,
                 thread_id: context.thread,
                 frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Assigns a new value to the number, boolean, enumeration, or pointer
+    /// `expression` names, and returns its new value. `value` is an
+    /// expression evaluated in the same frame, such as `42`, `x + 1`, or an
+    /// enumerator's name.
+    ///
+    /// The value must have storage: memory, or for a whole variable of the
+    /// innermost frame, a general register. A caller's register copies,
+    /// part of a value in a register, bit-fields, and values the debug
+    /// information computes are refused.
+    pub async fn assign(&self, expression: ValueExpression, value: &str) -> Result<InspectedValue> {
+        let context = self.context;
+        self.handle
+            .request(|reply| Request::Assign {
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                expression,
+                value: value.to_owned(),
                 reply,
             })
             .await

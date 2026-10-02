@@ -98,6 +98,14 @@ impl Condition {
         })
     }
 
+    /// Evaluates the expression to a value rather than a truth value.
+    pub fn value(
+        &self,
+        resolve: &mut dyn FnMut(&ValueExpression) -> std::result::Result<Operand, String>,
+    ) -> std::result::Result<Operand, String> {
+        evaluate(&self.expression, resolve)
+    }
+
     /// Evaluates the condition, resolving each value path with `resolve`.
     pub fn evaluate(
         &self,

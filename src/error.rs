@@ -127,6 +127,12 @@ pub enum Error {
     AddressOverflow,
     #[error("memory read of {requested} bytes exceeds the {maximum}-byte limit")]
     MemoryReadTooLarge { requested: u64, maximum: u64 },
+    #[error("cannot write {requested} bytes at once; at most {maximum} can be written")]
+    MemoryWriteTooLarge { requested: u64, maximum: u64 },
+    #[error("memory at {0} cannot be written")]
+    MemoryNotWritable(crate::VirtualAddress),
+    #[error("cannot assign to {expression}: {reason}")]
+    AssignmentRefused { expression: String, reason: String },
     #[error("address is outside the loaded module")]
     AddressOutsideModule,
     #[error("the stopped location is unavailable")]

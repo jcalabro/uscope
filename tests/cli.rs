@@ -392,6 +392,47 @@ fn strings_print_as_quoted_escaped_text() {
 }
 
 #[test]
+fn set_changes_values_the_program_then_uses() {
+    let stdout = batch(
+        "variables-gcc-o0",
+        &[],
+        &[
+            "break pointer_target",
+            "run",
+            "up",
+            "set signed_int = signed_int + 1",
+            "set boolean = false",
+            "delete all",
+            "continue",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(int) signed_int = -1234566\n",
+            "(_Bool) boolean = false\n",
+            "inferior exited with status 1\n",
+        ],
+    );
+    for (commands, message) in [
+        (
+            &["break pointer_target", "run", "set parameter 3"][..],
+            "usage: set <value-path> = [expression...]",
+        ),
+        (
+            &["break pointer_target", "run", "set parameter ="],
+            "usage: set <value-path> = [expression...]",
+        ),
+        (
+            &["break pointer_target", "run", "set pair = 1"],
+            "cannot assign to pair: only numbers, booleans, enumerations, and pointers can be assigned",
+        ),
+    ] {
+        assert_failure(&batch_output("variables-gcc-o0", commands), message);
+    }
+}
+
+#[test]
 fn hit_condition_commands_explain_rejected_input() {
     for (commands, message) in [
         (

@@ -67,6 +67,8 @@ pub fn variable(
         );
     }
     let path = item.path.filter(nameable);
+    let named = path.is_some();
+    let whole = path.as_ref().is_some_and(|path| path.steps.len() == 1);
     if let Some(path) = &path {
         variable.insert("evaluateName".to_owned(), path.to_string().into());
     }
@@ -116,10 +118,7 @@ pub fn variable(
                 );
             }
         }
-        let mut attributes = vec!["readOnly"];
-        if matches!(source, VariableValueSource::Constant) {
-            attributes.push("constant");
-        }
+        let attributes = attributes(source, value, context, whole, named);
         let kind = match value {
             VariableValue::Record | VariableValue::Union | VariableValue::Variant { .. } => "class",
             _ => "data",
@@ -131,6 +130,37 @@ pub fn variable(
     }
     variable.insert("variablesReference".to_owned(), reference.into());
     Ok(variable)
+}
+
+/// A value's presentation attributes: whether it can be changed, which
+/// numbers, enumerations, and pointers in memory, or whole variables in the
+/// innermost frame's registers, can; and whether it is a constant.
+fn attributes(
+    source: &VariableValueSource,
+    value: &VariableValue,
+    context: StopContext,
+    whole: bool,
+    named: bool,
+) -> Vec<&'static str> {
+    let leaf = matches!(
+        value,
+        VariableValue::Scalar(_) | VariableValue::Enumeration { .. } | VariableValue::Address(_)
+    );
+    let storage = match source {
+        VariableValueSource::Memory(_) => true,
+        VariableValueSource::Register(_) => {
+            context.frame == uscope::StackFrameId::INNERMOST && whole
+        }
+        _ => false,
+    };
+    let mut attributes = Vec::new();
+    if !(leaf && storage && named) {
+        attributes.push("readOnly");
+    }
+    if matches!(source, VariableValueSource::Constant) {
+        attributes.push("constant");
+    }
+    attributes
 }
 
 /// Presents a register, which never expands.

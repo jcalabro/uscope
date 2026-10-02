@@ -1181,6 +1181,21 @@ pub enum Request {
         byte_count: u64,
         reply: Reply<crate::MemoryRead>,
     },
+    WriteMemory {
+        process_id: ProcessId,
+        stop_id: StopId,
+        address: VirtualAddress,
+        bytes: Arc<[u8]>,
+        reply: Reply<u64>,
+    },
+    Assign {
+        stop_id: StopId,
+        thread_id: ThreadId,
+        frame: StackFrameId,
+        expression: crate::ValueExpression,
+        value: String,
+        reply: Reply<crate::InspectedValue>,
+    },
     ReadWord {
         process_id: ProcessId,
         stop_id: StopId,

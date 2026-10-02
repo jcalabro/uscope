@@ -76,6 +76,7 @@ mod signals;
 mod stepping;
 mod thread_db;
 mod watchpoints;
+mod writes;
 
 pub use post_mortem::{PostMortemSession, open_core};
 
@@ -713,6 +714,8 @@ enum LinuxError {
     UnsupportedClone(i32),
     #[error("floating-point register reads are unsupported by this tracing effect")]
     UnsupportedFloatingRegisters,
+    #[error("only general registers can be changed")]
+    UnsupportedRegisterWrite,
     #[error("the inferior replaced its executable image; loading the new image is not supported")]
     UnsupportedExec,
     #[error("could not determine the caller frame: {0}")]
@@ -864,6 +867,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         // never closes; dropping the `Debugger` sends a shutdown request.
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exhaustive request dispatcher keeps protocol routing in one place"
+    )]
     fn handle_request(&mut self, request: Request) -> bool {
         match request {
             Request::AddBreakpoint {
@@ -949,6 +956,27 @@ impl<P: LinuxTraceOps> Controller<P> {
                 reply,
             } => {
                 let result = self.write_word(process_id, stop_id, address, value);
+                let _ = reply.send(result);
+            }
+            Request::WriteMemory {
+                process_id,
+                stop_id,
+                address,
+                bytes,
+                reply,
+            } => {
+                let _ = reply.send(self.write_memory(process_id, stop_id, address, &bytes));
+            }
+            Request::Assign {
+                stop_id,
+                thread_id,
+                frame,
+                expression,
+                value,
+                reply,
+            } => {
+                let result = debug_pid(thread_id)
+                    .and_then(|pid| self.assign(stop_id, pid, frame, &expression, &value));
                 let _ = reply.send(result);
             }
             Request::Shutdown { reply } => {
@@ -1173,6 +1201,8 @@ impl<P: InspectionOps> Controller<P> {
             | Request::Step { .. }
             | Request::Pause { .. }
             | Request::WriteWord { .. }
+            | Request::WriteMemory { .. }
+            | Request::Assign { .. }
             | Request::Kill { .. }
             | Request::Terminate { .. }
             | Request::Shutdown { .. } => {
