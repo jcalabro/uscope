@@ -1222,29 +1222,8 @@ impl DebuggerHandle {
     }
 
     async fn stopped_selection(&self) -> Result<StoppedSelection> {
-        let snapshot = self.snapshot().await?;
-        let selected_thread = snapshot.selected_thread;
-        let selected_frame = snapshot.selected_frame;
-        let InferiorState::Stopped {
-            process_id,
-            stop_id,
-            thread_id,
-            ..
-        } = snapshot.inferior
-        else {
-            return Err(if matches!(snapshot.inferior, InferiorState::NotRunning) {
-                Error::NotRunning
-            } else {
-                Error::NotStopped
-            });
-        };
-
-        Ok(StoppedSelection {
-            process: process_id,
-            stop: stop_id,
-            thread: selected_thread.unwrap_or(thread_id),
-            frame: selected_frame.unwrap_or(StackFrameId::INNERMOST),
-        })
+        self.request(|reply| Request::StoppedSelection { reply })
+            .await
     }
 
     /// Waits for the stop or exit that ends `execution`.
@@ -1524,10 +1503,12 @@ impl StopView<'_> {
     }
 }
 
+/// The stop that implicit inspection reads and the thread and frame selected
+/// in it.
 #[derive(Clone, Copy)]
-struct StoppedSelection {
-    process: ProcessId,
-    stop: StopId,
-    thread: ThreadId,
-    frame: StackFrameId,
+pub(crate) struct StoppedSelection {
+    pub(crate) process: ProcessId,
+    pub(crate) stop: StopId,
+    pub(crate) thread: ThreadId,
+    pub(crate) frame: StackFrameId,
 }

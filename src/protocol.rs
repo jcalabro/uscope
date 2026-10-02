@@ -1257,6 +1257,11 @@ pub enum Request {
     Snapshot {
         reply: Reply<StateSnapshot>,
     },
+    /// The stop, thread, and frame that implicit inspection uses, without
+    /// copying the rest of a snapshot.
+    StoppedSelection {
+        reply: Reply<crate::StoppedSelection>,
+    },
     Backtrace {
         stop_id: StopId,
         thread_id: ThreadId,
@@ -1405,6 +1410,7 @@ impl Request {
             Self::DescribeAddress { .. } => "describe address".to_owned(),
             Self::StoppedLocation { .. } => "stopped location".to_owned(),
             Self::Snapshot { .. } => "snapshot".to_owned(),
+            Self::StoppedSelection { .. } => "stopped selection".to_owned(),
             Self::Backtrace { .. } => "backtrace".to_owned(),
             Self::Registers { .. } => "registers".to_owned(),
             Self::Variables { .. } => "variables".to_owned(),

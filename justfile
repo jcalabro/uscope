@@ -32,11 +32,12 @@ run *ARGS: build
     ./target/debug/uscope "$@"
 
 # Checks formatting and runs Clippy on development and release builds, which
-# differ in what the flight recorder compiles.
+# differ in what the flight recorder compiles. Incremental checking halves the
+# release lint after an edit and leaves release builds as they are.
 lint:
     cargo fmt --check
     cargo clippy --all-targets --all-features -- -D warnings
-    cargo clippy --release --all-targets --all-features -- -D warnings
+    CARGO_PROFILE_RELEASE_INCREMENTAL=true cargo clippy --release --all-targets --all-features -- -D warnings
     cargo check --quiet --manifest-path fuzz/Cargo.toml
 
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.

@@ -1176,6 +1176,9 @@ impl<P: InspectionOps> Controller<P> {
             Request::Snapshot { reply } => {
                 let _ = reply.send(Ok(self.snapshot()));
             }
+            Request::StoppedSelection { reply } => {
+                let _ = reply.send(self.stopped_selection());
+            }
             Request::Backtrace {
                 stop_id,
                 thread_id,
@@ -1506,13 +1509,10 @@ impl<P: InspectionOps> Controller<P> {
             inferior: state,
             stop_id: inferior.public_stop.as_ref().map(|stop| stop.id),
             selected_thread: inferior.selected_thread.map(debug_thread_id),
-            selected_frame: inferior.public_stop.as_ref().map(|stop| {
-                let thread = inferior.selected_thread.unwrap_or(stop.triggering_thread);
-                stop.selected_frames
-                    .get(&thread)
-                    .copied()
-                    .unwrap_or(StackFrameId::INNERMOST)
-            }),
+            selected_frame: inferior
+                .public_stop
+                .as_ref()
+                .map(|stop| selected_frame(inferior, stop)),
             threads,
             presentation: inferior.selected_thread.and_then(|pid| {
                 inferior
@@ -1531,6 +1531,29 @@ impl<P: InspectionOps> Controller<P> {
                 .into(),
         }
     }
+
+    /// The selection a snapshot reports, without copying the breakpoints
+    /// and threads that every stopped request would otherwise pay for.
+    fn stopped_selection(&self) -> Result<crate::StoppedSelection> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let stop = inferior.public_stop.as_ref().ok_or(Error::NotStopped)?;
+        Ok(crate::StoppedSelection {
+            process: process_id(inferior.tgid),
+            stop: stop.id,
+            thread: debug_thread_id(inferior.selected_thread.unwrap_or(stop.triggering_thread)),
+            frame: selected_frame(inferior, stop),
+        })
+    }
+}
+
+/// The frame selected in the stop's selected thread: the innermost until a
+/// client selects another.
+fn selected_frame(inferior: &Inferior, stop: &PublicStop) -> StackFrameId {
+    let thread = inferior.selected_thread.unwrap_or(stop.triggering_thread);
+    stop.selected_frames
+        .get(&thread)
+        .copied()
+        .unwrap_or(StackFrameId::INNERMOST)
 }
 
 impl<P: InspectionOps> Controller<P> {

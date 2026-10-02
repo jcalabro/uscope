@@ -199,7 +199,7 @@ async fn assert_module_matches_objdump(
     for section in image.sections().iter().filter(|section| section.executable) {
         let (start, end) = (section.range.start.get(), section.range.end.get());
         let context = format!("{context}: {file_name} {}", section.name);
-        let mut decoded = BTreeMap::new();
+        let mut blocks = Vec::new();
         let mut address = start;
         while address < end {
             let (boundary, _, block) = into_window(
@@ -225,45 +225,32 @@ async fn assert_module_matches_objdump(
                 .collect::<Vec<_>>();
             assert!(conflicts.is_empty(), "{context}: {conflicts:x?}");
             for instruction in block.instructions.iter() {
-                let image_address = instruction.address.get() - bias;
-                if image_address >= end {
+                if instruction.address.get() - bias >= end {
                     break;
                 }
-                decoded.insert(image_address, instruction.clone());
                 address = instruction.end().get() - bias;
             }
             if let BlockCompletion::Unreadable { address: stop, .. } = block.completion {
                 assert!(stop.get() - bias >= end, "{context}: unreadable at {stop}");
             }
+            blocks.push(block);
         }
 
-        let expected = oracle
-            .instructions
-            .range(start..end)
-            .collect::<BTreeMap<_, _>>();
-        let actual = decoded.keys().collect::<BTreeSet<_>>();
-        let missing = expected
-            .keys()
-            .filter(|address| !actual.contains(*address))
-            .take(4)
-            .collect::<Vec<_>>();
-        let invented = actual
+        let decoded = blocks
             .iter()
-            .filter(|address| !expected.contains_key(**address))
-            .take(4)
-            .collect::<Vec<_>>();
-        assert!(
-            missing.is_empty() && invented.is_empty(),
-            "{context}: objdump-only starts {missing:x?}, uscope-only starts {invented:x?}"
-        );
-        for (address, instruction) in &decoded {
-            let objdump = expected[address];
-            let context = format!("{context}+{address:#x} {objdump:?}");
-            assert_eq!(*instruction.bytes, *objdump.bytes, "{context}");
+            .flat_map(|block| block.instructions.iter())
+            .map(|instruction| (instruction.address.get() - bias, instruction))
+            .take_while(|(address, _)| *address < end);
+        let pairs = pair_with_objdump(decoded, oracle.instructions.range(start..end), &context);
+        for (address, instruction, objdump) in pairs {
+            assert_eq!(
+                *instruction.bytes, *objdump.bytes,
+                "{context}+{address:#x} {objdump:?}"
+            );
             assert_eq!(
                 matches!(instruction.content, InstructionContent::Invalid),
                 objdump.text.starts_with("(bad)"),
-                "{context}"
+                "{context}+{address:#x} {objdump:?}"
             );
             let InstructionContent::Decoded(decoded) = &instruction.content else {
                 continue;
@@ -274,18 +261,17 @@ async fn assert_module_matches_objdump(
                     .iter()
                     .filter(move |reference| reference.kind == kind)
                     .map(|reference| reference.address.get() - bias)
-                    .collect::<Vec<_>>()
             };
-            let branches = targets(InstructionReferenceKind::BranchTarget);
             assert_eq!(
-                branches.first().copied(),
+                targets(InstructionReferenceKind::BranchTarget).next(),
                 objdump.branch_target(),
-                "{context}"
+                "{context}+{address:#x} {objdump:?}"
             );
             if let Some(computed) = objdump.computed_address() {
                 assert!(
-                    targets(InstructionReferenceKind::MemoryOperand).contains(&computed),
-                    "{context}: {decoded:?}"
+                    targets(InstructionReferenceKind::MemoryOperand)
+                        .any(|target| target == computed),
+                    "{context}+{address:#x} {objdump:?}: {decoded:?}"
                 );
             }
             compared += 1;
@@ -293,6 +279,41 @@ async fn assert_module_matches_objdump(
     }
     assert!(compared > 0, "{context}: {file_name} had no code");
     compared
+}
+
+/// Pairs ascending decoded instructions with objdump's at the same image
+/// addresses, which must be exactly the same set of instruction starts.
+fn pair_with_objdump<'a, 'b>(
+    decoded: impl Iterator<Item = (u64, &'a DisassembledInstruction)>,
+    expected: impl Iterator<Item = (&'b u64, &'b ObjdumpInstruction)>,
+    context: &str,
+) -> Vec<(u64, &'a DisassembledInstruction, &'b ObjdumpInstruction)> {
+    // Both listings ascend, so one merge pairs every start they share.
+    let mut expected = expected.peekable();
+    let (mut missing, mut invented, mut pairs) = (Vec::new(), Vec::new(), Vec::new());
+    let mut previous = None;
+    for (address, instruction) in decoded {
+        assert!(
+            previous < Some(address),
+            "{context}: {address:#x} follows {previous:x?}"
+        );
+        previous = Some(address);
+        while let Some((&objdump, _)) = expected.next_if(|&(&objdump, _)| objdump < address) {
+            missing.push(objdump);
+        }
+        match expected.next_if(|&(&objdump, _)| objdump == address) {
+            Some((_, objdump)) => pairs.push((address, instruction, objdump)),
+            None => invented.push(address),
+        }
+    }
+    missing.extend(expected.map(|(&address, _)| address));
+    missing.truncate(4);
+    invented.truncate(4);
+    assert!(
+        missing.is_empty() && invented.is_empty(),
+        "{context}: objdump-only starts {missing:x?}, uscope-only starts {invented:x?}"
+    );
+    pairs
 }
 
 /// Launches a fixture that faults, installs breakpoints at code symbols so

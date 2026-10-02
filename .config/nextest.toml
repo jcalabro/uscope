@@ -1,3 +1,9 @@
 # A debugger test that hangs would otherwise block the run forever.
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
+
+# These suites compare whole modules with binutils and gdb, so their tests run
+# for a second or more. Starting them first keeps them off the end of a run.
+[[profile.default.overrides]]
+filter = 'binary(disassembly) | binary(symbols) | binary(frames)'
+priority = 50
