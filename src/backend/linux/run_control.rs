@@ -13,7 +13,7 @@ use crate::protocol::{
 };
 use crate::{Error, Result, StackFrameId, VirtualAddress};
 
-use super::breakpoints::remove_breakpoint_owner_from;
+use super::breakpoints::{install_plan_breakpoint, remove_breakpoint_owner_from};
 use super::classify::{format_raw_stop, visible_stop_priority};
 use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
@@ -142,12 +142,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         let mut installed = Vec::new();
         if let ActiveKind::Step { start, .. } = &kind {
             for &address in &start.plan_addresses {
-                if let Err(error) = self.ptrace.install_breakpoint(
-                    inferior.memory_thread(),
-                    &mut inferior.breakpoints,
-                    address,
-                    owner,
-                ) {
+                if let Err(error) =
+                    install_plan_breakpoint(&self.ptrace, inferior, address, execution_id)
+                {
                     for address in installed.into_iter().rev() {
                         if let Err(recovery) =
                             remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)

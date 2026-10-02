@@ -1,6 +1,7 @@
 //! Logical breakpoints and the software trap sites that implement them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use nix::unistd::Pid;
@@ -16,6 +17,88 @@ use crate::{BreakpointLocation, Error, Result, VirtualAddress};
 use super::native::LinuxTraceOps;
 use super::{BreakpointOwner, Controller, Inferior, LinuxError, backend_error};
 
+/// The logical breakpoints clients requested, in creation order, counted by
+/// spec so that adding one need not compare it with every other. A spec
+/// never changes once added; everything else is edited in place.
+#[derive(Debug, Default)]
+pub(super) struct UserBreakpoints {
+    list: Vec<Breakpoint>,
+    specs: HashMap<BreakpointSpec, usize>,
+}
+
+impl UserBreakpoints {
+    pub(super) fn push(&mut self, breakpoint: Breakpoint) {
+        *self.specs.entry(breakpoint.spec.clone()).or_default() += 1;
+        self.list.push(breakpoint);
+    }
+
+    pub(super) fn remove(&mut self, index: usize) -> Breakpoint {
+        let breakpoint = self.list.remove(index);
+        if let Some(count) = self.specs.get_mut(&breakpoint.spec) {
+            *count -= 1;
+            if *count == 0 {
+                self.specs.remove(&breakpoint.spec);
+            }
+        }
+        breakpoint
+    }
+
+    pub(super) fn take(&mut self) -> Vec<Breakpoint> {
+        self.specs.clear();
+        std::mem::take(&mut self.list)
+    }
+
+    /// The breakpoint that a request with this spec and these options would
+    /// duplicate.
+    fn identical(
+        &self,
+        spec: &BreakpointSpec,
+        options: &crate::BreakpointOptions,
+    ) -> Option<&Breakpoint> {
+        if !self.specs.contains_key(spec) {
+            return None;
+        }
+        self.list.iter().find(|breakpoint| {
+            breakpoint.spec == *spec
+                && breakpoint.hit_condition == options.hit_condition
+                && breakpoint.condition == options.condition
+                && breakpoint.log_message == options.log_message
+        })
+    }
+}
+
+impl Deref for UserBreakpoints {
+    type Target = [Breakpoint];
+
+    fn deref(&self) -> &[Breakpoint] {
+        &self.list
+    }
+}
+
+impl DerefMut for UserBreakpoints {
+    fn deref_mut(&mut self) -> &mut [Breakpoint] {
+        &mut self.list
+    }
+}
+
+impl<'a> IntoIterator for &'a UserBreakpoints {
+    type Item = &'a Breakpoint;
+    type IntoIter = std::slice::Iter<'a, Breakpoint>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut UserBreakpoints {
+    type Item = &'a mut Breakpoint;
+    type IntoIter = std::slice::IterMut<'a, Breakpoint>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.list.iter_mut()
+    }
+}
+
 impl<P: LinuxTraceOps> Controller<P> {
     /// Adds a logical breakpoint. Its traps are installed at once when the
     /// inferior's sites are live, which requires every thread to be stopped;
@@ -25,12 +108,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         spec: BreakpointSpec,
         options: crate::BreakpointOptions,
     ) -> Result<Breakpoint> {
-        if let Some(existing) = self.breakpoints.iter().find(|breakpoint| {
-            breakpoint.spec == spec
-                && breakpoint.hit_condition == options.hit_condition
-                && breakpoint.condition == options.condition
-                && breakpoint.log_message == options.log_message
-        }) {
+        if let Some(existing) = self.breakpoints.identical(&spec, &options) {
             return Ok(existing.clone());
         }
 
@@ -202,7 +280,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 removed.push(breakpoint.clone());
             }
         }
-        let removed: Arc<[Breakpoint]> = std::mem::take(&mut self.breakpoints).into();
+        let removed: Arc<[Breakpoint]> = self.breakpoints.take().into();
         self.publish_breakpoints_changed();
         Ok(removed)
     }
@@ -413,22 +491,30 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn cleanup_plan_breakpoints(&mut self, execution: ExecutionId) -> Result<()> {
-        let addresses = self
-            .inferior
-            .as_ref()
-            .ok_or(Error::NotRunning)?
-            .breakpoints
+        let owner = BreakpointOwner::Plan(execution);
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        let Some(recorded) = inferior.plan_sites.get(&execution) else {
+            return Ok(());
+        };
+        let addresses = recorded
             .iter()
-            .filter_map(|(&address, site)| {
-                site.owners
-                    .contains(&BreakpointOwner::Plan(execution))
-                    .then_some(address)
+            .copied()
+            .filter(|address| {
+                inferior
+                    .breakpoints
+                    .get(address)
+                    .is_some_and(|site| site.owners.contains(&owner))
             })
             .collect::<Vec<_>>();
 
         for address in addresses {
-            self.remove_breakpoint_owner(address, BreakpointOwner::Plan(execution))?;
+            self.remove_breakpoint_owner(address, owner)?;
         }
+        self.inferior
+            .as_mut()
+            .ok_or(Error::NotRunning)?
+            .plan_sites
+            .remove(&execution);
         Ok(())
     }
 }
@@ -456,12 +542,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let mut installed = Vec::new();
         for address in new_addresses {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-            if let Err(error) = self.ptrace.install_breakpoint(
-                inferior.memory_thread(),
-                &mut inferior.breakpoints,
-                address,
-                owner,
-            ) {
+            if let Err(error) = install_plan_breakpoint(&self.ptrace, inferior, address, execution)
+            {
                 for address in installed.into_iter().rev() {
                     if let Err(recovery) =
                         remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)
@@ -655,6 +737,29 @@ pub(super) fn runtime_breakpoint_address(
         BreakpointLocation::Image(address) => inferior.loaded_module.virtual_address(address),
         BreakpointLocation::Virtual(address) => Ok(address),
     }
+}
+
+/// Installs a site that `execution`'s plan owns, and records it for the
+/// plan's cleanup. The record comes first, so even a failed install is
+/// visited.
+pub(super) fn install_plan_breakpoint(
+    ptrace: &dyn LinuxTraceOps,
+    inferior: &mut Inferior,
+    address: VirtualAddress,
+    execution: ExecutionId,
+) -> Result<()> {
+    inferior
+        .plan_sites
+        .entry(execution)
+        .or_default()
+        .insert(address);
+    let pid = inferior.memory_thread();
+    ptrace.install_breakpoint(
+        pid,
+        &mut inferior.breakpoints,
+        address,
+        BreakpointOwner::Plan(execution),
+    )
 }
 
 pub(super) fn install_logical_breakpoint(

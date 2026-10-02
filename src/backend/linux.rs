@@ -564,6 +564,9 @@ struct Inferior {
     tgid: Pid,
     loaded_module: LoadedModule,
     breakpoints: BTreeMap<VirtualAddress, BreakpointSite>,
+    /// Every site each execution's plan installed, so that ending the plan
+    /// visits only those. A site the plan already released may remain.
+    plan_sites: BTreeMap<ExecutionId, BTreeSet<VirtualAddress>>,
     threads: BTreeMap<Pid, TraceThread>,
     /// Threads that left the inferior and whose exit status is still due.
     retired_threads: BTreeSet<Pid>,
@@ -615,6 +618,7 @@ impl Inferior {
             tgid,
             loaded_module,
             breakpoints: BTreeMap::new(),
+            plan_sites: BTreeMap::new(),
             threads,
             retired_threads: BTreeSet::new(),
             unowned_stops: BTreeMap::new(),
@@ -864,7 +868,7 @@ struct Controller<P: InspectionOps> {
     events: EventSender,
     ptrace: P,
     inferior: Option<Inferior>,
-    breakpoints: Vec<Breakpoint>,
+    breakpoints: breakpoints::UserBreakpoints,
     next_breakpoint_id: u64,
     next_watchpoint_id: u64,
     launch_reply: Option<Reply<ExecutionId>>,
@@ -939,7 +943,7 @@ impl<P: InspectionOps> Controller<P> {
             events: channels.events,
             ptrace,
             inferior: None,
-            breakpoints: Vec::new(),
+            breakpoints: breakpoints::UserBreakpoints::default(),
             next_breakpoint_id: 1,
             next_watchpoint_id: 1,
             launch_reply: None,
@@ -1470,7 +1474,7 @@ impl<P: InspectionOps> Controller<P> {
                 selected_frame: None,
                 threads: Arc::from([]),
                 presentation: None,
-                breakpoints: self.breakpoints.clone().into(),
+                breakpoints: Arc::from(&*self.breakpoints),
                 watchpoints: Arc::from([]),
             };
         };
@@ -1521,7 +1525,7 @@ impl<P: InspectionOps> Controller<P> {
                     .and_then(|stop| stop.presentations.get(&pid))
                     .cloned()
             }),
-            breakpoints: self.breakpoints.clone().into(),
+            breakpoints: Arc::from(&*self.breakpoints),
             watchpoints: inferior
                 .watch
                 .watchpoints
