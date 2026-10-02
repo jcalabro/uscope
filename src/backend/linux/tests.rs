@@ -3341,7 +3341,11 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
             }),
             progress_owed: false,
         };
-        let owner = BreakpointOwner::Plan(active.id);
+        let execution = active.id;
+        let owner = BreakpointOwner::Plan(execution);
+        inferior
+            .plan_sites
+            .insert(execution, BTreeSet::from([VirtualAddress::new(0x40)]));
         inferior.breakpoints.insert(
             VirtualAddress::new(0x40),
             BreakpointSite {
@@ -3389,6 +3393,64 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
     assert_eq!(
         inferior.active.as_ref().map(|active| active.id),
         Some(ExecutionId::new(2))
+    );
+}
+
+#[test]
+fn ending_a_plan_removes_only_the_sites_it_still_owns() {
+    let mut harness = watch_harness(1);
+    let (ending, other) = (ExecutionId::new(7), ExecutionId::new(8));
+    let user = BreakpointOwner::User(BreakpointId::new(1));
+    let address = VirtualAddress::new;
+    {
+        let ptrace = &harness.controller.ptrace;
+        let inferior = harness.controller.inferior.as_mut().expect("inferior");
+        for site in [0x20, 0x30, 0x40] {
+            breakpoints::install_plan_breakpoint(ptrace, inferior, address(site), ending)
+                .expect("plan site");
+        }
+        breakpoints::install_plan_breakpoint(ptrace, inferior, address(0x50), other)
+            .expect("other plan's site");
+        let pid = inferior.memory_thread();
+        ptrace
+            .install_breakpoint(pid, &mut inferior.breakpoints, address(0x40), user)
+            .expect("user site");
+        // A plan may release a site before it ends, as a finished guard does.
+        breakpoints::remove_breakpoint_owner_from(
+            ptrace,
+            inferior,
+            address(0x20),
+            BreakpointOwner::Plan(ending),
+        )
+        .expect("released");
+    }
+    harness.trace().take_actions();
+
+    harness
+        .controller
+        .cleanup_plan_breakpoints(ending)
+        .expect("cleanup");
+
+    assert_eq!(harness.trace().take_actions(), ["remove_site 0x30"]);
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    let owners = inferior
+        .breakpoints
+        .iter()
+        .map(|(&site, owners)| (site, owners.owners.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        [
+            (address(0x40), BTreeSet::from([user])),
+            (
+                address(0x50),
+                BTreeSet::from([BreakpointOwner::Plan(other)])
+            ),
+        ]
+    );
+    assert_eq!(
+        inferior.plan_sites.keys().copied().collect::<Vec<_>>(),
+        [other]
     );
 }
 

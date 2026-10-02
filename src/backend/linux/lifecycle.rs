@@ -695,6 +695,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.retired_threads.remove(&pid);
         inferior.threads.insert(pid, survivor);
         inferior.breakpoints.clear();
+        inferior.plan_sites.clear();
         inferior.repairs.clear();
         inferior.loader_site = None;
         // exec(2) flushes every debug register; the new image's addresses

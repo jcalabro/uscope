@@ -13,6 +13,7 @@ use crate::{
     CodeInstanceKind, Error, ImageLocation, InlineFrameLookup, Result, StackFrameId, VirtualAddress,
 };
 
+use super::breakpoints::install_plan_breakpoint;
 use super::frames::{
     DwarfCallerProvider, code_instance_is_active, frame_lookup_address, make_presentation,
     presentation_visible_count, selected_code_instance, source_for_code_instance,
@@ -176,12 +177,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .map(|active| active.id)
             .ok_or(Error::NotRunning)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        self.ptrace.install_breakpoint(
-            inferior.memory_thread(),
-            &mut inferior.breakpoints,
-            candidate,
-            BreakpointOwner::Plan(execution),
-        )?;
+        install_plan_breakpoint(&self.ptrace, inferior, candidate, execution)?;
         self.continue_thread(pid)?;
         Ok(true)
     }

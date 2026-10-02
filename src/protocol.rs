@@ -62,7 +62,7 @@ impl Default for ValueChildQuery {
 }
 
 /// A user-facing request for a logical breakpoint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BreakpointSpec {
     /// Break at every function with this name.
     Function(String),
