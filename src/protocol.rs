@@ -99,6 +99,166 @@ pub struct ResolvedBreakpointLocation {
     pub code_instances: Arc<[CodeInstanceId]>,
 }
 
+/// How a [`HitCondition`] compares a hit's number with its count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HitComparison {
+    /// The hit numbered `count`.
+    Equal,
+    /// Every hit except the one numbered `count`.
+    NotEqual,
+    /// Hits numbered below `count`.
+    Less,
+    /// Hits numbered up to and including `count`.
+    LessOrEqual,
+    /// Hits numbered above `count`.
+    Greater,
+    /// The hit numbered `count` and every later hit.
+    GreaterOrEqual,
+    /// Every hit whose number is a multiple of `count`.
+    Multiple,
+}
+
+impl HitComparison {
+    const fn operator(self) -> &'static str {
+        match self {
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+            Self::Less => "<",
+            Self::LessOrEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterOrEqual => ">=",
+            Self::Multiple => "%",
+        }
+    }
+}
+
+/// Selects which hits of a breakpoint stop execution.
+///
+/// Each time a thread reaches any of a breakpoint's locations is one hit.
+/// Hits are numbered from 1 per breakpoint, across all of its locations, and
+/// hits that do not stop still count. A condition that no hit can meet is
+/// rejected rather than kept as a breakpoint that silently never stops.
+///
+/// The text form is an operator followed by a decimal count, such as `>=5`,
+/// `==3`, or `%10`. A bare count is rejected: debuggers disagree whether `N`
+/// means only the Nth hit, the Nth and every later hit, or skipping N hits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HitCondition {
+    comparison: HitComparison,
+    count: u64,
+}
+
+impl HitCondition {
+    /// Creates a condition, rejecting one that no hit number can meet and a
+    /// multiple of zero.
+    pub fn new(comparison: HitComparison, count: u64) -> Result<Self> {
+        let condition = Self { comparison, count };
+        let satisfiable = match comparison {
+            HitComparison::Equal | HitComparison::LessOrEqual | HitComparison::Multiple => {
+                count != 0
+            }
+            HitComparison::Less => count > 1,
+            HitComparison::Greater => count != u64::MAX,
+            HitComparison::NotEqual | HitComparison::GreaterOrEqual => true,
+        };
+        if satisfiable {
+            Ok(condition)
+        } else {
+            Err(crate::Error::InvalidHitCondition(format!(
+                "no hit can satisfy {condition}"
+            )))
+        }
+    }
+
+    /// Returns how the condition compares hit numbers.
+    #[must_use]
+    pub const fn comparison(self) -> HitComparison {
+        self.comparison
+    }
+
+    /// Returns the count hit numbers are compared with.
+    #[must_use]
+    pub const fn count(self) -> u64 {
+        self.count
+    }
+
+    /// Whether the hit with this one-based number stops execution.
+    #[must_use]
+    pub const fn is_met(self, hit: u64) -> bool {
+        match self.comparison {
+            HitComparison::Equal => hit == self.count,
+            HitComparison::NotEqual => hit != self.count,
+            HitComparison::Less => hit < self.count,
+            HitComparison::LessOrEqual => hit <= self.count,
+            HitComparison::Greater => hit > self.count,
+            HitComparison::GreaterOrEqual => hit >= self.count,
+            HitComparison::Multiple => hit.is_multiple_of(self.count),
+        }
+    }
+
+    /// Whether any hit after the first `hits` can still stop execution.
+    #[must_use]
+    pub const fn may_stop_after(self, hits: u64) -> bool {
+        match self.comparison {
+            HitComparison::Equal | HitComparison::LessOrEqual => hits < self.count,
+            HitComparison::Less => hits.saturating_add(1) < self.count,
+            HitComparison::Greater | HitComparison::GreaterOrEqual => hits < u64::MAX,
+            HitComparison::NotEqual | HitComparison::Multiple => true,
+        }
+    }
+}
+
+impl fmt::Display for HitCondition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", self.comparison.operator(), self.count)
+    }
+}
+
+impl std::str::FromStr for HitCondition {
+    type Err = crate::Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let invalid = || {
+            let trimmed = text.trim();
+            crate::Error::InvalidHitCondition(
+                if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+                    format!(
+                        "a bare count is ambiguous; write =={trimmed} to stop only at that hit \
+                         or >={trimmed} to stop at it and every later hit"
+                    )
+                } else {
+                    format!(
+                        "'{text}' is not an operator (==, !=, <, <=, >, >=, %) followed by a \
+                         decimal count"
+                    )
+                },
+            )
+        };
+        // Two-character operators must be tried before their prefixes.
+        let (comparison, digits) = [
+            HitComparison::Equal,
+            HitComparison::NotEqual,
+            HitComparison::LessOrEqual,
+            HitComparison::GreaterOrEqual,
+            HitComparison::Less,
+            HitComparison::Greater,
+            HitComparison::Multiple,
+        ]
+        .into_iter()
+        .find_map(|comparison| {
+            text.trim()
+                .strip_prefix(comparison.operator())
+                .map(|digits| (comparison, digits.trim_start()))
+        })
+        .ok_or_else(invalid)?;
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(invalid());
+        }
+        let count = digits.parse().map_err(|_| invalid())?;
+        Self::new(comparison, count)
+    }
+}
+
 /// An immutable logical breakpoint and all locations resolved for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Breakpoint {
@@ -108,6 +268,28 @@ pub struct Breakpoint {
     pub spec: BreakpointSpec,
     /// Every deduplicated location at which the breakpoint is installed.
     pub locations: Arc<[ResolvedBreakpointLocation]>,
+    /// Which hits stop execution; `None` stops at every hit.
+    pub hit_condition: Option<HitCondition>,
+    /// How many times threads of the current process reached the
+    /// breakpoint, including hits its condition did not stop at. A new
+    /// process starts again from zero.
+    ///
+    /// Hits that do not stop are resolved internally and publish nothing, so
+    /// while the inferior runs the count advances without a new revision or
+    /// [`DebuggerEvent::BreakpointsChanged`]. It is exact at every published
+    /// stop and after the inferior exits.
+    pub hit_count: u64,
+}
+
+/// One logical breakpoint that a thread's hit stopped at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BreakpointHit {
+    /// The breakpoint whose hit condition the hit met.
+    pub breakpoint: BreakpointId,
+    /// The breakpoint's hit count including this hit, which is this hit's
+    /// number. Other threads' hits counted before the stop was published
+    /// can make [`Breakpoint::hit_count`] larger.
+    pub hit_count: u64,
 }
 
 numeric_id!(
@@ -549,7 +731,12 @@ pub enum StopReason {
     /// The debugger established an initial coherent stop after attaching.
     Attach,
     /// Execution reached an installed breakpoint.
-    Breakpoint { address: VirtualAddress },
+    Breakpoint {
+        address: VirtualAddress,
+        /// Every logical breakpoint at the address whose hit condition this
+        /// hit met, in identifier order.
+        hits: Arc<[BreakpointHit]>,
+    },
     /// A thread accessed watched memory. The thread stops after the
     /// accessing instruction, or within a repeated string instruction that
     /// has more iterations left.
@@ -786,6 +973,12 @@ pub type Reply<T> = oneshot::Sender<Result<T>>;
 pub enum Request {
     AddBreakpoint {
         spec: BreakpointSpec,
+        hit_condition: Option<HitCondition>,
+        reply: Reply<Breakpoint>,
+    },
+    SetBreakpointHitCondition {
+        id: BreakpointId,
+        hit_condition: Option<HitCondition>,
         reply: Reply<Breakpoint>,
     },
     RemoveBreakpoint {
@@ -957,4 +1150,92 @@ pub enum Request {
     Shutdown {
         reply: Reply<()>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const COMPARISONS: [HitComparison; 7] = [
+        HitComparison::Equal,
+        HitComparison::NotEqual,
+        HitComparison::Less,
+        HitComparison::LessOrEqual,
+        HitComparison::Greater,
+        HitComparison::GreaterOrEqual,
+        HitComparison::Multiple,
+    ];
+
+    #[test]
+    fn hit_conditions_parse_their_display_form_and_select_hits() {
+        let selected = |text: &str| {
+            let condition = text.parse::<HitCondition>().expect(text);
+            assert_eq!(
+                condition.to_string().parse::<HitCondition>().expect(text),
+                condition
+            );
+            (1..=12)
+                .filter(|&hit| condition.is_met(hit))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(selected("==3"), [3]);
+        assert_eq!(selected(" != 3 "), [1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+        assert_eq!(selected("<3"), [1, 2]);
+        assert_eq!(selected("<=3"), [1, 2, 3]);
+        assert_eq!(selected(">10"), [11, 12]);
+        assert_eq!(selected(">= 10"), [10, 11, 12]);
+        assert_eq!(selected("%5"), [5, 10]);
+        assert_eq!(selected(">=0"), (1..=12).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn hit_conditions_reject_ambiguous_malformed_and_unsatisfiable_text() {
+        let message = |text: &str| match text.parse::<HitCondition>() {
+            Err(crate::Error::InvalidHitCondition(message)) => message,
+            other => panic!("{text:?} parsed as {other:?}"),
+        };
+        assert!(message("5").contains("write ==5"), "{}", message("5"));
+        for text in [
+            "", "==", "= 5", "=>5", "<<5", "==-1", "==+1", "==5x", "==1e3", "%%2",
+        ] {
+            assert!(message(text).contains("not an operator"), "{text:?}");
+        }
+        assert!(message("==18446744073709551616").contains("not an operator"));
+        for text in ["==0", "<1", "<0", "<=0", "%0", ">18446744073709551615"] {
+            assert!(message(text).contains("no hit can satisfy"), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn construction_accepts_exactly_the_conditions_some_hit_meets() {
+        for comparison in COMPARISONS {
+            for count in (0..8).chain([u64::MAX - 1, u64::MAX]) {
+                let unchecked = HitCondition { comparison, count };
+                let hits = (1..64).chain([u64::MAX - 1, u64::MAX]);
+                assert_eq!(
+                    HitCondition::new(comparison, count).is_ok(),
+                    hits.clone().any(|hit| unchecked.is_met(hit)),
+                    "{unchecked}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn later_stops_are_predicted_exactly_by_the_conditions_hits() {
+        for comparison in COMPARISONS {
+            for count in 0..8 {
+                let Ok(condition) = HitCondition::new(comparison, count) else {
+                    continue;
+                };
+                for hits in 0..16 {
+                    assert_eq!(
+                        condition.may_stop_after(hits),
+                        (hits + 1..64).any(|hit| condition.is_met(hit)),
+                        "{condition} after {hits} hits"
+                    );
+                }
+            }
+        }
+    }
 }

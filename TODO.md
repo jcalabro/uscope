@@ -9,7 +9,7 @@
 - [x] Support core dumps from other machines with a sysroot or library search path.
 - [x] Map recorded source paths to local directories for programs built elsewhere.
 - [x] Add caller-frame selection for variables and source context, especially for core dumps.
-- [ ] Add hit-count breakpoints by evaluating hits at an internal stop and resuming transparently.
+- [x] Add hit-count breakpoints by evaluating hits at an internal stop and resuming transparently.
 - [ ] Add value-change-only watchpoints using the same internal evaluate-and-resume stop.
 - [ ] Expand expression evaluation beyond structural value inspection.
 - [ ] Add conditional breakpoints.

@@ -43,6 +43,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 };
                 let process_id = process_id(pid);
                 let execution_id = ExecutionId::new(1);
+                self.reset_breakpoint_hit_counts();
                 self.inferior = Some(Inferior {
                     active: Some(ActiveExecution {
                         id: execution_id,
@@ -146,6 +147,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .iter()
             .map(|&pid| (pid, TraceThread::starting(ExpectedStop::InitialAttach)))
             .collect();
+        self.reset_breakpoint_hit_counts();
         self.inferior = Some(Inferior::new(
             InferiorOrigin::Attached,
             tgid,
@@ -184,7 +186,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.barrier = Some(StopBarrier {
             execution: None,
             triggering_thread,
-            reason: StopReason::Attach,
+            reason: Some(StopReason::Attach),
         });
     }
 
@@ -629,6 +631,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         }
         if barrier_active {
+            if owned_execution
+                && let Some(barrier) = self
+                    .inferior
+                    .as_mut()
+                    .and_then(|inferior| inferior.barrier.as_mut())
+                    .filter(|barrier| barrier.reason.is_none())
+            {
+                // An internal stop has no execution left to resume.
+                barrier.reason = Some(StopReason::ThreadExited { thread_id, status });
+            }
             return self.finish_barrier_if_ready();
         }
         if owned_execution {

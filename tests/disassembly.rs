@@ -790,7 +790,9 @@ async fn data_inside_code_is_reported_instead_of_hidden() {
             .add_breakpoint_spec(BreakpointSpec::Address(VirtualAddress::new(hidden + 4)))
             .await;
         let stop = scenario.resume_to_stop().await;
-        assert!(matches!(stop, StopReason::Breakpoint { address } if address.get() == hidden + 4));
+        assert!(
+            matches!(stop, StopReason::Breakpoint { address, .. } if address.get() == hidden + 4)
+        );
         let (boundary, leading, block) =
             into_window(disassemble(&scenario, window(hidden + 4, 4, 2)).await);
         assert_eq!(
@@ -1293,10 +1295,8 @@ async fn assert_targets_at_each_stop(scenario: &mut Scenario, modules: &Modules,
     for label in INDIRECT_BRANCHES {
         let pc = symbol_address(label);
         assert_eq!(
-            scenario.resume_to_stop().await,
-            StopReason::Breakpoint {
-                address: VirtualAddress::new(pc)
-            },
+            support::breakpoint_address(&scenario.resume_to_stop().await),
+            VirtualAddress::new(pc),
             "{fixture}"
         );
         let registers = scenario.operation("registers", scenario.handle().registers());
@@ -1382,10 +1382,8 @@ async fn indirect_branches_name_the_targets_they_read_at_the_stop() {
             .add_breakpoint_spec(BreakpointSpec::Address(call.end()))
             .await;
         assert_eq!(
-            scenario.resume_to_stop().await,
-            StopReason::Breakpoint {
-                address: call.end()
-            }
+            support::breakpoint_address(&scenario.resume_to_stop().await),
+            call.end()
         );
         let jump = stub_jump(&scenario, &call).await;
         let (slot, target) = loaded(indirect_target(&jump));
@@ -1482,7 +1480,7 @@ async fn assert_executed_targets(fixture: &str) -> BTreeMap<&'static str, usize>
                 assert_eq!(status, uscope::ExitStatus::Code(0), "{fixture}");
                 break;
             }
-            StopReason::Breakpoint { address } => address,
+            StopReason::Breakpoint { address, .. } => address,
             StopReason::Step { .. } => {
                 let location = scenario.operation("location", scenario.handle().current_location());
                 location.await.address

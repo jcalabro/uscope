@@ -101,7 +101,7 @@ impl<P: InspectionOps> Controller<P> {
         };
 
         let breakpoint_targets = match reason {
-            Some(StopReason::Breakpoint { address }) => {
+            Some(StopReason::Breakpoint { address, .. }) => {
                 self.breakpoint_code_instances(inferior, *address)?
             }
             _ => BTreeSet::new(),

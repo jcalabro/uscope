@@ -663,8 +663,8 @@ async fn an_explicit_user_breakpoint_at_an_epilogue_marker_remains_visible() {
         .await;
 
     assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Breakpoint { address: marker },
+        support::breakpoint_address(&scenario.resume_to_stop().await),
+        marker,
         "the internal exit policy hid an explicit user breakpoint"
     );
     scenario.shutdown().await;
@@ -1261,7 +1261,7 @@ async fn instruction_step_explicitly_delivers_a_pending_signal() {
 async fn instruction_step_executes_the_instruction_hidden_by_a_breakpoint() {
     let mut scenario = Scenario::new("instruction step", Scenario::fixture("basic"));
     scenario.add_breakpoint("breakpoint_target").await;
-    let StopReason::Breakpoint { address } = scenario.run_to_stop().await else {
+    let StopReason::Breakpoint { address, .. } = scenario.run_to_stop().await else {
         panic!("expected breakpoint")
     };
     let instruction_word = scenario
@@ -1358,10 +1358,8 @@ async fn a_user_breakpoint_interrupts_finish_at_a_shared_site() {
     );
 
     assert_eq!(
-        scenario.step_to_stop(StepKind::Out).await,
-        StopReason::Breakpoint {
-            address: return_address
-        }
+        support::breakpoint_address(&scenario.step_to_stop(StepKind::Out).await),
+        return_address
     );
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -1644,8 +1642,8 @@ async fn stop_at_getpid_system_call(scenario: &mut Scenario) -> VirtualAddress {
         .add_breakpoint_spec(BreakpointSpec::Address(syscall))
         .await;
     assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Breakpoint { address: syscall }
+        support::breakpoint_address(&scenario.resume_to_stop().await),
+        syscall
     );
     syscall
 }
