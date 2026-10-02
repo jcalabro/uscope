@@ -142,6 +142,12 @@ pub struct Dap {
     finished: bool,
     /// Whether a failure already printed the transcript.
     reported: std::cell::Cell<bool>,
+    /// The programs run for `runInTerminal`, which the harness reaps.
+    terminals: Vec<Child>,
+    /// What those programs write, a line at a time.
+    terminal_output: (mpsc::Sender<String>, Receiver<String>),
+    /// The error `runInTerminal` is answered with instead of running.
+    refused_terminal: Option<String>,
 }
 
 /// Ordering rules checked on every message.
@@ -237,6 +243,92 @@ impl Dap {
             process: None,
             finished: false,
             reported: std::cell::Cell::new(false),
+            terminals: Vec::new(),
+            terminal_output: mpsc::channel(),
+            refused_terminal: None,
+        }
+    }
+
+    /// Answers `runInTerminal` with an error, as a client whose terminal
+    /// failed does.
+    pub fn refuse_terminals(&mut self, message: &str) {
+        self.refused_terminal = Some(message.to_owned());
+    }
+
+    /// Waits for the next line a program run in a terminal writes.
+    pub fn terminal_line(&self) -> String {
+        self.terminal_output
+            .1
+            .recv_timeout(EVENT_TIMEOUT)
+            .unwrap_or_else(|_| self.fail("no output arrived from the terminal"))
+    }
+
+    /// Runs a `runInTerminal` request's command as a terminal would, and
+    /// answers it.
+    fn run_in_terminal(&mut self, request: &Value) {
+        let arguments = &request["arguments"];
+        let result = self
+            .refused_terminal
+            .clone()
+            .map_or_else(|| Ok(self.spawn_terminal(arguments)), Err);
+        self.seq += 1;
+        let mut response = json!({
+            "seq": self.seq,
+            "type": "response",
+            "request_seq": request["seq"],
+            "command": "runInTerminal",
+            "success": result.is_ok(),
+        });
+        match result {
+            Ok(body) => response["body"] = body,
+            Err(message) => response["message"] = message.into(),
+        }
+        self.write(&response.to_string());
+    }
+
+    /// Spawns a terminal's command, returning the `runInTerminal` body.
+    fn spawn_terminal(&mut self, arguments: &Value) -> Value {
+        let args = arguments["args"]
+            .as_array()
+            .expect("args")
+            .iter()
+            .map(|argument| argument.as_str().expect("string argument"))
+            .collect::<Vec<_>>();
+        let mut command = Command::new(args[0]);
+        command
+            .args(&args[1..])
+            .current_dir(arguments["cwd"].as_str().expect("cwd"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (name, value) in arguments["env"].as_object().into_iter().flatten() {
+            match value.as_str() {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
+        let mut child = command.spawn().expect("run the terminal's command");
+        for stream in [
+            Box::new(child.stdout.take().expect("stdout")) as Box<dyn std::io::Read + Send>,
+            Box::new(child.stderr.take().expect("stderr")),
+        ] {
+            let lines = self.terminal_output.0.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                    let _ = lines.send(line);
+                }
+            });
+        }
+        let process = child.id();
+        self.terminals.push(child);
+        json!({"processId": process})
+    }
+
+    /// Kills and reaps the programs run in terminals.
+    fn reap_terminals(&mut self) {
+        for mut child in self.terminals.drain(..) {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
@@ -502,6 +594,9 @@ impl Dap {
                 "protocol violation: {problem}\nmessage: {message}"
             ));
         }
+        if message["type"] == "request" {
+            self.run_in_terminal(&message);
+        }
         if message["event"] == "process" {
             let attached = message["body"]["startMethod"] == "attach";
             self.process = message["body"]["systemProcessId"]
@@ -523,10 +618,11 @@ impl Dap {
             return Err(format!("expected seq {}", checks.next_seq));
         }
         checks.next_seq += 1;
-        if !message["body"].is_object() {
+        if message["type"] != "request" && !message["body"].is_object() {
             return Err("every response and event needs a body object".to_owned());
         }
         match message["type"].as_str() {
+            Some("request") if message["command"] == "runInTerminal" => {}
             Some("response") => {
                 let request_seq = message["request_seq"]
                     .as_u64()
@@ -873,6 +969,7 @@ impl Dap {
                 self.fail(&format!("the launched process {pid} outlived the session"));
             }
         }
+        self.reap_terminals();
         self.finished = true;
     }
 
@@ -942,6 +1039,7 @@ impl Drop for Dap {
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.reap_terminals();
         if std::thread::panicking() {
             if !self.reported.get() {
                 eprintln!("{} transcript:\n{}", self.name, self.transcript());
@@ -1025,7 +1123,11 @@ fn validate_schema(message: &Value) -> Result<(), String> {
             "{}Event",
             capitalized(message["event"].as_str().unwrap_or_default())
         ),
-        _ => return Err("not a response or event".to_owned()),
+        Some("request") => format!(
+            "{}Request",
+            capitalized(message["command"].as_str().unwrap_or_default())
+        ),
+        _ => return Err("not a request, response, or event".to_owned()),
     };
     if schema["definitions"].get(&definition).is_none() {
         return Err(format!("the protocol defines no {definition}"));

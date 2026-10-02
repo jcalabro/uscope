@@ -1074,7 +1074,10 @@ async fn job_control_stops_are_classified_without_inventing_a_pending_signal() {
 async fn nonleader_exec_rewrites_the_thread_registry_and_invalidates_the_image() {
     let mut scenario = Scenario::new("nonleader exec", Scenario::fixture("thread-exec"));
 
-    assert_eq!(scenario.run_to_stop().await, StopReason::Exec);
+    assert_eq!(
+        scenario.run_to_stop().await,
+        StopReason::Exec { followed: false }
+    );
     let snapshot = scenario.snapshot().await;
     assert_eq!(snapshot.threads.len(), 1);
     assert!(matches!(
@@ -1757,5 +1760,51 @@ async fn terminating_asks_the_program_to_end_without_stopping_it() {
         }
     }
     scenario.drain_pending_events();
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_line_breakpoint_stops_where_the_line_begins_not_at_its_later_statements() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/reexec.c"),
+    )
+    .expect("fixture source");
+    let line_of = |marker: &str| {
+        u64::try_from(
+            source
+                .lines()
+                .position(|line| line.contains(marker))
+                .expect("marked line")
+                + 1,
+        )
+        .expect("line number")
+    };
+    let mut scenario = Scenario::launch("reexec");
+    // The loop's header has statements for its start and for each test of
+    // its condition; only its start is a place to stop.
+    let header = line_of("for (int index = 1;");
+    let image = scenario.handle().module_image().clone();
+    let file = image
+        .source_file_matching("reexec.c".as_ref())
+        .expect("source");
+    let line = uscope::LineNumber::new(header).expect("line");
+    assert!(image.statement_addresses(file.id, line).count() > 1);
+    let loop_start = scenario.add_source_breakpoint("reexec.c", header).await;
+    assert_eq!(loop_start.locations.len(), 1);
+    // Its body runs once per argument, stopping each time.
+    let body = scenario
+        .add_source_breakpoint("reexec.c", line_of("puts(argv[index]);"))
+        .await;
+    let mut hits = Vec::new();
+    loop {
+        match scenario.resume_or_run().await {
+            StopReason::Breakpoint { hits: stop, .. } => hits.push(stop[0].breakpoint),
+            // The first image only executes itself again.
+            StopReason::Exec { followed: true } => {}
+            StopReason::Exited(_) => break,
+            other => panic!("stopped for {other:?}"),
+        }
+    }
+    assert_eq!(hits, [loop_start.id, body.id]);
     scenario.shutdown().await;
 }

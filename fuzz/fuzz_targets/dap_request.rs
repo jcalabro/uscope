@@ -53,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
             .to_json(1);
             assert!(response["body"].is_object());
         }
-        Ok(protocol::Incoming::Response) => {}
+        Ok(protocol::Incoming::Response { .. }) => {}
         Err(_) => {
             let _ = protocol::MessageError::request_seq(data);
         }

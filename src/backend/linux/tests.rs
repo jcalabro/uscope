@@ -335,7 +335,7 @@ impl LinuxTraceOps for RecordingTrace {
         Self::unexpected("process_threads")
     }
 
-    fn seize(&self, _pid: Pid) -> Result<bool> {
+    fn seize(&self, _pid: Pid, _exit_kill: bool) -> Result<bool> {
         Self::unexpected("seize")
     }
 
@@ -1418,7 +1418,7 @@ impl LinuxTraceOps for DebugRegisterTrace {
     fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
         RecordingTrace::unexpected("process_threads")
     }
-    fn seize(&self, _pid: Pid) -> Result<bool> {
+    fn seize(&self, _pid: Pid, _exit_kill: bool) -> Result<bool> {
         RecordingTrace::unexpected("seize")
     }
     fn interrupt(&self, pid: Pid) -> Result<bool> {

@@ -83,15 +83,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             let _ = reply.send(Err(Error::AlreadyRunning));
             return;
         }
-        let Ok(raw) = i32::try_from(requested.get()) else {
-            let _ = reply.send(Err(Error::InvalidProcessId(requested.get())));
-            return;
+        let requested_pid = match requested_pid(requested) {
+            Ok(pid) => pid,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
         };
-        if raw <= 0 {
-            let _ = reply.send(Err(Error::InvalidProcessId(requested.get())));
-            return;
-        }
-        let requested_pid = Pid::from_raw(raw);
         let tgid = match self.ptrace.thread_group_id(requested_pid) {
             Ok(tgid) => tgid,
             Err(error) => {
@@ -105,7 +103,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             for _ in 0..128 {
                 let observed = self.ptrace.process_threads(tgid)?;
                 for tid in observed {
-                    if !seized.contains(&tid) && self.ptrace.seize(tid)? {
+                    if !seized.contains(&tid) && self.ptrace.seize(tid, false)? {
                         seized.insert(tid);
                     }
                 }
@@ -186,6 +184,75 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.barrier = Some(StopBarrier::visible(triggering_thread, StopReason::Attach));
     }
 
+    /// Seizes a process waiting to exec the executable and lets it, so the
+    /// exec completes the launch as a spawned process's initial exec does.
+    pub(super) fn launch_by_exec(
+        &mut self,
+        requested: ProcessId,
+        stop_at_entry: bool,
+        release: Box<dyn FnOnce() + Send>,
+        reply: Reply<ExecutionId>,
+    ) {
+        if self.inferior.is_some() || self.launch_reply.is_some() || self.attach_reply.is_some() {
+            let _ = reply.send(Err(Error::AlreadyRunning));
+            return;
+        }
+        let result = (|| {
+            let pid = requested_pid(requested)?;
+            if self.ptrace.thread_group_id(pid)? != pid {
+                return Err(Error::InvalidProcessId(requested.get()));
+            }
+            if !self.ptrace.seize(pid, true)? {
+                return Err(Error::NotRunning);
+            }
+            // A thread the process started before it was seized would exec
+            // untraced.
+            if self.ptrace.process_threads(pid)? != [pid] {
+                self.rollback_seized(&BTreeSet::from([pid]));
+                return Err(Error::ProcessHasThreads(requested.get()));
+            }
+            self.ptrace
+                .spawn_waiter(self.message_sender.clone())
+                .inspect_err(|_| self.rollback_seized(&BTreeSet::from([pid])))
+                .map(|waiter| (pid, waiter))
+        })();
+        let (pid, waiter) = match result {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
+            }
+        };
+        let process_id = process_id(pid);
+        let execution_id = ExecutionId::new(1);
+        self.reset_breakpoint_hit_counts();
+        self.inferior = Some(Inferior {
+            active: Some(ActiveExecution {
+                id: execution_id,
+                kind: ActiveKind::Launch,
+                scope: ResumeScope::Process(process_id),
+                resume_threads: BTreeSet::from([pid]),
+            }),
+            next_execution: 1,
+            barrier: stop_at_entry.then_some(StopBarrier::visible(pid, StopReason::Entry)),
+            ..Inferior::new(
+                InferiorOrigin::LaunchedByExec,
+                pid,
+                LoadedModule::main(self.module_image.id(), 0),
+                BTreeMap::from([(pid, TraceThread::starting(ExpectedStop::AdoptedExec))]),
+                Some(waiter),
+            )
+        });
+        self.launch_reply = Some(reply);
+        self.bump_revision();
+        let _ = self.events.send(DebuggerEvent::InferiorLaunched {
+            revision: self.revision,
+            process_id,
+            execution_id,
+        });
+        release();
+    }
+
     pub(super) fn rollback_seized(&self, seized: &BTreeSet<Pid>) {
         for &pid in seized {
             let _ = self.ptrace.interrupt(pid);
@@ -217,20 +284,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             &self.executable_data,
             self.executable_identity,
         )?;
-        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
-        self.modules
-            .get_mut(&crate::ModuleId::new(0))
-            .expect("main module is registered")
-            .loaded = inferior.loaded_module;
-
-        for breakpoint in &self.breakpoints {
-            install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
-        }
-        // The kernel mapped the dynamic loader with the program; following
-        // it from here resolves breakpoints in libraries as they load.
-        self.refresh_modules()?;
-        self.ensure_loader_breakpoint()?;
+        self.load_main_image(load_bias)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
 
         let execution_id = inferior.active.as_ref().expect("launch is active").id;
@@ -266,6 +320,23 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(())
     }
 
+    /// Places the executable's image at `load_bias` in a freshly executed
+    /// process, plants every breakpoint, and starts following the dynamic
+    /// loader, which the kernel mapped with the program, so breakpoints in
+    /// libraries resolve as they load.
+    fn load_main_image(&mut self, load_bias: u64) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        inferior.loaded_module = LoadedModule::main(self.module_image.id(), load_bias);
+        self.modules
+            .get_mut(&crate::ModuleId::new(0))
+            .expect("main module is registered")
+            .loaded = inferior.loaded_module;
+        for breakpoint in &self.breakpoints {
+            install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
+        }
+        self.refresh_libraries()
+    }
+
     pub(super) fn handle_initial_attach_stop(&mut self, pid: Pid) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let thread = inferior.thread_mut(pid)?;
@@ -280,7 +351,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let exit_kill = self
             .inferior
             .as_ref()
-            .is_some_and(|inferior| inferior.origin == InferiorOrigin::Launched);
+            .is_some_and(|inferior| inferior.origin.owned());
         self.ptrace.set_options(pid, exit_kill)?;
         let arm_failure = self.arm_new_thread(pid);
         if let Some(inferior) = self.inferior.as_mut() {
@@ -541,6 +612,22 @@ impl<P: LinuxTraceOps> Controller<P> {
             .remove(&old_tid)
             .or_else(|| inferior.threads.remove(&pid))
             .unwrap_or_else(|| TraceThread::starting(ExpectedStop::None));
+        if matches!(survivor.expected, ExpectedStop::AdoptedExec) {
+            survivor.expected = ExpectedStop::InitialExec;
+            inferior.threads.insert(pid, survivor);
+            let ours = self.ptrace.load_bias(
+                pid,
+                &self.executable,
+                &self.executable_data,
+                self.executable_identity,
+            );
+            if ours.is_err() {
+                return Err(backend_error(LinuxError::ExecutedAnotherProgram(
+                    self.executable.to_path_buf(),
+                )));
+            }
+            return self.handle_initial_stop(pid);
+        }
         inferior
             .retired_threads
             .extend(inferior.threads.keys().copied());
@@ -557,7 +644,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.threads.insert(pid, survivor);
         inferior.breakpoints.clear();
         inferior.repairs.clear();
-        inferior.exec_unsupported = true;
+        inferior.loader_site = None;
         // exec(2) flushes every debug register; the new image's addresses
         // have no relation to the old watchpoints.
         self.discard_watchpoints();
@@ -567,7 +654,26 @@ impl<P: LinuxTraceOps> Controller<P> {
             thread.armed = Some(generation);
             thread.watch_hits.clear();
         }
-        self.begin_visible_stop(pid, StopReason::Exec)
+        self.reset_runtime_modules();
+        self.refresh_thread_names();
+        // Only the executable's own image can be followed: it is the one
+        // whose debug information is loaded.
+        let load_bias = self.ptrace.load_bias(
+            pid,
+            &self.executable,
+            &self.executable_data,
+            self.executable_identity,
+        );
+        let followed = load_bias.is_ok();
+        if let Ok(load_bias) = load_bias {
+            self.load_main_image(load_bias)?;
+        } else {
+            self.inferior
+                .as_mut()
+                .ok_or(Error::NotRunning)?
+                .exec_unsupported = true;
+        }
+        self.begin_visible_stop(pid, StopReason::Exec { followed })
     }
 }
 
@@ -584,7 +690,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// any thread was resumed.
     pub(super) fn drain_queued_traps(&mut self) -> Result<bool> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        if inferior.origin != InferiorOrigin::Attached {
+        if !inferior.origin.seized() {
             // Launched threads stop with SIGSTOP, which the kernel dequeues
             // only after synchronous signals such as SIGTRAP.
             return Ok(false);
@@ -1113,4 +1219,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             let _ = self.kill_inferior();
         }
     }
+}
+
+/// The native identifier of a requested process.
+fn requested_pid(requested: ProcessId) -> Result<Pid> {
+    i32::try_from(requested.get())
+        .ok()
+        .filter(|raw| *raw > 0)
+        .map(Pid::from_raw)
+        .ok_or(Error::InvalidProcessId(requested.get()))
 }

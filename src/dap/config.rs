@@ -32,6 +32,22 @@ pub struct Launch {
     pub arguments: Vec<OsString>,
     pub environment: Vec<(OsString, Option<OsString>)>,
     pub working_directory: Option<PathBuf>,
+    pub console: Console,
+}
+
+/// Where a launched program's standard streams go.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum Console {
+    /// The debug console, through the adapter.
+    #[default]
+    #[serde(rename = "internalConsole")]
+    Internal,
+    /// A terminal in the client's window.
+    #[serde(rename = "integratedTerminal")]
+    Integrated,
+    /// A terminal in its own window.
+    #[serde(rename = "externalTerminal")]
+    External,
 }
 
 /// A validated launch or attach configuration.
@@ -62,7 +78,8 @@ struct Arguments {
     disassembly_syntax: Option<Syntax>,
     #[serde(default)]
     signals: BTreeMap<String, Actions>,
-    console: Option<String>,
+    #[serde(default)]
+    console: Console,
     pid: Option<Pid>,
     core_file: Option<PathBuf>,
     sysroot: Option<PathBuf>,
@@ -105,16 +122,6 @@ pub fn launch(arguments: Value) -> Result<Configuration, String> {
                 .to_owned(),
         );
     }
-    if let Some(console) = parsed
-        .console
-        .as_deref()
-        .filter(|console| *console != "internalConsole")
-    {
-        return Err(format!(
-            "invalid launch configuration at console: \"{console}\" is not supported; \
-             program output appears in the debug console"
-        ));
-    }
     let program = parsed
         .program
         .clone()
@@ -128,6 +135,7 @@ pub fn launch(arguments: Value) -> Result<Configuration, String> {
             .map(|(name, value)| (name.into(), value.as_ref().map(OsString::from)))
             .collect(),
         working_directory: parsed.cwd.clone(),
+        console: parsed.console,
     };
     common(parsed, Start::Launch(launch), "launch configuration")
 }
@@ -320,8 +328,8 @@ mod tests {
                 "invalid launch configuration at signals.SIGUSR1: unknown signal action 'halt'; use stop, nostop, print, noprint, pass, or nopass",
             ),
             (
-                json!({"program": "p", "console": "integratedTerminal"}),
-                "invalid launch configuration at console: \"integratedTerminal\" is not supported; program output appears in the debug console",
+                json!({"program": "p", "console": "pty"}),
+                "invalid launch configuration at console: unknown variant `pty`, expected one of `internalConsole`, `integratedTerminal`, `externalTerminal`",
             ),
             (
                 json!({"program": "p", "sourceMap": [["/a"]]}),

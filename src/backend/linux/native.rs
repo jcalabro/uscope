@@ -71,7 +71,8 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         // overrides this method.
         None
     }
-    fn seize(&self, pid: Pid) -> Result<bool>;
+    /// Seizes a thread, killing it with the tracer when `exit_kill` is set.
+    fn seize(&self, pid: Pid, exit_kill: bool) -> Result<bool>;
     fn interrupt(&self, pid: Pid) -> Result<bool>;
     fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
     fn kill(&self, pid: Pid, signal: Signal) -> Result<()>;
@@ -239,9 +240,9 @@ impl LinuxTraceOps for LinuxPtrace {
         (!name.is_empty()).then(|| Arc::from(name))
     }
 
-    fn seize(&self, pid: Pid) -> Result<bool> {
+    fn seize(&self, pid: Pid, exit_kill: bool) -> Result<bool> {
         self.assert_owner_thread();
-        match ptrace::seize(pid, trace_options(false)) {
+        match ptrace::seize(pid, trace_options(exit_kill)) {
             Ok(()) => Ok(true),
             Err(Errno::ESRCH) => Ok(false),
             Err(error) => Err(backend_error(LinuxError::System(error))),

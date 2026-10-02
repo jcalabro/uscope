@@ -18,11 +18,10 @@ use super::classify::{format_raw_stop, visible_stop_priority};
 use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
     ActiveExecution, ActiveKind, BreakpointOwner, ClassifiedStop, Controller, ExpectedStop,
-    Inferior, InferiorOrigin, LinuxError, NativeThreadState, PendingSignal, PublicStop,
-    RepairGroup, Resume, SignalGuard, StopBarrier, allocate_stop_id, backend_error,
-    debug_thread_id, exception_info, pending_exception_info, process_id, scoped_threads,
-    steps_instructions, validate_process, validate_public_stop, validate_resumable,
-    validate_stopped_thread,
+    Inferior, LinuxError, NativeThreadState, PendingSignal, PublicStop, RepairGroup, Resume,
+    SignalGuard, StopBarrier, allocate_stop_id, backend_error, debug_thread_id, exception_info,
+    pending_exception_info, process_id, scoped_threads, steps_instructions, validate_process,
+    validate_public_stop, validate_resumable, validate_stopped_thread,
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -257,7 +256,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .iter()
             .find_map(|(&pid, thread)| {
                 (matches!(thread.state, NativeThreadState::Running)
-                    || matches!(thread.expected, ExpectedStop::InitialExec))
+                    || matches!(
+                        thread.expected,
+                        ExpectedStop::InitialExec | ExpectedStop::AdoptedExec
+                    ))
                 .then_some(pid)
             })
             .ok_or(Error::NotStopped)?;
@@ -1035,7 +1037,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn request_stops(&mut self) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let tgid = inferior.tgid;
-        let attached = inferior.origin == InferiorOrigin::Attached;
+        let attached = inferior.origin.seized();
         let running: Vec<_> = inferior
             .threads
             .iter()
@@ -1191,9 +1193,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ExpectedStop::BreakpointRepair { address },
             ),
             ExpectedStop::AwaitBreakpoint { .. } => self.resume_awaiting_thread(pid),
-            ExpectedStop::InitialExec | ExpectedStop::InitialAttach | ExpectedStop::None => {
-                self.continue_thread(pid)
-            }
+            ExpectedStop::InitialExec
+            | ExpectedStop::AdoptedExec
+            | ExpectedStop::InitialAttach
+            | ExpectedStop::None => self.continue_thread(pid),
         }
     }
 }

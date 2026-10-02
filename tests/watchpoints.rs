@@ -947,7 +947,10 @@ async fn exec_discards_watchpoints_because_the_kernel_cleared_them() {
     assert_eq!(watchpoint.scope, WatchScope::Location);
     let mut events = scenario.handle().subscribe();
 
-    assert_eq!(scenario.resume_to_stop().await, StopReason::Exec);
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exec { followed: false }
+    );
     assert!(scenario.snapshot().await.watchpoints.is_empty());
     assert!(matches!(
         watch_events(&mut events).as_slice(),

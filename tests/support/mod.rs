@@ -10,7 +10,7 @@
 use std::future::Future;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus as ProcessExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus as ProcessExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -65,11 +65,26 @@ impl ExternalProcess {
     /// Spawns a fixture and waits for the line it prints, beginning with
     /// `READY`, once it can be attached to.
     pub fn spawn(path: &Path) -> Self {
-        let child = Command::new(path)
+        Self::handshake(&mut Command::new(path))
+    }
+
+    /// Spawns a shell that execs `program` with `arguments` once a line
+    /// arrives on its standard input, as a terminal's launcher would.
+    pub fn exec_gate(program: &Path, arguments: &[&str]) -> Self {
+        Self::handshake(
+            Command::new("sh")
+                .args(["-c", r#"echo READY; read -r line; exec "$@""#, "sh"])
+                .arg(program)
+                .args(arguments),
+        )
+    }
+
+    fn handshake(command: &mut Command) -> Self {
+        let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .unwrap_or_else(|error| panic!("spawn {}: {error}", path.display()));
+            .unwrap_or_else(|error| panic!("spawn {command:?}: {error}"));
         // Owned before reading, so a failed handshake still kills the child.
         let mut process = Self {
             child: Some(child),
@@ -126,6 +141,20 @@ impl ExternalProcess {
             .expect("fixture stdin")
             .write_all(b"x")
             .expect("release fixture");
+    }
+
+    /// Takes the standard input that releases the process.
+    pub fn take_stdin(&mut self) -> ChildStdin {
+        self.child
+            .as_mut()
+            .and_then(|child| child.stdin.take())
+            .expect("fixture stdin")
+    }
+
+    /// Gives up a process that a debugger traced to its exit, and so reaped:
+    /// the debugger runs in this process, its parent.
+    pub fn reaped(mut self) {
+        drop(self.child.take());
     }
 
     pub fn wait(mut self) -> ProcessExitStatus {
@@ -409,6 +438,43 @@ impl Scenario {
         self.transcript.push(format!("reply: {reply:?}"));
         self.assert_terminal_event(&event, &reply);
         reply
+    }
+
+    /// Launches through `process`, which execs the scenario's program once
+    /// `release` runs, and waits for that launch's stop or exit.
+    pub async fn launch_by_exec_to_stop(
+        &mut self,
+        process: ProcessId,
+        stop_at_entry: bool,
+        release: impl FnOnce() + Send + 'static,
+    ) -> StopReason {
+        self.transcript.push(format!(
+            "request: launch by exec of {process}, stop at entry {stop_at_entry}"
+        ));
+        let handle = self.handle.clone();
+        let task = tokio::spawn(async move {
+            let mut events = handle.subscribe();
+            let execution = handle
+                .launch_by_exec(process, stop_at_entry, release)
+                .await?;
+            loop {
+                match events.recv().await {
+                    Ok(DebuggerEvent::InferiorStopped {
+                        execution_id: Some(id),
+                        reason,
+                        ..
+                    }) if id == execution => return Ok(reason),
+                    Ok(DebuggerEvent::InferiorExited {
+                        execution_id: Some(id),
+                        status,
+                        ..
+                    }) if id == execution => return Ok(StopReason::Exited(status)),
+                    Ok(_) => {}
+                    Err(error) => panic!("event stream failed: {error}"),
+                }
+            }
+        });
+        self.wait_for_request(task, "launch by exec").await
     }
 
     pub async fn start_running(&mut self) -> JoinHandle<Result<StopReason>> {

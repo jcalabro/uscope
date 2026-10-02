@@ -518,7 +518,7 @@ fn resolve_in_image(
                 .filter(|function| image.instances_for_function(function.id).next().is_some())
                 .collect::<Vec<_>>();
             if defined.is_empty() {
-                return Err(Error::FunctionNotFound(name.clone()));
+                return symbol_locations(image, name);
             }
             function_locations(image, defined)
         }
@@ -549,27 +549,66 @@ fn resolve_in_image(
             let line = image
                 .breakpoint_line(source.id, *line)
                 .ok_or_else(unavailable)?;
-            let addresses = image
+            let mut addresses = image
                 .statement_addresses(source.id, line)
                 .collect::<Vec<_>>();
             if addresses.is_empty() {
                 return Err(unavailable());
             }
-            Ok(addresses
-                .into_iter()
-                .map(|address| {
-                    let code_instances = image
-                        .code_instances()
-                        .iter()
-                        .filter(|instance| instance.contains(address))
-                        .map(|instance| instance.id)
-                        .collect::<Vec<_>>()
-                        .into();
-                    (address, code_instances)
-                })
-                .collect())
+            addresses.sort_unstable();
+            // Like gdb, stop where the line begins in each instance of its
+            // code, not again at its later statements, such as the use of
+            // a call's result or a loop's condition.
+            let mut seen = BTreeSet::new();
+            let mut locations = Vec::new();
+            for address in addresses {
+                let code_instances = image
+                    .code_instances()
+                    .iter()
+                    .filter(|instance| instance.contains(address))
+                    .collect::<Vec<_>>();
+                let innermost = code_instances
+                    .iter()
+                    .find(|instance| {
+                        !code_instances
+                            .iter()
+                            .any(|other| other.parent == Some(instance.id))
+                    })
+                    .map(|instance| instance.id);
+                if innermost.is_none_or(|instance| seen.insert(instance)) {
+                    let ids = code_instances.iter().map(|instance| instance.id).collect();
+                    locations.push((address, ids));
+                }
+            }
+            Ok(locations)
         }
     }
+}
+
+/// The entries of the code symbols with a name, for an image whose debug
+/// information does not describe the function, such as a system library's.
+/// An indirect function's symbol names its resolver, not the function.
+fn symbol_locations(
+    image: &crate::ModuleImage,
+    name: &str,
+) -> Result<Vec<(crate::ImageAddress, Arc<[crate::CodeInstanceId]>)>> {
+    let entries = image
+        .symbols()
+        .iter()
+        .filter(|symbol| {
+            &*symbol.name == name
+                && symbol.kind == crate::SymbolKind::Function
+                && symbol.extent.is_some()
+        })
+        .map(|symbol| symbol.address)
+        .collect::<BTreeSet<_>>();
+    if entries.is_empty() {
+        return Err(Error::FunctionNotFound(name.to_owned()));
+    }
+    Ok(entries
+        .into_iter()
+        .map(|address| (address, Arc::from([])))
+        .collect())
 }
 
 /// The locations of every instance of some functions: one per address

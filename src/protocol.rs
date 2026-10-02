@@ -870,7 +870,12 @@ pub enum StopReason {
     /// Execution stopped because of an exception.
     Exception(ExceptionInfo),
     /// The process replaced its executable image.
-    Exec,
+    Exec {
+        /// Whether the new image is this debugger's executable, which is
+        /// then loaded with every breakpoint in place. Any other image
+        /// cannot be inspected or resumed.
+        followed: bool,
+    },
     /// A thread-specific execution operation ended because its thread exited.
     ThreadExited {
         /// The thread that exited.
@@ -1155,6 +1160,12 @@ pub enum Request {
     Attach {
         process_id: ProcessId,
         reply: Reply<StopId>,
+    },
+    LaunchByExec {
+        process_id: ProcessId,
+        stop_at_entry: bool,
+        release: Box<dyn FnOnce() + Send>,
+        reply: Reply<ExecutionId>,
     },
     Continue {
         process_id: ProcessId,
