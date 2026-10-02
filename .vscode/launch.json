@@ -16,6 +16,51 @@
 			"args": [
 				"./build/test-programs/step"
 			]
+		},
+		// Test programs to debug with the uscope extension (editors/vscode).
+		{
+			"name": "C: segfault with worker threads",
+			"type": "uscope",
+			"request": "launch",
+			"preLaunchTask": "build in Nix dev shell",
+			"program": "${workspaceFolder}/build/test-programs/crash-gcc-o0",
+			"args": ["segv"],
+			"cwd": "${workspaceFolder}"
+		},
+		{
+			"name": "C: core dump of that segfault",
+			"type": "uscope",
+			"request": "attach",
+			"preLaunchTask": "build in Nix dev shell",
+			"coreFile": "${workspaceFolder}/build/test-programs/crash-gcc-o0-segv.core",
+			"program": "${workspaceFolder}/build/test-programs/crash-gcc-o0"
+		},
+		{
+			"name": "Go: nil pointer dereference",
+			"type": "uscope",
+			"request": "launch",
+			"preLaunchTask": "build in Nix dev shell",
+			"program": "${workspaceFolder}/build/test-programs/crash-go-o0",
+			"cwd": "${workspaceFolder}"
+		},
+		{
+			"name": "Rust: write to an unmapped address",
+			"type": "uscope",
+			"request": "launch",
+			"preLaunchTask": "build in Nix dev shell",
+			"program": "${workspaceFolder}/build/test-programs/crash-rust-o0",
+			"cwd": "${workspaceFolder}"
+		},
+		{
+			"name": "C: arguments, environment, and terminal input",
+			"type": "uscope",
+			"request": "launch",
+			"preLaunchTask": "build in Nix dev shell",
+			"program": "${workspaceFolder}/build/test-programs/process-environment",
+			"args": ["hello", "world"],
+			"env": { "USCOPE_FIXTURE_VALUE": "from launch.json" },
+			"cwd": "${workspaceFolder}",
+			"console": "integratedTerminal"
 		}
 	]
 }

@@ -1,0 +1,4 @@
+{
+	// The uscope launch configurations debug with the uscope this checkout builds.
+	"uscope.path": "${workspaceFolder}/target/debug/uscope"
+}

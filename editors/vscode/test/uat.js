@@ -72,11 +72,22 @@ function within(description, promise) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function terminated() {
+/** Polls until the predicate holds, or the wait times out. */
+function until(description, predicate) {
+    return within(description, new Promise((resolve) => {
+        const poll = () => (predicate() ? resolve() : setTimeout(poll, 20));
+        poll();
+    }));
+}
+
+/** Waits for a session to end: the one with the name, if given. */
+function terminated(name) {
     return within('the session to end', new Promise((resolve) => {
         const listener = vscode.debug.onDidTerminateDebugSession((session) => {
-            listener.dispose();
-            resolve(session);
+            if (name === undefined || session.name === name) {
+                listener.dispose();
+                resolve(session);
+            }
         });
     }));
 }
@@ -140,6 +151,62 @@ function sourceBreakpoint(file, marker) {
 async function topFrame(session, threadId) {
     const trace = await session.customRequest('stackTrace', { threadId, startFrame: 0, levels: 1 });
     return trace.stackFrames[0];
+}
+
+const workspace = () => vscode.workspace.workspaceFolders[0];
+
+/** Pressing F5 in a folder without a launch.json creates one to fill in. */
+async function createALaunchJson() {
+    const folder = workspace().uri.fsPath;
+    const program = path.join(folder, 'main.c');
+    const launchJson = path.join(folder, '.vscode', 'launch.json');
+    fs.writeFileSync(program, 'int main(void) { return 0; }\n');
+    try {
+        // The C file makes uscope the only debugger to guess.
+        await vscode.window.showTextDocument(vscode.Uri.file(program));
+        await vscode.commands.executeCommand('workbench.action.debug.start');
+        await until('launch.json', () => fs.existsSync(launchJson));
+        // VS Code writes its own comments at the top of the file.
+        const text = fs.readFileSync(launchJson, 'utf8').replace(/^\s*\/\/.*$/gm, '');
+        const { configurations } = JSON.parse(text);
+        assert.deepStrictEqual(configurations.map(({ type, request }) => ({ type, request })), [
+            { type: 'uscope', request: 'launch' },
+        ]);
+        assert.strictEqual(vscode.debug.activeDebugSession, undefined);
+    } finally {
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+        fs.rmSync(path.join(folder, '.vscode'), { recursive: true, force: true });
+        fs.rmSync(program, { force: true });
+    }
+}
+
+/** The uscope.path setting chooses the adapter, and a missing one is named. */
+async function findTheAdapterFromTheSetting() {
+    const folder = workspace();
+    const wrapper = path.join(folder.uri.fsPath, 'uscope-wrapper');
+    const marker = `${wrapper}.used`;
+    fs.writeFileSync(wrapper, `#!/bin/sh\ntouch '${marker}'\nexec uscope "$@"\n`, { mode: 0o755 });
+    const settings = vscode.workspace.getConfiguration('uscope');
+    const configuration = (name) => ({ type: 'uscope', request: 'launch', name, program: fixture('basic'), cwd: root });
+    try {
+        await settings.update('path', '${workspaceFolder}/missing-uscope', vscode.ConfigurationTarget.Global);
+        await assert.rejects(
+            vscode.debug.startDebugging(folder, configuration('vscode-missing-adapter')),
+            /Cannot find uscope at "\$\{workspaceFolder\}\/missing-uscope"/,
+        );
+
+        await settings.update('path', '${workspaceFolder}/uscope-wrapper', vscode.ConfigurationTarget.Global);
+        const exited = event('exited');
+        const ended = terminated('vscode-setting');
+        assert.ok(await vscode.debug.startDebugging(folder, configuration('vscode-setting')));
+        assert.strictEqual((await exited).message.body.exitCode, 0);
+        await ended;
+        assert.ok(fs.existsSync(marker), 'the session ran the configured adapter');
+    } finally {
+        await settings.update('path', undefined, vscode.ConfigurationTarget.Global);
+        fs.rmSync(wrapper, { force: true });
+        fs.rmSync(marker, { force: true });
+    }
 }
 
 async function launchStepInspectAndRestart() {
@@ -248,6 +315,51 @@ async function attachToAProcess() {
     }
 }
 
+/**
+ * ${command:pickProcess} lists the user's processes, or with a program, only
+ * those running it, which leaves the target as the one item to accept.
+ */
+async function pickAProcess() {
+    const target = childProcess.spawn(fixture('attach'), [], { stdio: ['pipe', 'pipe', 'inherit'] });
+    const exit = new Promise((resolve) => target.once('exit', resolve));
+    try {
+        await new Promise((resolve, reject) => {
+            target.stdout.once('data', resolve);
+            target.once('error', reject);
+        });
+        const { processes } = require(path.join(root, 'editors/vscode/extension.js'));
+        const listed = processes();
+        assert.deepStrictEqual(listed.filter((entry) => entry.pid === target.pid).map(
+            ({ name, commandLine, executable }) => ({ name, commandLine, executable }),
+        ), [{ name: 'attach', commandLine: fixture('attach'), executable: fixture('attach') }]);
+        assert.ok(!listed.some((entry) => entry.pid === process.pid), 'the extension host is not listed');
+
+        const attached = event('process');
+        const started = vscode.debug.startDebugging(undefined, {
+            type: 'uscope', request: 'attach', name: 'vscode-pick', program: fixture('attach'),
+            pid: '${command:pickProcess}',
+        });
+        let settled = false;
+        started.then(() => { settled = true; }, () => { settled = true; });
+        // Accept the only process the picker lists once it opens.
+        await until('the picker to be accepted', () => {
+            if (!settled) {
+                vscode.commands.executeCommand('workbench.action.acceptSelectedQuickOpenItem');
+            }
+            return settled;
+        });
+        assert.ok(await started);
+        const { session, message } = await attached;
+        assert.strictEqual(message.body.systemProcessId, target.pid);
+        const ended = terminated();
+        await vscode.debug.stopDebugging(session);
+        await ended;
+    } finally {
+        target.kill();
+        await exit;
+    }
+}
+
 async function openACoreDump() {
     const stopped = event('stopped', (body) => body.reason === 'exception');
     assert.ok(await vscode.debug.startDebugging(undefined, {
@@ -265,7 +377,10 @@ async function openACoreDump() {
 
 exports.run = async function run() {
     try {
-        for (const scenario of [launchStepInspectAndRestart, runInTheIntegratedTerminal, attachToAProcess, openACoreDump]) {
+        for (const scenario of [
+            createALaunchJson, findTheAdapterFromTheSetting, launchStepInspectAndRestart,
+            runInTheIntegratedTerminal, attachToAProcess, pickAProcess, openACoreDump,
+        ]) {
             console.log(`uat: ${scenario.name}`);
             await scenario();
             console.log(`uat: ${scenario.name} passed`);

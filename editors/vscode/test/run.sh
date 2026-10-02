@@ -8,6 +8,8 @@ root=$(cd "$here/../../.." && pwd)
 record=${1:?usage: run.sh RECORDING_DIRECTORY}
 profile=$(mktemp -d)
 trap 'rm -rf "$profile"' EXIT
+# An empty folder to open, so the test can press F5 without a launch.json.
+mkdir "$profile/workspace"
 
 # Extension tests run VS Code's Electron executable, not its CLI, which
 # would hand the window to another process and return at once.
@@ -30,4 +32,5 @@ USCOPE_UAT_ROOT=$root USCOPE_UAT_RECORD=$(realpath -m "$record") "${VSCODE_EXECU
     --skip-release-notes \
     --new-window \
     --extensionDevelopmentPath "$root/editors/vscode" \
-    --extensionTestsPath "$here/uat.js"
+    --extensionTestsPath "$here/uat.js" \
+    "$profile/workspace"

@@ -79,13 +79,18 @@ Attaching to a process, or opening a core dump:
 
 ### VS Code
 
-`editors/vscode` is a manifest-only extension that contributes the `uscope` debugger type. It provides configuration completion, snippets, and breakpoints in C, C++, Rust, Go, and Zig. Install it by linking it into the extensions directory, then reload the window:
+`editors/vscode` is a small extension, written in plain JavaScript with no build step, that contributes the `uscope` debugger type. It provides configuration completion, snippets, and breakpoints in C, C++, Rust, Go, and Zig. Install it by linking it into the extensions directory, then reload the window:
 
 ```sh
 ln -s "$PWD/editors/vscode" ~/.vscode/extensions/uscope.uscope-0.1.0
 ```
 
-Add a configuration to `.vscode/launch.json` with *Add Configuration…*, choosing a *uscope* snippet. To debug the adapter itself, run `uscope dap --port 4711` and add `"debugServer": 4711` to the configuration.
+- **Finding uscope.** The extension runs `uscope dap` from `PATH`. The `uscope.path` setting names another executable, such as `${workspaceFolder}/target/debug/uscope`; it may start with `${workspaceFolder}` or `${userHome}`.
+- **Configurations.** Pressing F5 in a folder without a `.vscode/launch.json` creates one with a launch configuration to fill in. *Add Configuration…* offers more as *uscope* snippets.
+- **Attaching.** `"pid": "${command:pickProcess}"` picks one of your processes when the session starts. With `program` set as well, the picker lists only processes running it.
+- **Debugging the adapter.** Run `uscope dap --port 4711` and add `"debugServer": 4711` to the configuration.
+
+This repository's `.vscode/launch.json` debugs a few test programs: crashes in C, Go, and Rust, a C core dump, and a program that reads from the integrated terminal. Each builds uscope and the programs first, and `.vscode/settings.json` points `uscope.path` at the build.
 
 ### Neovim (nvim-dap)
 
