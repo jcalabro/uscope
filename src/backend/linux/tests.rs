@@ -3669,6 +3669,49 @@ fn a_change_undone_before_every_thread_stopped_lets_a_stepi_finish_once() {
 }
 
 #[test]
+fn a_pause_survives_the_change_it_coincided_with_being_undone() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    harness.store(0x1_9000, 7);
+    harness
+        .add_watching(0x1_9000, 8, WatchAccess::Change)
+        .expect("arm");
+    harness.start_continue();
+    harness.store(0x1_9000, 9);
+    harness
+        .trap(
+            first,
+            TRAP_HARDWARE_BREAKPOINT,
+            debug_registers::STATUS_IDLE | 0b1,
+        )
+        .expect("changing store");
+    harness
+        .controller
+        .begin_pause(process_id(first))
+        .expect("pause while every thread stops");
+    harness.store(0x1_9000, 7);
+    harness
+        .trap(
+            second,
+            TRAP_HARDWARE_BREAKPOINT,
+            debug_registers::STATUS_IDLE | 0b1,
+        )
+        .expect("restoring store");
+
+    // The change is gone, but the client still asked for a stop.
+    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(
+        inferior
+            .threads
+            .values()
+            .all(|thread| thread.reason.is_none())
+    );
+}
+
+#[test]
 fn a_store_reports_only_the_watchpoints_whose_access_it_matches() {
     let mut harness = watch_harness(1);
     let pid = harness.threads[0];
