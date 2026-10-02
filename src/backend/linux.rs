@@ -458,15 +458,19 @@ struct StopBarrier {
     triggering_thread: Pid,
     /// The stop to publish, or `None` while the stop is internal.
     reason: Option<StopReason>,
+    /// Whether a client paused, so the stop is published as a pause when
+    /// every reason it would have published is dropped.
+    paused: bool,
     /// Client edits applied once every thread is stopped.
     edits: Vec<Edit>,
 }
 
 impl StopBarrier {
     /// A barrier that publishes `reason` from `triggering_thread`.
-    const fn visible(triggering_thread: Pid, reason: StopReason) -> Self {
+    fn visible(triggering_thread: Pid, reason: StopReason) -> Self {
         Self {
             triggering_thread,
+            paused: reason == StopReason::Pause,
             reason: Some(reason),
             edits: Vec::new(),
         }

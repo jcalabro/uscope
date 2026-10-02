@@ -117,6 +117,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.barrier = Some(StopBarrier {
             triggering_thread,
             reason: None,
+            paused: false,
             edits: Vec::new(),
         });
         self.request_stops()
@@ -275,7 +276,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return;
         }
         // The published hit is gone; another thread's reason, if any, takes
-        // its place.
+        // its place, and a pause the hit outranked otherwise.
         if let Some((pid, reason)) = inferior
             .threads
             .iter()
@@ -285,6 +286,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             barrier.triggering_thread = pid;
             barrier.reason = Some(reason);
+        } else if barrier.paused {
+            barrier.reason = Some(StopReason::Pause);
         }
     }
 }
