@@ -12,8 +12,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -125,7 +126,8 @@ struct Received {
 pub struct Dap {
     name: String,
     child: Option<Child>,
-    stdin: Option<ChildStdin>,
+    /// Where requests are written: the adapter's stdin or a socket.
+    stdin: Option<Box<dyn std::io::Write + Send>>,
     inbox: Receiver<Result<Value, String>>,
     transcript: Arc<Mutex<Vec<String>>>,
     started: Instant,
@@ -165,9 +167,19 @@ impl Dap {
 
     /// Starts `uscope dap` with extra command-line arguments.
     pub fn start_with(name: impl Into<String>, arguments: &[&str]) -> Self {
+        Self::start_in(name, arguments, &[])
+    }
+
+    /// Starts `uscope dap` with extra arguments and environment variables.
+    pub fn start_in(
+        name: impl Into<String>,
+        arguments: &[&str],
+        environment: &[(&str, &str)],
+    ) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
             .arg("dap")
             .args(arguments)
+            .envs(environment.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -175,11 +187,10 @@ impl Dap {
             .expect("start uscope dap");
         let stdout = child.stdout.take().expect("adapter stdout");
         let stderr = child.stderr.take().expect("adapter stderr");
-        let transcript = Arc::new(Mutex::new(Vec::new()));
-        let started = Instant::now();
-        let (send, inbox) = mpsc::channel();
-        std::thread::spawn(move || read_frames(stdout, &send));
-        let errors = Arc::clone(&transcript);
+        let stdin = child.stdin.take().expect("adapter stdin");
+        let dap = Self::over(name, Box::new(stdin), stdout, Some(child));
+        let errors = Arc::clone(&dap.transcript);
+        let started = dap.started;
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 errors.lock().expect("transcript").push(format!(
@@ -188,10 +199,30 @@ impl Dap {
                 ));
             }
         });
+        dap
+    }
+
+    /// Connects to an adapter serving TCP; its process is the caller's.
+    pub fn connect(name: impl Into<String>, address: SocketAddr) -> Self {
+        let stream = TcpStream::connect(address).expect("connect to the adapter");
+        let output = stream.try_clone().expect("clone the socket");
+        Self::over(name, Box::new(stream), output, None)
+    }
+
+    fn over(
+        name: impl Into<String>,
+        input: Box<dyn std::io::Write + Send>,
+        output: impl std::io::Read + Send + 'static,
+        child: Option<Child>,
+    ) -> Self {
+        let transcript = Arc::new(Mutex::new(Vec::new()));
+        let started = Instant::now();
+        let (send, inbox) = mpsc::channel();
+        std::thread::spawn(move || read_frames(output, &send));
         Self {
             name: name.into(),
-            stdin: child.stdin.take(),
-            child: Some(child),
+            stdin: Some(input),
+            child,
             inbox,
             transcript,
             started,
@@ -208,9 +239,19 @@ impl Dap {
         }
     }
 
-    /// Accepts requests racing stops, as a chaos client sends them.
+    /// Accepts requests racing stops and stops nobody looks at, as a
+    /// chaos client causes them.
     pub const fn relax_ordering_checks(&mut self) {
         self.checks.relaxed = true;
+    }
+
+    /// Sends text as a request with `seq`, which may be malformed, and
+    /// expects one response to it.
+    pub fn send_raw(&mut self, seq: u64, command: &str, text: &str) -> Sent {
+        let mark = self.mark();
+        self.outstanding.insert(seq, command.to_owned());
+        self.write(text);
+        Sent { seq, mark }
     }
 
     fn record(&self, direction: &str, text: &str) {
@@ -800,6 +841,8 @@ impl Dap {
         }
         if self.child.is_some() {
             self.wait_for_exit();
+        } else {
+            self.wait_for_end();
         }
         // Nothing may follow the disconnect response.
         self.drain();
@@ -809,7 +852,7 @@ impl Dap {
             .filter(|received| !received.consumed && received.message["event"] == "stopped")
             .map(|received| received.message.to_string())
             .collect::<Vec<_>>();
-        if !unexpected_stops.is_empty() {
+        if !unexpected_stops.is_empty() && !self.checks.relaxed {
             self.fail(&format!("stops nobody waited for: {unexpected_stops:?}"));
         }
         if !self.outstanding.is_empty() {
@@ -852,7 +895,12 @@ impl Dap {
                 self.fail("the adapter did not exit");
             }
         }
-        // The reader sees the end of the stream once the adapter is gone.
+        self.wait_for_end();
+    }
+
+    /// Waits for the adapter to close its output, as it does when its
+    /// session ends.
+    pub fn wait_for_end(&mut self) {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
             match self

@@ -7,11 +7,13 @@ mod dap;
 mod support;
 
 mod breakpoints;
+mod chaos;
 mod console;
 mod execution;
 mod lifecycle;
 mod memory;
 mod output;
+mod robustness;
 mod sources;
 mod variables;
 mod watch;

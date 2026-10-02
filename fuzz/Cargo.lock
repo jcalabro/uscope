@@ -762,6 +762,10 @@ name = "uscope-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
  "uscope",
 ]
 
