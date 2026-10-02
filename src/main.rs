@@ -100,12 +100,43 @@ fn main() -> ExitCode {
     {
         return dap::launcher::run(std::env::args_os().skip(1));
     }
+    #[cfg(debug_assertions)]
+    start_flight_recording();
     match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime.block_on(async_main()),
         Err(error) => {
             eprintln!("error: cannot start the async runtime: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Streams a development build's flight recording to the file named by
+/// `USCOPE_FLIGHT_RECORDING`, or to a new file under the recorder's `runs`
+/// directory. An empty variable turns recording off, as does running under
+/// nextest without the variable, so test runs do not crowd out recordings of
+/// development runs.
+///
+/// The variable is removed, so programs the debugger launches see the same
+/// environment, and so the same stack layout, as under a release build.
+#[cfg(debug_assertions)]
+#[allow(unsafe_code, reason = "the environment can only be edited unsafely")]
+fn start_flight_recording() {
+    use uscope::flight_recorder;
+
+    const VARIABLE: &str = "USCOPE_FLIGHT_RECORDING";
+    let path = std::env::var_os(VARIABLE);
+    // SAFETY: this runs before the async runtime starts, while the process
+    // has no other thread that could read the environment.
+    unsafe { std::env::remove_var(VARIABLE) };
+    let started = match path {
+        Some(path) if path.is_empty() => return,
+        Some(path) => flight_recorder::stream_to(std::path::Path::new(&path)),
+        None if std::env::var_os("NEXTEST").is_some() => return,
+        None => flight_recorder::stream_run().map(drop),
+    };
+    if let Err(error) = started {
+        eprintln!("warning: cannot write the flight recording: {error}");
     }
 }
 

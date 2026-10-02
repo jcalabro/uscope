@@ -594,6 +594,7 @@ pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<
                     Err(_) => break,
                 };
                 interval = WAITER_MIN_POLL;
+                record!("{}", super::recorded::describe_wait(&status));
                 if messages
                     .blocking_send(ControllerMessage::Wait(status))
                     .is_err()

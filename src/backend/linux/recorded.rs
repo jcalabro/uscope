@@ -1,0 +1,338 @@
+//! Records the native control calls a development build makes.
+//!
+//! [`Recorded`] wraps the ptrace edge and records every call that controls a
+//! tracee or reads how it stopped. Memory, register, and `/proc` reads are
+//! left out: they are frequent, change nothing, and would crowd the record of
+//! what the debugger did out of the ring.
+
+use std::collections::BTreeMap;
+use std::fmt::{Arguments, Debug};
+use std::path::Path;
+use std::sync::Arc;
+
+use nix::errno::Errno;
+use nix::libc;
+use nix::unistd::Pid;
+use tokio::sync::mpsc;
+
+use crate::backend::{ControllerMessage, FileIdentity};
+use crate::protocol::LaunchOptions;
+use crate::{Result, VirtualAddress};
+
+use super::memory::MemoryAccessError;
+use super::modules::ModuleMapping;
+use super::native::{InspectionOps, LinuxTraceOps};
+use super::registers::Fxsave;
+use super::signals::{Signal, WaitEvent};
+use super::{BreakpointOwner, BreakpointSite, SignalMetadata, Waiter};
+
+pub(super) struct Recorded<P>(pub(super) P);
+
+/// Records a call that acts on a tracee before making it, since a wait
+/// status it causes may be recorded before it returns, then records its
+/// result unless it is `expected`.
+fn issued<T: Debug + PartialEq, E: Debug>(
+    call: Arguments<'_>,
+    expected: &T,
+    make: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    record!("{call}");
+    let result = make();
+    match &result {
+        Ok(value) if value == expected => {}
+        Ok(value) => record!("{call} -> {value:?}"),
+        Err(error) => record!("{call} -> error {error:?}"),
+    }
+    result
+}
+
+/// Records a call that only reads, with its result.
+fn queried<T: Debug, E: Debug>(
+    call: Arguments<'_>,
+    result: std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    match &result {
+        Ok(value) => record!("{call} -> {value:?}"),
+        Err(error) => record!("{call} -> error {error:?}"),
+    }
+    result
+}
+
+/// Describes a wait status, naming its ptrace event.
+pub(super) fn describe_wait(status: &WaitEvent) -> String {
+    match *status {
+        WaitEvent::Exited(pid, code) => format!("{pid} exited {code}"),
+        WaitEvent::Signaled(pid, signal, core) => {
+            let core = if core { ", core dumped" } else { "" };
+            format!("{pid} killed by {signal}{core}")
+        }
+        WaitEvent::Stopped(pid, signal) => format!("{pid} stopped by {signal}"),
+        WaitEvent::PtraceEvent(pid, signal, event) => {
+            let name = match event {
+                libc::PTRACE_EVENT_FORK => "FORK",
+                libc::PTRACE_EVENT_VFORK => "VFORK",
+                libc::PTRACE_EVENT_CLONE => "CLONE",
+                libc::PTRACE_EVENT_EXEC => "EXEC",
+                libc::PTRACE_EVENT_VFORK_DONE => "VFORK_DONE",
+                libc::PTRACE_EVENT_EXIT => "EXIT",
+                libc::PTRACE_EVENT_SECCOMP => "SECCOMP",
+                libc::PTRACE_EVENT_STOP => "STOP",
+                _ => return format!("{pid} stopped by ptrace event {event} with {signal}"),
+            };
+            format!("{pid} PTRACE_EVENT_{name} with {signal}")
+        }
+        WaitEvent::PtraceSyscall(pid) => format!("{pid} stopped at a syscall"),
+        WaitEvent::Continued(pid) => format!("{pid} continued"),
+    }
+}
+
+impl<P: InspectionOps> InspectionOps for Recorded<P> {
+    fn read_word(&self, pid: Pid, address: u64) -> Result<u64> {
+        self.0.read_word(pid, address)
+    }
+
+    fn read_memory_word(
+        &self,
+        pid: Pid,
+        address: u64,
+    ) -> std::result::Result<u64, MemoryAccessError> {
+        self.0.read_memory_word(pid, address)
+    }
+
+    fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
+        self.0.registers(pid)
+    }
+
+    fn floating_registers(&self, pid: Pid) -> Result<Fxsave> {
+        self.0.floating_registers(pid)
+    }
+
+    fn tls_address(
+        &self,
+        thread: Pid,
+        link_map: VirtualAddress,
+        offset: u64,
+    ) -> std::result::Result<VirtualAddress, Arc<str>> {
+        self.0.tls_address(thread, link_map, offset)
+    }
+}
+
+impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
+    fn spawn(&self, executable: &Path, options: LaunchOptions) -> Result<Pid> {
+        record!("spawn {} {:?}", executable.display(), options.arguments);
+        let pid = self.0.spawn(executable, options);
+        match &pid {
+            Ok(pid) => record!("spawned {pid}"),
+            Err(error) => record!("spawn -> error {error:?}"),
+        }
+        pid
+    }
+
+    fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
+        let waiter = self.0.spawn_waiter(messages);
+        match &waiter {
+            Ok(_) => record!("spawned the waiter"),
+            Err(error) => record!("spawn waiter -> error {error:?}"),
+        }
+        waiter
+    }
+
+    fn process_threads(&self, process: Pid) -> Result<Vec<Pid>> {
+        queried(
+            format_args!("list threads of {process}"),
+            self.0.process_threads(process),
+        )
+    }
+
+    fn thread_name(&self, process: Pid, thread: Pid) -> Option<Arc<str>> {
+        self.0.thread_name(process, thread)
+    }
+
+    fn seize(&self, pid: Pid, exit_kill: bool) -> Result<bool> {
+        issued(
+            format_args!("PTRACE_SEIZE {pid} exit_kill={exit_kill}"),
+            &true,
+            || self.0.seize(pid, exit_kill),
+        )
+    }
+
+    fn interrupt(&self, pid: Pid) -> Result<bool> {
+        issued(format_args!("PTRACE_INTERRUPT {pid}"), &true, || {
+            self.0.interrupt(pid)
+        })
+    }
+
+    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
+        issued(format_args!("PTRACE_DETACH {pid} {signal:?}"), &(), || {
+            self.0.detach(pid, signal)
+        })
+    }
+
+    fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {
+        issued(format_args!("kill {pid} {signal}"), &(), || {
+            self.0.kill(pid, signal)
+        })
+    }
+
+    fn reap(&self, pid: Pid) -> Result<()> {
+        issued(format_args!("reap {pid}"), &(), || self.0.reap(pid))
+    }
+
+    fn thread_group_id(&self, pid: Pid) -> Result<Pid> {
+        self.0.thread_group_id(pid)
+    }
+
+    fn load_bias(
+        &self,
+        pid: Pid,
+        executable: &Path,
+        executable_data: &[u8],
+        identity: FileIdentity,
+    ) -> Result<u64> {
+        let bias = self.0.load_bias(pid, executable, executable_data, identity);
+        match &bias {
+            Ok(bias) => record!("load bias of {pid} -> {bias:#x}"),
+            Err(error) => record!("load bias of {pid} -> error {error:?}"),
+        }
+        bias
+    }
+
+    fn module_mappings(&self, pid: Pid) -> Result<Vec<ModuleMapping>> {
+        self.0.module_mappings(pid)
+    }
+
+    fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()> {
+        issued(
+            format_args!("PTRACE_POKEDATA {pid} {address:#x} {value:#018x}"),
+            &(),
+            || self.0.write_word(pid, address, value),
+        )
+    }
+
+    fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
+        issued(format_args!("PTRACE_CONT {pid} {signal:?}"), &(), || {
+            self.0.continue_execution(pid, signal)
+        })
+    }
+
+    fn continue_during_shutdown(&self, pid: Pid) -> Result<()> {
+        issued(
+            format_args!("PTRACE_CONT {pid} with SIGKILL to shut down"),
+            &(),
+            || self.0.continue_during_shutdown(pid),
+        )
+    }
+
+    fn step(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
+        issued(
+            format_args!("PTRACE_SINGLESTEP {pid} {signal:?}"),
+            &(),
+            || self.0.step(pid, signal),
+        )
+    }
+
+    fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
+        issued(
+            format_args!("PTRACE_SETREGS {pid} rip={:#x}", registers.rip),
+            &(),
+            || self.0.set_registers(pid, registers),
+        )
+    }
+
+    fn set_options(&self, pid: Pid, exit_kill: bool) -> Result<()> {
+        issued(
+            format_args!("PTRACE_SETOPTIONS {pid} exit_kill={exit_kill}"),
+            &(),
+            || self.0.set_options(pid, exit_kill),
+        )
+    }
+
+    fn event_message(&self, pid: Pid) -> Result<libc::c_long> {
+        queried(
+            format_args!("PTRACE_GETEVENTMSG {pid}"),
+            self.0.event_message(pid),
+        )
+    }
+
+    fn signal_metadata(&self, pid: Pid) -> std::result::Result<SignalMetadata, Errno> {
+        queried(
+            format_args!("PTRACE_GETSIGINFO {pid}"),
+            self.0.signal_metadata(pid),
+        )
+    }
+
+    fn request_stop(&self, process: Pid, thread: Pid) -> Result<()> {
+        issued(
+            format_args!("tgkill {process} {thread} SIGSTOP"),
+            &(),
+            || self.0.request_stop(process, thread),
+        )
+    }
+
+    fn queued_trap(&self, pid: Pid) -> Result<bool> {
+        queried(
+            format_args!("queued SIGTRAP of {pid}"),
+            self.0.queued_trap(pid),
+        )
+    }
+
+    fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno> {
+        queried(
+            format_args!("read DR{index} of {pid}"),
+            self.0.read_debug_register(pid, index),
+        )
+    }
+
+    fn write_debug_register(
+        &self,
+        pid: Pid,
+        index: usize,
+        value: u64,
+    ) -> std::result::Result<(), Errno> {
+        issued(
+            format_args!("write DR{index} of {pid} {value:#x}"),
+            &(),
+            || self.0.write_debug_register(pid, index, value),
+        )
+    }
+
+    fn install_breakpoint(
+        &self,
+        pid: Pid,
+        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+        address: VirtualAddress,
+        owner: BreakpointOwner,
+    ) -> Result<()> {
+        issued(
+            format_args!("install breakpoint {address} in {pid} for {owner:?}"),
+            &(),
+            || self.0.install_breakpoint(pid, sites, address, owner),
+        )
+    }
+
+    fn remove_breakpoint(
+        &self,
+        pid: Pid,
+        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+        address: VirtualAddress,
+    ) -> Result<()> {
+        issued(
+            format_args!("lift breakpoint {address} in {pid}"),
+            &(),
+            || self.0.remove_breakpoint(pid, sites, address),
+        )
+    }
+
+    fn reinstall_breakpoint(
+        &self,
+        pid: Pid,
+        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+        address: VirtualAddress,
+    ) -> Result<()> {
+        issued(
+            format_args!("reinstall breakpoint {address} in {pid}"),
+            &(),
+            || self.0.reinstall_breakpoint(pid, sites, address),
+        )
+    }
+}

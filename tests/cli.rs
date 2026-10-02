@@ -2832,3 +2832,68 @@ fn the_terminal_launcher_explains_why_it_cannot_run_the_program() {
         "uscope: cannot run /bin/true: the debugger stopped before it could debug it",
     );
 }
+
+/// A development build streams its flight recording as it goes, so even a
+/// killed session leaves the requests, native calls, wait statuses, and
+/// events that led up to the kill.
+#[cfg(debug_assertions)]
+#[test]
+fn a_killed_session_leaves_its_flight_recording() {
+    let scratch = support::ScratchDir::new("flight-recording");
+    let recording = scratch.path().join("recording.log");
+    let mut uscope = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .env("USCOPE_FLIGHT_RECORDING", &recording)
+        .args(["--eval", "break main", "--eval", "run"])
+        .arg(fixture("build/test-programs/basic"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("start uscope");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let contents = loop {
+        let contents = fs::read_to_string(&recording).unwrap_or_default();
+        if contents.contains("event InferiorStopped") {
+            break contents;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the recording never showed the stop:\n{contents}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    uscope.kill().expect("kill uscope");
+    uscope.wait().expect("reap uscope");
+
+    let position = |needle: &str| {
+        contents
+            .find(needle)
+            .unwrap_or_else(|| panic!("the recording lacks {needle:?}:\n{contents}"))
+    };
+    let order = [
+        "request add breakpoint",
+        "request launch",
+        "spawn ",
+        "stopped by SIGTRAP",
+        "install breakpoint",
+        "PTRACE_CONT",
+        "classified",
+        "event InferiorStopped",
+    ]
+    .map(position);
+    assert!(order.is_sorted(), "out of order {order:?}:\n{contents}");
+
+    // The inferior dies with the debugger that traced it.
+    let inferior = contents
+        .lines()
+        .find_map(|line| line.split_once("spawned ")?.1.parse::<i32>().ok())
+        .expect("the recording names the inferior");
+    while Path::new(&format!("/proc/{inferior}")).exists() {
+        assert!(
+            Instant::now() < deadline,
+            "inferior {inferior} outlived uscope"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}

@@ -3,9 +3,12 @@
 //! A [`Scenario`] drives the public request and event API, records every
 //! request, reply, and event in a transcript that it prints on failure,
 //! bounds every wait with a deadline, checks that event revisions never move
-//! backward, and verifies at shutdown that the inferior was reaped.
+//! backward, and verifies at shutdown that the inferior was reaped. A test
+//! that fails keeps the debugger's [`flight_recordings`].
 
 #![allow(dead_code, reason = "each test crate uses a subset of the harness")]
+
+pub mod flight_recordings;
 
 use std::future::Future;
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -252,6 +255,7 @@ impl Scenario {
     fn from_debugger(name: String, debugger: Debugger) -> Self {
         let handle = debugger.handle();
         let events = handle.subscribe();
+        flight_recordings::watch_scenarios();
 
         Self {
             name,

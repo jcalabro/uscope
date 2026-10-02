@@ -31,7 +31,7 @@ use nix::libc;
 use nix::unistd::Pid;
 pub use signals::Signal;
 use signals::{SignalPolicies, WaitEvent};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
 use crate::debug_info::{DebugInfo, UnwindInfo, VariableInfo};
 use crate::protocol::{
@@ -47,7 +47,7 @@ use crate::{
     VirtualAddress,
 };
 
-use super::{ControllerChannels, ControllerMessage, ExecutableSource, FileIdentity};
+use super::{ControllerChannels, ControllerMessage, EventSender, ExecutableSource, FileIdentity};
 use classify::is_stopping_signal;
 use debug_registers::DebugRegisterPlan;
 use memory::MemoryAccessError;
@@ -71,6 +71,8 @@ mod memory;
 mod modules;
 mod native;
 mod post_mortem;
+#[cfg(debug_assertions)]
+mod recorded;
 mod registers;
 mod run_control;
 mod signals;
@@ -815,7 +817,7 @@ struct Controller<P: InspectionOps> {
     next_image_id: u32,
     messages: mpsc::Receiver<ControllerMessage>,
     message_sender: mpsc::Sender<ControllerMessage>,
-    events: broadcast::Sender<DebuggerEvent>,
+    events: EventSender,
     ptrace: P,
     inferior: Option<Inferior>,
     breakpoints: Vec<Breakpoint>,
@@ -846,7 +848,13 @@ pub fn spawn_controller(
     Ok(thread::Builder::new()
         .name(CONTROLLER_THREAD_NAME.into())
         .spawn(move || {
-            Controller::new(lease, executable, debug_info, channels, LinuxPtrace::new()).run();
+            record!("started for {}", executable.display_path.display());
+            #[cfg(debug_assertions)]
+            let ptrace = recorded::Recorded(LinuxPtrace::new());
+            #[cfg(not(debug_assertions))]
+            let ptrace = LinuxPtrace::new();
+            Controller::new(lease, executable, debug_info, channels, ptrace).run();
+            record!("exited");
         })?)
 }
 
@@ -906,7 +914,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn run(mut self) {
         while let Some(message) = self.messages.blocking_recv() {
             let keep_running = match message {
-                ControllerMessage::Request(request) => self.handle_request(request),
+                ControllerMessage::Request(request) => {
+                    record!("request {}", request.describe());
+                    self.handle_request(request)
+                }
                 ControllerMessage::Wait(status) => self.handle_wait(status),
             };
 

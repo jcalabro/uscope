@@ -1,3 +1,13 @@
+/// Appends a line to the flight recorder of a development build. Release
+/// builds drop the arguments unevaluated, so they may use code that only
+/// development builds compile.
+macro_rules! record {
+    ($($argument:tt)*) => {{
+        #[cfg(debug_assertions)]
+        $crate::flight_recorder::record(::std::format_args!($($argument)*));
+    }};
+}
+
 mod assign;
 mod backend;
 mod condition;
@@ -6,6 +16,9 @@ mod demangle;
 mod disassembly;
 mod error;
 mod expression;
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub mod flight_recorder;
 mod inspection;
 pub(crate) mod model;
 mod protocol;
@@ -244,6 +257,8 @@ impl Debugger {
         )
             -> Result<(Arc<ModuleImage>, Option<Arc<CoreDumpInfo>>, JoinHandle<()>)>,
     ) -> Result<Self> {
+        #[cfg(debug_assertions)]
+        flight_recorder::record_panics();
         let (requests, receiver) = mpsc::channel(REQUEST_CAPACITY);
         let shutdown_permit = requests
             .clone()
@@ -253,7 +268,7 @@ impl Debugger {
         let (module_image, core_dump, controller) = spawn(backend::ControllerChannels {
             sender: requests.clone(),
             receiver,
-            events: events.clone(),
+            events: events.clone().into(),
         })?;
 
         Ok(Self {

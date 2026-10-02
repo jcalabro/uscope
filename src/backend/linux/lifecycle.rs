@@ -1258,6 +1258,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn fail_inferior(&mut self, error: Error) {
+        record!("inferior failed: {error}");
         if let Some(reply) = self.launch_reply.take() {
             let _ = reply.send(Err(error));
         } else if let Some(reply) = self.attach_reply.take() {

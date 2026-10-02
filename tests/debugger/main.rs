@@ -5,6 +5,8 @@ mod attach;
 mod concurrency;
 mod exec;
 mod execution;
+#[cfg(debug_assertions)]
+mod flight_recorder;
 mod globals;
 mod libraries;
 mod metadata;
