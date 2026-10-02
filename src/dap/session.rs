@@ -86,9 +86,15 @@ impl Client {
     }
 }
 
+/// The `seq` of each request the client cancelled, as text, shared by the
+/// reader that sees the cancellation and the session that honors it.
+pub type Cancelled = std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+
 /// What the reader hands the session.
 #[derive(Debug)]
 pub enum Inbound {
+    /// A request the client cancelled before the session reached it.
+    Cancelled { seq: Value, command: String },
     Request {
         seq: Value,
         command: String,
@@ -182,12 +188,20 @@ pub struct Session {
     pub(super) modules: BTreeSet<ModuleId>,
     /// The execution the client last started, whose resume it already knows.
     resumed: Option<uscope::ExecutionId>,
+    /// Whether the program is being restarted, so its end does not end the
+    /// session.
+    restarting: bool,
+    /// Requests read ahead of the one being handled.
+    queue: std::collections::VecDeque<Inbound>,
+    /// The `seq` of each request the client cancelled, as text.
+    cancelled: Cancelled,
     ended: bool,
 }
 
 impl Session {
-    pub fn new(client: Client) -> Self {
+    pub fn new(client: Client, cancelled: Cancelled) -> Self {
         Self {
+            cancelled,
             client,
             support: None,
             after: None,
@@ -205,6 +219,8 @@ impl Session {
             threads: BTreeSet::new(),
             modules: BTreeSet::new(),
             resumed: None,
+            restarting: false,
+            queue: std::collections::VecDeque::new(),
             ended: false,
         }
     }
@@ -218,11 +234,19 @@ impl Session {
     ) {
         tokio::pin!(shutdown);
         loop {
-            let input = tokio::select! {
-                biased;
-                () = &mut shutdown => None,
-                message = inbox.recv() => message.map(Input::Message),
-                event = next_event(&mut self.events) => Some(Input::Event(event)),
+            // Requests set aside while cancelling come first, in order.
+            while let Ok(message) = inbox.try_recv() {
+                self.queue.push_back(message);
+            }
+            let input = if let Some(message) = self.queue.pop_front() {
+                Some(Input::Message(message))
+            } else {
+                tokio::select! {
+                    biased;
+                    () = &mut shutdown => None,
+                    message = inbox.recv() => message.map(Input::Message),
+                    event = next_event(&mut self.events) => Some(Input::Event(event)),
+                }
             };
             let result = match input {
                 None => break,
@@ -248,11 +272,23 @@ impl Session {
 
     async fn message(&mut self, message: Inbound) -> Result<(), Closed> {
         let (header, arguments) = match message {
+            Inbound::Request { seq, command, .. } if self.take_cancellation(&seq) => {
+                return self
+                    .client
+                    .respond(&Header { seq, command }, Err(ErrorBody::cancelled()))
+                    .await;
+            }
             Inbound::Request {
                 seq,
                 command,
                 arguments,
             } => (Header { seq, command }, arguments),
+            Inbound::Cancelled { seq, command } => {
+                return self
+                    .client
+                    .respond(&Header { seq, command }, Err(ErrorBody::cancelled()))
+                    .await;
+            }
             Inbound::Malformed {
                 seq,
                 command,
@@ -299,6 +335,8 @@ impl Session {
             "configurationDone" => self.configuration_done()?,
             "disconnect" => self.disconnect(arguments).await?,
             "terminate" => self.terminate().await?,
+            "restart" => self.restart(arguments).await?,
+            "cancel" => json!({}),
             "threads" => self.threads().await?,
             "stackTrace" => self.stack_trace(arguments).await?,
             "scopes" => self.scopes(arguments).await?,
@@ -356,7 +394,7 @@ impl Session {
             ansi: arguments.supports_ansi_styling.unwrap_or(false),
         });
         self.after = Some(After::Initialized);
-        Ok(protocol::capabilities())
+        Ok(capabilities())
     }
 
     pub(super) const fn support(&self) -> ClientSupport {
@@ -547,8 +585,7 @@ impl Session {
         let Some(header) = self.starting.take() else {
             return Ok(());
         };
-        let begun = self.begin().await;
-        let (method, pipes) = match begun {
+        let (method, pipes) = match self.begin().await {
             Ok(begun) => begun,
             Err(error) => {
                 self.client.respond(&header, Err(error)).await?;
@@ -557,6 +594,56 @@ impl Session {
             }
         };
         self.client.respond(&header, Ok(json!({}))).await?;
+        let Some(snapshot) = self.announce_process(method, pipes).await? else {
+            return Ok(());
+        };
+        let InferiorState::Stopped {
+            stop_id,
+            thread_id,
+            reason,
+            ..
+        } = snapshot.inferior
+        else {
+            return Ok(());
+        };
+        let target = self.target.as_ref().expect("a started target");
+        match &target.start {
+            Start::Core(_) => self.stopped(stop_id, thread_id, reason).await?,
+            Start::Attach { .. } if target.stop_on_entry => {
+                self.stopped(stop_id, thread_id, StopReason::Entry).await?;
+            }
+            Start::Attach { .. } => {
+                let process = target.process.expect("an attached process");
+                let resumed = target
+                    .handle
+                    .continue_execution(
+                        stop_id,
+                        ResumeScope::Process(process),
+                        ExceptionDisposition::Pass,
+                    )
+                    .await;
+                match resumed {
+                    Ok(execution) => self.resumed = Some(execution),
+                    Err(error) => {
+                        self.client
+                            .important(format!("cannot resume the process: {error}"))
+                            .await?;
+                        self.stopped(stop_id, thread_id, StopReason::Attach).await?;
+                    }
+                }
+            }
+            Start::Launch(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Announces a started process: the `process` event, its output, its
+    /// modules, and its threads. Returns the state it started in.
+    async fn announce_process(
+        &mut self,
+        method: &'static str,
+        pipes: Vec<(std::os::fd::OwnedFd, &'static str)>,
+    ) -> Result<Option<uscope::StateSnapshot>, Closed> {
         let target = self.target.as_mut().expect("a started target");
         let snapshot = target.handle.snapshot().await.ok();
         let process = snapshot
@@ -590,46 +677,61 @@ impl Session {
             }
         }
         self.announce_modules().await?;
-        if let Some(snapshot) = snapshot {
-            self.announce_threads(&snapshot).await?;
-            if let InferiorState::Stopped {
-                stop_id,
-                thread_id,
-                reason,
-                ..
-            } = snapshot.inferior
-            {
-                let target = self.target.as_ref().expect("a started target");
-                match &target.start {
-                    Start::Core(_) => self.stopped(stop_id, thread_id, reason).await?,
-                    Start::Attach { .. } if target.stop_on_entry => {
-                        self.stopped(stop_id, thread_id, StopReason::Entry).await?;
-                    }
-                    Start::Attach { .. } => {
-                        let process = target.process.expect("an attached process");
-                        let resumed = target
-                            .handle
-                            .continue_execution(
-                                stop_id,
-                                ResumeScope::Process(process),
-                                ExceptionDisposition::Pass,
-                            )
-                            .await;
-                        match resumed {
-                            Ok(execution) => self.resumed = Some(execution),
-                            Err(error) => {
-                                self.client
-                                    .important(format!("cannot resume the process: {error}"))
-                                    .await?;
-                                self.stopped(stop_id, thread_id, StopReason::Attach).await?;
-                            }
-                        }
-                    }
-                    Start::Launch(_) => {}
-                }
+        if let Some(snapshot) = &snapshot {
+            self.announce_threads(snapshot).await?;
+        }
+        Ok(snapshot)
+    }
+
+    /// Kills a launched program and launches it again, keeping the session
+    /// and its breakpoints. The new arguments may change how the program is
+    /// started, but not which program.
+    async fn restart(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
+        let target = self
+            .target
+            .as_mut()
+            .ok_or_else(|| ErrorBody::new("no program is loaded"))?;
+        let Start::Launch(launch) = &mut target.start else {
+            return Err(ErrorBody::new(
+                "only a launched program can be restarted; start a new session instead",
+            ));
+        };
+        if let Some(configuration) = arguments.get("arguments").filter(|value| value.is_object()) {
+            let configuration = config::launch(configuration.clone()).map_err(ErrorBody::shown)?;
+            let Start::Launch(new) = configuration.start else {
+                unreachable!("launch configurations launch");
+            };
+            if new.program != launch.program {
+                return Err(ErrorBody::shown(
+                    "a restart cannot change the program; start a new session for another",
+                ));
+            }
+            *launch = new;
+            target.stop_on_entry = configuration.stop_on_entry;
+        }
+        let handle = target.handle.clone();
+        self.restarting = true;
+        let killed = match handle.kill().await {
+            Ok(()) | Err(Error::NotRunning) => Ok(()),
+            Err(error) => Err(self::error(error)),
+        };
+        // Report the old process's end, without ending the session.
+        while let Some(event) = self
+            .events
+            .as_mut()
+            .and_then(|events| events.try_recv().ok())
+        {
+            if self.event(event).await.is_err() {
+                break;
             }
         }
-        Ok(())
+        self.restarting = false;
+        killed?;
+        let (method, pipes) = self.begin().await?;
+        self.announce_process(method, pipes)
+            .await
+            .map_err(|Closed| closed())?;
+        Ok(json!({}))
     }
 
     /// Launches the program, or readies an attached process or core dump,
@@ -759,6 +861,42 @@ impl Session {
         self.stop.clone().ok_or_else(ErrorBody::not_stopped)
     }
 
+    /// Whether the client cancelled the request with this `seq`.
+    fn take_cancellation(&self, seq: &Value) -> bool {
+        self.cancelled
+            .lock()
+            .is_ok_and(|mut cancelled| cancelled.remove(&seq.to_string()))
+    }
+
+    /// Cancels queued requests that inspect the stop a resume leaves, which
+    /// the client no longer needs. A console command is kept, since it may
+    /// do more than inspect.
+    fn cancel_inspections(&mut self) {
+        for message in &mut self.queue {
+            if let Inbound::Request {
+                seq,
+                command,
+                arguments,
+            } = message
+                && matches!(
+                    command.as_str(),
+                    "stackTrace"
+                        | "scopes"
+                        | "variables"
+                        | "evaluate"
+                        | "disassemble"
+                        | "readMemory"
+                )
+                && arguments["context"] != "repl"
+            {
+                *message = Inbound::Cancelled {
+                    seq: seq.clone(),
+                    command: std::mem::take(command),
+                };
+            }
+        }
+    }
+
     async fn continue_execution(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<ThreadArguments>(arguments, "continue arguments")?;
         let stop = self.current_stop()?;
@@ -771,6 +909,7 @@ impl Session {
             .map_err(error)?;
         self.resumed = Some(execution);
         self.leave_stop();
+        self.cancel_inspections();
         Ok(json!({"allThreadsContinued": !single}))
     }
 
@@ -819,6 +958,7 @@ impl Session {
             .map_err(error)?;
         self.resumed = Some(execution);
         self.leave_stop();
+        self.cancel_inspections();
         // Without this, clients assume only the stepping thread runs.
         self.client
             .event(
@@ -1083,7 +1223,19 @@ impl Session {
         if let Some(target) = self.target.as_mut() {
             target.process = None;
         }
-        self.threads.clear();
+        // The program's threads end with it, also for a client that keeps
+        // the session for a restart.
+        for thread in std::mem::take(&mut self.threads) {
+            self.client
+                .event(
+                    "thread",
+                    json!({"reason": "exited", "threadId": thread.get()}),
+                )
+                .await?;
+        }
+        if self.restarting {
+            return Ok(());
+        }
         self.client.event("terminated", json!({})).await
     }
 
@@ -1691,6 +1843,38 @@ impl Session {
     }
 }
 
+/// The adapter's capabilities, as `initialize` reports them.
+fn capabilities() -> Value {
+    json!({
+        "supportsConfigurationDoneRequest": true,
+        "supportsFunctionBreakpoints": true,
+        "supportsHitConditionalBreakpoints": true,
+        "supportsEvaluateForHovers": true,
+        "supportsClipboardContext": true,
+        "supportsExceptionInfoRequest": true,
+        "supportsExceptionFilterOptions": true,
+        "exceptionBreakpointFilters": super::signals::filters(),
+        "supportTerminateDebuggee": true,
+        "supportsTerminateRequest": true,
+        "supportsInstructionBreakpoints": true,
+        "supportsRestartRequest": true,
+        "supportsCancelRequest": true,
+        "supportsDisassembleRequest": true,
+        "supportsReadMemoryRequest": true,
+        "supportsSteppingGranularity": true,
+        "supportsDataBreakpoints": true,
+        "supportsDataBreakpointBytes": true,
+        "supportsModulesRequest": true,
+        "supportsLoadedSourcesRequest": true,
+        "supportsBreakpointLocationsRequest": true,
+        "supportsValueFormattingOptions": true,
+        "supportsCompletionsRequest": true,
+        "completionTriggerCharacters": [" ", "."],
+        "supportsANSIStyling": true,
+        "supportsDelayedStackTraceLoading": true,
+    })
+}
+
 enum Input {
     Message(Inbound),
     Event(Result<DebuggerEvent, broadcast::error::RecvError>),
@@ -1753,6 +1937,64 @@ fn module_json(module: &uscope::LoadedModuleRecord) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request(seq: u64, command: &str, arguments: Value) -> Inbound {
+        Inbound::Request {
+            seq: seq.into(),
+            command: command.to_owned(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn resuming_cancels_queued_inspections_but_not_console_commands() {
+        let (outgoing, _messages) = mpsc::channel(8);
+        let mut session = Session::new(Client::new(outgoing), Cancelled::default());
+        session.queue.extend([
+            request(2, "stackTrace", json!({"threadId": 1})),
+            request(
+                3,
+                "evaluate",
+                json!({"expression": "break f", "context": "repl"}),
+            ),
+            request(
+                4,
+                "evaluate",
+                json!({"expression": "x", "context": "hover"}),
+            ),
+            request(5, "setBreakpoints", json!({})),
+            request(6, "variables", json!({"variablesReference": 7})),
+        ]);
+        session.cancel_inspections();
+        let kinds = session
+            .queue
+            .iter()
+            .map(|message| match message {
+                Inbound::Request { seq, .. } => format!("keep {seq}"),
+                Inbound::Cancelled { seq, command } => format!("cancel {seq} {command}"),
+                Inbound::Malformed { .. } => "malformed".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                "cancel 2 stackTrace",
+                "keep 3",
+                "cancel 4 evaluate",
+                "keep 5",
+                "cancel 6 variables",
+            ]
+        );
+        // A cancellation is honored once, by the request's own seq.
+        session
+            .cancelled
+            .lock()
+            .expect("lock")
+            .insert("9".to_owned());
+        assert!(!session.take_cancellation(&json!("9")));
+        assert!(session.take_cancellation(&json!(9)));
+        assert!(!session.take_cancellation(&json!(9)));
+    }
 
     #[test]
     fn thread_ids_must_be_positive() {

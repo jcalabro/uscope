@@ -184,6 +184,16 @@ impl ErrorBody {
     }
 }
 
+impl ErrorBody {
+    /// The well-known error for a request that was cancelled.
+    pub fn cancelled() -> Self {
+        Self {
+            short: "cancelled".to_owned(),
+            ..Self::new("the request was cancelled")
+        }
+    }
+}
+
 /// Escapes braces, which a `Message.format` string uses for variables.
 fn escape_format(message: &str) -> String {
     message.replace('{', "{{").replace('}', "}}")
@@ -434,36 +444,6 @@ pub struct DisconnectArguments {
 #[serde(rename_all = "camelCase", default)]
 pub struct ExceptionInfoArguments {
     pub thread_id: i64,
-}
-
-/// The adapter's capabilities, as `initialize` reports them.
-pub fn capabilities() -> Value {
-    json!({
-        "supportsConfigurationDoneRequest": true,
-        "supportsFunctionBreakpoints": true,
-        "supportsHitConditionalBreakpoints": true,
-        "supportsEvaluateForHovers": true,
-        "supportsClipboardContext": true,
-        "supportsExceptionInfoRequest": true,
-        "supportsExceptionFilterOptions": true,
-        "exceptionBreakpointFilters": crate::dap::signals::filters(),
-        "supportTerminateDebuggee": true,
-        "supportsTerminateRequest": true,
-        "supportsInstructionBreakpoints": true,
-        "supportsDisassembleRequest": true,
-        "supportsReadMemoryRequest": true,
-        "supportsSteppingGranularity": true,
-        "supportsDataBreakpoints": true,
-        "supportsDataBreakpointBytes": true,
-        "supportsModulesRequest": true,
-        "supportsLoadedSourcesRequest": true,
-        "supportsBreakpointLocationsRequest": true,
-        "supportsValueFormattingOptions": true,
-        "supportsCompletionsRequest": true,
-        "completionTriggerCharacters": [" ", "."],
-        "supportsANSIStyling": true,
-        "supportsDelayedStackTraceLoading": true,
-    })
 }
 
 /// Reads a memory reference: an address in hexadecimal with `0x`, or in

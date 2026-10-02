@@ -387,3 +387,96 @@ fn is_zombie(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
         .is_ok_and(|status| status.contains("State:\tZ"))
 }
+
+#[test]
+fn restarting_relaunches_the_program_with_new_arguments_in_the_same_session() {
+    let mut dap = Dap::start("restart");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("process-environment"),
+        json!({"args": ["one"], "stopOnEntry": true}),
+        &Configuration::default(),
+    );
+    let entry = dap.stopped(started.mark);
+    let first = dap.process_id().expect("first process");
+    let restart = dap.send(
+        "restart",
+        json!({"arguments": {"program": fixture("process-environment"), "args": ["a", "b", "c"]}}),
+    );
+    dap.success(restart);
+    // The old process ends, but the session goes on.
+    assert_eq!(
+        dap.event(restart.mark, "exited", |_| true),
+        json!({"exitCode": 128 + 9})
+    );
+    let exited = dap.event(restart.mark, "thread", |body| body["reason"] == "exited");
+    assert_eq!(exited["threadId"], entry.thread);
+    let process = dap.event(restart.mark, "process", |_| true);
+    assert_ne!(process["systemProcessId"], first);
+    assert_eq!(
+        dap.event(restart.mark, "exited", |_| true),
+        json!({"exitCode": 4})
+    );
+    dap.event(restart.mark, "terminated", |_| true);
+    assert!(
+        dap.output_text(restart.mark, "stdout")
+            .starts_with("argument 1: a\nargument 2: b\nargument 3: c\n")
+    );
+    let terminations = dap
+        .messages_since(restart.mark)
+        .iter()
+        .filter(|message| message["event"] == "terminated")
+        .count();
+    assert_eq!(
+        terminations, 1,
+        "only the restarted program's end ends the session"
+    );
+    dap.finish();
+}
+
+#[test]
+fn restarts_cannot_change_the_program_or_restart_attached_processes() {
+    let mut dap = Dap::start("restart refused");
+    let started = dap.launch(
+        Profile::Neovim,
+        &fixture("spin"),
+        json!({}),
+        &Configuration::default(),
+    );
+    dap.event(started.mark, "process", |_| true);
+    assert_eq!(
+        dap.request_error(
+            "restart",
+            json!({"arguments": {"program": fixture("basic")}})
+        ),
+        "a restart cannot change the program; start a new session for another"
+    );
+    dap.finish();
+
+    let process = ExternalProcess::spawn(&fixture("attach"));
+    let mut dap = Dap::start("restart attached");
+    let started = dap.begin(
+        Profile::Neovim,
+        ("attach", json!({"pid": process.process_id().get()})),
+        &Configuration::default(),
+    );
+    dap.event(started.mark, "process", |_| true);
+    assert_eq!(
+        dap.request_error("restart", Value::Null),
+        "only a launched program can be restarted; start a new session instead"
+    );
+    dap.finish();
+}
+
+#[test]
+fn cancelling_answered_or_unknown_requests_is_harmless() {
+    let mut dap = Dap::start("cancel");
+    dap.initialize(Profile::VsCode);
+    let threads = dap.send("threads", Value::Null);
+    dap.success(threads);
+    dap.request("cancel", json!({"requestId": threads.seq}));
+    dap.request("cancel", json!({"requestId": 9999}));
+    dap.request("cancel", json!({"progressId": "load"}));
+    dap.request("threads", Value::Null);
+    dap.finish();
+}

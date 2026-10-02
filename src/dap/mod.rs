@@ -182,9 +182,16 @@ async fn serve<R, W>(
     let client = Client::new(outgoing);
     let writer = tokio::spawn(write_messages(writer, messages, log.clone()));
     let (inbound, inbox) = mpsc::channel(64);
-    let reader = tokio::spawn(read_messages(reader, inbound, log, client.clone()));
+    let cancelled = session::Cancelled::default();
+    let reader = tokio::spawn(read_messages(
+        reader,
+        inbound,
+        log,
+        client.clone(),
+        cancelled.clone(),
+    ));
     let console = console.and_then(|read| output::spawn(read, "console", client.clone()).ok());
-    Session::new(client).run(inbox, shutdown).await;
+    Session::new(client, cancelled).run(inbox, shutdown).await;
     reader.abort();
     if let Some(console) = console {
         console.abort();
@@ -200,6 +207,7 @@ async fn read_messages<R: AsyncBufRead + Unpin>(
     inbound: mpsc::Sender<Inbound>,
     log: Log,
     client: Client,
+    cancelled: session::Cancelled,
 ) {
     loop {
         let frame = match transport::read_frame(&mut reader).await {
@@ -221,11 +229,21 @@ async fn read_messages<R: AsyncBufRead + Unpin>(
                 seq,
                 command,
                 arguments,
-            }) => Inbound::Request {
-                seq,
-                command,
-                arguments,
-            },
+            }) => {
+                // A cancellation must be seen before the session reaches the
+                // request it cancels, so the reader records it.
+                if command == "cancel"
+                    && let Some(request) = arguments.get("requestId").filter(|id| !id.is_null())
+                    && let Ok(mut cancelled) = cancelled.lock()
+                {
+                    cancelled.insert(request.to_string());
+                }
+                Inbound::Request {
+                    seq,
+                    command,
+                    arguments,
+                }
+            }
             // No reverse request is sent, so no response is awaited.
             Ok(Incoming::Response) => continue,
             Err(error) => {

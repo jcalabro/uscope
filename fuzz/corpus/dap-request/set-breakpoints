@@ -1,0 +1,1 @@
+{"seq":"7","type":"request","command":"setBreakpoints","arguments":{"source":{"path":"/a.c"},"breakpoints":[{"line":3,"hitCondition":">=2"}]}}

@@ -141,6 +141,16 @@ const REQUEST_CAPACITY: usize = 32;
 const EVENT_CAPACITY: usize = 256;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The number of events a subscriber may fall behind by before it misses
+/// some. `USCOPE_EVENT_CAPACITY` lowers it so tests can make clients lag.
+fn event_capacity() -> usize {
+    std::env::var("USCOPE_EVENT_CAPACITY")
+        .ok()
+        .and_then(|capacity| capacity.parse().ok())
+        .filter(|capacity| *capacity != 0)
+        .unwrap_or(EVENT_CAPACITY)
+}
+
 /// A debug session, owning the controller thread that serves its requests.
 ///
 /// Dropping a debugger requests shutdown without waiting for it; prefer
@@ -236,7 +246,7 @@ impl Debugger {
             .clone()
             .try_reserve_owned()
             .expect("new request channel has shutdown capacity");
-        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let (events, _) = broadcast::channel(event_capacity());
         let (module_image, core_dump, controller) = spawn(backend::ControllerChannels {
             sender: requests.clone(),
             receiver,
