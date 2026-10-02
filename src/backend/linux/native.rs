@@ -65,6 +65,12 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn spawn(&self, executable: &Path, options: LaunchOptions) -> Result<Pid>;
     fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter>;
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>>;
+    /// Reads the name a thread gave itself, if it is still readable.
+    fn thread_name(&self, _process: Pid, _thread: Pid) -> Option<Arc<str>> {
+        // Deterministic effect fakes have no names. The production edge
+        // overrides this method.
+        None
+    }
     fn seize(&self, pid: Pid) -> Result<bool>;
     fn interrupt(&self, pid: Pid) -> Result<bool>;
     fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
@@ -225,6 +231,12 @@ impl LinuxTraceOps for LinuxPtrace {
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>> {
         self.assert_owner_thread();
         process_threads(process)
+    }
+
+    fn thread_name(&self, process: Pid, thread: Pid) -> Option<Arc<str>> {
+        let name = fs::read_to_string(format!("/proc/{process}/task/{thread}/comm")).ok()?;
+        let name = name.strip_suffix('\n').unwrap_or(&name);
+        (!name.is_empty()).then(|| Arc::from(name))
     }
 
     fn seize(&self, pid: Pid) -> Result<bool> {

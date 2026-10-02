@@ -1478,3 +1478,284 @@ async fn source_path_maps_find_sources_of_programs_built_elsewhere() {
     );
     scenario.shutdown().await;
 }
+
+#[tokio::test]
+async fn function_breakpoints_stop_at_every_function_with_the_name() {
+    let mut scenario = Scenario::launch("same-names");
+    let image = scenario.handle().module_image().clone();
+    // A file that only calls shared_entry describes it by a declaration,
+    // which never competes with its definition.
+    assert!(image.function_named("shared_entry").is_ok());
+    assert!(matches!(
+        image.function_named("helper"),
+        Err(Error::DuplicateFunction(name)) if name == "helper"
+    ));
+    assert!(matches!(
+        scenario
+            .handle()
+            .add_breakpoint(BreakpointSpec::Function("absent".into()))
+            .await,
+        Err(Error::FunctionNotFound(name)) if name == "absent"
+    ));
+
+    let helper = scenario.add_breakpoint("helper").await;
+    assert_eq!(helper.locations.len(), 2, "{helper:?}");
+    let shared = scenario.add_breakpoint("shared_entry").await;
+    assert_eq!(shared.locations.len(), 1, "{shared:?}");
+
+    for (breakpoint, file) in [
+        (&helper, "main.c"),
+        (&shared, "other.c"),
+        (&helper, "other.c"),
+    ] {
+        let reason = scenario.resume_or_run().await;
+        assert!(
+            matches!(&reason, StopReason::Breakpoint { hits, .. } if hits.iter().map(|hit| hit.breakpoint).eq([breakpoint.id])),
+            "{reason:?}"
+        );
+        let location = scenario
+            .operation("location", scenario.handle().current_location())
+            .await;
+        let source = location.image.source.expect("source");
+        let path = image
+            .source_file(source.file)
+            .expect("source file")
+            .path
+            .clone();
+        assert!(path.ends_with(file), "{path:?} is not {file}");
+    }
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn source_breakpoints_move_to_the_next_line_with_code_in_their_function() {
+    let source = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/line-sliding.c"),
+    )
+    .expect("read line-sliding.c");
+    let line = |needle: &str| {
+        uscope::LineNumber::new(
+            u64::try_from(
+                source
+                    .lines()
+                    .position(|text| text.contains(needle))
+                    .unwrap_or_else(|| panic!("no line containing {needle:?}"))
+                    + 1,
+            )
+            .expect("line fits u64"),
+        )
+        .expect("nonzero line")
+    };
+    let comment = line("a comment inside the function");
+    let blank = uscope::LineNumber::new(comment.get() + 1).expect("line");
+    let code = line("the next code after the comment");
+    let between = line("a comment between the functions");
+
+    let mut scenario = Scenario::launch("line-sliding");
+    let image = scenario.handle().module_image().clone();
+    let file = image
+        .source_file_matching(std::path::Path::new("line-sliding.c"))
+        .expect("source file")
+        .id;
+    // Resolving a moved line again leaves it where it is.
+    for requested in [comment, blank, code] {
+        assert_eq!(image.breakpoint_line(file, requested), Some(code));
+    }
+    assert_eq!(image.breakpoint_line(file, between), None);
+    let last = uscope::LineNumber::new(
+        u64::try_from(source.lines().count()).expect("line count fits u64"),
+    )
+    .expect("line");
+    let lines = image
+        .breakpoint_lines(file, uscope::LineNumber::new(1).expect("line")..=last)
+        .collect::<Vec<_>>();
+    assert!(lines.contains(&code) && lines.contains(&line("int doubled")));
+    assert!(!lines.contains(&comment) && !lines.contains(&blank) && !lines.contains(&between));
+
+    assert!(matches!(
+        scenario
+            .handle()
+            .add_breakpoint(BreakpointSpec::Source {
+                path: "line-sliding.c".into(),
+                line: between,
+            })
+            .await,
+        Err(Error::SourceLineUnavailable { line, .. }) if line == between.get()
+    ));
+    let moved = scenario
+        .add_source_breakpoint("line-sliding.c", comment.get())
+        .await;
+    let exact = scenario
+        .add_source_breakpoint("line-sliding.c", code.get())
+        .await;
+    assert_eq!(moved.locations, exact.locations);
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { hits, .. }
+            if hits.iter().map(|hit| hit.breakpoint).eq([moved.id, exact.id])
+    ));
+    let location = scenario
+        .operation("location", scenario.handle().current_location())
+        .await;
+    assert_eq!(location.image.source.map(|source| source.line), Some(code));
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn killing_ends_the_inferior_but_keeps_the_session() {
+    let mut scenario = Scenario::launch("basic");
+    assert!(matches!(
+        scenario.handle().kill().await,
+        Err(Error::NotRunning)
+    ));
+    let breakpoint = scenario.add_breakpoint("breakpoint_target").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let mut events = scenario.handle().subscribe();
+    let first = match scenario.snapshot().await.inferior {
+        InferiorState::Stopped { process_id, .. } => process_id,
+        other => panic!("not stopped: {other:?}"),
+    };
+    scenario
+        .operation("kill a stopped inferior", scenario.handle().kill())
+        .await;
+    assert!(matches!(
+        scenario.snapshot().await.inferior,
+        InferiorState::NotRunning
+    ));
+    let exits = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            uscope::DebuggerEvent::InferiorExited {
+                process_id, status, ..
+            } => Some((process_id, status)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(
+            exits.as_slice(),
+            [(process, ExitStatus::Terminated(info))] if *process == first && info.code == 9
+        ),
+        "{exits:?}"
+    );
+    assert!(!std::path::Path::new(&format!("/proc/{first}")).exists());
+    scenario.drain_pending_events();
+
+    // The same program launches again, keeping its breakpoints.
+    let relaunched = scenario.run_to_stop().await;
+    assert!(
+        matches!(&relaunched, StopReason::Breakpoint { hits, .. } if hits.iter().map(|hit| hit.breakpoint).eq([breakpoint.id])),
+        "{relaunched:?}"
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn killing_a_running_or_attached_process_ends_it() {
+    let mut scenario = Scenario::launch("spin");
+    let _run = scenario.start_running().await;
+    scenario
+        .operation("kill a running inferior", scenario.handle().kill())
+        .await;
+    assert!(matches!(
+        scenario.snapshot().await.inferior,
+        InferiorState::NotRunning
+    ));
+    scenario.drain_pending_events();
+    scenario.shutdown().await;
+
+    let child = support::ExternalProcess::spawn(&Scenario::fixture("attach"));
+    let process = child.process_id();
+    let debugger = child.attach().await;
+    let mut events = debugger.handle().subscribe();
+    timeout(Duration::from_secs(2), debugger.handle().kill())
+        .await
+        .expect("kill timed out")
+        .expect("kill the attached process");
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
+            event,
+            uscope::DebuggerEvent::InferiorExited {
+                process_id,
+                status: ExitStatus::Terminated(info),
+                ..
+            } if process_id == process && info.code == 9
+        ))
+    );
+    debugger.shutdown().await.expect("shut down");
+    // The test spawned the process, so the debugger's wait reaped it.
+    assert!(!std::path::Path::new(&format!("/proc/{process}")).exists());
+}
+
+#[tokio::test]
+async fn terminating_asks_the_program_to_end_without_stopping_it() {
+    let sigterm = uscope::signal_named("SIGTERM").expect("SIGTERM");
+    let mut scenario = Scenario::launch("terminate");
+    assert!(
+        scenario
+            .operation("SIGTERM policy", scenario.handle().signal_policy(sigterm))
+            .await
+            .stop,
+        "SIGTERM stops by default"
+    );
+    // While running, once the program handles the signal.
+    scenario.add_breakpoint("terminate_tick").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    scenario.remove_all_breakpoints().await;
+    let running = scenario.start_resuming().await;
+    scenario
+        .operation("terminate", scenario.handle().terminate())
+        .await;
+    assert_eq!(
+        timeout(Duration::from_secs(5), running)
+            .await
+            .expect("no exit")
+            .expect("resume task")
+            .expect("resume"),
+        StopReason::Exited(ExitStatus::Code(7))
+    );
+    scenario.drain_pending_events();
+
+    // While stopped: the program resumes to receive the signal.
+    scenario.add_breakpoint("terminate_tick").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    scenario.remove_all_breakpoints().await;
+    let mut events = scenario.handle().subscribe();
+    scenario
+        .operation("terminate", scenario.handle().terminate())
+        .await;
+    loop {
+        match timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("no exit")
+            .expect("events")
+        {
+            uscope::DebuggerEvent::InferiorExited { status, .. } => {
+                assert_eq!(status, ExitStatus::Code(7));
+                break;
+            }
+            uscope::DebuggerEvent::InferiorStopped { reason, .. } => {
+                panic!("terminating stopped the program: {reason:?}")
+            }
+            _ => {}
+        }
+    }
+    scenario.drain_pending_events();
+    scenario.shutdown().await;
+}

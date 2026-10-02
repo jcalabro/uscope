@@ -26,7 +26,7 @@ pub enum Error {
         path: PathBuf,
         matches: Vec<PathBuf>,
     },
-    #[error("source line {line} in {path} has no breakpoint location")]
+    #[error("source line {line} in {path} has no code at or after it in its function")]
     SourceLineUnavailable { path: PathBuf, line: u64 },
     #[error("breakpoint {0} was not found")]
     BreakpointNotFound(u64),

@@ -345,6 +345,7 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             stopped(Role::Current),
             match kind {
                 StepKind::Instruction => "instruction step",
+                StepKind::OverInstruction => "instruction next",
                 StepKind::IntoSource => "source step",
                 StepKind::OverSource => "source next",
                 StepKind::Out => "frame return",
@@ -426,8 +427,18 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
                 } => format!("stopped: {}", stop(reason, renderer)),
                 ThreadState::Stopped { reason: None } => "stopped".to_owned(),
             };
+            let name = thread
+                .name
+                .as_ref()
+                .map(|name| {
+                    format!(
+                        " {}",
+                        renderer.paint(Role::Name, format_args!("\"{name}\""))
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                "{marker} {} {state}",
+                "{marker} {}{name} {state}",
                 renderer.paint(Role::Metadata, thread.id)
             )
         })

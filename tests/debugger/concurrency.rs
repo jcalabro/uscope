@@ -617,3 +617,29 @@ async fn finishing_a_threads_start_routine_ends_when_the_thread_exits() {
         scenario.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn threads_are_named_as_they_name_themselves() {
+    for fixture in THREAD_STEPS {
+        let (mut scenario, worker) =
+            thread_steps_at(fixture, &["spin"], "thread_steps_sink += 1;").await;
+        let names = scenario
+            .snapshot()
+            .await
+            .threads
+            .iter()
+            .map(|thread| (thread.id, thread.name.as_deref().map(str::to_owned)))
+            .collect::<Vec<_>>();
+        let main = names
+            .iter()
+            .find(|(id, _)| *id != worker)
+            .expect("main thread");
+        // Linux keeps the first 15 bytes of a name.
+        assert_eq!(main.1.as_deref(), Some(&fixture[..15]), "{names:?}");
+        assert!(
+            names.contains(&(worker, Some("sleepy-worker".to_owned()))),
+            "{names:?}"
+        );
+        scenario.shutdown().await;
+    }
+}

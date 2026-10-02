@@ -297,6 +297,11 @@ impl Scenario {
         self.run_request(false).await
     }
 
+    /// Launches the inferior the first time and resumes it afterwards.
+    pub async fn resume_or_run(&mut self) -> StopReason {
+        self.run_request(self.process_id.is_none()).await
+    }
+
     pub async fn resume_with_exception(&mut self, disposition: ExceptionDisposition) -> StopReason {
         self.transcript
             .push(format!("request: continue {disposition:?}"));

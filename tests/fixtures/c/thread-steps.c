@@ -3,7 +3,7 @@
 // until the debugger sets `main_released` instead. With `race`, a racer
 // thread keeps running the same functions the main thread steps through, so
 // it reaches every internal breakpoint of the main thread's steps.
-#define _DEFAULT_SOURCE
+#define _GNU_SOURCE
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -36,6 +36,7 @@ __attribute__((noinline)) int64_t shared_caller(int64_t seed) {
 
 static void *sleepy_worker(void *argument) {
     (void)argument;
+    pthread_setname_np(pthread_self(), "sleepy-worker");
     usleep(100 * 1000);
     worker_reached();
     atomic_store(&worker_finished, 1);

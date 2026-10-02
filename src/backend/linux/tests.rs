@@ -903,6 +903,7 @@ fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
             debugger_stop_pending: false,
             armed: None,
             watch_hits: BTreeSet::new(),
+            name: None,
         },
     );
     inferior.threads.insert(
@@ -917,6 +918,7 @@ fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
             debugger_stop_pending: true,
             armed: None,
             watch_hits: BTreeSet::new(),
+            name: None,
         },
     );
     inferior.barrier = Some(StopBarrier::visible(pid, StopReason::Exception(exception)));
@@ -1125,6 +1127,7 @@ fn virtual_step_inferior(pid: Pid, image: &ModuleImage, stop_id: StopId) -> Infe
                     debugger_stop_pending: false,
                     armed: None,
                     watch_hits: BTreeSet::new(),
+                    name: None,
                 },
             )]),
             None,
@@ -3106,7 +3109,7 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
         active.kind = ActiveKind::Step {
             thread: stepping,
             kind: StepKind::OverSource,
-            start: StepStart {
+            start: Box::new(StepStart {
                 source: None,
                 code_instance: None,
                 physical_instance: None,
@@ -3115,7 +3118,8 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
                 epilogue_traversal: None,
                 return_traversal: None,
                 signal_guard: None,
-            },
+                call_return: None,
+            }),
             progress_owed: false,
         };
         let owner = BreakpointOwner::Plan(active.id);

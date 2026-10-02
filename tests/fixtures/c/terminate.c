@@ -1,0 +1,30 @@
+// Runs until asked to end with SIGTERM, which it handles by exiting with
+// status 7.
+#define _POSIX_C_SOURCE 200809L
+
+#include <signal.h>
+#include <stddef.h>
+
+static volatile sig_atomic_t terminate_requested;
+volatile int terminate_loops;
+
+static void request_termination(int signal) {
+    (void)signal;
+    terminate_requested = 1;
+}
+
+__attribute__((noinline)) void terminate_tick(void) {
+    terminate_loops += 1;
+}
+
+int main(void) {
+    struct sigaction action = {.sa_handler = request_termination};
+    sigemptyset(&action.sa_mask);
+    if (sigaction(SIGTERM, &action, NULL) != 0) {
+        return 100;
+    }
+    while (!terminate_requested) {
+        terminate_tick();
+    }
+    return 7;
+}

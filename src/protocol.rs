@@ -64,9 +64,11 @@ impl Default for ValueChildQuery {
 /// A user-facing request for a logical breakpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BreakpointSpec {
-    /// Break at the uniquely named function.
+    /// Break at every function with this name.
     Function(String),
-    /// Break at every statement address for an exact source line.
+    /// Break at every statement address of a source line. A line without
+    /// statements moves to the next one with statements in the function
+    /// containing it; see [`crate::ModuleImage::breakpoint_line`].
     Source { path: PathBuf, line: LineNumber },
     /// Break at every concrete instance of a function declared in one source file.
     FileFunction { path: PathBuf, function: String },
@@ -704,6 +706,9 @@ pub enum ResumeScope {
 pub enum StepKind {
     /// Execute one machine instruction.
     Instruction,
+    /// Execute one machine instruction, running a call it makes until the
+    /// call returns.
+    OverInstruction,
     /// Advance to a different source location, entering calls.
     IntoSource,
     /// Advance to a different source location without stopping in callees.
@@ -853,6 +858,10 @@ pub struct ThreadSnapshot {
     pub id: ThreadId,
     /// The thread's observable execution state.
     pub state: ThreadState,
+    /// The name the thread gave itself, such as with
+    /// `pthread_setname_np`, as of its start or the last stop. Core dumps
+    /// record no thread names.
+    pub name: Option<Arc<str>>,
 }
 
 /// The externally observable state of the inferior.
@@ -1210,6 +1219,12 @@ pub enum Request {
     SignalPolicy {
         signal: u64,
         reply: Reply<SignalPolicy>,
+    },
+    Kill {
+        reply: Reply<()>,
+    },
+    Terminate {
+        reply: Reply<()>,
     },
     SetSignalPolicy {
         signal: u64,

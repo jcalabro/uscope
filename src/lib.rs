@@ -466,6 +466,21 @@ impl DebuggerHandle {
         .await
     }
 
+    /// Kills the inferior and waits until it is gone, keeping the session:
+    /// the program can be launched again, or another process attached.
+    pub async fn kill(&self) -> Result<()> {
+        self.request(|reply| Request::Kill { reply }).await
+    }
+
+    /// Asks the inferior to end, as with `SIGTERM` on Linux, and returns once
+    /// the request is sent. The request itself never stops the inferior,
+    /// whatever the signal's policy, and a stopped inferior is resumed to
+    /// receive it; the program then exits, or stops for a breakpoint or
+    /// signal while ending, as events report.
+    pub async fn terminate(&self) -> Result<()> {
+        self.request(|reply| Request::Terminate { reply }).await
+    }
+
     /// Launches the inferior and acknowledges once native execution has started.
     pub async fn launch(&self) -> Result<ExecutionId> {
         self.launch_with(LaunchOptions::default()).await

@@ -10,8 +10,8 @@ use nix::unistd::Pid;
 
 use crate::backend::process_start_time;
 use crate::protocol::{
-    DebuggerEvent, ExecutionId, ExitStatus, LaunchOptions, ProcessId, Reply, ResumeScope, StopId,
-    StopReason,
+    DebuggerEvent, ExceptionDisposition, ExecutionId, ExitStatus, LaunchOptions, ProcessId, Reply,
+    ResumeScope, StopId, StopReason,
 };
 use crate::{Error, LoadedModule, Result};
 
@@ -210,6 +210,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     pub(super) fn handle_initial_stop(&mut self, pid: Pid) -> Result<()> {
         self.ptrace.set_options(pid, true)?;
+        self.refresh_thread_names();
         let load_bias = self.ptrace.load_bias(
             pid,
             &self.executable,
@@ -277,6 +278,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .is_some_and(|inferior| inferior.origin == InferiorOrigin::Launched);
         self.ptrace.set_options(pid, exit_kill)?;
         let arm_failure = self.arm_new_thread(pid);
+        if let Some(inferior) = self.inferior.as_mut() {
+            let name = self.ptrace.thread_name(inferior.tgid, pid);
+            inferior.thread_mut(pid)?.name = name;
+        }
         let (process_id, barrier_active, should_resume) = {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             let thread = inferior.thread_mut(pid)?;
@@ -603,6 +608,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let _ = reply.send(Err(startup_failed()));
             }
             if let Some(reply) = self.shutdown_reply.take() {
+                let _ = reply.send(Ok(()));
+            }
+            if let Some(reply) = self.kill_reply.take() {
                 let _ = reply.send(Ok(()));
             }
             return Ok(());
@@ -975,6 +983,56 @@ impl<P: LinuxTraceOps> Controller<P> {
             process_id: process_id(inferior.tgid),
         });
         self.finish_shutdown(first_error.map_or(Ok(()), Err));
+    }
+
+    /// Kills the inferior and replies once its exit is processed.
+    pub(super) fn kill(&mut self, reply: Reply<()>) {
+        if self.inferior.is_none() {
+            let _ = reply.send(Err(Error::NotRunning));
+            return;
+        }
+        if self.kill_reply.is_some() {
+            let _ = reply.send(Err(Error::RequestCancelled));
+            return;
+        }
+        match self.kill_inferior() {
+            Ok(()) => self.kill_reply = Some(reply),
+            Err(error) => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+
+    /// Sends the inferior `SIGTERM`, which is delivered without stopping,
+    /// and resumes a stopped inferior so it receives it.
+    pub(super) fn terminate(&mut self) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let signal = Signal::SIGTERM;
+        inferior.terminating = Some(signal);
+        let (tgid, stop) = (
+            inferior.tgid,
+            inferior.public_stop.as_ref().map(|stop| stop.id),
+        );
+        self.ptrace.kill(tgid, signal)?;
+        let Some(stop) = stop else {
+            return Ok(());
+        };
+        let process = process_id(tgid);
+        let scope = ResumeScope::Process(process);
+        let execution = self.begin_execution(
+            process,
+            stop,
+            scope,
+            ActiveKind::Continue,
+            ExceptionDisposition::Pass,
+        )?;
+        let _ = self.events.send(DebuggerEvent::InferiorContinued {
+            revision: self.revision,
+            process_id: process,
+            execution_id: execution,
+            resumed: scope,
+        });
+        Ok(())
     }
 
     pub(super) fn kill_inferior(&self) -> Result<()> {

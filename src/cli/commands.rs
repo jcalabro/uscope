@@ -42,6 +42,7 @@ pub enum Command {
     Print,
     Globals,
     Stepi,
+    Nexti,
     Step,
     Next,
     Finish,
@@ -231,6 +232,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         repeatable
     ),
     command!(
+        Nexti,
+        "nexti",
+        ["ni"],
+        "nexti",
+        "Step one instruction, running a call until it returns",
+        repeatable
+    ),
+    command!(
         Step,
         "step",
         ["s"],
@@ -417,6 +426,7 @@ impl Cli {
             },
             Command::Globals => self.globals(first).await?,
             Command::Stepi => self.step(StepKind::Instruction).await?,
+            Command::Nexti => self.step(StepKind::OverInstruction).await?,
             Command::Step => self.step(StepKind::IntoSource).await?,
             Command::Next => self.step(StepKind::OverSource).await?,
             Command::Finish => self.step(StepKind::Out).await?,
