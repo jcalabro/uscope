@@ -220,11 +220,19 @@ enum NativeThreadState {
 #[derive(Debug, Clone)]
 enum ExpectedStop {
     InitialExec,
+    /// A process launched through its exec, which has not happened yet.
+    AdoptedExec,
     InitialAttach,
     None,
-    BreakpointRepair { address: VirtualAddress },
-    AwaitBreakpoint { address: VirtualAddress },
-    UserStep { kind: StepKind },
+    BreakpointRepair {
+        address: VirtualAddress,
+    },
+    AwaitBreakpoint {
+        address: VirtualAddress,
+    },
+    UserStep {
+        kind: StepKind,
+    },
 }
 
 struct TraceThread {
@@ -690,7 +698,22 @@ impl Waiter {
 enum InferiorOrigin {
     Launched,
     Attached,
+    /// Seized while waiting to exec the executable, and owned as a launch.
+    LaunchedByExec,
     PostMortem,
+}
+
+impl InferiorOrigin {
+    /// Whether the process dies with the debugger.
+    const fn owned(self) -> bool {
+        matches!(self, Self::Launched | Self::LaunchedByExec)
+    }
+
+    /// Whether its threads were seized, so they stop by `PTRACE_INTERRUPT`
+    /// and report group-stops as events.
+    const fn seized(self) -> bool {
+        matches!(self, Self::Attached | Self::LaunchedByExec)
+    }
 }
 
 struct RuntimeModule {
@@ -761,6 +784,8 @@ enum LinuxError {
     CoreFloatingRegistersUnsaved(i32),
     #[error("the process exited before its first stop: {0:?}")]
     ExitedBeforeStop(ExitStatus),
+    #[error("the process executed a program other than {}", .0.display())]
+    ExecutedAnotherProgram(PathBuf),
 }
 
 struct Controller<P: InspectionOps> {
@@ -934,6 +959,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Request::Launch { options, reply } => self.launch(*options, reply),
             Request::Attach { process_id, reply } => self.attach(process_id, reply),
+            Request::LaunchByExec {
+                process_id,
+                stop_at_entry,
+                release,
+                reply,
+            } => self.launch_by_exec(process_id, stop_at_entry, release, reply),
             Request::Continue {
                 process_id,
                 stop_id,
@@ -1208,6 +1239,7 @@ impl<P: InspectionOps> Controller<P> {
             | Request::RemoveAllWatchpoints { .. }
             | Request::Launch { .. }
             | Request::Attach { .. }
+            | Request::LaunchByExec { .. }
             | Request::Continue { .. }
             | Request::Step { .. }
             | Request::Pause { .. }
@@ -1266,6 +1298,20 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Err(backend_error(LinuxError::UnexpectedWait(format!(
                 "unowned {status:?}"
             ))));
+        }
+        if matches!(inferior.thread(pid)?.expected, ExpectedStop::AdoptedExec) {
+            // Until its exec, a process launched through it runs as it
+            // would untraced: signals are delivered and job control is
+            // ignored.
+            match status {
+                WaitEvent::Stopped(pid, signal) => {
+                    return self.ptrace.continue_execution(pid, Some(signal));
+                }
+                WaitEvent::PtraceEvent(pid, _, libc::PTRACE_EVENT_STOP) => {
+                    return self.ptrace.continue_execution(pid, None);
+                }
+                _ => {}
+            }
         }
 
         match status {

@@ -352,26 +352,21 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             stopped(Role::Error),
             renderer.paint(Role::Metadata, thread_id)
         ),
-        StopReason::Step { kind } => format!(
-            "{} after {}",
-            stopped(Role::Current),
-            match kind {
-                StepKind::Instruction => "instruction step",
-                StepKind::OverInstruction => "instruction next",
-                StepKind::IntoSource => "source step",
-                StepKind::OverSource => "source next",
-                StepKind::Out => "frame return",
-            }
-        ),
+        StopReason::Step { kind } => {
+            format!("{} after {}", stopped(Role::Current), step_name(*kind))
+        }
         StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
         StopReason::Exception(info) => format!(
             "{} by {}",
             stopped(Role::Error),
             exception(&info.description, info.code, renderer)
         ),
-        StopReason::Exec => format!(
+        StopReason::Exec { followed } => format!(
             "inferior {} its executable image",
-            renderer.paint(Role::Warning, "replaced")
+            renderer.paint(
+                Role::Warning,
+                if *followed { "re-executed" } else { "replaced" }
+            )
         ),
         StopReason::ThreadExited { thread_id, status } => format!(
             "thread {} {}: {}",
@@ -407,6 +402,16 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
             renderer.paint(Role::Error, "terminated"),
             exception(&info.description, info.code, renderer)
         ),
+    }
+}
+
+const fn step_name(kind: StepKind) -> &'static str {
+    match kind {
+        StepKind::Instruction => "instruction step",
+        StepKind::OverInstruction => "instruction next",
+        StepKind::IntoSource => "source step",
+        StepKind::OverSource => "source next",
+        StepKind::Out => "frame return",
     }
 }
 

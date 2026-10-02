@@ -4,7 +4,7 @@ use super::*;
 use uscope::{Breakpoint, DebuggerEvent};
 
 /// A function breakpoint kept while no loaded module defines the function.
-async fn pending_function(scenario: &Scenario, name: &str) -> Breakpoint {
+pub async fn pending_function(scenario: &Scenario, name: &str) -> Breakpoint {
     scenario
         .operation(
             "add pending breakpoint",
@@ -27,7 +27,7 @@ fn library_locations(breakpoint: &Breakpoint) -> usize {
         .count()
 }
 
-async fn breakpoint(scenario: &mut Scenario, id: uscope::BreakpointId) -> Breakpoint {
+pub async fn breakpoint(scenario: &mut Scenario, id: uscope::BreakpointId) -> Breakpoint {
     scenario
         .snapshot()
         .await
@@ -170,6 +170,52 @@ async fn source_breakpoints_resolve_in_library_source_once_it_loads() {
             .as_ref()
             .map(|source| source.line.get()),
         Some(line)
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn functions_without_debug_information_break_at_their_symbol() {
+    let mut scenario = Scenario::launch("reexec");
+    let puts = pending_function(&scenario, "puts").await;
+    // An indirect function's symbol names its resolver, which runs once at
+    // binding, not the function: it stays pending rather than mislead.
+    let strstr = pending_function(&scenario, "strstr").await;
+    let reason = scenario
+        .run_with_to_stop(LaunchOptions {
+            arguments: vec!["one".into()],
+            ..LaunchOptions::default()
+        })
+        .await;
+    let StopReason::Breakpoint { hits, .. } = &reason else {
+        panic!("stopped for {reason:?}");
+    };
+    assert_eq!(hits[0].breakpoint, puts.id);
+    assert_eq!(
+        library_locations(&breakpoint(&mut scenario, puts.id).await),
+        1
+    );
+    assert!(
+        breakpoint(&mut scenario, strstr.id)
+            .await
+            .locations
+            .is_empty()
+    );
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let symbol = trace.frames[0].symbol.as_ref().expect("a symbol frame");
+    // libc's `_IO_puts` names the same entry.
+    assert!(
+        symbol.name.ends_with("puts") && symbol.offset == 0,
+        "{symbol:?}"
+    );
+    assert_eq!(
+        trace.frames[1]
+            .function
+            .as_ref()
+            .map(|function| &*function.name),
+        Some("reexecuted")
     );
     scenario.shutdown().await;
 }

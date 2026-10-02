@@ -8,12 +8,14 @@ mod breakpoints;
 mod config;
 mod handles;
 mod inspect;
+pub mod launcher;
 mod memory;
 mod output;
 pub mod protocol;
 mod session;
 mod signals;
 mod sources;
+mod terminal;
 pub mod transport;
 mod values;
 mod watch;
@@ -180,7 +182,12 @@ async fn serve<R, W>(
 {
     let (outgoing, messages) = mpsc::channel(256);
     let client = Client::new(outgoing);
-    let writer = tokio::spawn(write_messages(writer, messages, log.clone()));
+    let writer = tokio::spawn(write_messages(
+        writer,
+        messages,
+        log.clone(),
+        client.responses(),
+    ));
     let (inbound, inbox) = mpsc::channel(64);
     let cancelled = session::Cancelled::default();
     let reader = tokio::spawn(read_messages(
@@ -201,13 +208,29 @@ async fn serve<R, W>(
     let _ = writer.await;
 }
 
-/// Reads the client's messages until the stream ends or breaks framing.
+/// Reads the client's messages until the stream ends or breaks framing,
+/// then fails the reverse requests still awaiting a response.
 async fn read_messages<R: AsyncBufRead + Unpin>(
+    reader: R,
+    inbound: mpsc::Sender<Inbound>,
+    log: Log,
+    client: Client,
+    cancelled: session::Cancelled,
+) {
+    let responses = client.responses();
+    read_frames(reader, inbound, log, client, cancelled, &responses).await;
+    if let Ok(mut responses) = responses.lock() {
+        responses.close();
+    }
+}
+
+async fn read_frames<R: AsyncBufRead + Unpin>(
     mut reader: R,
     inbound: mpsc::Sender<Inbound>,
     log: Log,
     client: Client,
     cancelled: session::Cancelled,
+    responses: &Mutex<session::Responses>,
 ) {
     loop {
         let frame = match transport::read_frame(&mut reader).await {
@@ -244,8 +267,16 @@ async fn read_messages<R: AsyncBufRead + Unpin>(
                     arguments,
                 }
             }
-            // No reverse request is sent, so no response is awaited.
-            Ok(Incoming::Response) => continue,
+            Ok(Incoming::Response {
+                request_seq: Some(seq),
+                result,
+            }) => {
+                if let Ok(mut responses) = responses.lock() {
+                    responses.settle(seq, result);
+                }
+                continue;
+            }
+            Ok(Incoming::Response { .. }) => continue,
             Err(error) => {
                 if let Some((seq, command)) = MessageError::request_seq(&frame.body) {
                     Inbound::Malformed {
@@ -275,10 +306,16 @@ async fn write_messages<W: AsyncWrite + Unpin>(
     mut writer: W,
     mut messages: mpsc::Receiver<Outgoing>,
     log: Log,
+    responses: Arc<Mutex<session::Responses>>,
 ) {
     let mut seq = 0_u64;
     while let Some(message) = messages.recv().await {
         seq += 1;
+        if let Outgoing::Request { ticket, .. } = &message
+            && let Ok(mut responses) = responses.lock()
+        {
+            responses.sent(*ticket, seq);
+        }
         let body: Value = message.to_json(seq);
         let text = body.to_string();
         log.record("->", &text);

@@ -7,10 +7,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uscope::{
     Backtrace, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle, Error,
@@ -38,6 +38,42 @@ const OUTPUT_DRAIN: std::time::Duration = std::time::Duration::from_secs(1);
 #[derive(Clone)]
 pub struct Client {
     outgoing: mpsc::Sender<Outgoing>,
+    responses: Arc<Mutex<Responses>>,
+}
+
+/// The client's answer to a reverse request: its body or error message.
+pub type Response = Result<Value, String>;
+
+/// Reverse requests awaiting the client's responses.
+#[derive(Default)]
+pub struct Responses {
+    next_ticket: u64,
+    /// Callers by ticket, until the writer numbers their request.
+    unsent: HashMap<u64, oneshot::Sender<Response>>,
+    /// Callers by the `seq` of their request.
+    sent: HashMap<u64, oneshot::Sender<Response>>,
+}
+
+impl Responses {
+    /// Records the `seq` the writer gave a request.
+    pub fn sent(&mut self, ticket: u64, seq: u64) {
+        if let Some(caller) = self.unsent.remove(&ticket) {
+            self.sent.insert(seq, caller);
+        }
+    }
+
+    /// Answers the caller of the request with this `seq`.
+    pub fn settle(&mut self, seq: u64, response: Response) {
+        if let Some(caller) = self.sent.remove(&seq) {
+            let _ = caller.send(response);
+        }
+    }
+
+    /// Fails every caller once the connection is gone.
+    pub fn close(&mut self) {
+        self.unsent.clear();
+        self.sent.clear();
+    }
 }
 
 /// The connection to the client is gone.
@@ -45,8 +81,41 @@ pub struct Client {
 pub struct Closed;
 
 impl Client {
-    pub const fn new(outgoing: mpsc::Sender<Outgoing>) -> Self {
-        Self { outgoing }
+    pub fn new(outgoing: mpsc::Sender<Outgoing>) -> Self {
+        Self {
+            outgoing,
+            responses: Arc::default(),
+        }
+    }
+
+    /// The reverse requests the connection's reader and writer settle.
+    pub fn responses(&self) -> Arc<Mutex<Responses>> {
+        Arc::clone(&self.responses)
+    }
+
+    /// Sends a reverse request and waits for the client's response.
+    pub(super) async fn request(
+        &self,
+        command: &'static str,
+        arguments: Value,
+    ) -> Result<Response, Closed> {
+        let (caller, response) = oneshot::channel();
+        let ticket = {
+            let mut responses = self.responses.lock().map_err(|_| Closed)?;
+            responses.next_ticket += 1;
+            let ticket = responses.next_ticket;
+            responses.unsent.insert(ticket, caller);
+            ticket
+        };
+        self.outgoing
+            .send(Outgoing::Request {
+                command,
+                arguments,
+                ticket,
+            })
+            .await
+            .map_err(|_| Closed)?;
+        response.await.map_err(|_| Closed)
     }
 
     pub async fn event(&self, event: &'static str, body: Value) -> Result<(), Closed> {
@@ -140,6 +209,7 @@ pub(super) struct ClientSupport {
     pub ansi: bool,
     pub invalidated: bool,
     pub memory_events: bool,
+    pub run_in_terminal: bool,
 }
 
 /// The program being debugged.
@@ -399,6 +469,7 @@ impl Session {
             ansi: arguments.supports_ansi_styling.unwrap_or(false),
             invalidated: arguments.supports_invalidated_event.unwrap_or(false),
             memory_events: arguments.supports_memory_event.unwrap_or(false),
+            run_in_terminal: arguments.supports_run_in_terminal_request.unwrap_or(false),
         });
         self.after = Some(After::Initialized);
         Ok(capabilities())
@@ -746,10 +817,24 @@ impl Session {
     async fn begin(
         &mut self,
     ) -> Result<(&'static str, Vec<(std::os::fd::OwnedFd, &'static str)>), ErrorBody> {
+        let supported = self.support().run_in_terminal;
         let target = self.target.as_mut().expect("a target to start");
         let Start::Launch(launch) = &target.start else {
             return Ok(("attach", Vec::new()));
         };
+        if launch.console != config::Console::Internal {
+            // The program's streams belong to the terminal.
+            let execution = super::terminal::launch(
+                &self.client,
+                supported,
+                &target.handle,
+                launch,
+                target.stop_on_entry,
+            )
+            .await?;
+            self.resumed = Some(execution);
+            return Ok(("launch", Vec::new()));
+        }
         let (stdout_read, stdout_write) =
             output::pipe().map_err(|error| ErrorBody::shown(error.to_string()))?;
         let (stderr_read, stderr_write) =
@@ -1137,47 +1222,6 @@ impl Session {
                 body["hitBreakpointIds"] = ids.into();
                 (kind, None, None)
             }
-            StopReason::Step { .. } => ("step", None, None),
-            StopReason::Pause => ("pause", None, None),
-            StopReason::Entry | StopReason::Attach => ("entry", None, None),
-            StopReason::Exception(info)
-            | StopReason::CoreDump {
-                exception: Some(info),
-            } => (
-                "exception",
-                Some(info.description.to_string()),
-                Some(signal_text(info.code)),
-            ),
-            StopReason::CoreDump { exception: None } => (
-                "exception",
-                Some("the core dump records no signal".to_owned()),
-                Some("core dump".to_owned()),
-            ),
-            StopReason::ThreadExited { thread_id, .. } => (
-                "step",
-                Some(format!("thread {thread_id} exited during the step")),
-                None,
-            ),
-            StopReason::Exec => (
-                "exception",
-                Some(
-                    "the process replaced its executable image (exec), which is not followed"
-                        .to_owned(),
-                ),
-                Some("exec".to_owned()),
-            ),
-            StopReason::Unclassifiable { description } => (
-                "exception",
-                Some(format!(
-                    "stopped for an unclassifiable reason: {description}"
-                )),
-                Some("unclassifiable stop".to_owned()),
-            ),
-            StopReason::WatchpointArmFailed { description, .. } => (
-                "exception",
-                Some(format!("watchpoints could not be armed: {description}")),
-                Some("watchpoint failure".to_owned()),
-            ),
             StopReason::Watchpoint { hits } => {
                 body["hitBreakpointIds"] = self.data.hit(hits).into();
                 (
@@ -1207,6 +1251,7 @@ impl Session {
                 )
             }
             StopReason::Exited(_) => return Ok(()),
+            other => describe_stop(other),
         };
         body["reason"] = kind.into();
         if let Some(description) = description {
@@ -2033,6 +2078,63 @@ pub(super) fn thread_id(id: i64) -> Result<ThreadId, ErrorBody> {
         .filter(|id| *id != 0)
         .map(ThreadId::new)
         .ok_or_else(|| ErrorBody::new(format!("there is no thread {id}")))
+}
+
+/// The `stopped` event's reason, description, and text for a stop that
+/// needs nothing from the session to describe.
+fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<String>) {
+    match reason {
+        StopReason::Step { .. } => ("step", None, None),
+        StopReason::Pause => ("pause", None, None),
+        StopReason::Entry | StopReason::Attach => ("entry", None, None),
+        StopReason::Exception(info)
+        | StopReason::CoreDump {
+            exception: Some(info),
+        } => (
+            "exception",
+            Some(info.description.to_string()),
+            Some(signal_text(info.code)),
+        ),
+        StopReason::CoreDump { exception: None } => (
+            "exception",
+            Some("the core dump records no signal".to_owned()),
+            Some("core dump".to_owned()),
+        ),
+        StopReason::ThreadExited { thread_id, .. } => (
+            "step",
+            Some(format!("thread {thread_id} exited during the step")),
+            None,
+        ),
+        StopReason::Exec { followed: true } => (
+            "entry",
+            Some("the process executed its program again".to_owned()),
+            None,
+        ),
+        StopReason::Exec { followed: false } => (
+            "exception",
+            Some(
+                "the process replaced its executable image (exec), which is not followed"
+                    .to_owned(),
+            ),
+            Some("exec".to_owned()),
+        ),
+        StopReason::Unclassifiable { description } => (
+            "exception",
+            Some(format!(
+                "stopped for an unclassifiable reason: {description}"
+            )),
+            Some("unclassifiable stop".to_owned()),
+        ),
+        StopReason::WatchpointArmFailed { description, .. } => (
+            "exception",
+            Some(format!("watchpoints could not be armed: {description}")),
+            Some("watchpoint failure".to_owned()),
+        ),
+        StopReason::Breakpoint { .. }
+        | StopReason::Watchpoint { .. }
+        | StopReason::WatchpointInvalidated { .. }
+        | StopReason::Exited(_) => unreachable!("the session describes these stops"),
+    }
 }
 
 /// A signal's name, or its number when it has none.

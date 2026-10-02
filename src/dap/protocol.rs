@@ -16,7 +16,11 @@ pub enum Incoming {
         arguments: Value,
     },
     /// The client's answer to a reverse request.
-    Response,
+    Response {
+        request_seq: Option<u64>,
+        /// The response's body, or its error message.
+        result: Result<Value, String>,
+    },
 }
 
 /// Why a message could not be understood.
@@ -72,7 +76,18 @@ pub fn parse(body: &[u8]) -> Result<Incoming, MessageError> {
                 Some(arguments) => arguments,
             },
         }),
-        "response" => Ok(Incoming::Response),
+        "response" => Ok(Incoming::Response {
+            request_seq: object.get("request_seq").and_then(Value::as_u64),
+            result: if object.get("success").and_then(Value::as_bool) == Some(true) {
+                Ok(object.remove("body").unwrap_or(Value::Null))
+            } else {
+                Err(object
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the client refused the request")
+                    .to_owned())
+            },
+        }),
         other => Err(MessageError::UnsupportedType(other.to_owned())),
     }
 }
@@ -88,6 +103,12 @@ pub enum Outgoing {
     Event {
         event: &'static str,
         body: Value,
+    },
+    /// A reverse request, whose response settles `ticket`.
+    Request {
+        command: &'static str,
+        arguments: Value,
+        ticket: u64,
     },
 }
 
@@ -130,6 +151,14 @@ impl Outgoing {
                 "type": "event",
                 "event": event,
                 "body": object_or_empty(body),
+            }),
+            Self::Request {
+                command, arguments, ..
+            } => json!({
+                "seq": seq,
+                "type": "request",
+                "command": command,
+                "arguments": arguments,
             }),
         }
     }

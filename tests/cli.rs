@@ -2802,3 +2802,38 @@ fn info_signals_lists_every_signals_policy() {
         );
     }
 }
+
+#[test]
+fn the_terminal_launcher_explains_why_it_cannot_run_the_program() {
+    let directory = support::ScratchDir::new("cli-launcher");
+    let socket = directory.path().join("launcher");
+    let output = uscope(&[
+        "dap-launcher",
+        "--connect",
+        socket.to_str().expect("path"),
+        "--",
+        "/bin/true",
+    ]);
+    assert_eq!(output.status.code(), Some(127));
+    assert_failure(
+        &output,
+        "uscope: cannot run /bin/true: No such file or directory",
+    );
+
+    // The adapter went away before it traced the launcher.
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+    let adapter = thread::spawn(move || drop(listener.accept().expect("accept")));
+    let output = uscope(&[
+        "dap-launcher",
+        "--connect",
+        socket.to_str().expect("path"),
+        "--",
+        "/bin/true",
+    ]);
+    adapter.join().expect("adapter");
+    assert_eq!(output.status.code(), Some(127));
+    assert_failure(
+        &output,
+        "uscope: cannot run /bin/true: the debugger stopped before it could debug it",
+    );
+}

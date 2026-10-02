@@ -91,8 +91,25 @@ fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsSt
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // The terminal launcher must stay single-threaded, so it runs before the
+    // runtime starts its threads.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|command| command == "dap-launcher")
+    {
+        return dap::launcher::run(std::env::args_os().skip(1));
+    }
+    match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime.block_on(async_main()),
+        Err(error) => {
+            eprintln!("error: cannot start the async runtime: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn async_main() -> ExitCode {
     if std::env::args_os()
         .nth(1)
         .is_some_and(|command| command == "dap")

@@ -159,8 +159,8 @@ fn invalid_configurations_are_shown_to_the_user_and_the_session_survives() {
         ),
         (
             "launch",
-            json!({"program": fixture("basic"), "console": "integratedTerminal"}),
-            "invalid launch configuration at console: \"integratedTerminal\" is not supported; program output appears in the debug console".to_owned(),
+            json!({"program": fixture("basic"), "console": "pty"}),
+            "invalid launch configuration at console: unknown variant `pty`, expected one of `internalConsole`, `integratedTerminal`, `externalTerminal`".to_owned(),
         ),
         (
             "launch",

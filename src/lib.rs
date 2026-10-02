@@ -538,6 +538,29 @@ impl DebuggerHandle {
         .await
     }
 
+    /// Launches through a process that is waiting to exec this debugger's
+    /// executable, such as a launcher started in a terminal, and
+    /// acknowledges as [`Self::launch_with`] does once it has.
+    ///
+    /// The process must be single-threaded. `release` runs once it is
+    /// traced and must then let it exec; until it does, the process runs
+    /// and receives signals as it would untraced. Exiting first fails the
+    /// launch.
+    pub async fn launch_by_exec(
+        &self,
+        process_id: ProcessId,
+        stop_at_entry: bool,
+        release: impl FnOnce() + Send + 'static,
+    ) -> Result<ExecutionId> {
+        self.request(|reply| Request::LaunchByExec {
+            process_id,
+            stop_at_entry,
+            release: Box::new(release),
+            reply,
+        })
+        .await
+    }
+
     /// Attaches to an existing process and returns its coherent initial stop.
     pub async fn attach_process(&self, process_id: ProcessId) -> Result<StopId> {
         self.request(|reply| Request::Attach { process_id, reply })

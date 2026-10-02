@@ -760,7 +760,11 @@ impl Session {
                 "core dump".to_owned(),
                 "the core dump records no signal".to_owned(),
             ),
-            StopReason::Exec => (
+            StopReason::Exec { followed: true } => (
+                "exec".to_owned(),
+                "the process executed its program again".to_owned(),
+            ),
+            StopReason::Exec { followed: false } => (
                 "exec".to_owned(),
                 "the process replaced its executable image, which is not followed".to_owned(),
             ),

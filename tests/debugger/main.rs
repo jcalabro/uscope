@@ -3,6 +3,7 @@ mod support;
 
 mod attach;
 mod concurrency;
+mod exec;
 mod execution;
 mod globals;
 mod libraries;

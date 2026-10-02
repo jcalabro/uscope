@@ -105,6 +105,10 @@ pub enum Error {
     AlreadyRunning,
     #[error("process identifier {0} is invalid")]
     InvalidProcessId(u64),
+    #[error(
+        "process {0} has several threads; only a single-threaded process can be launched through"
+    )]
+    ProcessHasThreads(u64),
     #[error("could not determine a stable identity for process {0}")]
     ProcessIdentityUnavailable(u64),
     #[error("the target process changed while the debugger was attaching")]

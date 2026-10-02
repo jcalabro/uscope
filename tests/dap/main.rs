@@ -15,6 +15,7 @@ mod memory;
 mod output;
 mod robustness;
 mod sources;
+mod terminal;
 mod variables;
 mod watch;
 mod writes;
