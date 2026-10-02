@@ -3,11 +3,11 @@
 //! The CLI is one client of [`DebuggerHandle`]: it parses commands, issues
 //! requests, and renders replies. Debugger semantics live in the library.
 
-mod commands;
-mod format;
+pub mod commands;
+pub mod format;
 mod repl;
 pub mod terminal;
-mod value;
+pub mod value;
 
 use std::ffi::OsString;
 use std::fmt::Display;
@@ -35,6 +35,15 @@ pub struct Renderers {
 }
 
 impl Renderers {
+    /// Renderers for every stream, with or without color.
+    pub const fn uniform(color: bool) -> Self {
+        Self {
+            stdout: Renderer::new(color),
+            stderr: Renderer::new(color),
+            stdout_control: false,
+        }
+    }
+
     /// Detects color and terminal support from the streams and environment.
     pub fn detect(choice: ColorChoice, batch: bool) -> Self {
         let environment = ColorEnvironment::current();

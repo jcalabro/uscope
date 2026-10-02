@@ -1,0 +1,248 @@
+//! Signals as exception breakpoint filters.
+//!
+//! Each filter stops on one group of signals. Their defaults reproduce the
+//! debugger's default signal policy, so a client that never changes them
+//! sees the same stops as the console. A filter's `condition`, when the
+//! client supports filter options, replaces its group with a
+//! comma-separated list of signals.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::{Value, json};
+
+use super::protocol::SetExceptionBreakpointsArguments;
+
+struct Filter {
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    default: bool,
+    /// The signals the filter covers; `None` covers every other signal.
+    signals: Option<&'static [&'static str]>,
+}
+
+const FILTERS: [Filter; 4] = [
+    Filter {
+        id: "fatal",
+        label: "Fatal signals",
+        description: "Stop on SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGSYS, and SIGTRAP",
+        default: true,
+        signals: Some(&[
+            "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGABRT", "SIGSYS", "SIGTRAP",
+        ]),
+    },
+    Filter {
+        id: "interrupt",
+        label: "Interrupt (SIGINT)",
+        description: "Stop on SIGINT without delivering it",
+        default: true,
+        signals: Some(&["SIGINT"]),
+    },
+    Filter {
+        id: "routine",
+        label: "Routine signals",
+        description: "Stop on signals programs use for routine work: SIGALRM, SIGURG, SIGCHLD, \
+                      SIGWINCH, SIGPROF, SIGVTALRM, SIGIO, and SIGPWR",
+        default: false,
+        signals: Some(&[
+            "SIGALRM",
+            "SIGURG",
+            "SIGCHLD",
+            "SIGWINCH",
+            "SIGPROF",
+            "SIGVTALRM",
+            "SIGIO",
+            "SIGPWR",
+        ]),
+    },
+    Filter {
+        id: "other",
+        label: "Other signals",
+        description: "Stop on every other signal, such as SIGUSR1, SIGTERM, SIGPIPE, and \
+                      real-time signals",
+        default: true,
+        signals: None,
+    },
+];
+
+/// The filters `initialize` advertises.
+pub fn filters() -> Value {
+    FILTERS
+        .iter()
+        .map(|filter| {
+            json!({
+                "filter": filter.id,
+                "label": filter.label,
+                "description": filter.description,
+                "default": filter.default,
+                "supportsCondition": true,
+                "conditionDescription": "Comma-separated signals to stop on instead, such as SIGUSR1,SIGUSR2",
+            })
+        })
+        .collect()
+}
+
+/// Which signals stop, as the exception filters select them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selection {
+    stopping: BTreeSet<u64>,
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        let enabled = FILTERS
+            .iter()
+            .filter(|filter| filter.default)
+            .map(|filter| (filter.id, None))
+            .collect();
+        Self::from_filters(&enabled)
+    }
+}
+
+impl Selection {
+    /// Whether the signal with this code stops.
+    pub fn stops(&self, code: u64) -> bool {
+        self.stopping.contains(&code)
+    }
+
+    /// Reads a `setExceptionBreakpoints` request, returning the selection
+    /// and one breakpoint per filter and filter option, in request order.
+    pub fn parse(arguments: &SetExceptionBreakpointsArguments) -> (Self, Vec<Value>) {
+        let mut enabled = BTreeMap::new();
+        let mut breakpoints = Vec::new();
+        let options = arguments.filter_options.iter().flatten().map(|option| {
+            (
+                option.filter_id.as_str(),
+                option
+                    .condition
+                    .as_deref()
+                    .filter(|text| !text.trim().is_empty()),
+            )
+        });
+        for (id, condition) in arguments
+            .filters
+            .iter()
+            .map(|id| (id.as_str(), None))
+            .chain(options)
+        {
+            let Some(filter) = FILTERS.iter().find(|filter| filter.id == id) else {
+                breakpoints.push(unverified(&format!("unknown exception filter '{id}'")));
+                continue;
+            };
+            let signals = match condition.map(signal_list).transpose() {
+                Ok(signals) => signals,
+                Err(message) => {
+                    breakpoints.push(unverified(&message));
+                    continue;
+                }
+            };
+            enabled.insert(filter.id, signals);
+            breakpoints.push(json!({"verified": true}));
+        }
+        (Self::from_filters(&enabled), breakpoints)
+    }
+
+    fn from_filters(enabled: &BTreeMap<&str, Option<BTreeSet<u64>>>) -> Self {
+        let grouped = FILTERS
+            .iter()
+            .filter_map(|filter| filter.signals)
+            .flatten()
+            .filter_map(|name| uscope::signal_named(name))
+            .collect::<BTreeSet<_>>();
+        let mut stopping = BTreeSet::new();
+        for filter in &FILTERS {
+            match enabled.get(filter.id) {
+                None => {}
+                Some(Some(listed)) => stopping.extend(listed),
+                Some(None) => match filter.signals {
+                    Some(names) => {
+                        stopping.extend(names.iter().filter_map(|name| uscope::signal_named(name)));
+                    }
+                    None => stopping
+                        .extend(uscope::signal_codes().filter(|code| !grouped.contains(code))),
+                },
+            }
+        }
+        Self { stopping }
+    }
+}
+
+fn unverified(message: &str) -> Value {
+    json!({"verified": false, "message": message, "reason": "failed"})
+}
+
+fn signal_list(text: &str) -> Result<BTreeSet<u64>, String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| uscope::signal_named(name).ok_or_else(|| format!("unknown signal '{name}'")))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dap::protocol::ExceptionFilterOptions;
+
+    fn code(name: &str) -> u64 {
+        uscope::signal_named(name).expect("known signal")
+    }
+
+    #[test]
+    fn default_filters_stop_exactly_where_the_default_policy_does() {
+        let selection = Selection::default();
+        for name in [
+            "SIGSEGV", "SIGABRT", "SIGINT", "SIGUSR1", "SIGTERM", "SIGPIPE", "SIG34",
+        ] {
+            assert!(selection.stops(code(name)), "{name}");
+        }
+        for name in [
+            "SIGALRM", "SIGURG", "SIGCHLD", "SIGWINCH", "SIGPROF", "SIGPWR",
+        ] {
+            assert!(!selection.stops(code(name)), "{name}");
+        }
+        let advertised = filters();
+        let defaults = advertised
+            .as_array()
+            .expect("filters")
+            .iter()
+            .filter(|filter| filter["default"] == json!(true))
+            .map(|filter| filter["filter"].as_str().expect("id").to_owned())
+            .collect::<Vec<_>>();
+        let (parsed, _) = Selection::parse(&SetExceptionBreakpointsArguments {
+            filters: defaults,
+            filter_options: None,
+        });
+        assert_eq!(parsed, selection);
+    }
+
+    #[test]
+    fn conditions_replace_a_filters_signals_and_bad_entries_are_unverified() {
+        let (selection, breakpoints) = Selection::parse(&SetExceptionBreakpointsArguments {
+            filters: vec!["fatal".to_owned(), "bogus".to_owned()],
+            filter_options: Some(vec![
+                ExceptionFilterOptions {
+                    filter_id: "other".to_owned(),
+                    condition: Some(" SIGUSR1, usr2 ".to_owned()),
+                },
+                ExceptionFilterOptions {
+                    filter_id: "routine".to_owned(),
+                    condition: Some("SIGNOPE".to_owned()),
+                },
+            ]),
+        });
+        assert!(selection.stops(code("SIGSEGV")));
+        assert!(selection.stops(code("SIGUSR1")) && selection.stops(code("SIGUSR2")));
+        assert!(!selection.stops(code("SIGTERM")) && !selection.stops(code("SIGINT")));
+        assert!(!selection.stops(code("SIGALRM")));
+        assert_eq!(
+            breakpoints,
+            [
+                json!({"verified": true}),
+                unverified("unknown exception filter 'bogus'"),
+                json!({"verified": true}),
+                unverified("unknown signal 'SIGNOPE'"),
+            ]
+        );
+    }
+}

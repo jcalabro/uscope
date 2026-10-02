@@ -194,6 +194,15 @@ pub fn untyped(name: &str, state: &VariableState, renderer: Renderer) -> String 
     )
 }
 
+/// Summarizes a value on one line without expanding aggregates, as
+/// `print` shows each variable, or describes why it has none.
+pub fn summary(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
+    type_info.map_or_else(
+        || state_failure(state).map_or_else(|| "<unknown value>".to_owned(), |(_, text)| text),
+        |type_info| state_summary(type_info, state),
+    )
+}
+
 /// Summarizes an available state's value, or describes why it has none.
 fn state_summary(type_info: &TypeInfo, state: &VariableState) -> String {
     match state {

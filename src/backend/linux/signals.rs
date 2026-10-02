@@ -157,6 +157,77 @@ pub fn default_policy(signal: Signal) -> SignalPolicy {
     }
 }
 
+/// Describes a delivered signal from its siginfo: its name, the code
+/// naming its cause, and the faulting address or the process that sent it.
+pub fn describe(
+    name: &str,
+    number: i32,
+    code: i32,
+    fault_address: Option<u64>,
+    sender: Option<i32>,
+) -> String {
+    let code =
+        signal_code_name(number, code).map_or_else(|| format!("si_code {code}"), str::to_owned);
+    match (fault_address, sender) {
+        (Some(address), _) => format!("{name} ({code}) at {address:#x}"),
+        (None, Some(sender)) if sender > 0 => format!("{name} ({code}) sent by process {sender}"),
+        _ => format!("{name} ({code})"),
+    }
+}
+
+fn signal_code_name(signal: i32, code: i32) -> Option<&'static str> {
+    let generic = match code {
+        0 => Some("SI_USER"),
+        0x80 => Some("SI_KERNEL"),
+        -1 => Some("SI_QUEUE"),
+        -2 => Some("SI_TIMER"),
+        -3 => Some("SI_MESGQ"),
+        -4 => Some("SI_ASYNCIO"),
+        -5 => Some("SI_SIGIO"),
+        -6 => Some("SI_TKILL"),
+        _ => None,
+    };
+    if generic.is_some() {
+        return generic;
+    }
+    let names: &[&str] = match signal {
+        libc::SIGSEGV => &["SEGV_MAPERR", "SEGV_ACCERR", "SEGV_BNDERR", "SEGV_PKUERR"],
+        libc::SIGBUS => &[
+            "BUS_ADRALN",
+            "BUS_ADRERR",
+            "BUS_OBJERR",
+            "BUS_MCEERR_AR",
+            "BUS_MCEERR_AO",
+        ],
+        libc::SIGILL => &[
+            "ILL_ILLOPC",
+            "ILL_ILLOPN",
+            "ILL_ILLADR",
+            "ILL_ILLTRP",
+            "ILL_PRVOPC",
+            "ILL_PRVREG",
+            "ILL_COPROC",
+            "ILL_BADSTK",
+        ],
+        libc::SIGFPE => &[
+            "FPE_INTDIV",
+            "FPE_INTOVF",
+            "FPE_FLTDIV",
+            "FPE_FLTOVF",
+            "FPE_FLTUND",
+            "FPE_FLTRES",
+            "FPE_FLTINV",
+            "FPE_FLTSUB",
+        ],
+        libc::SIGTRAP => &["TRAP_BRKPT", "TRAP_TRACE", "TRAP_BRANCH", "TRAP_HWBKPT"],
+        _ => &[],
+    };
+    usize::try_from(code)
+        .ok()
+        .and_then(|code| code.checked_sub(1))
+        .and_then(|index| names.get(index).copied())
+}
+
 impl fmt::Debug for Signal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.name())

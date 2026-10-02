@@ -1215,6 +1215,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
         Ok(SignalMetadata {
             code,
             sender: (code <= 0).then_some(71),
+            fault_address: None,
         })
     };
     let classify = |signal, siginfo, expected, breakpoint| {
@@ -1611,6 +1612,7 @@ impl WatchHarness {
                 SignalMetadata {
                     code: libc::SI_TKILL,
                     sender: Some(i32::try_from(std::process::id()).expect("pid fits")),
+                    fault_address: None,
                 },
             );
             self.controller
@@ -1624,10 +1626,14 @@ impl WatchHarness {
         let mut registers = self.trace().registers_of(pid);
         registers[debug_registers::STATUS_REGISTER] = status;
         self.trace().registers.borrow_mut().insert(pid, registers);
-        self.trace()
-            .siginfo
-            .borrow_mut()
-            .insert(pid, SignalMetadata { code, sender: None });
+        self.trace().siginfo.borrow_mut().insert(
+            pid,
+            SignalMetadata {
+                code,
+                sender: None,
+                fault_address: None,
+            },
+        );
         self.controller
             .process_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
     }
@@ -2190,6 +2196,7 @@ fn detaching_disarms_every_thread_first_and_never_redelivers_a_watch_trap() {
         SignalMetadata {
             code: TRAP_HARDWARE_BREAKPOINT,
             sender: None,
+            fault_address: None,
         },
     );
     assert!(
@@ -2373,6 +2380,7 @@ fn detaching_collects_queued_traps_before_releasing_the_process() {
         SignalMetadata {
             code: TRAP_HARDWARE_BREAKPOINT,
             sender: None,
+            fault_address: None,
         },
     );
     assert!(
@@ -2674,6 +2682,7 @@ fn a_visible_stop_during_an_internal_stop_wins_and_the_declined_hit_counts_once(
         SignalMetadata {
             code: 0,
             sender: Some(1),
+            fault_address: None,
         },
     );
     harness
@@ -2845,6 +2854,7 @@ fn a_trap_reexecuted_after_a_signal_interrupted_its_repair_is_not_a_new_hit() {
         SignalMetadata {
             code: 0,
             sender: Some(1),
+            fault_address: None,
         },
     );
     harness
@@ -3059,6 +3069,7 @@ fn a_signal_during_an_internal_stop_is_published_after_the_edit() {
         SignalMetadata {
             code: libc::SI_USER,
             sender: Some(1),
+            fault_address: None,
         },
     );
     harness
@@ -3267,6 +3278,7 @@ fn deliver(harness: &mut WatchHarness, pid: Pid, signal: Signal) {
         SignalMetadata {
             code: libc::SI_USER,
             sender: Some(1),
+            fault_address: None,
         },
     );
     harness

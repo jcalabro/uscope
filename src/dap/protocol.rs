@@ -1,0 +1,464 @@
+//! Debug Adapter Protocol message types.
+//!
+//! Only the messages and fields uscope uses are modeled. Unknown fields are
+//! ignored, absent or `null` arguments read as empty, and a client's `seq`
+//! is echoed exactly as sent, since some clients send strings.
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+/// A message received from the client.
+#[derive(Debug)]
+pub enum Incoming {
+    Request {
+        seq: Value,
+        command: String,
+        arguments: Value,
+    },
+    /// The client's answer to a reverse request.
+    Response,
+}
+
+/// Why a message could not be understood.
+#[derive(Debug, thiserror::Error)]
+pub enum MessageError {
+    #[error("the message is not valid JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("the message is not a JSON object")]
+    NotAnObject,
+    #[error("the message has no `type`")]
+    MissingType,
+    #[error("the request has no `command`")]
+    MissingCommand,
+    #[error("unsupported message type {0:?}")]
+    UnsupportedType(String),
+}
+
+impl MessageError {
+    /// The `seq` of a request that could not be parsed, so its error can
+    /// still be answered.
+    pub fn request_seq(body: &[u8]) -> Option<(Value, String)> {
+        let value = serde_json::from_slice::<Value>(body).ok()?;
+        let seq = value.get("seq")?.clone();
+        let command = value
+            .get("command")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        Some((seq, command))
+    }
+}
+
+/// Parses one message body.
+pub fn parse(body: &[u8]) -> Result<Incoming, MessageError> {
+    let value = serde_json::from_slice::<Value>(body)?;
+    let Value::Object(mut object) = value else {
+        return Err(MessageError::NotAnObject);
+    };
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or(MessageError::MissingType)?
+        .to_owned();
+    match kind.as_str() {
+        "request" => Ok(Incoming::Request {
+            seq: object.remove("seq").unwrap_or(Value::Null),
+            command: object
+                .remove("command")
+                .and_then(|command| command.as_str().map(str::to_owned))
+                .ok_or(MessageError::MissingCommand)?,
+            arguments: match object.remove("arguments") {
+                None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
+                Some(arguments) => arguments,
+            },
+        }),
+        "response" => Ok(Incoming::Response),
+        other => Err(MessageError::UnsupportedType(other.to_owned())),
+    }
+}
+
+/// A message to send to the client; the writer numbers it.
+#[derive(Debug)]
+pub enum Outgoing {
+    Response {
+        request_seq: Value,
+        command: String,
+        result: Result<Value, ErrorBody>,
+    },
+    Event {
+        event: &'static str,
+        body: Value,
+    },
+}
+
+impl Outgoing {
+    /// Serializes the message with the writer's `seq`. Every response and
+    /// event carries a body object, which strict clients require.
+    pub fn to_json(&self, seq: u64) -> Value {
+        match self {
+            Self::Response {
+                request_seq,
+                command,
+                result: Ok(body),
+            } => json!({
+                "seq": seq,
+                "type": "response",
+                "request_seq": request_seq,
+                "success": true,
+                "command": command,
+                "body": object_or_empty(body),
+            }),
+            Self::Response {
+                request_seq,
+                command,
+                result: Err(error),
+            } => json!({
+                "seq": seq,
+                "type": "response",
+                "request_seq": request_seq,
+                "success": false,
+                "command": command,
+                "message": error.short,
+                "body": {"error": {
+                    "id": error.id,
+                    "format": error.format,
+                    "showUser": error.show_user,
+                }},
+            }),
+            Self::Event { event, body } => json!({
+                "seq": seq,
+                "type": "event",
+                "event": event,
+                "body": object_or_empty(body),
+            }),
+        }
+    }
+}
+
+fn object_or_empty(body: &Value) -> Value {
+    if body.is_null() {
+        json!({})
+    } else {
+        body.clone()
+    }
+}
+
+/// A failed request's explanation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ErrorBody {
+    /// The raw error in short form: `notStopped`, `cancelled`, or the
+    /// message itself.
+    pub short: String,
+    /// The message shown to the user.
+    pub format: String,
+    pub id: u32,
+    pub show_user: bool,
+}
+
+impl ErrorBody {
+    /// An error whose message the client may show.
+    pub fn new(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            short: message.clone(),
+            format: escape_format(&message),
+            id: 1,
+            show_user: false,
+        }
+    }
+
+    /// An error the user must see, such as an invalid launch configuration.
+    pub fn shown(message: impl Into<String>) -> Self {
+        Self {
+            show_user: true,
+            ..Self::new(message)
+        }
+    }
+
+    /// The well-known error for a request that needs a stopped inferior.
+    pub fn not_stopped() -> Self {
+        Self {
+            short: "notStopped".to_owned(),
+            ..Self::new("the program is running; this request needs it stopped")
+        }
+    }
+}
+
+/// Escapes braces, which a `Message.format` string uses for variables.
+fn escape_format(message: &str) -> String {
+    message.replace('{', "{{").replace('}', "}}")
+}
+
+/// `initialize` arguments: the client's identity and capabilities.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InitializeArguments {
+    #[serde(rename = "clientID")]
+    pub client_id: Option<String>,
+    pub client_name: Option<String>,
+    #[serde(rename = "adapterID")]
+    pub adapter_id: Option<String>,
+    pub lines_start_at1: Option<bool>,
+    pub columns_start_at1: Option<bool>,
+    pub path_format: Option<String>,
+    pub supports_variable_type: Option<bool>,
+    pub supports_variable_paging: Option<bool>,
+    pub supports_run_in_terminal_request: Option<bool>,
+    pub supports_memory_references: Option<bool>,
+    pub supports_progress_reporting: Option<bool>,
+    pub supports_invalidated_event: Option<bool>,
+    #[serde(rename = "supportsANSIStyling")]
+    pub supports_ansi_styling: Option<bool>,
+}
+
+/// A source file as the client names it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "the protocol names the field sourceReference"
+)]
+pub struct Source {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_reference: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation_hint: Option<String>,
+}
+
+/// One requested source breakpoint.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SourceBreakpoint {
+    pub line: i64,
+    pub column: Option<i64>,
+    pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+    pub log_message: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetBreakpointsArguments {
+    pub source: Source,
+    pub breakpoints: Option<Vec<SourceBreakpoint>>,
+    /// The deprecated form of `breakpoints`: lines only.
+    pub lines: Option<Vec<i64>>,
+}
+
+/// One requested function breakpoint.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FunctionBreakpoint {
+    pub name: String,
+    pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetFunctionBreakpointsArguments {
+    pub breakpoints: Vec<FunctionBreakpoint>,
+}
+
+/// One requested instruction breakpoint.
+/// One requested instruction breakpoint.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InstructionBreakpoint {
+    pub instruction_reference: String,
+    pub offset: Option<i64>,
+    pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetInstructionBreakpointsArguments {
+    pub breakpoints: Vec<InstructionBreakpoint>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExceptionFilterOptions {
+    pub filter_id: String,
+    pub condition: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetExceptionBreakpointsArguments {
+    pub filters: Vec<String>,
+    pub filter_options: Option<Vec<ExceptionFilterOptions>>,
+}
+
+/// Arguments naming one thread, as run control requests do.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ThreadArguments {
+    pub thread_id: i64,
+    pub single_thread: Option<bool>,
+    pub granularity: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StackTraceArguments {
+    pub thread_id: i64,
+    pub start_frame: Option<i64>,
+    pub levels: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScopesArguments {
+    pub frame_id: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ValueFormat {
+    pub hex: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VariablesArguments {
+    pub variables_reference: i64,
+    pub filter: Option<String>,
+    pub start: Option<i64>,
+    pub count: Option<i64>,
+    pub format: Option<ValueFormat>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct EvaluateArguments {
+    pub expression: String,
+    pub frame_id: Option<i64>,
+    pub context: Option<String>,
+    pub format: Option<ValueFormat>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DisconnectArguments {
+    pub restart: Option<bool>,
+    pub terminate_debuggee: Option<bool>,
+    pub suspend_debuggee: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExceptionInfoArguments {
+    pub thread_id: i64,
+}
+
+/// The adapter's capabilities, as `initialize` reports them.
+pub fn capabilities() -> Value {
+    json!({
+        "supportsConfigurationDoneRequest": true,
+        "supportsFunctionBreakpoints": true,
+        "supportsHitConditionalBreakpoints": true,
+        "supportsEvaluateForHovers": true,
+        "supportsClipboardContext": true,
+        "supportsExceptionInfoRequest": true,
+        "supportsExceptionFilterOptions": true,
+        "exceptionBreakpointFilters": crate::dap::signals::filters(),
+        "supportTerminateDebuggee": true,
+        "supportsTerminateRequest": true,
+        "supportsInstructionBreakpoints": true,
+        "supportsDelayedStackTraceLoading": true,
+    })
+}
+
+/// Reads a memory reference: an address in hexadecimal with `0x`, or in
+/// decimal, as some clients send.
+pub fn address(reference: &str) -> Option<u64> {
+    let reference = reference.trim();
+    reference
+        .strip_prefix("0x")
+        .or_else(|| reference.strip_prefix("0X"))
+        .map_or_else(
+            || reference.parse().ok(),
+            |digits| u64::from_str_radix(digits, 16).ok(),
+        )
+}
+
+/// Offsets an address by a signed byte count, if the result is one.
+pub fn offset(address: u64, offset: Option<i64>) -> Option<u64> {
+    address.checked_add_signed(offset.unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requests_tolerate_string_sequences_and_missing_or_null_arguments() {
+        for (text, seq) in [
+            (
+                r#"{"seq":7,"type":"request","command":"threads"}"#,
+                json!(7),
+            ),
+            (
+                r#"{"seq":"7","type":"request","command":"threads","arguments":null}"#,
+                json!("7"),
+            ),
+        ] {
+            let Incoming::Request {
+                seq: parsed,
+                command,
+                arguments,
+            } = parse(text.as_bytes()).expect("request")
+            else {
+                panic!("not a request");
+            };
+            assert_eq!(
+                (parsed, command.as_str(), arguments),
+                (seq, "threads", json!({}))
+            );
+        }
+        assert!(matches!(
+            parse(br#"{"seq":1,"type":"event","event":"x"}"#),
+            Err(MessageError::UnsupportedType(kind)) if kind == "event"
+        ));
+        assert!(matches!(
+            parse(br#"{"seq":1,"type":"request"}"#),
+            Err(MessageError::MissingCommand)
+        ));
+        assert!(matches!(parse(b"[1]"), Err(MessageError::NotAnObject)));
+        assert!(matches!(parse(b"{"), Err(MessageError::Json(_))));
+        assert_eq!(
+            MessageError::request_seq(br#"{"seq":3,"command":"x"}"#),
+            Some((json!(3), "x".to_owned()))
+        );
+    }
+
+    #[test]
+    fn errors_carry_a_body_and_escape_braces_in_their_format() {
+        let response = Outgoing::Response {
+            request_seq: json!(2),
+            command: "evaluate".to_owned(),
+            result: Err(ErrorBody::new("no member {x}")),
+        }
+        .to_json(9);
+        assert_eq!(
+            response,
+            json!({
+                "seq": 9, "type": "response", "request_seq": 2, "success": false,
+                "command": "evaluate", "message": "no member {x}",
+                "body": {"error": {"id": 1, "format": "no member {{x}}", "showUser": false}},
+            })
+        );
+        let event = Outgoing::Event {
+            event: "initialized",
+            body: Value::Null,
+        }
+        .to_json(1);
+        assert_eq!(event["body"], json!({}));
+    }
+}

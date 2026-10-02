@@ -1,0 +1,176 @@
+//! Frame and variable references handed to the client.
+//!
+//! Every reference comes from one session-wide counter that never resets,
+//! so a reference from an earlier stop can never name an object of a later
+//! one: once the inferior resumes, every reference is dropped and requests
+//! naming one fail instead of being reinterpreted.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use uscope::{
+    DereferenceReference, StackFrameId, StopContext, ThreadId, ValueChildrenReference,
+    ValueExpression, ValueIndexRange, VariableKind,
+};
+
+/// The largest reference DAP clients accept: references are 32-bit signed.
+const MAX_REFERENCE: i64 = i32::MAX as i64;
+
+/// What a variables reference expands to.
+#[derive(Debug, Clone)]
+pub enum Variables {
+    /// The parameters or the locals of a frame.
+    Scope {
+        context: StopContext,
+        kind: VariableKind,
+    },
+    /// A frame's registers.
+    Registers { context: StopContext },
+    /// The children of an aggregate, named by `path` when it has a name.
+    Children {
+        context: StopContext,
+        reference: Arc<ValueChildrenReference>,
+        path: Option<ValueExpression>,
+    },
+    /// What a pointer or reference refers to.
+    Pointee {
+        context: StopContext,
+        reference: DereferenceReference,
+        name: Arc<str>,
+        path: Option<ValueExpression>,
+    },
+    /// The elements of an evaluated range, such as `values[2..6]`.
+    Range {
+        context: StopContext,
+        expression: ValueExpression,
+        range: ValueIndexRange,
+    },
+}
+
+/// The references valid at the current stop.
+#[derive(Debug)]
+pub struct References {
+    next: i64,
+    frames: HashMap<i64, StopContext>,
+    frame_ids: HashMap<(ThreadId, StackFrameId), i64>,
+    variables: HashMap<i64, Variables>,
+}
+
+/// The session ran out of references, which ends it rather than reusing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the session used every one of its {MAX_REFERENCE} references")]
+pub struct Exhausted;
+
+impl Default for References {
+    fn default() -> Self {
+        Self {
+            next: 1,
+            frames: HashMap::new(),
+            frame_ids: HashMap::new(),
+            variables: HashMap::new(),
+        }
+    }
+}
+
+impl References {
+    const fn allocate(&mut self) -> Result<i64, Exhausted> {
+        if self.next > MAX_REFERENCE {
+            return Err(Exhausted);
+        }
+        let id = self.next;
+        self.next += 1;
+        Ok(id)
+    }
+
+    /// Returns the reference of a frame, the same one each time it is asked
+    /// for during one stop.
+    pub fn frame(&mut self, context: StopContext) -> Result<i64, Exhausted> {
+        if let Some(&id) = self.frame_ids.get(&(context.thread, context.frame)) {
+            return Ok(id);
+        }
+        let id = self.allocate()?;
+        self.frames.insert(id, context);
+        self.frame_ids.insert((context.thread, context.frame), id);
+        Ok(id)
+    }
+
+    /// Returns a new reference that names nothing, such as for a row that
+    /// only labels.
+    pub const fn label(&mut self) -> Result<i64, Exhausted> {
+        self.allocate()
+    }
+
+    /// Returns a new reference for something expandable.
+    pub fn variables(&mut self, variables: Variables) -> Result<i64, Exhausted> {
+        let id = self.allocate()?;
+        self.variables.insert(id, variables);
+        Ok(id)
+    }
+
+    pub fn frame_context(&self, id: i64) -> Option<StopContext> {
+        self.frames.get(&id).copied()
+    }
+
+    pub fn variables_of(&self, id: i64) -> Option<&Variables> {
+        self.variables.get(&id)
+    }
+
+    /// Drops every reference, as when the inferior resumes.
+    pub fn clear(&mut self) {
+        self.frames.clear();
+        self.frame_ids.clear();
+        self.variables.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uscope::StopId;
+
+    fn context(stop: u64, thread: u64) -> StopContext {
+        StopContext {
+            stop: StopId::new(stop),
+            thread: ThreadId::new(thread),
+            frame: StackFrameId::INNERMOST,
+        }
+    }
+
+    #[test]
+    fn references_are_stable_within_a_stop_and_never_reused_after_it() {
+        let mut references = References::default();
+        let first = references.frame(context(1, 7)).expect("reference");
+        assert_eq!(references.frame(context(1, 7)), Ok(first));
+        let scope = references
+            .variables(Variables::Registers {
+                context: context(1, 7),
+            })
+            .expect("reference");
+        assert!(first > 0 && scope > first);
+
+        references.clear();
+        assert_eq!(references.frame_context(first), None);
+        assert!(references.variables_of(scope).is_none());
+        let again = references.frame(context(2, 7)).expect("reference");
+        assert!(again > scope, "a dropped reference is never reused");
+        assert_eq!(references.frame_context(again), Some(context(2, 7)));
+    }
+
+    #[test]
+    fn exhaustion_is_an_error_rather_than_a_wrap_around() {
+        let mut references = References {
+            next: MAX_REFERENCE,
+            ..References::default()
+        };
+        assert_eq!(references.frame(context(1, 1)), Ok(MAX_REFERENCE));
+        assert_eq!(references.frame(context(1, 2)), Err(Exhausted));
+        assert_eq!(
+            references
+                .variables(Variables::Registers {
+                    context: context(1, 1)
+                })
+                .err(),
+            Some(Exhausted)
+        );
+    }
+}

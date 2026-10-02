@@ -1,0 +1,389 @@
+//! Starting and ending sessions: launch, attach, core dumps, configuration
+//! errors, and every way a session ends.
+
+use serde_json::{Value, json};
+
+use crate::dap::{Configuration, Dap, Profile, fixture, line_of, source};
+use crate::support::{ExternalProcess, ScratchDir};
+
+#[test]
+fn every_client_profile_runs_a_program_to_its_breakpoints_and_exit() {
+    let path = source("c/basic.c");
+    let line = line_of(&path, "return uscope_value;");
+    for profile in Profile::ALL {
+        let mut dap = Dap::start(format!("{profile:?}"));
+        let started = dap.launch(
+            profile,
+            &fixture("basic"),
+            json!({}),
+            &Configuration {
+                sources: vec![(path.clone(), vec![line])],
+                functions: vec!["main".to_owned()],
+                ..Configuration::default()
+            },
+        );
+        let source_id = started.source_breakpoints[0][0]["id"].clone();
+        let function_id = started.function_breakpoints[0]["id"].clone();
+        let mut breakpoints = [
+            started.source_breakpoints[0][0].clone(),
+            started.function_breakpoints[0].clone(),
+        ];
+        if profile == Profile::DeferredLaunch {
+            // Configured before the program is loaded, the breakpoints wait
+            // for it and then resolve.
+            for breakpoint in &mut breakpoints {
+                assert_eq!(breakpoint["verified"], false);
+                assert_eq!(breakpoint["reason"], "pending");
+                let id = breakpoint["id"].clone();
+                *breakpoint = dap.event(started.mark, "breakpoint", |body| {
+                    body["breakpoint"]["id"] == id
+                })["breakpoint"]
+                    .clone();
+            }
+        }
+        assert_eq!(breakpoints[0]["verified"], true);
+        assert_eq!(breakpoints[0]["line"], line);
+        assert_eq!(breakpoints[1]["verified"], true);
+        assert_eq!(breakpoints[1]["line"], line_of(&path, "int main(void)") + 1);
+
+        let stop = dap.stopped(started.mark);
+        assert_eq!(stop.reason, "function breakpoint", "{profile:?}");
+        assert_eq!(stop.body["hitBreakpointIds"], json!([function_id]));
+        let frames = dap.inspect_as(profile, &stop);
+        assert_eq!(frames[0]["name"], "main");
+        assert_eq!(frames[0]["source"]["path"], path.display().to_string());
+
+        // The function is called twice, so its breakpoint stops twice.
+        for _ in 0..2 {
+            let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+            assert_eq!(dap.success(resumed), json!({"allThreadsContinued": true}));
+            let hit = dap.stopped(resumed.mark);
+            assert_eq!(hit.reason, "breakpoint");
+            assert_eq!(hit.body["hitBreakpointIds"], json!([source_id]));
+            let frames = dap.inspect_as(profile, &hit);
+            assert_eq!(frames[0]["name"], "breakpoint_target");
+            assert_eq!(frames[0]["line"], line);
+            assert_eq!(frames[1]["name"], "main");
+        }
+        let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+        dap.success(resumed);
+        assert_eq!(
+            dap.event(resumed.mark, "exited", |_| true),
+            json!({"exitCode": 0})
+        );
+        dap.event(resumed.mark, "terminated", |_| true);
+        dap.finish();
+    }
+}
+
+#[test]
+fn launches_pass_arguments_environment_and_directory_and_report_output() {
+    let directory = ScratchDir::new("dap-launch");
+    let mut dap = Dap::start("launch options");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("process-environment"),
+        json!({
+            "args": ["one", "two words"],
+            "env": {"USCOPE_FIXTURE_VALUE": "set", "USCOPE_FIXTURE_REMOVED": null},
+            "cwd": directory.path(),
+        }),
+        &Configuration::default(),
+    );
+    assert_eq!(
+        dap.event(started.mark, "exited", |_| true),
+        json!({"exitCode": 3})
+    );
+    // The program's output is complete when it exits.
+    assert_eq!(
+        dap.output_text(started.mark, "stdout"),
+        format!(
+            "argument 1: one\nargument 2: two words\nvalue: set\nremoved: absent\ndirectory: {}\n",
+            directory.path().display()
+        )
+    );
+    // Its stdin is empty rather than the adapter's protocol stream.
+    assert_eq!(dap.output_text(started.mark, "stderr"), "input: (eof)\n");
+    let process = dap.event(started.mark, "process", |_| true);
+    assert_eq!(process["startMethod"], "launch");
+    assert_eq!(
+        process["name"],
+        fixture("process-environment").display().to_string()
+    );
+    dap.event(started.mark, "terminated", |_| true);
+    dap.finish();
+}
+
+#[test]
+fn stop_on_entry_stops_before_the_program_runs_any_code() {
+    let mut dap = Dap::start("stop on entry");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("process-environment"),
+        json!({"stopOnEntry": true}),
+        &Configuration::default(),
+    );
+    let stop = dap.stopped(started.mark);
+    assert_eq!(stop.reason, "entry");
+    let frames = dap.inspect_as(Profile::VsCode, &stop);
+    // The first instruction belongs to the dynamic loader.
+    assert!(
+        frames[0]["name"]
+            .as_str()
+            .is_some_and(|name| name.contains("ld-linux")),
+        "{frames:?}"
+    );
+    assert!(dap.output_text(started.mark, "stdout").is_empty());
+    let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+    dap.success(resumed);
+    assert_eq!(
+        dap.event(resumed.mark, "exited", |_| true),
+        json!({"exitCode": 1})
+    );
+    dap.finish();
+}
+
+#[test]
+fn invalid_configurations_are_shown_to_the_user_and_the_session_survives() {
+    let missing = fixture("does-not-exist");
+    for (command, arguments, expected) in [
+        (
+            "launch",
+            json!({}),
+            "invalid launch configuration: missing field `program`".to_owned(),
+        ),
+        (
+            "launch",
+            json!({"program": fixture("basic"), "env": {"PATH": 1}}),
+            "invalid launch configuration at env.PATH: invalid type: integer `1`, expected a string".to_owned(),
+        ),
+        (
+            "launch",
+            json!({"program": fixture("basic"), "console": "integratedTerminal"}),
+            "invalid launch configuration at console: \"integratedTerminal\" is not supported; program output appears in the debug console".to_owned(),
+        ),
+        (
+            "launch",
+            json!({"program": missing}),
+            format!("failed to load {}: ", missing.display()),
+        ),
+        (
+            "attach",
+            json!({"program": fixture("basic")}),
+            "invalid attach configuration: give `pid` or `coreFile`".to_owned(),
+        ),
+        (
+            "attach",
+            json!({"pid": "not a number"}),
+            "invalid attach configuration at pid: expected a positive process id".to_owned(),
+        ),
+    ] {
+        let mut dap = Dap::start(format!("{command} {arguments}"));
+        dap.initialize(Profile::VsCode);
+        let sent = dap.send(command, arguments);
+        let response = dap.response(sent);
+        assert_eq!(response["success"], false);
+        assert_eq!(response["body"]["error"]["showUser"], true);
+        let message = response["message"].as_str().expect("message");
+        assert!(message.starts_with(&expected), "{message}");
+        // Requests still work after the failure.
+        dap.request("threads", Value::Null);
+        dap.finish();
+    }
+}
+
+#[test]
+fn requests_out_of_order_are_refused_without_ending_the_session() {
+    let mut dap = Dap::start("ordering");
+    assert_eq!(
+        dap.request_error("threads", Value::Null),
+        "the client must send initialize before threads"
+    );
+    dap.initialize(Profile::Neovim);
+    assert_eq!(
+        dap.request_error("initialize", json!({"adapterID": "uscope"})),
+        "the session is already initialized"
+    );
+    assert_eq!(
+        dap.request_error("stackTrace", json!({"threadId": 1})),
+        "the program is running; this request needs it stopped"
+    );
+    assert_eq!(
+        dap.request_error("frobnicate", json!({})),
+        "the 'frobnicate' request is not supported"
+    );
+    // A thread to pause exists even before anything is launched.
+    assert_eq!(
+        dap.request("threads", Value::Null),
+        json!({"threads": [{"id": 1, "name": "program"}]})
+    );
+    let launch = dap.send("launch", json!({"program": fixture("basic")}));
+    dap.request("configurationDone", Value::Null);
+    dap.success(launch);
+    assert_eq!(
+        dap.request_error("launch", json!({"program": fixture("basic")})),
+        "the session already has a program; start a new session for another"
+    );
+    assert_eq!(
+        dap.request_error("configurationDone", Value::Null),
+        "configuration is already done"
+    );
+    dap.event(launch.mark, "terminated", |_| true);
+    dap.finish();
+}
+
+#[test]
+fn disconnecting_kills_a_launched_program_whether_running_or_stopped() {
+    for stopped in [false, true] {
+        let mut dap = Dap::start(format!("disconnect stopped={stopped}"));
+        let path = source("c/spin.c");
+        let started = dap.launch(
+            Profile::Helix,
+            &fixture("spin"),
+            json!({"stopOnEntry": stopped}),
+            &Configuration::default(),
+        );
+        if stopped {
+            dap.stopped(started.mark);
+        } else {
+            dap.event(started.mark, "process", |_| true);
+        }
+        let pid = dap.process_id().expect("process id");
+        let sent = dap.send("disconnect", json!({}));
+        dap.success(sent);
+        // The program's end is reported before the disconnect response.
+        let messages = dap.messages_since(sent.mark);
+        let position = |predicate: &dyn Fn(&Value) -> bool| messages.iter().position(predicate);
+        let exited = position(&|message| message["event"] == "exited");
+        let terminated = position(&|message| message["event"] == "terminated");
+        let response = position(&|message| message["type"] == "response");
+        assert!(exited < terminated && terminated < response, "{messages:?}");
+        assert_eq!(
+            messages[exited.expect("exited")]["body"],
+            json!({"exitCode": 128 + 9})
+        );
+        dap.close_stdin();
+        dap.finish();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists() || is_zombie(pid));
+        let _ = path;
+    }
+}
+
+#[test]
+fn ending_input_or_signaling_the_adapter_ends_the_session_and_the_program() {
+    for signal in [
+        None,
+        Some(nix::sys::signal::Signal::SIGTERM),
+        Some(nix::sys::signal::Signal::SIGINT),
+    ] {
+        let mut dap = Dap::start(format!("end by {signal:?}"));
+        let started = dap.launch(
+            Profile::VsCode,
+            &fixture("spin"),
+            json!({}),
+            &Configuration::default(),
+        );
+        dap.event(started.mark, "process", |_| true);
+        match signal {
+            None => dap.close_stdin(),
+            Some(signal) => dap.signal(signal),
+        }
+        dap.wait_for_exit();
+        dap.close_stdin();
+        dap.finish();
+    }
+}
+
+#[test]
+fn attaching_continues_the_process_and_detaching_leaves_it_running() {
+    for stop_on_entry in [false, true] {
+        let mut process = ExternalProcess::spawn(&fixture("attach"));
+        let pid = process.process_id().get();
+        let mut dap = Dap::start(format!("attach stopOnEntry={stop_on_entry}"));
+        let started = dap.begin(
+            Profile::VsCode,
+            (
+                "attach",
+                json!({"pid": pid.to_string(), "stopOnEntry": stop_on_entry}),
+            ),
+            &Configuration {
+                functions: vec!["attach_breakpoint".to_owned()],
+                ..Configuration::default()
+            },
+        );
+        let event = dap.event(started.mark, "process", |_| true);
+        assert_eq!(event["startMethod"], "attach");
+        assert_eq!(event["systemProcessId"], pid);
+        if stop_on_entry {
+            let stop = dap.stopped(started.mark);
+            assert_eq!(stop.reason, "entry");
+            dap.inspect_as(Profile::VsCode, &stop);
+            let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+            dap.success(resumed);
+        }
+        let mark = dap.mark();
+        process.release();
+        let stop = dap.stopped(mark);
+        assert_eq!(stop.reason, "function breakpoint");
+        let frames = dap.inspect_as(Profile::VsCode, &stop);
+        assert_eq!(frames[0]["name"], "attach_breakpoint");
+        // Detaching leaves the process running; it then finishes alone.
+        dap.finish();
+        assert_eq!(process.wait().code(), Some(23));
+    }
+}
+
+#[test]
+fn attaching_with_terminate_debuggee_kills_the_process() {
+    let process = ExternalProcess::spawn(&fixture("attach"));
+    let mut dap = Dap::start("attach and terminate");
+    let started = dap.begin(
+        Profile::Neovim,
+        ("attach", json!({"pid": process.process_id().get()})),
+        &Configuration::default(),
+    );
+    dap.event(started.mark, "process", |_| true);
+    let sent = dap.send("disconnect", json!({"terminateDebuggee": true}));
+    dap.success(sent);
+    dap.event(sent.mark, "exited", |_| true);
+    dap.close_stdin();
+    dap.wait_for_exit();
+    dap.abandon();
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&process.wait()),
+        Some(9)
+    );
+}
+
+#[test]
+fn core_dumps_open_stopped_at_their_signal_and_refuse_to_run() {
+    let mut dap = Dap::start("core");
+    let started = dap.begin(
+        Profile::VsCode,
+        (
+            "attach",
+            json!({"coreFile": fixture("crash-gcc-o0-segv.core"), "program": fixture("crash-gcc-o0")}),
+        ),
+        &Configuration::default(),
+    );
+    let stop = dap.stopped(started.mark);
+    assert_eq!(stop.reason, "exception");
+    assert_eq!(stop.body["text"], "SIGSEGV");
+    let info = dap.request("exceptionInfo", json!({"threadId": stop.thread}));
+    assert_eq!(info["exceptionId"], "SIGSEGV");
+    assert_eq!(info["breakMode"], "always");
+    let frames = dap.inspect_as(Profile::VsCode, &stop);
+    assert!(frames.iter().any(|frame| {
+        frame["source"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("crash/main.c"))
+    }));
+    let message = dap.request_error("continue", json!({"threadId": stop.thread}));
+    assert!(message.contains("core dump"), "{message}");
+    dap.finish();
+}
+
+fn is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .is_ok_and(|status| status.contains("State:\tZ"))
+}
