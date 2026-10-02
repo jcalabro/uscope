@@ -889,8 +889,7 @@ impl<'a> Engine<'a> {
                 }
             };
             let next = position + length as u64;
-            let bytes = view.bytes[..length].to_vec();
-            instructions.push(self.instruction(address, bytes, content));
+            instructions.push(self.instruction(address, &view.bytes[..length], content));
 
             // A known start inside the range takes precedence over the range
             // end: decoding resumes there rather than ending.
@@ -966,7 +965,7 @@ impl<'a> Engine<'a> {
     fn instruction(
         &self,
         address: VirtualAddress,
-        bytes: Vec<u8>,
+        bytes: &[u8],
         content: InstructionContent,
     ) -> DisassembledInstruction {
         DisassembledInstruction {

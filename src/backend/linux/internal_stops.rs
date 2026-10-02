@@ -9,8 +9,6 @@
 //! or a signal, gives the barrier that reason, and the stop is published as
 //! usual once the edits apply.
 
-use std::collections::BTreeSet;
-
 use nix::unistd::Pid;
 
 use crate::protocol::StopReason;
@@ -210,11 +208,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// important reason any thread of the execution recorded, or becomes
     /// internal when none did.
     pub(super) fn settle_edited_reasons(&mut self) {
-        let breakpoints = self
-            .breakpoints
-            .iter()
-            .map(|breakpoint| breakpoint.id)
-            .collect::<BTreeSet<_>>();
+        // A stop holds a hit or two, so looking each up beats indexing every
+        // breakpoint at every stop.
+        let breakpoints = &self.breakpoints;
+        let exists = |id| breakpoints.iter().any(|breakpoint| breakpoint.id == id);
         let Some(inferior) = self.inferior.as_mut() else {
             return;
         };
@@ -237,7 +234,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     let hits = hits
                         .iter()
                         .copied()
-                        .filter(|hit| breakpoints.contains(&hit.breakpoint))
+                        .filter(|hit| exists(hit.breakpoint))
                         .collect::<Vec<_>>();
                     let address = *address;
                     thread.reason = (!hits.is_empty()).then(|| StopReason::Breakpoint {

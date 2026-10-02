@@ -2,6 +2,7 @@ mod support;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use object::{Object, ObjectSection, ObjectSymbol, ObjectSymbolTable};
@@ -1480,7 +1481,13 @@ async fn indirect_branch_sites(
 /// call, and return in its own code, the C library, and the dynamic loader,
 /// and checks that executing each one transfers control where its target
 /// said. Returns how many branches of each kind were checked.
-async fn assert_executed_targets(fixture: &str) -> BTreeMap<&'static str, usize> {
+///
+/// `library_sites` keeps each shared library's sites by image address, so a
+/// library that several fixtures load is decoded once.
+async fn assert_executed_targets(
+    fixture: &str,
+    library_sites: &mut BTreeMap<Arc<PathBuf>, BTreeSet<u64>>,
+) -> BTreeMap<&'static str, usize> {
     let mut scenario = Scenario::launch(fixture);
     scenario.add_breakpoint("main").await;
     scenario.run_to_stop().await;
@@ -1489,7 +1496,18 @@ async fn assert_executed_targets(fixture: &str) -> BTreeMap<&'static str, usize>
     let layout = ["disasm_marked_data", "disasm_hidden_data"];
     let mut sites = indirect_branch_sites(&scenario, &modules, fixture, &layout).await;
     for library in ["libc.so.6", "ld-linux-x86-64.so.2"] {
-        sites.extend(indirect_branch_sites(&scenario, &modules, library, &[]).await);
+        let (record, _) = modules.named(library);
+        let bias = record.module.load_bias;
+        if !library_sites.contains_key(&record.path) {
+            let found = indirect_branch_sites(&scenario, &modules, library, &[]).await;
+            let found = found.into_iter().map(|site| site.get() - bias).collect();
+            library_sites.insert(Arc::clone(&record.path), found);
+        }
+        sites.extend(
+            library_sites[&record.path]
+                .iter()
+                .map(|site| VirtualAddress::new(bias + site)),
+        );
     }
     for site in &sites {
         scenario
@@ -1556,8 +1574,9 @@ async fn assert_executed_targets(fixture: &str) -> BTreeMap<&'static str, usize>
 /// every one a program runs through lazy binding, formatted output, and exit.
 #[tokio::test]
 async fn indirect_targets_are_where_execution_goes() {
+    let mut library_sites = BTreeMap::new();
     for fixture in ["disassembly-gcc-o0", "disassembly-clang-o2-nopie"] {
-        let verified = assert_executed_targets(fixture).await;
+        let verified = assert_executed_targets(fixture, &mut library_sites).await;
         for kind in [
             "register",
             "memory the instruction addresses",
