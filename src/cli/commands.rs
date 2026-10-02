@@ -25,6 +25,7 @@ const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    Handle,
     Break,
     Breakpoints,
     Info,
@@ -132,8 +133,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         Info,
         "info",
         [],
-        "info breakpoints|watchpoints|core|symbol [0xaddress]",
+        "info breakpoints|watchpoints|signals|core|symbol [0xaddress]",
         "Show debugger information, or the symbol and section containing an address"
+    ),
+    command!(
+        Handle,
+        "handle",
+        [],
+        "handle <signal> [action] [action] [action]",
+        "Show or change how a signal is handled: stop|nostop, print|noprint, pass|nopass"
     ),
     command!(
         Delete,
@@ -378,8 +386,10 @@ impl Cli {
                     &debugger.describe_address(parse_address(address)?).await?,
                     renderer,
                 ),
+                ("signals" | "handle", None) => self.list_signals().await?,
                 _ => return Err(spec.usage_error()),
             },
+            Command::Handle => self.handle_signal(&arguments).await?,
             Command::Delete => self.delete_breakpoints(arguments[0], spec).await?,
             Command::Ignore => self.ignore(arguments[0], arguments[1], spec).await?,
             Command::Hits => self.hits(arguments[0], arguments[1], spec).await?,
@@ -392,14 +402,14 @@ impl Cli {
             Command::Watchpoints => self.list_watchpoints().await?,
             Command::Unwatch => self.delete_watchpoints(arguments[0], spec).await?,
             Command::Run => {
-                let reason = debugger.run_with(self.launch.options()).await?;
-                self.stop_with_source(&reason).await
+                let (signals, reason) = self
+                    .report_signals(debugger.run_with(self.launch.options()))
+                    .await?;
+                join_lines(&signals, &self.stop_with_source(&reason).await)
             }
             Command::Continue => {
-                let reason = debugger
-                    .resume_with_exception(self.resume_disposition().await?)
-                    .await?;
-                self.stop_with_source(&reason).await
+                let (signals, reason) = self.report_signals(debugger.resume()).await?;
+                join_lines(&signals, &self.stop_with_source(&reason).await)
             }
             Command::Print => match first {
                 Some(expression) => self.print(expression).await?,
@@ -577,11 +587,8 @@ impl Cli {
     }
 
     async fn step(&self, kind: StepKind) -> Result<String> {
-        let reason = self
-            .debugger
-            .step_with_exception(kind, self.resume_disposition().await?)
-            .await?;
-        Ok(self.stop_with_source(&reason).await)
+        let (signals, reason) = self.report_signals(self.debugger.step(kind)).await?;
+        Ok(join_lines(&signals, &self.stop_with_source(&reason).await))
     }
 
     async fn list_breakpoints(&self) -> Result<String> {
@@ -1087,6 +1094,59 @@ fn parse_breakpoint_spec(argument: &str, spec: &CommandSpec) -> Result<Breakpoin
             function: location.to_owned(),
         },
     })
+}
+
+/// Joins two parts of a command's output, either of which may be empty.
+fn join_lines(first: &str, second: &str) -> String {
+    match (first.is_empty(), second.is_empty()) {
+        (true, _) => second.to_owned(),
+        (false, true) => first.to_owned(),
+        (false, false) => format!("{first}\n{second}"),
+    }
+}
+
+impl Cli {
+    async fn list_signals(&self) -> Result<String> {
+        let mut policies = Vec::new();
+        for code in uscope::signal_codes() {
+            policies.push((code, self.debugger.signal_policy(code).await?));
+        }
+        Ok(format::signal_policies(&policies, self.renderers.stdout))
+    }
+
+    /// Shows or changes one signal's policy with gdb's actions: `stop`
+    /// implies `print`, and `noprint` implies `nostop`.
+    async fn handle_signal(&self, arguments: &[&str]) -> Result<String> {
+        let name = arguments[0];
+        let code = uscope::signal_named(name).ok_or_else(|| anyhow!("unknown signal '{name}'"))?;
+        let mut policy = self.debugger.signal_policy(code).await?;
+        for action in &arguments[1..] {
+            match *action {
+                "stop" => {
+                    policy.stop = true;
+                    policy.print = true;
+                }
+                "nostop" => policy.stop = false,
+                "print" => policy.print = true,
+                "noprint" => {
+                    policy.print = false;
+                    policy.stop = false;
+                }
+                "pass" | "noignore" => policy.pass = true,
+                "nopass" | "ignore" => policy.pass = false,
+                other => bail!(
+                    "unknown signal action '{other}'; use stop, nostop, print, noprint, pass, or nopass"
+                ),
+            }
+        }
+        if arguments.len() > 1 {
+            self.debugger.set_signal_policy(code, policy).await?;
+        }
+        Ok(format::signal_policies(
+            &[(code, policy)],
+            self.renderers.stdout,
+        ))
+    }
 }
 
 #[cfg(test)]

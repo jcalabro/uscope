@@ -715,10 +715,29 @@ pub enum StepKind {
 /// Selects what happens to an exception pending on a stopped thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExceptionDisposition {
-    /// Preserve the target's original exception delivery.
+    /// Deliver a pending signal that its [`SignalPolicy`] passes.
     Pass,
     /// Discard the pending exception.
     Suppress,
+}
+
+/// What the debugger does when the inferior receives a signal.
+///
+/// Signals are named by their platform exception code; see
+/// [`crate::signal_named`]. The defaults follow gdb: signals programs use
+/// for routine work, such as `SIGALRM`, `SIGCHLD`, and Go's `SIGURG`,
+/// neither stop nor print and are passed; `SIGINT` stops and is not
+/// passed; every other signal stops and is passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalPolicy {
+    /// Stop every thread and report the signal as
+    /// [`StopReason::Exception`].
+    pub stop: bool,
+    /// Report a signal that does not stop with
+    /// [`DebuggerEvent::SignalReceived`].
+    pub print: bool,
+    /// Deliver the signal to the inferior; one not passed is discarded.
+    pub pass: bool,
 }
 
 /// Platform-neutral information about an exception that stopped an inferior.
@@ -958,6 +977,14 @@ pub enum DebuggerEvent {
         revision: u64,
         process_id: ProcessId,
     },
+    /// A thread received a signal whose policy neither stops nor discards
+    /// its report: it was delivered or discarded and the thread ran on.
+    SignalReceived {
+        revision: u64,
+        process_id: ProcessId,
+        thread_id: ThreadId,
+        exception: ExceptionInfo,
+    },
     /// The set of logical breakpoints changed.
     BreakpointsChanged { revision: u64 },
     /// The set of armed watchpoints changed.
@@ -986,6 +1013,7 @@ impl DebuggerEvent {
             | Self::ModuleUnloaded { revision, .. }
             | Self::InferiorExited { revision, .. }
             | Self::InferiorDetached { revision, .. }
+            | Self::SignalReceived { revision, .. }
             | Self::BreakpointsChanged { revision }
             | Self::WatchpointsChanged { revision }
             | Self::WatchpointsInvalidated { revision, .. } => *revision,
@@ -1178,6 +1206,15 @@ pub enum Request {
         thread_id: ThreadId,
         frame: StackFrameId,
         reply: Reply<StackFrame>,
+    },
+    SignalPolicy {
+        signal: u64,
+        reply: Reply<SignalPolicy>,
+    },
+    SetSignalPolicy {
+        signal: u64,
+        policy: SignalPolicy,
+        reply: Reply<SignalPolicy>,
     },
     Shutdown {
         reply: Reply<()>,

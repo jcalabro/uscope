@@ -18,18 +18,12 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::ValueEnum;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
-use uscope::{
-    AssemblySyntax, DebuggerHandle, Error, ExceptionDisposition, LaunchOptions, StopReason,
-    ThreadState,
-};
+use uscope::{AssemblySyntax, DebuggerEvent, DebuggerHandle, Error, LaunchOptions, StopReason};
 
 use crate::Args;
 use terminal::{
     ColorChoice, ColorEnvironment, Renderer, Role, color_enabled, terminal_control_enabled,
 };
-
-/// The Linux signal number of `SIGINT`.
-const SIGINT: u64 = 2;
 
 /// Renderers for each output stream.
 #[derive(Clone, Copy)]
@@ -303,30 +297,40 @@ impl Cli {
         }
     }
 
-    /// Chooses how to resume past exceptions pending at the current stop.
-    ///
-    /// A terminal Ctrl-C signals the inferior's process group as well as
-    /// uscope, so, like gdb, a SIGINT that stopped the inferior is discarded
-    /// rather than delivered. Any other pending exception is delivered.
-    async fn resume_disposition(&self) -> Result<ExceptionDisposition> {
-        let snapshot = self.debugger.snapshot().await?;
-        let mut pending = snapshot
-            .threads
-            .iter()
-            .filter_map(|thread| match &thread.state {
-                ThreadState::Stopped {
-                    reason: Some(StopReason::Exception(exception)),
-                } => Some(exception.code),
-                _ => None,
-            })
-            .peekable();
-        Ok(
-            if pending.peek().is_some() && pending.all(|code| code == SIGINT) {
-                ExceptionDisposition::Suppress
-            } else {
-                ExceptionDisposition::Pass
-            },
-        )
+    /// Waits for an execution request, prefixing its result with a line
+    /// for each signal the inferior received without stopping.
+    async fn report_signals(
+        &self,
+        execution: impl std::future::Future<Output = uscope::Result<StopReason>>,
+    ) -> Result<(String, StopReason)> {
+        let mut events = self.debugger.subscribe();
+        let mut lines = Vec::new();
+        let mut record = |event: Result<DebuggerEvent, _>| {
+            if let Ok(DebuggerEvent::SignalReceived {
+                thread_id,
+                exception,
+                ..
+            }) = event
+            {
+                lines.push(format::signal_received(
+                    thread_id,
+                    &exception,
+                    self.renderers.stdout,
+                ));
+            }
+        };
+        tokio::pin!(execution);
+        let reason = loop {
+            tokio::select! {
+                biased;
+                event = events.recv() => record(event),
+                reason = &mut execution => break reason?,
+            }
+        };
+        while let Ok(event) = events.try_recv() {
+            record(Ok(event));
+        }
+        Ok((lines.join("\n"), reason))
     }
 
     fn report_error(&self, error: &anyhow::Error) {

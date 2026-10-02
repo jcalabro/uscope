@@ -111,6 +111,8 @@ pub enum Error {
     NotStopped,
     #[error("the inferior is already stopped")]
     AlreadyStopped,
+    #[error("{0} is not a signal of this target")]
+    UnknownSignal(u64),
     #[error("thread {0} is not a thread of the inferior")]
     UnknownThread(crate::ThreadId),
     #[error("the requested stopped snapshot is no longer current")]

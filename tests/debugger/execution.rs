@@ -1006,24 +1006,13 @@ async fn synchronous_faults_are_retained_and_delivered() {
 async fn forked_children_are_released_without_inherited_breakpoints() {
     let mut scenario = Scenario::launch("fork");
     scenario.add_breakpoint("shared_work").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
     // The child also runs shared_work; an inherited trap would kill it with
-    // SIGTRAP. The parent's SIGCHLD reports a normal exit (CLD_EXITED). The
-    // released child can exit before the parent reaches its breakpoint.
-    let first = scenario.run_to_stop().await;
-    let second = scenario.resume_to_stop().await;
-    let child_exited = |reason: &StopReason| {
-        matches!(
-            reason,
-            StopReason::Exception(exception)
-                if exception.code == 17 && exception.description.contains("si_code 1")
-        )
-    };
-    let breakpoint = |reason: &StopReason| matches!(reason, StopReason::Breakpoint { .. });
-    assert!(
-        (breakpoint(&first) && child_exited(&second))
-            || (child_exited(&first) && breakpoint(&second)),
-        "{first:?}, {second:?}"
-    );
+    // SIGTRAP and the parent would exit 5. Its SIGCHLD does not stop the
+    // parent.
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))

@@ -115,7 +115,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             .is_some_and(|active| {
                 matches!(
                     &active.kind,
-                    ActiveKind::Step { start, .. } if !start.plan_addresses.is_empty()
+                    ActiveKind::Step { start, .. }
+                        if !start.plan_addresses.is_empty() || start.signal_guard.is_some()
                 )
             });
         if uses_plan_breakpoints {
@@ -824,6 +825,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             plan_addresses,
             epilogue_traversal: None,
             return_traversal: None,
+            signal_guard: None,
         })
     }
 
@@ -897,6 +899,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             plan_addresses,
             epilogue_traversal: None,
             return_traversal: None,
+            signal_guard: None,
         })
     }
 

@@ -65,12 +65,31 @@ pub use protocol::{
     CoreModule, CoreModuleState, DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId,
     ExitStatus, FramePresentation, GlobalVariableQuery, HitComparison, HitCondition, InferiorState,
     InvalidatedWatchpoint, LaunchOptions, ModuleIdentity, PresentedFrame, ProcessId,
-    ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind, StopId, StopReason,
-    ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery, WatchAccess, WatchScope,
-    WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
+    ResolvedBreakpointLocation, ResumeScope, SignalPolicy, StateSnapshot, StepKind, StopId,
+    StopReason, ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery, WatchAccess,
+    WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
     WatchpointInvalidation, WatchpointSpec,
 };
 pub use source_map::SourcePathMap;
+
+/// Finds a signal's exception code by name, with or without its `SIG`
+/// prefix and in any case, or by number: `SIGUSR1`, `usr1`, `10`, `SIG34`.
+#[must_use]
+pub fn signal_named(name: &str) -> Option<u64> {
+    backend::signal_named(name)
+}
+
+/// Names the signal with an exception code, such as `SIGSEGV`. Real-time
+/// signals are named by number, as gdb does: `SIG34`.
+#[must_use]
+pub fn signal_name(code: u64) -> Option<String> {
+    backend::signal_name(code)
+}
+
+/// The exception codes of every signal this target defines, in order.
+pub fn signal_codes() -> impl Iterator<Item = u64> {
+    backend::signal_codes()
+}
 
 /// Makes every TLS lookup in this process compute addresses from glibc's own
 /// layout descriptors instead of asking `libthread_db`, which is otherwise
@@ -422,6 +441,29 @@ impl DebuggerHandle {
     pub async fn remove_all_watchpoints(&self) -> Result<Arc<[Watchpoint]>> {
         self.request(|reply| Request::RemoveAllWatchpoints { reply })
             .await
+    }
+
+    /// Returns how the debugger handles a signal, named by its exception
+    /// code.
+    pub async fn signal_policy(&self, signal: u64) -> Result<SignalPolicy> {
+        self.request(|reply| Request::SignalPolicy { signal, reply })
+            .await
+    }
+
+    /// Changes how the debugger handles a signal and returns the previous
+    /// policy. The change applies at once, also while the inferior runs, and
+    /// lasts for the whole session.
+    pub async fn set_signal_policy(
+        &self,
+        signal: u64,
+        policy: SignalPolicy,
+    ) -> Result<SignalPolicy> {
+        self.request(|reply| Request::SetSignalPolicy {
+            signal,
+            policy,
+            reply,
+        })
+        .await
     }
 
     /// Launches the inferior and acknowledges once native execution has started.

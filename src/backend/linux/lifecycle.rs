@@ -3,10 +3,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::signals::{Signal, WaitEvent};
 use nix::errno::Errno;
 use nix::libc;
-use nix::sys::signal::Signal as NixSignal;
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 
 use crate::backend::process_start_time;
@@ -17,7 +16,7 @@ use crate::protocol::{
 use crate::{Error, LoadedModule, Result};
 
 use super::breakpoints::install_logical_breakpoint;
-use super::native::{LinuxTraceOps, wait_status_pid};
+use super::native::{LinuxTraceOps, wait_for};
 use super::{
     ActiveExecution, ActiveKind, ClassifiedStop, Controller, ExpectedStop, Inferior,
     InferiorOrigin, LinuxError, NativeThreadState, StopBarrier, TraceThread, Waiter, backend_error,
@@ -37,7 +36,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let waiter = match self.ptrace.spawn_waiter(self.message_sender.clone()) {
                     Ok(waiter) => waiter,
                     Err(error) => {
-                        let _ = self.ptrace.kill(pid, NixSignal::SIGKILL);
+                        let _ = self.ptrace.kill(pid, Signal::SIGKILL);
                         let _ = self.ptrace.reap(pid);
                         let _ = reply.send(Err(error));
                         return;
@@ -193,12 +192,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         for &pid in seized {
             loop {
-                match waitpid(pid, Some(WaitPidFlag::__WALL)) {
-                    Ok(WaitStatus::Stopped(..) | WaitStatus::PtraceEvent(..)) => {
+                match wait_for(pid, libc::__WALL) {
+                    Ok(Some(WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(..))) => {
                         let _ = self.ptrace.detach(pid, None);
                         break;
                     }
-                    Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..)) | Err(Errno::ECHILD) => {
+                    Ok(Some(WaitEvent::Exited(..) | WaitEvent::Signaled(..)))
+                    | Err(Errno::ECHILD) => {
                         break;
                     }
                     Ok(_) | Err(Errno::EINTR) => {}
@@ -392,7 +392,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             // The killed child's exit status is still delivered.
             inferior.unowned_stops.remove(&child);
             inferior.retired_threads.insert(child);
-            let _ = self.ptrace.kill(child, NixSignal::SIGKILL);
+            let _ = self.ptrace.kill(child, Signal::SIGKILL);
             return self.begin_visible_stop(
                 parent,
                 StopReason::Unclassifiable {
@@ -482,7 +482,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|()| self.ptrace.detach(child, None))
             .is_err()
         {
-            let _ = self.ptrace.kill(child, NixSignal::SIGKILL);
+            let _ = self.ptrace.kill(child, Signal::SIGKILL);
             inferior.retired_threads.insert(child);
         }
     }
@@ -722,10 +722,8 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// inferior: a retired thread's late exit, a fork child, or a new
     /// thread's first stop arriving before its clone event. Returns whether
     /// the status needed nothing more.
-    pub(super) fn absorb_untracked_wait(&mut self, status: &WaitStatus) -> bool {
-        let Some(pid) = wait_status_pid(status) else {
-            return false;
-        };
+    pub(super) fn absorb_untracked_wait(&mut self, status: &WaitEvent) -> bool {
+        let pid = status.pid();
         let Some(inferior) = self.inferior.as_mut() else {
             return false;
         };
@@ -733,12 +731,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             return false;
         }
         match status {
-            WaitStatus::Exited(..) | WaitStatus::Signaled(..) => {
+            WaitEvent::Exited(..) | WaitEvent::Signaled(..) => {
                 inferior.retired_threads.remove(&pid);
                 inferior.fork_children.remove(&pid);
                 inferior.unowned_stops.remove(&pid);
             }
-            WaitStatus::Stopped(..) | WaitStatus::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP) => {
+            WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP) => {
                 if inferior.fork_children.remove(&pid) {
                     self.release_fork_child(pid);
                 } else {
@@ -764,11 +762,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.release_fork_child(pid);
         }
         for pid in pending {
-            let _ = self.ptrace.kill(pid, NixSignal::SIGKILL);
+            let _ = self.ptrace.kill(pid, Signal::SIGKILL);
         }
     }
 
-    pub(super) fn handle_shutdown_wait(&mut self, status: WaitStatus) -> bool {
+    pub(super) fn handle_shutdown_wait(&mut self, status: WaitEvent) -> bool {
         let attached = self
             .inferior
             .as_ref()
@@ -784,16 +782,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.handle_detach_wait(status);
         }
         let result = match status {
-            WaitStatus::Exited(pid, code) => {
+            WaitEvent::Exited(pid, code) => {
                 self.handle_terminal(pid, ExitStatus::Code(i64::from(code)))
             }
-            WaitStatus::Signaled(pid, signal, _) => {
+            WaitEvent::Signaled(pid, signal, _) => {
                 self.handle_terminal(pid, ExitStatus::Terminated(exception_info(signal)))
             }
-            WaitStatus::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
+            WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
                 self.ptrace.continue_during_shutdown(pid)
             }
-            WaitStatus::Stopped(pid, _) | WaitStatus::PtraceEvent(pid, _, _) => self
+            WaitEvent::Stopped(pid, _) | WaitEvent::PtraceEvent(pid, _, _) => self
                 .kill_inferior()
                 .and_then(|()| self.ptrace.continue_during_shutdown(pid)),
             other => Err(backend_error(LinuxError::UnexpectedWait(format!(
@@ -807,24 +805,24 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.inferior.is_some()
     }
 
-    pub(super) fn handle_detach_wait(&mut self, status: WaitStatus) -> bool {
+    pub(super) fn handle_detach_wait(&mut self, status: WaitEvent) -> bool {
         let result = match status {
-            WaitStatus::Exited(pid, code) => {
+            WaitEvent::Exited(pid, code) => {
                 self.handle_terminal(pid, ExitStatus::Code(i64::from(code)))
             }
-            WaitStatus::Signaled(pid, signal, _) => {
+            WaitEvent::Signaled(pid, signal, _) => {
                 self.handle_terminal(pid, ExitStatus::Terminated(exception_info(signal)))
             }
-            WaitStatus::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
+            WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
                 self.ptrace.continue_execution(pid, None)
             }
-            WaitStatus::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_CLONE => {
+            WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_CLONE => {
                 self.handle_clone_during_detach(pid)
             }
-            WaitStatus::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_FORK => {
+            WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_FORK => {
                 self.handle_fork_during_detach(pid)
             }
-            WaitStatus::Stopped(pid, signal) => {
+            WaitEvent::Stopped(pid, signal) => {
                 let classified = self.classify_stop(pid, signal);
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning);
                 inferior.and_then(|inferior| {
@@ -836,7 +834,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     Ok(())
                 })
             }
-            WaitStatus::PtraceEvent(pid, _, _) => {
+            WaitEvent::PtraceEvent(pid, _, _) => {
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning);
                 inferior.and_then(|inferior| {
                     inferior.thread_mut(pid)?.state = NativeThreadState::Stopped;
@@ -961,10 +959,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             record(waiter.stop_and_join());
         }
         for (&pid, thread) in &inferior.threads {
-            record(
-                self.ptrace
-                    .detach(pid, thread.pending_signal.map(|pending| pending.signal)),
-            );
+            let signal = thread
+                .pending_signal
+                .map(|pending| pending.signal)
+                .filter(|signal| self.signals.get(*signal).pass);
+            record(self.ptrace.detach(pid, signal));
         }
         if !inferior.watch.watchpoints.is_empty() {
             self.publish_watchpoints_changed();
@@ -982,7 +981,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Some(inferior) = self.inferior.as_ref() else {
             return Ok(());
         };
-        self.ptrace.kill(inferior.tgid, NixSignal::SIGKILL)
+        self.ptrace.kill(inferior.tgid, Signal::SIGKILL)
     }
 
     pub(super) fn fail_inferior(&mut self, error: Error) {

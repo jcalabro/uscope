@@ -1089,7 +1089,7 @@ fn command_argument_errors_use_the_registered_canonical_usage() {
         let stderr = String::from_utf8(output.stderr).expect("UTF-8 error output");
         assert!(!output.status.success(), "{command}");
         assert!(
-            stderr.contains("usage: info breakpoints|watchpoints|core|symbol [0xaddress]"),
+            stderr.contains("usage: info breakpoints|watchpoints|signals|core|symbol [0xaddress]"),
             "{command}: {stderr}"
         );
     }
@@ -2588,4 +2588,79 @@ fn registers_show_the_selected_frames_own_values() {
         .find(|word| word.starts_with("0x"))
         .expect("frame address");
     assert!(lines[rip].ends_with(frame_address), "{stdout}");
+}
+
+#[test]
+fn handle_shows_and_changes_signal_policies_like_gdb() {
+    let stdout = assert_success(uscope(&[
+        "--batch",
+        "--eval",
+        "handle SIGUSR1",
+        "--eval",
+        "handle usr1 nostop",
+        "--eval",
+        "handle SIGALRM print nopass",
+        "--eval",
+        "handle SIG35 noprint",
+        "--eval",
+        "run",
+        "build/test-programs/signal-policy",
+    ]));
+    let lines = stdout.lines().collect::<Vec<_>>();
+    let shown = |name: &str, stop: &str, print: &str, pass: &str| {
+        format!("{name:<8}  {stop:<4}  {print:<5}  {pass}")
+    };
+    // `nostop` keeps printing; `noprint` implies `nostop`.
+    for expected in [
+        shown("SIGUSR1", "yes", "yes", "yes"),
+        shown("SIGUSR1", "no", "yes", "yes"),
+        shown("SIGALRM", "no", "yes", "no"),
+        shown("SIG35", "no", "no", "yes"),
+    ] {
+        assert!(
+            lines.contains(&expected.as_str()),
+            "{expected:?}:\n{stdout}"
+        );
+    }
+    // Received signals are reported in order before the program exits with
+    // every handler but the discarded SIGALRM's.
+    let usr1 = line_index(&lines, 0, |line| {
+        line.starts_with("thread ") && line.contains(" received SIGUSR1 (si_code ")
+    });
+    let alarm = line_index(&lines, usr1, |line| line.contains(" received SIGALRM "));
+    let exited = line_index(&lines, alarm, |line| line.contains("exited with status 61"));
+    assert!(exited > alarm);
+}
+
+#[test]
+fn info_signals_lists_every_signals_policy() {
+    let stdout = assert_success(uscope(&[
+        "--batch",
+        "--eval",
+        "info signals",
+        "build/test-programs/basic",
+    ]));
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "signal    stop  print  pass");
+    assert_eq!(lines.len(), 65, "{stdout}");
+    assert!(lines.contains(&"SIGINT    yes   yes    no"), "{stdout}");
+    assert!(lines.contains(&"SIGURG    no    no     yes"), "{stdout}");
+    assert!(lines.contains(&"SIG64     yes   yes    yes"), "{stdout}");
+
+    for (command, expected) in [
+        ("handle SIGNOPE nostop", "unknown signal 'SIGNOPE'"),
+        (
+            "handle SIGUSR1 sometimes",
+            "unknown signal action 'sometimes'",
+        ),
+        (
+            "handle",
+            "usage: handle <signal> [action] [action] [action]",
+        ),
+    ] {
+        assert_failure(
+            &uscope(&["--batch", "--eval", command, "build/test-programs/basic"]),
+            expected,
+        );
+    }
 }
