@@ -355,7 +355,15 @@ numeric_id!(
 /// The memory accesses that trigger a watchpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WatchAccess {
-    /// Stores to any watched byte.
+    /// Stores that leave the watched bytes different from those the
+    /// debugger last observed, as gdb's `watch` and lldb's `modify` report.
+    ///
+    /// The hardware traps every store, so a store of the bytes already
+    /// there is resolved internally: the thread resumes without a stop or
+    /// event. A change is judged again once every thread is stopped, and a
+    /// store another thread undid before then is not reported either.
+    Change,
+    /// Stores to any watched byte, including stores of an identical value.
     Write,
     /// Loads from any watched byte, without stores.
     Read,
@@ -366,6 +374,7 @@ pub enum WatchAccess {
 impl fmt::Display for WatchAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Change => "change",
             Self::Write => "write",
             Self::Read => "read",
             Self::ReadWrite => "read/write",
@@ -382,7 +391,8 @@ pub struct WatchpointCapabilities {
     /// The widest naturally aligned span one slot covers. Other spans use
     /// several slots.
     pub max_slot_bytes: u64,
-    /// The access kinds the hardware can report exactly.
+    /// The access kinds that can be watched, including changes judged from
+    /// the stores the hardware reports.
     pub access: Arc<[WatchAccess]>,
 }
 
@@ -518,11 +528,12 @@ pub struct Watchpoint {
 /// One watchpoint reported by one thread's access.
 ///
 /// Hardware reports that an access happened, not what it changed: a store of
-/// an identical value is reported with equal bytes. Accesses made by the
-/// kernel on the process's behalf, such as `read(2)` filling a watched
-/// buffer, are never reported, so `previous` is the value last observed by
-/// the debugger rather than necessarily the value immediately before this
-/// access.
+/// an identical value is reported with equal bytes, except by a
+/// [`WatchAccess::Change`] watchpoint, whose hits always differ. Accesses
+/// made by the kernel on the process's behalf, such as `read(2)` filling a
+/// watched buffer, are never reported, so `previous` is the value last
+/// observed by the debugger rather than necessarily the value immediately
+/// before this access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchpointHit {
     /// The watchpoint that reported the access.

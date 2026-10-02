@@ -278,10 +278,12 @@ async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
         let capabilities = scenario.handle().watchpoint_capabilities();
         assert_eq!(capabilities.slots, 4);
         assert_eq!(capabilities.max_slot_bytes, 8);
-        assert_eq!(
-            capabilities.access.as_ref(),
-            [WatchAccess::Write, WatchAccess::ReadWrite]
-        );
+        let kinds = [
+            WatchAccess::Change,
+            WatchAccess::Write,
+            WatchAccess::ReadWrite,
+        ];
+        assert_eq!(capabilities.access.as_ref(), kinds);
 
         let oversized = scenario
             .handle()
@@ -715,6 +717,49 @@ async fn a_handler_run_before_a_breakpoint_repair_reports_its_write() {
             .await;
         // The breakpoint the handler interrupted is repaired without being
         // reported again.
+        resume_to_exit(&mut scenario).await;
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn a_handler_storing_the_same_value_before_a_breakpoint_repair_is_transparent() {
+    for fixture in MATRIX {
+        let mut scenario = Scenario::launch(fixture);
+        run_to(&mut scenario, "await_signal").await;
+        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Change).await;
+        let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
+            panic!("inferior is stopped");
+        };
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(i32::try_from(process_id.get()).expect("pid fits i32")),
+            nix::sys::signal::Signal::SIGUSR1,
+        )
+        .expect("signal the inferior");
+        assert!(matches!(
+            scenario.resume_to_stop().await,
+            StopReason::Exception(exception) if exception.code == 10
+        ));
+
+        // The handler stores the 99 already there. The thread then returns
+        // to its breakpoint and steps over it, and neither is reported: the
+        // next stop is the fork phase's change.
+        let mut reason = scenario.resume_to_stop().await;
+        while matches!(&reason, StopReason::Exception(exception) if exception.code == 17) {
+            reason = scenario.resume_to_stop().await;
+        }
+        assert_single_hit(&reason, watchpoint.id, 99, 4321);
+        assert_eq!(
+            stopped_function(&scenario).await.as_deref(),
+            Some("fork_write"),
+            "{fixture}"
+        );
+        scenario
+            .operation(
+                "remove watchpoint",
+                scenario.handle().remove_watchpoint(watchpoint.id),
+            )
+            .await;
         resume_to_exit(&mut scenario).await;
         scenario.shutdown().await;
     }
@@ -1179,8 +1224,12 @@ fn locals_line(needle: &str) -> u64 {
 /// Watches a frame-scoped local and checks that its scope names the
 /// selected thread's current activation.
 async fn watch_local(scenario: &mut Scenario, name: &str) -> Watchpoint {
+    watch_local_for(scenario, name, WatchAccess::Write).await
+}
+
+async fn watch_local_for(scenario: &mut Scenario, name: &str, access: WatchAccess) -> Watchpoint {
     let thread = selected_thread(scenario).await;
-    let watchpoint = watch(scenario, name, WatchAccess::Write).await;
+    let watchpoint = watch(scenario, name, access).await;
     assert!(
         matches!(watchpoint.scope, WatchScope::Frame { thread: owner, .. } if owner == thread),
         "{name}: {:?}",
@@ -1237,10 +1286,15 @@ async fn hits_until_invalidated(
 
 #[tokio::test]
 async fn frame_watchpoints_end_when_their_activation_returns() {
-    for fixture in LOCALS {
+    for (fixture, access) in LOCALS.into_iter().flat_map(|fixture| {
+        [
+            (fixture, WatchAccess::Write),
+            (fixture, WatchAccess::Change),
+        ]
+    }) {
         let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "leaf_local").await;
-        let watchpoint = watch_local(&mut scenario, "local").await;
+        let watchpoint = watch_local_for(&mut scenario, "local", access).await;
         scenario
             .add_source_breakpoint("watch-locals.c", locals_line("local += 2;"))
             .await;
@@ -1263,12 +1317,20 @@ async fn frame_watchpoints_end_when_their_activation_returns() {
             scenario.resume_to_stop().await,
             StopReason::Breakpoint { .. }
         ));
-        assert_eq!(scenario.snapshot().await.watchpoints.len(), 1, "{fixture}");
-        assert!(watch_events(&mut events).is_empty(), "{fixture}");
+        assert_eq!(
+            scenario.snapshot().await.watchpoints.len(),
+            1,
+            "{fixture} {access}"
+        );
+        assert!(watch_events(&mut events).is_empty(), "{fixture} {access}");
 
         let (values, reason, _) = hits_until_invalidated(&mut scenario, watchpoint.id).await;
-        assert_eq!(values, [13], "{fixture}");
-        assert_eq!(reason, WatchpointInvalidation::ScopeExited, "{fixture}");
+        assert_eq!(values, [13], "{fixture} {access}");
+        assert_eq!(
+            reason,
+            WatchpointInvalidation::ScopeExited,
+            "{fixture} {access}"
+        );
         scenario.shutdown().await;
     }
 }
@@ -1609,18 +1671,25 @@ async fn watchpoints_work_across_the_rust_and_zig_matrix() {
             watchpoint.scope
         );
         assert_eq!(watchpoint.byte_size, 8, "{fixture}");
-        let mut values = Vec::new();
+        // A change watchpoint on the same bytes shares the hardware slot.
+        let changes = watch(&scenario, global, WatchAccess::Change).await;
+        let mut values = BTreeMap::<_, Vec<_>>::new();
         loop {
             match scenario.resume_to_stop().await {
                 StopReason::Watchpoint { hits } => {
-                    assert_eq!(hits.len(), 1, "{fixture}");
-                    values.push(value(hits[0].current.as_ref()));
+                    for hit in hits.iter() {
+                        values
+                            .entry(hit.watchpoint)
+                            .or_default()
+                            .push(value(hit.current.as_ref()));
+                    }
                 }
                 StopReason::Exited(ExitStatus::Code(0)) => break,
                 other => panic!("{fixture}: unexpected stop {other:?}"),
             }
         }
-        assert_eq!(values, [1, 2, 3, 3], "{fixture}");
+        assert_eq!(values[&watchpoint.id], [1, 2, 3, 3], "{fixture}");
+        assert_eq!(values[&changes.id], [1, 2, 3], "{fixture}");
         scenario.shutdown().await;
     }
 }
@@ -2062,4 +2131,409 @@ async fn attached_processes_arm_threads_they_create_later() {
     assert!(writers.contains(&main));
     debugger.shutdown().await.expect("shut down");
     drop(target);
+}
+
+/// One change a watchpoint reported: what it watched, and its value before
+/// and after.
+type Change = (String, u64, u64);
+
+/// Runs a fixture to its end under gdb with a `watch` on each expression,
+/// which stops only where a store changes the value, and collects what gdb
+/// reported.
+fn gdb_changes(fixture: &str, expressions: &[&str]) -> Vec<Change> {
+    let mut command = std::process::Command::new("gdb");
+    command.args(["--quiet", "--nx", "--batch"]);
+    for setup in [
+        "set debuginfod enabled off",
+        "set pagination off",
+        "handle SIGUSR1 nostop noprint pass",
+        "break main",
+        "run",
+    ] {
+        command.args(["-ex", setup]);
+    }
+    for expression in expressions {
+        command.args(["-ex", &format!("watch {expression}")]);
+    }
+    for _ in 0..48 {
+        command.args(["-ex", "continue"]);
+    }
+    let output = command
+        .arg(Scenario::fixture(fixture))
+        .output()
+        .expect("run gdb");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("exited normally"),
+        "{fixture}: gdb did not run the program to its end:\n{text}"
+    );
+    let number = |line: &str, prefix: &str| {
+        line.strip_prefix(prefix)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    let lines = text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    lines
+        .windows(3)
+        .filter_map(|window| {
+            let expression = window[0]
+                .strip_prefix("Hardware watchpoint ")?
+                .split_once(": ")?
+                .1;
+            Some((
+                expression.to_owned(),
+                number(window[1], "Old value = ")?,
+                number(window[2], "New value = ")?,
+            ))
+        })
+        .collect()
+}
+
+/// Runs a fixture to its end with a change watchpoint on each expression
+/// and collects what they reported.
+async fn uscope_changes(fixture: &str, expressions: &[&str]) -> Vec<Change> {
+    let mut scenario = Scenario::launch(fixture);
+    run_to(&mut scenario, "main").await;
+    let mut watched = BTreeMap::new();
+    for expression in expressions {
+        let watchpoint = watch(&scenario, expression, WatchAccess::Change).await;
+        assert_eq!(watchpoint.access, WatchAccess::Change);
+        watched.insert(watchpoint.id, *expression);
+    }
+    let mut changes = Vec::new();
+    loop {
+        match scenario.resume_to_stop().await {
+            StopReason::Watchpoint { hits } => {
+                for hit in hits.iter() {
+                    assert!(hit.changed(), "{fixture}: {hit:?}");
+                    changes.push((
+                        watched[&hit.watchpoint].to_owned(),
+                        value(hit.previous.as_ref()),
+                        value(hit.current.as_ref()),
+                    ));
+                }
+            }
+            StopReason::Exception(exception) if matches!(exception.code, 10 | 17) => {}
+            StopReason::Exited(ExitStatus::Code(0)) => break,
+            other => panic!("{fixture}: unexpected stop {other:?}"),
+        }
+    }
+    scenario.shutdown().await;
+    changes
+}
+
+/// gdb's `watch` is an independent oracle for which stores change a value:
+/// stores of the value already there, including a failed `lock cmpxchg`
+/// writing its destination back, are not reported, each `rep stos`
+/// iteration that changes a byte is, and a kernel write is seen only once a
+/// later store differs from the value last observed.
+#[tokio::test]
+async fn change_watchpoints_report_the_changes_gdb_watch_reports() {
+    for fixture in MATRIX {
+        for expressions in [
+            &[
+                "watch_i32",
+                "watch_u64",
+                "watch_wide.words[0]",
+                "watch_steady",
+            ][..],
+            &["watch_kernel", "watch_pair.first", "watch_u8", "watch_u16"][..],
+        ] {
+            let expected = gdb_changes(fixture, expressions);
+            assert!(expected.len() >= 5, "{fixture}: {expected:?}");
+            assert_eq!(
+                uscope_changes(fixture, expressions).await,
+                expected,
+                "{fixture}: changes differ from gdb's"
+            );
+        }
+    }
+}
+
+/// Runs a script of steps through `steady_stores`, whose lines and callee
+/// store the value the variable already holds, and returns where each step
+/// stopped. The script depends only on where each step stops: it steps out
+/// only of the callee and ends once execution leaves both functions.
+async fn steady_step_script(fixture: &str, access: Option<WatchAccess>) -> Vec<(StopReason, u64)> {
+    use StepKind::{Instruction, IntoSource, Out, OverInstruction, OverSource};
+    let mut scenario = Scenario::launch(fixture);
+    run_to(&mut scenario, "steady_stores").await;
+    scenario
+        .operation(
+            "remove breakpoints",
+            scenario.handle().remove_all_breakpoints(),
+        )
+        .await;
+    if let Some(access) = access {
+        watch(&scenario, "watch_steady", access).await;
+    }
+    let mut stops = Vec::new();
+    for kind in [
+        OverSource,
+        IntoSource,
+        Instruction,
+        Out,
+        OverSource,
+        OverInstruction,
+        IntoSource,
+        Instruction,
+        Out,
+        OverSource,
+        IntoSource,
+        Out,
+        Instruction,
+        OverSource,
+        OverSource,
+        OverSource,
+        OverSource,
+        OverSource,
+    ] {
+        let function = stopped_function(&scenario).await;
+        let kind = match function.as_deref() {
+            Some("steady_stores") if kind == Out => OverSource,
+            Some("steady_store" | "steady_stores") => kind,
+            _ => break,
+        };
+        let reason = scenario.step_to_stop(kind).await;
+        stops.push((reason, program_counter(&scenario).await));
+    }
+    if access == Some(WatchAccess::Change) {
+        // The watchpoint stayed armed throughout and still reports the
+        // first store that changes the value, but not the one repeating it.
+        let reason = scenario.resume_to_stop().await;
+        assert_single_hit(&reason, hits(&reason)[0].watchpoint, 7, 8);
+        assert_eq!(
+            stopped_function(&scenario).await.as_deref(),
+            Some("steady_change"),
+            "{fixture}"
+        );
+        resume_to_exit(&mut scenario).await;
+    }
+    scenario.shutdown().await;
+    stops
+}
+
+#[tokio::test]
+async fn steps_cross_stores_that_change_nothing_as_if_unwatched() {
+    for fixture in MATRIX {
+        let plain = steady_step_script(fixture, None).await;
+        assert!(plain.len() >= 10, "{fixture}: {plain:?}");
+        assert_eq!(
+            steady_step_script(fixture, Some(WatchAccess::Change)).await,
+            plain,
+            "{fixture}"
+        );
+        // The script does cross stores: a write watchpoint ends steps there.
+        let written = steady_step_script(fixture, Some(WatchAccess::Write)).await;
+        assert!(
+            written
+                .iter()
+                .any(|(reason, _)| matches!(reason, StopReason::Watchpoint { .. })),
+            "{fixture}: {written:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_debugger_write_is_what_the_next_store_is_judged_against() {
+    for fixture in MATRIX {
+        let mut scenario = Scenario::launch(fixture);
+        run_to(&mut scenario, "scalar_stores").await;
+        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Change).await;
+
+        // Writing the value the program stores next hides that store.
+        let word = scenario
+            .operation("read word", scenario.handle().read_word(watchpoint.address))
+            .await;
+        scenario
+            .operation(
+                "write watched word",
+                scenario
+                    .handle()
+                    .write_word(watchpoint.address, (word & !0xffff_ffff) | 1),
+            )
+            .await;
+        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 1, 2);
+        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 2, 42);
+
+        scenario
+            .operation(
+                "remove watchpoint",
+                scenario.handle().remove_watchpoint(watchpoint.id),
+            )
+            .await;
+        resume_to_exit(&mut scenario).await;
+        scenario.shutdown().await;
+    }
+}
+
+/// Reads a global's word.
+async fn global(scenario: &Scenario, name: &str) -> u64 {
+    let address = symbol(scenario, name).await;
+    scenario
+        .operation(
+            &format!("read {name}"),
+            scenario.handle().read_word(address),
+        )
+        .await
+}
+
+/// Each change hit's `previous` is the value at the previous stop, when the
+/// debugger last observed it, so racing stores that leave the value as the
+/// last stop saw it are never reported, and every report is a change.
+#[tokio::test]
+async fn racing_threads_report_changes_from_the_value_each_stop_observed() {
+    const WORKERS: u64 = 2;
+    const ITERATIONS: u64 = 40;
+    const CHURN: u64 = 16;
+
+    let mut scenario = Scenario::new("watch changes", Scenario::fixture("watch-threads"));
+    run_to(&mut scenario, "before_threads").await;
+    let locked = watch(&scenario, "locked_counter", WatchAccess::Change).await;
+    let racing = watch(&scenario, "racing_counter", WatchAccess::Change).await;
+    scenario
+        .operation(
+            "remove breakpoints",
+            scenario.handle().remove_all_breakpoints(),
+        )
+        .await;
+
+    let mut locked_values = Vec::new();
+    let mut racing_stops = 0;
+    let mut observed = BTreeMap::from([
+        (locked.id, global(&scenario, "locked_counter").await),
+        (racing.id, global(&scenario, "racing_counter").await),
+    ]);
+    loop {
+        match scenario.resume_to_stop().await {
+            StopReason::Watchpoint { .. } => {}
+            StopReason::Exited(ExitStatus::Code(0)) => break,
+            other => panic!("unexpected stop: {other:?}"),
+        }
+        let stop_hits = thread_hits(&mut scenario).await;
+        assert!(!stop_hits.is_empty());
+        for hit in &stop_hits {
+            assert!(hit.changed(), "{hit:?}");
+            assert_eq!(value(hit.previous.as_ref()), observed[&hit.watchpoint]);
+        }
+        if let Some(hit) = stop_hits.iter().find(|hit| hit.watchpoint == locked.id) {
+            locked_values.push(value(hit.current.as_ref()));
+        }
+        racing_stops += u64::from(stop_hits.iter().any(|hit| hit.watchpoint == racing.id));
+        observed = BTreeMap::from([
+            (locked.id, global(&scenario, "locked_counter").await),
+            (racing.id, global(&scenario, "racing_counter").await),
+        ]);
+    }
+
+    // Every locked increment is a change; `after_join`'s `+= 0` is not.
+    assert_eq!(
+        locked_values,
+        (1..=WORKERS * ITERATIONS + CHURN).collect::<Vec<_>>()
+    );
+    // The reset to zero in `before_threads` stores what is already there.
+    assert!(
+        (1..=WORKERS * ITERATIONS).contains(&racing_stops),
+        "{racing_stops} racing stops"
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn stores_that_change_nothing_never_stop_threads_receiving_signals() {
+    let mut scenario = Scenario::launch("watch-steady");
+    run_to(&mut scenario, "main").await;
+    let watchpoint = watch(&scenario, "steady", WatchAccess::Change).await;
+    scenario
+        .operation(
+            "remove breakpoints",
+            scenario.handle().remove_all_breakpoints(),
+        )
+        .await;
+    scenario.add_breakpoint("finished").await;
+
+    let mut signals = 0;
+    let mut reason = scenario.resume_to_stop().await;
+    while let StopReason::Exception(exception) = &reason {
+        assert_eq!(exception.code, nix::sys::signal::Signal::SIGUSR1 as u64);
+        signals += 1;
+        reason = scenario
+            .resume_with_exception(uscope::ExceptionDisposition::Pass)
+            .await;
+    }
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{reason:?}"
+    );
+    assert_eq!(signals, 12);
+    let stores = global(&scenario, "stores").await;
+    assert!(stores >= 12 * 40, "workers stored while signals arrived");
+
+    let reason = scenario.resume_to_stop().await;
+    assert_single_hit(&reason, watchpoint.id, 7, 8);
+    assert_eq!(global(&scenario, "finished_stores").await, stores);
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+/// Resumes and pauses until the spinning threads have made `count` more
+/// stores, none of which stopped, and returns the total.
+async fn pause_after_stores(scenario: &mut Scenario, count: u64) -> u64 {
+    let target = global(scenario, "stores").await + count;
+    loop {
+        let running = scenario.start_resuming().await;
+        tokio::task::yield_now().await;
+        scenario.operation("pause", scenario.handle().pause()).await;
+        let reason = running.await.expect("resume task").expect("resume");
+        assert_eq!(reason, StopReason::Pause);
+        assert!(thread_hits(scenario).await.is_empty());
+        let stores = global(scenario, "stores").await;
+        if stores >= target {
+            return stores;
+        }
+    }
+}
+
+#[tokio::test]
+async fn pause_and_shutdown_interrupt_endless_stores_that_change_nothing() {
+    let mut scenario = Scenario::launch("watch-steady-spin");
+    run_to(&mut scenario, "store_steady").await;
+    scenario
+        .operation(
+            "remove breakpoints",
+            scenario.handle().remove_all_breakpoints(),
+        )
+        .await;
+    watch(&scenario, "steady", WatchAccess::Change).await;
+    pause_after_stores(&mut scenario, 200).await;
+
+    // Shutting down while stores are being resolved reaps the inferior.
+    let _running = scenario.start_resuming().await;
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn attached_processes_detach_unharmed_while_stores_change_nothing() {
+    let child = support::ExternalProcess::spawn_running(&Scenario::fixture("watch-steady-spin"));
+    let mut scenario = Scenario::attached("attached steady", child.attach().await);
+    let watchpoint = watch(&scenario, "steady", WatchAccess::Change).await;
+    let stores = pause_after_stores(&mut scenario, 200).await;
+    assert_eq!(scenario.snapshot().await.watchpoints[0].id, watchpoint.id);
+
+    // Detaching while stores are being resolved disarms every thread first:
+    // a leftover debug register would kill the process with SIGTRAP.
+    let _running = scenario.start_resuming().await;
+    scenario.shutdown().await;
+    let mut reattached = Scenario::attached("reattached", child.attach().await);
+    let snapshot = reattached.snapshot().await;
+    assert_eq!(snapshot.threads.len(), 4, "every thread survived");
+    assert!(snapshot.watchpoints.is_empty());
+    assert!(global(&reattached, "stores").await > stores);
+    reattached.shutdown().await;
 }

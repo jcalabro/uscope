@@ -957,6 +957,10 @@ for fixture in hit-count-threads hit-count-spin hit-count-signals; do
 done
 build_fixture gcc "$c_fixtures_dir/watch-threads.c" "$output_dir/watch-threads" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/watch-steady.c" "$output_dir/watch-steady" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/watch-steady.c" "$output_dir/watch-steady-spin" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread -DSPIN
 build_fixture gcc "$c_fixtures_dir/watch-locals.c" "$output_dir/watch-locals-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_fixture clang "$c_fixtures_dir/watch-locals.c" "$output_dir/watch-locals-clang-o0" \

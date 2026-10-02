@@ -199,15 +199,24 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Reconciles the reasons threads stopped for with the edits the
-    /// barrier just applied.
+    /// barrier just applied and with the watched bytes every thread now
+    /// sees.
     ///
     /// A breakpoint or watchpoint removed while its trap was being reported
     /// no longer reports it: like gdb's moribund locations, a hit left with
     /// no breakpoint or watchpoint is dropped instead of published, and the
-    /// thread resumes normally. The barrier then publishes the next most
-    /// important reason any thread of the execution recorded, or becomes
-    /// internal when none did.
+    /// thread resumes normally. So is a change watchpoint's hit when its
+    /// bytes are back to those last observed: another thread undid the
+    /// change before every thread stopped. The barrier then publishes the
+    /// next most important reason any thread of the execution recorded, or
+    /// becomes internal when none did.
     pub(super) fn settle_edited_reasons(&mut self) {
+        let unchanged = self.unchanged_watchpoints(
+            self.inferior
+                .iter()
+                .flat_map(|inferior| inferior.threads.values())
+                .flat_map(|thread| thread.watch_hits.iter().copied()),
+        );
         // A stop holds a hit or two, so looking each up beats indexing every
         // breakpoint at every stop.
         let breakpoints = &self.breakpoints;
@@ -226,9 +235,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             if !resumed.contains(pid) {
                 continue;
             }
-            thread
-                .watch_hits
-                .retain(|id| inferior.watch.watchpoints.contains_key(id));
+            thread.watch_hits.retain(|id| {
+                inferior.watch.watchpoints.contains_key(id) && !unchanged.contains(id)
+            });
             match &thread.reason {
                 Some(StopReason::Breakpoint { address, hits }) => {
                     let hits = hits

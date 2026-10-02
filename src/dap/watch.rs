@@ -69,11 +69,16 @@ impl Data {
     }
 }
 
-const fn access_name(access: WatchAccess) -> &'static str {
+/// The protocol's name for an access kind. A `write` data breakpoint stops
+/// when the value changes, as clients present it ("Break on Value Change")
+/// and as gdb's and lldb's adapters arm it, so stores of an identical value
+/// have no name.
+const fn access_name(access: WatchAccess) -> Option<&'static str> {
     match access {
-        WatchAccess::Write => "write",
-        WatchAccess::Read => "read",
-        WatchAccess::ReadWrite => "readWrite",
+        WatchAccess::Change => Some("write"),
+        WatchAccess::Write => None,
+        WatchAccess::Read => Some("read"),
+        WatchAccess::ReadWrite => Some("readWrite"),
     }
 }
 
@@ -154,7 +159,7 @@ impl Session {
             .watchpoint_capabilities()
             .access
             .iter()
-            .map(|access| access_name(*access))
+            .filter_map(|access| access_name(*access))
             .collect::<Vec<_>>();
         Ok(json!({
             "dataId": data_id,
@@ -176,7 +181,7 @@ impl Session {
             .iter()
             .map(|breakpoint| {
                 let access = match breakpoint.access_type.as_deref() {
-                    None | Some("write") => Ok(WatchAccess::Write),
+                    None | Some("write") => Ok(WatchAccess::Change),
                     Some("read") => Ok(WatchAccess::Read),
                     Some("readWrite") => Ok(WatchAccess::ReadWrite),
                     Some(other) => Err(format!("unknown access type '{other}'")),
@@ -218,7 +223,7 @@ impl Session {
                 Err(message) => DataEntry {
                     id: self.breakpoints.allocate_id(),
                     data_id: breakpoint.data_id.clone(),
-                    access: WatchAccess::Write,
+                    access: WatchAccess::Change,
                     watchpoint: Err(message),
                 },
             };

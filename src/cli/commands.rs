@@ -181,8 +181,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Watch,
         "watch",
         [],
-        "watch <value-path|0xaddress:byte-count>",
-        "Stop when watched memory is written"
+        "watch [-w] <value-path|0xaddress:byte-count>",
+        "Stop when a store changes watched memory; with -w, at every store, even of the same value"
     ),
     command!(
         AccessWatch,
@@ -422,7 +422,7 @@ impl Cli {
             Command::Ignore => self.ignore(arguments[0], arguments[1], spec).await?,
             Command::Hits => self.hits(arguments[0], arguments[1], spec).await?,
             Command::Condition => self.condition(arguments[0], &arguments[1..], spec).await?,
-            Command::Watch => self.watch(arguments[0], WatchAccess::Write, spec).await?,
+            Command::Watch => self.watch_stores(&arguments, spec).await?,
             Command::AccessWatch => {
                 self.watch(arguments[0], WatchAccess::ReadWrite, spec)
                     .await?
@@ -696,6 +696,18 @@ impl Cli {
             &self.debugger.snapshot().await?.watchpoints,
             self.renderers.stdout,
         ))
+    }
+
+    /// Watches for stores that change a value, as gdb's `watch` does, or
+    /// with `-w` for every store.
+    async fn watch_stores(&self, arguments: &[&str], spec: &CommandSpec) -> Result<String> {
+        match arguments {
+            ["-w", target] => self.watch(target, WatchAccess::Write, spec).await,
+            [target] if !target.starts_with('-') => {
+                self.watch(target, WatchAccess::Change, spec).await
+            }
+            _ => Err(spec.usage_error()),
+        }
     }
 
     async fn watch(
