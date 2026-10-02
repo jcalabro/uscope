@@ -30,6 +30,7 @@
 - Any lifecycle or concurrency change must test cleanup, cancellation, event/state consistency, and the absence of surviving inferior processes.
 - Execution-control changes should cover the pure reducer/classifier where applicable, the public scenario harness, and synchronized native fixtures.
 - A test may only wait for something it can observe: an event, a debugger state, a `/proc` fact, or a line the fixture prints. Never assume something has happened by now. Before pausing, signalling, or attaching, wait until the program has visibly reached the point the assertions depend on; a poll that reaches its deadline fails rather than carrying on; never assert that something did not happen within a window. Fixtures synchronize their own threads instead of sleeping.
+- Run `just stress` before merging any lifecycle, run-control, attach, or concurrency change. It runs the suite ten times, about a minute, with twice as many test threads as CPUs and busy loops beside them; races that fail one run in hundreds when idle fail several times as often under that load. Give a count and a nextest filter to chase one failure, e.g. `just stress 100 -E 'binary(dap)'`. It stops at the first failure because a later pass of the same test would remove that test's flight recording.
 
 ## Flight Recorder
 
@@ -57,6 +58,7 @@ Useful focused commands:
 ```sh
 just build-test-programs           # build native fixtures
 just test                          # run the tests
+just stress                        # run the tests ten times under CPU load
 cargo nextest run --test debugger  # run real debugger scenarios
 just run build/test-programs/basic
 ```
