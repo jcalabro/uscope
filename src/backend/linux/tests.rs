@@ -21,6 +21,7 @@ use crate::unwind::MemoryReader;
 use crate::unwind::RegisterFile;
 use std::cell::RefCell;
 use std::rc::Rc;
+use tokio::sync::broadcast;
 
 use super::classify::{WatchStatus, classify_stop_evidence, format_raw_stop};
 use super::frames::{default_inline_visible_count, frame_lookup_address};
@@ -485,7 +486,7 @@ fn test_controller<P: InspectionOps>(
         ControllerChannels {
             sender,
             receiver,
-            events,
+            events: events.into(),
         },
         trace,
     );

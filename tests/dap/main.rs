@@ -12,6 +12,8 @@ mod console;
 mod differential;
 mod execution;
 mod faults;
+#[cfg(debug_assertions)]
+mod flight_recorder;
 mod languages;
 mod lifecycle;
 mod memory;

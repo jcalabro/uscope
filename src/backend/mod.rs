@@ -92,7 +92,30 @@ pub struct ControllerChannels {
     /// Lets the controller's waiter thread queue native events.
     pub sender: mpsc::Sender<ControllerMessage>,
     pub receiver: mpsc::Receiver<ControllerMessage>,
-    pub events: broadcast::Sender<DebuggerEvent>,
+    pub events: EventSender,
+}
+
+/// Publishes debugger events to every subscribed client, recording each in
+/// the flight recorder of a development build.
+pub struct EventSender(broadcast::Sender<DebuggerEvent>);
+
+impl EventSender {
+    pub fn send(
+        &self,
+        event: DebuggerEvent,
+    ) -> std::result::Result<usize, broadcast::error::SendError<DebuggerEvent>> {
+        // Every other event carries the revision a state change announces.
+        if !matches!(event, DebuggerEvent::StateChanged { .. }) {
+            record!("event {event:?}");
+        }
+        self.0.send(event)
+    }
+}
+
+impl From<broadcast::Sender<DebuggerEvent>> for EventSender {
+    fn from(sender: broadcast::Sender<DebuggerEvent>) -> Self {
+        Self(sender)
+    }
 }
 
 /// Starts the controller for a live session of `executable`.

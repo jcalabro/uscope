@@ -1339,6 +1339,90 @@ pub enum Request {
     },
 }
 
+#[cfg(debug_assertions)]
+impl Request {
+    /// Names the request and what it acts on, for the flight recorder.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::Launch { options, .. } => format!("launch {:?}", options.arguments),
+            Self::Attach { process_id, .. } => format!("attach {process_id}"),
+            Self::LaunchByExec {
+                process_id,
+                stop_at_entry,
+                ..
+            } => format!("launch by exec {process_id}, stop at entry {stop_at_entry}"),
+            Self::Continue {
+                stop_id,
+                scope,
+                exception,
+                ..
+            } => format!("continue {stop_id:?} {scope:?} {exception:?}"),
+            Self::Step {
+                stop_id,
+                thread_id,
+                frame,
+                kind,
+                scope,
+                exception,
+                ..
+            } => {
+                format!("step {kind:?} {stop_id:?} {thread_id:?} {frame:?} {scope:?} {exception:?}")
+            }
+            Self::Pause { process_id, .. } => format!("pause {process_id}"),
+            Self::AddBreakpoint { spec, .. } => format!("add breakpoint {spec:?}"),
+            Self::RemoveBreakpoint { id, .. } => format!("remove breakpoint {id:?}"),
+            Self::SetBreakpointCondition { id, .. } => format!("set condition of {id:?}"),
+            Self::SetBreakpointHitCondition { id, .. } => format!("set hit condition of {id:?}"),
+            Self::AddWatchpoint { spec, access, .. } => {
+                format!("add watchpoint {spec:?} {access:?}")
+            }
+            Self::RemoveWatchpoint { id, .. } => format!("remove watchpoint {id:?}"),
+            Self::WriteMemory {
+                stop_id,
+                address,
+                bytes,
+                ..
+            } => format!("write {} bytes at {address} {stop_id:?}", bytes.len()),
+            Self::WriteWord {
+                stop_id,
+                address,
+                value,
+                ..
+            } => format!("write word {value:#x} at {address} {stop_id:?}"),
+            Self::SetSignalPolicy { signal, policy, .. } => {
+                format!("set signal policy {signal} {policy:?}")
+            }
+            Self::RemoveAllBreakpoints { .. } => "remove all breakpoints".to_owned(),
+            Self::ResolveWatchTarget { .. } => "resolve watch target".to_owned(),
+            Self::RemoveAllWatchpoints { .. } => "remove all watchpoints".to_owned(),
+            Self::ReadMemory { .. } => "read memory".to_owned(),
+            Self::Assign { .. } => "assign".to_owned(),
+            Self::ReadWord { .. } => "read word".to_owned(),
+            Self::LoadedModule { .. } => "loaded module".to_owned(),
+            Self::LoadedModules { .. } => "loaded modules".to_owned(),
+            Self::ModuleImage { .. } => "module image".to_owned(),
+            Self::Disassemble { .. } => "disassemble".to_owned(),
+            Self::DescribeAddress { .. } => "describe address".to_owned(),
+            Self::StoppedLocation { .. } => "stopped location".to_owned(),
+            Self::Snapshot { .. } => "snapshot".to_owned(),
+            Self::Backtrace { .. } => "backtrace".to_owned(),
+            Self::Registers { .. } => "registers".to_owned(),
+            Self::Variables { .. } => "variables".to_owned(),
+            Self::Inspect { .. } => "inspect".to_owned(),
+            Self::InspectRange { .. } => "inspect range".to_owned(),
+            Self::Dereference { .. } => "dereference".to_owned(),
+            Self::ValueChildren { .. } => "value children".to_owned(),
+            Self::Globals { .. } => "globals".to_owned(),
+            Self::SelectThread { .. } => "select thread".to_owned(),
+            Self::SelectFrame { .. } => "select frame".to_owned(),
+            Self::SignalPolicy { .. } => "signal policy".to_owned(),
+            Self::Kill { .. } => "kill".to_owned(),
+            Self::Terminate { .. } => "terminate".to_owned(),
+            Self::Shutdown { .. } => "shutdown".to_owned(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

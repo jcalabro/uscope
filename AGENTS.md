@@ -30,6 +30,14 @@
 - Any lifecycle or concurrency change must test cleanup, cancellation, event/state consistency, and the absence of surviving inferior processes.
 - Execution-control changes should cover the pure reducer/classifier where applicable, the public scenario harness, and synchronized native fixtures. Avoid scheduler-dependent sleeps.
 
+## Flight Recorder
+
+Development builds (`debug_assertions`) record every client request, ptrace control call, wait status, stop classification, published event, and panic, one timestamped line each, under `target/flight-recorder`. Release builds compile none of it. Read a recording before adding temporary tracing to diagnose a failure.
+
+- A failing test keeps its recordings in `tests/<suite>/<test>.log` (scenarios) and `<test>.adapter.log` (DAP adapters), and prints their paths; passing tests leave nothing. The directory therefore lists the tests that failed when last run.
+- Each `uscope` run streams to `runs/`, keeping the latest 20, and `latest.log` links to the newest. `USCOPE_FLIGHT_RECORDING=PATH` streams to PATH instead, and an empty value turns recording off.
+- Record new native control paths through `record!` or the `Recorded` ptrace wrapper. Recording must never change what the inferior sees.
+
 ## Local Development
 
 Run all project commands inside the pinned Nix environment. Do not run `cargo`,

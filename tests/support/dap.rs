@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::support::flight_recordings;
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -157,6 +159,8 @@ pub struct Dap {
     reference: bool,
     /// `runInTerminal` requests held unanswered, when holding them.
     held_terminals: Option<Vec<Value>>,
+    /// Where the adapter streams its flight recording.
+    recording: Option<PathBuf>,
 }
 
 /// Ordering rules checked on every message.
@@ -199,7 +203,10 @@ impl Dap {
             .arg("dap")
             .args(arguments)
             .envs(environment.iter().copied());
-        Self::spawn(name, &mut command)
+        let recording = flight_recordings::watch_adapter(&mut command);
+        let mut dap = Self::spawn(name, &mut command);
+        dap.recording = recording;
+        dap
     }
 
     /// Starts another adapter to compare with, such as gdb's, whose
@@ -273,6 +280,7 @@ impl Dap {
             refused_terminal: None,
             reference: false,
             held_terminals: None,
+            recording: None,
         }
     }
 
@@ -1129,6 +1137,9 @@ impl Drop for Dap {
             let _ = child.wait();
         }
         self.reap_terminals();
+        if let Some(recording) = &self.recording {
+            flight_recordings::adapter_finished(recording);
+        }
         if std::thread::panicking() {
             if !self.reported.get() {
                 eprintln!("{} transcript:\n{}", self.name, self.transcript());

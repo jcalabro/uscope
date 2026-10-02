@@ -473,6 +473,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn handle_classified_stop(&mut self, pid: Pid, stop: ClassifiedStop) -> Result<()> {
+        record!("classified {pid} as {stop:?}");
         {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             inferior.thread_mut(pid)?.state = NativeThreadState::Stopped;

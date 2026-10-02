@@ -8,8 +8,14 @@ use crate::{Error, Result};
 macro_rules! address_type {
     ($name:ident, $description:literal) => {
         #[doc = $description]
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(u64);
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}({:#x})", stringify!($name), self.0)
+            }
+        }
 
         impl $name {
             /// Creates an address from its numeric representation.
