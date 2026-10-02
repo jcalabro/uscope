@@ -1,0 +1,140 @@
+-- User acceptance test: nvim-dap drives `uscope dap` from a headless
+-- Neovim, as a user would, and the adapter records each session's traffic.
+--
+-- nvim --headless --clean -l editors/nvim/uat.lua NVIM_DAP ROOT RECORDING_DIRECTORY
+
+local nvim_dap, root, record = arg[1], arg[2], arg[3]
+vim.opt.runtimepath:prepend(nvim_dap)
+local dap = require('dap')
+
+local TIMEOUT = 15000
+local fixture = function(name) return root .. '/build/test-programs/' .. name end
+local source = function(name) return root .. '/tests/fixtures/c/' .. name end
+vim.fn.mkdir(record, 'p')
+
+local function fail(message)
+  io.stderr:write('uat: ' .. message .. '\n')
+  os.exit(1)
+end
+
+local function expect(condition, message)
+  if not condition then
+    fail(message)
+  end
+end
+
+-- The adapter's events since the last wait, by kind.
+local seen = {}
+for _, name in ipairs({ 'stopped', 'exited', 'terminated', 'process' }) do
+  dap.listeners.after['event_' .. name]['uat'] = function(_, body)
+    table.insert(seen, { event = name, body = body })
+  end
+end
+
+--- Waits for an event the predicate accepts, consuming those before it.
+local function event(name, predicate)
+  local found
+  local ok = vim.wait(TIMEOUT, function()
+    while #seen > 0 do
+      local next = table.remove(seen, 1)
+      if next.event == name and (predicate == nil or predicate(next.body)) then
+        found = next.body
+        return true
+      end
+    end
+    return false
+  end, 10)
+  expect(ok, 'timed out waiting for a ' .. name .. ' event')
+  return found
+end
+
+--- Waits until nvim-dap has fetched the stopped thread's frames.
+local function frame()
+  local current
+  expect(vim.wait(TIMEOUT, function()
+    local session = dap.session()
+    current = session and session.stopped_thread_id and session.current_frame
+    return current ~= nil
+  end, 10), 'timed out waiting for the current frame')
+  return current
+end
+
+--- Sends a request and waits for its response.
+local function request(command, arguments)
+  local done, failure, response = false, nil, nil
+  dap.session():request(command, arguments, function(err, result)
+    done, failure, response = true, err, result
+  end)
+  expect(vim.wait(TIMEOUT, function() return done end, 10), 'timed out waiting for ' .. command)
+  expect(failure == nil, command .. ' failed: ' .. vim.inspect(failure))
+  return response
+end
+
+local function line_of(file, marker)
+  for number, line in ipairs(vim.fn.readfile(file)) do
+    if line:find(marker, 1, true) then
+      return number
+    end
+  end
+  fail(marker .. ' is not in ' .. file)
+end
+
+local function breakpoint(file, marker)
+  vim.cmd.edit(file)
+  vim.api.nvim_win_set_cursor(0, { line_of(file, marker), 0 })
+  dap.toggle_breakpoint()
+end
+
+local function adapter(name)
+  dap.adapters.uscope = {
+    type = 'executable',
+    command = 'uscope',
+    args = { 'dap', '--log', record .. '/' .. name .. '.log' },
+  }
+end
+
+-- Breakpoints, stepping, evaluation, and the program's exit.
+adapter('nvim-launch')
+breakpoint(source('basic.c'), 'return uscope_value;')
+dap.run({ type = 'uscope', request = 'launch', name = 'nvim-launch', program = fixture('basic'), cwd = root })
+expect(event('stopped').reason == 'breakpoint', 'stopped at the breakpoint')
+local top = frame()
+expect(top.name == 'breakpoint_target', 'stopped in breakpoint_target, not ' .. top.name)
+expect(top.line == line_of(source('basic.c'), 'return uscope_value;'), 'stopped at the line')
+local value = request('evaluate', { expression = 'uscope_value', frameId = top.id, context = 'hover' })
+expect(value.result == '1234605616436508552', 'evaluated ' .. vim.inspect(value))
+dap.step_out()
+expect(event('stopped').reason == 'step', 'stepped out')
+expect(frame().name == 'main', 'returned to main')
+dap.step_over()
+expect(event('stopped').reason == 'step', 'stepped over')
+frame()
+dap.clear_breakpoints()
+dap.continue()
+expect(event('exited').exitCode == 0, 'the program exited with 0')
+event('terminated')
+
+-- A program in nvim-dap's terminal, which owns its input and output.
+adapter('nvim-terminal')
+breakpoint(source('process-environment.c'), 'if (fgets(line')
+dap.run({
+  type = 'uscope', request = 'launch', name = 'nvim-terminal', program = fixture('process-environment'),
+  args = { 'one' }, console = 'integratedTerminal', cwd = root,
+})
+expect(event('process').startMethod == 'launch', 'launched')
+expect(event('stopped').reason == 'breakpoint', 'stopped in the terminal program')
+expect(frame().name == 'main', 'stopped in main')
+local terminal = vim.tbl_filter(function(buffer)
+  return vim.bo[buffer].buftype == 'terminal'
+end, vim.api.nvim_list_bufs())[1]
+expect(terminal ~= nil, 'nvim-dap opened a terminal')
+dap.clear_breakpoints()
+dap.continue()
+vim.api.nvim_chan_send(vim.bo[terminal].channel, 'typed\n')
+expect(event('exited').exitCode == 2, 'the terminal program exited with its argument count')
+event('terminated')
+local lines = table.concat(vim.api.nvim_buf_get_lines(terminal, 0, -1, false), '\n')
+expect(lines:find('argument 1: one', 1, true) ~= nil, 'the terminal shows the output: ' .. lines)
+
+print('uat: nvim-dap passed')
+os.exit(0)

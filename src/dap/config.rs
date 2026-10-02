@@ -360,4 +360,112 @@ mod tests {
             Start::Attach { process, executable: None } if process == ProcessId::new(42)
         ));
     }
+
+    /// The VS Code extension's manifest documents the configurations.
+    fn manifest() -> Value {
+        serde_json::from_str(include_str!("../../editors/vscode/package.json")).expect("manifest")
+    }
+
+    #[test]
+    fn every_key_the_vscode_extension_documents_is_read() {
+        let debugger = &manifest()["contributes"]["debuggers"][0];
+        for (request, base) in [
+            ("launch", json!({"program": "p"})),
+            ("attach", json!({"pid": 1})),
+        ] {
+            let properties = debugger["configurationAttributes"][request]["properties"]
+                .as_object()
+                .expect("properties");
+            for (key, schema) in properties {
+                // A value of the wrong type must be refused at its key.
+                let wrong = if schema["type"] == "boolean" {
+                    json!("yes")
+                } else {
+                    json!(true)
+                };
+                let mut arguments = if matches!(key.as_str(), "pid" | "coreFile") {
+                    json!({})
+                } else {
+                    base.clone()
+                };
+                arguments[key] = wrong;
+                let error = match request {
+                    "launch" => launch(arguments),
+                    _ => attach(arguments),
+                }
+                .expect_err(key);
+                assert!(error.contains(&format!(" at {key}")), "{key}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_vscode_extension_configurations_are_valid() {
+        let debugger = &manifest()["contributes"]["debuggers"][0];
+        let snippets = debugger["configurationSnippets"]
+            .as_array()
+            .expect("snippets")
+            .iter()
+            .map(|snippet| snippet["body"].clone());
+        let initial = debugger["initialConfigurations"]
+            .as_array()
+            .expect("initial configurations")
+            .clone();
+        for configuration in initial.into_iter().chain(snippets) {
+            let configuration = expand(configuration);
+            let parsed = match configuration["request"].as_str() {
+                Some("launch") => launch(configuration.clone()),
+                _ => attach(configuration.clone()),
+            };
+            assert!(parsed.is_ok(), "{configuration}: {parsed:?}");
+        }
+    }
+
+    /// Expands what VS Code would in a configuration's strings: a snippet's
+    /// quoting, escapes, and placeholders, and the variables it substitutes.
+    fn expand(value: Value) -> Value {
+        match value {
+            Value::String(text) => {
+                let text = text
+                    .strip_prefix("^\"")
+                    .and_then(|text| text.strip_suffix('"'))
+                    .unwrap_or(&text)
+                    .replace("\\$", "$");
+                let text = with_defaults(&text)
+                    .replace("${workspaceFolder}", "/workspace")
+                    .replace("${command:pickProcess}", "1234");
+                assert!(!text.contains('$'), "unexpanded {text}");
+                Value::String(text)
+            }
+            Value::Array(values) => Value::Array(values.into_iter().map(expand).collect()),
+            Value::Object(map) => Value::Object(
+                map.into_iter()
+                    .map(|(key, value)| (key, expand(value)))
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    /// Replaces each snippet placeholder, `${1:text}`, with its text.
+    fn with_defaults(text: &str) -> String {
+        let mut filled = String::new();
+        let mut rest = text;
+        while let Some(start) = rest.find("${") {
+            filled.push_str(&rest[..start]);
+            let inner = &rest[start + 2..];
+            let placeholder = inner
+                .split_once(':')
+                .filter(|(index, _)| index.bytes().all(|byte| byte.is_ascii_digit()));
+            if let Some((default, after)) = placeholder.and_then(|(_, text)| text.split_once('}')) {
+                filled.push_str(default);
+                rest = after;
+            } else {
+                filled.push_str("${");
+                rest = inner;
+            }
+        }
+        filled.push_str(rest);
+        filled
+    }
 }

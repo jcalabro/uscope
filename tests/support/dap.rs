@@ -28,6 +28,11 @@ const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Mark(usize);
 
+impl Mark {
+    /// The start of the session.
+    pub const START: Self = Self(0);
+}
+
 /// A request that was sent.
 #[derive(Debug, Clone, Copy)]
 pub struct Sent {
@@ -148,6 +153,8 @@ pub struct Dap {
     terminal_output: (mpsc::Sender<String>, Receiver<String>),
     /// The error `runInTerminal` is answered with instead of running.
     refused_terminal: Option<String>,
+    /// Whether this is another adapter, compared with but not checked.
+    reference: bool,
 }
 
 /// Ordering rules checked on every message.
@@ -183,15 +190,29 @@ impl Dap {
         arguments: &[&str],
         environment: &[(&str, &str)],
     ) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
+        command
             .arg("dap")
             .args(arguments)
-            .envs(environment.iter().copied())
+            .envs(environment.iter().copied());
+        Self::spawn(name, &mut command)
+    }
+
+    /// Starts another adapter to compare with, such as gdb's, whose
+    /// messages are not held to this adapter's checks.
+    pub fn reference(name: impl Into<String>, command: &mut Command) -> Self {
+        let mut dap = Self::spawn(name, command);
+        dap.reference = true;
+        dap
+    }
+
+    fn spawn(name: impl Into<String>, command: &mut Command) -> Self {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("start uscope dap");
+            .unwrap_or_else(|error| panic!("start {command:?}: {error}"));
         let stdout = child.stdout.take().expect("adapter stdout");
         let stderr = child.stderr.take().expect("adapter stderr");
         let stdin = child.stdin.take().expect("adapter stdin");
@@ -246,6 +267,7 @@ impl Dap {
             terminals: Vec::new(),
             terminal_output: mpsc::channel(),
             refused_terminal: None,
+            reference: false,
         }
     }
 
@@ -589,6 +611,13 @@ impl Dap {
             Err(violation) => self.fail(&format!("the adapter broke framing: {violation}")),
         };
         self.record("<-", &message.to_string());
+        if self.reference {
+            self.received.push(Received {
+                message,
+                consumed: false,
+            });
+            return;
+        }
         if let Err(problem) = self.check(&message) {
             self.fail(&format!(
                 "protocol violation: {problem}\nmessage: {message}"
