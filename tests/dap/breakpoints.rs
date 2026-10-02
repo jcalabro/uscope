@@ -267,30 +267,129 @@ fn breakpoints_in_files_outside_the_program_fail_with_a_reason() {
     dap.finish();
 }
 
+/// Launches the hit-count program stopped at its entry.
+fn counting(dap: &mut Dap) -> crate::dap::Stopped {
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("hit-counts-gcc-o0"),
+        json!({"stopOnEntry": true}),
+        &Configuration::default(),
+    );
+    dap.stopped(started.mark)
+}
+
+/// The `call` argument of the innermost frame of a stopped thread.
+fn call_of(dap: &mut Dap, thread: i64) -> String {
+    let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 1}));
+    let frame = trace["stackFrames"][0]["id"].clone();
+    dap.request(
+        "evaluate",
+        json!({"expression": "call", "frameId": frame, "context": "watch"}),
+    )["result"]
+        .as_str()
+        .expect("result")
+        .to_owned()
+}
+
 #[test]
-fn conditions_and_logpoints_are_refused_until_supported() {
-    let path = source("c/basic.c");
+fn conditions_stop_only_where_they_hold() {
     let mut dap = Dap::start("conditions");
-    dap.initialize(Profile::VsCode);
-    let launch = dap.send("launch", json!({"program": fixture("basic")}));
+    let entry = counting(&mut dap);
+    let set = dap.request(
+        "setFunctionBreakpoints",
+        json!({"breakpoints": [
+            {"name": "counted", "condition": "call % 10 == 0 || (call > 37 && last_call == call - 1)"},
+            {"name": "caller", "condition": "call = 3"},
+        ]}),
+    );
+    let [counted, invalid] = &breakpoints(&set)[..] else {
+        panic!("two breakpoints");
+    };
+    assert_eq!(counted["verified"], true);
+    assert_eq!(invalid["verified"], false);
+    assert_eq!(
+        invalid["message"],
+        "invalid condition: '=' assigns; compare with '=='"
+    );
+    let mut mark = dap.send("continue", json!({"threadId": entry.thread})).mark;
+    for expected in ["10", "20", "30", "38", "39", "40"] {
+        let stop = dap.stopped(mark);
+        assert_eq!(stop.body["hitBreakpointIds"], json!([counted["id"]]));
+        assert_eq!(call_of(&mut dap, stop.thread), expected);
+        let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+        dap.success(resumed);
+        mark = resumed.mark;
+    }
+    assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
+    dap.finish();
+}
+
+#[test]
+fn logpoints_log_values_instead_of_stopping() {
+    let path = source("c/hit-counts.c");
+    let line = line_of(&path, "last_call = call;");
+    let mut dap = Dap::start("logpoints");
+    let entry = counting(&mut dap);
     let set = dap.request(
         "setBreakpoints",
         json!({"source": {"path": path}, "breakpoints": [
-            {"line": 6, "condition": "first == 1"},
-            {"line": 6, "logMessage": "hit {first}"},
+            {"line": line, "logMessage": "call {call} after {last_call}, {{braces}}"},
+            {"line": line, "logMessage": "seven", "condition": "call == 7"},
+            {"line": line, "logMessage": "bad {call + 1}"},
         ]}),
     );
     let set = breakpoints(&set);
     assert_eq!(
-        set[0]["message"],
-        "conditional breakpoints are not supported yet"
+        (&set[0]["verified"], &set[1]["verified"]),
+        (&json!(true), &json!(true))
     );
-    assert_eq!(set[1]["message"], "logpoints are not supported yet");
-    dap.request("configurationDone", Value::Null);
-    dap.success(launch);
     assert_eq!(
-        dap.event(launch.mark, "exited", |_| true),
+        set[2]["message"],
+        "invalid log message: '{call + 1}' is not a value path such as name, a.b, p->next, or items[2]"
+    );
+    let resumed = dap.send("continue", json!({"threadId": entry.thread}));
+    dap.success(resumed);
+    assert_eq!(
+        dap.event(resumed.mark, "exited", |_| true),
         json!({"exitCode": 0})
+    );
+    let console = dap.output_text(resumed.mark, "console");
+    let expected = (1..=40)
+        .map(|call| {
+            let mut line = format!("call {call} after {}, {{braces}}\n", call - 1);
+            if call == 7 {
+                line.push_str("seven\n");
+            }
+            line
+        })
+        .collect::<String>();
+    // The two logpoints share one address, so their order within a hit
+    // follows their ids.
+    assert_eq!(console, expected);
+    dap.finish();
+}
+
+#[test]
+fn a_condition_that_cannot_be_evaluated_stops_and_says_why() {
+    let mut dap = Dap::start("condition errors");
+    let entry = counting(&mut dap);
+    let set = dap.request(
+        "setFunctionBreakpoints",
+        json!({"breakpoints": [{"name": "counted", "condition": "no_such_value > 1"}]}),
+    );
+    let id = breakpoints(&set)[0]["id"].clone();
+    let resumed = dap.send("continue", json!({"threadId": entry.thread}));
+    dap.success(resumed);
+    let stop = dap.stopped(resumed.mark);
+    assert_eq!(stop.body["hitBreakpointIds"], json!([id]));
+    assert_eq!(call_of(&mut dap, stop.thread), "1");
+    let important = dap.output_containing(resumed.mark, "important", "condition");
+    assert_eq!(
+        important,
+        format!(
+            "breakpoint {id} stopped because its condition could not be evaluated: \
+             no visible variable or parameter named 'no_such_value' was found\n"
+        )
     );
     dap.finish();
 }

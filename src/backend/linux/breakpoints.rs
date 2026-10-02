@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use nix::unistd::Pid;
+
 use super::signals::Signal;
 
 use crate::protocol::{
@@ -21,13 +23,14 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn add_breakpoint(
         &mut self,
         spec: BreakpointSpec,
-        hit_condition: Option<HitCondition>,
+        options: crate::BreakpointOptions,
     ) -> Result<Breakpoint> {
-        if let Some(existing) = self
-            .breakpoints
-            .iter()
-            .find(|breakpoint| breakpoint.spec == spec && breakpoint.hit_condition == hit_condition)
-        {
+        if let Some(existing) = self.breakpoints.iter().find(|breakpoint| {
+            breakpoint.spec == spec
+                && breakpoint.hit_condition == options.hit_condition
+                && breakpoint.condition == options.condition
+                && breakpoint.log_message == options.log_message
+        }) {
             return Ok(existing.clone());
         }
 
@@ -37,7 +40,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             .checked_add(1)
             .ok_or_else(|| backend_error(LinuxError::BreakpointIdExhausted))?;
         let breakpoint = Breakpoint {
-            hit_condition,
+            hit_condition: options.hit_condition,
+            condition: options.condition,
+            log_message: options.log_message,
             ..self.resolve_breakpoint(id, spec)?
         };
 
@@ -142,6 +147,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             spec,
             locations,
             hit_condition: None,
+            condition: None,
+            log_message: None,
             hit_count: 0,
         })
     }
@@ -259,10 +266,32 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(breakpoint)
     }
 
+    /// Replaces a breakpoint's condition. Like its hit condition, this is
+    /// controller state only, so no stop is required.
+    pub(super) fn set_breakpoint_condition(
+        &mut self,
+        id: BreakpointId,
+        condition: Option<crate::Condition>,
+    ) -> Result<Breakpoint> {
+        let breakpoint = self
+            .breakpoints
+            .iter_mut()
+            .find(|breakpoint| breakpoint.id == id)
+            .ok_or(Error::BreakpointNotFound(id.get()))?;
+        breakpoint.condition = condition;
+        let breakpoint = breakpoint.clone();
+        self.publish_breakpoints_changed();
+        Ok(breakpoint)
+    }
+
     /// Counts one hit for every logical breakpoint owning the site at
-    /// `address` and returns those whose hit condition the hit meets.
+    /// `address` that thread `pid` reached, and returns those the hit stops
+    /// at: its hit condition and condition are met, and it logs no message
+    /// instead. A condition that cannot be evaluated stops, as gdb does,
+    /// since skipping the hit could hide what the user asked to see.
     pub(super) fn record_breakpoint_hits(
         &mut self,
+        pid: Pid,
         address: VirtualAddress,
     ) -> Arc<[BreakpointHit]> {
         let Some(site) = self
@@ -280,7 +309,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 BreakpointOwner::Plan(_) => None,
             })
             .collect::<BTreeSet<_>>();
-        let mut stopping = Vec::new();
+        let mut candidates = Vec::new();
         for breakpoint in &mut self.breakpoints {
             if !owners.contains(&breakpoint.id) {
                 continue;
@@ -290,14 +319,113 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .hit_condition
                 .is_none_or(|condition| condition.is_met(breakpoint.hit_count))
             {
-                stopping.push(BreakpointHit {
-                    breakpoint: breakpoint.id,
-                    hit_count: breakpoint.hit_count,
-                });
+                candidates.push((
+                    BreakpointHit {
+                        breakpoint: breakpoint.id,
+                        hit_count: breakpoint.hit_count,
+                    },
+                    breakpoint.condition.clone(),
+                    breakpoint.log_message.clone(),
+                ));
             }
+        }
+        let mut stopping = Vec::new();
+        for (hit, condition, log_message) in candidates {
+            if let Some(condition) = condition {
+                match self.condition_met(pid, &condition) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        self.publish_hit_event(pid, |revision, process_id, thread_id| {
+                            DebuggerEvent::ConditionFailed {
+                                revision,
+                                process_id,
+                                thread_id,
+                                breakpoint: hit.breakpoint,
+                                error: error.into(),
+                            }
+                        });
+                        stopping.push(hit);
+                        continue;
+                    }
+                }
+            }
+            if let Some(message) = log_message {
+                let parts = self.log_parts(pid, &message);
+                self.publish_hit_event(pid, |revision, process_id, thread_id| {
+                    DebuggerEvent::LogMessage {
+                        revision,
+                        process_id,
+                        thread_id,
+                        breakpoint: hit.breakpoint,
+                        parts,
+                    }
+                });
+                continue;
+            }
+            stopping.push(hit);
         }
         stopping.sort_unstable_by_key(|hit| hit.breakpoint);
         stopping.into()
+    }
+
+    /// Evaluates a condition in the innermost frame of a thread stopped at a
+    /// hit.
+    fn condition_met(
+        &self,
+        pid: Pid,
+        condition: &crate::Condition,
+    ) -> std::result::Result<bool, String> {
+        condition.evaluate(&mut |path| {
+            let value = self
+                .inspect_at_hit(pid, path)
+                .map_err(|error| error.to_string())?;
+            crate::Operand::of(path, value.type_info.as_ref(), &value.state)
+        })
+    }
+
+    /// Reads the values a log message shows, as the hitting thread sees them.
+    fn log_parts(&self, pid: Pid, message: &crate::LogMessage) -> Arc<[crate::LogPart]> {
+        message
+            .segments()
+            .iter()
+            .map(|segment| match segment {
+                crate::LogSegment::Text(text) => crate::LogPart::Text(Arc::clone(text)),
+                crate::LogSegment::Value(expression) => {
+                    match self.inspect_at_hit(pid, expression) {
+                        Ok(value) => crate::LogPart::Value {
+                            expression: expression.clone(),
+                            type_info: value.type_info,
+                            state: value.state,
+                        },
+                        Err(error) => crate::LogPart::Error {
+                            expression: expression.clone(),
+                            error: error.to_string().into(),
+                        },
+                    }
+                }
+            })
+            .collect()
+    }
+
+    fn publish_hit_event(
+        &mut self,
+        pid: Pid,
+        event: impl FnOnce(u64, crate::ProcessId, crate::ThreadId) -> DebuggerEvent,
+    ) {
+        let Some(process_id) = self
+            .inferior
+            .as_ref()
+            .map(|inferior| super::process_id(inferior.tgid))
+        else {
+            return;
+        };
+        self.bump_revision();
+        let _ = self.events.send(event(
+            self.revision,
+            process_id,
+            super::debug_thread_id(pid),
+        ));
     }
 
     /// Starts every breakpoint's count again for a new process.

@@ -1002,23 +1002,9 @@ impl Session {
                     target.process = Some(process_id);
                 }
             }
-            DebuggerEvent::InferiorContinued {
-                execution_id,
-                process_id,
-                ..
-            } => {
-                if self.resumed != Some(execution_id) && self.stop.is_some() {
-                    let thread = self
-                        .stop
-                        .as_ref()
-                        .map_or_else(|| process_id.get(), |stop| stop.thread.get());
-                    self.leave_stop();
-                    self.client
-                        .event(
-                            "continued",
-                            json!({"threadId": thread, "allThreadsContinued": true}),
-                        )
-                        .await?;
+            DebuggerEvent::InferiorContinued { execution_id, .. } => {
+                if self.resumed != Some(execution_id) {
+                    self.resumed_elsewhere().await?;
                 }
             }
             DebuggerEvent::InferiorStopped {
@@ -1075,12 +1061,53 @@ impl Session {
                     .await?;
             }
             DebuggerEvent::BreakpointsChanged { .. } => self.sync_breakpoints().await?,
+            DebuggerEvent::LogMessage { parts, .. } => {
+                self.client
+                    .console(crate::cli::format::log_message(&parts))
+                    .await?;
+            }
+            DebuggerEvent::ConditionFailed {
+                breakpoint, error, ..
+            } => self.condition_failed(breakpoint, &error).await?,
             DebuggerEvent::WatchpointsInvalidated { invalidated, .. } => {
                 self.data_invalidated(&invalidated).await?;
             }
             DebuggerEvent::StateChanged { .. } | DebuggerEvent::WatchpointsChanged { .. } => {}
         }
         Ok(())
+    }
+
+    /// Tells the client the program resumed without its asking, such as
+    /// to receive a termination signal.
+    async fn resumed_elsewhere(&mut self) -> Result<(), Closed> {
+        let Some(stop) = self.stop.take() else {
+            return Ok(());
+        };
+        self.leave_stop();
+        self.client
+            .event(
+                "continued",
+                json!({"threadId": stop.thread.get(), "allThreadsContinued": true}),
+            )
+            .await
+    }
+
+    /// Explains a stop that a breakpoint's unevaluable condition caused.
+    async fn condition_failed(
+        &self,
+        breakpoint: uscope::BreakpointId,
+        error: &str,
+    ) -> Result<(), Closed> {
+        let id = self
+            .breakpoints
+            .entries()
+            .find(|(_, entry)| entry.breakpoint() == Some(breakpoint))
+            .map_or_else(|| breakpoint.to_string(), |(_, entry)| entry.id.to_string());
+        self.client
+            .important(format!(
+                "breakpoint {id} stopped because its condition could not be evaluated: {error}"
+            ))
+            .await
     }
 
     /// Reports a stop to the client.
@@ -1295,17 +1322,7 @@ impl Session {
                     self.stopped(stop_id, thread_id, reason).await?;
                 }
             }
-            InferiorState::Running { .. } => {
-                if let Some(stop) = self.stop.take() {
-                    self.leave_stop();
-                    self.client
-                        .event(
-                            "continued",
-                            json!({"threadId": stop.thread.get(), "allThreadsContinued": true}),
-                        )
-                        .await?;
-                }
-            }
+            InferiorState::Running { .. } => self.resumed_elsewhere().await?,
             InferiorState::NotRunning => {
                 if self
                     .target
@@ -1474,20 +1491,9 @@ impl Session {
         if let Key::Invalid(message) = &want.key {
             return failed(message.clone());
         }
-        if want.condition.is_some() {
-            return failed("conditional breakpoints are not supported yet".to_owned());
-        }
-        if want.log_message.is_some() {
-            return failed("logpoints are not supported yet".to_owned());
-        }
-        let hit_condition = match want
-            .hit_condition
-            .as_deref()
-            .map(str::parse::<uscope::HitCondition>)
-        {
-            None => None,
-            Some(Ok(condition)) => Some(condition),
-            Some(Err(error)) => return failed(error.to_string()),
+        let options = match breakpoint_options(want) {
+            Ok(options) => options,
+            Err(error) => return failed(error.to_string()),
         };
         let spec = match (group, &want.key) {
             (Group::Source(path), Key::Line(line)) => {
@@ -1514,14 +1520,7 @@ impl Session {
             }
             _ => return failed("this breakpoint cannot be placed".to_owned()),
         };
-        let added = match hit_condition {
-            Some(condition) => {
-                handle
-                    .add_breakpoint_with_hit_condition(spec, condition)
-                    .await
-            }
-            None => handle.add_breakpoint(spec).await,
-        };
+        let added = handle.add_breakpoint_with(spec, options).await;
         match added {
             Ok(breakpoint) => {
                 self.breakpoints.acquire(breakpoint.id);
@@ -1849,6 +1848,8 @@ fn capabilities() -> Value {
         "supportsConfigurationDoneRequest": true,
         "supportsFunctionBreakpoints": true,
         "supportsHitConditionalBreakpoints": true,
+        "supportsConditionalBreakpoints": true,
+        "supportsLogPoints": true,
         "supportsEvaluateForHovers": true,
         "supportsClipboardContext": true,
         "supportsExceptionInfoRequest": true,
@@ -1887,6 +1888,23 @@ async fn next_event(
         Some(events) => events.recv().await,
         None => std::future::pending().await,
     }
+}
+
+/// The debugger's options for a client breakpoint, or why it has none.
+fn breakpoint_options(want: &Want) -> uscope::Result<uscope::BreakpointOptions> {
+    Ok(uscope::BreakpointOptions {
+        hit_condition: want.hit_condition.as_deref().map(str::parse).transpose()?,
+        condition: want
+            .condition
+            .as_deref()
+            .map(uscope::Condition::parse)
+            .transpose()?,
+        log_message: want
+            .log_message
+            .as_deref()
+            .map(uscope::LogMessage::parse)
+            .transpose()?,
+    })
 }
 
 /// Parses request arguments into their type.

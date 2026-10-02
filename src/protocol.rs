@@ -272,6 +272,12 @@ pub struct Breakpoint {
     pub locations: Arc<[ResolvedBreakpointLocation]>,
     /// Which hits stop execution; `None` stops at every hit.
     pub hit_condition: Option<HitCondition>,
+    /// A condition the hitting thread's innermost frame must meet for a
+    /// hit that its hit condition allows to stop.
+    pub condition: Option<crate::Condition>,
+    /// A message logged, as [`DebuggerEvent::LogMessage`], at each hit
+    /// that would stop, which then does not stop.
+    pub log_message: Option<crate::LogMessage>,
     /// How many times threads of the current process reached the
     /// breakpoint, including hits its condition did not stop at. A new
     /// process starts again from zero.
@@ -281,6 +287,46 @@ pub struct Breakpoint {
     /// [`DebuggerEvent::BreakpointsChanged`]. It is exact at every published
     /// stop and after the inferior exits.
     pub hit_count: u64,
+}
+
+/// What a breakpoint does at a hit besides counting it. Every hit is
+/// counted; one stops when it meets the hit condition and the condition,
+/// unless the breakpoint logs a message instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BreakpointOptions {
+    /// Which hits may stop; `None` lets every hit stop.
+    pub hit_condition: Option<HitCondition>,
+    /// A condition the hitting thread's innermost frame must meet.
+    pub condition: Option<crate::Condition>,
+    /// A message to log instead of stopping.
+    pub log_message: Option<crate::LogMessage>,
+}
+
+/// One part of a logged message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a message has few parts, each made once per logged hit"
+)]
+pub enum LogPart {
+    /// Literal text.
+    Text(Arc<str>),
+    /// A value the message shows, as the hitting thread saw it.
+    Value {
+        /// The value's path.
+        expression: crate::ValueExpression,
+        /// Its type, when it resolved.
+        type_info: Option<crate::TypeInfo>,
+        /// Its state; its capabilities belong to no stop.
+        state: crate::VariableState,
+    },
+    /// A value the message names that could not be read.
+    Error {
+        /// The value's path.
+        expression: crate::ValueExpression,
+        /// Why it could not be read.
+        error: Arc<str>,
+    },
 }
 
 /// One logical breakpoint that a thread's hit stopped at.
@@ -994,6 +1040,23 @@ pub enum DebuggerEvent {
         thread_id: ThreadId,
         exception: ExceptionInfo,
     },
+    /// A thread hit a breakpoint that logs instead of stopping.
+    LogMessage {
+        revision: u64,
+        process_id: ProcessId,
+        thread_id: ThreadId,
+        breakpoint: BreakpointId,
+        parts: Arc<[LogPart]>,
+    },
+    /// A breakpoint's condition could not be evaluated at a hit, which
+    /// therefore stops as if the condition were met.
+    ConditionFailed {
+        revision: u64,
+        process_id: ProcessId,
+        thread_id: ThreadId,
+        breakpoint: BreakpointId,
+        error: Arc<str>,
+    },
     /// The set of logical breakpoints changed.
     BreakpointsChanged { revision: u64 },
     /// The set of armed watchpoints changed.
@@ -1023,6 +1086,8 @@ impl DebuggerEvent {
             | Self::InferiorExited { revision, .. }
             | Self::InferiorDetached { revision, .. }
             | Self::SignalReceived { revision, .. }
+            | Self::LogMessage { revision, .. }
+            | Self::ConditionFailed { revision, .. }
             | Self::BreakpointsChanged { revision }
             | Self::WatchpointsChanged { revision }
             | Self::WatchpointsInvalidated { revision, .. } => *revision,
@@ -1037,12 +1102,17 @@ pub type Reply<T> = oneshot::Sender<Result<T>>;
 pub enum Request {
     AddBreakpoint {
         spec: BreakpointSpec,
-        hit_condition: Option<HitCondition>,
+        options: Box<BreakpointOptions>,
         reply: Reply<Breakpoint>,
     },
     SetBreakpointHitCondition {
         id: BreakpointId,
         hit_condition: Option<HitCondition>,
+        reply: Reply<Breakpoint>,
+    },
+    SetBreakpointCondition {
+        id: BreakpointId,
+        condition: Option<crate::Condition>,
         reply: Reply<Breakpoint>,
     },
     RemoveBreakpoint {

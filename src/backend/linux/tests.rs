@@ -2064,6 +2064,8 @@ fn stale_status_is_never_consulted_outside_debug_exceptions() {
         spec: BreakpointSpec::Address(VirtualAddress::new(0x40)),
         locations: Arc::from([]),
         hit_condition: None,
+        condition: None,
+        log_message: None,
         hit_count: 0,
     });
     harness.start_continue();
@@ -2546,6 +2548,8 @@ fn hit_harness(thread_count: i32, hit_condition: &str) -> WatchHarness {
             code_instances: Arc::from([]),
         }]),
         hit_condition: Some(hit_condition.parse().expect("test hit condition")),
+        condition: None,
+        log_message: None,
         hit_count: 0,
     });
     harness
@@ -2894,7 +2898,7 @@ fn an_edit_while_running_applies_at_an_internal_stop_and_resumes_silently() {
     harness.published();
     let mut added = harness.edit(|reply| Edit::AddBreakpoint {
         spec: address_breakpoint(0x40),
-        hit_condition: None,
+        options: Box::default(),
         reply,
     });
 
@@ -2943,7 +2947,7 @@ fn a_hit_on_a_breakpoint_removed_while_running_is_dropped() {
     let breakpoint = harness
         .edit(|reply| Edit::AddBreakpoint {
             spec: address_breakpoint(0x40),
-            hit_condition: None,
+            options: Box::default(),
             reply,
         })
         .try_recv()
@@ -2999,7 +3003,7 @@ fn a_hit_on_a_breakpoint_that_survives_the_edit_is_published_with_its_owners() {
     let kept = harness
         .edit(|reply| Edit::AddBreakpoint {
             spec: address_breakpoint(0x40),
-            hit_condition: None,
+            options: Box::default(),
             reply,
         })
         .try_recv()
@@ -3008,7 +3012,7 @@ fn a_hit_on_a_breakpoint_that_survives_the_edit_is_published_with_its_owners() {
     let other = harness
         .edit(|reply| Edit::AddBreakpoint {
             spec: address_breakpoint(0x48),
-            hit_condition: None,
+            options: Box::default(),
             reply,
         })
         .try_recv()
@@ -3060,7 +3064,7 @@ fn a_signal_during_an_internal_stop_is_published_after_the_edit() {
     harness.published();
     let mut added = harness.edit(|reply| Edit::AddBreakpoint {
         spec: address_breakpoint(0x40),
-        hit_condition: None,
+        options: Box::default(),
         reply,
     });
     let pid = Pid::from_raw(5001);
@@ -3098,7 +3102,7 @@ fn pausing_during_an_internal_stop_publishes_the_pause() {
     let process = process_id(harness.threads[0]);
     let mut added = harness.edit(|reply| Edit::AddBreakpoint {
         spec: address_breakpoint(0x40),
-        hit_condition: None,
+        options: Box::default(),
         reply,
     });
     assert_eq!(
@@ -3238,7 +3242,7 @@ fn repairing_harness() -> WatchHarness {
     harness
         .edit(|reply| Edit::AddBreakpoint {
             spec: address_breakpoint(0x40),
-            hit_condition: None,
+            options: Box::default(),
             reply,
         })
         .try_recv()

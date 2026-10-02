@@ -328,6 +328,36 @@ fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
 }
 
 #[test]
+fn batch_mode_sets_and_clears_breakpoint_conditions() {
+    let stdout = batch(
+        "hit-counts-gcc-o0",
+        &[],
+        &[
+            "break counted",
+            "condition 1 call % 10 == 0 && last_call == call - 1",
+            "run",
+            "print call",
+            "breakpoints",
+            "condition 1",
+            "continue",
+            "print call",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 1 stops where call % 10 == 0 && last_call == call - 1 holds\n",
+            "stopped at breakpoint 1 (hit 10) at ",
+            "(uint64_t) call = 10\n",
+            "1  counted  1 location  hit 10 times  where call % 10 == 0 && last_call == call - 1\n",
+            "breakpoint 1 stops unconditionally\n",
+            "stopped at breakpoint 1 (hit 11) at ",
+            "(uint64_t) call = 11\n",
+        ],
+    );
+}
+
+#[test]
 fn hit_condition_commands_explain_rejected_input() {
     for (commands, message) in [
         (
@@ -353,6 +383,12 @@ fn hit_condition_commands_explain_rejected_input() {
             &["break counted", "hits one >=2"],
             "usage: hits <id> <hit-condition|always>",
         ),
+        (
+            &["break counted", "condition 1 call = 3"],
+            "invalid condition: '=' assigns; compare with '=='",
+        ),
+        (&["condition 4 x > 1"], "breakpoint 4 was not found"),
+        (&["condition"], "usage: condition <id> [expression...]"),
     ] {
         assert_failure(&batch_output("hit-counts-gcc-o0", commands), message);
     }

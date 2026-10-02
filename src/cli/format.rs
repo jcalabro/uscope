@@ -174,6 +174,18 @@ pub fn breakpoints(breakpoints: &[Breakpoint], renderer: Renderer) -> String {
         if let Some(condition) = hit_condition(breakpoint, renderer) {
             write!(output, "  {condition}").expect("writing to a String cannot fail");
         }
+        if let Some(condition) = &breakpoint.condition {
+            write!(output, "  where {}", renderer.paint(Role::Value, condition))
+                .expect("writing to a String cannot fail");
+        }
+        if let Some(message) = &breakpoint.log_message {
+            write!(
+                output,
+                "  logs \"{}\"",
+                renderer.paint(Role::Value, message)
+            )
+            .expect("writing to a String cannot fail");
+        }
         for resolved in breakpoint.locations.iter() {
             write!(
                 output,
@@ -1311,6 +1323,20 @@ pub fn signal_policies(policies: &[(u64, uscope::SignalPolicy)], renderer: Rende
 }
 
 /// Reports a signal that did not stop the inferior.
+/// Renders a logged message with the values it shows.
+pub fn log_message(parts: &[uscope::LogPart]) -> String {
+    parts
+        .iter()
+        .map(|part| match part {
+            uscope::LogPart::Text(text) => text.to_string(),
+            uscope::LogPart::Value {
+                type_info, state, ..
+            } => value::summary(type_info.as_ref(), state),
+            uscope::LogPart::Error { expression, error } => format!("<{expression}: {error}>"),
+        })
+        .collect()
+}
+
 pub fn signal_received(
     thread: uscope::ThreadId,
     info: &uscope::ExceptionInfo,

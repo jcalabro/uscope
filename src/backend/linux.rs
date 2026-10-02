@@ -423,7 +423,7 @@ impl StopBarrier {
 enum Edit {
     AddBreakpoint {
         spec: crate::BreakpointSpec,
-        hit_condition: Option<crate::HitCondition>,
+        options: Box<crate::BreakpointOptions>,
         reply: Reply<Breakpoint>,
     },
     RemoveBreakpoint {
@@ -868,14 +868,21 @@ impl<P: LinuxTraceOps> Controller<P> {
         match request {
             Request::AddBreakpoint {
                 spec,
-                hit_condition,
+                options,
                 reply,
             } => {
                 self.edit(Edit::AddBreakpoint {
                     spec,
-                    hit_condition,
+                    options,
                     reply,
                 });
+            }
+            Request::SetBreakpointCondition {
+                id,
+                condition,
+                reply,
+            } => {
+                let _ = reply.send(self.set_breakpoint_condition(id, condition));
             }
             Request::SetBreakpointHitCondition {
                 id,
@@ -1154,6 +1161,7 @@ impl<P: InspectionOps> Controller<P> {
             }
             Request::AddBreakpoint { .. }
             | Request::SetBreakpointHitCondition { .. }
+            | Request::SetBreakpointCondition { .. }
             | Request::RemoveBreakpoint { .. }
             | Request::RemoveAllBreakpoints { .. }
             | Request::AddWatchpoint { .. }

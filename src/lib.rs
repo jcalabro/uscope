@@ -1,4 +1,5 @@
 mod backend;
+mod condition;
 mod debug_info;
 mod demangle;
 mod disassembly;
@@ -21,6 +22,7 @@ use tokio::time::timeout;
 use backend::ControllerMessage;
 use protocol::Request;
 
+pub use condition::{Condition, LogMessage, LogSegment, Operand};
 pub use disassembly::{
     AssemblySyntax, BlockCompletion, BoundaryConflict, BoundaryEvidence, ContextShortfall,
     ControlFlow, DecodedInstruction, DisassembledFunction, DisassembledInstruction, Disassembly,
@@ -61,14 +63,14 @@ pub use model::{
     VirtualAddress,
 };
 pub use protocol::{
-    Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, CoreDumpInfo, CoreDumpOptions,
-    CoreModule, CoreModuleState, DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId,
-    ExitStatus, FramePresentation, GlobalVariableQuery, HitComparison, HitCondition, InferiorState,
-    InvalidatedWatchpoint, LaunchOptions, ModuleIdentity, PresentedFrame, ProcessId,
-    ResolvedBreakpointLocation, ResumeScope, SignalPolicy, StateSnapshot, StepKind, StopId,
-    StopReason, ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery, WatchAccess,
-    WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
-    WatchpointInvalidation, WatchpointSpec,
+    Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CoreDumpInfo,
+    CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent, ExceptionDisposition,
+    ExceptionInfo, ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, HitComparison,
+    HitCondition, InferiorState, InvalidatedWatchpoint, LaunchOptions, LogPart, ModuleIdentity,
+    PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope, SignalPolicy,
+    StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState, ValueChildQuery,
+    VariableQuery, WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities,
+    WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
 };
 pub use source_map::SourcePathMap;
 
@@ -345,9 +347,21 @@ impl DebuggerHandle {
     /// locations resolved by the backend. Adding the spec of an existing
     /// breakpoint without a hit condition returns that breakpoint.
     pub async fn add_breakpoint(&self, spec: BreakpointSpec) -> Result<Breakpoint> {
+        self.add_breakpoint_with(spec, BreakpointOptions::default())
+            .await
+    }
+
+    /// Adds a logical breakpoint that stops or logs at the hits `options`
+    /// select. Adding the spec and options of an existing breakpoint
+    /// returns that breakpoint, with the hits it already counted.
+    pub async fn add_breakpoint_with(
+        &self,
+        spec: BreakpointSpec,
+        options: BreakpointOptions,
+    ) -> Result<Breakpoint> {
         self.request(|reply| Request::AddBreakpoint {
             spec,
-            hit_condition: None,
+            options: Box::new(options),
             reply,
         })
         .await
@@ -361,11 +375,13 @@ impl DebuggerHandle {
         spec: BreakpointSpec,
         hit_condition: HitCondition,
     ) -> Result<Breakpoint> {
-        self.request(|reply| Request::AddBreakpoint {
+        self.add_breakpoint_with(
             spec,
-            hit_condition: Some(hit_condition),
-            reply,
-        })
+            BreakpointOptions {
+                hit_condition: Some(hit_condition),
+                ..BreakpointOptions::default()
+            },
+        )
         .await
     }
 
@@ -381,6 +397,21 @@ impl DebuggerHandle {
         self.request(|reply| Request::SetBreakpointHitCondition {
             id,
             hit_condition,
+            reply,
+        })
+        .await
+    }
+
+    /// Replaces a breakpoint's condition; `None` removes it. Like a hit
+    /// condition, this needs no stop and applies from the next hit.
+    pub async fn set_breakpoint_condition(
+        &self,
+        id: BreakpointId,
+        condition: Option<Condition>,
+    ) -> Result<Breakpoint> {
+        self.request(|reply| Request::SetBreakpointCondition {
+            id,
+            condition,
             reply,
         })
         .await
