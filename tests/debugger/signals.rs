@@ -295,11 +295,19 @@ async fn go_preemption_signals_never_stop_the_program() {
         scenario.run_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
     );
-    let mut preemptions = 0;
-    while let Ok(event) = events.try_recv() {
-        if let DebuggerEvent::SignalReceived { exception, .. } = event {
-            assert_eq!(exception.code, urgent);
-            preemptions += 1;
+    let mut preemptions = 0_u64;
+    loop {
+        match events.try_recv() {
+            Ok(DebuggerEvent::SignalReceived { exception, .. }) => {
+                assert_eq!(exception.code, urgent);
+                preemptions += 1;
+            }
+            Ok(_) => {}
+            // So many signals arrived that this subscriber fell behind.
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                preemptions += skipped;
+            }
+            Err(_) => break,
         }
     }
     assert!(preemptions > 0, "the runtime never preempted a goroutine");

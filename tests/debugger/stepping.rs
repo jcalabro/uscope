@@ -1104,6 +1104,9 @@ async fn inline_next_is_owned_by_the_selected_thread() {
         let mut scenario = Scenario::launch(fixture);
         scenario.add_breakpoint("thread_caller").await;
         scenario.run_to_stop().await;
+        // The other worker runs during the step; without the breakpoint it
+        // runs the same code, reaching the step's internal breakpoints.
+        scenario.remove_all_breakpoints().await;
         let before = scenario.snapshot().await;
         let selected = before.selected_thread.expect("selected worker thread");
 
