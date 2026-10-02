@@ -828,6 +828,10 @@ build_fixture gcc "$c_fixtures_dir/threads.c" "$output_dir/threads" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/process-environment.c" "$output_dir/process-environment" \
     -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/signal-policy.c" "$output_dir/signal-policy" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/signal-steps.c" "$output_dir/signal-steps" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/signals.c" "$output_dir/signals" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/fatal-signal.c" "$output_dir/fatal-signal" \
@@ -982,6 +986,8 @@ build_rust_fixture "$rust_fixtures_dir/crash.rs" "$output_dir/crash-rust-o0" \
 # keeps the v0-mangled symbol table.
 build_rust_fixture "$rust_fixtures_dir/crash.rs" "$output_dir/crash-rust-nodebug" \
     -C opt-level=0 -C debuginfo=0 -C strip=debuginfo
+build_go_fixture "$go_fixtures_dir/preempt" "$output_dir/preempt-go" \
+    -buildmode=pie
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-nodwarf" \

@@ -729,11 +729,8 @@ async fn forked_children_do_not_inherit_watchpoints() {
         let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
         // A child that inherited the watchpoint would die by SIGTRAP and the
-        // parent would exit 73 instead of storing 4321.
-        assert!(matches!(
-            scenario.resume_to_stop().await,
-            StopReason::Exception(exception) if exception.code == 17
-        ));
+        // parent would exit 73 instead of storing 4321. Its SIGCHLD does not
+        // stop the parent.
         assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 99, 4321);
 
         scenario

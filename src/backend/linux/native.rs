@@ -17,7 +17,6 @@ use nix::errno::Errno;
 use nix::libc;
 use nix::sys::ptrace::{self, Options};
 use nix::sys::signal::{self, Signal as NixSignal};
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 use tokio::sync::mpsc;
 
@@ -29,6 +28,7 @@ use crate::{Error, Result, VirtualAddress};
 use super::memory::MemoryAccessError;
 use super::modules::{ModuleMapping, load_bias, module_mappings};
 use super::registers::{Fxsave, native_fxsave};
+use super::signals::{Signal, WaitEvent};
 use super::{
     BREAKPOINT_OPCODE, BreakpointOwner, BreakpointSite, LinuxError, SignalMetadata,
     WAITER_THREAD_NAME, Waiter, backend_error,
@@ -67,8 +67,8 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>>;
     fn seize(&self, pid: Pid) -> Result<bool>;
     fn interrupt(&self, pid: Pid) -> Result<bool>;
-    fn detach(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
-    fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()>;
+    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
+    fn kill(&self, pid: Pid, signal: Signal) -> Result<()>;
     fn reap(&self, pid: Pid) -> Result<()>;
     fn thread_group_id(&self, pid: Pid) -> Result<Pid>;
     fn load_bias(
@@ -84,9 +84,9 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         Ok(Vec::new())
     }
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()>;
-    fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
+    fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()>;
-    fn step(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()>;
+    fn step(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()>;
     fn set_options(&self, pid: Pid, exit_kill: bool) -> Result<()>;
     fn event_message(&self, pid: Pid) -> Result<libc::c_long>;
@@ -248,16 +248,18 @@ impl LinuxTraceOps for LinuxPtrace {
         }
     }
 
-    fn detach(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         self.assert_owner_thread();
-        match ptrace::detach(pid, signal) {
+        match ptrace_with_signal(libc::PTRACE_DETACH, pid, signal) {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
             Err(error) => Err(backend_error(LinuxError::System(error))),
         }
     }
 
-    fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
+    fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {
         self.assert_owner_thread();
+        let signal = NixSignal::try_from(signal.number())
+            .map_err(|error| backend_error(LinuxError::System(error)))?;
         let result = signal::kill(pid, signal);
         self.wake_waiter();
         match result {
@@ -268,7 +270,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn reap(&self, pid: Pid) -> Result<()> {
         self.assert_owner_thread();
-        waitpid(pid, Some(WaitPidFlag::__WALL))
+        wait_for(pid, libc::__WALL)
             .map(|_| ())
             .map_err(|error| backend_error(LinuxError::System(error)))
     }
@@ -330,16 +332,17 @@ impl LinuxTraceOps for LinuxPtrace {
             .map_err(|error| backend_error(LinuxError::System(error)))
     }
 
-    fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+    fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         self.assert_owner_thread();
-        ptrace::cont(pid, signal).map_err(|error| backend_error(LinuxError::System(error)))?;
+        ptrace_with_signal(libc::PTRACE_CONT, pid, signal)
+            .map_err(|error| backend_error(LinuxError::System(error)))?;
         self.wake_waiter();
         Ok(())
     }
 
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()> {
         self.assert_owner_thread();
-        let result = ptrace::cont(pid, Some(NixSignal::SIGKILL));
+        let result = ptrace_with_signal(libc::PTRACE_CONT, pid, Some(Signal::SIGKILL));
         self.wake_waiter();
         match result {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
@@ -347,9 +350,10 @@ impl LinuxTraceOps for LinuxPtrace {
         }
     }
 
-    fn step(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+    fn step(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         self.assert_owner_thread();
-        ptrace::step(pid, signal).map_err(|error| backend_error(LinuxError::System(error)))?;
+        ptrace_with_signal(libc::PTRACE_SINGLESTEP, pid, signal)
+            .map_err(|error| backend_error(LinuxError::System(error)))?;
         self.wake_waiter();
         Ok(())
     }
@@ -377,7 +381,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()> {
         self.assert_owner_thread();
-        tgkill(process, thread, NixSignal::SIGSTOP)?;
+        tgkill(process, thread, Signal::SIGSTOP)?;
         self.wake_waiter();
         Ok(())
     }
@@ -504,7 +508,7 @@ pub(super) fn queued_trap_in_status(status: &str) -> bool {
             .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
             .unwrap_or(0)
     };
-    let trap = 1 << (NixSignal::SIGTRAP as u32 - 1);
+    let trap = 1 << (Signal::SIGTRAP.number() - 1);
     mask("SigPnd:") & trap != 0 && mask("SigBlk:") & trap == 0
 }
 
@@ -558,25 +562,22 @@ pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<
         .spawn(move || {
             let mut interval = WAITER_MIN_POLL;
             while !thread_stop.load(Ordering::Acquire) {
-                let status = match waitpid(
-                    Pid::from_raw(-1),
-                    Some(WaitPidFlag::__WALL | WaitPidFlag::WNOHANG),
-                ) {
-                    Ok(status) => status,
+                let status = match wait_for(Pid::from_raw(-1), libc::__WALL | libc::WNOHANG) {
+                    Ok(Some(status)) => status,
+                    Ok(None) => {
+                        let parked = Instant::now();
+                        thread::park_timeout(interval);
+                        // Returning early means the controller woke the waiter.
+                        interval = if parked.elapsed() < interval {
+                            WAITER_MIN_POLL
+                        } else {
+                            interval.saturating_mul(2).min(WAITER_MAX_POLL)
+                        };
+                        continue;
+                    }
                     Err(Errno::EINTR) => continue,
                     Err(_) => break,
                 };
-                if status == WaitStatus::StillAlive {
-                    let parked = Instant::now();
-                    thread::park_timeout(interval);
-                    // Returning early means the controller woke the waiter.
-                    interval = if parked.elapsed() < interval {
-                        WAITER_MIN_POLL
-                    } else {
-                        interval.saturating_mul(2).min(WAITER_MAX_POLL)
-                    };
-                    continue;
-                }
                 interval = WAITER_MIN_POLL;
                 if messages
                     .blocking_send(ControllerMessage::Wait(status))
@@ -615,14 +616,14 @@ pub(super) fn trace_child(command: &mut ProcessCommand) {
     unsafe_code,
     reason = "Linux exposes thread-directed signals through tgkill"
 )]
-pub(super) fn tgkill(process: Pid, thread: Pid, signal: NixSignal) -> Result<()> {
+pub(super) fn tgkill(process: Pid, thread: Pid, signal: Signal) -> Result<()> {
     // SAFETY: tgkill takes three integer values and does not dereference user memory.
     let result = unsafe {
         libc::syscall(
             libc::SYS_tgkill,
             process.as_raw(),
             thread.as_raw(),
-            signal as i32,
+            signal.number(),
         )
     };
     if result == -1 {
@@ -664,16 +665,49 @@ pub(super) const fn siginfo_has_fault_address(number: i32, code: i32) -> bool {
         && code != libc::SI_KERNEL
 }
 
-pub(super) const fn wait_status_pid(status: &WaitStatus) -> Option<Pid> {
-    match *status {
-        WaitStatus::Exited(pid, _)
-        | WaitStatus::Signaled(pid, _, _)
-        | WaitStatus::Stopped(pid, _)
-        | WaitStatus::PtraceEvent(pid, _, _)
-        | WaitStatus::PtraceSyscall(pid)
-        | WaitStatus::Continued(pid) => Some(pid),
-        WaitStatus::StillAlive => None,
+/// Waits for a status change of `pid`, or of any child for -1, decoding
+/// every signal; `None` means `WNOHANG` found no change.
+#[allow(
+    unsafe_code,
+    reason = "nix's waitpid rejects statuses of real-time signals"
+)]
+pub(super) fn wait_for(
+    pid: Pid,
+    options: libc::c_int,
+) -> std::result::Result<Option<WaitEvent>, Errno> {
+    let mut status = 0;
+    // SAFETY: `status` is a writable c_int that outlives the call.
+    let child = Errno::result(unsafe { libc::waitpid(pid.as_raw(), &raw mut status, options) })?;
+    if child == 0 {
+        return Ok(None);
     }
+    WaitEvent::decode(Pid::from_raw(child), status).map(Some)
+}
+
+/// Resumes or detaches a stopped tracee, delivering `signal` to it.
+#[allow(
+    unsafe_code,
+    reason = "nix's ptrace wrappers cannot deliver real-time signals"
+)]
+fn ptrace_with_signal(
+    request: libc::c_uint,
+    pid: Pid,
+    signal: Option<Signal>,
+) -> std::result::Result<(), Errno> {
+    let data = signal.map_or(0, |signal| {
+        usize::try_from(signal.number()).expect("signal numbers are positive")
+    });
+    // SAFETY: continuing, single-stepping, and detaching ignore `addr` and
+    // read no memory; `data` carries only the signal number to deliver.
+    let result = unsafe {
+        libc::ptrace(
+            request,
+            pid.as_raw(),
+            std::ptr::null_mut::<libc::c_void>(),
+            std::ptr::without_provenance_mut::<libc::c_void>(data),
+        )
+    };
+    Errno::result(result).map(drop)
 }
 
 pub(super) fn thread_group_id(pid: Pid) -> Result<Pid> {

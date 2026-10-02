@@ -591,6 +591,9 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
             .iter()
             .all(|thread| matches!(thread.state, ThreadState::Stopped { .. }))
     );
+    // Each worker's value is a parameter of its worker frame, which a
+    // worker still spinning on the release flag shows below an inline frame.
+    let stop = snapshot.stop_id.expect("stopped");
     let mut values = BTreeSet::new();
     for thread in snapshot.threads.iter() {
         scenario
@@ -604,18 +607,38 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
             .await;
         assert_eq!(trace.thread, thread.id);
         assert!(!trace.frames.is_empty());
-        match scenario.handle().variable("value").await {
-            Ok(variable) => {
-                let uscope::VariableValue::Scalar(ScalarValue::Unsigned(value)) =
-                    available_value(&variable.state)
-                else {
-                    panic!("Zig worker value was not available: {variable:?}");
-                };
-                values.insert(*value);
-            }
-            Err(Error::LocationUnavailable | Error::VariableNotFound(_)) => {}
-            Err(error) => panic!("unexpected Zig thread variable error: {error}"),
-        }
+        let Some(frame) = trace.frames.iter().find(|frame| {
+            frame
+                .function
+                .as_ref()
+                .is_some_and(|function| ["worker", "workerBreakpoint"].contains(&&*function.name))
+        }) else {
+            continue;
+        };
+        let variables = scenario
+            .operation(
+                "Zig worker variables",
+                scenario
+                    .handle()
+                    .at(uscope::StopContext {
+                        stop,
+                        thread: thread.id,
+                        frame: frame.id,
+                    })
+                    .variables(),
+            )
+            .await;
+        let value = variables
+            .variables
+            .iter()
+            .find(|variable| &*variable.name == "value")
+            .unwrap_or_else(|| panic!("no Zig worker value in {variables:?}"));
+        let uscope::VariableValue::Scalar(ScalarValue::Unsigned(value)) =
+            available_value(&value.state)
+        else {
+            panic!("Zig worker value was not available: {value:?}");
+        };
+        values.insert(*value);
     }
     assert_eq!(values, BTreeSet::from([101, 202]));
 

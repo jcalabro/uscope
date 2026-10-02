@@ -84,7 +84,7 @@ pub fn process_start_time(process: i32) -> Option<u64> {
 
 pub enum ControllerMessage {
     Request(Request),
-    Wait(linux::WaitEvent),
+    Wait(linux::NativeWait),
 }
 
 /// The channels a controller serves.
@@ -115,6 +115,21 @@ pub fn open_core(
 /// Makes TLS lookups in this process bypass the platform's thread library.
 pub fn force_internal_tls_lookup(forced: bool) {
     linux::force_internal_tls_lookup(forced);
+}
+
+/// Finds a signal's exception code by name.
+pub fn signal_named(name: &str) -> Option<u64> {
+    linux::Signal::named(name).map(linux::Signal::code)
+}
+
+/// Names the signal with an exception code.
+pub fn signal_name(code: u64) -> Option<String> {
+    linux::Signal::from_code(code).map(linux::Signal::name)
+}
+
+/// The exception codes of every signal, in order.
+pub fn signal_codes() -> impl Iterator<Item = u64> {
+    linux::Signal::all().map(linux::Signal::code)
 }
 
 /// Describes the platform's hardware watchpoint support.

@@ -28,9 +28,9 @@ use std::thread::{self, JoinHandle};
 
 use nix::errno::Errno;
 use nix::libc;
-use nix::sys::signal::Signal as NixSignal;
-use nix::sys::wait::WaitStatus;
 use nix::unistd::Pid;
+pub use signals::Signal;
+use signals::{SignalPolicies, WaitEvent};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::debug_info::{DebugInfo, UnwindInfo, VariableInfo};
@@ -52,7 +52,7 @@ use classify::is_stopping_signal;
 use debug_registers::DebugRegisterPlan;
 use memory::MemoryAccessError;
 use modules::{ModuleMapping, loader_link_maps, mapped_module_load_bias, module_mappings};
-use native::{InspectionOps, LinuxPtrace, LinuxTraceOps, wait_status_pid};
+use native::{InspectionOps, LinuxPtrace, LinuxTraceOps};
 use registers::Fxsave;
 
 mod breakpoints;
@@ -72,6 +72,7 @@ mod native;
 mod post_mortem;
 mod registers;
 mod run_control;
+mod signals;
 mod stepping;
 mod thread_db;
 mod watchpoints;
@@ -116,7 +117,8 @@ const MAX_VALUE_CHILD_PAGE_LIMIT: u32 = 256;
 
 static LINUX_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-pub type WaitEvent = WaitStatus;
+/// A decoded `waitpid` status the waiter thread reports to the controller.
+pub type NativeWait = WaitEvent;
 
 fn backend_error(error: LinuxError) -> Error {
     Error::backend(error)
@@ -139,8 +141,8 @@ fn debug_pid(thread: DebugThreadId) -> Result<Pid> {
         .ok_or(Error::UnknownThread(thread))
 }
 
-fn exception_info(signal: NixSignal) -> ExceptionInfo {
-    ExceptionInfo::new(u64::from(signal as u32), signal.to_string())
+fn exception_info(signal: Signal) -> ExceptionInfo {
+    ExceptionInfo::new(signal.code(), signal.to_string())
 }
 
 fn pending_exception_info(pending: PendingSignal) -> ExceptionInfo {
@@ -148,7 +150,7 @@ fn pending_exception_info(pending: PendingSignal) -> ExceptionInfo {
         .sender
         .map_or_else(|| "unavailable".to_owned(), |sender| sender.to_string());
     ExceptionInfo::new(
-        u64::from(pending.signal as u32),
+        pending.signal.code(),
         format!(
             "{} (si_code {}, sender {})",
             pending.signal, pending.code, sender
@@ -270,7 +272,7 @@ struct WatchRecord {
 
 #[derive(Debug, Clone, Copy)]
 struct PendingSignal {
-    signal: NixSignal,
+    signal: Signal,
     code: i32,
     sender: Option<i32>,
 }
@@ -291,7 +293,7 @@ struct RawStopRecord {
 enum ClassifiedStop {
     ThreadStart,
     SignalDelivery(PendingSignal),
-    GroupStop(NixSignal),
+    GroupStop(Signal),
     Breakpoint(VirtualAddress),
     Watch(BTreeSet<WatchpointId>),
     Trace {
@@ -311,6 +313,16 @@ struct StepStart {
     plan_addresses: BTreeSet<VirtualAddress>,
     epilogue_traversal: Option<EpilogueTraversal>,
     return_traversal: Option<ReturnTraversal>,
+    /// Where a signal handler returns to the instruction it interrupted.
+    signal_guard: Option<SignalGuard>,
+}
+
+/// The instruction a delivered signal interrupted during a step, and the
+/// stack pointer its handler restores on returning there.
+#[derive(Debug, Clone, Copy)]
+struct SignalGuard {
+    address: VirtualAddress,
+    stack: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -489,7 +501,7 @@ struct Inferior {
     retired_threads: BTreeSet<Pid>,
     /// Initial stops of new threads or fork children that arrived before
     /// the event that announces them.
-    unowned_stops: BTreeMap<Pid, WaitStatus>,
+    unowned_stops: BTreeMap<Pid, WaitEvent>,
     /// Fork children announced before their initial stop arrived.
     fork_children: BTreeSet<Pid>,
     waiter: Option<Waiter>,
@@ -743,6 +755,7 @@ struct Controller<P: InspectionOps> {
     /// or detach, and the controller exits once the inferior is gone.
     shutting_down: bool,
     shutdown_reply: Option<Reply<()>>,
+    signals: SignalPolicies,
     revision: u64,
 }
 
@@ -804,6 +817,7 @@ impl<P: InspectionOps> Controller<P> {
             attach_reply: None,
             shutting_down: false,
             shutdown_reply: None,
+            signals: SignalPolicies::default(),
             revision: 0,
         }
     }
@@ -1091,6 +1105,24 @@ impl<P: InspectionOps> Controller<P> {
                         self.resolve_watch_target(stop_id, pid, frame, &expression)
                     }));
             }
+            Request::SignalPolicy { signal, reply } => {
+                let _ = reply.send(
+                    Signal::from_code(signal)
+                        .map(|signal| self.signals.get(signal))
+                        .ok_or(Error::UnknownSignal(signal)),
+                );
+            }
+            Request::SetSignalPolicy {
+                signal,
+                policy,
+                reply,
+            } => {
+                let _ = reply.send(
+                    Signal::from_code(signal)
+                        .map(|signal| self.signals.set(signal, policy))
+                        .ok_or(Error::UnknownSignal(signal)),
+                );
+            }
             Request::AddBreakpoint { .. }
             | Request::SetBreakpointHitCondition { .. }
             | Request::RemoveBreakpoint { .. }
@@ -1112,7 +1144,7 @@ impl<P: InspectionOps> Controller<P> {
 }
 
 impl<P: LinuxTraceOps> Controller<P> {
-    fn handle_wait(&mut self, status: WaitStatus) -> bool {
+    fn handle_wait(&mut self, status: WaitEvent) -> bool {
         if self.shutting_down {
             return self.handle_shutdown_wait(status);
         }
@@ -1124,9 +1156,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         true
     }
 
-    fn process_wait(&mut self, status: WaitStatus) -> Result<()> {
-        let pid = wait_status_pid(&status)
-            .ok_or_else(|| backend_error(LinuxError::UnexpectedWait(format!("{status:?}"))))?;
+    fn process_wait(&mut self, status: WaitEvent) -> Result<()> {
+        let pid = status.pid();
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         let known = inferior.threads.contains_key(&pid);
         let retired = inferior.retired_threads.contains(&pid);
@@ -1138,7 +1169,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             // seized one.
             let stop = matches!(
                 status,
-                WaitStatus::Stopped(..) | WaitStatus::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP)
+                WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP)
             );
             let expected = stop || retired || inferior.fork_children.contains(&pid);
             if expected && self.absorb_untracked_wait(&status) {
@@ -1150,45 +1181,45 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         match status {
-            WaitStatus::Exited(pid, code) => {
+            WaitEvent::Exited(pid, code) => {
                 self.handle_terminal(pid, ExitStatus::Code(i64::from(code)))
             }
-            WaitStatus::Signaled(pid, signal, _) => {
+            WaitEvent::Signaled(pid, signal, _) => {
                 self.handle_terminal(pid, ExitStatus::Terminated(exception_info(signal)))
             }
-            WaitStatus::PtraceEvent(pid, signal, libc::PTRACE_EVENT_STOP) => {
+            WaitEvent::PtraceEvent(pid, signal, libc::PTRACE_EVENT_STOP) => {
                 self.handle_event_stop(pid, signal)
             }
-            WaitStatus::PtraceEvent(pid, _, event) => self.handle_ptrace_event(pid, event),
-            WaitStatus::PtraceSyscall(pid) => self.handle_classified_stop(
+            WaitEvent::PtraceEvent(pid, _, event) => self.handle_ptrace_event(pid, event),
+            WaitEvent::PtraceSyscall(pid) => self.handle_classified_stop(
                 pid,
                 ClassifiedStop::Unclassifiable(RawStopRecord {
                     status: "ptrace syscall stop while syscall tracing is unsupported".to_owned(),
                     siginfo: Err(Errno::EINVAL),
                 }),
             ),
-            WaitStatus::Stopped(pid, signal) => {
+            WaitEvent::Stopped(pid, signal) => {
                 let initial = self
                     .inferior
                     .as_ref()
                     .and_then(|inferior| inferior.threads.get(&pid))
                     .is_some_and(|thread| matches!(thread.expected, ExpectedStop::InitialExec));
-                if initial && signal == NixSignal::SIGTRAP {
+                if initial && signal == Signal::SIGTRAP {
                     self.handle_initial_stop(pid)
                 } else {
                     let stop = self.classify_stop(pid, signal);
                     self.handle_classified_stop(pid, stop)
                 }
             }
-            other => Err(backend_error(LinuxError::UnexpectedWait(format!(
-                "{other:?}"
-            )))),
+            other @ WaitEvent::Continued(_) => Err(backend_error(LinuxError::UnexpectedWait(
+                format!("{other:?}"),
+            ))),
         }
     }
 
     /// Routes a `PTRACE_EVENT_STOP`, which seized threads report for several
     /// unrelated reasons.
-    fn handle_event_stop(&mut self, pid: Pid, signal: NixSignal) -> Result<()> {
+    fn handle_event_stop(&mut self, pid: Pid, signal: Signal) -> Result<()> {
         let thread = self
             .inferior
             .as_ref()

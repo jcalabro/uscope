@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use nix::sys::signal::Signal as NixSignal;
+use super::signals::Signal;
 use nix::unistd::Pid;
 
 use crate::protocol::{
@@ -19,9 +19,9 @@ use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
     ActiveExecution, ActiveKind, BreakpointOwner, ClassifiedStop, Controller, ExpectedStop,
     Inferior, InferiorOrigin, LinuxError, NativeThreadState, PendingSignal, PublicStop,
-    RepairGroup, Resume, StopBarrier, allocate_stop_id, backend_error, debug_thread_id,
-    exception_info, pending_exception_info, process_id, scoped_threads, validate_process,
-    validate_public_stop, validate_resumable, validate_stopped_thread,
+    RepairGroup, Resume, SignalGuard, StopBarrier, allocate_stop_id, backend_error,
+    debug_thread_id, exception_info, pending_exception_info, process_id, scoped_threads,
+    validate_process, validate_public_stop, validate_resumable, validate_stopped_thread,
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -152,7 +152,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         if let Err(recovery) =
                             remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)
                         {
-                            let _ = self.ptrace.kill(inferior.tgid, NixSignal::SIGKILL);
+                            let _ = self.ptrace.kill(inferior.tgid, Signal::SIGKILL);
                             return Err(backend_error(LinuxError::ResumeRecovery {
                                 cause: error.to_string(),
                                 recovery: recovery.to_string(),
@@ -444,9 +444,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     ) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let thread = inferior.thread_mut(pid)?;
+        // A pending signal is delivered only if its policy passes it.
         let signal = deliver_signal
             .then(|| thread.pending_signal.map(|pending| pending.signal))
-            .flatten();
+            .flatten()
+            .filter(|signal| self.signals.get(*signal).pass);
         let result = match resume {
             Resume::Continue => self.ptrace.continue_execution(pid, signal),
             Resume::Step => self.ptrace.step(pid, signal),
@@ -563,6 +565,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .is_some_and(|site| site.owners.contains(&BreakpointOwner::Plan(*execution)))
         });
         if let Some((execution, kind)) = planned {
+            if self.reach_signal_guard(pid, address)? {
+                return Ok(());
+            }
             if kind != StepKind::Instruction {
                 self.begin_epilogue_traversal(pid)?;
             }
@@ -704,7 +709,45 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.finish_barrier_if_ready()
     }
 
+    /// Applies the signal's policy to a signal-delivery stop: a visible
+    /// stop, or delivering or discarding the signal as the thread resumes
+    /// what it was doing.
     pub(super) fn handle_signal_stop(&mut self, pid: Pid, pending: PendingSignal) -> Result<()> {
+        let policy = self.signals.get(pending.signal);
+        if policy.stop {
+            return self.stop_for_signal(pid, pending);
+        }
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        if policy.print {
+            let _ = self.events.send(DebuggerEvent::SignalReceived {
+                revision: self.revision,
+                process_id: process_id(inferior.tgid),
+                thread_id: debug_thread_id(pid),
+                exception: pending_exception_info(pending),
+            });
+        }
+        let delivered = policy.pass.then_some(pending);
+        let expected = inferior.thread(pid)?.expected.clone();
+        match expected {
+            ExpectedStop::BreakpointRepair { address } => {
+                self.signal_during_repair(pid, address, delivered)
+            }
+            ExpectedStop::UserStep { kind } => self.signal_during_step(pid, kind, delivered),
+            expected => {
+                self.inferior
+                    .as_mut()
+                    .ok_or(Error::NotRunning)?
+                    .thread_mut(pid)?
+                    .pending_signal = delivered;
+                if self.barrier_active() {
+                    return self.finish_barrier_if_ready();
+                }
+                self.resume_native(pid, Resume::Continue, true, expected)
+            }
+        }
+    }
+
+    fn stop_for_signal(&mut self, pid: Pid, pending: PendingSignal) -> Result<()> {
         let repair_address = self
             .inferior
             .as_ref()
@@ -725,6 +768,164 @@ impl<P: LinuxTraceOps> Controller<P> {
         thread.expected = ExpectedStop::None;
         thread.pending_signal = Some(pending);
         self.begin_visible_stop(pid, StopReason::Exception(pending_exception_info(pending)))
+    }
+
+    /// Handles a signal that arrived before a thread stepped over its
+    /// breakpoint site. A delivered signal runs its handler first, with the
+    /// site restored so no other thread can pass it, and the thread repairs
+    /// the site when it reaches it again; a discarded one repeats the step.
+    fn signal_during_repair(
+        &mut self,
+        pid: Pid,
+        address: VirtualAddress,
+        delivered: Option<PendingSignal>,
+    ) -> Result<()> {
+        let barrier = self.barrier_active();
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let Some(pending) = delivered else {
+            inferior.thread_mut(pid)?.pending_signal = None;
+            if barrier {
+                return self.finish_barrier_if_ready();
+            }
+            return self.resume_native(
+                pid,
+                Resume::Step,
+                false,
+                ExpectedStop::BreakpointRepair { address },
+            );
+        };
+        let memory = inferior.memory_thread();
+        if let Some(group) = inferior
+            .repairs
+            .front_mut()
+            .filter(|group| group.address == address && group.current == Some(pid))
+        {
+            group.current = None;
+            if group.site_removed {
+                self.ptrace
+                    .reinstall_breakpoint(memory, &mut inferior.breakpoints, address)?;
+                group.site_removed = false;
+            }
+        }
+        let thread = inferior.thread_mut(pid)?;
+        thread.stopped_at_breakpoint = None;
+        thread.awaiting_breakpoint = Some(address);
+        thread.pending_signal = Some(pending);
+        thread.expected = ExpectedStop::None;
+        if barrier {
+            self.finish_barrier_if_ready()
+        } else {
+            self.resume_awaiting_thread(pid)
+        }
+    }
+
+    /// Handles a signal that arrived before the stepping thread executed
+    /// its next instruction. A discarded signal repeats the step. A
+    /// delivered one runs its handler at full speed: a guard at the
+    /// interrupted instruction resumes the step when the handler returns
+    /// there, so the step never stops inside the handler.
+    fn signal_during_step(
+        &mut self,
+        pid: Pid,
+        kind: StepKind,
+        delivered: Option<PendingSignal>,
+    ) -> Result<()> {
+        let barrier = self.barrier_active();
+        let Some(pending) = delivered else {
+            self.inferior
+                .as_mut()
+                .ok_or(Error::NotRunning)?
+                .thread_mut(pid)?
+                .pending_signal = None;
+            if barrier {
+                return self.finish_barrier_if_ready();
+            }
+            return self.resume_native(pid, Resume::Step, false, ExpectedStop::UserStep { kind });
+        };
+        let registers = self.ptrace.registers(pid)?;
+        let guard = SignalGuard {
+            address: VirtualAddress::new(registers.rip),
+            stack: registers.rsp,
+        };
+        let execution = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .map(|active| active.id)
+            .ok_or(Error::NotRunning)?;
+        self.install_additional_plan_breakpoints(execution, &BTreeSet::from([guard.address]))?;
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        if let Some(ActiveKind::Step { start, .. }) =
+            inferior.active.as_mut().map(|active| &mut active.kind)
+        {
+            start.signal_guard = Some(guard);
+        }
+        let thread = inferior.thread_mut(pid)?;
+        thread.pending_signal = Some(pending);
+        thread.expected = ExpectedStop::None;
+        if barrier {
+            self.finish_barrier_if_ready()
+        } else {
+            self.continue_thread(pid)
+        }
+    }
+
+    /// Recognizes the stepping thread's return from a signal handler to the
+    /// instruction it interrupted, where the step resumes. Returns whether
+    /// the site was the guard and has been handled.
+    fn reach_signal_guard(&mut self, pid: Pid, address: VirtualAddress) -> Result<bool> {
+        let Some((execution, kind, guard, planned)) = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match &active.kind {
+                ActiveKind::Step {
+                    thread,
+                    kind,
+                    start,
+                    ..
+                } if *thread == pid => start
+                    .signal_guard
+                    .filter(|guard| guard.address == address)
+                    .map(|guard| {
+                        (
+                            active.id,
+                            *kind,
+                            guard,
+                            start.plan_addresses.contains(&address),
+                        )
+                    }),
+                _ => None,
+            })
+        else {
+            return Ok(false);
+        };
+        if self.ptrace.registers(pid)?.rsp != guard.stack {
+            // The handler itself ran the interrupted code. A site only the
+            // guard owns is passed; a planned one is evaluated as usual.
+            if planned {
+                return Ok(false);
+            }
+            self.repair_when_alone(pid, address)?;
+            return Ok(true);
+        }
+        if let Some(ActiveKind::Step { start, .. }) = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .map(|active| &mut active.kind)
+        {
+            start.signal_guard = None;
+        }
+        if planned {
+            // The step's own site is evaluated as if no signal had arrived.
+            return Ok(false);
+        }
+        // Removing the guard restores the interrupted instruction, which the
+        // step now executes.
+        self.remove_breakpoint_owner(address, BreakpointOwner::Plan(execution))?;
+        self.start_user_step(pid, kind)?;
+        Ok(true)
     }
 }
 

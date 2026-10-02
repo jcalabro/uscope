@@ -13,7 +13,9 @@ use crate::WatchpointSpec;
 use crate::debug_info::VariableContext;
 use crate::debug_info::VariableRuntime;
 use crate::inspection::InspectionBudget;
-use crate::protocol::{BreakpointHit, BreakpointSpec, ResolvedBreakpointLocation, ResumeScope};
+use crate::protocol::{
+    BreakpointHit, BreakpointSpec, ResolvedBreakpointLocation, ResumeScope, SignalPolicy,
+};
 use crate::unwind::FrameContext;
 use crate::unwind::MemoryReader;
 use crate::unwind::RegisterFile;
@@ -341,13 +343,13 @@ impl LinuxTraceOps for RecordingTrace {
         Self::unexpected("interrupt")
     }
 
-    fn detach(&self, _pid: Pid, _signal: Option<NixSignal>) -> Result<()> {
+    fn detach(&self, _pid: Pid, _signal: Option<Signal>) -> Result<()> {
         Self::unexpected("detach")
     }
 
-    fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
+    fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {
         assert_eq!(pid, self.pid);
-        assert_eq!(signal, NixSignal::SIGKILL);
+        assert_eq!(signal, Signal::SIGKILL);
         self.record("kill");
         Ok(())
     }
@@ -376,7 +378,7 @@ impl LinuxTraceOps for RecordingTrace {
         Self::unexpected("write_word")
     }
 
-    fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+    fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         assert_eq!(pid, self.pid);
         assert_eq!(signal, None);
         self.record("continue");
@@ -387,7 +389,7 @@ impl LinuxTraceOps for RecordingTrace {
         Self::unexpected("continue_during_shutdown")
     }
 
-    fn step(&self, _pid: Pid, _signal: Option<NixSignal>) -> Result<()> {
+    fn step(&self, _pid: Pid, _signal: Option<Signal>) -> Result<()> {
         Self::unexpected("step")
     }
 
@@ -694,7 +696,7 @@ fn controller_lifecycle_is_driven_through_the_linux_effect_boundary() {
 
     controller.launch(LaunchOptions::default(), launch_reply);
     controller
-        .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
+        .process_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
         .expect("process initial stop");
 
     assert_eq!(
@@ -707,9 +709,7 @@ fn controller_lifecycle_is_driven_through_the_linux_effect_boundary() {
 
     let (shutdown_reply, shutdown_result) = tokio::sync::oneshot::channel();
     controller.begin_shutdown(Some(shutdown_reply));
-    assert!(
-        !controller.handle_shutdown_wait(WaitStatus::Signaled(pid, NixSignal::SIGKILL, false,))
-    );
+    assert!(!controller.handle_shutdown_wait(WaitEvent::Signaled(pid, Signal::SIGKILL, false,)));
     shutdown_result
         .blocking_recv()
         .expect("shutdown reply")
@@ -746,7 +746,7 @@ fn pause_during_launch_completes_at_the_initial_exec_stop() {
         ExecutionId::new(1)
     );
     controller
-        .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
+        .process_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
         .expect("process initial stop");
 
     assert_eq!(
@@ -886,7 +886,7 @@ fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
     } = virtual_step_controller();
     let breakpoint_thread = Pid::from_raw(pid.as_raw() + 1);
     let pending_thread = Pid::from_raw(pid.as_raw() + 2);
-    let exception = exception_info(NixSignal::SIGURG);
+    let exception = exception_info(Signal::SIGURG);
     let inferior = controller.inferior.as_mut().expect("test inferior exists");
     inferior.public_stop = None;
     inferior.thread_mut(pid).expect("test thread exists").reason =
@@ -1229,7 +1229,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
 
     assert!(matches!(
         classify(
-            NixSignal::SIGTRAP,
+            Signal::SIGTRAP,
             metadata(libc::TRAP_TRACE),
             &ExpectedStop::UserStep {
                 kind: StepKind::Instruction
@@ -1241,7 +1241,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
     // A step across a system call completes from the call's exit path.
     assert!(matches!(
         classify(
-            NixSignal::SIGTRAP,
+            Signal::SIGTRAP,
             metadata(libc::TRAP_BRKPT),
             &ExpectedStop::UserStep {
                 kind: StepKind::Instruction
@@ -1252,42 +1252,42 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
     ));
     assert!(matches!(
         classify(
-            NixSignal::SIGTRAP,
+            Signal::SIGTRAP,
             metadata(libc::SI_TKILL),
             &ExpectedStop::None,
             None,
         ),
         ClassifiedStop::SignalDelivery(PendingSignal {
-            signal: NixSignal::SIGTRAP,
+            signal: Signal::SIGTRAP,
             sender: Some(71),
             ..
         })
     ));
     assert!(matches!(
         classify(
-            NixSignal::SIGSEGV,
+            Signal::SIGSEGV,
             metadata(libc::SI_KERNEL),
             &ExpectedStop::None,
             None,
         ),
         ClassifiedStop::SignalDelivery(PendingSignal {
-            signal: NixSignal::SIGSEGV,
+            signal: Signal::SIGSEGV,
             code: libc::SI_KERNEL,
             ..
         })
     ));
     assert!(matches!(
         classify(
-            NixSignal::SIGSTOP,
+            Signal::SIGSTOP,
             Err(Errno::EINVAL),
             &ExpectedStop::None,
             None,
         ),
-        ClassifiedStop::GroupStop(NixSignal::SIGSTOP)
+        ClassifiedStop::GroupStop(Signal::SIGSTOP)
     ));
     assert!(matches!(
         classify(
-            NixSignal::SIGTRAP,
+            Signal::SIGTRAP,
             Err(Errno::ESRCH),
             &ExpectedStop::None,
             None,
@@ -1299,7 +1299,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
     ));
     assert!(matches!(
         classify(
-            NixSignal::SIGTRAP,
+            Signal::SIGTRAP,
             metadata(libc::SI_KERNEL),
             &ExpectedStop::None,
             Some(VirtualAddress::new(0x1234)),
@@ -1396,11 +1396,11 @@ impl LinuxTraceOps for DebugRegisterTrace {
         self.record(format!("interrupt {pid}"));
         Ok(true)
     }
-    fn detach(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         self.record(format!("detach {pid} {signal:?}"));
         Ok(())
     }
-    fn kill(&self, pid: Pid, signal: NixSignal) -> Result<()> {
+    fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {
         self.record(format!("kill {pid} {signal}"));
         Ok(())
     }
@@ -1422,7 +1422,7 @@ impl LinuxTraceOps for DebugRegisterTrace {
     fn write_word(&self, _pid: Pid, _address: u64, _value: u64) -> Result<()> {
         RecordingTrace::unexpected("write_word")
     }
-    fn continue_execution(&self, pid: Pid, signal: Option<NixSignal>) -> Result<()> {
+    fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         self.record(format!("continue {pid} {signal:?}"));
         if self.vanished.borrow().contains(&pid) {
             return Err(backend_error(LinuxError::System(Errno::ESRCH)));
@@ -1432,7 +1432,7 @@ impl LinuxTraceOps for DebugRegisterTrace {
     fn continue_during_shutdown(&self, _pid: Pid) -> Result<()> {
         RecordingTrace::unexpected("continue_during_shutdown")
     }
-    fn step(&self, pid: Pid, _signal: Option<NixSignal>) -> Result<()> {
+    fn step(&self, pid: Pid, _signal: Option<Signal>) -> Result<()> {
         self.record(format!("step {pid}"));
         Ok(())
     }
@@ -1611,7 +1611,7 @@ impl WatchHarness {
                 },
             );
             self.controller
-                .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGSTOP))
+                .process_wait(WaitEvent::Stopped(pid, Signal::SIGSTOP))
                 .expect("debugger stop");
         }
     }
@@ -1626,7 +1626,7 @@ impl WatchHarness {
             .borrow_mut()
             .insert(pid, SignalMetadata { code, sender: None });
         self.controller
-            .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
+            .process_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
     }
 
     /// Reports an int3 at `address`, leaving the PC after it.
@@ -1883,7 +1883,7 @@ fn new_threads_are_armed_before_they_first_run() {
     harness.trace().take_actions();
     harness
         .controller
-        .process_wait(WaitStatus::Stopped(child, NixSignal::SIGSTOP))
+        .process_wait(WaitEvent::Stopped(child, Signal::SIGSTOP))
         .expect("thread start");
     let actions = harness.trace().take_actions();
     let armed = actions
@@ -1915,7 +1915,7 @@ fn a_new_thread_that_cannot_be_armed_never_runs() {
     harness.trace().take_actions();
     harness
         .controller
-        .process_wait(WaitStatus::Stopped(child, NixSignal::SIGSTOP))
+        .process_wait(WaitEvent::Stopped(child, Signal::SIGSTOP))
         .expect("thread start");
     harness.settle_requested_stops();
 
@@ -2192,15 +2192,15 @@ fn detaching_disarms_every_thread_first_and_never_redelivers_a_watch_trap() {
     assert!(
         harness
             .controller
-            .handle_detach_wait(WaitStatus::Stopped(first, NixSignal::SIGTRAP))
+            .handle_detach_wait(WaitEvent::Stopped(first, Signal::SIGTRAP))
     );
     harness.trace().take_actions();
     assert!(
         !harness
             .controller
-            .handle_detach_wait(WaitStatus::PtraceEvent(
+            .handle_detach_wait(WaitEvent::PtraceEvent(
                 second,
-                NixSignal::SIGTRAP,
+                Signal::SIGTRAP,
                 libc::PTRACE_EVENT_STOP
             ))
     );
@@ -2298,9 +2298,9 @@ fn an_attached_stop_collects_traps_queued_behind_its_interrupt() {
     );
     harness
         .controller
-        .process_wait(WaitStatus::PtraceEvent(
+        .process_wait(WaitEvent::PtraceEvent(
             second,
-            NixSignal::SIGTRAP,
+            Signal::SIGTRAP,
             libc::PTRACE_EVENT_STOP,
         ))
         .expect("interrupt stop");
@@ -2375,7 +2375,7 @@ fn detaching_collects_queued_traps_before_releasing_the_process() {
     assert!(
         !harness
             .controller
-            .handle_detach_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
+            .handle_detach_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
     );
     result
         .blocking_recv()
@@ -2427,7 +2427,7 @@ fn continuing_tolerates_threads_killed_by_a_siblings_exit() {
     for pid in [second, third, first] {
         harness
             .controller
-            .process_wait(WaitStatus::Exited(pid, 0))
+            .process_wait(WaitEvent::Exited(pid, 0))
             .expect("exit");
     }
     assert!(harness.controller.inferior.is_none());
@@ -2491,18 +2491,18 @@ fn a_seized_thread_whose_start_precedes_its_clone_event_is_armed_before_running(
     // The child's first stop arrives before the debugger knows it exists.
     harness
         .controller
-        .process_wait(WaitStatus::PtraceEvent(
+        .process_wait(WaitEvent::PtraceEvent(
             child,
-            NixSignal::SIGTRAP,
+            Signal::SIGTRAP,
             libc::PTRACE_EVENT_STOP,
         ))
         .expect("early child stop is retained");
     assert!(harness.trace().take_actions().is_empty());
     harness
         .controller
-        .process_wait(WaitStatus::PtraceEvent(
+        .process_wait(WaitEvent::PtraceEvent(
             parent,
-            NixSignal::SIGTRAP,
+            Signal::SIGTRAP,
             libc::PTRACE_EVENT_CLONE,
         ))
         .expect("clone event");
@@ -2675,11 +2675,11 @@ fn a_visible_stop_during_an_internal_stop_wins_and_the_declined_hit_counts_once(
     );
     harness
         .controller
-        .process_wait(WaitStatus::Stopped(second, NixSignal::SIGUSR1))
+        .process_wait(WaitEvent::Stopped(second, Signal::SIGUSR1))
         .expect("signal stop");
     assert!(matches!(
         harness.public_reason(),
-        Some(StopReason::Exception(exception)) if exception.code == NixSignal::SIGUSR1 as u64
+        Some(StopReason::Exception(exception)) if exception.code == Signal::SIGUSR1.code()
     ));
     let declined = harness.thread(first);
     assert_eq!(declined.reason, None);
@@ -2767,7 +2767,7 @@ fn a_declined_thread_exiting_during_an_internal_stop_publishes_nothing() {
     harness.hit(first).expect("declined hit");
     harness
         .controller
-        .process_wait(WaitStatus::Exited(first, 0))
+        .process_wait(WaitEvent::Exited(first, 0))
         .expect("thread exit");
     harness.trace().take_actions();
     harness.settle_requested_stops();
@@ -2844,7 +2844,7 @@ fn a_trap_reexecuted_after_a_signal_interrupted_its_repair_is_not_a_new_hit() {
     );
     harness
         .controller
-        .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGUSR1))
+        .process_wait(WaitEvent::Stopped(pid, Signal::SIGUSR1))
         .expect("signal during repair");
     assert!(matches!(
         harness.public_reason(),
@@ -3058,14 +3058,14 @@ fn a_signal_during_an_internal_stop_is_published_after_the_edit() {
     );
     harness
         .controller
-        .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGUSR1))
+        .process_wait(WaitEvent::Stopped(pid, Signal::SIGUSR1))
         .expect("signal stop");
     harness.settle_requested_stops();
 
     added.try_recv().expect("reply").expect("added");
     assert!(matches!(
         harness.public_reason(),
-        Some(StopReason::Exception(info)) if info.code == NixSignal::SIGUSR1 as u64
+        Some(StopReason::Exception(info)) if info.code == Signal::SIGUSR1.code()
     ));
     assert!(
         harness
@@ -3114,6 +3114,7 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
                 plan_addresses: BTreeSet::from([VirtualAddress::new(0x40)]),
                 epilogue_traversal: None,
                 return_traversal: None,
+                signal_guard: None,
             },
             progress_owed: false,
         };
@@ -3211,4 +3212,143 @@ fn a_hit_on_a_watchpoint_removed_while_running_is_dropped() {
             |thread| thread.state == NativeThreadState::Running && thread.watch_hits.is_empty()
         )
     );
+}
+
+/// Puts the harness's first thread in the middle of stepping over a user
+/// breakpoint at 0x40 while its sibling waits stopped, as a continue does.
+fn repairing_harness() -> WatchHarness {
+    let mut harness = watch_harness(2);
+    harness
+        .edit(|reply| Edit::AddBreakpoint {
+            spec: address_breakpoint(0x40),
+            hit_condition: None,
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("added");
+    harness.start_continue();
+    let repairing = harness.threads[0];
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.repairs = VecDeque::from([RepairGroup {
+        address: VirtualAddress::new(0x40),
+        remaining: VecDeque::new(),
+        current: Some(repairing),
+        site_removed: true,
+    }]);
+    inferior
+        .breakpoints
+        .get_mut(&VirtualAddress::new(0x40))
+        .expect("site")
+        .installed = false;
+    let thread = inferior.thread_mut(repairing).expect("thread");
+    thread.stopped_at_breakpoint = Some(VirtualAddress::new(0x40));
+    thread.expected = ExpectedStop::BreakpointRepair {
+        address: VirtualAddress::new(0x40),
+    };
+    inferior
+        .thread_mut(harness.threads[1])
+        .expect("thread")
+        .state = NativeThreadState::Stopped;
+    harness.trace().take_actions();
+    harness.published();
+    harness
+}
+
+fn deliver(harness: &mut WatchHarness, pid: Pid, signal: Signal) {
+    harness.trace().siginfo.borrow_mut().insert(
+        pid,
+        SignalMetadata {
+            code: libc::SI_USER,
+            sender: Some(1),
+        },
+    );
+    harness
+        .controller
+        .process_wait(WaitEvent::Stopped(pid, signal))
+        .expect("signal stop");
+}
+
+#[test]
+fn a_quiet_signal_during_a_repair_runs_its_handler_before_the_repair() {
+    let mut harness = repairing_harness();
+    let (repairing, waiting) = (harness.threads[0], harness.threads[1]);
+    let alarm = Signal::new(libc::SIGALRM).expect("SIGALRM");
+
+    deliver(&mut harness, repairing, alarm);
+    // The site is restored while the handler runs alone, so the waiting
+    // sibling cannot run past it.
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "reinstall_site 0x40".to_owned(),
+            format!("continue {repairing} Some({alarm:?})"),
+        ]
+    );
+    assert_eq!(
+        harness.thread(repairing).awaiting_breakpoint,
+        Some(VirtualAddress::new(0x40))
+    );
+    assert_eq!(harness.thread(waiting).state, NativeThreadState::Stopped);
+
+    // Returning from the handler re-traps at the site, which the thread
+    // now steps over before its sibling resumes.
+    harness.hit_at(repairing, 0x40).expect("re-trap");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            format!("set_registers {repairing} rip=0x40"),
+            "remove_site 0x40".to_owned(),
+            format!("step {repairing}"),
+        ]
+    );
+    harness
+        .trap(repairing, libc::TRAP_TRACE, debug_registers::STATUS_IDLE)
+        .expect("repair step");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "reinstall_site 0x40".to_owned(),
+            format!("continue {repairing} None"),
+            format!("continue {waiting} None"),
+        ]
+    );
+    assert!(
+        !harness
+            .published()
+            .iter()
+            .any(|event| matches!(event, DebuggerEvent::InferiorStopped { .. }))
+    );
+}
+
+#[test]
+fn a_discarded_signal_during_a_repair_repeats_the_repair_step() {
+    let mut harness = repairing_harness();
+    let repairing = harness.threads[0];
+    let alarm = Signal::new(libc::SIGALRM).expect("SIGALRM");
+    harness.controller.signals.set(
+        alarm,
+        SignalPolicy {
+            stop: false,
+            print: true,
+            pass: false,
+        },
+    );
+
+    deliver(&mut harness, repairing, alarm);
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("step {repairing}")]
+    );
+    let published = harness.published();
+    assert!(
+        matches!(
+            published.as_slice(),
+            [DebuggerEvent::SignalReceived { thread_id, exception, .. }]
+                if thread_id.get() == u64::try_from(repairing.as_raw()).expect("pid")
+                    && exception.code == alarm.code()
+        ),
+        "{published:?}"
+    );
+    assert!(harness.thread(repairing).pending_signal.is_none());
 }

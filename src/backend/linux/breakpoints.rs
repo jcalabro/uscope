@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use nix::sys::signal::Signal as NixSignal;
+use super::signals::Signal;
 
 use crate::protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, DebuggerEvent, ExecutionId,
@@ -363,7 +363,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     if let Err(recovery) =
                         remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)
                     {
-                        let _ = self.ptrace.kill(inferior.tgid, NixSignal::SIGKILL);
+                        let _ = self.ptrace.kill(inferior.tgid, Signal::SIGKILL);
                         return Err(backend_error(LinuxError::ResumeRecovery {
                             cause: error.to_string(),
                             recovery: recovery.to_string(),

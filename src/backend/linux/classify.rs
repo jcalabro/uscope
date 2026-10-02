@@ -2,9 +2,9 @@
 
 use std::collections::BTreeSet;
 
+use super::signals::Signal;
 use nix::errno::Errno;
 use nix::libc;
-use nix::sys::signal::Signal as NixSignal;
 use nix::unistd::Pid;
 
 use crate::VirtualAddress;
@@ -18,7 +18,7 @@ use super::{
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
-    pub(super) fn classify_stop(&self, pid: Pid, signal: NixSignal) -> ClassifiedStop {
+    pub(super) fn classify_stop(&self, pid: Pid, signal: Signal) -> ClassifiedStop {
         let status = format!("Stopped({pid}, {signal})");
         let siginfo = self.ptrace.signal_metadata(pid);
         let expected = self
@@ -31,7 +31,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .and_then(|inferior| inferior.threads.get(&pid))
             .is_some_and(|thread| matches!(thread.state, NativeThreadState::Starting));
-        let debugger_requested = signal == NixSignal::SIGSTOP
+        let debugger_requested = signal == Signal::SIGSTOP
             && self
                 .inferior
                 .as_ref()
@@ -42,14 +42,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                     && metadata.sender
                         == Some(i32::try_from(std::process::id()).unwrap_or(i32::MAX))
             });
-        let expected_trace = signal == NixSignal::SIGTRAP
+        let expected_trace = signal == Signal::SIGTRAP
             && siginfo.as_ref().is_ok_and(is_single_step_trap)
             && matches!(
                 expected,
                 ExpectedStop::BreakpointRepair { .. } | ExpectedStop::UserStep { .. }
             );
         let code = siginfo.as_ref().ok().map(|metadata| metadata.code);
-        let watch = if signal == NixSignal::SIGTRAP {
+        let watch = if signal == Signal::SIGTRAP {
             self.watch_status(pid, code)
         } else {
             WatchStatus::Absent
@@ -58,7 +58,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         // by a process also stop after an instruction, and rewinding the PC
         // for them would execute that instruction twice.
         let breakpoint =
-            (signal == NixSignal::SIGTRAP && !expected_trace && code == Some(libc::SI_KERNEL))
+            (signal == Signal::SIGTRAP && !expected_trace && code == Some(libc::SI_KERNEL))
                 .then(|| self.normalize_breakpoint_pc(pid))
                 .flatten();
 
@@ -153,10 +153,10 @@ pub(super) const fn visible_stop_priority(reason: &StopReason) -> u8 {
     }
 }
 
-pub(super) const fn is_stopping_signal(signal: NixSignal) -> bool {
+pub(super) const fn is_stopping_signal(signal: Signal) -> bool {
     matches!(
         signal,
-        NixSignal::SIGSTOP | NixSignal::SIGTSTP | NixSignal::SIGTTIN | NixSignal::SIGTTOU
+        Signal::SIGSTOP | Signal::SIGTSTP | Signal::SIGTTIN | Signal::SIGTTOU
     )
 }
 
@@ -176,7 +176,7 @@ pub(super) enum WatchStatus {
     reason = "the pure classifier receives every piece of native stop evidence explicitly"
 )]
 pub(super) fn classify_stop_evidence(
-    signal: NixSignal,
+    signal: Signal,
     status: String,
     siginfo: std::result::Result<SignalMetadata, Errno>,
     expected: &ExpectedStop,
@@ -185,13 +185,13 @@ pub(super) fn classify_stop_evidence(
     breakpoint: Option<VirtualAddress>,
     watch: WatchStatus,
 ) -> ClassifiedStop {
-    if signal == NixSignal::SIGSTOP && starting {
+    if signal == Signal::SIGSTOP && starting {
         return ClassifiedStop::ThreadStart;
     }
     if debugger_requested {
         return ClassifiedStop::DebuggerRequested;
     }
-    if signal == NixSignal::SIGTRAP
+    if signal == Signal::SIGTRAP
         && siginfo
             .as_ref()
             .is_ok_and(|metadata| metadata.code == TRAP_HARDWARE_BREAKPOINT)
@@ -210,7 +210,7 @@ pub(super) fn classify_stop_evidence(
             }
         };
     }
-    if signal == NixSignal::SIGTRAP
+    if signal == Signal::SIGTRAP
         && siginfo.as_ref().is_ok_and(is_single_step_trap)
         && matches!(
             expected,
@@ -233,7 +233,7 @@ pub(super) fn classify_stop_evidence(
     }
 
     match siginfo {
-        Ok(metadata) if signal != NixSignal::SIGTRAP || metadata.code <= 0 => {
+        Ok(metadata) if signal != Signal::SIGTRAP || metadata.code <= 0 => {
             ClassifiedStop::SignalDelivery(PendingSignal {
                 signal,
                 code: metadata.code,

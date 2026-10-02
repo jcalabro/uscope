@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use super::signals::Signal;
 use nix::errno::Errno;
-use nix::sys::signal::Signal as NixSignal;
 use nix::unistd::Pid;
 
 use crate::backend::linux::debug_registers;
@@ -203,7 +203,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         match program_debug_registers(&self.ptrace, armed, &previous) {
                             Ok(()) | Err(ArmFailure::ThreadGone) => {}
                             Err(recovery) => {
-                                let _ = self.ptrace.kill(inferior.tgid, NixSignal::SIGKILL);
+                                let _ = self.ptrace.kill(inferior.tgid, Signal::SIGKILL);
                                 return Err(backend_error(LinuxError::WatchpointArmRecovery {
                                     cause: cause.to_string(),
                                     recovery: arm_error(armed, &recovery).to_string(),

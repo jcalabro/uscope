@@ -6,6 +6,7 @@ mod concurrency;
 mod execution;
 mod globals;
 mod metadata;
+mod signals;
 mod stepping;
 mod unwind;
 mod values;
@@ -760,13 +761,11 @@ async fn resume_go_to_exit(scenario: &mut Scenario, fixture: &str) {
             StopReason::Breakpoint { .. } => {
                 reason = scenario.resume_to_stop().await;
             }
-            StopReason::Exception(ref exception) if exception.code == 23 => {
-                reason = scenario.resume_to_stop().await;
-            }
+            // The runtime's SIGURG preemption never stops the program.
             _ => panic!("{fixture} stopped unexpectedly while exiting: {reason:?}"),
         }
     }
-    panic!("{fixture} did not exit after 32 runtime signals");
+    panic!("{fixture} did not exit after 32 breakpoint stops");
 }
 
 async fn step_to_source_line(scenario: &mut Scenario, line: u32) {

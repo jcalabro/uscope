@@ -1272,6 +1272,46 @@ pub fn globals(page: &GlobalVariablePage, renderer: Renderer) -> String {
     lines.join("\n")
 }
 
+/// Renders signal policies as a table, one signal per line.
+pub fn signal_policies(policies: &[(u64, uscope::SignalPolicy)], renderer: Renderer) -> String {
+    let yes_no = |value: bool| if value { "yes" } else { "no" };
+    std::iter::once(
+        renderer
+            .paint(Role::Muted, "signal    stop  print  pass")
+            .to_string(),
+    )
+    .chain(policies.iter().map(|(code, policy)| {
+        format!(
+            "{}  {:<4}  {:<5}  {}",
+            renderer.paint(
+                Role::Name,
+                format_args!(
+                    "{:<8}",
+                    uscope::signal_name(*code).unwrap_or_else(|| code.to_string())
+                )
+            ),
+            yes_no(policy.stop),
+            yes_no(policy.print),
+            yes_no(policy.pass)
+        )
+    }))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+/// Reports a signal that did not stop the inferior.
+pub fn signal_received(
+    thread: uscope::ThreadId,
+    info: &uscope::ExceptionInfo,
+    renderer: Renderer,
+) -> String {
+    format!(
+        "thread {} received {}",
+        renderer.paint(Role::Metadata, thread),
+        exception(&info.description, info.code, renderer)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
