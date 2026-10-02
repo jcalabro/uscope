@@ -366,7 +366,10 @@ struct RepairGroup {
 struct StopBarrier {
     execution: Option<ExecutionId>,
     triggering_thread: Pid,
-    reason: StopReason,
+    /// The reason to publish once every thread stops. `None` marks an
+    /// internal stop, which publishes nothing and resumes the active
+    /// execution unless a client-visible stop happens before it completes.
+    reason: Option<StopReason>,
 }
 
 /// The data object an expression's longest matching name prefix selected.
@@ -516,6 +519,7 @@ impl Inferior {
             stop.presentations.remove(&pid);
         }
         // A barrier is presented from its triggering thread, which must live.
+        // An internal stop still has nothing to present.
         let replacement = self
             .threads
             .iter()
@@ -529,10 +533,12 @@ impl Inferior {
             && let Some(replacement) = replacement
         {
             barrier.triggering_thread = replacement;
-            barrier.reason = StopReason::ThreadExited {
-                thread_id: debug_thread_id(pid),
-                status: status.clone(),
-            };
+            if barrier.reason.is_some() {
+                barrier.reason = Some(StopReason::ThreadExited {
+                    thread_id: debug_thread_id(pid),
+                    status: status.clone(),
+                });
+            }
         }
         interrupted
     }
@@ -758,8 +764,19 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     fn handle_request(&mut self, request: Request) -> bool {
         match request {
-            Request::AddBreakpoint { spec, reply } => {
-                let _ = reply.send(self.add_breakpoint(spec));
+            Request::AddBreakpoint {
+                spec,
+                hit_condition,
+                reply,
+            } => {
+                let _ = reply.send(self.add_breakpoint(spec, hit_condition));
+            }
+            Request::SetBreakpointHitCondition {
+                id,
+                hit_condition,
+                reply,
+            } => {
+                let _ = reply.send(self.set_breakpoint_hit_condition(id, hit_condition));
             }
             Request::RemoveBreakpoint { id, reply } => {
                 let _ = reply.send(self.remove_breakpoint(id));
@@ -1000,6 +1017,7 @@ impl<P: InspectionOps> Controller<P> {
                     }));
             }
             Request::AddBreakpoint { .. }
+            | Request::SetBreakpointHitCondition { .. }
             | Request::RemoveBreakpoint { .. }
             | Request::RemoveAllBreakpoints { .. }
             | Request::AddWatchpoint { .. }

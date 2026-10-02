@@ -259,6 +259,119 @@ fn batch_mode_prints_every_location_of_an_inline_breakpoint() {
     assert_eq!(stdout.matches("  image address ").count(), 6, "{stdout}");
 }
 
+/// Runs batch commands against a fixture and returns the process output,
+/// which may be a failure.
+fn batch_output(fixture_name: &str, commands: &[&str]) -> std::process::Output {
+    let mut arguments = vec!["--batch"];
+    for command in commands {
+        arguments.extend(["--eval", command]);
+    }
+    let executable = format!("build/test-programs/{fixture_name}");
+    arguments.push(&executable);
+    uscope(&arguments)
+}
+
+/// Asserts each expected text appears, in order, after the previous one.
+fn assert_in_order(output: &str, expected: &[&str]) {
+    let mut rest = output;
+    for text in expected {
+        let found = rest
+            .find(text)
+            .unwrap_or_else(|| panic!("{text:?} does not follow in:\n{output}"));
+        rest = &rest[found + text.len()..];
+    }
+}
+
+#[test]
+fn batch_mode_sets_skips_and_amends_breakpoint_hit_conditions() {
+    let stdout = batch(
+        "hit-counts-gcc-o0",
+        &[],
+        &[
+            "break counted ==3",
+            "break shared %4",
+            "run",
+            "breakpoints",
+            "continue",
+            "ignore 1 5",
+            "hits 2 always",
+            "info breakpoints",
+            "delete 2",
+            "continue",
+            "hits 1 ==2",
+            "continue",
+            "breakpoints",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 1 set at image address ",
+            ", stops at hits ==3\n",
+            "breakpoint 2 set at 2 locations, stops at hits %4\n",
+            // The fourth hit is the second inline site of the second call.
+            "stopped at breakpoint 2 (hit 4) at ",
+            "1  counted  1 location  hit 2 times  stops at hits ==3\n",
+            "2  shared  2 locations  hit 4 times  stops at hits %4\n",
+            "stopped at breakpoint 1 (hit 3) at ",
+            "breakpoint 1 ignores its next 5 hits\n",
+            "breakpoint 2 stops at every hit, hit 4 times so far\n",
+            "1  counted  1 location  hit 3 times  stops at hits >=9\n",
+            "2  shared  2 locations  hit 4 times\n",
+            "deleted breakpoint 2\n",
+            "stopped at breakpoint 1 (hit 9) at ",
+            "breakpoint 1 stops at hits ==2 (no later hit can stop), hit 9 times so far\n",
+            "inferior exited with status 0\n",
+            "1  counted  1 location  hit 40 times  stops at hits ==2 (no later hit can stop)\n",
+        ],
+    );
+}
+
+#[test]
+fn hit_condition_commands_explain_rejected_input() {
+    for (commands, message) in [
+        (
+            &["break counted 5"][..],
+            "invalid hit condition: a bare count is ambiguous; write ==5 to stop only at that \
+             hit or >=5 to stop at it and every later hit",
+        ),
+        (
+            &["break counted =<5"],
+            "invalid hit condition: '=<5' is not an operator",
+        ),
+        (
+            &["break counted", "hits 1 ==0"],
+            "invalid hit condition: no hit can satisfy ==0",
+        ),
+        (&["hits 1 always"], "breakpoint 1 was not found"),
+        (&["ignore 1 2"], "breakpoint 1 was not found"),
+        (
+            &["break counted", "ignore 1 many"],
+            "usage: ignore <id> <count>",
+        ),
+        (
+            &["break counted", "hits one >=2"],
+            "usage: hits <id> <hit-condition|always>",
+        ),
+    ] {
+        assert_failure(&batch_output("hit-counts-gcc-o0", commands), message);
+    }
+
+    // Ignoring zero hits stops at the next one.
+    let stdout = batch(
+        "hit-counts-gcc-o0",
+        &[],
+        &["break counted ==9", "ignore 1 0", "run"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 1 stops at its next hit\n",
+            "stopped at breakpoint 1 (hit 1) at ",
+        ],
+    );
+}
+
 #[test]
 fn batch_mode_sets_lists_and_deletes_source_and_file_function_breakpoints() {
     let executable = fixture("build/test-programs/basic");
@@ -359,7 +472,7 @@ fn help_and_clear_are_generated_from_the_command_registry() {
     );
     assert!(
         stdout.contains(
-            "  Set a breakpoint\n  aliases: b\n  usage: break <function|0xaddress|file:line|file:function>"
+            "  Set a breakpoint, optionally stopping only at hits such as >=5, ==3, or %10\n  aliases: b\n  usage: break <function|0xaddress|file:line|file:function> [hit-condition]"
         ),
         "{stdout}"
     );

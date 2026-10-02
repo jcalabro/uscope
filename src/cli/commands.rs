@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow, bail};
 use uscope::{
     BreakpointId, BreakpointSpec, ByteOrder, Disassembly, DisassemblyQuery, DisassemblyRange,
-    LineNumber, MAX_WINDOW_AFTER, RegisterRole, StackFrameId, StepKind, ThreadId, VirtualAddress,
-    WatchAccess, WatchpointId, WatchpointSpec,
+    HitComparison, HitCondition, LineNumber, MAX_WINDOW_AFTER, RegisterRole, StackFrameId,
+    StepKind, ThreadId, VirtualAddress, WatchAccess, WatchpointId, WatchpointSpec,
 };
 
 use super::format::{self, plural};
@@ -29,6 +29,8 @@ pub enum Command {
     Breakpoints,
     Info,
     Delete,
+    Ignore,
+    Hits,
     Watch,
     AccessWatch,
     ReadWatch,
@@ -116,8 +118,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Break,
         "break",
         ["b"],
-        "break <function|0xaddress|file:line|file:function>",
-        "Set a breakpoint"
+        "break <function|0xaddress|file:line|file:function> [hit-condition]",
+        "Set a breakpoint, optionally stopping only at hits such as >=5, ==3, or %10"
     ),
     command!(
         Breakpoints,
@@ -139,6 +141,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         ["del", "d"],
         "delete <id|all>",
         "Delete logical breakpoints"
+    ),
+    command!(
+        Ignore,
+        "ignore",
+        [],
+        "ignore <id> <count>",
+        "Skip a breakpoint's next count hits, then stop at every hit; 0 stops at the next"
+    ),
+    command!(
+        Hits,
+        "hits",
+        [],
+        "hits <id> <hit-condition|always>",
+        "Choose which hits of a breakpoint stop, such as >=5, ==3, or %10"
     ),
     command!(
         Watch,
@@ -347,10 +363,8 @@ impl Cli {
 
         let output = match spec.command {
             Command::Break => {
-                let breakpoint = debugger
-                    .add_breakpoint(parse_breakpoint_spec(arguments[0], spec)?)
-                    .await?;
-                format::breakpoint(&breakpoint, renderer)
+                self.add_breakpoint(arguments[0], arguments.get(1).copied(), spec)
+                    .await?
             }
             Command::Breakpoints => self.list_breakpoints().await?,
             Command::Info => match (arguments[0], arguments.get(1)) {
@@ -367,6 +381,8 @@ impl Cli {
                 _ => return Err(spec.usage_error()),
             },
             Command::Delete => self.delete_breakpoints(arguments[0], spec).await?,
+            Command::Ignore => self.ignore(arguments[0], arguments[1], spec).await?,
+            Command::Hits => self.hits(arguments[0], arguments[1], spec).await?,
             Command::Watch => self.watch(arguments[0], WatchAccess::Write, spec).await?,
             Command::AccessWatch => {
                 self.watch(arguments[0], WatchAccess::ReadWrite, spec)
@@ -450,6 +466,84 @@ impl Cli {
             }
         };
         Ok(format::deleted(&what, self.renderers.stdout))
+    }
+
+    async fn add_breakpoint(
+        &self,
+        location: &str,
+        condition: Option<&str>,
+        spec: &CommandSpec,
+    ) -> Result<String> {
+        let location = parse_breakpoint_spec(location, spec)?;
+        let breakpoint = match condition {
+            Some(condition) => {
+                self.debugger
+                    .add_breakpoint_with_hit_condition(location, condition.parse()?)
+                    .await?
+            }
+            None => self.debugger.add_breakpoint(location).await?,
+        };
+        Ok(format::breakpoint(&breakpoint, self.renderers.stdout))
+    }
+
+    async fn hits(&self, id: &str, condition: &str, spec: &CommandSpec) -> Result<String> {
+        let id = parse_breakpoint_id(id, spec)?;
+        let condition = match condition {
+            "always" => None,
+            condition => Some(condition.parse()?),
+        };
+        Ok(format::breakpoint_hit_condition(
+            &self
+                .debugger
+                .set_breakpoint_hit_condition(id, condition)
+                .await?,
+            self.renderers.stdout,
+        ))
+    }
+
+    /// Skips a breakpoint's next `count` hits like gdb's `ignore`: the hit
+    /// condition becomes `>=` the hit after them.
+    async fn ignore(&self, id: &str, count: &str, spec: &CommandSpec) -> Result<String> {
+        let id = parse_breakpoint_id(id, spec)?;
+        let count = parse_count(count).ok_or_else(|| spec.usage_error())?;
+        let condition = if count == 0 {
+            None
+        } else {
+            let hits = self
+                .debugger
+                .snapshot()
+                .await?
+                .breakpoints
+                .iter()
+                .find(|breakpoint| breakpoint.id == id)
+                .ok_or_else(|| anyhow!("breakpoint {id} was not found"))?
+                .hit_count;
+            let first_stop = hits
+                .checked_add(count)
+                .and_then(|skipped| skipped.checked_add(1))
+                .ok_or_else(|| anyhow!("ignore count {count} is too large"))?;
+            Some(HitCondition::new(
+                HitComparison::GreaterOrEqual,
+                first_stop,
+            )?)
+        };
+        let breakpoint = self
+            .debugger
+            .set_breakpoint_hit_condition(id, condition)
+            .await?;
+        let renderer = self.renderers.stdout;
+        Ok(if count == 0 {
+            format!(
+                "breakpoint {} stops at its next hit",
+                renderer.paint(Role::Metadata, breakpoint.id)
+            )
+        } else {
+            format!(
+                "breakpoint {} ignores its next {}",
+                renderer.paint(Role::Metadata, breakpoint.id),
+                plural(count, "hit")
+            )
+        })
     }
 
     async fn delete_watchpoints(&self, argument: &str, spec: &CommandSpec) -> Result<String> {
@@ -943,6 +1037,13 @@ fn parse_memory_byte_count(value: Option<&str>, spec: &CommandSpec) -> Result<u6
         .ok_or_else(|| spec.usage_error())
 }
 
+fn parse_breakpoint_id(argument: &str, spec: &CommandSpec) -> Result<BreakpointId> {
+    argument
+        .parse()
+        .map(BreakpointId::new)
+        .map_err(|_| spec.usage_error())
+}
+
 /// Parses `all` as `None` or a numeric identifier.
 fn parse_id_or_all(argument: &str, spec: &CommandSpec) -> Result<Option<u64>> {
     if argument == "all" {
@@ -1020,7 +1121,7 @@ mod tests {
             );
         }
         assert_eq!(spec(Command::Run).arity(), (0, 0));
-        assert_eq!(spec(Command::Break).arity(), (1, 1));
+        assert_eq!(spec(Command::Break).arity(), (1, 2));
         assert_eq!(spec(Command::Info).arity(), (1, 2));
         assert_eq!(spec(Command::Print).arity(), (0, 1));
         assert_eq!(spec(Command::Examine).arity(), (1, 2));

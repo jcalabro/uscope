@@ -12,6 +12,7 @@ use crate::WatchpointSpec;
 use crate::debug_info::VariableContext;
 use crate::debug_info::VariableRuntime;
 use crate::inspection::InspectionBudget;
+use crate::protocol::{BreakpointHit, BreakpointSpec, ResolvedBreakpointLocation, ResumeScope};
 use crate::unwind::FrameContext;
 use crate::unwind::MemoryReader;
 use crate::unwind::RegisterFile;
@@ -920,12 +921,19 @@ fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
     inferior.barrier = Some(StopBarrier {
         execution: Some(ExecutionId::new(2)),
         triggering_thread: pid,
-        reason: StopReason::Exception(exception),
+        reason: Some(StopReason::Exception(exception)),
     });
     let address = VirtualAddress::new(0x20);
+    let breakpoint = StopReason::Breakpoint {
+        address,
+        hits: Arc::from([BreakpointHit {
+            breakpoint: BreakpointId::new(1),
+            hit_count: 1,
+        }]),
+    };
 
     controller
-        .begin_visible_stop(breakpoint_thread, StopReason::Breakpoint { address })
+        .begin_visible_stop(breakpoint_thread, breakpoint.clone())
         .expect("record coincident breakpoint");
 
     let barrier = controller
@@ -934,7 +942,7 @@ fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
         .and_then(|inferior| inferior.barrier.as_ref())
         .expect("pending thread keeps barrier active");
     assert_eq!(barrier.triggering_thread, breakpoint_thread);
-    assert_eq!(barrier.reason, StopReason::Breakpoint { address });
+    assert_eq!(barrier.reason, Some(breakpoint));
     assert!(actions.borrow().is_empty());
 }
 
@@ -2006,6 +2014,13 @@ fn stale_status_is_never_consulted_outside_debug_exceptions() {
                 owners: BTreeSet::from([BreakpointOwner::User(BreakpointId::new(1))]),
             },
         );
+    harness.controller.breakpoints.push(Breakpoint {
+        id: BreakpointId::new(1),
+        spec: BreakpointSpec::Address(VirtualAddress::new(0x40)),
+        locations: Arc::from([]),
+        hit_condition: None,
+        hit_count: 0,
+    });
     harness.start_continue();
     harness.trace().take_actions();
     // An int3 stop while DR6 still records an earlier hit.
@@ -2015,7 +2030,11 @@ fn stale_status_is_never_consulted_outside_debug_exceptions() {
     assert_eq!(
         harness.public_reason(),
         Some(StopReason::Breakpoint {
-            address: VirtualAddress::new(0x40)
+            address: VirtualAddress::new(0x40),
+            hits: Arc::from([BreakpointHit {
+                breakpoint: BreakpointId::new(1),
+                hit_count: 1,
+            }]),
         })
     );
     assert!(
@@ -2463,4 +2482,352 @@ fn a_seized_thread_whose_start_precedes_its_clone_event_is_armed_before_running(
         .expect("the child was resumed");
     assert!(armed < resumed, "{actions:?}");
     assert_eq!(harness.public_reason(), None, "no unclassifiable stop");
+}
+
+/// The trap site of the hit-count harness's one user breakpoint.
+const HIT_SITE: u64 = 0x40;
+
+/// A process-wide continue whose threads can reach one user breakpoint at
+/// [`HIT_SITE`] with `hit_condition`.
+fn hit_harness(thread_count: i32, hit_condition: &str) -> WatchHarness {
+    let mut harness = watch_harness(thread_count);
+    harness.controller.breakpoints.push(Breakpoint {
+        id: BreakpointId::new(1),
+        spec: BreakpointSpec::Address(VirtualAddress::new(HIT_SITE)),
+        locations: Arc::from([ResolvedBreakpointLocation {
+            location: crate::BreakpointLocation::Virtual(VirtualAddress::new(HIT_SITE)),
+            code_instances: Arc::from([]),
+        }]),
+        hit_condition: Some(hit_condition.parse().expect("test hit condition")),
+        hit_count: 0,
+    });
+    harness
+        .controller
+        .inferior
+        .as_mut()
+        .expect("inferior")
+        .breakpoints
+        .insert(
+            VirtualAddress::new(HIT_SITE),
+            BreakpointSite {
+                original_byte: 0x90,
+                installed: true,
+                owners: BTreeSet::from([BreakpointOwner::User(BreakpointId::new(1))]),
+            },
+        );
+    harness.start_continue();
+    harness.trace().take_actions();
+    harness
+}
+
+impl WatchHarness {
+    /// Reports `pid` executing the trap at [`HIT_SITE`].
+    fn hit(&mut self, pid: Pid) -> Result<()> {
+        self.trace()
+            .program_counters
+            .borrow_mut()
+            .insert(pid, HIT_SITE + 1);
+        self.trap(pid, libc::SI_KERNEL, debug_registers::STATUS_IDLE)
+    }
+
+    /// Completes the single step a breakpoint repair began.
+    fn finish_step(&mut self, pid: Pid) -> Result<()> {
+        self.trap(pid, libc::TRAP_TRACE, debug_registers::STATUS_IDLE)
+    }
+
+    fn hit_count(&self) -> u64 {
+        self.controller.breakpoints[0].hit_count
+    }
+
+    fn published_stops(&mut self) -> usize {
+        std::iter::from_fn(|| self.events.try_recv().ok())
+            .filter(|event| matches!(event, DebuggerEvent::InferiorStopped { .. }))
+            .count()
+    }
+
+    fn resume(&mut self) -> Result<ExecutionId> {
+        let inferior = self.controller.inferior.as_ref().expect("inferior");
+        let process = process_id(inferior.tgid);
+        let stop = inferior.public_stop.as_ref().expect("public stop").id;
+        self.controller.begin_execution(
+            process,
+            stop,
+            ResumeScope::Process(process),
+            ActiveKind::Continue,
+            ExceptionDisposition::Pass,
+        )
+    }
+}
+
+fn site_hit(hit_count: u64) -> StopReason {
+    StopReason::Breakpoint {
+        address: VirtualAddress::new(HIT_SITE),
+        hits: Arc::from([BreakpointHit {
+            breakpoint: BreakpointId::new(1),
+            hit_count,
+        }]),
+    }
+}
+
+#[test]
+fn declined_hits_lift_the_trap_only_once_every_sibling_stopped() {
+    let mut harness = hit_harness(3, "==2");
+    let [first, second, third] = harness.threads[..] else {
+        panic!("three threads");
+    };
+
+    harness.hit(first).expect("declined hit");
+    let actions = harness.trace().take_actions();
+    assert!(
+        actions.contains(&format!("request_stop {second}")),
+        "{actions:?}"
+    );
+    assert!(
+        actions.contains(&format!("request_stop {third}")),
+        "{actions:?}"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| action.starts_with("remove_site") || action.starts_with("step")),
+        "the trap was lifted while siblings ran: {actions:?}"
+    );
+
+    harness.settle_requested_stops();
+    let actions = harness.trace().take_actions();
+    let repair = [
+        format!("remove_site {HIT_SITE:#x}"),
+        format!("step {first}"),
+    ];
+    assert!(actions.ends_with(&repair), "{actions:?}");
+
+    harness.finish_step(first).expect("repair step");
+    let actions = harness.trace().take_actions();
+    let resumed = [
+        format!("reinstall_site {HIT_SITE:#x}"),
+        format!("continue {first} None"),
+        format!("continue {second} None"),
+        format!("continue {third} None"),
+    ];
+    assert!(actions.ends_with(&resumed), "{actions:?}");
+    assert_eq!(harness.published_stops(), 0);
+    assert_eq!(harness.public_reason(), None);
+    assert_eq!(harness.hit_count(), 1);
+
+    // The next arrival meets the condition and stops every thread.
+    harness.hit(second).expect("stopping hit");
+    harness.settle_requested_stops();
+    assert_eq!(harness.public_reason(), Some(site_hit(2)));
+    assert_eq!(harness.published_stops(), 1);
+}
+
+#[test]
+fn a_visible_stop_during_an_internal_stop_wins_and_the_declined_hit_counts_once() {
+    let mut harness = hit_harness(2, "==5");
+    let [first, second] = harness.threads[..] else {
+        panic!("two threads");
+    };
+    harness.hit(first).expect("declined hit");
+
+    // The sibling reports a signal before the stop it was asked for.
+    harness.trace().siginfo.borrow_mut().insert(
+        second,
+        SignalMetadata {
+            code: 0,
+            sender: Some(1),
+        },
+    );
+    harness
+        .controller
+        .process_wait(WaitStatus::Stopped(second, NixSignal::SIGUSR1))
+        .expect("signal stop");
+    assert!(matches!(
+        harness.public_reason(),
+        Some(StopReason::Exception(exception)) if exception.code == NixSignal::SIGUSR1 as u64
+    ));
+    let declined = harness.thread(first);
+    assert_eq!(declined.reason, None);
+    assert_eq!(
+        declined.stopped_at_breakpoint,
+        Some(VirtualAddress::new(HIT_SITE))
+    );
+    harness.trace().take_actions();
+
+    // Resuming steps the declined thread over the site before anything runs.
+    harness.resume().expect("resume");
+    let actions = harness.trace().take_actions();
+    assert!(
+        actions.ends_with(&[
+            format!("remove_site {HIT_SITE:#x}"),
+            format!("step {first}")
+        ]),
+        "{actions:?}"
+    );
+    harness.finish_step(first).expect("repair step");
+    let actions = harness.trace().take_actions();
+    assert!(
+        actions.ends_with(&[
+            format!("reinstall_site {HIT_SITE:#x}"),
+            format!("continue {first} None"),
+            format!("continue {second} Some(SIGUSR1)"),
+        ]),
+        "{actions:?}"
+    );
+    assert_eq!(harness.hit_count(), 1);
+}
+
+#[test]
+fn a_pause_requested_during_an_internal_stop_is_published() {
+    let mut harness = hit_harness(2, "==5");
+    let first = harness.threads[0];
+    harness.hit(first).expect("declined hit");
+    let process = process_id(harness.controller.inferior.as_ref().expect("inferior").tgid);
+    harness.controller.begin_pause(process).expect("pause");
+    harness.settle_requested_stops();
+
+    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
+    assert!(
+        !harness
+            .trace()
+            .take_actions()
+            .iter()
+            .any(|action| action.starts_with("remove_site")),
+        "a pause must not repair or resume anything"
+    );
+    assert_eq!(
+        harness.thread(first).stopped_at_breakpoint,
+        Some(VirtualAddress::new(HIT_SITE))
+    );
+}
+
+#[test]
+fn a_co_hit_meeting_its_condition_turns_an_internal_stop_visible() {
+    let mut harness = hit_harness(2, "==2");
+    let [first, second] = harness.threads[..] else {
+        panic!("two threads");
+    };
+    harness.hit(first).expect("declined hit");
+    // The sibling trapped at the same site before its requested stop.
+    harness.hit(second).expect("stopping co-hit");
+
+    assert_eq!(harness.public_reason(), Some(site_hit(2)));
+    let stop = harness
+        .controller
+        .inferior
+        .as_ref()
+        .and_then(|inferior| inferior.public_stop.as_ref())
+        .expect("published stop");
+    assert_eq!(stop.triggering_thread, second);
+    assert_eq!(harness.thread(first).reason, None);
+    assert_eq!(harness.thread(second).reason, Some(site_hit(2)));
+}
+
+#[test]
+fn a_declined_thread_exiting_during_an_internal_stop_publishes_nothing() {
+    let mut harness = hit_harness(3, "==5");
+    let [first, second, third] = harness.threads[..] else {
+        panic!("three threads");
+    };
+    harness.hit(first).expect("declined hit");
+    harness
+        .controller
+        .process_wait(WaitStatus::Exited(first, 0))
+        .expect("thread exit");
+    harness.trace().take_actions();
+    harness.settle_requested_stops();
+
+    let actions = harness.trace().take_actions();
+    assert!(
+        actions.ends_with(&[
+            format!("continue {second} None"),
+            format!("continue {third} None"),
+        ]),
+        "{actions:?}"
+    );
+    assert!(!actions.iter().any(|action| action.starts_with("step")));
+    assert_eq!(harness.published_stops(), 0);
+}
+
+#[test]
+fn removing_a_breakpoint_releases_threads_waiting_to_step_over_it() {
+    let mut harness = hit_harness(2, "==5");
+    let [first, second] = harness.threads[..] else {
+        panic!("two threads");
+    };
+    harness.hit(first).expect("declined hit");
+    let process = process_id(harness.controller.inferior.as_ref().expect("inferior").tgid);
+    harness.controller.begin_pause(process).expect("pause");
+    harness.settle_requested_stops();
+    harness
+        .controller
+        .remove_breakpoint(BreakpointId::new(1))
+        .expect("remove");
+    assert_eq!(harness.thread(first).stopped_at_breakpoint, None);
+    harness.trace().take_actions();
+
+    harness.resume().expect("resume");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            format!("continue {first} None"),
+            format!("continue {second} None")
+        ]
+    );
+}
+
+#[test]
+fn amending_a_hit_condition_while_running_applies_to_the_next_hit() {
+    let mut harness = hit_harness(1, "==5");
+    let pid = harness.threads[0];
+    harness.hit(pid).expect("declined hit");
+    harness.finish_step(pid).expect("repair step");
+    assert_eq!(harness.public_reason(), None);
+
+    let amended = harness
+        .controller
+        .set_breakpoint_hit_condition(BreakpointId::new(1), Some(">=2".parse().expect("valid")))
+        .expect("amend while running");
+    assert_eq!(amended.hit_count, 1);
+    harness.hit(pid).expect("stopping hit");
+    assert_eq!(harness.public_reason(), Some(site_hit(2)));
+}
+
+#[test]
+fn a_trap_reexecuted_after_a_signal_interrupted_its_repair_is_not_a_new_hit() {
+    let mut harness = hit_harness(1, "==2");
+    let pid = harness.threads[0];
+    harness.hit(pid).expect("declined hit");
+    // A signal arrives instead of the repair step's trace trap, before the
+    // original instruction ran.
+    harness.trace().siginfo.borrow_mut().insert(
+        pid,
+        SignalMetadata {
+            code: 0,
+            sender: Some(1),
+        },
+    );
+    harness
+        .controller
+        .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGUSR1))
+        .expect("signal during repair");
+    assert!(matches!(
+        harness.public_reason(),
+        Some(StopReason::Exception(_))
+    ));
+    harness.trace().take_actions();
+
+    harness.resume().expect("resume");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("continue {pid} Some(SIGUSR1)")]
+    );
+    // After its handler returns the thread executes the same trap again.
+    harness.hit(pid).expect("re-executed trap");
+    assert_eq!(harness.public_reason(), None, "the hit was counted twice");
+    harness.finish_step(pid).expect("repair step");
+    assert_eq!(harness.hit_count(), 1);
+    assert_eq!(
+        harness.trace().take_actions().last(),
+        Some(&format!("continue {pid} None"))
+    );
 }

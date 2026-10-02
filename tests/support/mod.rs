@@ -20,7 +20,7 @@ use tokio::time::timeout;
 use uscope::{
     Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
     DebuggerHandle, ExceptionDisposition, ExitStatus, LineNumber, ProcessId, Result, StateSnapshot,
-    StepKind, StopReason,
+    StepKind, StopReason, VirtualAddress,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -190,6 +190,12 @@ impl Scenario {
             )
         });
         Self::from_debugger(name, debugger)
+    }
+
+    /// Drives a debugger attached to an external process. Shutting the
+    /// scenario down detaches; the process's owner reaps it.
+    pub fn attached(name: impl Into<String>, debugger: Debugger) -> Self {
+        Self::from_debugger(name.into(), debugger)
     }
 
     fn from_debugger(name: String, debugger: Debugger) -> Self {
@@ -483,6 +489,14 @@ impl Scenario {
             self.name,
             self.transcript.join("\n")
         )
+    }
+}
+
+/// Returns the address of a breakpoint stop, failing on any other stop.
+pub fn breakpoint_address(reason: &StopReason) -> VirtualAddress {
+    match reason {
+        StopReason::Breakpoint { address, .. } => *address,
+        other => panic!("expected a breakpoint stop, got {other:?}"),
     }
 }
 

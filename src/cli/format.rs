@@ -110,19 +110,36 @@ fn breakpoint_location(location: BreakpointLocation, renderer: Renderer) -> Stri
     }
 }
 
+/// Describes which hits a breakpoint stops at, or nothing when it stops at
+/// every hit.
+fn hit_condition(breakpoint: &Breakpoint, renderer: Renderer) -> Option<String> {
+    let condition = breakpoint.hit_condition?;
+    let mut text = format!("stops at hits {}", renderer.paint(Role::Name, condition));
+    if !condition.may_stop_after(breakpoint.hit_count) {
+        text.push_str(" (no later hit can stop)");
+    }
+    Some(text)
+}
+
 pub fn breakpoint(breakpoint: &Breakpoint, renderer: Renderer) -> String {
     let heading = format!(
         "{} {} set",
         renderer.paint(Role::Success, "breakpoint"),
         renderer.paint(Role::Metadata, breakpoint.id),
     );
+    let condition = hit_condition(breakpoint, renderer)
+        .map(|condition| format!(", {condition}"))
+        .unwrap_or_default();
     if let [resolved] = breakpoint.locations.as_ref() {
         return format!(
-            "{heading} at {}",
+            "{heading} at {}{condition}",
             breakpoint_location(resolved.location, renderer)
         );
     }
-    let mut output = format!("{heading} at {} locations", breakpoint.locations.len());
+    let mut output = format!(
+        "{heading} at {} locations{condition}",
+        breakpoint.locations.len()
+    );
     for resolved in breakpoint.locations.iter() {
         write!(
             output,
@@ -134,14 +151,29 @@ pub fn breakpoint(breakpoint: &Breakpoint, renderer: Renderer) -> String {
     output
 }
 
+/// Describes a breakpoint whose hit condition changed.
+pub fn breakpoint_hit_condition(breakpoint: &Breakpoint, renderer: Renderer) -> String {
+    format!(
+        "{} {} {}, hit {} so far",
+        renderer.paint(Role::Success, "breakpoint"),
+        renderer.paint(Role::Metadata, breakpoint.id),
+        hit_condition(breakpoint, renderer).unwrap_or_else(|| "stops at every hit".to_owned()),
+        plural(breakpoint.hit_count, "time"),
+    )
+}
+
 pub fn breakpoints(breakpoints: &[Breakpoint], renderer: Renderer) -> String {
     lines_or(breakpoints, "no breakpoints", renderer, |breakpoint| {
         let mut output = format!(
-            "{}  {}  {}",
+            "{}  {}  {}  hit {}",
             renderer.paint(Role::Metadata, breakpoint.id),
             renderer.paint(Role::Name, &breakpoint.spec),
-            plural(breakpoint.locations.len() as u64, "location")
+            plural(breakpoint.locations.len() as u64, "location"),
+            plural(breakpoint.hit_count, "time"),
         );
+        if let Some(condition) = hit_condition(breakpoint, renderer) {
+            write!(output, "  {condition}").expect("writing to a String cannot fail");
+        }
         for resolved in breakpoint.locations.iter() {
             write!(
                 output,
@@ -267,9 +299,22 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
     let stopped = |role| renderer.paint(role, "stopped");
     match reason {
         StopReason::Attach => format!("{} after attaching", stopped(Role::Current)),
-        StopReason::Breakpoint { address } => format!(
-            "{} at breakpoint {}",
+        StopReason::Breakpoint { address, hits } => format!(
+            "{} at {} {} at {}",
             stopped(Role::Current),
+            if hits.len() == 1 {
+                "breakpoint"
+            } else {
+                "breakpoints"
+            },
+            hits.iter()
+                .map(|hit| format!(
+                    "{} (hit {})",
+                    renderer.paint(Role::Metadata, hit.breakpoint),
+                    hit.hit_count
+                ))
+                .collect::<Vec<_>>()
+                .join(", "),
             renderer.paint(Role::Metadata, address)
         ),
         StopReason::Watchpoint { hits } => format!(

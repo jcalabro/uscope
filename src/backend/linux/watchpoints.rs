@@ -422,9 +422,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             };
             if let Some(barrier) = inferior.barrier.as_mut()
                 && barrier.triggering_thread == pid
-                && matches!(barrier.reason, StopReason::Watchpoint { .. })
+                && matches!(barrier.reason, Some(StopReason::Watchpoint { .. }))
             {
-                barrier.reason = reason.clone();
+                barrier.reason = Some(reason.clone());
             }
             thread.reason = Some(reason);
         }

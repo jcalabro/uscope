@@ -61,13 +61,13 @@ pub use model::{
     VirtualAddress,
 };
 pub use protocol::{
-    Breakpoint, BreakpointId, BreakpointSpec, CoreDumpInfo, CoreDumpOptions, CoreModule,
-    CoreModuleState, DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId, ExitStatus,
-    FramePresentation, GlobalVariableQuery, InferiorState, InvalidatedWatchpoint, ModuleIdentity,
-    PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope, StateSnapshot, StepKind,
-    StopId, StopReason, ThreadSnapshot, ThreadState, ValueChildQuery, VariableQuery, WatchAccess,
-    WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
-    WatchpointInvalidation, WatchpointSpec,
+    Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, CoreDumpInfo, CoreDumpOptions,
+    CoreModule, CoreModuleState, DebuggerEvent, ExceptionDisposition, ExceptionInfo, ExecutionId,
+    ExitStatus, FramePresentation, GlobalVariableQuery, HitComparison, HitCondition, InferiorState,
+    InvalidatedWatchpoint, ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation,
+    ResumeScope, StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState,
+    ValueChildQuery, VariableQuery, WatchAccess, WatchScope, WatchTarget, Watchpoint,
+    WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
 };
 pub use source_map::SourcePathMap;
 
@@ -311,10 +311,49 @@ impl DebuggerHandle {
         self.events.subscribe()
     }
 
-    /// Adds a logical breakpoint and returns all locations resolved by the backend.
+    /// Adds a logical breakpoint that stops at every hit and returns all
+    /// locations resolved by the backend. Adding the spec of an existing
+    /// breakpoint without a hit condition returns that breakpoint.
     pub async fn add_breakpoint(&self, spec: BreakpointSpec) -> Result<Breakpoint> {
-        self.request(|reply| Request::AddBreakpoint { spec, reply })
-            .await
+        self.request(|reply| Request::AddBreakpoint {
+            spec,
+            hit_condition: None,
+            reply,
+        })
+        .await
+    }
+
+    /// Adds a logical breakpoint that stops only at hits meeting
+    /// `hit_condition`. Adding the spec and condition of an existing
+    /// breakpoint returns that breakpoint, with the hits it already counted.
+    pub async fn add_breakpoint_with_hit_condition(
+        &self,
+        spec: BreakpointSpec,
+        hit_condition: HitCondition,
+    ) -> Result<Breakpoint> {
+        self.request(|reply| Request::AddBreakpoint {
+            spec,
+            hit_condition: Some(hit_condition),
+            reply,
+        })
+        .await
+    }
+
+    /// Replaces which hits of a breakpoint stop execution; `None` stops at
+    /// every hit. The hits already counted are kept. Unlike adding and
+    /// removing breakpoints, this needs no stop and works while the inferior
+    /// runs, taking effect from the next hit.
+    pub async fn set_breakpoint_hit_condition(
+        &self,
+        id: BreakpointId,
+        hit_condition: Option<HitCondition>,
+    ) -> Result<Breakpoint> {
+        self.request(|reply| Request::SetBreakpointHitCondition {
+            id,
+            hit_condition,
+            reply,
+        })
+        .await
     }
 
     /// Removes one logical breakpoint and returns its prior definition.

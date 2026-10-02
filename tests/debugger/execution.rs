@@ -301,11 +301,11 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
         Err(Error::NotRunning)
     ));
 
-    let breakpoint = scenario.add_breakpoint("breakpoint_target").await;
+    let mut breakpoint = scenario.add_breakpoint("breakpoint_target").await;
     let first = scenario.run_to_stop().await;
 
     let first_address = match first {
-        StopReason::Breakpoint { address } => address,
+        StopReason::Breakpoint { address, .. } => address,
         other => panic!("expected breakpoint, got {other:?}"),
     };
 
@@ -361,6 +361,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
         &snapshot.inferior,
         InferiorState::Stopped { reason, .. } if *reason == first
     ));
+    breakpoint.hit_count = 1;
     assert_eq!(
         snapshot.breakpoints.as_ref(),
         std::slice::from_ref(&breakpoint)
@@ -405,10 +406,8 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
     );
 
     assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Breakpoint {
-            address: first_address
-        }
+        support::breakpoint_address(&scenario.resume_to_stop().await),
+        first_address
     );
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -423,7 +422,7 @@ async fn raw_memory_reads_are_bounded_stop_scoped_and_hide_breakpoints() {
     let mut scenario = Scenario::new("raw memory", Scenario::fixture("basic"));
     scenario.add_breakpoint("breakpoint_target").await;
     let first_address = match scenario.run_to_stop().await {
-        StopReason::Breakpoint { address } => address,
+        StopReason::Breakpoint { address, .. } => address,
         other => panic!("expected breakpoint, got {other:?}"),
     };
     let value_address = scenario
@@ -495,10 +494,8 @@ async fn raw_memory_reads_are_bounded_stop_scoped_and_hide_breakpoints() {
     ));
 
     assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Breakpoint {
-            address: first_address
-        }
+        support::breakpoint_address(&scenario.resume_to_stop().await),
+        first_address
     );
     assert_eq!(
         scenario.resume_to_stop().await,

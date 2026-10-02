@@ -908,6 +908,19 @@ for variant in "gcc-o0 gcc -O0 -fno-omit-frame-pointer -fPIE -pie" \
     require_instruction "$output_dir/watch-${name}" paired_store 'movdqu'
     require_instruction "$output_dir/watch-${name}" failed_exchange 'lock cmpxchg'
 done
+for variant in "gcc-o0 gcc -O0 -fno-omit-frame-pointer -fPIE -pie" \
+    "clang-o0 clang -O0 -fno-omit-frame-pointer -fPIE -pie" \
+    "clang-o2 clang -O2 -fomit-frame-pointer -fPIE -pie" \
+    "gcc-o2-nopie gcc -O2 -fomit-frame-pointer -no-pie"; do
+    read -r name compiler flags <<<"$variant"
+    # shellcheck disable=SC2086
+    build_fixture "$compiler" "$c_fixtures_dir/hit-counts.c" "$output_dir/hit-counts-${name}" \
+        -g3 -gdwarf-5 $flags
+done
+for fixture in hit-count-threads hit-count-spin hit-count-signals; do
+    build_fixture gcc "$c_fixtures_dir/${fixture}.c" "$output_dir/${fixture}" \
+        -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
+done
 build_fixture gcc "$c_fixtures_dir/watch-threads.c" "$output_dir/watch-threads" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/watch-locals.c" "$output_dir/watch-locals-gcc-o0" \

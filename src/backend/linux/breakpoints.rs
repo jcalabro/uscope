@@ -6,8 +6,8 @@ use std::sync::Arc;
 use nix::sys::signal::Signal as NixSignal;
 
 use crate::protocol::{
-    Breakpoint, BreakpointId, BreakpointSpec, DebuggerEvent, ExecutionId,
-    ResolvedBreakpointLocation,
+    Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, DebuggerEvent, ExecutionId,
+    HitCondition, ResolvedBreakpointLocation,
 };
 use crate::{BreakpointLocation, Error, Result, VirtualAddress};
 
@@ -17,11 +17,15 @@ use super::{
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
-    pub(super) fn add_breakpoint(&mut self, spec: BreakpointSpec) -> Result<Breakpoint> {
+    pub(super) fn add_breakpoint(
+        &mut self,
+        spec: BreakpointSpec,
+        hit_condition: Option<HitCondition>,
+    ) -> Result<Breakpoint> {
         if let Some(existing) = self
             .breakpoints
             .iter()
-            .find(|breakpoint| breakpoint.spec == spec)
+            .find(|breakpoint| breakpoint.spec == spec && breakpoint.hit_condition == hit_condition)
         {
             return Ok(existing.clone());
         }
@@ -31,7 +35,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .next_breakpoint_id
             .checked_add(1)
             .ok_or_else(|| backend_error(LinuxError::BreakpointIdExhausted))?;
-        let breakpoint = self.resolve_breakpoint(id, spec)?;
+        let breakpoint = Breakpoint {
+            hit_condition,
+            ..self.resolve_breakpoint(id, spec)?
+        };
 
         if let Some(inferior) = self.inferior.as_mut() {
             validate_public_stop(inferior, inferior.public_stop.as_ref().map(|stop| stop.id))?;
@@ -117,6 +124,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             id,
             spec,
             locations,
+            hit_condition: None,
+            hit_count: 0,
         })
     }
 
@@ -213,6 +222,72 @@ impl<P: LinuxTraceOps> Controller<P> {
         let removed: Arc<[Breakpoint]> = std::mem::take(&mut self.breakpoints).into();
         self.publish_breakpoints_changed();
         Ok(removed)
+    }
+
+    /// Replaces a breakpoint's hit condition, keeping the hits it counted.
+    /// The condition is controller state only, so no stop is required.
+    pub(super) fn set_breakpoint_hit_condition(
+        &mut self,
+        id: BreakpointId,
+        hit_condition: Option<HitCondition>,
+    ) -> Result<Breakpoint> {
+        let breakpoint = self
+            .breakpoints
+            .iter_mut()
+            .find(|breakpoint| breakpoint.id == id)
+            .ok_or(Error::BreakpointNotFound(id.get()))?;
+        breakpoint.hit_condition = hit_condition;
+        let breakpoint = breakpoint.clone();
+        self.publish_breakpoints_changed();
+        Ok(breakpoint)
+    }
+
+    /// Counts one hit for every logical breakpoint owning the site at
+    /// `address` and returns those whose hit condition the hit meets.
+    pub(super) fn record_breakpoint_hits(
+        &mut self,
+        address: VirtualAddress,
+    ) -> Arc<[BreakpointHit]> {
+        let Some(site) = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.breakpoints.get(&address))
+        else {
+            return Arc::from([]);
+        };
+        let owners = site
+            .owners
+            .iter()
+            .filter_map(|owner| match owner {
+                BreakpointOwner::User(id) => Some(*id),
+                BreakpointOwner::Plan(_) => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let mut stopping = Vec::new();
+        for breakpoint in &mut self.breakpoints {
+            if !owners.contains(&breakpoint.id) {
+                continue;
+            }
+            breakpoint.hit_count = breakpoint.hit_count.saturating_add(1);
+            if breakpoint
+                .hit_condition
+                .is_none_or(|condition| condition.is_met(breakpoint.hit_count))
+            {
+                stopping.push(BreakpointHit {
+                    breakpoint: breakpoint.id,
+                    hit_count: breakpoint.hit_count,
+                });
+            }
+        }
+        stopping.sort_unstable_by_key(|hit| hit.breakpoint);
+        stopping.into()
+    }
+
+    /// Starts every breakpoint's count again for a new process.
+    pub(super) fn reset_breakpoint_hit_counts(&mut self) {
+        for breakpoint in &mut self.breakpoints {
+            breakpoint.hit_count = 0;
+        }
     }
 
     pub(super) fn publish_breakpoints_changed(&mut self) {

@@ -809,8 +809,8 @@ async fn a_breakpoint_right_after_a_watched_store_is_still_reported() {
                 scenario.resume_to_stop().await
             };
             assert_eq!(
-                next,
-                StopReason::Breakpoint { address: after },
+                support::breakpoint_address(&next),
+                after,
                 "{fixture}: the breakpoint at the next instruction is not skipped"
             );
             scenario.shutdown().await;
@@ -831,8 +831,8 @@ async fn stepping_over_a_breakpoint_on_a_watched_store_reports_the_store() {
                 .add_breakpoint_spec(BreakpointSpec::Address(site))
                 .await;
             assert_eq!(
-                scenario.resume_to_stop().await,
-                StopReason::Breakpoint { address: site }
+                support::breakpoint_address(&scenario.resume_to_stop().await),
+                site
             );
             let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
