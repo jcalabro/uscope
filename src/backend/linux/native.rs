@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::libc;
+use nix::sys::personality::{self, Persona};
 use nix::sys::ptrace::{self, Options};
 use nix::sys::signal::{self, Signal as NixSignal};
 use nix::unistd::Pid;
@@ -621,8 +622,18 @@ pub(super) fn trace_child(command: &mut ProcessCommand) {
             if libc::getppid() != i32::try_from(expected_parent).unwrap_or(i32::MAX) {
                 return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
             }
+            disable_address_randomization();
             ptrace::traceme().map_err(|error| std::io::Error::from_raw_os_error(error as i32))
         });
+    }
+}
+
+/// Runs the program this process executes next without address space
+/// randomization, as gdb does, so a rerun shows the same addresses, pointers,
+/// and stack contents. A sandbox may forbid it, which costs only that.
+fn disable_address_randomization() {
+    if let Ok(persona) = personality::get() {
+        let _ = personality::set(persona | Persona::ADDR_NO_RANDOMIZE);
     }
 }
 

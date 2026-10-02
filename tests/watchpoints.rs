@@ -258,9 +258,8 @@ async fn write_watchpoints_report_every_store_after_its_instruction() {
             "{fixture}: exiting discards {armed:?}"
         );
 
-        // Watchpoints never carry into the next run, whose addresses are
-        // randomized independently; it reaches the breakpoint and exits
-        // without a watch stop.
+        // Watchpoints never carry into the next run; it reaches the
+        // breakpoint and exits without a watch stop.
         assert!(matches!(
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }

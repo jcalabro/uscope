@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
 use clap::Parser;
+use nix::sys::personality::{self, Persona};
 
 /// Runs a program in a terminal for the uscope debug adapter.
 #[derive(Parser)]
@@ -50,9 +51,15 @@ fn launch(args: &LauncherArgs) -> io::Error {
     };
     let mut traced = [0];
     match adapter.read(&mut traced) {
-        Ok(1) => Command::new(&args.command[0])
-            .args(&args.command[1..])
-            .exec(),
+        Ok(1) => {
+            // Unrandomized, as a program the adapter launches itself is.
+            if let Ok(persona) = personality::get() {
+                let _ = personality::set(persona | Persona::ADDR_NO_RANDOMIZE);
+            }
+            Command::new(&args.command[0])
+                .args(&args.command[1..])
+                .exec()
+        }
         Ok(_) => io::Error::other("the debugger stopped before it could debug it"),
         Err(error) => error,
     }
