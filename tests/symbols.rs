@@ -577,6 +577,9 @@ async fn core_backtraces_agree_with_gdb() {
 /// readelf's reading of one ELF file's sections and symbol tables.
 struct Oracle {
     files: Vec<OracleFile>,
+    /// Data symbols defined in allocated, non-thread-local sections, each
+    /// with the end of its section.
+    data: Vec<(OracleSymbol, u64)>,
 }
 
 struct OracleFile {
@@ -607,9 +610,21 @@ impl Oracle {
     /// Reads the oracles of one module. Several files describe a module with
     /// an embedded symbol table.
     fn read(names: &[&str]) -> Self {
-        Self {
+        let mut oracle = Self {
             files: names.iter().map(|name| OracleFile::read(name)).collect(),
-        }
+            data: Vec::new(),
+        };
+        oracle.data = oracle
+            .symbols()
+            .filter(|(_, symbol)| symbol.kind == Some(SymbolKind::Data) && symbol.binding.is_some())
+            .filter_map(|(file, symbol)| {
+                let (_, start, end, thread_local) =
+                    file.allocated_sections.get(&symbol.section?)?;
+                (!thread_local && *start <= symbol.address && symbol.address < *end)
+                    .then(|| (symbol.clone(), *end))
+            })
+            .collect();
+        oracle
     }
 
     fn symbols(&self) -> impl Iterator<Item = (&OracleFile, &OracleSymbol)> {
@@ -1202,25 +1217,15 @@ impl Oracle {
             .min_by_key(|(_, start, end, _)| (std::cmp::Reverse(*start), *end))
             .map(|(name, ..)| name.clone());
 
-        // Data symbols defined in allocated, non-thread-local sections.
-        let data = self
-            .symbols()
-            .filter(|(_, symbol)| symbol.kind == Some(SymbolKind::Data) && symbol.binding.is_some())
-            .filter_map(|(file, symbol)| {
-                let (_, start, end, thread_local) =
-                    file.allocated_sections.get(&symbol.section?)?;
-                (!thread_local && *start <= symbol.address && symbol.address < *end)
-                    .then_some((symbol, *end))
-            })
-            .collect::<Vec<_>>();
-        let sized = data
+        let sized = self
+            .data
             .iter()
             .filter(|(symbol, section_end)| {
                 symbol.size != 0
                     && symbol.address + symbol.size <= *section_end
                     && (symbol.address..symbol.address + symbol.size).contains(&address)
             })
-            .map(|(symbol, _)| *symbol)
+            .map(|(symbol, _)| symbol)
             .collect::<Vec<_>>();
         let innermost = sized
             .iter()
@@ -1239,7 +1244,8 @@ impl Oracle {
             )
         } else {
             (
-                data.iter()
+                self.data
+                    .iter()
                     .filter(|(symbol, _)| symbol.size == 0 && symbol.address == address)
                     .map(|(symbol, _)| (symbol.name.clone(), symbol.address))
                     .collect(),
