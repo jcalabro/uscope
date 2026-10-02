@@ -284,6 +284,18 @@ impl<P: InspectionOps> Controller<P> {
         frame: StackFrameId,
     ) -> Result<ResolvedFrame> {
         let presentation = self.presentation_for_stopped_thread(pid)?;
+        self.resolve_presented_frame(inferior, pid, frame, presentation)
+    }
+
+    /// Resolves a frame of a thread whose logical presentation is known,
+    /// such as one stopped by a breakpoint hit before any stop is published.
+    pub(super) fn resolve_presented_frame(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+        frame: StackFrameId,
+        presentation: FramePresentation,
+    ) -> Result<ResolvedFrame> {
         let level = usize::try_from(frame.get()).expect("u32 fits usize");
         // Every activation presents at least one logical frame, so unwinding
         // one activation per level always reaches the requested frame.

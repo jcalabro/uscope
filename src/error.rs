@@ -32,6 +32,10 @@ pub enum Error {
     BreakpointNotFound(u64),
     #[error("invalid hit condition: {0}")]
     InvalidHitCondition(String),
+    #[error("invalid condition: {0}")]
+    InvalidCondition(String),
+    #[error("invalid log message: {0}")]
+    InvalidLogMessage(String),
     #[error("no symbol named '{0}' was found")]
     SymbolNotFound(String),
     #[error("multiple symbols named '{0}' were found")]

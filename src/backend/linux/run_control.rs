@@ -538,7 +538,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.start_next_repair();
         }
 
-        let stopping = self.record_breakpoint_hits(address);
+        let stopping = self.record_breakpoint_hits(pid, address);
         if !stopping.is_empty() {
             return self.begin_visible_stop(
                 pid,

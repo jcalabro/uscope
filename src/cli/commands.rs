@@ -32,6 +32,7 @@ pub enum Command {
     Delete,
     Ignore,
     Hits,
+    Condition,
     Watch,
     AccessWatch,
     ReadWatch,
@@ -76,13 +77,16 @@ pub struct CommandSpec {
 }
 
 impl CommandSpec {
-    /// Returns the inclusive range of argument counts the usage accepts.
+    /// Returns the inclusive range of argument counts the usage accepts. A
+    /// final `[words...]` takes the rest of the line.
     fn arity(&self) -> (usize, usize) {
         self.usage
             .split_whitespace()
             .skip(1)
             .fold((0, 0), |(minimum, maximum), word| {
-                if word.starts_with('[') {
+                if word.ends_with("...]") {
+                    (minimum, usize::MAX)
+                } else if word.starts_with('[') {
                     (minimum, maximum + 1)
                 } else {
                     (minimum + 1, maximum + 1)
@@ -164,6 +168,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         [],
         "hits <id> <hit-condition|always>",
         "Choose which hits of a breakpoint stop, such as >=5, ==3, or %10"
+    ),
+    command!(
+        Condition,
+        "condition",
+        [],
+        "condition <id> [expression...]",
+        "Stop at a breakpoint only where an expression such as x > 3 && p->next != NULL holds; without one, always"
     ),
     command!(
         Watch,
@@ -402,6 +413,7 @@ impl Cli {
             Command::Delete => self.delete_breakpoints(arguments[0], spec).await?,
             Command::Ignore => self.ignore(arguments[0], arguments[1], spec).await?,
             Command::Hits => self.hits(arguments[0], arguments[1], spec).await?,
+            Command::Condition => self.condition(arguments[0], &arguments[1..], spec).await?,
             Command::Watch => self.watch(arguments[0], WatchAccess::Write, spec).await?,
             Command::AccessWatch => {
                 self.watch(arguments[0], WatchAccess::ReadWrite, spec)
@@ -550,6 +562,36 @@ impl Cli {
                 .set_breakpoint_hit_condition(id, condition)
                 .await?,
             self.renderers.stdout,
+        ))
+    }
+
+    /// Sets or removes a breakpoint's condition, as gdb's `condition` does.
+    async fn condition(&self, id: &str, words: &[&str], spec: &CommandSpec) -> Result<String> {
+        let id = parse_breakpoint_id(id, spec)?;
+        let condition = if words.is_empty() {
+            None
+        } else {
+            Some(uscope::Condition::parse(&words.join(" "))?)
+        };
+        let breakpoint = self
+            .debugger
+            .set_breakpoint_condition(id, condition)
+            .await?;
+        let renderer = self.renderers.stdout;
+        Ok(breakpoint.condition.as_ref().map_or_else(
+            || {
+                format!(
+                    "breakpoint {} stops unconditionally",
+                    renderer.paint(Role::Metadata, breakpoint.id)
+                )
+            },
+            |condition| {
+                format!(
+                    "breakpoint {} stops where {} holds",
+                    renderer.paint(Role::Metadata, breakpoint.id),
+                    renderer.paint(Role::Value, condition)
+                )
+            },
         ))
     }
 

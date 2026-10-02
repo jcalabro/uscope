@@ -796,7 +796,8 @@ impl Controller<CoreTarget> {
                 }
                 Request::AddBreakpoint { reply, .. }
                 | Request::RemoveBreakpoint { reply, .. }
-                | Request::SetBreakpointHitCondition { reply, .. } => reject(reply),
+                | Request::SetBreakpointHitCondition { reply, .. }
+                | Request::SetBreakpointCondition { reply, .. } => reject(reply),
                 Request::RemoveAllBreakpoints { reply } => reject(reply),
                 Request::ResolveWatchTarget { reply, .. } => reject(reply),
                 Request::AddWatchpoint { reply, .. } | Request::RemoveWatchpoint { reply, .. } => {

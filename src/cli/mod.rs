@@ -314,19 +314,22 @@ impl Cli {
     ) -> Result<(String, StopReason)> {
         let mut events = self.debugger.subscribe();
         let mut lines = Vec::new();
-        let mut record = |event: Result<DebuggerEvent, _>| {
-            if let Ok(DebuggerEvent::SignalReceived {
+        let renderer = self.renderers.stdout;
+        let mut record = |event: Result<DebuggerEvent, _>| match event {
+            Ok(DebuggerEvent::SignalReceived {
                 thread_id,
                 exception,
                 ..
-            }) = event
-            {
-                lines.push(format::signal_received(
-                    thread_id,
-                    &exception,
-                    self.renderers.stdout,
-                ));
-            }
+            }) => lines.push(format::signal_received(thread_id, &exception, renderer)),
+            Ok(DebuggerEvent::LogMessage { parts, .. }) => lines.push(format::log_message(&parts)),
+            Ok(DebuggerEvent::ConditionFailed {
+                breakpoint, error, ..
+            }) => lines.push(format!(
+                "{}: the condition of breakpoint {} could not be evaluated: {error}",
+                renderer.paint(Role::Warning, "warning"),
+                renderer.paint(Role::Metadata, breakpoint)
+            )),
+            _ => {}
         };
         tokio::pin!(execution);
         let reason = loop {

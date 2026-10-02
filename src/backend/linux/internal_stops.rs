@@ -75,10 +75,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         match edit {
             Edit::AddBreakpoint {
                 spec,
-                hit_condition,
+                options,
                 reply,
             } => {
-                let _ = reply.send(self.add_breakpoint(spec, hit_condition));
+                let _ = reply.send(self.add_breakpoint(spec, *options));
             }
             Edit::RemoveBreakpoint { id, reply } => {
                 let _ = reply.send(self.remove_breakpoint(id));

@@ -485,6 +485,8 @@ mod tests {
             spec: uscope::BreakpointSpec::Function("f".to_owned()),
             locations: std::sync::Arc::from([]),
             hit_condition: None,
+            condition: None,
+            log_message: None,
             hit_count: 0,
         };
         let changes = breakpoints.sync(&[core(4), core(9)]);
