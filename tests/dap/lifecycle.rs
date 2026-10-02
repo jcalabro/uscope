@@ -212,6 +212,11 @@ fn requests_out_of_order_are_refused_without_ending_the_session() {
         dap.request_error("frobnicate", json!({})),
         "the 'frobnicate' request is not supported"
     );
+    // Every source has a path, so a client never needs its contents sent.
+    assert_eq!(
+        dap.request_error("source", json!({"sourceReference": 1})),
+        "source contents are not available from the debugger; open the file locally"
+    );
     // A thread to pause exists even before anything is launched.
     assert_eq!(
         dap.request("threads", Value::Null),
@@ -479,4 +484,69 @@ fn cancelling_answered_or_unknown_requests_is_harmless() {
     dap.request("cancel", json!({"progressId": "load"}));
     dap.request("threads", Value::Null);
     dap.finish();
+}
+
+#[test]
+fn core_dumps_explain_their_signal_their_missing_modules_and_mismatched_files() {
+    // An abort, as a fatal signal the program sent itself.
+    let mut dap = Dap::start("abort core");
+    let started = dap.begin(
+        Profile::Neovim,
+        (
+            "attach",
+            json!({"coreFile": fixture("crash-gcc-o0-abort.core"), "program": fixture("crash-gcc-o0")}),
+        ),
+        &Configuration::default(),
+    );
+    let stop = dap.stopped(started.mark);
+    assert_eq!(
+        (stop.reason.as_str(), &stop.body["text"]),
+        ("exception", &json!("SIGABRT"))
+    );
+    dap.finish();
+
+    // A library the core records but this machine lacks is reported, and
+    // the rest of the dump is still debugged.
+    let core = fixture("core-missing-library/crash.core");
+    let mut dap = Dap::start("core missing a library");
+    let started = dap.begin(
+        Profile::VsCode,
+        ("attach", json!({"coreFile": core})),
+        &Configuration::default(),
+    );
+    let warning = dap.output_containing(started.mark, "important", "libcrash.so is missing");
+    assert!(
+        warning.contains("its frames and unsaved memory are unavailable"),
+        "{warning}"
+    );
+    let stop = dap.stopped(started.mark);
+    assert_eq!(stop.body["text"], "SIGSEGV");
+    dap.inspect_as(Profile::VsCode, &stop);
+    dap.finish();
+
+    // A rebuilt executable is refused unless mismatches are allowed.
+    for allowed in [false, true] {
+        let mut dap = Dap::start(format!("mismatched core, allowed {allowed}"));
+        dap.initialize(Profile::VsCode);
+        let attach = dap.send(
+            "attach",
+            json!({
+                "coreFile": fixture("crash-gcc-o0-segv.core"),
+                "program": fixture("crash-gcc-o0-rebuilt"),
+                "allowModuleMismatch": allowed,
+            }),
+        );
+        dap.request("configurationDone", Value::Null);
+        if allowed {
+            dap.success(attach);
+            assert_eq!(dap.stopped(attach.mark).body["text"], "SIGSEGV");
+        } else {
+            let message = dap.failure(attach);
+            assert!(
+                message.contains("the build-id note differs; allow module mismatches"),
+                "{message}"
+            );
+        }
+        dap.finish();
+    }
 }

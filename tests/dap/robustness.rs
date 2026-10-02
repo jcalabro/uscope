@@ -188,19 +188,94 @@ fn wait_until_gone(pid: u32) -> bool {
 
 #[test]
 fn missed_events_are_recovered_from_the_debuggers_state() {
-    // With room for one event, the adapter misses most of a burst of
-    // thread starts and exits, and must catch up from the debugger's state.
-    let mut dap = Dap::start_in("lagged", &[], &[("USCOPE_EVENT_CAPACITY", "1")]);
+    // With room for one event, the adapter misses most of each burst of
+    // thread starts and exits, and must catch up from the debugger's state:
+    // at every stop, the threads the client was told of are the threads
+    // there are.
+    let mut dap = Dap::start_in("lagged threads", &[], &[("USCOPE_EVENT_CAPACITY", "1")]);
     let started = dap.launch(
         Profile::Helix,
         &fixture("thread-stress"),
         json!({}),
-        &Configuration::default(),
+        &Configuration {
+            functions: vec!["churn_breakpoint".to_owned()],
+            ..Configuration::default()
+        },
     );
+    let mut mark = started.mark;
+    for _ in 0..16 {
+        let stop = dap.stopped(mark);
+        let threads = dap.request("threads", Value::Null)["threads"]
+            .as_array()
+            .expect("threads")
+            .iter()
+            .map(|thread| thread["id"].as_i64().expect("id"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(dap.known_threads(), threads);
+        assert!(threads.contains(&stop.thread));
+        let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+        dap.success(resumed);
+        mark = resumed.mark;
+    }
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
+    dap.event(mark, "terminated", |_| true);
+    dap.finish();
+
+    // Libraries load and unload in bursts too: at every stop, the modules
+    // the client was told of are the modules loaded.
+    let mut dap = Dap::start_in("lagged modules", &[], &[("USCOPE_EVENT_CAPACITY", "1")]);
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("globals-shared"),
+        json!({}),
+        &Configuration {
+            functions: vec!["dso_touch".to_owned(), "after_unload".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let mut mark = started.mark;
+    for _ in 0..3 {
+        let stop = dap.stopped(mark);
+        let modules = dap.request("modules", json!({}))["modules"]
+            .as_array()
+            .expect("modules")
+            .iter()
+            .map(|module| module["id"].as_str().expect("id").to_owned())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(dap.known_modules(), modules);
+        let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+        dap.success(resumed);
+        mark = resumed.mark;
+    }
+    assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
+    dap.finish();
+}
+
+#[test]
+fn requests_cancelled_while_waiting_their_turn_answer_that_they_were_cancelled() {
+    // The adapter waits for the client's terminal inside the launch, so the
+    // requests sent meanwhile wait their turn.
+    let mut dap = Dap::start("cancel waiting requests");
+    dap.hold_terminals();
+    dap.initialize(Profile::VsCode);
+    let launch = dap.send(
+        "launch",
+        json!({"program": fixture("spin"), "console": "integratedTerminal"}),
+    );
+    let done = dap.send("configurationDone", Value::Null);
+    let cancelled = dap.send("threads", Value::Null);
+    let kept = dap.send("threads", Value::Null);
+    let cancel = dap.send("cancel", json!({"requestId": cancelled.seq}));
+    dap.release_terminals();
+    dap.success(done);
+    dap.success(launch);
+    let response = dap.response(cancelled);
     assert_eq!(
-        dap.event(started.mark, "exited", |_| true),
-        json!({"exitCode": 0})
+        (&response["success"], &response["message"]),
+        (&json!(false), &json!("cancelled"))
     );
-    dap.event(started.mark, "terminated", |_| true);
+    dap.success(kept);
+    dap.success(cancel);
     dap.finish();
 }

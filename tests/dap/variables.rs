@@ -288,6 +288,31 @@ fn large_arrays_are_read_in_the_pages_clients_ask_for() {
     assert_eq!(page[99]["name"], "[1099]");
     assert_eq!(page[99]["evaluateName"], "large.padding[1099]");
     assert!(page.iter().all(|element| element["value"] == "0"));
+    // Any window holds exactly the elements it covers; a count of zero, as
+    // the protocol says, means every element from the start.
+    for (start, count, expected) in [
+        (0, 1, 1),
+        (7, 13, 13),
+        (1999, 1, 1),
+        (2040, 100, 8),
+        (2000, 0, 48),
+    ] {
+        let window = dap.request(
+            "variables",
+            json!({"variablesReference": padding["variablesReference"], "filter": "indexed", "start": start, "count": count}),
+        )["variables"]
+            .as_array()
+            .expect("window")
+            .clone();
+        let names = window
+            .iter()
+            .map(|element| element["name"].as_str().expect("name").to_owned())
+            .collect::<Vec<_>>();
+        let wanted = (start..start + expected)
+            .map(|index| format!("[{index}]"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, wanted, "start {start}, count {count}");
+    }
     // Past the end there is nothing.
     let past = dap.request(
         "variables",

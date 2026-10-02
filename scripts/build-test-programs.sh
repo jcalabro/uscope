@@ -704,6 +704,8 @@ build_fixture clang "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-clang" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_cpp_fixture g++ "$cpp_fixtures_dir/overloads.cpp" "$output_dir/overloads-cpp-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie
 build_cpp_fixture clang++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o2" \

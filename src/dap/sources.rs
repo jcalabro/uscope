@@ -32,8 +32,9 @@ impl Session {
         Ok(json!({"modules": modules, "totalModules": records.len()}))
     }
 
-    /// Announces loaded modules the client has not heard about, such as the
-    /// program itself, which no load event reports.
+    /// Brings the client's modules up to date: announces the loaded ones it
+    /// has not heard about, such as the program itself, which no load event
+    /// reports, and removes those unloaded while events were missed.
     pub(super) async fn announce_modules(&mut self) -> Result<(), Closed> {
         let Some(handle) = self.target_handle().ok() else {
             return Ok(());
@@ -41,6 +42,20 @@ impl Session {
         let Ok(snapshot) = handle.loaded_modules().await else {
             return Ok(());
         };
+        let loaded = snapshot
+            .modules
+            .iter()
+            .map(|record| record.module.id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let unloaded = self
+            .modules
+            .keys()
+            .filter(|id| !loaded.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        for id in unloaded {
+            self.forget_module(id).await?;
+        }
         for record in snapshot.modules.iter() {
             self.announce_module(record).await?;
         }
@@ -51,9 +66,10 @@ impl Session {
         &mut self,
         record: &LoadedModuleRecord,
     ) -> Result<(), Closed> {
-        if !self.modules.insert(record.module.id) {
+        if self.modules.contains_key(&record.module.id) {
             return Ok(());
         }
+        self.modules.insert(record.module.id, record.clone());
         let image = self.image(record.module.id).await;
         self.client
             .event(
@@ -112,7 +128,7 @@ impl Session {
     }
 }
 
-fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImage>) -> Value {
+pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImage>) -> Value {
     let mut module = json!({
         "id": record.module.id.get().to_string(),
         "name": record

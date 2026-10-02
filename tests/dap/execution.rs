@@ -340,3 +340,47 @@ fn go_preemption_signals_never_stop_a_go_program() {
     assert!(dap.output_text(started.mark, "console").is_empty());
     dap.finish();
 }
+
+#[test]
+fn single_thread_requests_run_only_the_thread_they_name() {
+    let mut dap = Dap::start("single thread");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("hot-calls"),
+        json!({}),
+        &Configuration {
+            functions: vec!["hot_function".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let first = dap.stopped(started.mark);
+    // Only the named thread runs, so only it can stop again, though every
+    // thread calls the function.
+    for _ in 0..5 {
+        let resumed = dap.send(
+            "continue",
+            json!({"threadId": first.thread, "singleThread": true}),
+        );
+        assert_eq!(dap.success(resumed), json!({"allThreadsContinued": false}));
+        assert_eq!(dap.stopped(resumed.mark).thread, first.thread);
+    }
+    let stepped = dap.send(
+        "next",
+        json!({"threadId": first.thread, "singleThread": true}),
+    );
+    dap.success(stepped);
+    let stop = dap.stopped(stepped.mark);
+    assert_eq!((stop.reason.as_str(), stop.thread), ("step", first.thread));
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    dap.request(
+        "setExpression",
+        json!({"expression": "hot_stop", "value": "1"}),
+    );
+    let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+    dap.success(resumed);
+    assert_eq!(
+        dap.event(resumed.mark, "exited", |_| true),
+        json!({"exitCode": 0})
+    );
+    dap.finish();
+}

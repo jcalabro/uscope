@@ -197,3 +197,39 @@ fn values_that_cannot_be_watched_say_why_without_failing() {
     );
     dap.finish();
 }
+
+#[test]
+fn addresses_are_watched_as_memory_a_client_names_by_address() {
+    let mut dap = Dap::start("address data breakpoints");
+    let (stop, frame) = stopped_in(&mut dap, "watch-gcc-o0", "scalar_stores");
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    let reference = dap.request(
+        "evaluate",
+        json!({"expression": "watch_i32", "frameId": frame["id"], "context": "watch"}),
+    )["memoryReference"]
+        .as_str()
+        .expect("watch_i32 is in memory")
+        .to_owned();
+    let info = dap.request(
+        "dataBreakpointInfo",
+        json!({"name": reference, "asAddress": true, "bytes": 4}),
+    );
+    let address = u64::from_str_radix(reference.trim_start_matches("0x"), 16).expect("hex");
+    assert_eq!(info["description"], format!("4 bytes at {address:#x}"));
+    let set = dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [{"dataId": info["dataId"], "accessType": "write"}]}),
+    );
+    let id = breakpoints(&set)[0]["id"].clone();
+    let change = next_change(&mut dap, stop.thread, &id);
+    assert!(change.contains("changed"), "{change}");
+
+    // A name that is no address cannot be watched as one.
+    let refused = dap.request(
+        "dataBreakpointInfo",
+        json!({"name": "watch_i32", "asAddress": true}),
+    );
+    assert_eq!(refused["dataId"], Value::Null);
+    assert_eq!(refused["description"], "'watch_i32' is not an address");
+    dap.finish();
+}
