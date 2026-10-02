@@ -74,6 +74,12 @@ pub enum State {
         breakpoint: BreakpointId,
         placement: Placement,
     },
+    /// Installed in the debugger, with no locations until a module that has
+    /// code for it loads.
+    Pending {
+        breakpoint: BreakpointId,
+        message: String,
+    },
     Unresolved {
         message: String,
         /// Whether it may still resolve later, such as once the program
@@ -93,7 +99,9 @@ pub struct Entry {
 impl Entry {
     pub const fn breakpoint(&self) -> Option<BreakpointId> {
         match &self.state {
-            State::Resolved { breakpoint, .. } => Some(*breakpoint),
+            State::Resolved { breakpoint, .. } | State::Pending { breakpoint, .. } => {
+                Some(*breakpoint)
+            }
             State::Unresolved { .. } => None,
         }
     }
@@ -222,6 +230,13 @@ impl Breakpoints {
         self.groups
             .iter()
             .flat_map(|(group, entries)| entries.iter().map(move |entry| (group, entry)))
+    }
+
+    /// A copy of every entry with its group, to update while iterating.
+    pub fn owned_entries(&self) -> Vec<(Group, Entry)> {
+        self.entries()
+            .map(|(group, entry)| (group.clone(), entry.clone()))
+            .collect()
     }
 
     /// Every unresolved entry with its group, to be resolved again and put

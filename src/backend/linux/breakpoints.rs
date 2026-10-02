@@ -43,7 +43,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             hit_condition: options.hit_condition,
             condition: options.condition,
             log_message: options.log_message,
-            ..self.resolve_breakpoint(id, spec)?
+            ..self.resolve_breakpoint(id, spec, options.pending)?
         };
 
         if self.sites_live() {
@@ -65,83 +65,22 @@ impl<P: LinuxTraceOps> Controller<P> {
         &self,
         id: BreakpointId,
         spec: BreakpointSpec,
+        pending: bool,
     ) -> Result<Breakpoint> {
-        let locations: Arc<[ResolvedBreakpointLocation]> = match &spec {
+        let locations = match &spec {
             BreakpointSpec::Address(address) => Arc::from([ResolvedBreakpointLocation {
                 location: BreakpointLocation::Virtual(*address),
                 code_instances: Arc::from([]),
+                library: None,
             }]),
-            BreakpointSpec::Function(name) => {
-                // Like gdb, break at every function with the name that has
-                // code: overloads and same-named static functions alike.
-                let named = self.module_image.functions_named(name).collect::<Vec<_>>();
-                if named.is_empty() {
-                    return Err(Error::FunctionNotFound(name.clone()));
+            _ => match self.resolve_in_modules(&spec) {
+                Ok(locations) => locations,
+                Err(Error::FunctionNotFound(_) | Error::SourceFileNotFound(_)) if pending => {
+                    Arc::from([])
                 }
-                self.resolve_function_breakpoint(named.into_iter().filter(|function| {
-                    self.module_image
-                        .instances_for_function(function.id)
-                        .next()
-                        .is_some()
-                }))?
-            }
-            BreakpointSpec::FileFunction { path, function } => {
-                let source = self.module_image.source_file_matching(path)?;
-                let functions = self
-                    .module_image
-                    .functions()
-                    .iter()
-                    .filter(|candidate| candidate.name.as_ref() == function)
-                    .filter(|candidate| {
-                        candidate
-                            .declaration
-                            .as_ref()
-                            .is_some_and(|location| location.file == source.id)
-                    })
-                    .collect::<Vec<_>>();
-                if functions.is_empty() {
-                    return Err(Error::FunctionNotFound(function.clone()));
-                }
-                self.resolve_function_breakpoint(functions)?
-            }
-            BreakpointSpec::Source { path, line } => {
-                let source = self.module_image.source_file_matching(path)?;
-                let unavailable = || Error::SourceLineUnavailable {
-                    path: path.clone(),
-                    line: line.get(),
-                };
-                let line = self
-                    .module_image
-                    .breakpoint_line(source.id, *line)
-                    .ok_or_else(unavailable)?;
-                let addresses = self
-                    .module_image
-                    .statement_addresses(source.id, line)
-                    .collect::<Vec<_>>();
-                if addresses.is_empty() {
-                    return Err(unavailable());
-                }
-                addresses
-                    .into_iter()
-                    .map(|address| {
-                        let code_instances = self
-                            .module_image
-                            .code_instances()
-                            .iter()
-                            .filter(|instance| instance.contains(address))
-                            .map(|instance| instance.id)
-                            .collect::<Vec<_>>()
-                            .into();
-                        ResolvedBreakpointLocation {
-                            location: BreakpointLocation::Image(address),
-                            code_instances,
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .into()
-            }
+                Err(error) => return Err(error),
+            },
         };
-
         Ok(Breakpoint {
             id,
             spec,
@@ -153,46 +92,66 @@ impl<P: LinuxTraceOps> Controller<P> {
         })
     }
 
-    pub(super) fn resolve_function_breakpoint<'a>(
+    /// Resolves a function or source spec in the program and every loaded
+    /// shared library. The spec fails only when no module has code for it;
+    /// a module that does not know the name or file contributes nothing.
+    pub(super) fn resolve_in_modules(
         &self,
-        functions: impl IntoIterator<Item = &'a crate::FunctionInfo>,
+        spec: &BreakpointSpec,
     ) -> Result<Arc<[ResolvedBreakpointLocation]>> {
-        let mut instances = Vec::new();
-        for function in functions {
-            instances.extend(self.module_image.instances_for_function(function.id));
-        }
-        if instances.is_empty()
-            || instances.iter().any(|instance| {
-                self.module_image
-                    .recommended_entries_for_instance(instance.id)
-                    .next()
-                    .is_none()
-            })
-        {
-            return Err(Error::LocationUnavailable);
-        }
-
-        let mut by_address = BTreeMap::<_, Vec<_>>::new();
-        for instance in instances {
-            for entry in self
-                .module_image
-                .recommended_entries_for_instance(instance.id)
-            {
-                by_address
-                    .entry(entry.address)
-                    .or_default()
-                    .push(instance.id);
+        let mut locations = Vec::new();
+        let mut failure = None;
+        let main = (crate::ModuleId::new(0), &*self.module_image, None);
+        let libraries = self
+            .modules
+            .values()
+            .filter(|module| module.loaded.id != crate::ModuleId::new(0))
+            .map(|module| {
+                (
+                    module.loaded.id,
+                    &*module.image,
+                    Some(module.loaded.load_bias),
+                )
+            });
+        for (module, image, bias) in std::iter::once(main).chain(libraries) {
+            match resolve_in_image(image, spec) {
+                Ok(addresses) => {
+                    for (address, code_instances) in addresses {
+                        locations.push(ResolvedBreakpointLocation {
+                            location: match bias {
+                                None => BreakpointLocation::Image(address),
+                                Some(bias) => BreakpointLocation::Virtual(VirtualAddress::new(
+                                    bias.checked_add(address.get())
+                                        .ok_or(Error::AddressOverflow)?,
+                                )),
+                            },
+                            code_instances,
+                            library: bias.map(|_| module),
+                        });
+                    }
+                }
+                // A module without the name or file is not a failure, but
+                // one with the file and no code at the line is, unless
+                // another module has code for it.
+                Err(error @ (Error::FunctionNotFound(_) | Error::SourceFileNotFound(_))) => {
+                    failure.get_or_insert(error);
+                }
+                Err(error) => {
+                    if failure.as_ref().is_none_or(|failure| {
+                        matches!(
+                            failure,
+                            Error::FunctionNotFound(_) | Error::SourceFileNotFound(_)
+                        )
+                    }) {
+                        failure = Some(error);
+                    }
+                }
             }
         }
-
-        Ok(by_address
-            .into_iter()
-            .map(|(address, code_instances)| ResolvedBreakpointLocation {
-                location: BreakpointLocation::Image(address),
-                code_instances: code_instances.into(),
-            })
-            .collect::<Vec<_>>()
-            .into())
+        if locations.is_empty() {
+            return Err(failure.expect("the program itself was searched"));
+        }
+        Ok(locations.into())
     }
 
     pub(super) fn remove_breakpoint(&mut self, id: BreakpointId) -> Result<Breakpoint> {
@@ -306,7 +265,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .iter()
             .filter_map(|owner| match owner {
                 BreakpointOwner::User(id) => Some(*id),
-                BreakpointOwner::Plan(_) => None,
+                BreakpointOwner::Plan(_) | BreakpointOwner::Loader => None,
             })
             .collect::<BTreeSet<_>>();
         let mut candidates = Vec::new();
@@ -541,6 +500,113 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 }
 
+/// Resolves a function or source spec in one module image to image
+/// addresses and the code instances at each.
+fn resolve_in_image(
+    image: &crate::ModuleImage,
+    spec: &BreakpointSpec,
+) -> Result<Vec<(crate::ImageAddress, Arc<[crate::CodeInstanceId]>)>> {
+    match spec {
+        BreakpointSpec::Address(_) => Ok(Vec::new()),
+        BreakpointSpec::Function(name) => {
+            // Like gdb, break at every function with the name that has
+            // code: overloads and same-named static functions alike.
+            // A function the image only declares, such as one another
+            // module defines, has no code here.
+            let defined = image
+                .functions_named(name)
+                .filter(|function| image.instances_for_function(function.id).next().is_some())
+                .collect::<Vec<_>>();
+            if defined.is_empty() {
+                return Err(Error::FunctionNotFound(name.clone()));
+            }
+            function_locations(image, defined)
+        }
+        BreakpointSpec::FileFunction { path, function } => {
+            let source = image.source_file_matching(path)?;
+            let functions = image
+                .functions()
+                .iter()
+                .filter(|candidate| candidate.name.as_ref() == function)
+                .filter(|candidate| {
+                    candidate
+                        .declaration
+                        .as_ref()
+                        .is_some_and(|location| location.file == source.id)
+                })
+                .collect::<Vec<_>>();
+            if functions.is_empty() {
+                return Err(Error::FunctionNotFound(function.clone()));
+            }
+            function_locations(image, functions)
+        }
+        BreakpointSpec::Source { path, line } => {
+            let source = image.source_file_matching(path)?;
+            let unavailable = || Error::SourceLineUnavailable {
+                path: path.clone(),
+                line: line.get(),
+            };
+            let line = image
+                .breakpoint_line(source.id, *line)
+                .ok_or_else(unavailable)?;
+            let addresses = image
+                .statement_addresses(source.id, line)
+                .collect::<Vec<_>>();
+            if addresses.is_empty() {
+                return Err(unavailable());
+            }
+            Ok(addresses
+                .into_iter()
+                .map(|address| {
+                    let code_instances = image
+                        .code_instances()
+                        .iter()
+                        .filter(|instance| instance.contains(address))
+                        .map(|instance| instance.id)
+                        .collect::<Vec<_>>()
+                        .into();
+                    (address, code_instances)
+                })
+                .collect())
+        }
+    }
+}
+
+/// The locations of every instance of some functions: one per address
+/// where an instance's code begins after its prologue.
+fn function_locations<'a>(
+    image: &crate::ModuleImage,
+    functions: impl IntoIterator<Item = &'a crate::FunctionInfo>,
+) -> Result<Vec<(crate::ImageAddress, Arc<[crate::CodeInstanceId]>)>> {
+    let mut instances = Vec::new();
+    for function in functions {
+        instances.extend(image.instances_for_function(function.id));
+    }
+    if instances.is_empty()
+        || instances.iter().any(|instance| {
+            image
+                .recommended_entries_for_instance(instance.id)
+                .next()
+                .is_none()
+        })
+    {
+        return Err(Error::LocationUnavailable);
+    }
+    let mut by_address = BTreeMap::<_, Vec<_>>::new();
+    for instance in instances {
+        for entry in image.recommended_entries_for_instance(instance.id) {
+            by_address
+                .entry(entry.address)
+                .or_default()
+                .push(instance.id);
+        }
+    }
+    Ok(by_address
+        .into_iter()
+        .map(|(address, code_instances)| (address, code_instances.into()))
+        .collect())
+}
+
 pub(super) fn runtime_breakpoint_address(
     inferior: &Inferior,
     location: BreakpointLocation,
@@ -634,7 +700,7 @@ pub(super) fn remove_logical_breakpoint(
 }
 
 /// Forgets every repair of a site whose original instruction is restored.
-fn forget_removed_site(inferior: &mut Inferior, address: VirtualAddress) {
+pub(super) fn forget_removed_site(inferior: &mut Inferior, address: VirtualAddress) {
     for thread in inferior.threads.values_mut() {
         if thread.stopped_at_breakpoint == Some(address) {
             // Breakpoint PCs are normalized when the trap is classified. With the

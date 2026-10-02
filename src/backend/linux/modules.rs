@@ -84,6 +84,12 @@ impl<P: InspectionOps> Controller<P> {
             .expect("main module is registered");
         main.loaded = LoadedModule::main(main.image.id(), 0);
         main.link_map = None;
+        if self.drop_library_locations() {
+            self.bump_revision();
+            let _ = self.events.send(DebuggerEvent::BreakpointsChanged {
+                revision: self.revision,
+            });
+        }
     }
 }
 

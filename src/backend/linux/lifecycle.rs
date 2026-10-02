@@ -227,6 +227,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         for breakpoint in &self.breakpoints {
             install_logical_breakpoint(&self.ptrace, inferior, breakpoint)?;
         }
+        // The kernel mapped the dynamic loader with the program; following
+        // it from here resolves breakpoints in libraries as they load.
+        self.refresh_modules()?;
+        self.ensure_loader_breakpoint()?;
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
 
         let execution_id = inferior.active.as_ref().expect("launch is active").id;
         let process_id = process_id(inferior.tgid);

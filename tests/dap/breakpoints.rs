@@ -92,11 +92,14 @@ fn function_breakpoints_stop_at_every_function_with_the_name() {
         panic!("three breakpoints");
     };
     assert_eq!(helper["verified"], true);
-    assert_eq!(missing["verified"], false);
-    assert!(
-        missing["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("no_such_function"))
+    // A function no loaded module has waits for one that does.
+    assert_eq!(
+        (&missing["verified"], &missing["reason"]),
+        (&json!(false), &json!("pending"))
+    );
+    assert_eq!(
+        missing["message"],
+        "no loaded module has code for no_such_function; the breakpoint resolves when one that does loads"
     );
     assert_eq!(
         malformed["message"],
@@ -240,7 +243,7 @@ fn breakpoints_set_while_running_stop_it_and_cleared_ones_never_do() {
 }
 
 #[test]
-fn breakpoints_in_files_outside_the_program_fail_with_a_reason() {
+fn breakpoints_in_files_no_loaded_module_has_wait_pending() {
     let mut dap = Dap::start("unrelated files");
     let started = dap.launch(
         Profile::Helix,
@@ -256,11 +259,11 @@ fn breakpoints_in_files_outside_the_program_fail_with_a_reason() {
     );
     for breakpoints in &started.source_breakpoints {
         assert_eq!(breakpoints[0]["verified"], false);
-        assert_eq!(breakpoints[0]["reason"], "failed");
+        assert_eq!(breakpoints[0]["reason"], "pending");
         assert!(
             breakpoints[0]["message"]
                 .as_str()
-                .is_some_and(|message| !message.is_empty())
+                .is_some_and(|message| message.starts_with("no loaded module has code for "))
         );
     }
     dap.stopped(started.mark);
@@ -391,5 +394,52 @@ fn a_condition_that_cannot_be_evaluated_stops_and_says_why() {
              no visible variable or parameter named 'no_such_value' was found\n"
         )
     );
+    dap.finish();
+}
+
+#[test]
+fn breakpoints_in_libraries_wait_for_them_and_follow_them_in_and_out() {
+    let mut dap = Dap::start("library breakpoints");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("globals-shared"),
+        json!({}),
+        &Configuration {
+            functions: vec!["dso_touch".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let pending = &started.function_breakpoints[0];
+    let id = pending["id"].clone();
+    assert_eq!(
+        (&pending["verified"], &pending["reason"]),
+        (&json!(false), &json!("pending"))
+    );
+    let mut mark = started.mark;
+    for round in 0..2 {
+        // The library loads: the breakpoint resolves, then stops in it.
+        let changed = dap.event(mark, "breakpoint", |body| {
+            body["breakpoint"]["id"] == id && body["breakpoint"]["verified"] == true
+        });
+        assert_eq!(changed["reason"], "changed");
+        assert!(
+            changed["breakpoint"]["source"]["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("shared/library.c")),
+            "{changed}"
+        );
+        let stop = dap.stopped(mark);
+        assert_eq!(stop.body["hitBreakpointIds"], json!([id]), "round {round}");
+        let trace = dap.request("stackTrace", json!({"threadId": stop.thread, "levels": 1}));
+        assert_eq!(trace["stackFrames"][0]["name"], "dso_touch");
+        let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+        dap.success(resumed);
+        // The library unloads: the breakpoint waits again.
+        dap.event(resumed.mark, "breakpoint", |body| {
+            body["breakpoint"]["id"] == id && body["breakpoint"]["reason"] == "pending"
+        });
+        mark = resumed.mark;
+    }
+    assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
     dap.finish();
 }

@@ -1531,10 +1531,7 @@ impl Session {
         match added {
             Ok(breakpoint) => {
                 self.breakpoints.acquire(breakpoint.id);
-                State::Resolved {
-                    breakpoint: breakpoint.id,
-                    placement: self.placement(&breakpoint),
-                }
+                self.state_of(&breakpoint).await
             }
             Err(error) => failed(error.to_string()),
         }
@@ -1570,19 +1567,13 @@ impl Session {
                 Change::New(entry) => ("new", entry),
                 Change::Removed(entry) => ("removed", entry),
             };
-            if let (
-                State::Resolved {
-                    breakpoint,
-                    placement,
-                },
-                "new",
-            ) = (&mut entry.state, reason)
+            if reason == "new"
                 && let Some(core) = snapshot
                     .breakpoints
                     .iter()
-                    .find(|core| core.id == *breakpoint)
+                    .find(|core| Some(core.id) == entry.breakpoint())
             {
-                *placement = self.placement(core);
+                entry.state = self.state_of(core).await;
                 self.breakpoints.replace(&Group::Console, entry.clone());
             }
             self.client
@@ -1592,40 +1583,109 @@ impl Session {
                 )
                 .await?;
         }
+        // Libraries loading and unloading move breakpoints in and out of
+        // pending.
+        for (group, entry) in self.breakpoints.owned_entries() {
+            let Some(core) = snapshot
+                .breakpoints
+                .iter()
+                .find(|core| Some(core.id) == entry.breakpoint())
+            else {
+                continue;
+            };
+            let state = self.state_of(core).await;
+            if state == entry.state {
+                continue;
+            }
+            let entry = Entry { state, ..entry };
+            self.breakpoints.replace(&group, entry.clone());
+            self.client
+                .event(
+                    "breakpoint",
+                    json!({"reason": "changed", "breakpoint": self.breakpoint_json(&group, &entry)}),
+                )
+                .await?;
+        }
         Ok(())
+    }
+
+    /// The state a debugger breakpoint gives the client's breakpoint: where
+    /// it resolved, or that it waits for a module with code for it.
+    async fn state_of(&mut self, breakpoint: &uscope::Breakpoint) -> State {
+        if breakpoint.locations.is_empty() {
+            return State::Pending {
+                breakpoint: breakpoint.id,
+                message: format!(
+                    "no loaded module has code for {}; the breakpoint resolves when one that does loads",
+                    breakpoint.spec
+                ),
+            };
+        }
+        State::Resolved {
+            breakpoint: breakpoint.id,
+            placement: self.placement(breakpoint).await,
+        }
     }
 
     /// Where a debugger breakpoint resolved: its first location's source
     /// line and address.
-    fn placement(&self, breakpoint: &uscope::Breakpoint) -> Placement {
-        let Some(target) = &self.target else {
+    async fn placement(&mut self, breakpoint: &uscope::Breakpoint) -> Placement {
+        let Some(handle) = self.handle().cloned() else {
             return Placement::default();
         };
-        let image = target.handle.module_image();
         let Some(first) = breakpoint.locations.first() else {
             return Placement::default();
         };
-        match first.location {
-            uscope::BreakpointLocation::Image(address) => Placement {
-                source: image.source_location(address).and_then(|location| {
-                    let file = image.source_file(location.file)?;
-                    let line = match &breakpoint.spec {
-                        // A line keeps the file the client named.
-                        BreakpointSpec::Source { path, line } => image
-                            .source_file_matching(path)
-                            .ok()
-                            .and_then(|file| image.breakpoint_line(file.id, *line))
-                            .unwrap_or(location.line),
-                        _ => location.line,
-                    };
-                    Some((self.local_path(&file.path), line.get()))
-                }),
-                address: None,
-            },
-            uscope::BreakpointLocation::Virtual(address) => Placement {
-                source: None,
-                address: Some(address.get()),
-            },
+        // A location's image, and its address there.
+        let (image, address, virtual_address) = match (first.location, first.library) {
+            (uscope::BreakpointLocation::Image(address), _) => {
+                (Arc::clone(handle.module_image()), address, None)
+            }
+            (uscope::BreakpointLocation::Virtual(address), Some(library)) => {
+                let bias = handle.loaded_modules().await.ok().and_then(|snapshot| {
+                    snapshot
+                        .modules
+                        .iter()
+                        .find(|record| record.module.id == library)
+                        .map(|record| record.module.load_bias)
+                });
+                match (self.image(library).await, bias) {
+                    (Some(image), Some(bias)) => (
+                        image,
+                        uscope::ImageAddress::new(address.get().wrapping_sub(bias)),
+                        Some(address),
+                    ),
+                    _ => {
+                        return Placement {
+                            source: None,
+                            address: Some(address.get()),
+                        };
+                    }
+                }
+            }
+            (uscope::BreakpointLocation::Virtual(address), None) => {
+                return Placement {
+                    source: None,
+                    address: Some(address.get()),
+                };
+            }
+        };
+        let source = image.source_location(address).and_then(|location| {
+            let file = image.source_file(location.file)?;
+            let line = match &breakpoint.spec {
+                // A line keeps the file the client named.
+                BreakpointSpec::Source { path, line } => image
+                    .source_file_matching(path)
+                    .ok()
+                    .and_then(|file| image.breakpoint_line(file.id, *line))
+                    .unwrap_or(location.line),
+                _ => location.line,
+            };
+            Some((self.local_path(&file.path), line.get()))
+        });
+        Placement {
+            source,
+            address: virtual_address.map(uscope::VirtualAddress::get),
         }
     }
 
@@ -1656,6 +1716,15 @@ impl Session {
                 }
                 if let Some(address) = placement.address {
                     body["instructionReference"] = format!("{address:#x}").into();
+                }
+            }
+            State::Pending { message, .. } => {
+                body["verified"] = false.into();
+                body["message"] = message.as_str().into();
+                body["reason"] = "pending".into();
+                if let (Group::Source(client), Key::Line(line)) = (group, &entry.want.key) {
+                    body["line"] = to_client(*line).into();
+                    body["source"] = source(client);
                 }
             }
             State::Unresolved { message, pending } => {
@@ -1932,6 +2001,8 @@ fn breakpoint_options(want: &Want) -> uscope::Result<uscope::BreakpointOptions> 
             .as_deref()
             .map(uscope::LogMessage::parse)
             .transpose()?,
+        // A library loaded later may have code for it.
+        pending: true,
     })
 }
 

@@ -185,6 +185,9 @@ pub(super) fn classify_stop_evidence(
     breakpoint: Option<VirtualAddress>,
     watch: WatchStatus,
 ) -> ClassifiedStop {
+    if is_superseded(&siginfo) {
+        return ClassifiedStop::Superseded;
+    }
     if signal == Signal::SIGSTOP && starting {
         return ClassifiedStop::ThreadStart;
     }
@@ -246,6 +249,18 @@ pub(super) fn classify_stop_evidence(
             status,
             siginfo: outcome,
         }),
+    }
+}
+
+/// Returns whether SIGKILL woke the thread from the stop just reported.
+/// Nothing else ends a ptrace-stop the tracer did not resume, so its
+/// siginfo is gone while it exits, or describes its exit event once it
+/// stops there.
+fn is_superseded(siginfo: &std::result::Result<SignalMetadata, Errno>) -> bool {
+    const EXIT_EVENT: i32 = libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8);
+    match siginfo {
+        Ok(metadata) => metadata.code == EXIT_EVENT,
+        Err(errno) => *errno == Errno::ESRCH,
     }
 }
 

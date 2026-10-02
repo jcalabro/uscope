@@ -99,6 +99,9 @@ pub struct ResolvedBreakpointLocation {
     pub location: BreakpointLocation,
     /// Concrete code instances represented by this location.
     pub code_instances: Arc<[CodeInstanceId]>,
+    /// The shared library the location is in, whose unloading removes it;
+    /// `None` for the program itself and for explicit addresses.
+    pub library: Option<crate::ModuleId>,
 }
 
 /// How a [`HitCondition`] compares a hit's number with its count.
@@ -300,6 +303,10 @@ pub struct BreakpointOptions {
     pub condition: Option<crate::Condition>,
     /// A message to log instead of stopping.
     pub log_message: Option<crate::LogMessage>,
+    /// Whether to keep a function or source breakpoint that no loaded module
+    /// has code for yet, with no locations, until a module that has it
+    /// loads. Without this, such a breakpoint is refused.
+    pub pending: bool,
 }
 
 /// One part of a logged message.
