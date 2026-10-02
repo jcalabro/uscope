@@ -160,7 +160,7 @@ impl<P: InspectionOps> Controller<P> {
 
         for id in site.owners.iter().filter_map(|owner| match owner {
             BreakpointOwner::User(id) => Some(*id),
-            BreakpointOwner::Plan(_) => None,
+            BreakpointOwner::Plan(_) | BreakpointOwner::Loader => None,
         }) {
             let breakpoint = self
                 .breakpoints

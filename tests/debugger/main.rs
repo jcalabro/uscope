@@ -5,6 +5,7 @@ mod attach;
 mod concurrency;
 mod execution;
 mod globals;
+mod libraries;
 mod metadata;
 mod signals;
 mod stepping;

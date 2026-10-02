@@ -1290,14 +1290,9 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
         ClassifiedStop::GroupStop(Signal::SIGSTOP)
     ));
     assert!(matches!(
-        classify(
-            Signal::SIGTRAP,
-            Err(Errno::ESRCH),
-            &ExpectedStop::None,
-            None,
-        ),
+        classify(Signal::SIGTRAP, Err(Errno::EIO), &ExpectedStop::None, None),
         ClassifiedStop::Unclassifiable(RawStopRecord {
-            siginfo: Err(Errno::ESRCH),
+            siginfo: Err(Errno::EIO),
             ..
         })
     ));
@@ -1310,6 +1305,36 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
         ),
         ClassifiedStop::Breakpoint(address) if address == VirtualAddress::new(0x1234)
     ));
+}
+
+#[test]
+fn stop_classifier_treats_a_thread_killed_from_its_stop_as_exiting() {
+    let classify = |siginfo| {
+        classify_stop_evidence(
+            Signal::SIGTRAP,
+            "raw-status".to_owned(),
+            siginfo,
+            &ExpectedStop::BreakpointRepair {
+                address: VirtualAddress::new(0x1234),
+            },
+            false,
+            false,
+            None,
+            WatchStatus::Absent,
+        )
+    };
+    // SIGKILL wakes a thread from a reported stop: its siginfo vanishes and
+    // then describes its exit event.
+    for siginfo in [
+        Err(Errno::ESRCH),
+        Ok(SignalMetadata {
+            code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
+            sender: None,
+            fault_address: None,
+        }),
+    ] {
+        assert!(matches!(classify(siginfo), ClassifiedStop::Superseded));
+    }
 }
 
 /// Models per-thread debug registers the way Linux exposes them, records
@@ -2546,6 +2571,7 @@ fn hit_harness(thread_count: i32, hit_condition: &str) -> WatchHarness {
         locations: Arc::from([ResolvedBreakpointLocation {
             location: crate::BreakpointLocation::Virtual(VirtualAddress::new(HIT_SITE)),
             code_instances: Arc::from([]),
+            library: None,
         }]),
         hit_condition: Some(hit_condition.parse().expect("test hit condition")),
         condition: None,

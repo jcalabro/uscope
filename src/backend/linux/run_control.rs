@@ -504,6 +504,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             ClassifiedStop::GroupStop(signal) => {
                 self.begin_visible_stop(pid, StopReason::Exception(exception_info(signal)))
             }
+            // Its exit event or exit status arrives next.
+            ClassifiedStop::Superseded => {
+                let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+                inferior.thread_mut(pid)?.state = NativeThreadState::Running;
+                Ok(())
+            }
             ClassifiedStop::Unclassifiable(raw) => self.begin_visible_stop(
                 pid,
                 StopReason::Unclassifiable {
@@ -538,6 +544,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.start_next_repair();
         }
 
+        if self.is_loader_site(address) {
+            self.queue_module_refresh()?;
+        }
         let stopping = self.record_breakpoint_hits(pid, address);
         if !stopping.is_empty() {
             return self.begin_visible_stop(
@@ -1108,7 +1117,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .is_some_and(|inferior| inferior.exec_unsupported);
         if !exec_replaced {
-            self.refresh_modules()?;
+            self.refresh_libraries()?;
         }
         self.evaluate_watchpoints()?;
         self.refresh_thread_names();

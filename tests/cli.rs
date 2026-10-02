@@ -259,6 +259,32 @@ fn batch_mode_prints_every_location_of_an_inline_breakpoint() {
     assert_eq!(stdout.matches("  image address ").count(), 6, "{stdout}");
 }
 
+#[test]
+fn batch_mode_breaks_in_a_loaded_library_at_its_runtime_address() {
+    let stdout = assert_success(batch_output(
+        "module-frames-gcc-o0",
+        &[
+            "break main",
+            "run",
+            "break dso_apply",
+            "continue",
+            "backtrace",
+        ],
+    ));
+    assert_in_order(
+        &stdout,
+        &[
+            "breakpoint 2 set at virtual address 0x",
+            "stopped at breakpoint 2 (hit 1)",
+            "module-frames/library.c:5",
+            "#0  0x",
+            " in dso_apply at ",
+            "#1  0x",
+            " in main at ",
+        ],
+    );
+}
+
 /// Runs batch commands against a fixture and returns the process output,
 /// which may be a failure.
 fn batch_output(fixture_name: &str, commands: &[&str]) -> std::process::Output {

@@ -65,6 +65,7 @@ mod frames;
 mod glibc_tls;
 mod inspection;
 mod internal_stops;
+mod libraries;
 mod lifecycle;
 mod memory;
 mod modules;
@@ -203,6 +204,8 @@ struct BreakpointSite {
 enum BreakpointOwner {
     User(BreakpointId),
     Plan(ExecutionId),
+    /// The dynamic loader's report of each change to the loaded libraries.
+    Loader,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,6 +311,8 @@ enum ClassifiedStop {
         watch: BTreeSet<WatchpointId>,
     },
     DebuggerRequested,
+    /// SIGKILL took the thread out of the reported stop; its exit follows.
+    Superseded,
     Unclassifiable(RawStopRecord),
 }
 
@@ -446,6 +451,9 @@ enum Edit {
     RemoveAllWatchpoints {
         reply: Reply<Arc<[Watchpoint]>>,
     },
+    /// Bring modules and breakpoints up to date after the loader changed
+    /// the loaded libraries.
+    RefreshModules,
 }
 
 /// The data object an expression's longest matching name prefix selected.
@@ -530,6 +538,8 @@ struct Inferior {
     selected_thread: Option<Pid>,
     next_execution: u64,
     exec_unsupported: bool,
+    /// The loader's breakpoint, once the loader is known.
+    loader_site: Option<VirtualAddress>,
     watch: WatchState,
     /// A signal the debugger sent to end the inferior, delivered without
     /// stopping whatever its policy.
@@ -563,6 +573,7 @@ impl Inferior {
             selected_thread: None,
             next_execution: 0,
             exec_unsupported: false,
+            loader_site: None,
             watch: WatchState::default(),
             terminating: None,
         }
