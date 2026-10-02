@@ -3299,19 +3299,85 @@ impl ModuleImage {
             .copied()
     }
 
-    /// Finds the single function with the supplied source-level name.
-    pub fn function_named(&self, name: &str) -> Result<&FunctionInfo> {
-        let matches = self
-            .functions_by_name
-            .get(name)
-            .ok_or_else(|| Error::FunctionNotFound(name.to_owned()))?;
-        let [function] = matches.as_ref() else {
-            return Err(Error::DuplicateFunction(name.to_owned()));
-        };
+    /// Returns the lines of one source file within `lines` that have
+    /// statement addresses: the lines a source breakpoint stops at as
+    /// requested.
+    pub fn breakpoint_lines(
+        &self,
+        file: SourceFileId,
+        lines: std::ops::RangeInclusive<LineNumber>,
+    ) -> impl Iterator<Item = LineNumber> + '_ {
+        self.statements_by_source_line
+            .range((file, *lines.start())..=(file, *lines.end()))
+            .map(|((_, line), _)| *line)
+    }
 
-        Ok(self
-            .function(*function)
-            .expect("name index references a function"))
+    /// Finds the line a source breakpoint requested at `line` stops at, as
+    /// gdb does: the line itself when it has statements, otherwise the next
+    /// line that does, provided a function whose statements begin at or
+    /// before the request contains it. A line between functions never moves
+    /// into the next one.
+    #[must_use]
+    pub fn breakpoint_line(&self, file: SourceFileId, line: LineNumber) -> Option<LineNumber> {
+        let ((_, next), addresses) = self
+            .statements_by_source_line
+            .range((file, line)..)
+            .next()
+            .filter(|((next_file, _), _)| *next_file == file)?;
+        if *next == line {
+            return Some(line);
+        }
+        let encloses_request = |instance: &CodeInstanceInfo| {
+            self.statements.iter().any(|row| {
+                row.flags.is_statement()
+                    && instance.contains(row.address)
+                    && row
+                        .location
+                        .as_ref()
+                        .is_some_and(|location| location.file == file && location.line <= line)
+            })
+        };
+        addresses
+            .iter()
+            .flat_map(|address| {
+                self.code_range_index
+                    .containing(*address)
+                    .filter_map(|instance| self.code_instance(instance))
+            })
+            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+            .any(encloses_request)
+            .then_some(*next)
+    }
+
+    /// Finds the single function with the supplied source-level name.
+    ///
+    /// Only functions with code compete: a compile unit that merely calls
+    /// a function defined in another one may describe it by a declaration.
+    pub fn function_named(&self, name: &str) -> Result<&FunctionInfo> {
+        let named = self.functions_named(name).collect::<Vec<_>>();
+        let defined = named
+            .iter()
+            .copied()
+            .filter(|function| self.instances_for_function(function.id).next().is_some())
+            .collect::<Vec<_>>();
+        match (defined.as_slice(), named.as_slice()) {
+            ([function], _) | ([], [function]) => Ok(function),
+            (_, []) => Err(Error::FunctionNotFound(name.to_owned())),
+            _ => Err(Error::DuplicateFunction(name.to_owned())),
+        }
+    }
+
+    /// Returns every function with the supplied source-level name, such as
+    /// C++ overloads and same-named static functions of different files.
+    pub fn functions_named(&self, name: &str) -> impl Iterator<Item = &FunctionInfo> {
+        self.functions_by_name
+            .get(name)
+            .into_iter()
+            .flat_map(|functions| functions.iter())
+            .map(|function| {
+                self.function(*function)
+                    .expect("name index references a function")
+            })
     }
 
     /// Finds the single linker symbol with the supplied name.

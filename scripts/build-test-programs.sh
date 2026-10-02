@@ -629,6 +629,8 @@ require_dwarf_operation "$output_dir/variables-static-clang-o2" DW_OP_addrx
 build_fixture gcc "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-gcc-nopie" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie
 require_dwarf_operation "$output_dir/variables-static-gcc-nopie" 'DW_OP_addr:'
+build_c_fixture_directory gcc "$c_fixtures_dir/same-names" "$output_dir/same-names" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie
 build_c_fixture_directory gcc "$c_fixtures_dir/globals" "$output_dir/globals-c-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_c_fixture_directory clang "$c_fixtures_dir/globals" "$output_dir/globals-c-clang-o0" \
@@ -827,6 +829,10 @@ build_fixture gcc "$c_fixtures_dir/spin.c" "$output_dir/spin" \
 build_fixture gcc "$c_fixtures_dir/threads.c" "$output_dir/threads" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/process-environment.c" "$output_dir/process-environment" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/line-sliding.c" "$output_dir/line-sliding" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/terminate.c" "$output_dir/terminate" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/signal-policy.c" "$output_dir/signal-policy" \
     -O0 -g3 -fPIE -pie

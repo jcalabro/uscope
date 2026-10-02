@@ -66,9 +66,20 @@ impl<P: LinuxTraceOps> Controller<P> {
                 location: BreakpointLocation::Virtual(*address),
                 code_instances: Arc::from([]),
             }]),
-            BreakpointSpec::Function(name) => self.resolve_function_breakpoint(std::iter::once(
-                self.module_image.function_named(name)?,
-            ))?,
+            BreakpointSpec::Function(name) => {
+                // Like gdb, break at every function with the name that has
+                // code: overloads and same-named static functions alike.
+                let named = self.module_image.functions_named(name).collect::<Vec<_>>();
+                if named.is_empty() {
+                    return Err(Error::FunctionNotFound(name.clone()));
+                }
+                self.resolve_function_breakpoint(named.into_iter().filter(|function| {
+                    self.module_image
+                        .instances_for_function(function.id)
+                        .next()
+                        .is_some()
+                }))?
+            }
             BreakpointSpec::FileFunction { path, function } => {
                 let source = self.module_image.source_file_matching(path)?;
                 let functions = self
@@ -90,15 +101,20 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             BreakpointSpec::Source { path, line } => {
                 let source = self.module_image.source_file_matching(path)?;
+                let unavailable = || Error::SourceLineUnavailable {
+                    path: path.clone(),
+                    line: line.get(),
+                };
+                let line = self
+                    .module_image
+                    .breakpoint_line(source.id, *line)
+                    .ok_or_else(unavailable)?;
                 let addresses = self
                     .module_image
-                    .statement_addresses(source.id, *line)
+                    .statement_addresses(source.id, line)
                     .collect::<Vec<_>>();
                 if addresses.is_empty() {
-                    return Err(Error::SourceLineUnavailable {
-                        path: path.clone(),
-                        line: line.get(),
-                    });
+                    return Err(unavailable());
                 }
                 addresses
                     .into_iter()

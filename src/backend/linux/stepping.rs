@@ -21,11 +21,14 @@ use super::frames::{
 use super::memory::PtraceMemory;
 use super::native::LinuxTraceOps;
 use super::registers::x86_64_registers;
+use crate::disassembly::{AssemblySyntax, ControlFlow, RawDecode, decoder_for};
+
+use super::memory::read_logical_memory;
 use super::{
-    ActiveKind, BreakpointOwner, Controller, EpilogueTraversal, ExpectedStop, LinuxError,
+    ActiveKind, BreakpointOwner, Controller, EpilogueTraversal, ExpectedStop, Inferior, LinuxError,
     NativeThreadState, Resume, ReturnTraversal, StepStart, allocate_stop_id, backend_error,
-    debug_thread_id, process_id, validate_process, validate_public_stop, validate_resumable,
-    validate_stopped_thread,
+    debug_thread_id, process_id, steps_instructions, validate_process, validate_public_stop,
+    validate_resumable, validate_stopped_thread,
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -188,7 +191,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn complete_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
         self.retire_return_guard()?;
         self.retire_epilogue_return_guard()?;
-        if kind != StepKind::Instruction && self.begin_epilogue_traversal(pid)? {
+        if !steps_instructions(kind) && self.begin_epilogue_traversal(pid)? {
             return self.start_user_step(pid, kind);
         }
         if self.source_step_returned_to_undescribed_code(pid, kind)? {
@@ -587,6 +590,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 _ => None,
             })
             .expect("source step has a starting state");
+        if kind == StepKind::OverInstruction {
+            // A stepped-over call completes when it returns to its caller's
+            // stack, not when recursion reaches the same return address.
+            return Ok(start.call_return.is_none_or(|(address, stack)| {
+                registers.rip == address.get() && registers.rsp == stack
+            }));
+        }
 
         if let Some(traversal) = &start.return_traversal {
             let instruction = VirtualAddress::new(registers.rip);
@@ -643,7 +653,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         match kind {
-            StepKind::Instruction => Ok(true),
+            StepKind::Instruction | StepKind::OverInstruction => Ok(true),
             StepKind::IntoSource => self.step_into_source_is_complete(pid, &registers, start),
             StepKind::OverSource | StepKind::Out => {
                 let Some(activation) = start.activation else {
@@ -778,11 +788,17 @@ impl<P: LinuxTraceOps> Controller<P> {
         // Stepping into source never needs the activation, so a thread
         // stopped in code without unwind information can still step in.
         let activation = match kind {
-            StepKind::Instruction => None,
+            StepKind::Instruction | StepKind::OverInstruction => None,
             StepKind::IntoSource => self.top_activation(pid, &registers).ok(),
             StepKind::OverSource | StepKind::Out => Some(self.top_activation(pid, &registers)?),
         };
         let mut plan_addresses = BTreeSet::new();
+        let call_return = if kind == StepKind::OverInstruction {
+            self.call_return(inferior, pid, &registers)?
+        } else {
+            None
+        };
+        plan_addresses.extend(call_return.map(|(address, _)| address));
 
         let selected_is_inline = code_instance
             .and_then(|instance| self.module_image.code_instance(instance))
@@ -826,6 +842,41 @@ impl<P: LinuxTraceOps> Controller<P> {
             epilogue_traversal: None,
             return_traversal: None,
             signal_guard: None,
+            call_return,
+        })
+    }
+
+    /// Returns the return address and stack pointer of the call instruction
+    /// a thread is about to execute, or `None` for any other instruction.
+    fn call_return(
+        &self,
+        inferior: &Inferior,
+        pid: Pid,
+        registers: &libc::user_regs_struct,
+    ) -> Result<Option<(VirtualAddress, u64)>> {
+        let mut decoder = decoder_for(self.module_image.target(), AssemblySyntax::Intel)?;
+        let read = read_logical_memory(
+            &self.ptrace,
+            pid,
+            &inferior.breakpoints,
+            VirtualAddress::new(registers.rip),
+            decoder.max_instruction_length(),
+        )?;
+        Ok(match decoder.decode(registers.rip, &read.bytes, None) {
+            RawDecode::Instruction {
+                length,
+                flow: ControlFlow::Call | ControlFlow::IndirectCall,
+                ..
+            } => Some((
+                VirtualAddress::new(
+                    registers
+                        .rip
+                        .checked_add(u64::try_from(length).expect("instruction length fits u64"))
+                        .ok_or(Error::AddressOverflow)?,
+                ),
+                registers.rsp,
+            )),
+            _ => None,
         })
     }
 
@@ -900,6 +951,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             epilogue_traversal: None,
             return_traversal: None,
             signal_guard: None,
+            call_return: None,
         })
     }
 

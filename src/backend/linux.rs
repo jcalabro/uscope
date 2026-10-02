@@ -236,6 +236,8 @@ struct TraceThread {
     armed: Option<u64>,
     /// Watchpoints whose slots this thread hit since its last public stop.
     watch_hits: BTreeSet<WatchpointId>,
+    /// The thread's name as of its start or the last published stop.
+    name: Option<Arc<str>>,
 }
 
 impl TraceThread {
@@ -250,6 +252,7 @@ impl TraceThread {
             debugger_stop_pending: false,
             armed: None,
             watch_hits: BTreeSet::new(),
+            name: None,
         }
     }
 }
@@ -315,6 +318,15 @@ struct StepStart {
     return_traversal: Option<ReturnTraversal>,
     /// Where a signal handler returns to the instruction it interrupted.
     signal_guard: Option<SignalGuard>,
+    /// For a step over a call instruction, the return address and the stack
+    /// pointer the call returns with.
+    call_return: Option<(VirtualAddress, u64)>,
+}
+
+/// Whether a step kind executes machine instructions rather than source
+/// lines.
+const fn steps_instructions(kind: StepKind) -> bool {
+    matches!(kind, StepKind::Instruction | StepKind::OverInstruction)
 }
 
 /// The instruction a delivered signal interrupted during a step, and the
@@ -360,7 +372,7 @@ enum ActiveKind {
     Step {
         thread: Pid,
         kind: StepKind,
-        start: StepStart,
+        start: Box<StepStart>,
         /// The stepping thread executed an instruction whose effect on the
         /// step has not been evaluated yet, because a breakpoint repair or
         /// an internal stop intervened.
@@ -513,6 +525,9 @@ struct Inferior {
     next_execution: u64,
     exec_unsupported: bool,
     watch: WatchState,
+    /// A signal the debugger sent to end the inferior, delivered without
+    /// stopping whatever its policy.
+    terminating: Option<Signal>,
 }
 
 impl Inferior {
@@ -542,6 +557,7 @@ impl Inferior {
             next_execution: 0,
             exec_unsupported: false,
             watch: WatchState::default(),
+            terminating: None,
         }
     }
 
@@ -755,6 +771,8 @@ struct Controller<P: InspectionOps> {
     /// or detach, and the controller exits once the inferior is gone.
     shutting_down: bool,
     shutdown_reply: Option<Reply<()>>,
+    /// The client waiting for a killed inferior to be gone.
+    kill_reply: Option<Reply<()>>,
     signals: SignalPolicies,
     revision: u64,
 }
@@ -817,6 +835,7 @@ impl<P: InspectionOps> Controller<P> {
             attach_reply: None,
             shutting_down: false,
             shutdown_reply: None,
+            kill_reply: None,
             signals: SignalPolicies::default(),
             revision: 0,
         }
@@ -922,6 +941,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::Shutdown { reply } => {
                 self.begin_shutdown(Some(reply));
                 return self.inferior.is_some();
+            }
+            Request::Kill { reply } => self.kill(reply),
+            Request::Terminate { reply } => {
+                let _ = reply.send(self.terminate());
             }
             request => self.handle_inspection_request(request),
         }
@@ -1136,6 +1159,8 @@ impl<P: InspectionOps> Controller<P> {
             | Request::Step { .. }
             | Request::Pause { .. }
             | Request::WriteWord { .. }
+            | Request::Kill { .. }
+            | Request::Terminate { .. }
             | Request::Shutdown { .. } => {
                 unreachable!("run-control requests are routed by the session dispatcher")
             }
@@ -1279,6 +1304,7 @@ impl<P: InspectionOps> Controller<P> {
             .iter()
             .map(|(&pid, thread)| ThreadSnapshot {
                 id: debug_thread_id(pid),
+                name: thread.name.clone(),
                 state: if matches!(thread.state, NativeThreadState::Stopped) {
                     ObservableThreadState::Stopped {
                         reason: thread.reason.clone(),

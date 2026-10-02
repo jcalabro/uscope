@@ -808,7 +808,9 @@ impl Controller<CoreTarget> {
                 | Request::Step { reply, .. }
                 | Request::Pause { reply, .. } => reject(reply),
                 Request::Attach { reply, .. } => reject(reply),
-                Request::WriteWord { reply, .. } => reject(reply),
+                Request::WriteWord { reply, .. }
+                | Request::Kill { reply }
+                | Request::Terminate { reply } => reject(reply),
                 request => self.handle_inspection_request(request),
             }
         }

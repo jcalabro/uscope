@@ -1692,3 +1692,100 @@ async fn instruction_steps_and_breakpoint_repairs_cross_system_calls() {
     );
     scenario.shutdown().await;
 }
+
+#[tokio::test]
+async fn next_instruction_runs_a_recursive_call_until_this_activation_returns() {
+    let source = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/frames.c"),
+    )
+    .expect("read frames.c");
+    let call_line = source
+        .lines()
+        .position(|line| line.contains("int64_t below = frames_recurse(depth - 1, seed);"))
+        .expect("recursive call")
+        + 1;
+    let mut scenario = Scenario::launch("frames-gcc-o0");
+    scenario
+        .add_source_breakpoint("frames.c", u64::try_from(call_line).expect("line"))
+        .await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    scenario.remove_all_breakpoints().await;
+    let pc = |registers: &uscope::RegisterSnapshot| {
+        register_u64(registers, RegisterRole::ProgramCounter)
+    };
+
+    // An ordinary instruction is one step, like stepi.
+    let before = pc(&scenario
+        .operation("registers", scenario.handle().registers())
+        .await);
+    assert_eq!(
+        scenario.step_to_stop(StepKind::OverInstruction).await,
+        StopReason::Step {
+            kind: StepKind::OverInstruction
+        }
+    );
+    let after = pc(&scenario
+        .operation("registers", scenario.handle().registers())
+        .await);
+    assert!(
+        after > before && after - before < 16,
+        "{before:#x} -> {after:#x}"
+    );
+
+    // Reach the recursive call itself.
+    let mut call = None;
+    for _ in 0..16 {
+        let address = pc(&scenario
+            .operation("registers", scenario.handle().registers())
+            .await);
+        let opcode = scenario
+            .operation(
+                "opcode",
+                scenario
+                    .handle()
+                    .read_memory(VirtualAddress::new(address), 1),
+            )
+            .await;
+        if opcode.bytes.as_ref() == [0xe8] {
+            call = Some(address);
+            break;
+        }
+        scenario.step_to_stop(StepKind::Instruction).await;
+    }
+    let call = call.expect("a direct call follows the argument setup");
+    let depth = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await
+        .frames
+        .len();
+    // Deeper activations return to the same address first; only this
+    // activation's return completes the step.
+    assert_eq!(
+        scenario.step_to_stop(StepKind::OverInstruction).await,
+        StopReason::Step {
+            kind: StepKind::OverInstruction
+        }
+    );
+    assert_eq!(
+        pc(&scenario
+            .operation("registers", scenario.handle().registers())
+            .await),
+        call + 5
+    );
+    assert_eq!(
+        scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await
+            .frames
+            .len(),
+        depth
+    );
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}

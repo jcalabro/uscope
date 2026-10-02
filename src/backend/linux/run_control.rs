@@ -8,8 +8,8 @@ use super::signals::Signal;
 use nix::unistd::Pid;
 
 use crate::protocol::{
-    DebuggerEvent, ExceptionDisposition, ExecutionId, ProcessId, Reply, ResumeScope, StepKind,
-    StopId, StopReason, WatchpointId,
+    DebuggerEvent, ExceptionDisposition, ExecutionId, ProcessId, Reply, ResumeScope, SignalPolicy,
+    StepKind, StopId, StopReason, WatchpointId,
 };
 use crate::{Error, Result, StackFrameId, VirtualAddress};
 
@@ -21,7 +21,8 @@ use super::{
     Inferior, InferiorOrigin, LinuxError, NativeThreadState, PendingSignal, PublicStop,
     RepairGroup, Resume, SignalGuard, StopBarrier, allocate_stop_id, backend_error,
     debug_thread_id, exception_info, pending_exception_info, process_id, scoped_threads,
-    validate_process, validate_public_stop, validate_resumable, validate_stopped_thread,
+    steps_instructions, validate_process, validate_public_stop, validate_resumable,
+    validate_stopped_thread,
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -104,7 +105,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 ActiveKind::Step {
                     thread: pid,
                     kind,
-                    start,
+                    start: Box::new(start),
                     progress_owed: false,
                 },
                 exception,
@@ -568,7 +569,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if self.reach_signal_guard(pid, address)? {
                 return Ok(());
             }
-            if kind != StepKind::Instruction {
+            if !steps_instructions(kind) {
                 self.begin_epilogue_traversal(pid)?;
             }
             if self.source_step_returned_to_undescribed_code(pid, kind)? {
@@ -605,7 +606,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         // which is not the user's to see. A source step that single-stepped
         // onto a declined site may end there, with the hit counted once.
         if let Some((_, kind)) = step
-            && kind != StepKind::Instruction
+            && !steps_instructions(kind)
             && self.step_is_complete(pid, kind)?
         {
             return self.begin_visible_stop(pid, StopReason::Step { kind });
@@ -713,7 +714,18 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// stop, or delivering or discarding the signal as the thread resumes
     /// what it was doing.
     pub(super) fn handle_signal_stop(&mut self, pid: Pid, pending: PendingSignal) -> Result<()> {
-        let policy = self.signals.get(pending.signal);
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        // The debugger's own request to end the inferior never stops it.
+        let policy = if inferior.terminating == Some(pending.signal) {
+            inferior.terminating = None;
+            SignalPolicy {
+                stop: false,
+                print: false,
+                pass: true,
+            }
+        } else {
+            self.signals.get(pending.signal)
+        };
         if policy.stop {
             return self.stop_for_signal(pid, pending);
         }
@@ -1099,6 +1111,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.refresh_modules()?;
         }
         self.evaluate_watchpoints()?;
+        self.refresh_thread_names();
         let (triggering_thread, reason) = self
             .inferior
             .as_ref()
@@ -1141,6 +1154,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             let _ = reply.send(Ok(stop_id));
         }
         Ok(())
+    }
+
+    /// Reads every thread's name, which it may have changed while running.
+    pub(super) fn refresh_thread_names(&mut self) {
+        let Some(inferior) = self.inferior.as_mut() else {
+            return;
+        };
+        for (&pid, thread) in &mut inferior.threads {
+            thread.name = self.ptrace.thread_name(inferior.tgid, pid);
+        }
     }
 
     pub(super) fn restart_after_internal(&mut self, pid: Pid) -> Result<()> {
