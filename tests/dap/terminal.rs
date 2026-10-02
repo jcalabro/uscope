@@ -4,7 +4,7 @@
 use serde_json::{Value, json};
 
 use crate::dap::{Configuration, Dap, Profile, fixture, line_of, source};
-use crate::support::ScratchDir;
+use crate::support::{self, ScratchDir};
 
 #[test]
 fn a_program_launched_in_a_terminal_is_debugged_with_its_streams_in_the_terminal() {
@@ -75,6 +75,9 @@ fn a_program_launched_in_a_terminal_is_debugged_with_its_streams_in_the_terminal
 
 #[test]
 fn a_program_in_an_external_terminal_stops_on_entry_restarts_and_ends_with_the_session() {
+    // The terminal's program is unrandomized too, though the client's
+    // terminal starts it.
+    support::randomize_addresses();
     let mut dap = Dap::start("external terminal");
     let started = dap.launch(
         Profile::VsCode,
@@ -91,6 +94,7 @@ fn a_program_in_an_external_terminal_stops_on_entry_restarts_and_ends_with_the_s
             .is_some_and(|name| name.contains("ld-linux")),
         "{frames:?}"
     );
+    let entry = frames[0]["instructionPointerReference"].clone();
     let first = dap.process_id().expect("a process");
 
     // A restart runs the program in a new terminal.
@@ -110,6 +114,10 @@ fn a_program_in_an_external_terminal_stops_on_entry_restarts_and_ends_with_the_s
     let stop = dap.stopped(restarted.mark);
     assert_eq!(stop.reason, "entry");
     assert_ne!(dap.process_id(), Some(first));
+    assert_eq!(
+        dap.inspect_as(Profile::VsCode, &stop)[0]["instructionPointerReference"],
+        entry
+    );
     let resumed = dap.send("continue", json!({"threadId": stop.thread}));
     dap.success(resumed);
     // Disconnecting kills the program the terminal runs.

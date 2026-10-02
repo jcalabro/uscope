@@ -1210,6 +1210,31 @@ async fn launch_options_start_the_program_with_its_arguments_environment_directo
 }
 
 #[tokio::test]
+async fn launched_programs_run_at_the_same_addresses_every_time() {
+    // As under gdb, a rerun shows the same pointers and stack contents even
+    // when the debugger itself runs randomized.
+    support::randomize_addresses();
+    let mut layouts = Vec::new();
+    for _ in 0..2 {
+        let mut scenario = Scenario::launch("basic");
+        scenario.add_breakpoint("main").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
+            panic!("the program stopped in main");
+        };
+        layouts.push(
+            fs::read_to_string(format!("/proc/{}/maps", process_id.get()))
+                .expect("read the program's mappings"),
+        );
+        scenario.shutdown().await;
+    }
+    assert_eq!(layouts[0], layouts[1]);
+}
+
+#[tokio::test]
 async fn stop_at_entry_ends_the_launch_before_the_loader_runs() {
     let mut scenario = Scenario::launch("basic");
     scenario.add_breakpoint("main").await;

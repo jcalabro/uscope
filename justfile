@@ -25,10 +25,12 @@ run *ARGS: build
     ./target/debug/uscope "$@"
 
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
-# Doc tests only run with the full suite.
+# Doc tests only run with the full suite. `nix develop` turns address
+# randomization off, which setarch turns back on, so tests see what they would
+# in any shell.
 [doc("Builds the native test fixtures and runs the Rust test suite.")]
 test *ARGS: build-test-programs
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; cargo nextest run --test-threads "$test_threads" "$@"
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
 # Runs one fuzz target: value-expression, dwarf-expression, core-dump,

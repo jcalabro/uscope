@@ -13,7 +13,7 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
 
 ## What it supports
 
-- **Starting.** Launch a program with its arguments, environment, and working directory, optionally stopping at its first instruction. Attach to a running process, or open a core dump with its module search paths.
+- **Starting.** Launch a program with its arguments, environment, and working directory, optionally stopping at its first instruction. As under gdb, it runs without address randomization, so a rerun shows the same addresses. Attach to a running process, or open a core dump with its module search paths.
 - **Program I/O.** Output appears in the debug console and input is empty, or the program runs in the client's integrated or external terminal (`"console"`), which owns its input and output.
 - **Breakpoints.**
   - Source, function, and instruction breakpoints.

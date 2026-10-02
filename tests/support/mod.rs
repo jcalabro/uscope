@@ -14,6 +14,7 @@ use std::process::{Child, ChildStdin, Command, ExitStatus as ProcessExitStatus, 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use nix::sys::personality::{self, Persona};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -655,6 +656,13 @@ pub fn breakpoint_address(reason: &StopReason) -> VirtualAddress {
         StopReason::Breakpoint { address, .. } => *address,
         other => panic!("expected a breakpoint stop, got {other:?}"),
     }
+}
+
+/// Randomizes the address space of every process this thread starts from
+/// now on, as an ordinary shell does; `nix develop` turns that off.
+pub fn randomize_addresses() {
+    let persona = personality::get().expect("read this thread's personality");
+    personality::set(persona - Persona::ADDR_NO_RANDOMIZE).expect("randomize addresses");
 }
 
 async fn within<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
