@@ -35,6 +35,7 @@ mod stubs {
 
 #[cfg(debug_assertions)]
 mod recording {
+    use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -114,6 +115,12 @@ mod recording {
 
     static RECORDINGS: Mutex<Option<Recordings>> = Mutex::new(None);
 
+    thread_local! {
+        /// Whether this thread holds the recordings, so a panic while it
+        /// does cannot wait for them.
+        static HOLDING: Cell<bool> = const { Cell::new(false) };
+    }
+
     impl Recordings {
         fn path(&self, suffix: &str) -> PathBuf {
             let mut path = self.stem.clone().into_os_string();
@@ -149,7 +156,16 @@ mod recording {
     }
 
     fn with<T>(change: impl FnOnce(&mut Recordings) -> T) -> T {
+        struct Holding;
+        impl Drop for Holding {
+            fn drop(&mut self) {
+                HOLDING.set(false);
+            }
+        }
+
         let mut recordings = RECORDINGS.lock().unwrap_or_else(PoisonError::into_inner);
+        HOLDING.set(true);
+        let _holding = Holding;
         change(recordings.get_or_insert_with(start))
     }
 
@@ -171,17 +187,15 @@ mod recording {
                 let _ = fs::remove_file(entry.path());
             }
         }
-        let _ = fs::create_dir_all(&directory);
 
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             // The debugger's own hook records the panic before reporting it.
             previous(info);
-            // A panic while the recordings are locked cannot wait for them.
-            if let Ok(mut recordings) = RECORDINGS.try_lock()
-                && let Some(recordings) = recordings.as_mut()
-            {
-                recordings.keep();
+            // Another thread may hold the recordings briefly, so wait for
+            // them unless this thread holds them.
+            if !HOLDING.get() {
+                with(Recordings::keep);
             }
         }));
         Recordings {

@@ -11,20 +11,22 @@
 //! source tree that built the binary. Release builds compile none of this:
 //! the module is absent and every `record!` expands to dead code.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
 use std::fs::{self, File};
-use std::io::{self, Write as _};
+use std::io::{self, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, Once, OnceLock, PoisonError};
+use std::sync::{Mutex, Once, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// How many lines the ring keeps before dropping the oldest.
 const CAPACITY: usize = 16 * 1024;
-/// The longest line kept; longer ones, such as large event payloads, are cut.
+/// The longest message a line keeps after its time and thread; longer ones,
+/// such as large event payloads, are cut without formatting the rest.
 const MAX_LINE: usize = 1024;
-/// How large a streamed recording may grow before streaming stops.
+/// How large a streamed recording may grow before it restarts from the ring.
 const MAX_STREAM_BYTES: u64 = 64 * 1024 * 1024;
 /// How many recordings of past runs [`stream_run`] keeps.
 const KEPT_RUNS: usize = 20;
@@ -36,8 +38,11 @@ struct Recorder {
 }
 
 struct Stream {
+    path: PathBuf,
     file: File,
     written: u64,
+    /// How many times the stream reached its size limit and restarted.
+    restarts: u64,
 }
 
 static RECORDER: Mutex<Recorder> = Mutex::new(Recorder {
@@ -47,57 +52,118 @@ static RECORDER: Mutex<Recorder> = Mutex::new(Recorder {
 });
 static START: OnceLock<Instant> = OnceLock::new();
 
-fn recorder() -> MutexGuard<'static, Recorder> {
+thread_local! {
+    /// Whether this thread holds the recorder, so a panic while it does
+    /// cannot wait for it.
+    static HOLDING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn with_recorder<T>(change: impl FnOnce(&mut Recorder) -> T) -> T {
+    struct Holding;
+    impl Drop for Holding {
+        fn drop(&mut self) {
+            HOLDING.set(false);
+        }
+    }
+
     // Pushing a line cannot leave the ring inconsistent.
-    RECORDER.lock().unwrap_or_else(PoisonError::into_inner)
+    let mut recorder = RECORDER.lock().unwrap_or_else(PoisonError::into_inner);
+    HOLDING.set(true);
+    let _holding = Holding;
+    change(&mut recorder)
 }
 
 /// Appends one line. Use the crate's `record!` macro, which compiles away in
 /// release builds.
 pub(crate) fn record(message: fmt::Arguments<'_>) {
-    let line = format_line(message);
-    recorder().push(line);
-}
-
-fn format_line(message: fmt::Arguments<'_>) -> String {
-    let elapsed = START.get_or_init(Instant::now).elapsed();
     let current = thread::current();
     let thread = current.name().map_or("unnamed", |name| {
         name.strip_prefix("uscope-").unwrap_or(name)
     });
-    let mut line = format!("{:>11.6} {thread:<10} ", elapsed.as_secs_f64());
-    let _ = line.write_fmt(message);
-    if line.len() > MAX_LINE {
-        let mut end = MAX_LINE;
-        while !line.is_char_boundary(end) {
+    let mut body = Bounded(String::new());
+    if body.write_fmt(message).is_err() {
+        body.0.push_str(" …");
+    }
+    with_recorder(|recorder| recorder.push(thread, &body.0));
+}
+
+/// A message that refuses text past [`MAX_LINE`], which stops formatting
+/// there.
+struct Bounded(String);
+
+impl fmt::Write for Bounded {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let room = MAX_LINE.saturating_sub(self.0.len());
+        if text.len() <= room {
+            self.0.push_str(text);
+            return Ok(());
+        }
+        let mut end = room;
+        while !text.is_char_boundary(end) {
             end -= 1;
         }
-        line.truncate(end);
-        line.push_str(" …");
+        self.0.push_str(&text[..end]);
+        Err(fmt::Error)
     }
-    line.push('\n');
-    line
 }
 
 impl Recorder {
-    fn push(&mut self, line: String) {
-        if let Some(stream) = self.stream.as_mut() {
-            stream.write(&line);
-        }
+    /// Stamps `body` while holding the recorder, so time never runs backward
+    /// from one line to the next, and appends it.
+    fn push(&mut self, thread: &str, body: &str) {
+        let elapsed = START.get_or_init(Instant::now).elapsed();
+        let mut line = String::with_capacity(body.len() + 24);
+        let _ = writeln!(line, "{:>11.6} {thread:<10} {body}", elapsed.as_secs_f64());
         if self.lines.len() == CAPACITY {
             self.lines.pop_front();
             self.dropped += 1;
         }
         self.lines.push_back(line);
+        self.stream();
     }
 
-    fn contents(&self, path: &Path) -> String {
+    /// Writes the newest line to the stream, or, once the stream reaches its
+    /// size limit, rewrites it with the ring so it ends with the newest lines.
+    fn stream(&mut self) {
+        let Some(mut stream) = self.stream.take() else {
+            return;
+        };
+        let line = self.lines.back().map_or("", String::as_str);
+        if stream.written + line.len() as u64 <= MAX_STREAM_BYTES {
+            // One write per line, so a killed process loses nothing it
+            // recorded.
+            let _ = stream.file.write_all(line.as_bytes());
+            stream.written += line.len() as u64;
+        } else {
+            stream.restarts += 1;
+            let text = self.contents(&stream.path, stream.restarts);
+            let rewritten = stream
+                .file
+                .set_len(0)
+                .and_then(|()| stream.file.seek(SeekFrom::Start(0)))
+                .and_then(|_| stream.file.write_all(text.as_bytes()));
+            stream.written = text.len() as u64;
+            if rewritten.is_err() {
+                // Stop rather than leave a file that silently lacks lines.
+                return;
+            }
+        }
+        self.stream = Some(stream);
+    }
+
+    fn contents(&self, path: &Path, restarts: u64) -> String {
         let mut text = format!(
             "# uscope flight recording {}\n# process {}, written at unix time {}\n",
             path.display(),
             std::process::id(),
             unix_seconds(),
         );
+        if restarts > 0 {
+            let _ = writeln!(
+                text,
+                "# the recording reached its size limit {restarts} times and kept the newest lines",
+            );
+        }
         if self.dropped > 0 {
             let _ = writeln!(text, "# the ring dropped the {} oldest lines", self.dropped);
         }
@@ -106,22 +172,6 @@ impl Recorder {
             text.push_str(line);
         }
         text
-    }
-}
-
-impl Stream {
-    fn write(&mut self, line: &str) {
-        if self.written >= MAX_STREAM_BYTES {
-            return;
-        }
-        // One write per line, so a killed process loses nothing it recorded.
-        let _ = self.file.write_all(line.as_bytes());
-        self.written += line.len() as u64;
-        if self.written >= MAX_STREAM_BYTES {
-            let _ = self
-                .file
-                .write_all(b"# the recording reached its size limit and stops here\n");
-        }
     }
 }
 
@@ -134,7 +184,7 @@ pub fn directory() -> PathBuf {
 
 /// Writes the lines the ring holds to `path`, replacing any file there.
 pub fn dump(path: &Path) -> io::Result<()> {
-    let text = recorder().contents(path);
+    let text = with_recorder(|recorder| recorder.contents(path, 0));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -150,15 +200,17 @@ pub fn stream_to(path: &Path) -> io::Result<()> {
     let mut file = File::create(path)?;
     // Holding the ring while writing it keeps any line from falling between
     // the copy and the stream.
-    let mut recorder = recorder();
-    let text = recorder.contents(path);
-    file.write_all(text.as_bytes())?;
-    recorder.stream = Some(Stream {
-        file,
-        written: text.len() as u64,
-    });
-    drop(recorder);
-    Ok(())
+    with_recorder(|recorder| {
+        let text = recorder.contents(path, 0);
+        file.write_all(text.as_bytes())?;
+        recorder.stream = Some(Stream {
+            path: path.to_owned(),
+            file,
+            written: text.len() as u64,
+            restarts: 0,
+        });
+        Ok(())
+    })
 }
 
 /// Streams this process's recording to a new file under `runs/`, points
@@ -204,9 +256,9 @@ pub fn record_panics() {
     INSTALL.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            // A panic while recording holds the lock this would wait for.
-            if let Ok(mut recorder) = RECORDER.try_lock() {
-                recorder.push(format_line(format_args!("panic: {info}")));
+            // A panic while this thread records cannot wait for itself.
+            if !HOLDING.get() {
+                record(format_args!("panic: {info}"));
             }
             previous(info);
         }));
@@ -217,4 +269,40 @@ fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stream that outgrows its limit restarts from the ring, so it keeps
+    /// the newest lines, and a long line stops formatting at the limit.
+    #[test]
+    fn a_full_stream_keeps_the_newest_lines() {
+        let path =
+            std::env::temp_dir().join(format!("uscope-flight-recorder-{}.log", std::process::id()));
+        stream_to(&path).expect("stream");
+        let long = "x".repeat(4 * MAX_LINE);
+        let lines = MAX_STREAM_BYTES / MAX_LINE as u64 + CAPACITY as u64;
+        for line in 0..lines {
+            record(format_args!("{line} {long}"));
+        }
+        record(format_args!("last"));
+        with_recorder(|recorder| recorder.stream = None);
+
+        let contents = fs::read_to_string(&path).expect("read the recording");
+        fs::remove_file(&path).expect("remove the recording");
+        assert!(
+            contents.len() as u64 <= MAX_STREAM_BYTES,
+            "{}",
+            contents.len()
+        );
+        assert!(contents.contains("reached its size limit 1 times"));
+        let mut recorded = contents.lines().filter(|line| !line.starts_with('#'));
+        let first = recorded.next().expect("a recorded line");
+        assert!(first.ends_with(" …"), "{first}");
+        let kept = first.matches('x').count();
+        assert!(kept < MAX_LINE, "{kept}");
+        assert!(contents.ends_with(" last\n"));
+    }
 }

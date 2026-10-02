@@ -41,10 +41,12 @@ test *ARGS: build-test-programs
 fuzz TARGET *ARGS="":
     if [[ "$1" == disassembly ]]; then set -- "$@" -detect_leaks=0; fi; cargo fuzz run "$1" -- "${@:2}"
 
-# Checks formatting and runs Clippy.
+# Checks formatting and runs Clippy on development and release builds, which
+# differ in what the flight recorder compiles.
 lint:
     cargo fmt --check
     cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --release --all-targets --all-features -- -D warnings
     cargo check --quiet --manifest-path fuzz/Cargo.toml
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
