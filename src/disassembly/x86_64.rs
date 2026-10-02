@@ -1,5 +1,8 @@
 //! The x86-64 instruction decoder and renderer, built on iced-x86.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use iced_x86::{
     Code, DecoderError, DecoderOptions, FlowControl, Formatter, FormatterOutput, FormatterTextKind,
     GasFormatter, Instruction, IntelFormatter, OpKind, Register,
@@ -17,6 +20,9 @@ const MAX_INSTRUCTION_LENGTH: usize = 15;
 
 pub struct Decoder {
     formatter: Box<dyn Formatter>,
+    /// The mnemonics, registers, and punctuation rendered so far, which
+    /// nearly every instruction repeats, so that its tokens share them.
+    texts: HashSet<Arc<str>>,
 }
 
 impl Decoder {
@@ -35,7 +41,10 @@ impl Decoder {
         options.set_rip_relative_addresses(true);
         options.set_branch_leading_zeros(false);
         options.set_show_branch_size(false);
-        Self { formatter }
+        Self {
+            formatter,
+            texts: HashSet::new(),
+        }
     }
 }
 
@@ -62,11 +71,14 @@ impl super::InstructionDecoder for Decoder {
                 _ => RawDecode::Invalid,
             };
         }
-        let mut tokens = Tokens(Vec::new());
+        let mut tokens = Tokens {
+            tokens: Vec::with_capacity(16),
+            texts: &mut self.texts,
+        };
         self.formatter.format(&instruction, &mut tokens);
         RawDecode::Instruction {
             length: instruction.len(),
-            tokens: tokens.0,
+            tokens: tokens.tokens,
             flow: flow(&instruction),
             references: references(&instruction),
             indirect: indirect(&instruction, bytes, registers),
@@ -74,9 +86,12 @@ impl super::InstructionDecoder for Decoder {
     }
 }
 
-struct Tokens(Vec<InstructionToken>);
+struct Tokens<'a> {
+    tokens: Vec<InstructionToken>,
+    texts: &'a mut HashSet<Arc<str>>,
+}
 
-impl FormatterOutput for Tokens {
+impl FormatterOutput for Tokens<'_> {
     fn write(&mut self, text: &str, kind: FormatterTextKind) {
         let kind = match kind {
             FormatterTextKind::Mnemonic => InstructionTokenKind::Mnemonic,
@@ -96,10 +111,20 @@ impl FormatterOutput for Tokens {
             }
             _ => InstructionTokenKind::Text,
         };
-        self.0.push(InstructionToken {
+        // Numbers and addresses rarely repeat, so sharing them saves nothing.
+        let text = if matches!(
             kind,
-            text: text.into(),
-        });
+            InstructionTokenKind::Number | InstructionTokenKind::Address
+        ) {
+            text.into()
+        } else if let Some(shared) = self.texts.get(text) {
+            Arc::clone(shared)
+        } else {
+            let shared: Arc<str> = text.into();
+            self.texts.insert(Arc::clone(&shared));
+            shared
+        };
+        self.tokens.push(InstructionToken { kind, text });
     }
 }
 
