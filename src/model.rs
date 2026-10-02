@@ -1426,6 +1426,35 @@ impl fmt::Display for VariableInvalidReason {
     }
 }
 
+/// The text a string value holds, read for display.
+///
+/// The bytes are the program's, which need not be UTF-8; presenting them is
+/// the client's choice. A C string's bytes end before its terminating NUL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSummary {
+    /// The bytes read, at most [`TextSummary::MAX_BYTES`].
+    pub bytes: Arc<[u8]>,
+    /// Whether every byte of the text was read.
+    pub completion: TextCompletion,
+}
+
+impl TextSummary {
+    /// The most bytes of text read for one value.
+    pub const MAX_BYTES: usize = 256;
+}
+
+/// Whether a text summary holds all of its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextCompletion {
+    /// Every byte was read.
+    Complete,
+    /// More text follows the bytes read: `length` bytes in all, when the
+    /// string records its length.
+    Truncated { length: Option<u64> },
+    /// The text continues into memory that could not be read.
+    Unreadable { address: VirtualAddress },
+}
+
 /// The inspection state of one visible variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariableState {
@@ -1442,6 +1471,9 @@ pub enum VariableState {
         dereference: DereferenceState,
         /// Explicit lazy structural-child state.
         children: ValueChildren,
+        /// The text the value holds, for values that are strings: a pointer
+        /// to characters, a character array, or a language's string type.
+        text: Option<Arc<TextSummary>>,
     },
     /// Valid metadata does not provide a supported readable value here.
     Unavailable(VariableUnavailableReason),

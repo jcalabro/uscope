@@ -290,6 +290,7 @@ mod tests {
             value,
             dereference: uscope::DereferenceState::NotApplicable,
             children: ValueChildren::NotApplicable,
+            text: None,
         };
         let signed = state(VariableValue::Scalar(ScalarValue::Signed(-1)));
         assert_eq!(hex(Some(4), &signed).as_deref(), Some("0xffffffff"));

@@ -442,3 +442,45 @@ fn references_from_an_earlier_stop_are_refused_after_resuming() {
     );
     dap.finish();
 }
+
+#[test]
+fn strings_show_their_text_and_still_expand() {
+    let mut dap = Dap::start("strings");
+    let stop = stopped_at(
+        &mut dap,
+        "strings-c-gcc-o0",
+        "c/strings.c",
+        "strings stop here",
+    );
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let scopes = scopes(&mut dap, &frame);
+    let arguments = variables(&mut dap, &scopes["Arguments"]["variablesReference"]);
+    let greeting = named(&arguments, "greeting");
+    let value = greeting["value"].as_str().expect("value");
+    assert!(
+        value.starts_with("0x") && value.ends_with(r#" "hello, world""#),
+        "{value}"
+    );
+    // The pointer still leads to its first character.
+    let pointee = variables(&mut dap, &greeting["variablesReference"]);
+    assert_eq!(
+        values(&pointee),
+        [("*greeting".to_owned(), "104".to_owned())]
+    );
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+    let buffer = named(&locals, "buffer");
+    assert_eq!(
+        (&buffer["value"], &buffer["indexedVariables"]),
+        (&json!(r#""abc""#), &json!(16))
+    );
+    let evaluated = dap.request(
+        "evaluate",
+        json!({"expression": "edge", "frameId": frame["id"], "context": "hover"}),
+    );
+    assert!(
+        evaluated["result"]
+            .as_str()
+            .is_some_and(|result| result.contains(r#""eeeee"... <unreadable at 0x"#))
+    );
+    dap.finish();
+}

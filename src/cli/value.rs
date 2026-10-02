@@ -1,5 +1,7 @@
 //! Renders inspected values within a fixed output budget.
 
+use std::fmt::Write as _;
+
 use rustc_apfloat::Float as _;
 use rustc_apfloat::ieee::X87DoubleExtended;
 use uscope::{
@@ -207,8 +209,19 @@ pub fn summary(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
 fn state_summary(type_info: &TypeInfo, state: &VariableState) -> String {
     match state {
         VariableState::Available {
-            value, children, ..
-        } => value_summary(type_info, value, children),
+            value,
+            children,
+            text,
+            ..
+        } => {
+            let summary = value_summary(type_info, value, children);
+            match (text, value) {
+                (None, _) => summary,
+                // A pointer keeps its address; the text follows it.
+                (Some(text), VariableValue::Address(_)) => format!("{summary} {}", quoted(text)),
+                (Some(text), _) => quoted(text),
+            }
+        }
         _ => state_failure(state)
             .map(|(_, text)| text)
             .unwrap_or_default(),
@@ -292,6 +305,55 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
     }
 }
 
+/// Renders text in double quotes, escaping what is not printable, and says
+/// when more text follows or could not be read.
+pub fn quoted(text: &uscope::TextSummary) -> String {
+    let mut output = String::from("\"");
+    for chunk in text.bytes.utf8_chunks() {
+        for character in chunk.valid().chars() {
+            match character {
+                '"' => output.push_str("\\\""),
+                '\\' => output.push_str("\\\\"),
+                '\n' => output.push_str("\\n"),
+                '\t' => output.push_str("\\t"),
+                '\r' => output.push_str("\\r"),
+                character if character.is_control() => {
+                    output.push_str(&character.escape_unicode().to_string());
+                }
+                character => output.push(character),
+            }
+        }
+        for byte in chunk.invalid() {
+            let _ = write!(output, "\\x{byte:02x}");
+        }
+    }
+    output.push('"');
+    match text.completion {
+        uscope::TextCompletion::Complete => {}
+        uscope::TextCompletion::Truncated { length: None } => output.push_str("..."),
+        uscope::TextCompletion::Truncated {
+            length: Some(length),
+        } => {
+            let _ = write!(output, "... ({length} bytes)");
+        }
+        uscope::TextCompletion::Unreadable { address } => {
+            let _ = write!(output, "... <unreadable at {address}>");
+        }
+    }
+    output
+}
+
+/// Whether a value has no parts to expand.
+const fn is_leaf(value: &VariableValue) -> bool {
+    matches!(
+        value,
+        VariableValue::Scalar(_)
+            | VariableValue::Enumeration { .. }
+            | VariableValue::Address(_)
+            | VariableValue::ImplicitPointer
+    )
+}
+
 /// Pending output of [`expanded`], consumed from the back.
 enum Work {
     State(Box<(TypeInfo, VariableState)>, u64),
@@ -323,20 +385,18 @@ pub async fn expanded(
         };
         let (type_info, state) = &*boxed;
         let VariableState::Available {
-            value, children, ..
+            value,
+            children,
+            text,
+            ..
         } = state
         else {
             output.push_str(&state_summary(type_info, state));
             continue;
         };
-        if matches!(
-            value,
-            VariableValue::Scalar(_)
-                | VariableValue::Enumeration { .. }
-                | VariableValue::Address(_)
-                | VariableValue::ImplicitPointer
-        ) {
-            output.push_str(&value_summary(type_info, value, children));
+        // Strings show as their text rather than their parts.
+        if text.is_some() || is_leaf(value) {
+            output.push_str(&state_summary(type_info, state));
             continue;
         }
         if depth >= remaining.aggregate_depth {
