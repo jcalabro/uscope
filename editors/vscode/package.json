@@ -11,7 +11,22 @@
   "categories": [
     "Debuggers"
   ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onDebugResolve:uscope"
+  ],
   "contributes": {
+    "configuration": {
+      "title": "uscope",
+      "properties": {
+        "uscope.path": {
+          "type": "string",
+          "default": "uscope",
+          "scope": "machine-overridable",
+          "markdownDescription": "The `uscope` executable: a name searched for on `PATH`, or a path, which may start with `${workspaceFolder}` or `${userHome}`. Relative paths start at the workspace folder."
+        }
+      }
+    },
     "breakpoints": [
       { "language": "c" },
       { "language": "cpp" },
@@ -24,8 +39,9 @@
         "type": "uscope",
         "label": "uscope",
         "languages": ["c", "cpp", "rust", "go", "zig"],
-        "runtime": "uscope",
-        "runtimeArgs": ["dap"],
+        "variables": {
+          "pickProcess": "uscope.pickProcess"
+        },
         "configurationAttributes": {
           "launch": {
             "required": ["program"],
@@ -93,7 +109,7 @@
               "pid": {
                 "type": ["integer", "string"],
                 "default": "${command:pickProcess}",
-                "description": "The process to attach to."
+                "description": "The process to attach to. ${command:pickProcess} picks one when the session starts."
               },
               "coreFile": {
                 "type": "string",
@@ -101,7 +117,7 @@
               },
               "program": {
                 "type": "string",
-                "description": "The process's or core dump's executable, when it cannot be found automatically."
+                "description": "The process's or core dump's executable, when it cannot be found automatically. With ${command:pickProcess}, the picker lists only processes running it."
               },
               "stopOnEntry": {
                 "type": "boolean",
