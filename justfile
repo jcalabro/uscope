@@ -8,9 +8,16 @@ max_test_threads := "16"
 # Lints the Rust code and runs the complete test suite.
 default: check
 
+# Checks formatting, runs Clippy, and runs the complete test suite.
+check: lint test
+
 # Enters the Nix development shell.
 dev *ARGS="":
     exec ./scripts/dev.sh "$@"
+
+# Installs the vscode extension as a symlink for fast local development.
+install-vscode-symlink:
+    ln -s "$PWD/editors/vscode" ~/.vscode/extensions/uscope.uscope-0.1.0
 
 # Builds the native test fixtures without running Rust tests.
 build-test-programs:
@@ -23,6 +30,14 @@ build: build-test-programs
 # Builds uscope and runs it with the supplied arguments.
 run *ARGS: build
     ./target/debug/uscope "$@"
+
+# Checks formatting and runs Clippy on development and release builds, which
+# differ in what the flight recorder compiles.
+lint:
+    cargo fmt --check
+    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --release --all-targets --all-features -- -D warnings
+    cargo check --quiet --manifest-path fuzz/Cargo.toml
 
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
 # Doc tests only run with the full suite. `nix develop` turns address
@@ -40,17 +55,6 @@ test *ARGS: build-test-programs
 # LeakSanitizer would report as a failure when the disassembly target exits.
 fuzz TARGET *ARGS="":
     if [[ "$1" == disassembly ]]; then set -- "$@" -detect_leaks=0; fi; cargo fuzz run "$1" -- "${@:2}"
-
-# Checks formatting and runs Clippy on development and release builds, which
-# differ in what the flight recorder compiles.
-lint:
-    cargo fmt --check
-    cargo clippy --all-targets --all-features -- -D warnings
-    cargo clippy --release --all-targets --all-features -- -D warnings
-    cargo check --quiet --manifest-path fuzz/Cargo.toml
-
-# Checks formatting, runs Clippy, and runs the complete test suite.
-check: lint test
 
 # Drives the DAP adapter from a real VS Code window, as a user would, and
 # records each session's traffic in DIR. Needs a display. Recording into
