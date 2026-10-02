@@ -454,18 +454,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base64_decodes_what_it_encodes() {
-        for bytes in [&b""[..], b"f", b"fo", b"foo", b"foob", b"\xff\x00\xfe\x01"] {
-            assert_eq!(unbase64(&base64(bytes)).as_deref(), Some(bytes));
-        }
-        assert_eq!(unbase64("Zm9v"), Some(b"foo".to_vec()));
-        assert_eq!(unbase64("Zg"), Some(b"f".to_vec()));
-        assert_eq!(unbase64("Z"), None);
-        assert_eq!(unbase64("Zm9v!"), None);
-    }
-
-    #[test]
-    fn base64_matches_the_standard_encoding() {
+    fn base64_matches_the_standard_encoding_and_rejects_malformed_text() {
         for (bytes, text) in [
             (&b""[..], ""),
             (b"f", "Zg=="),
@@ -475,7 +464,12 @@ mod tests {
             (b"\xff\x00\xfe", "/wD+"),
         ] {
             assert_eq!(base64(bytes), text);
+            assert_eq!(unbase64(text).as_deref(), Some(bytes));
         }
+        // Clients may leave out the padding.
+        assert_eq!(unbase64("Zg"), Some(b"f".to_vec()));
+        assert_eq!(unbase64("Z"), None);
+        assert_eq!(unbase64("Zm9v!"), None);
     }
 
     #[test]

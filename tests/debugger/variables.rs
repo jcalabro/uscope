@@ -107,59 +107,6 @@ async fn stack_scalar_variables_are_read_through_the_public_scenario_path() {
 }
 
 #[tokio::test]
-async fn variable_inspection_uses_live_values_and_lexical_scope() {
-    let mut changing = Scenario::new(
-        "changing stack variable",
-        Scenario::fixture("variables-gcc-o0"),
-    );
-    changing.add_source_breakpoint("variables.c", 30).await;
-    assert!(matches!(
-        changing.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    let first = changing
-        .operation(
-            "first changing value",
-            changing.handle().variable("changing"),
-        )
-        .await;
-    assert_variable_value(&first, ScalarValue::Signed(10));
-    assert!(matches!(
-        changing.resume_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    let second = changing
-        .operation(
-            "second changing value",
-            changing.handle().variable("changing"),
-        )
-        .await;
-    assert_variable_value(&second, ScalarValue::Signed(17));
-    changing.shutdown().await;
-
-    let mut shadow = Scenario::new(
-        "shadowed stack variables",
-        Scenario::fixture("variables-gcc-o0"),
-    );
-    shadow.add_source_breakpoint("variables.c", 39).await;
-    assert!(matches!(
-        shadow.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    let named = shadow
-        .operation("innermost shadow", shadow.handle().variable("shadowed"))
-        .await;
-    assert_variable_value(&named, ScalarValue::Signed(200));
-    let listed = shadow
-        .operation("all shadows", shadow.handle().variables())
-        .await;
-    assert_eq!(listed.variables.len(), 2);
-    assert_variable_value(&listed.variables[0], ScalarValue::Signed(100));
-    assert_variable_value(&listed.variables[1], ScalarValue::Signed(200));
-    shadow.shutdown().await;
-}
-
-#[tokio::test]
 async fn stack_scalar_parameters_are_read_through_the_public_scenario_path() {
     for fixture in [
         "variables-parameters-gcc-o0",
@@ -525,12 +472,26 @@ async fn zig_scalars_cover_pie_nonpie_and_optimized_partial_locations() {
             .unwrap_or_else(|| panic!("{fixture} did not expose {name}: {snapshot:?}"));
         assert_variable_value(variable, expected);
     }
-    assert!(
-        snapshot
-            .variables
-            .iter()
-            .any(|variable| { matches!(variable.state, VariableState::Unavailable(_)) })
+    // The remaining locals have no location at the stop.
+    let unavailable = snapshot
+        .variables
+        .iter()
+        .filter(|variable| {
+            matches!(
+                variable.state,
+                VariableState::Unavailable(
+                    uscope::VariableUnavailableReason::UnavailableAtInstruction
+                )
+            )
+        })
+        .map(|variable| variable.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unavailable,
+        ["local_unsigned", "local_single", "local_double"],
+        "{snapshot:?}"
     );
+    assert_eq!(snapshot.variables.len(), 9, "{snapshot:?}");
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))

@@ -155,7 +155,9 @@ fn stepping_stops_where_gdb_stops_with_the_same_values() {
 #[test]
 fn threads_stop_and_step_where_gdb_stops_them() {
     // Over a thread's creation and over joining it, which only completes
-    // while the other thread runs.
+    // while the other thread runs. The worker waits at a gate the joining
+    // line opens, so it is alive at every stop before that line's step, and
+    // gone after it: a stop waits for an exiting thread's exit status.
     let (mut uscope, gdb) = compare(
         "thread-steps-gcc-o0",
         "main",

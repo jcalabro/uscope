@@ -2,16 +2,27 @@
 
 use super::*;
 
+/// Waits for a released attach fixture to exit, and returns its exit code. A
+/// process left stopped by the debugger would never exit.
+fn exit_code(child: support::ExternalProcess) -> Option<i32> {
+    let stat = format!("/proc/{}/stat", child.process_id());
+    support::wait_until("the fixture exits", || {
+        let stat = fs::read_to_string(&stat).expect("read fixture stat");
+        // Fields resume after the command name's final parenthesis.
+        stat.rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().next())
+            == Some("Z")
+    });
+    child.wait().code()
+}
+
 #[tokio::test]
 async fn attach_discovers_the_executable_and_detaches_without_harming_the_process() {
     let fixture = Scenario::fixture("attach");
     let mut child = support::ExternalProcess::spawn(&fixture);
 
     let process = child.process_id();
-    let debugger = timeout(Duration::from_secs(5), Debugger::attach(process))
-        .await
-        .expect("attach timed out")
-        .expect("attach debugger");
+    let debugger = child.attach().await;
     let handle = debugger.handle();
     assert_eq!(handle.executable(), fixture);
     let snapshot = handle.snapshot().await.expect("attached snapshot");
@@ -40,8 +51,7 @@ async fn attach_discovers_the_executable_and_detaches_without_harming_the_proces
     ));
 
     debugger.shutdown().await.expect("detach debugger");
-    let status = child.wait();
-    assert_eq!(status.code(), Some(23));
+    assert_eq!(exit_code(child), Some(23));
 }
 
 #[tokio::test]
@@ -49,30 +59,11 @@ async fn attached_group_stops_are_classified_and_resumable() {
     let mut child = support::ExternalProcess::spawn(&Scenario::fixture("attach"));
     let process = child.process_id();
     let pid = Pid::from_raw(i32::try_from(process.get()).expect("PID fits i32"));
-    let debugger = timeout(Duration::from_secs(5), Debugger::attach(process))
-        .await
-        .expect("attach timed out")
-        .expect("attach debugger");
-    let handle = debugger.handle();
-    let resume = || async {
-        timeout(Duration::from_secs(5), handle.resume())
-            .await
-            .expect("resume timed out")
-            .expect("resume attached process")
-    };
+    let mut scenario = Scenario::attached("attached group stop", child.attach().await);
 
     // SIGSTOP is reported once on delivery and again as the seized
     // thread's group-stop; neither may become an unresumable stop.
-    let stopping = tokio::spawn({
-        let handle = handle.clone();
-        async move { handle.resume().await }
-    });
-    while !matches!(
-        handle.snapshot().await.expect("running snapshot").inferior,
-        InferiorState::Running { .. }
-    ) {
-        tokio::task::yield_now().await;
-    }
+    let stopping = scenario.start_resuming().await;
     kill(pid, Signal::SIGSTOP).expect("stop attached process");
     assert!(matches!(
         timeout(Duration::from_secs(5), stopping)
@@ -83,25 +74,20 @@ async fn attached_group_stops_are_classified_and_resumable() {
         StopReason::Exception(exception) if exception.code == 19
     ));
     assert!(matches!(
-        resume().await,
+        scenario.resume_to_stop().await,
         StopReason::Exception(exception) if exception.code == 19
     ));
 
-    debugger
-        .shutdown()
-        .await
-        .expect("detach group-stopped process");
+    scenario.shutdown().await;
     kill(pid, Signal::SIGCONT).expect("continue detached process");
     child.release();
-    assert_eq!(child.wait().code(), Some(23));
+    assert_eq!(exit_code(child), Some(23));
 }
 
 #[tokio::test]
 async fn attach_stops_and_detaches_every_existing_native_thread() {
     let mut child = support::ExternalProcess::spawn(&Scenario::fixture("attach-threads"));
-    let debugger = Debugger::attach(child.process_id())
-        .await
-        .expect("attach multithreaded fixture");
+    let debugger = child.attach().await;
     let snapshot = debugger
         .handle()
         .snapshot()
@@ -117,13 +103,19 @@ async fn attach_stops_and_detaches_every_existing_native_thread() {
 
     child.release();
     debugger.shutdown().await.expect("detach every thread");
-    assert_eq!(child.wait().code(), Some(0));
+    assert_eq!(exit_code(child), Some(0));
 }
+
+/// The kernel's flag for a thread that has begun to exit.
+const PF_EXITING: u64 = 0x4;
 
 #[tokio::test]
 async fn attaching_while_threads_are_created_traces_every_thread() {
     let child = support::ExternalProcess::spawn_running(&Scenario::fixture("attach-clones"));
     let tasks = format!("/proc/{}/task", child.process_id().get());
+    support::wait_until("the fixture runs every worker", || {
+        fs::read_dir(&tasks).is_ok_and(|entries| entries.count() > 128)
+    });
     for _ in 0..20 {
         let scenario = Scenario::attached("attach while cloning", child.attach().await);
         // With every thread stopped none is inside clone, so the list is
@@ -134,7 +126,19 @@ async fn attaching_while_threads_are_created_traces_every_thread() {
             .filter_map(|entry| {
                 let path = entry.expect("thread entry").path();
                 // A thread may exit while the list is read.
+                let stat = fs::read_to_string(path.join("stat")).ok()?;
                 let status = fs::read_to_string(path.join("status")).ok()?;
+                // An exiting thread runs no more of the program, and one that
+                // has exited cannot be seized.
+                let fields = stat
+                    .rsplit_once(')')?
+                    .1
+                    .split_whitespace()
+                    .collect::<Vec<_>>();
+                let flags = fields[6].parse::<u64>().expect("stat flags");
+                if matches!(fields[0], "Z" | "X") || flags & PF_EXITING != 0 {
+                    return None;
+                }
                 // The tracer is the debugger's controller thread.
                 let tracer = status
                     .lines()
@@ -153,11 +157,10 @@ async fn attaching_while_threads_are_created_traces_every_thread() {
 
 #[tokio::test]
 async fn shutdown_detaches_a_running_attached_process_and_cancels_waiters() {
-    let child = support::ExternalProcess::spawn_running(&Scenario::fixture("spin"));
-    let pid = child.process_id().get();
-    let debugger = child.attach().await;
-    let handle = debugger.handle();
-    let attached = handle.snapshot().await.expect("attached snapshot").inferior;
+    let mut child = support::ExternalProcess::spawn(&Scenario::fixture("attach"));
+    let pid = child.process_id();
+    let mut scenario = Scenario::attached("detach running", child.attach().await);
+    let attached = scenario.snapshot().await.inferior;
     assert!(
         matches!(
             attached,
@@ -170,17 +173,8 @@ async fn shutdown_detaches_a_running_attached_process_and_cancels_waiters() {
     );
 
     // A resume waiting for a stop that shutdown preempts must not hang.
-    let resuming = tokio::spawn({
-        let handle = handle.clone();
-        async move { handle.resume().await }
-    });
-    while !matches!(
-        handle.snapshot().await.expect("running snapshot").inferior,
-        InferiorState::Running { .. }
-    ) {
-        tokio::task::yield_now().await;
-    }
-    debugger.shutdown().await.expect("detach running target");
+    let resuming = scenario.start_resuming().await;
+    scenario.shutdown().await;
     assert!(matches!(
         timeout(Duration::from_secs(5), resuming)
             .await
@@ -191,12 +185,9 @@ async fn shutdown_detaches_a_running_attached_process_and_cancels_waiters() {
 
     let status = fs::read_to_string(format!("/proc/{pid}/status")).expect("read target status");
     assert!(status.contains("\nTracerPid:\t0\n"), "{status}");
-    assert!(
-        status
-            .lines()
-            .any(|line| line.starts_with("State:") && !line.contains("stopped")),
-        "the detached target must keep running: {status}"
-    );
+    // A stop left behind by the detach would keep it from finishing.
+    child.release();
+    assert_eq!(exit_code(child), Some(23));
 }
 
 #[tokio::test]
@@ -207,9 +198,7 @@ async fn attach_reads_an_unlinked_executable_through_proc() {
     let mut child = support::ExternalProcess::spawn(&executable);
     fs::remove_file(&executable).expect("unlink running fixture");
 
-    let debugger = Debugger::attach(child.process_id())
-        .await
-        .expect("attach through proc executable link");
+    let debugger = child.attach().await;
     assert!(
         debugger
             .handle()
@@ -219,7 +208,7 @@ async fn attach_reads_an_unlinked_executable_through_proc() {
     );
     child.release();
     debugger.shutdown().await.expect("detach deleted fixture");
-    assert_eq!(child.wait().code(), Some(23));
+    assert_eq!(exit_code(child), Some(23));
 }
 
 #[tokio::test]

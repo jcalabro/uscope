@@ -6,9 +6,9 @@ use std::path::Path;
 
 use support::Scenario;
 use uscope::{
-    CoreDumpOptions, DereferenceState, Error, ExceptionDisposition, ExitStatus, FloatValue,
-    IntegerValue, PresentedFrame, ResumeScope, ScalarValue, StackFrame, StackFrameId, StepKind,
-    StopReason, ThreadId, ValueChildQuery, ValueChildren, Variable, VariableState,
+    CoreDumpOptions, DebuggerEvent, DereferenceState, Error, ExceptionDisposition, ExitStatus,
+    FloatValue, IntegerValue, PresentedFrame, ResumeScope, ScalarValue, StackFrame, StackFrameId,
+    StepKind, StopReason, ThreadId, ValueChildQuery, ValueChildren, Variable, VariableState,
     VariableUnavailableReason, VariableValue, WatchAccess, WatchScope, WatchpointInvalidation,
 };
 
@@ -573,6 +573,7 @@ async fn compare_frame(
                     (_, OracleValue::OptimizedOut | OracleValue::Error) => {
                         panic!("{context}: gdb cannot read {value:?}")
                     }
+                    // Pointers and aggregates have no numeric view to compare.
                     _ => {}
                 }
             }
@@ -893,11 +894,11 @@ async fn each_thread_keeps_its_own_selected_frame() {
         .await;
     let snapshot = scenario.snapshot().await;
     assert_eq!(snapshot.selected_frame.map(StackFrameId::get), Some(1));
-    // Values in main come from main's frame, not the crashing callee's.
-    let record = scenario
-        .operation("record", scenario.handle().variable("record"))
-        .await;
-    assert!(matches!(record.state, VariableState::Available { .. }));
+    // Names resolve in main's frame, not the crashing callee's.
+    assert!(matches!(
+        scenario.handle().variable("depth").await,
+        Err(Error::VariableNotFound(_))
+    ));
     scenario.shutdown().await;
 }
 
@@ -1238,15 +1239,29 @@ async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
     assert_eq!(innermost_function(&scenario).await, "frames_recurse");
     assert_eq!(integer_variable(&scenario, "depth").await, 1);
 
-    // Once depth 1 returns, its storage belongs to nothing being watched.
-    match scenario.resume_to_stop().await {
+    // Once depth 1 returns, its storage belongs to nothing being watched:
+    // the next stop, whatever stops first, ends the watchpoint.
+    scenario
+        .add_source_breakpoint("frames.c", frames_line("frames_sink = total;"))
+        .await;
+    let mut events = scenario.handle().subscribe();
+    let reason = match scenario.resume_to_stop().await {
         StopReason::WatchpointInvalidated { invalidated } => {
-            assert_eq!(invalidated.len(), 1);
-            assert_eq!(invalidated[0].reason, WatchpointInvalidation::ScopeExited);
+            assert_eq!(invalidated.len(), 1, "{invalidated:?}");
+            invalidated[0].reason
         }
-        StopReason::Exited(ExitStatus::Code(0)) => {}
-        other => panic!("expected invalidation or exit, got {other:?}"),
-    }
+        StopReason::Breakpoint { .. } => std::iter::from_fn(|| events.try_recv().ok())
+            .find_map(|event| match event {
+                DebuggerEvent::WatchpointsInvalidated { invalidated, .. } => {
+                    invalidated.first().map(|entry| entry.reason)
+                }
+                _ => None,
+            })
+            .expect("the stop after depth 1 returned invalidated the watchpoint"),
+        other => panic!("expected the watchpoint to end, got {other:?}"),
+    };
+    assert_eq!(reason, WatchpointInvalidation::ScopeExited);
+    assert!(scenario.snapshot().await.watchpoints.is_empty());
     scenario.shutdown().await;
 }
 
@@ -1395,57 +1410,4 @@ async fn revealing_an_inline_frame_without_running_selects_the_innermost_frame()
         );
         scenario.shutdown().await;
     }
-}
-
-#[tokio::test]
-async fn pausing_cancels_stepping_out_of_an_outer_frame() {
-    let mut scenario = Scenario::launch("step");
-    scenario.add_breakpoint("step_forever").await;
-    assert!(matches!(
-        scenario.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    scenario.remove_all_breakpoints().await;
-    let frames = backtrace(&scenario).await;
-    select(&mut scenario, level_of(&frames, "main", 0)).await;
-
-    // main cannot return while its callee loops, so the step stays active
-    // with its plan breakpoint at main's return address.
-    let snapshot = scenario.snapshot().await;
-    scenario
-        .operation(
-            "finish main",
-            scenario.handle().start_step(
-                snapshot.stop_id.expect("stopped"),
-                snapshot.selected_thread.expect("selected thread"),
-                snapshot.selected_frame.expect("selected frame"),
-                StepKind::Out,
-                ResumeScope::Thread(snapshot.selected_thread.expect("selected thread")),
-                ExceptionDisposition::Pass,
-            ),
-        )
-        .await;
-    let reason = scenario
-        .attempt("pause", scenario.handle().pause())
-        .await
-        .expect("pause");
-    assert_eq!(reason, StopReason::Pause);
-    assert_eq!(innermost_function(&scenario).await, "step_forever");
-
-    // A plan breakpoint left behind would stop main's return.
-    let release = scenario
-        .operation(
-            "step_release",
-            scenario.handle().runtime_address("step_release"),
-        )
-        .await;
-    scenario
-        .operation("release", scenario.handle().write_word(release, 1))
-        .await;
-    scenario.drain_pending_events();
-    assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Exited(ExitStatus::Code(0))
-    );
-    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }

@@ -82,9 +82,10 @@ async fn thread_steps_at(fixture: &str, arguments: &[&str], needle: &str) -> (Sc
 #[tokio::test]
 async fn next_over_a_join_runs_the_thread_it_waits_for() {
     for fixture in THREAD_STEPS {
-        let (mut scenario, main) = thread_steps_at(fixture, &[], "joins the sleepy worker").await;
-        // The worker sleeps before it finishes, so the step completes only
-        // because the worker runs while it does.
+        let (mut scenario, main) = thread_steps_at(fixture, &[], "joins the gated worker").await;
+        // The worker waits at a gate this line opens, so it is still alive
+        // here, and the step completes only because it runs while it does.
+        assert_eq!(scenario.snapshot().await.threads.len(), 2, "{fixture}");
         assert_eq!(
             scenario.step_to_stop(StepKind::OverSource).await,
             StopReason::Step {
@@ -113,7 +114,9 @@ async fn next_over_a_join_runs_the_thread_it_waits_for() {
 #[tokio::test]
 async fn another_threads_breakpoint_ends_a_step_and_retracts_its_plan() {
     for fixture in THREAD_STEPS {
-        let (mut scenario, main) = thread_steps_at(fixture, &[], "joins the sleepy worker").await;
+        let (mut scenario, main) = thread_steps_at(fixture, &[], "joins the gated worker").await;
+        // The worker cannot reach its breakpoint before this line opens its
+        // gate.
         let worker = scenario.add_breakpoint("worker_reached").await;
         let reason = scenario.step_to_stop(StepKind::OverSource).await;
         assert!(
@@ -233,6 +236,7 @@ async fn a_single_thread_step_keeps_every_other_thread_stopped() {
             );
             assert_eq!(stopped_thread(&mut scenario).await, main, "{fixture}");
         }
+        // The racer never sleeps, so it would have counted rounds had it run.
         assert_eq!(
             scenario
                 .operation("racer rounds", scenario.handle().read_word(rounds))
@@ -345,7 +349,6 @@ async fn breakpoints_are_edited_while_running_without_publishing_a_stop() {
             .count(),
         2
     );
-    scenario.drain_pending_events();
     scenario.shutdown().await;
 }
 
@@ -467,7 +470,6 @@ async fn breakpoints_edited_while_threads_hit_them_report_only_current_breakpoin
         .expect("pause");
     assert_eq!(reason, StopReason::Pause);
     set_flag(&scenario, "hot_stop").await;
-    scenario.drain_pending_events();
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -564,7 +566,6 @@ async fn watchpoints_are_armed_and_disarmed_while_running() {
     );
     set_flag(&scenario, "hot_stop").await;
     drop(resumed);
-    scenario.drain_pending_events();
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -586,7 +587,7 @@ async fn finishing_a_threads_start_routine_ends_when_the_thread_exits() {
         );
         assert_eq!(
             position(&scenario).await.0.as_deref(),
-            Some("sleepy_worker"),
+            Some("gated_worker"),
             "{fixture}"
         );
         // The start routine returns into the C library, which has no source
@@ -637,7 +638,7 @@ async fn threads_are_named_as_they_name_themselves() {
         // Linux keeps the first 15 bytes of a name.
         assert_eq!(main.1.as_deref(), Some(&fixture[..15]), "{names:?}");
         assert!(
-            names.contains(&(worker, Some("sleepy-worker".to_owned()))),
+            names.contains(&(worker, Some("gated-worker".to_owned()))),
             "{names:?}"
         );
         scenario.shutdown().await;

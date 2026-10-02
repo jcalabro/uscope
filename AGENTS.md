@@ -28,7 +28,8 @@
 - Native fixture sources live in language directories under `tests/fixtures`; each Go executable has its own package subdirectory. Scenario filenames describe the program without repeating the language. Rust tests may launch fixtures but must not invoke compilers. `just build-test-programs` builds them incrementally.
 - Exercise a compact compiler/linker matrix where output can affect behavior: GCC and Clang, optimized and unoptimized, PIE and non-PIE, with and without frame pointers as relevant.
 - Any lifecycle or concurrency change must test cleanup, cancellation, event/state consistency, and the absence of surviving inferior processes.
-- Execution-control changes should cover the pure reducer/classifier where applicable, the public scenario harness, and synchronized native fixtures. Avoid scheduler-dependent sleeps.
+- Execution-control changes should cover the pure reducer/classifier where applicable, the public scenario harness, and synchronized native fixtures.
+- A test may only wait for something it can observe: an event, a debugger state, a `/proc` fact, or a line the fixture prints. Never assume something has happened by now. Before pausing, signalling, or attaching, wait until the program has visibly reached the point the assertions depend on; a poll that reaches its deadline fails rather than carrying on; never assert that something did not happen within a window. Fixtures synchronize their own threads instead of sleeping.
 
 ## Flight Recorder
 

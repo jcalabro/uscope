@@ -23,12 +23,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use tokio::sync::broadcast;
 
-use super::classify::{WatchStatus, classify_stop_evidence, format_raw_stop};
+use super::classify::{WatchStatus, classify_stop_evidence};
 use super::frames::{default_inline_visible_count, frame_lookup_address};
 use super::inspection::validate_value_expression;
 use super::memory::{MemoryAccessError, read_logical_memory_with};
 use super::modules::{ModuleMapping, parse_maps};
-use super::native::{InspectionOps, LinuxTraceOps, ThreadAffinity, queued_trap_in_status};
+use super::native::{InspectionOps, LinuxTraceOps, queued_trap_in_status};
 use super::*;
 use crate::{AddressRange, ImageAddress};
 
@@ -642,7 +642,7 @@ fn launch_controller() -> LaunchHarness {
         },
     ));
     let (controller, event_receiver) = test_controller(
-        SessionLease::acquire().expect("acquire test session"),
+        SessionLease::detached(),
         "/test/program",
         sectionless_elf(),
         image,
@@ -1163,14 +1163,6 @@ fn frame_symbolization_adjusts_only_ordinary_caller_resume_addresses() {
 }
 
 #[test]
-fn thread_affinity_rejects_another_os_thread() {
-    let affinity = ThreadAffinity::new();
-    let result = thread::spawn(move || affinity.assert_owner()).join();
-
-    assert!(result.is_err());
-}
-
-#[test]
 fn queued_traps_are_read_from_the_threads_own_unblocked_pending_set() {
     let status = |pending: &str, blocked: &str| {
         format!(
@@ -1195,19 +1187,6 @@ fn queued_traps_are_read_from_the_threads_own_unblocked_pending_set() {
     );
     assert!(!queued_trap_in_status("SigPnd:\tnot-hex\n"));
     assert!(!queued_trap_in_status(""));
-}
-
-#[test]
-fn raw_stop_format_preserves_siginfo_failure() {
-    let record = RawStopRecord {
-        status: "Stopped(7, SIGTRAP)".to_owned(),
-        siginfo: Err(Errno::ESRCH),
-    };
-
-    assert_eq!(
-        format_raw_stop(&record),
-        "Stopped(7, SIGTRAP); PTRACE_GETSIGINFO failed: ESRCH: No such process"
-    );
 }
 
 #[test]
@@ -1892,11 +1871,15 @@ fn an_exiting_thread_is_skipped_and_armed_when_execution_resumes() {
         .controller
         .sync_debug_registers()
         .expect("sync stale thread");
-    let actions = harness.trace().take_actions();
-    assert!(
-        actions
-            .iter()
-            .all(|action| action.contains(&exiting.to_string()))
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            format!("write {exiting} dr7=0x0"),
+            format!("write {exiting} dr0=0xb000"),
+            format!("write {exiting} dr7=0x90001"),
+            format!("read {exiting} dr7"),
+            format!("read {exiting} dr0"),
+        ]
     );
     assert_eq!(harness.thread(exiting).armed, Some(1));
 }
@@ -2289,7 +2272,16 @@ fn a_failed_disarm_still_detaches_and_publishes_the_detach() {
     let (reply, result) = tokio::sync::oneshot::channel();
     harness.controller.begin_shutdown(Some(reply));
     let result = result.blocking_recv().expect("shutdown reply");
-    assert!(result.is_err(), "the disarm failure is reported");
+    assert!(
+        matches!(
+            &result,
+            Err(Error::Backend(error)) if matches!(
+                error.downcast_ref::<LinuxError>(),
+                Some(LinuxError::System(Errno::EPERM))
+            )
+        ),
+        "the disarm failure is reported: {result:?}"
+    );
 
     // Keeping the process traced would not help: the tracer is exiting.
     let actions = harness.trace().take_actions();

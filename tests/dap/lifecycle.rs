@@ -241,7 +241,6 @@ fn requests_out_of_order_are_refused_without_ending_the_session() {
 fn disconnecting_kills_a_launched_program_whether_running_or_stopped() {
     for stopped in [false, true] {
         let mut dap = Dap::start(format!("disconnect stopped={stopped}"));
-        let path = source("c/spin.c");
         let started = dap.launch(
             Profile::Helix,
             &fixture("spin"),
@@ -253,24 +252,19 @@ fn disconnecting_kills_a_launched_program_whether_running_or_stopped() {
         } else {
             dap.event(started.mark, "process", |_| true);
         }
-        let pid = dap.process_id().expect("process id");
         let sent = dap.send("disconnect", json!({}));
         dap.success(sent);
         // The program's end is reported before the disconnect response.
         let messages = dap.messages_since(sent.mark);
         let position = |predicate: &dyn Fn(&Value) -> bool| messages.iter().position(predicate);
-        let exited = position(&|message| message["event"] == "exited");
-        let terminated = position(&|message| message["event"] == "terminated");
-        let response = position(&|message| message["type"] == "response");
+        let exited = position(&|message| message["event"] == "exited").expect("exited");
+        let terminated = position(&|message| message["event"] == "terminated").expect("terminated");
+        let response = position(&|message| message["type"] == "response").expect("response");
         assert!(exited < terminated && terminated < response, "{messages:?}");
-        assert_eq!(
-            messages[exited.expect("exited")]["body"],
-            json!({"exitCode": 128 + 9})
-        );
+        assert_eq!(messages[exited]["body"], json!({"exitCode": 128 + 9}));
+        // Finishing checks that the program is gone.
         dap.close_stdin();
         dap.finish();
-        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists() || is_zombie(pid));
-        let _ = path;
     }
 }
 
@@ -386,11 +380,6 @@ fn core_dumps_open_stopped_at_their_signal_and_refuse_to_run() {
     let message = dap.request_error("continue", json!({"threadId": stop.thread}));
     assert!(message.contains("core dump"), "{message}");
     dap.finish();
-}
-
-fn is_zombie(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/status"))
-        .is_ok_and(|status| status.contains("State:\tZ"))
 }
 
 #[test]

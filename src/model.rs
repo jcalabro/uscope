@@ -4396,7 +4396,12 @@ mod tests {
         else {
             panic!("overlapping siblings were not reported as ambiguous")
         };
-        assert_eq!(chains.len(), 2);
+        let mut chains = chains
+            .iter()
+            .map(|chain| chain.instances.as_ref())
+            .collect::<Vec<_>>();
+        chains.sort_unstable();
+        assert_eq!(chains, [[CodeInstanceId::new(1)], [CodeInstanceId::new(2)]]);
     }
 
     /// One test symbol: name, start, end (equal for a symbol without an

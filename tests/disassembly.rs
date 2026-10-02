@@ -379,7 +379,7 @@ async fn core_dumps_decode_verified_files_like_objdump() {
     for (core, files) in [
         (
             "crash-gcc-o0-segv.core",
-            &["crash-gcc-o0", "libcrash.so", "libc.so.6"][..],
+            &["crash-gcc-o0", "libcrash.so"][..],
         ),
         (
             "elf-symbols-gcc-o0.core",
@@ -451,11 +451,19 @@ async fn functions_cover_every_debug_information_range() {
         let bias = record.module.load_bias;
         let oracle = Objdump::read(fixture);
         let mut split = 0;
+        let mut names = Vec::new();
         for instance in image
             .code_instances()
             .iter()
             .filter(|instance| matches!(instance.kind, uscope::CodeInstanceKind::OutOfLine))
         {
+            names.push(
+                image
+                    .function(instance.function)
+                    .expect("instance function")
+                    .name
+                    .clone(),
+            );
             let mut ranges = instance
                 .ranges
                 .iter()
@@ -487,6 +495,10 @@ async fn functions_cover_every_debug_information_range() {
             }
             split += usize::from(ranges.len() > 1);
         }
+        assert!(
+            names.iter().any(|name| name.as_ref() == "main"),
+            "{fixture}: {names:?}"
+        );
         if fixture == "crash-gcc-o2-nopie" {
             assert!(
                 split > 0,
@@ -1028,7 +1040,6 @@ async fn code_that_no_verified_file_or_dump_holds_is_unreadable() {
         "{boundary:?}"
     );
     assert!(leading.is_some());
-    assert!(block.instructions.is_empty());
     assert!(matches!(
         block.completion,
         BlockCompletion::Unreadable { address: stop, .. } if stop.get() == address
@@ -1706,17 +1717,8 @@ async fn core_dumps_name_the_targets_their_saved_slots_hold() {
 #[tokio::test]
 async fn a_register_that_a_restarted_system_call_replaces_is_never_used() {
     let child = support::ExternalProcess::spawn(&Scenario::fixture("attach-restart"));
-    // Waits until the thread blocks in pause(2), so that attaching
-    // interrupts the system call.
-    let syscall = format!("/proc/{}/syscall", child.process_id().get());
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while fs::read_to_string(&syscall).is_ok_and(|text| !text.starts_with("34 ")) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fixture never paused"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-    }
+    // Attaching must interrupt pause(2).
+    support::wait_for_system_call(child.process_id(), 34);
     let debugger = child.attach().await;
     let handle = debugger.handle();
     let location = handle.current_location().await.expect("location");

@@ -342,6 +342,7 @@ impl Scenario {
 
     /// Launches with explicit options and waits for that launch's stop or exit.
     pub async fn run_with_to_stop(&mut self, options: LaunchOptions) -> StopReason {
+        self.drain_events();
         self.transcript.push(format!("request: run {options:?}"));
         let handle = self.handle.clone();
         let task = tokio::spawn(async move { handle.run_with(options).await });
@@ -358,6 +359,7 @@ impl Scenario {
     }
 
     pub async fn resume_with_exception(&mut self, disposition: ExceptionDisposition) -> StopReason {
+        self.drain_events();
         self.transcript
             .push(format!("request: continue {disposition:?}"));
         let handle = self.handle.clone();
@@ -366,6 +368,7 @@ impl Scenario {
     }
 
     pub async fn step_to_stop(&mut self, kind: StepKind) -> StopReason {
+        self.drain_events();
         self.transcript.push(format!("request: step {kind:?}"));
         let handle = self.handle.clone();
         let task = tokio::spawn(async move { handle.step(kind).await });
@@ -374,6 +377,7 @@ impl Scenario {
 
     /// Steps the selected thread while every other thread stays stopped.
     pub async fn step_alone_to_stop(&mut self, kind: StepKind) -> StopReason {
+        self.drain_events();
         self.transcript
             .push(format!("request: step {kind:?} alone"));
         let handle = self.handle.clone();
@@ -424,6 +428,7 @@ impl Scenario {
 
     async fn run_request(&mut self, launch: bool) -> StopReason {
         let operation = if launch { "run" } else { "continue" };
+        self.drain_events();
         self.transcript.push(format!("request: {operation}"));
         let handle = self.handle.clone();
         let task = tokio::spawn(async move {
@@ -474,6 +479,7 @@ impl Scenario {
         stop_at_entry: bool,
         release: impl FnOnce() + Send + 'static,
     ) -> StopReason {
+        self.drain_events();
         self.transcript.push(format!(
             "request: launch by exec of {process}, stop at entry {stop_at_entry}"
         ));
@@ -504,6 +510,7 @@ impl Scenario {
     }
 
     pub async fn start_running(&mut self) -> JoinHandle<Result<StopReason>> {
+        self.drain_events();
         self.transcript.push("request: run".to_owned());
         let handle = self.handle.clone();
         let task = tokio::spawn(async move { handle.run().await });
@@ -519,6 +526,7 @@ impl Scenario {
     /// Starts running and returns as soon as the inferior exists, which may be
     /// before its initial exec stop has been processed.
     pub async fn start_launching(&mut self) -> JoinHandle<Result<StopReason>> {
+        self.drain_events();
         self.transcript.push("request: run".to_owned());
         let handle = self.handle.clone();
         let task = tokio::spawn(async move { handle.run().await });
@@ -528,6 +536,7 @@ impl Scenario {
     }
 
     pub async fn start_resuming(&mut self) -> JoinHandle<Result<StopReason>> {
+        self.drain_events();
         self.transcript.push("request: continue".to_owned());
         let handle = self.handle.clone();
         let task = tokio::spawn(async move { handle.resume().await });
@@ -652,6 +661,26 @@ impl Scenario {
             self.transcript.join("\n")
         )
     }
+}
+
+/// Waits until `condition` holds, failing with `what` at the event deadline.
+/// For facts outside the debugger, such as `/proc`, that nothing announces.
+pub fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + EVENT_TIMEOUT;
+    while !condition() {
+        assert!(Instant::now() < deadline, "timed out waiting until {what}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Waits until `process` is blocked in system call `number`.
+pub fn wait_for_system_call(process: ProcessId, number: u64) {
+    let path = format!("/proc/{process}/syscall");
+    wait_until(&format!("{process} is in system call {number}"), || {
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+        text.split_whitespace().next() == Some(&number.to_string())
+    });
 }
 
 /// Returns the address of a breakpoint stop, failing on any other stop.

@@ -477,24 +477,6 @@ async fn frames_in_code_without_debug_info_are_named_by_elf_symbols() {
     }
 }
 
-#[tokio::test]
-async fn core_dumps_name_frames_without_debug_info_like_live_processes() {
-    for (executable, library) in VARIANTS {
-        let scenario = open_core(executable);
-        let modules = Modules::load(&scenario).await;
-        let trace = scenario
-            .operation("backtrace", scenario.handle().backtrace())
-            .await;
-        assert_fault_chain(&trace, &modules, executable, library);
-        let location = scenario
-            .operation("location", scenario.handle().current_location())
-            .await;
-        assert_eq!(location.module, modules.named(library).0);
-        assert_eq!(location.image.symbol, trace.frames[0].symbol);
-        scenario.shutdown().await;
-    }
-}
-
 /// One frame of gdb's backtrace of a core.
 #[derive(Debug)]
 struct GdbFrame {
@@ -527,17 +509,24 @@ fn gdb_backtrace(executable: &str) -> Vec<GdbFrame> {
         .collect()
 }
 
+/// A core names frames without debug info as the live process does, and
 /// gdb's backtrace of the same core is an independent oracle for both the
 /// unwound frames and their names. Names may differ only by choosing another
 /// symbol at the same address.
 #[tokio::test]
 async fn core_backtraces_agree_with_gdb() {
-    for (executable, _) in VARIANTS {
+    for (executable, library) in VARIANTS {
         let scenario = open_core(executable);
         let modules = Modules::load(&scenario).await;
         let trace = scenario
             .operation("backtrace", scenario.handle().backtrace())
             .await;
+        assert_fault_chain(&trace, &modules, executable, library);
+        let location = scenario
+            .operation("location", scenario.handle().current_location())
+            .await;
+        assert_eq!(location.module, modules.named(library).0);
+        assert_eq!(location.image.symbol, trace.frames[0].symbol);
         let gdb = gdb_backtrace(executable);
         assert_eq!(trace.frames.len(), gdb.len(), "{executable}: {gdb:#?}");
 

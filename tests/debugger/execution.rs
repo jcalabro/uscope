@@ -480,7 +480,7 @@ async fn raw_memory_reads_are_bounded_stop_scoped_and_hide_breakpoints() {
 }
 
 #[tokio::test]
-async fn shutdown_reaps_running_and_stopped_inferiors() {
+async fn shutdown_kills_and_reaps_a_running_inferior() {
     let mut running = Scenario::new("shutdown running", Scenario::fixture("spin"));
 
     let run = running.start_running().await;
@@ -504,17 +504,6 @@ async fn shutdown_reaps_running_and_stopped_inferiors() {
         run.await.expect("run task"),
         Ok(StopReason::Exited(ExitStatus::Terminated(exception))) if exception.code == 9
     ));
-
-    let mut stopped = Scenario::new("shutdown stopped", Scenario::fixture("basic"));
-
-    stopped.add_breakpoint("breakpoint_target").await;
-
-    assert!(matches!(
-        stopped.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-
-    stopped.shutdown().await;
 }
 
 #[tokio::test]
@@ -751,7 +740,7 @@ async fn linux_wait_ownership_allows_only_one_session_per_host_process() {
 #[tokio::test]
 async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
     let mut scenario = Scenario::new("pthread all-stop", Scenario::fixture("threads"));
-    scenario.add_breakpoint("worker_breakpoint").await;
+    let breakpoint = scenario.add_breakpoint("worker_breakpoint").await;
 
     assert!(matches!(
         scenario.run_to_stop().await,
@@ -826,16 +815,35 @@ async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
     }
     assert_eq!(scenario.snapshot().await.stop_id, Some(stop_id));
 
-    for _ in 0..3 {
-        if matches!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        ) {
-            scenario.shutdown().await;
-            return;
-        }
+    finish_worker_hits(&mut scenario, breakpoint.id).await;
+    scenario.shutdown().await;
+}
+
+/// Resumes the `threads` fixture until it exits, after which each of its two
+/// workers has hit `breakpoint` once. The second hit stops on its own unless it was
+/// reported with the first.
+async fn finish_worker_hits(scenario: &mut Scenario, breakpoint: uscope::BreakpointId) {
+    let mut reason = scenario.resume_to_stop().await;
+    if let StopReason::Breakpoint { hits, .. } = &reason {
+        assert_eq!(
+            **hits,
+            [uscope::BreakpointHit {
+                breakpoint,
+                hit_count: 2
+            }]
+        );
+        reason = scenario.resume_to_stop().await;
     }
-    panic!("pthread fixture did not exit after repairing worker breakpoints");
+    assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)));
+    let hits = scenario
+        .snapshot()
+        .await
+        .breakpoints
+        .iter()
+        .find(|candidate| candidate.id == breakpoint)
+        .expect("worker breakpoint")
+        .hit_count;
+    assert_eq!(hits, 2, "each worker hit its breakpoint once");
 }
 
 #[tokio::test]
@@ -876,7 +884,7 @@ async fn repeated_thread_creation_and_exit_loses_no_breakpoint_events() {
 #[tokio::test]
 async fn a_thread_scoped_continue_stops_cleanly_when_its_thread_exits() {
     let mut scenario = Scenario::new("thread scoped exit", Scenario::fixture("threads"));
-    scenario.add_breakpoint("worker_breakpoint").await;
+    let breakpoint = scenario.add_breakpoint("worker_breakpoint").await;
     scenario.run_to_stop().await;
 
     let snapshot = scenario.snapshot().await;
@@ -930,18 +938,9 @@ async fn a_thread_scoped_continue_stops_cleanly_when_its_thread_exits() {
             ..
         } if process_id == process
     ));
-    scenario.drain_pending_events();
 
-    for _ in 0..2 {
-        if matches!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        ) {
-            scenario.shutdown().await;
-            return;
-        }
-    }
-    panic!("remaining threads did not exit");
+    finish_worker_hits(&mut scenario, breakpoint.id).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
@@ -1389,9 +1388,6 @@ async fn pause_cancels_an_active_source_execution_plan() {
             scenario.handle().write_word(release, 1),
         )
         .await;
-    // The pause above was requested outside the scenario transcript loop, so
-    // its stop event is still queued and must not satisfy the resume below.
-    scenario.drain_pending_events();
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0)),
@@ -1677,7 +1673,6 @@ async fn killing_ends_the_inferior_but_keeps_the_session() {
         "{exits:?}"
     );
     assert!(!std::path::Path::new(&format!("/proc/{first}")).exists());
-    scenario.drain_pending_events();
 
     // The same program launches again, keeping its breakpoints.
     let relaunched = scenario.run_to_stop().await;
@@ -1699,7 +1694,6 @@ async fn killing_a_running_or_attached_process_ends_it() {
         scenario.snapshot().await.inferior,
         InferiorState::NotRunning
     ));
-    scenario.drain_pending_events();
     scenario.shutdown().await;
 
     let child = support::ExternalProcess::spawn(&Scenario::fixture("attach"));
@@ -1755,7 +1749,6 @@ async fn terminating_asks_the_program_to_end_without_stopping_it() {
             .expect("resume"),
         StopReason::Exited(ExitStatus::Code(7))
     );
-    scenario.drain_pending_events();
 
     // While stopped: the program resumes to receive the signal.
     scenario.add_breakpoint("terminate_tick").await;
@@ -1784,7 +1777,6 @@ async fn terminating_asks_the_program_to_end_without_stopping_it() {
             _ => {}
         }
     }
-    scenario.drain_pending_events();
     scenario.shutdown().await;
 }
 

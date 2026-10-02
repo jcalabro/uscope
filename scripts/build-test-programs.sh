@@ -768,8 +768,6 @@ build_rust_fixture "$rust_fixtures_dir/globals.rs" "$output_dir/globals-rust-o2"
     -C opt-level=2 -C force-frame-pointers=no
 build_go_fixture "$go_fixtures_dir/variables" "$output_dir/variables-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
-build_go_fixture "$go_fixtures_dir/variables" "$output_dir/variables-go-o2" \
-    -buildmode=pie
 build_go_fixture "$go_fixtures_dir/records" "$output_dir/records-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/records" "$output_dir/records-go-o2" \

@@ -2,40 +2,80 @@
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::dap::{Configuration, Dap, Profile, fixture};
-use crate::support::ExternalProcess;
+use crate::support::{self, ExternalProcess, ScratchDir};
 
-/// Starts `uscope dap --listen` on an unused port and returns its address.
-fn listening_adapter() -> (std::process::Child, SocketAddr) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .args(["dap", "--listen", "127.0.0.1:0"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start the adapter");
-    let mut line = String::new();
-    BufReader::new(child.stderr.as_mut().expect("stderr"))
-        .read_line(&mut line)
-        .expect("read the listening address");
-    let address = line
-        .trim()
-        .strip_prefix("uscope dap listening on ")
-        .unwrap_or_else(|| panic!("unexpected announcement {line:?}"))
-        .parse()
-        .expect("an address");
-    (child, address)
+/// `uscope dap --listen` on an unused port, killed on drop so a failing
+/// test leaves nothing behind.
+struct ListeningAdapter {
+    child: std::process::Child,
+    address: SocketAddr,
+}
+
+impl ListeningAdapter {
+    /// Starts the adapter, logging its traffic to `log`, and waits for it
+    /// to announce its address.
+    fn start(log: &Path) -> Self {
+        let child = Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .args(["dap", "--listen", "127.0.0.1:0", "--log"])
+            .arg(log)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the adapter");
+        let mut adapter = Self {
+            child,
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+        };
+        let mut line = String::new();
+        BufReader::new(adapter.child.stderr.as_mut().expect("stderr"))
+            .read_line(&mut line)
+            .expect("read the listening address");
+        adapter.address = line
+            .trim()
+            .strip_prefix("uscope dap listening on ")
+            .unwrap_or_else(|| panic!("unexpected announcement {line:?}"))
+            .parse()
+            .expect("an address");
+        adapter
+    }
+
+    /// Asks the adapter to stop, as an editor does, and checks that it
+    /// exits cleanly.
+    fn stop(mut self) {
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(i32::try_from(self.child.id()).expect("pid")),
+            nix::sys::signal::Signal::SIGTERM,
+        )
+        .expect("signal the adapter");
+        assert!(self.child.wait().expect("wait").success());
+    }
+}
+
+impl Drop for ListeningAdapter {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 #[test]
 fn tcp_serves_one_client_at_a_time_and_refuses_browsers() {
-    let (mut adapter, address) = listening_adapter();
+    let directory = ScratchDir::new("dap-listen");
+    let log = directory.path().join("traffic.log");
+    let adapter = ListeningAdapter::start(&log);
     // A web page's request carries Origin; the adapter drops it unanswered.
-    let mut browser = TcpStream::connect(address).expect("connect");
+    let mut browser = TcpStream::connect(adapter.address).expect("connect");
+    browser
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("set a read timeout");
     let request = r#"{"seq":1,"type":"request","command":"initialize","arguments":{}}"#;
     write!(
         browser,
@@ -47,7 +87,7 @@ fn tcp_serves_one_client_at_a_time_and_refuses_browsers() {
     browser.read_to_end(&mut answer).expect("read");
     assert!(answer.is_empty(), "{}", String::from_utf8_lossy(&answer));
 
-    let mut first = Dap::connect("tcp first", address);
+    let mut first = Dap::connect("tcp first", adapter.address);
     let started = first.launch(
         Profile::VsCode,
         &fixture("spin"),
@@ -55,8 +95,9 @@ fn tcp_serves_one_client_at_a_time_and_refuses_browsers() {
         &Configuration::default(),
     );
     first.event(started.mark, "process", |_| true);
-    // A second client waits until the first session ends.
-    let mut second = Dap::connect("tcp second", address);
+    // A second client connects and asks during the first session, and is
+    // served once it ends.
+    let mut second = Dap::connect("tcp second", adapter.address);
     let initialize = second.send("initialize", json!({"adapterID": "uscope"}));
     first.finish();
     second.success(initialize);
@@ -68,13 +109,35 @@ fn tcp_serves_one_client_at_a_time_and_refuses_browsers() {
         json!({"exitCode": 0})
     );
     second.finish();
+    adapter.stop();
 
-    nix::sys::signal::kill(
-        nix::unistd::Pid::from_raw(i32::try_from(adapter.id()).expect("pid")),
-        nix::sys::signal::Signal::SIGTERM,
-    )
-    .expect("signal the adapter");
-    assert!(adapter.wait().expect("wait").success());
+    // The adapter logs each client's arrival and departure, which never
+    // overlap: each client is accepted only after the one before is gone.
+    let log = std::fs::read_to_string(&log).expect("read the traffic log");
+    let sessions = log
+        .lines()
+        .filter_map(|line| line.strip_prefix("-- client "))
+        .collect::<Vec<_>>();
+    let browser = browser.local_addr().expect("browser address");
+    let peers = sessions
+        .chunks(2)
+        .map(|pair| match pair {
+            [connected, disconnected] => {
+                let peer = connected
+                    .strip_suffix(" connected")
+                    .unwrap_or_else(|| panic!("{connected:?} is not an arrival:\n{log}"));
+                assert_eq!(
+                    disconnected.strip_suffix(" disconnected"),
+                    Some(peer),
+                    "{log}"
+                );
+                peer
+            }
+            _ => panic!("a client never left:\n{log}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(peers.len(), 3, "{log}");
+    assert_eq!(peers[0], browser.to_string(), "{log}");
 }
 
 #[test]
@@ -113,12 +176,10 @@ fn broken_framing_ends_the_session_and_the_program() {
         &Configuration::default(),
     );
     dap.event(started.mark, "process", |_| true);
-    let pid = dap.process_id().expect("process");
     dap.write_bytes(b"Content-Length: lots\r\n\r\n");
     dap.wait_for_exit();
     dap.close_stdin();
     dap.finish();
-    let _ = pid;
 }
 
 #[test]
@@ -134,10 +195,11 @@ fn killing_the_adapter_kills_its_program_and_releases_attached_ones() {
     let pid = launched.process_id().expect("process");
     launched.signal(nix::sys::signal::Signal::SIGKILL);
     launched.abandon();
-    assert!(
-        wait_until_gone(pid),
-        "the launched program outlived its adapter"
-    );
+    // Nothing reports the death of a process this test did not start.
+    support::wait_until("the launched program is gone with its adapter", || {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .map_or(true, |status| status.contains("State:\tZ"))
+    });
 
     let mut process = ExternalProcess::spawn(&fixture("attach"));
     let mut attached = Dap::start("killed attached");
@@ -172,26 +234,13 @@ fn killing_the_adapter_kills_its_program_and_releases_attached_ones() {
     assert_eq!(status.code(), Some(23), "{status:?}");
 }
 
-/// Waits for a process to disappear, since nothing reports the death of
-/// a process this test did not start.
-fn wait_until_gone(pid: u32) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        match std::fs::read_to_string(format!("/proc/{pid}/status")) {
-            Err(_) => return true,
-            Ok(status) if status.contains("State:\tZ") => return true,
-            Ok(_) => std::thread::yield_now(),
-        }
-    }
-    false
-}
-
 #[test]
 fn missed_events_are_recovered_from_the_debuggers_state() {
     // With room for one event, the adapter misses most of each burst of
     // thread starts and exits, and must catch up from the debugger's state:
     // at every stop, the threads the client was told of are the threads
-    // there are.
+    // there are. A stop waits for every exiting thread to be gone, so no
+    // thread starts or exits while the program is stopped.
     let mut dap = Dap::start_in("lagged threads", &[], &[("USCOPE_EVENT_CAPACITY", "1")]);
     let started = dap.launch(
         Profile::Helix,

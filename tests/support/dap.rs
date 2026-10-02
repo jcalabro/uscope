@@ -351,27 +351,28 @@ impl Dap {
         command
             .args(&args[1..])
             .current_dir(arguments["cwd"].as_str().expect("cwd"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdin(Stdio::null());
+        // One pipe for both streams, as a terminal has, keeps their order.
+        let (output, input) = std::io::pipe().expect("create the terminal's pipe");
+        command
+            .stdout(input.try_clone().expect("share the terminal's pipe"))
+            .stderr(input);
         for (name, value) in arguments["env"].as_object().into_iter().flatten() {
             match value.as_str() {
                 Some(value) => command.env(name, value),
                 None => command.env_remove(name),
             };
         }
-        let mut child = command.spawn().expect("run the terminal's command");
-        for stream in [
-            Box::new(child.stdout.take().expect("stdout")) as Box<dyn std::io::Read + Send>,
-            Box::new(child.stderr.take().expect("stderr")),
-        ] {
-            let lines = self.terminal_output.0.clone();
-            std::thread::spawn(move || {
-                for line in BufReader::new(stream).lines().map_while(Result::ok) {
-                    let _ = lines.send(line);
-                }
-            });
-        }
+        let child = command.spawn().expect("run the terminal's command");
+        // The command holds copies of the pipe's input; without them the
+        // pipe ends when the program's copies close.
+        drop(command);
+        let lines = self.terminal_output.0.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(output).lines().map_while(Result::ok) {
+                let _ = lines.send(line);
+            }
+        });
         let process = child.id();
         self.terminals.push(child);
         json!({"processId": process})

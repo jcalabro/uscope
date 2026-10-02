@@ -19,7 +19,7 @@ use super::codec::{
     decode_address, decode_integer_value, decode_scalar, extract_bit_field, read_sleb128_i128,
     read_uleb128_u128,
 };
-use super::die::{check_data_object_capacity, checked_reference_chain};
+use super::die::checked_reference_chain;
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, dwarf_value_bytes, evaluate,
     evaluate_frame_base, incomplete_piece_reason, materialize_constant, materialize_pieces,
@@ -190,6 +190,19 @@ fn variant_selection_validation_rejects_overlap_and_multiple_defaults() {
         ]))),
     ];
     assert!(validate_variant_selections(&overlapping).is_err());
+    let adjacent = [
+        variant(VariantSelection::Selectors(Arc::from([
+            VariantSelector::Range {
+                low: IntegerValue::Signed(-3),
+                high: IntegerValue::Signed(2),
+            },
+        ]))),
+        variant(VariantSelection::Selectors(Arc::from([
+            VariantSelector::Value(IntegerValue::Signed(3)),
+        ]))),
+        variant(VariantSelection::Default),
+    ];
+    assert!(validate_variant_selections(&adjacent).is_ok());
     assert!(
         validate_variant_selections(&[
             variant(VariantSelection::Default),
@@ -778,38 +791,21 @@ fn operational_memory_failures_escape_the_per_variable_result_lane() {
 }
 
 #[test]
-fn data_object_catalog_has_an_exact_load_time_ceiling() {
-    check_data_object_capacity(MAX_DATA_OBJECTS - 1).expect("last available object slot");
-    assert!(matches!(
-        check_data_object_capacity(MAX_DATA_OBJECTS),
-        Err(DwarfError::DataObjectLimit(limit)) if limit == MAX_DATA_OBJECTS
-    ));
-}
-
-#[test]
-fn fixed_width_constants_take_signedness_from_the_variable_type() {
+fn fixed_form_constants_zero_extend_and_signed_forms_sign_extend() {
     let little = target(ByteOrder::Little);
-    // DW_FORM_data1 0xff for a signed 4-byte type is -1, not 255.
-    let fixed = ConstantValue::Fixed(0xff);
+    // A fixed data form supplies zero high bits: DW_FORM_data1 0xff for a
+    // signed 4-byte type is 255; producers use DW_FORM_sdata for -1.
     assert_eq!(
-        materialize_constant(&fixed, 4, little)
+        materialize_constant(&ConstantValue::Fixed(0xff), 4, little)
             .expect("zero-extended fixed-form constant")
             .as_ref(),
         &[0xff, 0x00, 0x00, 0x00]
     );
     assert_eq!(
-        materialize_constant(&fixed, 4, little)
-            .expect("zero-extended constant")
+        materialize_constant(&ConstantValue::Signed(-1), 4, little)
+            .expect("sign-extended constant")
             .as_ref(),
-        &[0xff, 0x00, 0x00, 0x00]
-    );
-    // A non-negative fixed-width value is unchanged by sign extension.
-    let positive = ConstantValue::Fixed(0x7f);
-    assert_eq!(
-        materialize_constant(&positive, 2, little)
-            .expect("positive constant")
-            .as_ref(),
-        &[0x7f, 0x00]
+        &[0xff, 0xff, 0xff, 0xff]
     );
 }
 

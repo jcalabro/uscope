@@ -439,19 +439,32 @@ fn breakpoints_in_libraries_wait_for_them_and_follow_them_in_and_out() {
         dap.success(resumed);
         // The library unloads: the breakpoint waits again, as the client
         // hears before the next stop or the exit.
-        dap.event(resumed.mark, "breakpoint", |body| {
-            body["breakpoint"]["id"] == id && body["breakpoint"]["reason"] == "pending"
+        let (next, body) = dap.next_event(resumed.mark, &["stopped", "exited"]);
+        let messages = dap.messages_since(resumed.mark);
+        let pending = messages.iter().position(|message| {
+            message["event"] == "breakpoint"
+                && message["body"]["breakpoint"]["id"] == id
+                && message["body"]["breakpoint"]["reason"] == "pending"
         });
-        mark = resumed.mark;
+        let ended = messages
+            .iter()
+            .position(|message| message["event"] == next.as_str());
+        assert!(
+            pending.is_some_and(|pending| Some(pending) < ended),
+            "{messages:?}"
+        );
         if round == 0 {
-            let unloaded = dap.stopped(mark);
-            assert_eq!(unloaded.reason, "function breakpoint");
-            let resumed = dap.send("continue", json!({"threadId": unloaded.thread}));
+            assert_eq!(
+                (next.as_str(), &body["reason"]),
+                ("stopped", &json!("function breakpoint"))
+            );
+            let resumed = dap.send("continue", json!({"threadId": body["threadId"]}));
             dap.success(resumed);
             mark = resumed.mark;
+        } else {
+            assert_eq!((next.as_str(), body), ("exited", json!({"exitCode": 0})));
         }
     }
-    assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
     dap.finish();
 }
 
@@ -584,7 +597,16 @@ fn a_function_breakpoint_stops_in_every_overload_and_method_of_the_name() {
 }
 
 #[test]
-fn threads_hitting_one_breakpoint_together_are_each_reported_in_turn() {
+fn threads_hitting_one_breakpoint_together_count_every_hit() {
+    // Four threads call the function as fast as they can, so their traps
+    // coincide. Each continue reports one thread's hit; the others that
+    // trapped meanwhile count theirs and step over the site when the
+    // program resumes. Every call traps before it increments hot_count, and
+    // no thread traps again before its increment, so at every stop the hits
+    // exceed the increments by the threads between the two: at least the
+    // one reported, at most all four. A hit lost or counted twice shifts
+    // the difference for the rest of the run.
+    const THREADS: u64 = 4;
     let mut dap = Dap::start("co-hits");
     let started = dap.launch(
         Profile::VsCode,
@@ -596,30 +618,43 @@ fn threads_hitting_one_breakpoint_together_are_each_reported_in_turn() {
         },
     );
     let id = started.function_breakpoints[0]["id"].clone();
-    // Four threads call the function as fast as they can, so their traps
-    // coincide; each continue reports one stop, and a hit held back while
-    // another thread's was reported comes next.
-    let mut reporters = std::collections::BTreeSet::new();
-    let mut mark = started.mark;
-    let mut stop = dap.stopped(mark);
+    let mut stop = dap.stopped(started.mark);
+    let mut previous_hits = 0;
     for _ in 0..40 {
         assert_eq!(stop.body["hitBreakpointIds"], json!([id]));
-        let threads = dap.request("threads", Value::Null)["threads"].clone();
+        let trace = dap.request("stackTrace", json!({"threadId": stop.thread, "levels": 1}));
+        assert_eq!(trace["stackFrames"][0]["name"], "hot_function");
+        let frame = trace["stackFrames"][0]["id"].clone();
+        let mut evaluate = |expression: &str, context: &str| {
+            dap.request(
+                "evaluate",
+                json!({"expression": expression, "frameId": frame, "context": context}),
+            )["result"]
+                .as_str()
+                .expect("result")
+                .to_owned()
+        };
+        let increments = evaluate("hot_count", "watch")
+            .parse::<u64>()
+            .expect("a count");
+        let listing = evaluate("info breakpoints", "repl");
+        let hits = listing
+            .split_once("  hit ")
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .and_then(|count| count.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("no hit count in {listing:?}"));
         assert!(
-            threads
-                .as_array()
-                .expect("threads")
-                .iter()
-                .any(|thread| thread["id"] == stop.thread),
-            "{threads}"
+            hits > previous_hits
+                && hits
+                    .checked_sub(increments)
+                    .is_some_and(|between| (1..=THREADS).contains(&between)),
+            "{hits} hits after {previous_hits}, {increments} increments"
         );
-        reporters.insert(stop.thread);
+        previous_hits = hits;
         let resumed = dap.send("continue", json!({"threadId": stop.thread}));
         dap.success(resumed);
-        mark = resumed.mark;
-        stop = dap.stopped(mark);
+        stop = dap.stopped(resumed.mark);
     }
-    assert!(reporters.len() > 1, "only {reporters:?} reported hits");
     // Release the threads and let the program end.
     dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
     dap.request(

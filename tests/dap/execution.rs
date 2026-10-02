@@ -42,8 +42,12 @@ fn next_over_a_join_completes_while_the_worker_runs() {
         &mut dap,
         "thread-steps-gcc-o0",
         "c/thread-steps.c",
-        "joins the sleepy worker",
+        "joins the gated worker",
     );
+    // The worker waits at a gate this line opens, so it is alive here and
+    // the step completes only because it runs.
+    let threads = dap.request("threads", Value::Null);
+    assert_eq!(threads["threads"].as_array().map(Vec::len), Some(2));
     let next = dap.send("next", json!({"threadId": stop.thread}));
     // The step resumes every thread, as the continued event says first.
     let continued = dap.event(next.mark, "continued", |_| true);
@@ -73,7 +77,7 @@ fn next_over_a_join_completes_while_the_worker_runs() {
 fn another_threads_breakpoint_ends_a_step_where_it_hit() {
     let mut dap = Dap::start("interrupted step");
     let path = source("c/thread-steps.c");
-    let line = line_of(&path, "joins the sleepy worker");
+    let line = line_of(&path, "joins the gated worker");
     let started = dap.launch(
         Profile::Neovim,
         &fixture("thread-steps-gcc-o0"),
@@ -108,7 +112,7 @@ fn another_threads_breakpoint_ends_a_step_where_it_hit() {
         .clone();
     assert_eq!(
         worker["name"],
-        format!("sleepy-worker ({})", interrupted.thread)
+        format!("gated-worker ({})", interrupted.thread)
     );
     // The abandoned step leaves nothing behind: the program now runs out.
     let resumed = dap.send("continue", json!({"threadId": interrupted.thread}));
