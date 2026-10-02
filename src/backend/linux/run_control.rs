@@ -728,8 +728,12 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn handle_signal_stop(&mut self, pid: Pid, pending: PendingSignal) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         // The debugger's own request to end the inferior never stops it.
-        let policy = if inferior.terminating == Some(pending.signal) {
-            inferior.terminating = None;
+        let terminating = inferior
+            .terminating
+            .as_mut()
+            .filter(|terminating| terminating.signal == pending.signal);
+        let policy = if let Some(terminating) = terminating {
+            terminating.delivered = true;
             SignalPolicy {
                 stop: false,
                 print: false,
@@ -1141,6 +1145,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             thread.expected = ExpectedStop::None;
         }
         inferior.barrier = None;
+        // Once the request to end has been delivered, a stop hands the
+        // signal back to its policy.
+        inferior.terminating = inferior
+            .terminating
+            .filter(|terminating| !terminating.delivered);
         inferior.public_stop = Some(PublicStop {
             id: stop_id,
             triggering_thread,

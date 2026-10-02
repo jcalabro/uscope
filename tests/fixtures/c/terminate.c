@@ -1,9 +1,11 @@
 // Runs until asked to end with SIGTERM, which it handles by exiting with
-// status 7.
+// status 7. `terminate reraise` instead cleans up and raises SIGTERM again
+// with its default action, as Go's runtime does, and dies of it.
 #define _POSIX_C_SOURCE 200809L
 
 #include <signal.h>
 #include <stddef.h>
+#include <string.h>
 
 static volatile sig_atomic_t terminate_requested;
 volatile int terminate_loops;
@@ -17,7 +19,7 @@ __attribute__((noinline)) void terminate_tick(void) {
     terminate_loops += 1;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     struct sigaction action = {.sa_handler = request_termination};
     sigemptyset(&action.sa_mask);
     if (sigaction(SIGTERM, &action, NULL) != 0) {
@@ -25,6 +27,11 @@ int main(void) {
     }
     while (!terminate_requested) {
         terminate_tick();
+    }
+    if (argc > 1 && strcmp(argv[1], "reraise") == 0) {
+        signal(SIGTERM, SIG_DFL);
+        raise(SIGTERM);
+        return 101;
     }
     return 7;
 }

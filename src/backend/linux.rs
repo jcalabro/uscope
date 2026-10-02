@@ -586,9 +586,19 @@ struct Inferior {
     /// The loader's breakpoint, once the loader is known.
     loader_site: Option<VirtualAddress>,
     watch: WatchState,
-    /// A signal the debugger sent to end the inferior, delivered without
-    /// stopping whatever its policy.
-    terminating: Option<Signal>,
+    /// The signal the debugger sent to end the inferior, which never stops
+    /// it whatever its policy.
+    terminating: Option<Terminating>,
+}
+
+/// The debugger asked the inferior to end with `signal`. Programs often
+/// handle it by cleaning up and raising it again with its default action,
+/// as Go's runtime does, so every delivery of it passes silently until the
+/// user sees a stop after the first one.
+#[derive(Clone, Copy, Debug)]
+struct Terminating {
+    signal: Signal,
+    delivered: bool,
 }
 
 impl Inferior {

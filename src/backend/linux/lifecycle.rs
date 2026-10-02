@@ -19,8 +19,8 @@ use super::breakpoints::install_logical_breakpoint;
 use super::native::{LinuxTraceOps, is_vanished_tracee, wait_for};
 use super::{
     ActiveExecution, ActiveKind, ClassifiedStop, Controller, ExpectedStop, Inferior,
-    InferiorOrigin, LinuxError, NativeThreadState, StopBarrier, TraceThread, Waiter, backend_error,
-    debug_thread_id, exception_info, process_id,
+    InferiorOrigin, LinuxError, NativeThreadState, StopBarrier, Terminating, TraceThread, Waiter,
+    backend_error, debug_thread_id, exception_info, process_id,
 };
 
 /// How many times an attach may find threads it has not traced before it
@@ -1223,7 +1223,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn terminate(&mut self) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let signal = Signal::SIGTERM;
-        inferior.terminating = Some(signal);
+        inferior.terminating = Some(Terminating {
+            signal,
+            delivered: false,
+        });
         let (tgid, stop) = (
             inferior.tgid,
             inferior.public_stop.as_ref().map(|stop| stop.id),
