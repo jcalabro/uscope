@@ -127,6 +127,8 @@ enum After {
 )]
 pub(super) struct ClientSupport {
     pub lines_start_at1: bool,
+    pub columns_start_at1: bool,
+    pub progress: bool,
     pub variable_type: bool,
     pub memory_references: bool,
     pub ansi: bool,
@@ -144,6 +146,7 @@ struct Target {
     default_policies: HashMap<u64, SignalPolicy>,
     applied_policies: HashMap<u64, SignalPolicy>,
     console: Cli,
+    syntax: uscope::AssemblySyntax,
     images: HashMap<ModuleId, Arc<ModuleImage>>,
     /// Recorded source paths by the canonical local path they map to.
     recorded_paths: Option<HashMap<PathBuf, PathBuf>>,
@@ -168,13 +171,15 @@ pub struct Session {
     starting: Option<Header>,
     target: Option<Target>,
     events: Option<broadcast::Receiver<DebuggerEvent>>,
-    breakpoints: Breakpoints,
+    pub(super) breakpoints: Breakpoints,
+    pub(super) data: super::watch::Data,
     exceptions: Selection,
     pub(super) references: References,
     pub(super) stop: Option<Stop>,
     backtraces: HashMap<ThreadId, Arc<Backtrace>>,
     variables: HashMap<(ThreadId, StackFrameId), Arc<VariableSnapshot>>,
     threads: BTreeSet<ThreadId>,
+    pub(super) modules: BTreeSet<ModuleId>,
     /// The execution the client last started, whose resume it already knows.
     resumed: Option<uscope::ExecutionId>,
     ended: bool,
@@ -191,12 +196,14 @@ impl Session {
             target: None,
             events: None,
             breakpoints: Breakpoints::default(),
+            data: super::watch::Data::default(),
             exceptions: Selection::default(),
             references: References::default(),
             stop: None,
             backtraces: HashMap::new(),
             variables: HashMap::new(),
             threads: BTreeSet::new(),
+            modules: BTreeSet::new(),
             resumed: None,
             ended: false,
         }
@@ -313,6 +320,14 @@ impl Session {
             "setFunctionBreakpoints" => self.set_function_breakpoints(arguments).await?,
             "setExceptionBreakpoints" => self.set_exception_breakpoints(arguments).await?,
             "setInstructionBreakpoints" => self.set_instruction_breakpoints(arguments).await?,
+            "readMemory" => self.read_memory(arguments).await?,
+            "dataBreakpointInfo" => self.data_breakpoint_info(arguments).await?,
+            "modules" => self.modules(arguments).await?,
+            "loadedSources" => self.loaded_sources().await?,
+            "breakpointLocations" => self.breakpoint_locations(arguments)?,
+            "completions" => self.completions(arguments).await?,
+            "setDataBreakpoints" => self.set_data_breakpoints(arguments).await?,
+            "disassemble" => self.disassemble(arguments).await?,
             "source" => {
                 return Err(ErrorBody::new(
                     "source contents are not available from the debugger; open the file locally",
@@ -334,6 +349,8 @@ impl Session {
         let arguments = parse::<protocol::InitializeArguments>(arguments, "initialize arguments")?;
         self.support = Some(ClientSupport {
             lines_start_at1: arguments.lines_start_at1.unwrap_or(true),
+            columns_start_at1: arguments.columns_start_at1.unwrap_or(true),
+            progress: arguments.supports_progress_reporting.unwrap_or(false),
             variable_type: arguments.supports_variable_type.unwrap_or(false),
             memory_references: arguments.supports_memory_references.unwrap_or(false),
             ansi: arguments.supports_ansi_styling.unwrap_or(false),
@@ -357,7 +374,12 @@ impl Session {
             unreachable!("launch configurations launch");
         };
         let program = launch.program.clone();
-        let debugger = tokio::task::spawn_blocking(move || Debugger::new(&program))
+        let title = format!("Loading {}", launch.program.display());
+        let debugger = self
+            .with_progress(
+                title,
+                tokio::task::spawn_blocking(move || Debugger::new(&program)),
+            )
             .await
             .map_err(|error| ErrorBody::shown(error.to_string()))?
             .map_err(|error| {
@@ -391,17 +413,46 @@ impl Session {
                 })?
             }
             Start::Core(options) => {
+                let title = format!("Opening {}", options.core.display());
                 let options = options.clone();
-                tokio::task::spawn_blocking(move || Debugger::open_core(&options))
-                    .await
-                    .map_err(|error| ErrorBody::shown(error.to_string()))?
-                    .map_err(|error| {
-                        ErrorBody::shown(format!("failed to open the core dump: {error}"))
-                    })?
+                self.with_progress(
+                    title,
+                    tokio::task::spawn_blocking(move || Debugger::open_core(&options)),
+                )
+                .await
+                .map_err(|error| ErrorBody::shown(error.to_string()))?
+                .map_err(|error| {
+                    ErrorBody::shown(format!("failed to open the core dump: {error}"))
+                })?
             }
             Start::Launch(_) => unreachable!("attach configurations attach"),
         };
         self.adopt(debugger, configuration, header).await
+    }
+
+    /// Reports slow work, such as loading debug information, to a client
+    /// that shows progress.
+    async fn with_progress<T>(
+        &self,
+        title: String,
+        work: impl std::future::Future<Output = T>,
+    ) -> T {
+        if !self.support().progress {
+            return work.await;
+        }
+        let _ = self
+            .client
+            .event(
+                "progressStart",
+                json!({"progressId": "load", "title": title, "cancellable": false}),
+            )
+            .await;
+        let result = work.await;
+        let _ = self
+            .client
+            .event("progressEnd", json!({"progressId": "load"}))
+            .await;
+        result
     }
 
     fn check_unstarted(&self) -> Result<(), ErrorBody> {
@@ -450,6 +501,7 @@ impl Session {
             applied_policies: default_policies.clone(),
             default_policies,
             console,
+            syntax,
             images: HashMap::new(),
             recorded_paths: None,
             process: None,
@@ -537,6 +589,7 @@ impl Session {
                 }
             }
         }
+        self.announce_modules().await?;
         if let Some(snapshot) = snapshot {
             self.announce_threads(&snapshot).await?;
             if let InferiorState::Stopped {
@@ -847,18 +900,12 @@ impl Session {
                         .await?;
                 }
             }
-            DebuggerEvent::ModuleLoaded { module, .. } => {
-                self.client
-                    .event(
-                        "module",
-                        json!({"reason": "new", "module": module_json(&module)}),
-                    )
-                    .await?;
-            }
+            DebuggerEvent::ModuleLoaded { module, .. } => self.announce_module(&module).await?,
             DebuggerEvent::ModuleUnloaded { module, .. } => {
                 if let Some(target) = self.target.as_mut() {
                     target.images.remove(&module.module.id);
                 }
+                self.modules.remove(&module.module.id);
                 self.client
                     .event(
                         "module",
@@ -888,9 +935,10 @@ impl Session {
                     .await?;
             }
             DebuggerEvent::BreakpointsChanged { .. } => self.sync_breakpoints().await?,
-            DebuggerEvent::StateChanged { .. }
-            | DebuggerEvent::WatchpointsChanged { .. }
-            | DebuggerEvent::WatchpointsInvalidated { .. } => {}
+            DebuggerEvent::WatchpointsInvalidated { invalidated, .. } => {
+                self.data_invalidated(&invalidated).await?;
+            }
+            DebuggerEvent::StateChanged { .. } | DebuggerEvent::WatchpointsChanged { .. } => {}
         }
         Ok(())
     }
@@ -956,8 +1004,33 @@ impl Session {
                 Some(format!("watchpoints could not be armed: {description}")),
                 Some("watchpoint failure".to_owned()),
             ),
-            StopReason::Watchpoint { .. } | StopReason::WatchpointInvalidated { .. } => {
-                ("data breakpoint", None, None)
+            StopReason::Watchpoint { hits } => {
+                body["hitBreakpointIds"] = self.data.hit(hits).into();
+                (
+                    "data breakpoint",
+                    Some(self.watch_description(hits).await),
+                    None,
+                )
+            }
+            StopReason::WatchpointInvalidated { invalidated } => {
+                self.data_invalidated(invalidated).await?;
+                (
+                    "data breakpoint",
+                    Some(
+                        invalidated
+                            .iter()
+                            .map(|entry| {
+                                format!(
+                                    "the watch on {} ended: {}",
+                                    crate::cli::format::watch_subject(&entry.watchpoint),
+                                    super::watch::invalidation_text(entry.reason)
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    ),
+                    None,
+                )
             }
             StopReason::Exited(_) => return Ok(()),
         };
@@ -1167,17 +1240,20 @@ impl Session {
         )?;
         let mut wants = Vec::new();
         for breakpoint in arguments.breakpoints {
-            let address = protocol::address(&breakpoint.instruction_reference)
+            let key = protocol::address(&breakpoint.instruction_reference)
                 .and_then(|address| protocol::offset(address, breakpoint.offset))
-                .ok_or_else(|| {
-                    ErrorBody::new(format!(
-                        "invalid instruction reference '{}' with offset {}",
-                        breakpoint.instruction_reference,
-                        breakpoint.offset.unwrap_or(0)
-                    ))
-                })?;
+                .map_or_else(
+                    || {
+                        Key::Invalid(format!(
+                            "invalid instruction reference '{}' with offset {}",
+                            breakpoint.instruction_reference,
+                            breakpoint.offset.unwrap_or(0)
+                        ))
+                    },
+                    Key::Instruction,
+                );
             wants.push(Want {
-                key: Key::Instruction(address),
+                key,
                 condition: breakpoint.condition.filter(|text| !text.trim().is_empty()),
                 hit_condition: breakpoint
                     .hit_condition
@@ -1243,6 +1319,9 @@ impl Session {
                 pending: true,
             };
         };
+        if let Key::Invalid(message) = &want.key {
+            return failed(message.clone());
+        }
         if want.condition.is_some() {
             return failed("conditional breakpoints are not supported yet".to_owned());
         }
@@ -1492,7 +1571,7 @@ impl Session {
     /// The recorded path of the source file a client path names: the one
     /// whose local copy it is, or else the only one ending with the most of
     /// its trailing components.
-    fn recorded_path(&mut self, client: &Path) -> PathBuf {
+    pub(super) fn recorded_path(&mut self, client: &Path) -> PathBuf {
         let Some(target) = self.target.as_mut() else {
             return client.to_owned();
         };
@@ -1578,6 +1657,13 @@ impl Session {
         Ok(snapshot)
     }
 
+    /// The assembly syntax the configuration chose.
+    pub(super) fn syntax(&self) -> uscope::AssemblySyntax {
+        self.target
+            .as_ref()
+            .map_or_else(uscope::AssemblySyntax::default, |target| target.syntax)
+    }
+
     pub(super) fn console(&self) -> Result<&Cli, ErrorBody> {
         self.target
             .as_ref()
@@ -1585,7 +1671,17 @@ impl Session {
             .ok_or_else(|| ErrorBody::new("no program is loaded"))
     }
 
-    /// Converts a client line to a one-based line.
+    /// Converts a client's line to a one-based line, if it is one.
+    pub(super) fn line_from_client(&self, line: i64) -> Option<u64> {
+        let line = u64::try_from(line).ok()?;
+        if self.support().lines_start_at1 {
+            Some(line)
+        } else {
+            line.checked_add(1)
+        }
+    }
+
+    /// Converts a one-based line to the client's numbering.
     pub(super) const fn line_to_client(&self, line: u64) -> u64 {
         if self.support().lines_start_at1 {
             line
@@ -1645,7 +1741,7 @@ pub(super) fn signal_text(code: u64) -> String {
 
 fn module_json(module: &uscope::LoadedModuleRecord) -> Value {
     json!({
-        "id": module.module.id.get(),
+        "id": module.module.id.get().to_string(),
         "name": module
             .path
             .file_name()

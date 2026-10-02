@@ -8,12 +8,15 @@ mod breakpoints;
 mod config;
 mod handles;
 mod inspect;
+mod memory;
 mod output;
 pub mod protocol;
 mod session;
 mod signals;
+mod sources;
 pub mod transport;
 mod values;
+mod watch;
 
 use std::fs::File;
 use std::io::Write as _;

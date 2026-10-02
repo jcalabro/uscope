@@ -187,7 +187,7 @@ pub fn breakpoints(breakpoints: &[Breakpoint], renderer: Renderer) -> String {
 }
 
 /// Names a watchpoint by the expression that resolved it, or by its bytes.
-fn watch_subject(watchpoint: &Watchpoint) -> String {
+pub fn watch_subject(watchpoint: &Watchpoint) -> String {
     watchpoint.expression.as_ref().map_or_else(
         || format!("{}:{}", watchpoint.address, watchpoint.byte_size),
         ToString::to_string,
@@ -982,7 +982,7 @@ fn instruction_bytes(bytes: &[u8]) -> String {
 }
 
 /// Renders an instruction's text with each encoded address named.
-fn instruction_text(
+pub fn instruction_text(
     decoded: &DecodedInstruction,
     stopped: bool,
     module: Option<ModuleId>,

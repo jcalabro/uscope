@@ -34,6 +34,8 @@ pub enum Key {
     Instruction(u64),
     /// A debugger breakpoint made from the console.
     Console(BreakpointId),
+    /// A location the client named that names nothing, with the reason.
+    Invalid(String),
 }
 
 /// One breakpoint as the client asked for it.
@@ -186,6 +188,13 @@ impl Breakpoints {
         } else {
             self.groups.insert(group, entries);
         }
+    }
+
+    /// Allocates an id from the one space every kind of breakpoint shares.
+    pub const fn allocate_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
     }
 
     /// Records one more owner of a debugger breakpoint.

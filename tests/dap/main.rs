@@ -10,5 +10,8 @@ mod breakpoints;
 mod console;
 mod execution;
 mod lifecycle;
+mod memory;
 mod output;
+mod sources;
 mod variables;
+mod watch;
