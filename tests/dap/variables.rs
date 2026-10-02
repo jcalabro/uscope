@@ -432,13 +432,13 @@ fn references_from_an_earlier_stop_are_refused_after_resuming() {
         ),
         stale("frame", &frame["id"])
     );
-    // While running, every inspection says the program is not stopped.
+    // Once the program is gone, every inspection says so.
     let resumed = dap.send("continue", json!({"threadId": again.thread}));
     dap.success(resumed);
     dap.event(resumed.mark, "terminated", |_| true);
     assert_eq!(
         dap.request_error("variables", json!({"variablesReference": pair})),
-        "the program is running; this request needs it stopped"
+        "the program is not running"
     );
     dap.finish();
 }

@@ -2115,10 +2115,7 @@ fn disassembly_and_finish_follow_the_selected_frame() {
 }
 
 #[test]
-fn the_innermost_frame_disassembles_where_no_single_inline_frame_is_active() {
-    // A source breakpoint inside the inline body belongs to both the caller
-    // and the inline instance, so no backtrace exists, but the program
-    // counter does.
+fn a_line_breakpoint_inside_an_inline_body_stops_in_the_inline_frame() {
     let stdout = assert_success(uscope(&[
         "build/test-programs/variables-inline-gcc-o0",
         "--batch",
@@ -2127,25 +2124,23 @@ fn the_innermost_frame_disassembles_where_no_single_inline_frame_is_active() {
         "--eval",
         "run",
         "--eval",
+        "backtrace",
+        "--eval",
+        "up",
+        "--eval",
         "disassemble",
     ]));
-    assert!(
-        stdout.contains("function inline_caller in variables-inline-gcc-o0:")
-            && stdout.lines().any(|line| line.starts_with("=> 0x")),
-        "{stdout}"
-    );
-    assert_failure(
-        &uscope(&[
-            "build/test-programs/variables-inline-gcc-o0",
-            "--batch",
-            "--eval",
-            "break variables-inline.c:6",
-            "--eval",
-            "run",
-            "--eval",
-            "up",
-        ]),
-        "the active inline frame is ambiguous",
+    assert_in_order(
+        &stdout,
+        &[
+            "#0  ",
+            " in inline_target at ",
+            "variables-inline.c:6",
+            "#1  ",
+            " in inline_caller at ",
+            "variables-inline.c:12",
+            "function inline_caller in variables-inline-gcc-o0:",
+        ],
     );
 }
 
