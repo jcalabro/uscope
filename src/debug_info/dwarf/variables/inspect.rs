@@ -1713,11 +1713,31 @@ impl DwarfVariableInfo {
         Ok(inspected_value(Some(type_info), state, budget))
     }
 
+    /// Materializes a value, with its text when it is a string.
+    pub(super) fn materialize_value_state(
+        &self,
+        type_id: TypeId,
+        shape: &ValueShape,
+        storage: &LocatedStorage,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<VariableState> {
+        let mut state =
+            self.materialize_shape_state(type_id, shape, storage, context, runtime, budget)?;
+        if let VariableState::Available { value, text, .. } = &mut state {
+            *text = self
+                .text_summary(shape, value, storage, runtime)
+                .map(Arc::new);
+        }
+        Ok(state)
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "each value shape has a distinct lazy summary and child capability"
     )]
-    pub(super) fn materialize_value_state(
+    fn materialize_shape_state(
         &self,
         type_id: TypeId,
         shape: &ValueShape,
@@ -1732,6 +1752,7 @@ impl DwarfVariableInfo {
             value,
             dereference,
             children: ValueChildren::NotApplicable,
+            text: None,
         };
         let read =
             |size: u64,
@@ -1842,6 +1863,7 @@ impl DwarfVariableInfo {
                         value: VariableValue::ImplicitPointer,
                         dereference,
                         children: ValueChildren::NotApplicable,
+                        text: None,
                     }
                 }
                 _ => match read(*byte_size, runtime, budget) {
@@ -1924,6 +1946,7 @@ impl DwarfVariableInfo {
                     children: ValueChildren::Available(Self::child_reference(
                         storage, context, type_id, total, None,
                     )),
+                    text: None,
                 }
             }
             ValueShapeKind::Slice {
@@ -1963,6 +1986,7 @@ impl DwarfVariableInfo {
                         decoded.length,
                         None,
                     )),
+                    text: None,
                 }
             }
             ValueShapeKind::Record { members, bases, .. } => {
@@ -1976,6 +2000,7 @@ impl DwarfVariableInfo {
                     children: ValueChildren::Available(Self::child_reference(
                         storage, context, type_id, total, None,
                     )),
+                    text: None,
                 }
             }
             ValueShapeKind::Union { members, .. } => {
@@ -1988,6 +2013,7 @@ impl DwarfVariableInfo {
                     children: ValueChildren::Available(Self::child_reference(
                         storage, context, type_id, total, None,
                     )),
+                    text: None,
                 }
             }
             ValueShapeKind::Variant {
@@ -2046,6 +2072,7 @@ impl DwarfVariableInfo {
                         u64::try_from(total).unwrap_or(u64::MAX),
                         active,
                     )),
+                    text: None,
                 }
             }
         })

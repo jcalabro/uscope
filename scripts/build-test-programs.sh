@@ -718,6 +718,10 @@ build_cpp_fixture g++ "$cpp_fixtures_dir/records.cpp" "$output_dir/records-cpp-g
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_cpp_fixture clang++ "$cpp_fixtures_dir/records.cpp" "$output_dir/records-cpp-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+# libstdc++ only declares std::string in programs that use it; clang's
+# standalone debug information defines it, so its layout is known.
+build_cpp_fixture clang++ "$cpp_fixtures_dir/strings.cpp" "$output_dir/strings-cpp-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fstandalone-debug -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/globals.cpp" "$output_dir/globals-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture clang++ "$cpp_fixtures_dir/globals.cpp" "$output_dir/globals-cpp-clang-o0" \
@@ -748,6 +752,8 @@ build_rust_fixture "$rust_fixtures_dir/records.rs" "$output_dir/records-rust-o0"
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/records.rs" "$output_dir/records-rust-o2" \
     -C opt-level=2 -C force-frame-pointers=no
+build_rust_fixture "$rust_fixtures_dir/strings.rs" "$output_dir/strings-rust-o0" \
+    -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/enums.rs" "$output_dir/enums-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/enums.rs" "$output_dir/enums-rust-o2" \
@@ -764,6 +770,8 @@ build_go_fixture "$go_fixtures_dir/records" "$output_dir/records-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/records" "$output_dir/records-go-o2" \
     -buildmode=pie
+build_go_fixture "$go_fixtures_dir/strings" "$output_dir/strings-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/globals" "$output_dir/globals-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/globals" "$output_dir/globals-go-o2" \
@@ -831,6 +839,8 @@ build_fixture gcc "$c_fixtures_dir/threads.c" "$output_dir/threads" \
 build_fixture gcc "$c_fixtures_dir/process-environment.c" "$output_dir/process-environment" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/output-streams.c" "$output_dir/output-streams" \
+    -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/strings.c" "$output_dir/strings-c-gcc-o0" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/line-sliding.c" "$output_dir/line-sliding" \
     -O0 -g3 -fPIE -pie

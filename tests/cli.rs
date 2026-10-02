@@ -358,6 +358,40 @@ fn batch_mode_sets_and_clears_breakpoint_conditions() {
 }
 
 #[test]
+fn strings_print_as_quoted_escaped_text() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/strings.c");
+    let line = std::fs::read_to_string(&path)
+        .expect("source")
+        .lines()
+        .position(|line| line.contains("strings stop here"))
+        .expect("marker")
+        + 1;
+    let stdout = batch(
+        "strings-c-gcc-o0",
+        &[],
+        &[&format!("break strings.c:{line}"), "run", "print"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "(const char *) greeting = 0x",
+            " \"hello, world\"\n",
+            "(const char *) escaped = 0x",
+            r#" "tab\there \"quoted\" \\ é\x80""#,
+            "(const char *) long_text = 0x",
+            &format!(" \"{}\"...\n", "x".repeat(256)),
+            "(const char *) edge = 0x",
+            " \"eeeee\"... <unreadable at 0x",
+            "(char[16]) buffer = \"abc\"\n",
+            "(char[4]) unterminated = \"wxyz\"\n",
+            "(const char *) null_text = 0x0000000000000000\n",
+            "(const char *) invalid = 0x0000000000000001 \"\"... <unreadable at 0x1>\n",
+            "(unsigned char[3]) bytes = \"A\\xff\"\n",
+        ],
+    );
+}
+
+#[test]
 fn hit_condition_commands_explain_rejected_input() {
     for (commands, message) in [
         (

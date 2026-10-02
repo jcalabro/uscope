@@ -50,6 +50,7 @@ mod globals;
 mod inspect;
 mod location;
 mod shape;
+mod text;
 mod types;
 mod variant;
 

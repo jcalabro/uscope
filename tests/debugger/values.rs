@@ -2467,3 +2467,161 @@ async fn readable_invalid_boolean_bytes_are_not_reported_as_unavailable_or_malfo
         scenario.shutdown().await;
     }
 }
+
+/// The text summary of a variable, or `None` when it has none.
+fn text_of(variables: &[uscope::Variable], name: &str) -> Option<uscope::TextSummary> {
+    let variable = variables
+        .iter()
+        .find(|variable| &*variable.name == name)
+        .unwrap_or_else(|| panic!("no variable {name} in {variables:?}"));
+    let VariableState::Available { text, .. } = &variable.state else {
+        panic!("{name} is not available: {:?}", variable.state);
+    };
+    text.as_deref().cloned()
+}
+
+fn text(bytes: &[u8], completion: uscope::TextCompletion) -> uscope::TextSummary {
+    uscope::TextSummary {
+        bytes: bytes.into(),
+        completion,
+    }
+}
+
+/// Text longer than a summary holds, of one repeated byte.
+fn truncated(byte: u8, length: Option<u64>) -> uscope::TextSummary {
+    text(
+        &[byte; uscope::TextSummary::MAX_BYTES],
+        uscope::TextCompletion::Truncated { length },
+    )
+}
+
+/// Stops a fixture at its "strings stop here" line, or in `function`, and
+/// checks each variable's text.
+async fn assert_strings(
+    fixture: &str,
+    source: &str,
+    function: Option<&str>,
+    expected: &[(&str, Option<uscope::TextSummary>)],
+) {
+    let mut scenario = Scenario::launch(fixture);
+    if let Some(function) = function {
+        scenario.add_breakpoint(function).await;
+    } else {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(source);
+        let line = std::fs::read_to_string(&path)
+            .expect("source")
+            .lines()
+            .position(|line| line.contains("strings stop here"))
+            .expect("marker") as u64
+            + 1;
+        let file = path.file_name().expect("name").to_str().expect("utf8");
+        scenario.add_source_breakpoint(file, line).await;
+    }
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let variables = scenario
+        .operation("variables", scenario.handle().variables())
+        .await;
+    for (name, expected) in expected {
+        assert_eq!(
+            &text_of(&variables.variables, name),
+            expected,
+            "{fixture} {name}"
+        );
+    }
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn c_strings_read_up_to_their_terminator_limit_or_unreadable_memory() {
+    use uscope::TextCompletion::{Complete, Unreadable};
+
+    let unreadable = Unreadable {
+        address: VirtualAddress::new(1),
+    };
+    assert_strings(
+        "strings-c-gcc-o0",
+        "c/strings.c",
+        None,
+        &[
+            ("greeting", Some(text(b"hello, world", Complete))),
+            (
+                "escaped",
+                Some(text(b"tab\there \"quoted\" \\ \xc3\xa9\x80", Complete)),
+            ),
+            ("long_text", Some(truncated(b'x', None))),
+            ("buffer", Some(text(b"abc", Complete))),
+            // An array without a terminator is all text.
+            ("unterminated", Some(text(b"wxyz", Complete))),
+            ("null_text", None),
+            ("invalid", Some(text(b"", unreadable))),
+            ("bytes", Some(text(b"A\xff", Complete))),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn cpp_rust_and_go_strings_read_their_recorded_length() {
+    use uscope::TextCompletion::Complete;
+
+    assert_strings(
+        "strings-cpp-clang-o0",
+        "cpp/strings.cpp",
+        None,
+        &[
+            ("short_text", Some(text(b"short", Complete))),
+            ("long_text", Some(truncated(b'y', Some(300)))),
+            ("empty", Some(text(b"", Complete))),
+            ("with_nul", Some(text(b"a\0b", Complete))),
+        ],
+    )
+    .await;
+    assert_strings(
+        "strings-rust-o0",
+        "rust/strings.rs",
+        Some("strings_target"),
+        &[
+            ("borrowed", Some(text("héllo".as_bytes(), Complete))),
+            ("owned", Some(text(b"owned text", Complete))),
+            ("empty", Some(text(b"", Complete))),
+            ("long", Some(truncated(b'z', Some(300)))),
+        ],
+    )
+    .await;
+    assert_strings(
+        "strings-go-o0",
+        "go/strings/main.go",
+        None,
+        &[
+            ("name", Some(text(b"gopher", Complete))),
+            ("long", Some(truncated(b'g', Some(300)))),
+            ("empty", Some(text(b"", Complete))),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn text_running_into_an_unmapped_page_stops_at_the_page() {
+    let mut scenario = Scenario::launch("strings-c-gcc-o0");
+    scenario.add_breakpoint("strings_target").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let variables = scenario
+        .operation("variables", scenario.handle().variables())
+        .await;
+    let edge = text_of(&variables.variables, "edge").expect("text");
+    assert_eq!(&*edge.bytes, b"eeeee");
+    let uscope::TextCompletion::Unreadable { address } = edge.completion else {
+        panic!("the text continues into an unmapped page: {edge:?}");
+    };
+    assert_eq!(address.get() % 4096, 0);
+    scenario.shutdown().await;
+}
