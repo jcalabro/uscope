@@ -1,0 +1,203 @@
+{
+  "name": "uscope",
+  "displayName": "uscope",
+  "description": "Debug native Linux programs written in C, C++, Rust, Go, and Zig with uscope",
+  "version": "0.1.0",
+  "publisher": "uscope",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "contributes": {
+    "breakpoints": [
+      { "language": "c" },
+      { "language": "cpp" },
+      { "language": "rust" },
+      { "language": "go" },
+      { "language": "zig" }
+    ],
+    "debuggers": [
+      {
+        "type": "uscope",
+        "label": "uscope",
+        "languages": ["c", "cpp", "rust", "go", "zig"],
+        "runtime": "uscope",
+        "runtimeArgs": ["dap"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "The executable to launch."
+              },
+              "args": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": [],
+                "description": "Arguments passed to the program."
+              },
+              "cwd": {
+                "type": "string",
+                "description": "The program's working directory. Defaults to the adapter's."
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": { "type": ["string", "null"] },
+                "default": {},
+                "description": "Environment variables set over the adapter's environment; null removes one."
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false,
+                "description": "Stop at the program's first instruction, in the dynamic loader."
+              },
+              "console": {
+                "type": "string",
+                "enum": ["internalConsole", "integratedTerminal", "externalTerminal"],
+                "enumDescriptions": [
+                  "The program's output appears in the debug console, and its input is empty.",
+                  "The program runs in the integrated terminal, which owns its input and output.",
+                  "The program runs in an external terminal, which owns its input and output."
+                ],
+                "default": "internalConsole",
+                "description": "Where the program's standard streams go."
+              },
+              "sourceMap": {
+                "type": ["array", "object"],
+                "default": [],
+                "description": "Rules that read source files recorded under one path from another: [[\"/build/src\", \"${workspaceFolder}/src\"]]. Earlier rules are tried first."
+              },
+              "disassemblySyntax": {
+                "type": "string",
+                "enum": ["intel", "att"],
+                "default": "intel",
+                "description": "The assembly syntax of the disassembly view."
+              },
+              "signals": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": ["string", "array"],
+                  "items": { "type": "string" }
+                },
+                "default": {},
+                "description": "How each signal is handled, over the exception filters: stop, nostop, print, noprint, pass, or nopass, such as {\"SIGUSR1\": \"nostop\"}."
+              }
+            }
+          },
+          "attach": {
+            "properties": {
+              "pid": {
+                "type": ["integer", "string"],
+                "default": "${command:pickProcess}",
+                "description": "The process to attach to."
+              },
+              "coreFile": {
+                "type": "string",
+                "description": "A core dump to open instead of a process."
+              },
+              "program": {
+                "type": "string",
+                "description": "The process's or core dump's executable, when it cannot be found automatically."
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "default": false,
+                "description": "Stay stopped after attaching instead of continuing the process."
+              },
+              "sysroot": {
+                "type": "string",
+                "description": "A copy of the files of the machine that wrote the core dump, in which its module paths are looked up."
+              },
+              "modulePaths": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": [],
+                "description": "Directories searched for core dump modules missing from their recorded paths."
+              },
+              "allowModuleMismatch": {
+                "type": "boolean",
+                "default": false,
+                "description": "Use module files that cannot be proven to match the core dump."
+              },
+              "sourceMap": {
+                "type": ["array", "object"],
+                "default": [],
+                "description": "Rules that read source files recorded under one path from another."
+              },
+              "disassemblySyntax": {
+                "type": "string",
+                "enum": ["intel", "att"],
+                "default": "intel",
+                "description": "The assembly syntax of the disassembly view."
+              },
+              "signals": {
+                "type": "object",
+                "default": {},
+                "description": "How each signal is handled, over the exception filters."
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "uscope",
+            "request": "launch",
+            "name": "Launch",
+            "program": "${workspaceFolder}/a.out",
+            "args": [],
+            "cwd": "${workspaceFolder}"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "uscope: Launch",
+            "description": "Launch a program under uscope.",
+            "body": {
+              "type": "uscope",
+              "request": "launch",
+              "name": "Launch",
+              "program": "^\"\\${workspaceFolder}/${1:a.out}\"",
+              "args": [],
+              "cwd": "^\"\\${workspaceFolder}\""
+            }
+          },
+          {
+            "label": "uscope: Launch in the integrated terminal",
+            "description": "Launch a program whose input and output belong to a terminal.",
+            "body": {
+              "type": "uscope",
+              "request": "launch",
+              "name": "Launch in terminal",
+              "program": "^\"\\${workspaceFolder}/${1:a.out}\"",
+              "console": "integratedTerminal"
+            }
+          },
+          {
+            "label": "uscope: Attach to a process",
+            "description": "Attach to a running process.",
+            "body": {
+              "type": "uscope",
+              "request": "attach",
+              "name": "Attach",
+              "pid": "^\"\\${command:pickProcess}\""
+            }
+          },
+          {
+            "label": "uscope: Open a core dump",
+            "description": "Inspect a core dump.",
+            "body": {
+              "type": "uscope",
+              "request": "attach",
+              "name": "Core dump",
+              "coreFile": "^\"\\${workspaceFolder}/${1:core}\""
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -47,3 +47,17 @@ lint:
 
 # Checks formatting, runs Clippy, and runs the complete test suite.
 check: lint test
+
+# Drives the DAP adapter from a real VS Code window, as a user would, and
+# records each session's traffic in DIR. Needs a display. Recording into
+# tests/dap/traffic refreshes the traffic the DAP tests replay.
+uat-vscode DIR="target/uat": build
+    PATH="$PWD/target/debug:$PATH" editors/vscode/test/run.sh "$1"
+    sed -i "s#$PWD#\${root}#g" "$1"/vscode-*.log
+
+# Drives the DAP adapter from nvim-dap in a headless Neovim and records each
+# session's traffic in DIR. NVIM_DAP is an nvim-dap checkout.
+uat-nvim NVIM_DAP DIR="target/uat": build
+    rm -f "$2"/nvim-*.log
+    PATH="$PWD/target/debug:$PATH" nvim --headless --clean -l editors/nvim/uat.lua "$1" "$PWD" "$2"
+    sed -i "s#$PWD#\${root}#g" "$2"/nvim-*.log
