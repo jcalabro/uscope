@@ -536,8 +536,9 @@ struct Inferior {
     unowned_stops: BTreeMap<Pid, WaitEvent>,
     /// Threads that began exiting before the event that announces them.
     vanished_threads: BTreeSet<Pid>,
-    /// Fork children announced before their initial stop arrived.
-    fork_children: BTreeSet<Pid>,
+    /// Fork children announced before their initial stop arrived, with the
+    /// breakpoint sites each inherited.
+    fork_children: BTreeMap<Pid, Vec<(VirtualAddress, u8)>>,
     waiter: Option<Waiter>,
     active: Option<ActiveExecution>,
     repairs: VecDeque<RepairGroup>,
@@ -572,7 +573,7 @@ impl Inferior {
             retired_threads: BTreeSet::new(),
             unowned_stops: BTreeMap::new(),
             vanished_threads: BTreeSet::new(),
-            fork_children: BTreeSet::new(),
+            fork_children: BTreeMap::new(),
             waiter,
             active: None,
             repairs: VecDeque::new(),
@@ -658,6 +659,16 @@ impl Inferior {
             }
         }
         interrupted
+    }
+
+    /// The breakpoint sites a process forked now inherits, with their
+    /// original bytes. A site lifted for a repair is included, since
+    /// restoring a byte that is already in place changes nothing.
+    fn inherited_sites(&self) -> Vec<(VirtualAddress, u8)> {
+        self.breakpoints
+            .iter()
+            .map(|(&address, site)| (address, site.original_byte))
+            .collect()
     }
 
     /// Ends `pid`'s step over the front repair group's breakpoint at `address`.
@@ -812,6 +823,9 @@ struct Controller<P: InspectionOps> {
     next_watchpoint_id: u64,
     launch_reply: Option<Reply<ExecutionId>>,
     attach_reply: Option<Reply<StopId>>,
+    /// How many times the attach in progress found threads it had not
+    /// traced.
+    attach_rescans: u32,
     /// Whether the session is ending: wait events then only advance the kill
     /// or detach, and the controller exits once the inferior is gone.
     shutting_down: bool,
@@ -878,6 +892,7 @@ impl<P: InspectionOps> Controller<P> {
             next_watchpoint_id: 1,
             launch_reply: None,
             attach_reply: None,
+            attach_rescans: 0,
             shutting_down: false,
             shutdown_reply: None,
             kill_reply: None,
@@ -1285,7 +1300,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             );
             let expected = stop
                 || retired
-                || inferior.fork_children.contains(&pid)
+                || inferior.fork_children.contains_key(&pid)
                 || matches!(
                     status,
                     WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_EXIT)
@@ -1373,6 +1388,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         } else if is_stopping_signal(signal) {
             // A seized thread reports a group-stop here, with its signal.
             ClassifiedStop::GroupStop(signal)
+        } else if signal == Signal::SIGTRAP {
+            // A `PTRACE_INTERRUPT` that reached a thread already in another
+            // ptrace-stop, such as a clone event while attaching, is kept
+            // until the thread resumes. It then stops before running any
+            // instruction, after the debugger took the other stop for it.
+            ClassifiedStop::DebuggerRequested
         } else {
             return self.handle_ptrace_event(pid, libc::PTRACE_EVENT_STOP);
         };

@@ -245,6 +245,7 @@ impl LinuxTraceOps for LinuxPtrace {
         match ptrace::seize(pid, trace_options(exit_kill)) {
             Ok(()) => Ok(true),
             Err(Errno::ESRCH) => Ok(false),
+            Err(Errno::EPERM) if thread_has_exited(pid) => Ok(false),
             Err(error) => Err(backend_error(LinuxError::System(error))),
         }
     }
@@ -751,6 +752,20 @@ pub(super) fn process_threads(process: Pid) -> Result<Vec<Pid>> {
         .collect::<Vec<_>>();
     threads.sort_unstable();
     Ok(threads)
+}
+
+/// Whether a thread is gone or has finished exiting. Such a thread stays
+/// in the thread list for a moment, and `PTRACE_SEIZE` refuses it with
+/// `EPERM`.
+fn thread_has_exited(pid: Pid) -> bool {
+    match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // Fields resume after the command name's final parenthesis.
+        Ok(stat) => stat
+            .rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().next())
+            .is_some_and(|state| matches!(state, "Z" | "X")),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
 }
 
 pub(super) fn trace_options(exit_kill: bool) -> Options {

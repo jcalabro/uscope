@@ -1047,18 +1047,21 @@ impl<P: LinuxTraceOps> Controller<P> {
             .collect();
         for pid in running {
             let thread = inferior.thread_mut(pid)?;
-            // A clone or another ptrace event can stop this thread and satisfy an
-            // earlier barrier before its requested SIGSTOP is delivered. Standard
-            // signals coalesce, so retain that outstanding request instead of
-            // sending an indistinguishable duplicate for the next barrier.
-            if !thread.debugger_stop_pending {
-                if attached {
-                    let _ = self.ptrace.interrupt(pid)?;
-                } else {
-                    self.ptrace.request_stop(tgid, pid)?;
-                }
-                thread.debugger_stop_pending = true;
+            if attached {
+                // Any ptrace-stop after an interrupt, such as a clone event,
+                // satisfies it without the stop it asked for, so a seized
+                // thread is always asked again. Interrupts coalesce, and one
+                // that outlives its barrier is absorbed when it stops.
+                let _ = self.ptrace.interrupt(pid)?;
+            } else if !thread.debugger_stop_pending {
+                // A clone or another ptrace event can stop this thread and
+                // satisfy an earlier barrier before its requested SIGSTOP is
+                // delivered. Standard signals coalesce, so retain that
+                // outstanding request instead of sending an indistinguishable
+                // duplicate for the next barrier.
+                self.ptrace.request_stop(tgid, pid)?;
             }
+            thread.debugger_stop_pending = true;
             thread.state = NativeThreadState::StopRequested;
         }
         Ok(())
@@ -1075,12 +1078,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !ready {
             return Ok(());
         }
-        if self.attach_reply.is_none() && self.drain_queued_traps()? {
-            return Ok(());
-        }
-
         if self.attach_reply.is_some() {
+            if self.seize_untraced_threads()? {
+                return Ok(());
+            }
             self.initialize_attached_inferior()?;
+        } else if self.drain_queued_traps()? {
+            return Ok(());
         }
         self.restore_active_breakpoints()?;
         let edits = self

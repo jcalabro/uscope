@@ -218,7 +218,24 @@ fn missed_events_are_recovered_from_the_debuggers_state() {
         mark = resumed.mark;
     }
     dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
-    assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
+    // A thread can reach the breakpoint before its removal takes effect,
+    // which stops the program there once more.
+    let (kind, body) = dap.next_event(mark, &["stopped", "exited"]);
+    let exited = if kind == "stopped" {
+        assert!(
+            matches!(
+                body["reason"].as_str(),
+                Some("function breakpoint" | "breakpoint")
+            ),
+            "{body}"
+        );
+        let resumed = dap.send("continue", json!({"threadId": body["threadId"]}));
+        dap.success(resumed);
+        dap.event(resumed.mark, "exited", |_| true)
+    } else {
+        body
+    };
+    assert_eq!(exited, json!({"exitCode": 0}));
     dap.event(mark, "terminated", |_| true);
     dap.finish();
 

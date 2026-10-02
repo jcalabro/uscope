@@ -1356,6 +1356,8 @@ struct DebugRegisterTrace {
     vanished: RefCell<BTreeSet<Pid>>,
     /// The child reported by the next clone event, in the process `tgid`.
     clone: RefCell<Option<(Pid, Pid)>>,
+    /// The process's thread list.
+    listed_threads: RefCell<Vec<Pid>>,
 }
 
 impl DebugRegisterTrace {
@@ -1416,10 +1418,11 @@ impl LinuxTraceOps for DebugRegisterTrace {
         })
     }
     fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
-        RecordingTrace::unexpected("process_threads")
+        Ok(self.listed_threads.borrow().clone())
     }
-    fn seize(&self, _pid: Pid, _exit_kill: bool) -> Result<bool> {
-        RecordingTrace::unexpected("seize")
+    fn seize(&self, pid: Pid, _exit_kill: bool) -> Result<bool> {
+        self.record(format!("seize {pid}"));
+        Ok(true)
     }
     fn interrupt(&self, pid: Pid) -> Result<bool> {
         self.record(format!("interrupt {pid}"));
@@ -1446,10 +1449,11 @@ impl LinuxTraceOps for DebugRegisterTrace {
         _executable_data: &[u8],
         _identity: FileIdentity,
     ) -> Result<u64> {
-        RecordingTrace::unexpected("load_bias")
+        Ok(0)
     }
-    fn write_word(&self, _pid: Pid, _address: u64, _value: u64) -> Result<()> {
-        RecordingTrace::unexpected("write_word")
+    fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()> {
+        self.record(format!("write_word {pid} {address:#x} {value:#x}"));
+        Ok(())
     }
     fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
         self.record(format!("continue {pid} {signal:?}"));
@@ -2423,6 +2427,177 @@ fn detaching_collects_queued_traps_before_releasing_the_process() {
     assert!(
         actions.contains(&format!("detach {pid} None")),
         "the collected trap is not delivered: {actions:?}"
+    );
+}
+
+impl WatchHarness {
+    /// Makes the harness's threads those of an attach that has seized and
+    /// interrupted them, and returns the attach's reply.
+    fn begin_attach(&mut self) -> tokio::sync::oneshot::Receiver<Result<StopId>> {
+        let (reply, attached) = tokio::sync::oneshot::channel();
+        self.controller.attach_reply = Some(reply);
+        let inferior = self.controller.inferior.as_mut().expect("inferior");
+        inferior.origin = InferiorOrigin::Attached;
+        inferior.public_stop = None;
+        inferior.barrier = Some(StopBarrier::visible(inferior.tgid, StopReason::Attach));
+        for thread in inferior.threads.values_mut() {
+            *thread = TraceThread::starting(ExpectedStop::InitialAttach);
+        }
+        self.trace().listed_threads.replace(self.threads.clone());
+        self.trace().take_actions();
+        attached
+    }
+
+    /// Reports the `PTRACE_EVENT_STOP` an interrupt causes.
+    fn interrupted(&mut self, pid: Pid) -> Result<()> {
+        self.controller.process_wait(WaitEvent::PtraceEvent(
+            pid,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_STOP,
+        ))
+    }
+
+    /// Reports `parent` stopped at its clone event for `child`.
+    fn cloned(&mut self, parent: Pid, child: Pid) -> Result<()> {
+        let tgid = self.controller.inferior.as_ref().expect("inferior").tgid;
+        self.trace().clone.replace(Some((child, tgid)));
+        self.controller.process_wait(WaitEvent::PtraceEvent(
+            parent,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_CLONE,
+        ))
+    }
+}
+
+#[test]
+fn an_attach_traces_threads_created_while_their_creators_were_seized() {
+    let mut harness = watch_harness(1);
+    let leader = harness.threads[0];
+    let mut attached = harness.begin_attach();
+    // The leader was seized inside clone, after the kernel had decided not
+    // to trace the thread it was creating, which the thread list now shows.
+    let untraced = Pid::from_raw(5100);
+    harness.trace().listed_threads.borrow_mut().push(untraced);
+
+    harness.interrupted(leader).expect("leader stops");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("seize {untraced}"), format!("interrupt {untraced}")]
+    );
+    assert!(
+        attached.try_recv().is_err(),
+        "{:?}",
+        harness.public_reason()
+    );
+
+    harness.interrupted(untraced).expect("new thread stops");
+    attached
+        .try_recv()
+        .expect("attach replied")
+        .expect("attached");
+    assert_eq!(harness.public_reason(), Some(StopReason::Attach));
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert_eq!(
+        inferior.threads.keys().copied().collect::<Vec<_>>(),
+        [leader, untraced]
+    );
+}
+
+#[test]
+fn an_interrupt_kept_past_a_clone_event_resumes_the_thread_unseen() {
+    let mut harness = watch_harness(1);
+    let leader = harness.threads[0];
+    let child = Pid::from_raw(5001);
+    let mut attached = harness.begin_attach();
+    // The leader was already at its clone event when the attach interrupted
+    // it. The kernel keeps such an interrupt until the thread resumes.
+    harness.trace().listed_threads.borrow_mut().push(child);
+    harness.cloned(leader, child).expect("clone event");
+    harness.interrupted(child).expect("new thread starts");
+    attached
+        .try_recv()
+        .expect("attach replied")
+        .expect("attached");
+    harness.resume().expect("continue");
+    harness.trace().take_actions();
+    while harness.events.try_recv().is_ok() {}
+
+    harness.interrupted(leader).expect("kept interrupt");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("continue {leader} None")]
+    );
+    assert_eq!(harness.public_reason(), None);
+    assert_eq!(harness.published_stops(), 0);
+}
+
+#[test]
+fn a_seized_thread_whose_interrupt_a_clone_event_took_is_interrupted_again() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    let child = Pid::from_raw(5100);
+    harness
+        .controller
+        .inferior
+        .as_mut()
+        .expect("inferior")
+        .origin = InferiorOrigin::Attached;
+    harness.resume().expect("continue");
+    let process = process_id(harness.controller.inferior.as_ref().expect("inferior").tgid);
+
+    // The first thread reaches its clone event after the pause interrupts
+    // it. That stop satisfies the interrupt, so no other stop follows.
+    harness.controller.begin_pause(process).expect("pause");
+    harness.cloned(first, child).expect("clone event");
+    harness.interrupted(child).expect("new thread starts");
+    harness.interrupted(second).expect("second stops");
+    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
+
+    harness.resume().expect("continue");
+    harness.trace().take_actions();
+    harness.controller.begin_pause(process).expect("pause");
+    let actions = harness.trace().take_actions();
+    for pid in [first, second, child] {
+        assert!(actions.contains(&format!("interrupt {pid}")), "{actions:?}");
+    }
+}
+
+#[test]
+fn a_fork_child_loses_each_trap_it_inherited_even_one_lifted_since() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    let child = Pid::from_raw(6000);
+    harness.trace().clone.replace(Some((child, child)));
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            parent,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_FORK,
+        ))
+        .expect("fork event");
+    harness.hit(parent).expect("breakpoint stop");
+    assert_eq!(harness.public_reason(), Some(site_hit(1)));
+    // The parent steps over the trap it stopped at, lifted from its own
+    // memory but not from the child's, when the child first stops.
+    harness.resume().expect("continue");
+    assert!(harness.trace().take_actions().ends_with(&[
+        format!("remove_site {HIT_SITE:#x}"),
+        format!("step {parent}")
+    ]));
+
+    harness
+        .controller
+        .process_wait(WaitEvent::Stopped(child, Signal::SIGSTOP))
+        .expect("child's first stop");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            format!("write_word {child} {HIT_SITE:#x} 0x90"),
+            format!("detach {child} None"),
+        ]
     );
 }
 

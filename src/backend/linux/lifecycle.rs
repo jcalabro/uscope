@@ -13,7 +13,7 @@ use crate::protocol::{
     DebuggerEvent, ExceptionDisposition, ExecutionId, ExitStatus, LaunchOptions, ProcessId, Reply,
     ResumeScope, StopId, StopReason,
 };
-use crate::{Error, LoadedModule, Result};
+use crate::{Error, LoadedModule, Result, VirtualAddress};
 
 use super::breakpoints::install_logical_breakpoint;
 use super::native::{LinuxTraceOps, is_vanished_tracee, wait_for};
@@ -22,6 +22,10 @@ use super::{
     InferiorOrigin, LinuxError, NativeThreadState, StopBarrier, TraceThread, Waiter, backend_error,
     debug_thread_id, exception_info, process_id,
 };
+
+/// How many times an attach may find threads it has not traced before it
+/// gives up on a thread list that never settles.
+const MAX_ATTACH_RESCANS: u32 = 128;
 
 impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn launch(&mut self, options: LaunchOptions, reply: Reply<ExecutionId>) {
@@ -98,22 +102,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         };
 
+        // Threads created while these are seized are found once every seized
+        // thread has stopped; see `seize_untraced_threads`. Listing again now
+        // could not find them all, and would find threads already traced
+        // through their creator's clone event, which cannot be seized.
         let mut seized = BTreeSet::new();
         let result = (|| -> Result<()> {
-            for _ in 0..128 {
-                let observed = self.ptrace.process_threads(tgid)?;
-                for tid in observed {
-                    if !seized.contains(&tid) && self.ptrace.seize(tid, false)? {
-                        seized.insert(tid);
-                    }
-                }
-                let current = self.ptrace.process_threads(tgid)?;
-                if current.iter().all(|tid| seized.contains(tid)) {
-                    seized.retain(|tid| current.binary_search(tid).is_ok());
-                    return Ok(());
+            for tid in self.ptrace.process_threads(tgid)? {
+                if self.ptrace.seize(tid, false)? {
+                    seized.insert(tid);
                 }
             }
-            Err(backend_error(LinuxError::AttachThreadsUnstable))
+            Ok(())
         })();
         if let Err(error) = result {
             self.rollback_seized(&seized);
@@ -154,6 +154,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             Some(waiter),
         ));
         self.attach_reply = Some(reply);
+        self.attach_rescans = 0;
 
         for tid in seized {
             match self.ptrace.interrupt(tid) {
@@ -343,6 +344,59 @@ impl<P: LinuxTraceOps> Controller<P> {
         thread.state = NativeThreadState::Stopped;
         thread.expected = ExpectedStop::None;
         self.finish_barrier_if_ready()
+    }
+
+    /// Seizes the threads an attach has not traced yet, and returns whether
+    /// the attach now waits for any of them to stop.
+    ///
+    /// The kernel decides whether a new thread is traced as its clone
+    /// begins, so a thread seized inside clone creates an untraced thread,
+    /// which can join the thread list after any listing taken meanwhile.
+    /// Once every seized thread is stopped none is inside clone, and each
+    /// thread they created since was announced by its clone event. Any
+    /// other listed thread is untraced, and would die of the first
+    /// breakpoint it reached.
+    pub(super) fn seize_untraced_threads(&mut self) -> Result<bool> {
+        loop {
+            let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+            let untraced = self
+                .ptrace
+                .process_threads(inferior.tgid)?
+                .into_iter()
+                .filter(|tid| {
+                    !inferior.threads.contains_key(tid)
+                        && !inferior.retired_threads.contains(tid)
+                        && !inferior.vanished_threads.contains(tid)
+                        && !inferior.unowned_stops.contains_key(tid)
+                })
+                .collect::<Vec<_>>();
+            if untraced.is_empty() {
+                return Ok(false);
+            }
+            // Untraced threads can keep creating untraced threads.
+            self.attach_rescans += 1;
+            if self.attach_rescans > MAX_ATTACH_RESCANS {
+                return Err(backend_error(LinuxError::AttachThreadsUnstable));
+            }
+            let mut waiting = false;
+            for tid in untraced {
+                if !self.ptrace.seize(tid, false)? {
+                    continue;
+                }
+                if self.ptrace.interrupt(tid)? {
+                    inferior
+                        .threads
+                        .insert(tid, TraceThread::starting(ExpectedStop::InitialAttach));
+                    waiting = true;
+                } else {
+                    // The thread is exiting; its exit status retires it.
+                    inferior.retired_threads.insert(tid);
+                }
+            }
+            if waiting {
+                return Ok(true);
+            }
+        }
     }
 }
 
@@ -552,10 +606,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .map_err(|_| Error::AddressOverflow)?,
         );
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        // The child's memory is the parent's as it forked; later edits, such
+        // as lifting a site to step over it, never reach the child.
+        let sites = inferior.inherited_sites();
         if inferior.unowned_stops.remove(&child).is_some() {
-            self.release_fork_child(child);
+            self.release_fork_child(child, &sites);
         } else {
-            inferior.fork_children.insert(child);
+            inferior.fork_children.insert(child, sites);
         }
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         if inferior.barrier.is_some() {
@@ -566,20 +623,15 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Detaches a stopped fork child after removing the breakpoints it
-    /// inherited, which would otherwise kill it with SIGTRAP once untraced.
-    /// Debug registers are not inherited across fork. A child that cannot be
-    /// cleaned is killed rather than released with traps in place.
-    pub(super) fn release_fork_child(&mut self, child: Pid) {
+    /// inherited, `sites`, which would otherwise kill it with SIGTRAP once
+    /// untraced. Debug registers are not inherited across fork. A child that
+    /// cannot be cleaned is killed rather than released with traps in place.
+    pub(super) fn release_fork_child(&mut self, child: Pid, sites: &[(VirtualAddress, u8)]) {
         let Some(inferior) = self.inferior.as_mut() else {
             return;
         };
-        let sites = inferior
-            .breakpoints
-            .iter()
-            .filter(|(_, site)| site.installed)
-            .map(|(&address, site)| (address, site.original_byte));
         let mut cleaned = Ok(());
-        for (address, original_byte) in sites {
+        for &(address, original_byte) in sites {
             cleaned = self
                 .ptrace
                 .read_word(child, address.get())
@@ -892,7 +944,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         match status {
             WaitEvent::Exited(..) | WaitEvent::Signaled(..) => {
                 // A thread no event announced yet exited; one may still come.
-                if !inferior.retired_threads.remove(&pid) && !inferior.fork_children.remove(&pid) {
+                if !inferior.retired_threads.remove(&pid)
+                    && inferior.fork_children.remove(&pid).is_none()
+                {
                     inferior.vanished_threads.insert(pid);
                 }
                 inferior.unowned_stops.remove(&pid);
@@ -904,8 +958,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                 return self.release_exiting_thread(pid).is_ok();
             }
             WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP) => {
-                if inferior.fork_children.remove(&pid) {
-                    self.release_fork_child(pid);
+                if let Some(sites) = inferior.fork_children.remove(&pid) {
+                    self.release_fork_child(pid, &sites);
                 } else {
                     inferior.unowned_stops.insert(pid, *status);
                 }
@@ -925,10 +979,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         let stopped = std::mem::take(&mut inferior.unowned_stops);
         let pending = std::mem::take(&mut inferior.fork_children);
+        let sites = inferior.inherited_sites();
         for &pid in stopped.keys() {
-            self.release_fork_child(pid);
+            self.release_fork_child(pid, &sites);
         }
-        for pid in pending {
+        for &pid in pending.keys() {
             let _ = self.ptrace.kill(pid, Signal::SIGKILL);
         }
     }
@@ -1069,10 +1124,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         );
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         inferior.thread_mut(parent)?.state = NativeThreadState::Stopped;
+        let sites = inferior.inherited_sites();
         if inferior.unowned_stops.remove(&child).is_some() {
-            self.release_fork_child(child);
+            self.release_fork_child(child, &sites);
         } else {
-            inferior.fork_children.insert(child);
+            inferior.fork_children.insert(child, sites);
         }
         Ok(())
     }
