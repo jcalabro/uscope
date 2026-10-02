@@ -49,6 +49,23 @@ test *ARGS: build-test-programs
     test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
+# Races in process control fail far more often when the debugger competes for
+# the CPUs, so this oversubscribes the test threads and keeps busy loops
+# running beside them. It stops at the first failure so that the failing
+# test's flight recording is kept; a later pass of the same test would remove
+# it. Arguments go to nextest, e.g. `just stress 100 -E 'binary(dap)'`.
+[doc("Runs the test suite COUNT times under CPU load.")]
+stress COUNT="10" *ARGS: build-test-programs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Build before the busy loops start so they slow only the tests.
+    cargo nextest run --no-run
+    cpus="$(nproc)"
+    burners=()
+    trap 'kill "${burners[@]}" 2>/dev/null || true' EXIT
+    for (( i = 0; i < cpus / 2; i++ )); do (while :; do :; done) & burners+=($!); done
+    setarch "$(uname -m)" cargo nextest run --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
+
 # Runs one fuzz target: value-expression, dwarf-expression, core-dump,
 # elf-symbols, disassembly, debug-register-plan, dap-transport, or
 # dap-request. Arguments go to libFuzzer.
