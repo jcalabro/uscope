@@ -12,7 +12,7 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus as ProcessExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -103,15 +103,36 @@ impl ExternalProcess {
         process
     }
 
-    /// Spawns a fixture that runs without a readiness handshake.
+    /// Spawns a dynamically linked fixture that runs without a readiness
+    /// handshake, and waits until its exec has finished.
     pub fn spawn_running(path: &Path) -> Self {
         let child = Command::new(path)
             .spawn()
             .unwrap_or_else(|error| panic!("spawn {}: {error}", path.display()));
-        Self {
+        let process = Self {
             child: Some(child),
             ready: String::new(),
+        };
+        // `posix_spawn` returns once the exec releases the test's memory,
+        // before the exec finishes, so an attach could find the test's own
+        // executable or stop at the exec. Nothing shows the exec's end but
+        // the new image running: its loader mapping the C library, which the
+        // test's image had mapped too until the fixture's replaced it.
+        let image = std::fs::canonicalize(path).expect("canonical fixture path");
+        let pid = process.process_id().get();
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        while std::fs::read_link(format!("/proc/{pid}/exe")).ok().as_ref() != Some(&image)
+            || !std::fs::read_to_string(format!("/proc/{pid}/maps"))
+                .is_ok_and(|maps| maps.contains("/libc.so"))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{} did not start",
+                path.display()
+            );
+            std::thread::yield_now();
         }
+        process
     }
 
     /// Returns the readiness line, without its newline.

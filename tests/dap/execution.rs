@@ -179,9 +179,17 @@ fn pausing_stops_a_running_program_and_is_harmless_when_stopped() {
         Profile::Helix,
         &fixture("spin"),
         json!({}),
-        &Configuration::default(),
+        &Configuration {
+            functions: vec!["main".to_owned()],
+            ..Configuration::default()
+        },
     );
-    dap.event(started.mark, "process", |_| true);
+    // Run from main, which then loops forever, so the pause cannot land in
+    // the loader or the C library's startup.
+    let entered = dap.stopped(started.mark);
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    let running = dap.send("continue", json!({"threadId": entered.thread}));
+    dap.success(running);
     // Requests that need a stop say so while the program runs.
     assert_eq!(
         dap.request_error("stackTrace", json!({"threadId": 1})),

@@ -121,18 +121,53 @@ async fn attach_stops_and_detaches_every_existing_native_thread() {
 }
 
 #[tokio::test]
+async fn attaching_while_threads_are_created_traces_every_thread() {
+    let child = support::ExternalProcess::spawn_running(&Scenario::fixture("attach-clones"));
+    let tasks = format!("/proc/{}/task", child.process_id().get());
+    for _ in 0..20 {
+        let scenario = Scenario::attached("attach while cloning", child.attach().await);
+        // With every thread stopped none is inside clone, so the list is
+        // complete. An untraced thread would run through breakpoints and
+        // die of their traps.
+        let untraced = fs::read_dir(&tasks)
+            .expect("list threads")
+            .filter_map(|entry| {
+                let path = entry.expect("thread entry").path();
+                // A thread may exit while the list is read.
+                let status = fs::read_to_string(path.join("status")).ok()?;
+                // The tracer is the debugger's controller thread.
+                let tracer = status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("TracerPid:"))
+                    .expect("status names the tracer")
+                    .trim();
+                let ours = tracer != "0"
+                    && fs::exists(format!("/proc/self/task/{tracer}")).is_ok_and(|exists| exists);
+                (!ours).then_some(path)
+            })
+            .collect::<Vec<_>>();
+        assert!(untraced.is_empty(), "untraced threads: {untraced:?}");
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn shutdown_detaches_a_running_attached_process_and_cancels_waiters() {
     let child = support::ExternalProcess::spawn_running(&Scenario::fixture("spin"));
     let pid = child.process_id().get();
     let debugger = child.attach().await;
     let handle = debugger.handle();
-    assert!(matches!(
-        handle.snapshot().await.expect("attached snapshot").inferior,
-        InferiorState::Stopped {
-            reason: StopReason::Attach,
-            ..
-        }
-    ));
+    let attached = handle.snapshot().await.expect("attached snapshot").inferior;
+    assert!(
+        matches!(
+            attached,
+            InferiorState::Stopped {
+                reason: StopReason::Attach,
+                ..
+            }
+        ),
+        "{attached:?}"
+    );
 
     // A resume waiting for a stop that shutdown preempts must not hang.
     let resuming = tokio::spawn({
