@@ -514,6 +514,8 @@ struct Inferior {
     /// Initial stops of new threads or fork children that arrived before
     /// the event that announces them.
     unowned_stops: BTreeMap<Pid, WaitEvent>,
+    /// Threads that began exiting before the event that announces them.
+    vanished_threads: BTreeSet<Pid>,
     /// Fork children announced before their initial stop arrived.
     fork_children: BTreeSet<Pid>,
     waiter: Option<Waiter>,
@@ -547,6 +549,7 @@ impl Inferior {
             threads,
             retired_threads: BTreeSet::new(),
             unowned_stops: BTreeMap::new(),
+            vanished_threads: BTreeSet::new(),
             fork_children: BTreeSet::new(),
             waiter,
             active: None,
@@ -1196,7 +1199,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                 status,
                 WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP)
             );
-            let expected = stop || retired || inferior.fork_children.contains(&pid);
+            let expected = stop
+                || retired
+                || inferior.fork_children.contains(&pid)
+                || matches!(
+                    status,
+                    WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_EXIT)
+                        | WaitEvent::Exited(..)
+                        | WaitEvent::Signaled(..)
+                );
             if expected && self.absorb_untracked_wait(&status) {
                 return Ok(());
             }
