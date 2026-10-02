@@ -7,9 +7,9 @@ use std::path::Path;
 use support::Scenario;
 use uscope::{
     CoreDumpOptions, DereferenceState, Error, ExceptionDisposition, ExitStatus, FloatValue,
-    IntegerValue, PresentedFrame, ScalarValue, StackFrame, StackFrameId, StepKind, StopReason,
-    ThreadId, ValueChildQuery, ValueChildren, Variable, VariableState, VariableUnavailableReason,
-    VariableValue, WatchAccess, WatchScope, WatchpointInvalidation,
+    IntegerValue, PresentedFrame, ResumeScope, ScalarValue, StackFrame, StackFrameId, StepKind,
+    StopReason, ThreadId, ValueChildQuery, ValueChildren, Variable, VariableState,
+    VariableUnavailableReason, VariableValue, WatchAccess, WatchScope, WatchpointInvalidation,
 };
 
 /// The frames fixture across compilers, optimization, and PIE.
@@ -1117,7 +1117,14 @@ async fn stepping_from_a_selected_outer_frame_is_explicit() {
         assert!(matches!(
             scenario
                 .handle()
-                .start_step(stop, thread, frames[2].id, kind, ExceptionDisposition::Pass)
+                .start_step(
+                    stop,
+                    thread,
+                    frames[2].id,
+                    kind,
+                    ResumeScope::Thread(thread),
+                    ExceptionDisposition::Pass
+                )
                 .await,
             Err(Error::FrameStepUnsupported(_))
         ));
@@ -1413,6 +1420,7 @@ async fn pausing_cancels_stepping_out_of_an_outer_frame() {
                 snapshot.selected_thread.expect("selected thread"),
                 snapshot.selected_frame.expect("selected frame"),
                 StepKind::Out,
+                ResumeScope::Thread(snapshot.selected_thread.expect("selected thread")),
                 ExceptionDisposition::Pass,
             ),
         )

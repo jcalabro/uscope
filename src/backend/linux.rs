@@ -11,6 +11,8 @@
 //! - [`classify`]: turning raw wait statuses into classified stops.
 //! - [`run_control`]: resuming threads, repairing breakpoint sites, and
 //!   publishing all-stop snapshots.
+//! - [`internal_stops`]: stopping every thread without publishing a stop,
+//!   to edit breakpoints and watchpoints or repair a site while running.
 //! - [`stepping`]: source and instruction stepping plans.
 //! - [`breakpoints`] and [`watchpoints`]: software traps and debug registers.
 //! - [`frames`], [`inspection`], [`memory`], [`registers`]: read-only views of
@@ -62,6 +64,7 @@ mod disassembly;
 mod frames;
 mod glibc_tls;
 mod inspection;
+mod internal_stops;
 mod lifecycle;
 mod memory;
 mod modules;
@@ -346,6 +349,10 @@ enum ActiveKind {
         thread: Pid,
         kind: StepKind,
         start: StepStart,
+        /// The stepping thread executed an instruction whose effect on the
+        /// step has not been evaluated yet, because a breakpoint repair or
+        /// an internal stop intervened.
+        progress_owed: bool,
     },
 }
 
@@ -363,13 +370,54 @@ struct RepairGroup {
     site_removed: bool,
 }
 
+/// Stops every thread of the inferior, then either publishes a stop or,
+/// when no thread produced a visible reason, applies its edits and resumes
+/// the active execution as if nothing happened.
 struct StopBarrier {
-    execution: Option<ExecutionId>,
     triggering_thread: Pid,
-    /// The reason to publish once every thread stops. `None` marks an
-    /// internal stop, which publishes nothing and resumes the active
-    /// execution unless a client-visible stop happens before it completes.
+    /// The stop to publish, or `None` while the stop is internal.
     reason: Option<StopReason>,
+    /// Client edits applied once every thread is stopped.
+    edits: Vec<Edit>,
+}
+
+impl StopBarrier {
+    /// A barrier that publishes `reason` from `triggering_thread`.
+    const fn visible(triggering_thread: Pid, reason: StopReason) -> Self {
+        Self {
+            triggering_thread,
+            reason: Some(reason),
+            edits: Vec::new(),
+        }
+    }
+}
+
+/// A breakpoint or watchpoint change that needs every thread stopped.
+enum Edit {
+    AddBreakpoint {
+        spec: crate::BreakpointSpec,
+        hit_condition: Option<crate::HitCondition>,
+        reply: Reply<Breakpoint>,
+    },
+    RemoveBreakpoint {
+        id: BreakpointId,
+        reply: Reply<Breakpoint>,
+    },
+    RemoveAllBreakpoints {
+        reply: Reply<Arc<[Breakpoint]>>,
+    },
+    AddWatchpoint {
+        spec: crate::WatchpointSpec,
+        access: WatchAccess,
+        reply: Reply<Watchpoint>,
+    },
+    RemoveWatchpoint {
+        id: WatchpointId,
+        reply: Reply<Watchpoint>,
+    },
+    RemoveAllWatchpoints {
+        reply: Reply<Arc<[Watchpoint]>>,
+    },
 }
 
 /// The data object an expression's longest matching name prefix selected.
@@ -485,6 +533,20 @@ impl Inferior {
         }
     }
 
+    /// A stopped thread through which to read and write the shared address
+    /// space: the leader when it is stopped, otherwise any stopped thread.
+    /// While some threads run, only a stopped thread accepts ptrace requests.
+    fn memory_thread(&self) -> Pid {
+        let stopped = |thread: &TraceThread| matches!(thread.state, NativeThreadState::Stopped);
+        if self.threads.get(&self.tgid).is_some_and(stopped) {
+            return self.tgid;
+        }
+        self.threads
+            .iter()
+            .find_map(|(&pid, thread)| stopped(thread).then_some(pid))
+            .unwrap_or(self.tgid)
+    }
+
     fn thread(&self, pid: Pid) -> Result<&TraceThread> {
         self.threads
             .get(&pid)
@@ -533,6 +595,7 @@ impl Inferior {
             && let Some(replacement) = replacement
         {
             barrier.triggering_thread = replacement;
+            // An internal stop stays internal.
             if barrier.reason.is_some() {
                 barrier.reason = Some(StopReason::ThreadExited {
                     thread_id: debug_thread_id(pid),
@@ -769,7 +832,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                 hit_condition,
                 reply,
             } => {
-                let _ = reply.send(self.add_breakpoint(spec, hit_condition));
+                self.edit(Edit::AddBreakpoint {
+                    spec,
+                    hit_condition,
+                    reply,
+                });
             }
             Request::SetBreakpointHitCondition {
                 id,
@@ -779,23 +846,27 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let _ = reply.send(self.set_breakpoint_hit_condition(id, hit_condition));
             }
             Request::RemoveBreakpoint { id, reply } => {
-                let _ = reply.send(self.remove_breakpoint(id));
+                self.edit(Edit::RemoveBreakpoint { id, reply });
             }
             Request::RemoveAllBreakpoints { reply } => {
-                let _ = reply.send(self.remove_all_breakpoints());
+                self.edit(Edit::RemoveAllBreakpoints { reply });
             }
             Request::AddWatchpoint {
                 spec,
                 access,
                 reply,
             } => {
-                let _ = reply.send(self.add_watchpoint(spec, access));
+                self.edit(Edit::AddWatchpoint {
+                    spec,
+                    access,
+                    reply,
+                });
             }
             Request::RemoveWatchpoint { id, reply } => {
-                let _ = reply.send(self.remove_watchpoint(id));
+                self.edit(Edit::RemoveWatchpoint { id, reply });
             }
             Request::RemoveAllWatchpoints { reply } => {
-                let _ = reply.send(self.remove_all_watchpoints());
+                self.edit(Edit::RemoveAllWatchpoints { reply });
             }
             Request::Launch { options, reply } => self.launch(*options, reply),
             Request::Attach { process_id, reply } => self.attach(process_id, reply),
@@ -812,10 +883,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 thread_id,
                 frame,
                 kind,
+                scope,
                 exception,
                 reply,
             } => match debug_pid(thread_id) {
-                Ok(pid) => self.step(process_id, stop_id, pid, frame, kind, exception, reply),
+                Ok(pid) => self.step(
+                    process_id, stop_id, pid, frame, kind, scope, exception, reply,
+                ),
                 Err(error) => {
                     let _ = reply.send(Err(error));
                 }

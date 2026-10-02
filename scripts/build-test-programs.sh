@@ -842,6 +842,12 @@ build_fixture gcc "$c_fixtures_dir/job-control.c" "$output_dir/job-control" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/thread-exec.c" "$output_dir/thread-exec" \
     -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/thread-steps.c" "$output_dir/thread-steps-gcc-o0" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie -pthread
+build_fixture clang "$c_fixtures_dir/thread-steps.c" "$output_dir/thread-steps-clang-o2" \
+    -O2 -g3 -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/hot-calls.c" "$output_dir/hot-calls" \
+    -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/thread-stress.c" "$output_dir/thread-stress" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/step.c" "$output_dir/step" \

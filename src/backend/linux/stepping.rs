@@ -173,7 +173,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .ok_or(Error::NotRunning)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         self.ptrace.install_breakpoint(
-            inferior.tgid,
+            inferior.memory_thread(),
             &mut inferior.breakpoints,
             candidate,
             BreakpointOwner::Plan(execution),

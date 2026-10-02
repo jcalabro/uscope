@@ -20,7 +20,7 @@ use tokio::time::timeout;
 use uscope::{
     Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
     DebuggerHandle, ExceptionDisposition, ExitStatus, LaunchOptions, LineNumber, ProcessId, Result,
-    StateSnapshot, StepKind, StopReason, VirtualAddress,
+    ResumeScope, StackFrameId, StateSnapshot, StepKind, StopReason, VirtualAddress,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -312,6 +312,56 @@ impl Scenario {
         self.wait_for_request(task, "step").await
     }
 
+    /// Steps the selected thread while every other thread stays stopped.
+    pub async fn step_alone_to_stop(&mut self, kind: StepKind) -> StopReason {
+        self.transcript
+            .push(format!("request: step {kind:?} alone"));
+        let handle = self.handle.clone();
+        let task = tokio::spawn(async move {
+            let snapshot = handle.snapshot().await?;
+            let (Some(stop), Some(thread), Some(frame)) = (
+                snapshot.stop_id,
+                snapshot.selected_thread,
+                snapshot.selected_frame,
+            ) else {
+                return Err(uscope::Error::NotStopped);
+            };
+            let frame = if kind == StepKind::Out {
+                frame
+            } else {
+                StackFrameId::INNERMOST
+            };
+            let mut events = handle.subscribe();
+            let execution = handle
+                .start_step(
+                    stop,
+                    thread,
+                    frame,
+                    kind,
+                    ResumeScope::Thread(thread),
+                    ExceptionDisposition::Pass,
+                )
+                .await?;
+            loop {
+                match events.recv().await {
+                    Ok(DebuggerEvent::InferiorStopped {
+                        execution_id: Some(id),
+                        reason,
+                        ..
+                    }) if id == execution => return Ok(reason),
+                    Ok(DebuggerEvent::InferiorExited {
+                        execution_id: Some(id),
+                        status,
+                        ..
+                    }) if id == execution => return Ok(StopReason::Exited(status)),
+                    Ok(_) => {}
+                    Err(error) => panic!("event stream failed: {error}"),
+                }
+            }
+        });
+        self.wait_for_request(task, "step").await
+    }
+
     async fn run_request(&mut self, launch: bool) -> StopReason {
         let operation = if launch { "run" } else { "continue" };
         self.transcript.push(format!("request: {operation}"));
@@ -444,8 +494,15 @@ impl Scenario {
     }
 
     fn drain_events(&mut self) {
-        while let Ok(event) = self.events.try_recv() {
-            self.record_event(&event);
+        loop {
+            match self.events.try_recv() {
+                Ok(event) => self.record_event(&event),
+                Err(broadcast::error::TryRecvError::Lagged(count)) => {
+                    self.transcript
+                        .push(format!("transcript skipped {count} lagged events"));
+                }
+                Err(_) => return,
+            }
         }
     }
 

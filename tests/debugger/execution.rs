@@ -268,31 +268,6 @@ async fn unresolved_source_breakpoints_fail_without_mutating_public_state() {
 }
 
 #[tokio::test]
-async fn deleting_breakpoints_while_running_is_rejected_without_mutation() {
-    let mut scenario = Scenario::new("delete while running", Scenario::fixture("spin"));
-    let breakpoint = scenario.add_breakpoint("unreached").await;
-    let run = scenario.start_running().await;
-    let before = scenario.snapshot().await;
-    let mut events = scenario.handle().subscribe();
-
-    assert!(matches!(
-        scenario.handle().remove_breakpoint(breakpoint.id).await,
-        Err(Error::NotStopped)
-    ));
-    let after = scenario.snapshot().await;
-    assert_eq!(after.breakpoints, before.breakpoints);
-    while let Ok(event) = events.try_recv() {
-        assert!(
-            !matches!(event, uscope::DebuggerEvent::BreakpointsChanged { .. }),
-            "rejected deletion published a breakpoint mutation"
-        );
-    }
-
-    scenario.shutdown().await;
-    let _shutdown_result = run.await.expect("run task panicked");
-}
-
-#[tokio::test]
 async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
     let mut scenario = Scenario::new("breakpoint lifecycle", Scenario::fixture("basic"));
 
@@ -385,7 +360,7 @@ async fn breakpoint_memory_and_event_state_follow_one_consistent_scenario() {
 
     assert_eq!(
         scenario.snapshot().await.breakpoints.as_ref(),
-        &[breakpoint, main_breakpoint]
+        &[breakpoint.clone(), main_breakpoint]
     );
 
     let value_address = scenario
@@ -1031,17 +1006,24 @@ async fn synchronous_faults_are_retained_and_delivered() {
 async fn forked_children_are_released_without_inherited_breakpoints() {
     let mut scenario = Scenario::launch("fork");
     scenario.add_breakpoint("shared_work").await;
-    assert!(matches!(
-        scenario.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
     // The child also runs shared_work; an inherited trap would kill it with
-    // SIGTRAP. The parent's SIGCHLD reports a normal exit (CLD_EXITED).
-    assert!(matches!(
-        scenario.resume_to_stop().await,
-        StopReason::Exception(exception)
-            if exception.code == 17 && exception.description.contains("si_code 1")
-    ));
+    // SIGTRAP. The parent's SIGCHLD reports a normal exit (CLD_EXITED). The
+    // released child can exit before the parent reaches its breakpoint.
+    let first = scenario.run_to_stop().await;
+    let second = scenario.resume_to_stop().await;
+    let child_exited = |reason: &StopReason| {
+        matches!(
+            reason,
+            StopReason::Exception(exception)
+                if exception.code == 17 && exception.description.contains("si_code 1")
+        )
+    };
+    let breakpoint = |reason: &StopReason| matches!(reason, StopReason::Breakpoint { .. });
+    assert!(
+        (breakpoint(&first) && child_exited(&second))
+            || (child_exited(&first) && breakpoint(&second)),
+        "{first:?}, {second:?}"
+    );
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -1338,10 +1320,13 @@ async fn pause_cancels_an_active_source_execution_plan() {
     scenario.remove_all_breakpoints().await;
 
     let snapshot = scenario.snapshot().await;
-    let (stop, thread) = match snapshot.inferior {
+    let (process, stop, thread) = match snapshot.inferior {
         InferiorState::Stopped {
-            stop_id, thread_id, ..
-        } => (stop_id, thread_id),
+            process_id,
+            stop_id,
+            thread_id,
+            ..
+        } => (process_id, stop_id, thread_id),
         other => panic!("expected stopped inferior, got {other:?}"),
     };
     scenario
@@ -1352,6 +1337,7 @@ async fn pause_cancels_an_active_source_execution_plan() {
                 thread,
                 uscope::StackFrameId::INNERMOST,
                 StepKind::Out,
+                uscope::ResumeScope::Process(process),
                 uscope::ExceptionDisposition::Pass,
             ),
         )

@@ -919,11 +919,7 @@ fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
             watch_hits: BTreeSet::new(),
         },
     );
-    inferior.barrier = Some(StopBarrier {
-        execution: Some(ExecutionId::new(2)),
-        triggering_thread: pid,
-        reason: Some(StopReason::Exception(exception)),
-    });
+    inferior.barrier = Some(StopBarrier::visible(pid, StopReason::Exception(exception)));
     let address = VirtualAddress::new(0x20);
     let breakpoint = StopReason::Breakpoint {
         address,
@@ -1498,11 +1494,24 @@ impl LinuxTraceOps for DebugRegisterTrace {
     fn install_breakpoint(
         &self,
         _pid: Pid,
-        _sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
-        _address: VirtualAddress,
-        _owner: BreakpointOwner,
+        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
+        address: VirtualAddress,
+        owner: BreakpointOwner,
     ) -> Result<()> {
-        RecordingTrace::unexpected("install_breakpoint")
+        if let Some(site) = sites.get_mut(&address) {
+            site.owners.insert(owner);
+            return Ok(());
+        }
+        self.record(format!("install_site {address}"));
+        sites.insert(
+            address,
+            BreakpointSite {
+                original_byte: 0x90,
+                installed: true,
+                owners: BTreeSet::from([owner]),
+            },
+        );
+        Ok(())
     }
     fn remove_breakpoint(
         &self,
@@ -1618,6 +1627,32 @@ impl WatchHarness {
             .insert(pid, SignalMetadata { code, sender: None });
         self.controller
             .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGTRAP))
+    }
+
+    /// Reports an int3 at `address`, leaving the PC after it.
+    fn hit_at(&mut self, pid: Pid, address: u64) -> Result<()> {
+        self.trace()
+            .program_counters
+            .borrow_mut()
+            .insert(pid, address + 1);
+        self.trap(pid, libc::SI_KERNEL, debug_registers::STATUS_IDLE)
+    }
+
+    /// Requests an edit and returns the receiver of its reply.
+    fn edit<T>(
+        &mut self,
+        make: impl FnOnce(Reply<T>) -> Edit,
+    ) -> tokio::sync::oneshot::Receiver<Result<T>> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.controller.edit(make(reply));
+        result
+    }
+
+    /// Takes the published events other than revision changes.
+    fn published(&mut self) -> Vec<DebuggerEvent> {
+        std::iter::from_fn(|| self.events.try_recv().ok())
+            .filter(|event| !matches!(event, DebuggerEvent::StateChanged { .. }))
+            .collect()
     }
 
     fn public_reason(&self) -> Option<StopReason> {
@@ -2830,5 +2865,350 @@ fn a_trap_reexecuted_after_a_signal_interrupted_its_repair_is_not_a_new_hit() {
     assert_eq!(
         harness.trace().take_actions().last(),
         Some(&format!("continue {pid} None"))
+    );
+}
+
+fn address_breakpoint(address: u64) -> BreakpointSpec {
+    BreakpointSpec::Address(VirtualAddress::new(address))
+}
+
+#[test]
+fn an_edit_while_running_applies_at_an_internal_stop_and_resumes_silently() {
+    let mut harness = watch_harness(2);
+    harness.start_continue();
+    harness.published();
+    let mut added = harness.edit(|reply| Edit::AddBreakpoint {
+        spec: address_breakpoint(0x40),
+        hit_condition: None,
+        reply,
+    });
+
+    assert_eq!(
+        harness.trace().take_actions(),
+        ["request_stop 5000", "request_stop 5001"]
+    );
+    assert!(added.try_recv().is_err(), "the edit waits for every thread");
+    harness.settle_requested_stops();
+
+    let breakpoint = added.try_recv().expect("edit reply").expect("added");
+    assert_eq!(breakpoint.id, BreakpointId::new(1));
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "install_site 0x40",
+            "continue 5000 None",
+            "continue 5001 None"
+        ]
+    );
+    assert!(
+        matches!(
+            harness.published().as_slice(),
+            [DebuggerEvent::BreakpointsChanged { .. }]
+        ),
+        "an internal stop publishes no stop or continue"
+    );
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(inferior.public_stop.is_none() && inferior.barrier.is_none());
+    assert_eq!(
+        inferior.active.as_ref().map(|active| active.id),
+        Some(ExecutionId::new(2)),
+        "the execution continues under its own identity"
+    );
+    assert!(
+        inferior
+            .threads
+            .values()
+            .all(|thread| thread.state == NativeThreadState::Running)
+    );
+}
+
+#[test]
+fn a_hit_on_a_breakpoint_removed_while_running_is_dropped() {
+    let mut harness = watch_harness(2);
+    let breakpoint = harness
+        .edit(|reply| Edit::AddBreakpoint {
+            spec: address_breakpoint(0x40),
+            hit_condition: None,
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("added at the stop");
+    harness.start_continue();
+    harness.trace().take_actions();
+    harness.published();
+
+    let mut removed = harness.edit(|reply| Edit::RemoveBreakpoint {
+        id: breakpoint.id,
+        reply,
+    });
+    // The trap was raised before the thread saw its stop request.
+    harness
+        .hit_at(Pid::from_raw(5000), 0x40)
+        .expect("breakpoint trap");
+    harness.settle_requested_stops();
+
+    // The hit counted, but the breakpoint is gone before it stops anything.
+    let removed = removed.try_recv().expect("reply").expect("removed");
+    assert_eq!((removed.id, removed.hit_count), (breakpoint.id, 1));
+    let actions = harness.trace().take_actions();
+    assert_eq!(
+        &actions[actions.len() - 3..],
+        [
+            "remove_site 0x40",
+            "continue 5000 None",
+            "continue 5001 None"
+        ],
+        "the thread resumes the restored instruction without a repair: {actions:?}"
+    );
+    assert!(
+        !harness
+            .published()
+            .iter()
+            .any(|event| matches!(event, DebuggerEvent::InferiorStopped { .. })),
+        "a removed breakpoint's hit is never published"
+    );
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(inferior.breakpoints.is_empty());
+    assert!(
+        inferior
+            .threads
+            .values()
+            .all(|thread| thread.stopped_at_breakpoint.is_none() && thread.reason.is_none())
+    );
+}
+
+#[test]
+fn a_hit_on_a_breakpoint_that_survives_the_edit_is_published_with_its_owners() {
+    let mut harness = watch_harness(2);
+    let kept = harness
+        .edit(|reply| Edit::AddBreakpoint {
+            spec: address_breakpoint(0x40),
+            hit_condition: None,
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("added");
+    let other = harness
+        .edit(|reply| Edit::AddBreakpoint {
+            spec: address_breakpoint(0x48),
+            hit_condition: None,
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("added");
+    harness.start_continue();
+    harness.published();
+
+    let mut removed = harness.edit(|reply| Edit::RemoveBreakpoint {
+        id: other.id,
+        reply,
+    });
+    harness
+        .hit_at(Pid::from_raw(5001), 0x40)
+        .expect("breakpoint trap");
+    harness.settle_requested_stops();
+
+    removed.try_recv().expect("reply").expect("removed");
+    let published = harness.published();
+    let position = |predicate: fn(&DebuggerEvent) -> bool| {
+        published
+            .iter()
+            .position(predicate)
+            .unwrap_or_else(|| panic!("missing event in {published:?}"))
+    };
+    assert!(
+        position(|event| matches!(event, DebuggerEvent::BreakpointsChanged { .. }))
+            < position(|event| matches!(event, DebuggerEvent::InferiorStopped { .. })),
+        "the edit applies before the stop is published"
+    );
+    assert!(published.iter().any(|event| matches!(
+        event,
+        DebuggerEvent::InferiorStopped {
+            execution_id: Some(execution),
+            thread_id,
+            reason: StopReason::Breakpoint { address, hits },
+            ..
+        } if *execution == ExecutionId::new(2)
+            && thread_id.get() == 5001
+            && address.get() == 0x40
+            && hits.iter().map(|hit| hit.breakpoint).eq([kept.id])
+    )));
+}
+
+#[test]
+fn a_signal_during_an_internal_stop_is_published_after_the_edit() {
+    let mut harness = watch_harness(2);
+    harness.start_continue();
+    harness.published();
+    let mut added = harness.edit(|reply| Edit::AddBreakpoint {
+        spec: address_breakpoint(0x40),
+        hit_condition: None,
+        reply,
+    });
+    let pid = Pid::from_raw(5001);
+    harness.trace().siginfo.borrow_mut().insert(
+        pid,
+        SignalMetadata {
+            code: libc::SI_USER,
+            sender: Some(1),
+        },
+    );
+    harness
+        .controller
+        .process_wait(WaitStatus::Stopped(pid, NixSignal::SIGUSR1))
+        .expect("signal stop");
+    harness.settle_requested_stops();
+
+    added.try_recv().expect("reply").expect("added");
+    assert!(matches!(
+        harness.public_reason(),
+        Some(StopReason::Exception(info)) if info.code == NixSignal::SIGUSR1 as u64
+    ));
+    assert!(
+        harness
+            .trace()
+            .take_actions()
+            .contains(&"install_site 0x40".to_owned())
+    );
+}
+
+#[test]
+fn pausing_during_an_internal_stop_publishes_the_pause() {
+    let mut harness = watch_harness(2);
+    harness.start_continue();
+    let process = process_id(harness.threads[0]);
+    let mut added = harness.edit(|reply| Edit::AddBreakpoint {
+        spec: address_breakpoint(0x40),
+        hit_condition: None,
+        reply,
+    });
+    assert_eq!(
+        harness.controller.begin_pause(process).expect("pause"),
+        ExecutionId::new(2)
+    );
+    harness.settle_requested_stops();
+
+    added.try_recv().expect("reply").expect("added");
+    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
+}
+
+#[test]
+fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_stopped() {
+    let mut harness = watch_harness(2);
+    let (stepping, other) = (harness.threads[0], harness.threads[1]);
+    harness.start_continue();
+    {
+        let inferior = harness.controller.inferior.as_mut().expect("inferior");
+        let active = inferior.active.as_mut().expect("execution");
+        active.kind = ActiveKind::Step {
+            thread: stepping,
+            kind: StepKind::OverSource,
+            start: StepStart {
+                source: None,
+                code_instance: None,
+                physical_instance: None,
+                activation: None,
+                plan_addresses: BTreeSet::from([VirtualAddress::new(0x40)]),
+                epilogue_traversal: None,
+                return_traversal: None,
+            },
+            progress_owed: false,
+        };
+        let owner = BreakpointOwner::Plan(active.id);
+        inferior.breakpoints.insert(
+            VirtualAddress::new(0x40),
+            BreakpointSite {
+                original_byte: 0x90,
+                installed: true,
+                owners: BTreeSet::from([owner]),
+            },
+        );
+    }
+    harness.published();
+    harness.trace().take_actions();
+
+    harness.hit_at(other, 0x40).expect("plan site trap");
+    assert_eq!(
+        harness.trace().take_actions(),
+        ["set_registers 5001 rip=0x40", "request_stop 5000"],
+        "the stepping thread stops before the site is lifted"
+    );
+    harness.settle_requested_stops();
+    assert_eq!(
+        harness.trace().take_actions(),
+        ["remove_site 0x40", "step 5001"]
+    );
+    harness
+        .trap(other, libc::TRAP_TRACE, debug_registers::STATUS_IDLE)
+        .expect("repair step");
+
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            "reinstall_site 0x40",
+            "continue 5000 None",
+            "continue 5001 None"
+        ]
+    );
+    assert!(
+        !harness
+            .published()
+            .iter()
+            .any(|event| matches!(event, DebuggerEvent::InferiorStopped { .. })),
+        "the stepping plan's site is never reported for another thread"
+    );
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(inferior.barrier.is_none() && inferior.repairs.is_empty());
+    assert_eq!(
+        inferior.active.as_ref().map(|active| active.id),
+        Some(ExecutionId::new(2))
+    );
+}
+
+#[test]
+fn a_hit_on_a_watchpoint_removed_while_running_is_dropped() {
+    let mut harness = watch_harness(2);
+    let watchpoint = harness.add(0xd000, 8).expect("armed");
+    harness.start_continue();
+    harness.published();
+
+    let mut removed = harness.edit(|reply| Edit::RemoveWatchpoint {
+        id: watchpoint.id,
+        reply,
+    });
+    harness
+        .trap(
+            harness.threads[0],
+            TRAP_HARDWARE_BREAKPOINT,
+            debug_registers::STATUS_IDLE | 0b1,
+        )
+        .expect("watch trap");
+    harness.settle_requested_stops();
+
+    assert_eq!(
+        removed.try_recv().expect("reply").expect("removed"),
+        watchpoint
+    );
+    let published = harness.published();
+    assert!(
+        !published
+            .iter()
+            .any(|event| matches!(event, DebuggerEvent::InferiorStopped { .. })),
+        "a removed watchpoint's hit is never published: {published:?}"
+    );
+    assert!(
+        published
+            .iter()
+            .any(|event| matches!(event, DebuggerEvent::WatchpointsChanged { .. }))
+    );
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(inferior.watch.watchpoints.is_empty() && inferior.barrier.is_none());
+    assert!(
+        inferior.threads.values().all(
+            |thread| thread.state == NativeThreadState::Running && thread.watch_hits.is_empty()
+        )
     );
 }
