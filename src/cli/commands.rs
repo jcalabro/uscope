@@ -41,6 +41,7 @@ pub enum Command {
     Run,
     Continue,
     Print,
+    Set,
     Globals,
     Stepi,
     Nexti,
@@ -226,6 +227,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         ["p"],
         "print [value-path]",
         "Print variables, indexed values, members, or one bounded range"
+    ),
+    command!(
+        Set,
+        "set",
+        [],
+        "set <value-path> = [expression...]",
+        "Change a number, boolean, enumeration, or pointer, such as set x = y + 1"
     ),
     command!(
         Globals,
@@ -437,6 +445,7 @@ impl Cli {
                 None => value::variables(&debugger.variables().await?, renderer),
             },
             Command::Globals => self.globals(first).await?,
+            Command::Set => self.set(arguments[0], &arguments[1..], spec).await?,
             Command::Stepi => self.step(StepKind::Instruction).await?,
             Command::Nexti => self.step(StepKind::OverInstruction).await?,
             Command::Step => self.step(StepKind::IntoSource).await?,
@@ -739,6 +748,37 @@ impl Cli {
                 .await?
             }
             None => value::untyped(expression, &inspected.state, renderer),
+        })
+    }
+
+    /// Assigns a value in the selected frame, as gdb's `set var` does.
+    async fn set(&self, target: &str, words: &[&str], spec: &CommandSpec) -> Result<String> {
+        let ["=", value @ ..] = words else {
+            return Err(spec.usage_error());
+        };
+        if value.is_empty() {
+            return Err(spec.usage_error());
+        }
+        let parsed = uscope::parse_value_expression(target)?;
+        if parsed.range.is_some() {
+            bail!("a range cannot be assigned");
+        }
+        let assigned = self
+            .debugger
+            .assign(parsed.expression, &value.join(" "))
+            .await?;
+        let renderer = self.renderers.stdout;
+        Ok(match &assigned.type_info {
+            Some(type_info) => format!(
+                "({}) {} = {}",
+                renderer.paint(Role::Type, &type_info.name),
+                renderer.paint(Role::Name, target),
+                renderer.paint(
+                    Role::Value,
+                    value::summary(Some(type_info), &assigned.state)
+                )
+            ),
+            None => value::untyped(target, &assigned.state, renderer),
         })
     }
 

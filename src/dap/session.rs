@@ -138,6 +138,8 @@ pub(super) struct ClientSupport {
     pub variable_type: bool,
     pub memory_references: bool,
     pub ansi: bool,
+    pub invalidated: bool,
+    pub memory_events: bool,
 }
 
 /// The program being debugged.
@@ -359,6 +361,9 @@ impl Session {
             "setExceptionBreakpoints" => self.set_exception_breakpoints(arguments).await?,
             "setInstructionBreakpoints" => self.set_instruction_breakpoints(arguments).await?,
             "readMemory" => self.read_memory(arguments).await?,
+            "writeMemory" => self.write_memory(arguments).await?,
+            "setVariable" => self.set_variable(arguments).await?,
+            "setExpression" => self.set_expression(arguments).await?,
             "dataBreakpointInfo" => self.data_breakpoint_info(arguments).await?,
             "modules" => self.modules(arguments).await?,
             "loadedSources" => self.loaded_sources().await?,
@@ -392,6 +397,8 @@ impl Session {
             variable_type: arguments.supports_variable_type.unwrap_or(false),
             memory_references: arguments.supports_memory_references.unwrap_or(false),
             ansi: arguments.supports_ansi_styling.unwrap_or(false),
+            invalidated: arguments.supports_invalidated_event.unwrap_or(false),
+            memory_events: arguments.supports_memory_event.unwrap_or(false),
         });
         self.after = Some(After::Initialized);
         Ok(capabilities())
@@ -1794,6 +1801,24 @@ impl Session {
         Ok(trace)
     }
 
+    /// Tells a client that shows values to read them again, after a write
+    /// may have changed any of them.
+    pub(super) async fn invalidate_values(&self) {
+        if self.support().invalidated {
+            let _ = self
+                .client
+                .event("invalidated", json!({"areas": ["variables"]}))
+                .await;
+        }
+    }
+
+    /// Forgets what was read at the current stop, after a write changed
+    /// it; references stay valid, since the stop is the same.
+    pub(super) fn forget_reads(&mut self) {
+        self.backtraces.clear();
+        self.variables.clear();
+    }
+
     pub(super) async fn frame_variables(
         &mut self,
         context: StopContext,
@@ -1859,6 +1884,9 @@ fn capabilities() -> Value {
         "supportsTerminateRequest": true,
         "supportsInstructionBreakpoints": true,
         "supportsRestartRequest": true,
+        "supportsWriteMemoryRequest": true,
+        "supportsSetVariable": true,
+        "supportsSetExpression": true,
         "supportsCancelRequest": true,
         "supportsDisassembleRequest": true,
         "supportsReadMemoryRequest": true,

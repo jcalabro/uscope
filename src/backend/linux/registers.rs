@@ -95,6 +95,34 @@ pub(super) fn x86_64_caller_variable_register(
     Err(VariableUnavailableReason::Unsupported(UnsupportedVariableFeature::RegisterClass).into())
 }
 
+/// The field of a general register, by its descriptor's id.
+pub(super) const fn x86_64_general_register_slot(
+    registers: &mut libc::user_regs_struct,
+    register: RegisterId,
+) -> Option<&mut u64> {
+    Some(match register.get() {
+        0 => &mut registers.rax,
+        1 => &mut registers.rbx,
+        2 => &mut registers.rcx,
+        3 => &mut registers.rdx,
+        4 => &mut registers.rsi,
+        5 => &mut registers.rdi,
+        6 => &mut registers.rbp,
+        7 => &mut registers.rsp,
+        8 => &mut registers.r8,
+        9 => &mut registers.r9,
+        10 => &mut registers.r10,
+        11 => &mut registers.r11,
+        12 => &mut registers.r12,
+        13 => &mut registers.r13,
+        14 => &mut registers.r14,
+        15 => &mut registers.r15,
+        16 => &mut registers.rip,
+        17 => &mut registers.eflags,
+        _ => return None,
+    })
+}
+
 pub(super) fn x86_64_general_register_descriptor(dwarf: u16) -> Option<RegisterDescriptor> {
     let (id, name, role) = match dwarf {
         0 => (0, "rax", None),

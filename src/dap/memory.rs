@@ -6,7 +6,9 @@ use uscope::{
     MemoryReadCompletion, StopContext, VirtualAddress,
 };
 
-use super::protocol::{self, DisassembleArguments, ErrorBody, ReadMemoryArguments};
+use super::protocol::{
+    self, DisassembleArguments, ErrorBody, ReadMemoryArguments, WriteMemoryArguments,
+};
 use super::session::{Session, error, parse};
 
 /// The most bytes one `readMemory` request returns.
@@ -49,6 +51,37 @@ impl Session {
             body["unreadableBytes"] = unreadable.into();
         }
         Ok(body)
+    }
+
+    pub(super) async fn write_memory(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<WriteMemoryArguments>(arguments, "writeMemory arguments")?;
+        self.current_stop()?;
+        let address = reference(&arguments.memory_reference, arguments.offset)?;
+        let bytes =
+            unbase64(&arguments.data).ok_or_else(|| ErrorBody::new("the data is not base64"))?;
+        let handle = self.target_handle()?;
+        let written = handle
+            .write_memory(VirtualAddress::new(address), &bytes)
+            .await
+            .map_err(error)?;
+        if written != bytes.len() as u64 && arguments.allow_partial != Some(true) {
+            return Err(ErrorBody::new(format!(
+                "only {written} of {} bytes could be written at {address:#x}",
+                bytes.len()
+            )));
+        }
+        self.forget_reads();
+        if self.support().memory_events {
+            self.client
+                .event(
+                    "memory",
+                    json!({"memoryReference": format!("{address:#x}"), "offset": 0, "count": written}),
+                )
+                .await
+                .map_err(|_| ErrorBody::new("the connection to the client closed"))?;
+        }
+        self.invalidate_values().await;
+        Ok(json!({"offset": 0, "bytesWritten": written}))
     }
 
     pub(super) async fn disassemble(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
@@ -367,6 +400,34 @@ fn reference(reference: &str, offset: Option<i64>) -> Result<u64, ErrorBody> {
         })
 }
 
+/// Decodes standard base64, with or without padding.
+fn unbase64(text: &str) -> Option<Vec<u8>> {
+    let value = |byte: u8| match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let digits = text.trim().trim_end_matches('=').as_bytes();
+    let mut bytes = Vec::with_capacity(digits.len() * 3 / 4);
+    for chunk in digits.chunks(4) {
+        if chunk.len() == 1 {
+            return None;
+        }
+        let word = chunk
+            .iter()
+            .enumerate()
+            .try_fold(0_u32, |word, (index, digit)| {
+                Some(word | u32::from(value(*digit)?) << (18 - 6 * index))
+            })?;
+        let decoded = word.to_be_bytes();
+        bytes.extend_from_slice(&decoded[1..chunk.len()]);
+    }
+    Some(bytes)
+}
+
 /// Encodes bytes as standard base64 with padding.
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -391,6 +452,17 @@ fn base64(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64_decodes_what_it_encodes() {
+        for bytes in [&b""[..], b"f", b"fo", b"foo", b"foob", b"\xff\x00\xfe\x01"] {
+            assert_eq!(unbase64(&base64(bytes)).as_deref(), Some(bytes));
+        }
+        assert_eq!(unbase64("Zm9v"), Some(b"foo".to_vec()));
+        assert_eq!(unbase64("Zg"), Some(b"f".to_vec()));
+        assert_eq!(unbase64("Z"), None);
+        assert_eq!(unbase64("Zm9v!"), None);
+    }
 
     #[test]
     fn base64_matches_the_standard_encoding() {
