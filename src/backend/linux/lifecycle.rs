@@ -16,7 +16,7 @@ use crate::protocol::{
 use crate::{Error, LoadedModule, Result};
 
 use super::breakpoints::install_logical_breakpoint;
-use super::native::{LinuxTraceOps, wait_for};
+use super::native::{LinuxTraceOps, is_vanished_tracee, wait_for};
 use super::{
     ActiveExecution, ActiveKind, ClassifiedStop, Controller, ExpectedStop, Inferior,
     InferiorOrigin, LinuxError, NativeThreadState, StopBarrier, TraceThread, Waiter, backend_error,
@@ -375,7 +375,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             libc::PTRACE_EVENT_EXIT => {
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
                 inferior.thread_mut(pid)?.state = NativeThreadState::Exiting;
-                self.ptrace.continue_execution(pid, None)
+                self.release_exiting_thread(pid)
             }
             other => self.begin_visible_stop(
                 pid,
@@ -386,13 +386,47 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    /// Lets a thread stopped at its exit event finish exiting. A sibling's
+    /// `exit_group` may already have released it, which is no failure: its
+    /// exit status follows either way.
+    pub(super) fn release_exiting_thread(&self, pid: Pid) -> Result<()> {
+        match self.ptrace.continue_execution(pid, None) {
+            Err(error) if is_vanished_tracee(&error) => Ok(()),
+            result => result,
+        }
+    }
+
     pub(super) fn handle_clone_event(&mut self, parent: Pid) -> Result<()> {
         let child = Pid::from_raw(
             i32::try_from(self.ptrace.event_message(parent)?)
                 .map_err(|_| Error::AddressOverflow)?,
         );
-        let child_tgid = self.ptrace.thread_group_id(child)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        // A sibling's exit_group can end the new thread before this event
+        // announces it.
+        let ended = inferior.vanished_threads.remove(&child);
+        let child_tgid = if ended {
+            None
+        } else {
+            match self.ptrace.thread_group_id(child) {
+                Ok(tgid) => Some(tgid),
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    // The thread is already gone; its exit status follows.
+                    inferior.retired_threads.insert(child);
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let Some(child_tgid) = child_tgid else {
+            inferior.unowned_stops.remove(&child);
+            return if inferior.barrier.is_some() {
+                inferior.thread_mut(parent)?.state = NativeThreadState::Stopped;
+                self.finish_barrier_if_ready()
+            } else {
+                self.restart_after_internal(parent)
+            };
+        };
         if child_tgid != inferior.tgid {
             // The killed child's exit status is still delivered.
             inferior.unowned_stops.remove(&child);
@@ -580,6 +614,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             .threads
             .remove(&pid)
             .ok_or(Error::UnknownThread(thread_id))?;
+        if pid == inferior.tgid {
+            // The kernel reports the leader's exit only once every other
+            // thread is gone, even those whose own exits went unseen.
+            let others = std::mem::take(&mut inferior.threads);
+            inferior.retired_threads.extend(others.into_keys());
+        }
         let process_id = process_id(inferior.tgid);
         let execution = inferior.active.as_ref().map(|active| active.id);
 
@@ -740,9 +780,17 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         match status {
             WaitEvent::Exited(..) | WaitEvent::Signaled(..) => {
-                inferior.retired_threads.remove(&pid);
-                inferior.fork_children.remove(&pid);
+                // A thread no event announced yet exited; one may still come.
+                if !inferior.retired_threads.remove(&pid) && !inferior.fork_children.remove(&pid) {
+                    inferior.vanished_threads.insert(pid);
+                }
                 inferior.unowned_stops.remove(&pid);
+            }
+            WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_EXIT) => {
+                // A thread no event announced yet is exiting; let it go.
+                inferior.unowned_stops.remove(&pid);
+                inferior.vanished_threads.insert(pid);
+                return self.release_exiting_thread(pid).is_ok();
             }
             WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP) => {
                 if inferior.fork_children.remove(&pid) {
@@ -822,7 +870,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.handle_terminal(pid, ExitStatus::Terminated(exception_info(signal)))
             }
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
-                self.ptrace.continue_execution(pid, None)
+                self.release_exiting_thread(pid)
             }
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_CLONE => {
                 self.handle_clone_during_detach(pid)

@@ -2767,10 +2767,12 @@ fn a_declined_thread_exiting_during_an_internal_stop_publishes_nothing() {
     let [first, second, third] = harness.threads[..] else {
         panic!("three threads");
     };
-    harness.hit(first).expect("declined hit");
+    // The kernel reports the leader's exit only after every other thread's,
+    // so a sibling exits here.
+    harness.hit(second).expect("declined hit");
     harness
         .controller
-        .process_wait(WaitEvent::Exited(first, 0))
+        .process_wait(WaitEvent::Exited(second, 0))
         .expect("thread exit");
     harness.trace().take_actions();
     harness.settle_requested_stops();
@@ -2778,7 +2780,7 @@ fn a_declined_thread_exiting_during_an_internal_stop_publishes_nothing() {
     let actions = harness.trace().take_actions();
     assert!(
         actions.ends_with(&[
-            format!("continue {second} None"),
+            format!("continue {first} None"),
             format!("continue {third} None"),
         ]),
         "{actions:?}"
@@ -3355,4 +3357,81 @@ fn a_discarded_signal_during_a_repair_repeats_the_repair_step() {
         "{published:?}"
     );
     assert!(harness.thread(repairing).pending_signal.is_none());
+}
+
+#[test]
+fn threads_ending_before_their_announcement_never_become_live() {
+    let mut harness = watch_harness(2);
+    let (leader, sibling) = (harness.threads[0], harness.threads[1]);
+    let tgid = harness.controller.inferior.as_ref().expect("inferior").tgid;
+    harness.start_continue();
+    harness.trace().take_actions();
+    let unannounced = Pid::from_raw(5009);
+
+    // A sibling's exit_group ends a thread its creator has not announced.
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            unannounced,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_EXIT,
+        ))
+        .expect("an unannounced thread's exit event");
+    harness
+        .controller
+        .process_wait(WaitEvent::Exited(unannounced, 0))
+        .expect("an unannounced thread's exit");
+    *harness.trace().clone.borrow_mut() = Some((unannounced, tgid));
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            leader,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_CLONE,
+        ))
+        .expect("the late announcement");
+    assert!(
+        !harness
+            .controller
+            .inferior
+            .as_ref()
+            .expect("inferior")
+            .threads
+            .contains_key(&unannounced),
+        "an ended thread became live"
+    );
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            format!("continue {unannounced} None"),
+            format!("continue {leader} None"),
+        ]
+    );
+
+    // A thread whose exit event the kernel released early is no failure.
+    harness.trace().vanished.borrow_mut().insert(sibling);
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            sibling,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_EXIT,
+        ))
+        .expect("a released exit event");
+
+    // The leader's exit is reported once every thread is gone, even one
+    // whose own exit was never seen.
+    harness.published();
+    harness
+        .controller
+        .process_wait(WaitEvent::Exited(leader, 0))
+        .expect("the leader's exit");
+    assert!(harness.controller.inferior.is_none());
+    assert!(harness.published().iter().any(|event| matches!(
+        event,
+        DebuggerEvent::InferiorExited {
+            status: ExitStatus::Code(0),
+            ..
+        }
+    )));
 }
