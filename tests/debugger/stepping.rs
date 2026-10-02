@@ -53,95 +53,6 @@ async fn source_step_into_stops_after_the_physical_prologue_with_readable_parame
 }
 
 #[tokio::test]
-async fn boundary_fixture_preserves_inline_step_and_next_semantics() {
-    for fixture in ["stepping-boundaries-gcc-o2", "stepping-boundaries-clang-o2"] {
-        let mut step = Scenario::new(format!("inline step {fixture}"), Scenario::fixture(fixture));
-        step.add_breakpoint("main").await;
-        assert!(matches!(
-            step.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-        let physical = step
-            .operation("physical boundary caller", step.handle().current_location())
-            .await;
-
-        assert_eq!(
-            step.step_to_stop(StepKind::IntoSource).await,
-            StopReason::Step {
-                kind: StepKind::IntoSource
-            },
-            "{fixture}"
-        );
-        let inlined = step
-            .operation("inline boundary location", step.handle().current_location())
-            .await;
-        assert_eq!(
-            inlined.image.physical_instance, physical.image.physical_instance,
-            "{fixture} entered a physical callee instead of a logical inline frame"
-        );
-        assert_eq!(
-            inlined
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
-            Some("inline_adjust"),
-            "{fixture}"
-        );
-        assert_eq!(
-            inlined
-                .image
-                .source
-                .as_ref()
-                .map(|source| source.line.get()),
-            Some(24),
-            "{fixture}: {inlined:?}"
-        );
-        let sink = fixture_symbol_address(&step, &inlined, "boundary_sink");
-        assert_eq!(
-            boundary_sink_value(&step, sink).await,
-            0,
-            "{fixture} executed inline user work before its entry stop"
-        );
-        step.shutdown().await;
-
-        let mut next = Scenario::new(format!("inline next {fixture}"), Scenario::fixture(fixture));
-        next.add_breakpoint("main").await;
-        next.run_to_stop().await;
-        advance_to_boundary_inline_call(&mut next, fixture).await;
-
-        assert_eq!(
-            next.step_to_stop(StepKind::OverSource).await,
-            StopReason::Step {
-                kind: StepKind::OverSource
-            },
-            "{fixture}"
-        );
-        let after = next
-            .operation(
-                "after inline boundary next",
-                next.handle().current_location(),
-            )
-            .await;
-        assert_eq!(
-            after
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
-            Some("main"),
-            "{fixture}"
-        );
-        assert_eq!(
-            after.image.source.as_ref().map(|source| source.line.get()),
-            Some(31),
-            "{fixture}"
-        );
-        next.shutdown().await;
-    }
-}
-
-#[tokio::test]
 async fn clang_o0_inline_steps_cover_entry_body_return_caller_and_exit() {
     let fixture = "stepping-boundaries-clang-o0";
     let (mut scenario, _) =
@@ -291,6 +202,13 @@ async fn finish_distinguishes_inline_and_physical_frames_across_the_boundary_fix
             "{fixture}: {inlined:?}"
         );
         assert_eq!(inlined.image.physical_instance, main_physical);
+        assert_eq!(boundary_line(&inlined), Some(24), "{fixture}: {inlined:?}");
+        let sink = fixture_symbol_address(&scenario, &inlined, "boundary_sink");
+        assert_eq!(
+            boundary_sink_value(&scenario, sink).await,
+            0,
+            "{fixture} executed inline user work before its entry stop"
+        );
 
         let after_inline =
             boundary_source_step(&mut scenario, StepKind::Out, "caller after inline finish").await;
@@ -302,7 +220,6 @@ async fn finish_distinguishes_inline_and_physical_frames_across_the_boundary_fix
             "{fixture} finished inline_adjust at unexpected line {after_inline_line}"
         );
         advance_boundary_to_line(&mut scenario, fixture, 31).await;
-        let sink = fixture_symbol_address(&scenario, &after_inline, "boundary_sink");
 
         for case in [
             (31, "marked_returns", 11, 33),
@@ -1267,19 +1184,23 @@ async fn instruction_step_executes_the_instruction_hidden_by_a_breakpoint() {
     let StopReason::Breakpoint { address, .. } = scenario.run_to_stop().await else {
         panic!("expected breakpoint")
     };
-    let instruction_word = scenario
+    let disassembly = scenario
         .operation(
-            "read breakpoint instruction",
-            scenario.handle().read_word(address),
+            "disassemble breakpoint_target",
+            scenario.handle().disassemble(uscope::DisassemblyQuery {
+                range: uscope::DisassemblyRange::Function(address),
+                syntax: uscope::AssemblySyntax::Intel,
+            }),
         )
         .await;
-    assert_ne!(instruction_word.to_ne_bytes()[0], 0xcc);
-    scenario
-        .operation(
-            "rewrite breakpoint instruction",
-            scenario.handle().write_word(address, instruction_word),
-        )
-        .await;
+    let uscope::DisassemblyView::Function { blocks, .. } = disassembly.view else {
+        panic!("a function query returned a window");
+    };
+    let hidden = blocks
+        .iter()
+        .flat_map(|block| block.instructions.iter())
+        .find(|instruction| instruction.address == address)
+        .expect("the breakpoint is on an instruction");
 
     assert_eq!(
         scenario.step_to_stop(StepKind::Instruction).await,
@@ -1287,13 +1208,17 @@ async fn instruction_step_executes_the_instruction_hidden_by_a_breakpoint() {
             kind: StepKind::Instruction
         }
     );
+    // The original instruction ran, not the trap: execution continues
+    // after it rather than one byte past the breakpoint.
     let registers = scenario
         .operation("registers after step", scenario.handle().registers())
         .await;
-    assert_ne!(
+    assert_eq!(
         register_u64(&registers, RegisterRole::ProgramCounter),
-        address.get()
+        hidden.end().get(),
+        "{hidden:?}"
     );
+    assert!(hidden.end().get() > address.get() + 1, "{hidden:?}");
 
     assert!(matches!(
         scenario.resume_to_stop().await,
@@ -1394,6 +1319,15 @@ async fn source_next_steps_over_calls_but_preserves_user_breakpoints() {
             .as_ref()
             .map(|function| function.name.as_ref()),
         Some("middle")
+    );
+    assert_eq!(
+        location
+            .image
+            .source
+            .as_ref()
+            .map(|source| source.line.get()),
+        Some(12),
+        "next ran the call on line 11 to its return"
     );
     step_over.shutdown().await;
 

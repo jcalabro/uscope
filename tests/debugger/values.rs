@@ -206,7 +206,12 @@ async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_
             "{fixture}: terminal type was lost after the null hop: {unavailable:?}"
         );
         assert!(
-            matches!(unavailable.state, VariableState::Unavailable(_)),
+            matches!(
+                unavailable.state,
+                VariableState::Unavailable(VariableUnavailableReason::ValueAccess(
+                    uscope::ValueAccessUnavailableReason::NullPointer
+                ))
+            ),
             "{fixture}: {unavailable:?}"
         );
 
@@ -407,7 +412,16 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                 "{fixture}: {void_pointer:?}"
             );
             let invalid = dereference_named(&scenario, "invalid_pointer", 1).await;
-            assert!(matches!(invalid.state, VariableState::Unavailable(_)));
+            assert!(
+                matches!(
+                    invalid.state,
+                    VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
+                        completed: 0,
+                        ..
+                    })
+                ),
+                "{fixture}: {invalid:?}"
+            );
         }
         if source == "variables.cpp" {
             assert_dereferenced_scalar(
@@ -746,10 +760,12 @@ async fn c_records_cover_nesting_arrays_bit_fields_globals_and_optimization() {
             let flexible = dereference_named(&scenario, "flexible", 1).await;
             let flexible_page = record_page(&scenario, &flexible.state, 2, fixture).await;
             assert_signed_state(&named_child(&flexible_page, "count").state, 2);
-            assert!(matches!(
+            let unsupported = uscope::UnsupportedVariableFeature::TypeRepresentation;
+            assert_eq!(
                 named_child(&flexible_page, "values").state,
-                VariableState::Unavailable(_)
-            ));
+                VariableState::Unavailable(VariableUnavailableReason::Unsupported(unsupported)),
+                "{fixture}"
+            );
 
             let incomplete = scenario
                 .operation(
@@ -951,7 +967,23 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
                 .handle()
                 .inspect_range(parsed.expression, parsed.range.expect("terminal range"))
                 .await;
-            assert!(result.is_err(), "{fixture}: {expression}: {result:?}");
+            let expected = match expression {
+                "huge_array[1048576..1048578]" => matches!(
+                    &result,
+                    Err(Error::ValueIndexOutOfBounds {
+                        index: 1_048_577,
+                        count: 1_048_577,
+                        ..
+                    })
+                ),
+                "global_record[0..1]" => matches!(
+                    &result,
+                    Err(Error::IndexAccessOnNonIndexable { type_name })
+                        if type_name.as_ref() == "outer_record"
+                ),
+                _ => matches!(&result, Err(Error::InvalidValueRange(_))),
+            };
+            assert!(expected, "{fixture}: {expression}: {result:?}");
         }
         let out_of_bounds = scenario
             .handle()
@@ -1450,6 +1482,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
                 available_value(&slice_page.children[0].state),
                 uscope::VariableValue::Record
             ));
+            assert_record_members(&scenario, "inner.signed_value", fixture).await;
             if fixture.starts_with("records-zig-") {
                 let packed = dereference_named(&scenario, "packed_record", 1).await;
                 let packed_page = record_page(&scenario, &packed.state, 1, fixture).await;
@@ -1507,6 +1540,7 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
                 available_value(&slice.state),
                 uscope::VariableValue::Slice { length: 2, .. }
             ));
+            assert_record_members(&scenario, "inner.signedValue", fixture).await;
         } else {
             let variable = scenario
                 .operation(
@@ -1518,6 +1552,26 @@ async fn rust_zig_and_go_records_cover_nested_arrays_slices_and_optimized_metada
         }
         resume_go_to_exit(&mut scenario, fixture).await;
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
+/// Reads one member through each of the record fixtures' parameters: the
+/// record, the array of records, and the slice of it.
+async fn assert_record_members(scenario: &Scenario, signed_member: &str, fixture: &str) {
+    for (expression, expected) in [
+        (format!("(*record).{signed_member}"), -7),
+        ("(*records)[1].values[1]".to_owned(), 44),
+        ("slice[0].values[0]".to_owned(), 20),
+    ] {
+        let value = scenario
+            .operation(
+                &expression,
+                scenario
+                    .handle()
+                    .inspect(parsed_value_expression(&expression)),
+            )
+            .await;
+        assert_inspected_signed(&value, expected, &format!("{fixture}: {expression}"));
     }
 }
 
@@ -2025,11 +2079,15 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
         assert_signed_state(&readable.children[0].state, 41);
         assert_signed_state(&readable.children[1].state, 42);
         let unreadable = child_page(&scenario, &array.state, 2, 2).await;
+        assert_eq!(unreadable.children.len(), 2, "{fixture}: {unreadable:?}");
         assert!(
-            unreadable
-                .children
-                .iter()
-                .all(|child| matches!(child.state, VariableState::Unavailable(_))),
+            unreadable.children.iter().all(|child| matches!(
+                child.state,
+                VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
+                    completed: 0,
+                    ..
+                })
+            )),
             "{fixture}: an unmapped child was reported as readable: {unreadable:?}"
         );
         assert_eq!(
@@ -2075,12 +2133,18 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
                     .inspect_range(parsed.expression, parsed.range.expect("terminal range")),
             )
             .await;
+        assert_eq!(range.children.len(), 4, "{fixture}: {range:?}");
         assert_signed_state(&range.children[0].state, 41);
         assert_signed_state(&range.children[1].state, 42);
         assert!(
-            range.children[2..]
-                .iter()
-                .all(|child| matches!(child.state, VariableState::Unavailable(_)))
+            range.children[2..].iter().all(|child| matches!(
+                child.state,
+                VariableState::Unavailable(VariableUnavailableReason::MemoryInaccessible {
+                    completed: 0,
+                    ..
+                })
+            )),
+            "{fixture}: {range:?}"
         );
 
         assert_eq!(

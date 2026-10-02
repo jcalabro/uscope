@@ -536,6 +536,8 @@ async fn post_mortem_targets_reject_execution_modification_and_breakpoints() {
     let (stop, before) = stopped(&mut scenario).await;
     let handle = scenario.handle().clone();
     let pc = handle.current_location().await.unwrap().address;
+    let original = handle.read_word(pc).await.unwrap();
+    assert_ne!(original, 0, "the rejected write stores zero");
 
     let rejected = [
         ("launch", handle.launch().await.map(drop)),
@@ -592,7 +594,6 @@ async fn post_mortem_targets_reject_execution_modification_and_breakpoints() {
     assert_eq!(after.revision, before.revision);
     assert_eq!(after_stop.stop, stop.stop);
     assert!(after.breakpoints.is_empty());
-    let original = handle.read_word(pc).await.unwrap();
     assert_eq!(handle.read_word(pc).await.unwrap(), original);
     scenario.drain_pending_events();
     assert_eq!(

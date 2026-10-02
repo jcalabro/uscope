@@ -2,9 +2,10 @@ mod support;
 
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1476,50 +1477,6 @@ fn plain_repl_reports_errors_and_continues() {
 }
 
 #[test]
-fn ctrl_c_shuts_down_and_reaps_a_running_inferior() {
-    let executable = fixture("build/test-programs/spin");
-    assert!(
-        executable.exists(),
-        "missing test fixture; run `just build-test-programs`"
-    );
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .arg(executable)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("run uscope");
-    child
-        .stdin
-        .take()
-        .expect("stdin pipe")
-        .write_all(b"run\n")
-        .expect("write command");
-
-    let debugger_pid = child.id();
-    let inferior_pid = wait_for_child_process(debugger_pid).unwrap_or_else(|| {
-        child.kill().expect("kill debugger after test timeout");
-        child.wait().expect("reap debugger after test timeout");
-        panic!("debugger did not launch an inferior");
-    });
-
-    kill(
-        Pid::from_raw(i32::try_from(debugger_pid).expect("debugger PID fits i32")),
-        Signal::SIGINT,
-    )
-    .expect("interrupt uscope");
-
-    let output = child.wait_with_output().expect("wait for uscope");
-
-    assert_success(output);
-    assert!(
-        !PathBuf::from(format!("/proc/{inferior_pid}")).exists(),
-        "inferior {inferior_pid} survived debugger shutdown"
-    );
-}
-
-#[test]
 fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
     let executable = fixture("build/test-programs/spin");
     assert!(
@@ -1527,35 +1484,46 @@ fn ctrl_c_pauses_a_running_inferior_before_accepting_more_commands() {
         "missing test fixture; run `just build-test-programs`"
     );
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .arg(&executable)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("run uscope");
-    let mut stdin = child.stdin.take().expect("stdin pipe");
-    stdin.write_all(b"run\n").expect("write run command");
+    let mut uscope = Uscope::spawn(Command::new(env!("CARGO_BIN_EXE_uscope")).arg(&executable));
+    uscope.send("break main\nrun\nthreads\n");
+    uscope.line("the breakpoint stop", |line| {
+        line.starts_with("stopped at breakpoint 1")
+    });
+    let thread = uscope.line("the stopped thread", |line| line.starts_with("* "));
+    let inferior: u32 = thread
+        .split_whitespace()
+        .nth(1)
+        .and_then(|id| id.parse().ok())
+        .unwrap_or_else(|| panic!("no thread ID in {thread:?}"));
 
-    let debugger_pid = child.id();
-    let inferior_pid = wait_for_child_process(debugger_pid).expect("debugger launched inferior");
-    wait_for_running_executable(inferior_pid, &executable);
+    // main's loop is a jump to itself, so the breakpoint must go before the
+    // inferior can run it. Only the continue can make the stopped inferior
+    // runnable again, so once it is, Ctrl-C interrupts the loop.
+    uscope.send("delete 1\ncontinue\n");
+    support::wait_until("the inferior runs main's loop", || {
+        process_state(inferior) == Some('R')
+    });
     kill(
-        Pid::from_raw(i32::try_from(debugger_pid).expect("debugger PID fits i32")),
+        Pid::from_raw(i32::try_from(uscope.id()).expect("debugger PID fits i32")),
         Signal::SIGINT,
     )
     .expect("pause uscope");
-    stdin
-        .write_all(b"registers\nquit\n")
-        .expect("write inspection commands");
-    drop(stdin);
+    uscope.line("the pause", |line| line == "inferior paused");
 
-    let stdout = assert_success(child.wait_with_output().expect("wait for uscope"));
-    assert!(stdout.contains("inferior paused"), "{stdout}");
-    assert!(stdout.lines().any(|line| line.starts_with("rip ")));
+    // End of input shuts the session down, killing and reaping the inferior.
+    uscope.send("where\n");
+    uscope.close_stdin();
+    let stdout = assert_success(uscope.finish());
     assert!(
-        !PathBuf::from(format!("/proc/{inferior_pid}")).exists(),
-        "inferior {inferior_pid} survived debugger shutdown"
+        stdout
+            .lines()
+            .any(|line| line.starts_with("main at ") && line.contains("spin.c:10 ")),
+        "the pause did not land in main's loop:\n{stdout}"
+    );
+    assert_eq!(
+        process_state(inferior),
+        None,
+        "inferior {inferior} survived debugger shutdown"
     );
 }
 
@@ -1571,49 +1539,140 @@ fn continuing_past_a_sigint_stop_discards_the_interrupt() {
     assert!(stdout.contains("inferior exited with status 0"), "{stdout}");
 }
 
-fn wait_for_child_process(parent: u32) -> Option<u32> {
-    let tasks = PathBuf::from(format!("/proc/{parent}/task"));
-    let deadline = Instant::now() + Duration::from_secs(2);
+/// The harness's deadline for anything a test waits to observe.
+const DEADLINE: Duration = Duration::from_secs(5);
 
-    loop {
-        for task in fs::read_dir(&tasks).expect("read debugger tasks") {
-            let children = task.expect("read debugger task").path().join("children");
-            let contents = fs::read_to_string(children).expect("read debugger children");
+/// A uscope process whose output a test reads as it arrives. It is killed if
+/// the test ends first, which also kills an inferior it launched or attached
+/// to, since uscope traces with `PTRACE_O_EXITKILL`.
+struct Uscope {
+    child: Child,
+    stdout: mpsc::Receiver<String>,
+    transcript: String,
+    stderr: Option<thread::JoinHandle<String>>,
+}
 
-            if let Some(pid) = contents.split_whitespace().next() {
-                return Some(pid.parse().expect("numeric inferior PID"));
+impl Uscope {
+    /// Starts uscope with piped standard streams.
+    fn spawn(command: &mut Command) -> Self {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run uscope");
+        let stdout = child.stdout.take().expect("stdout pipe");
+        let mut stderr = child.stderr.take().expect("stderr pipe");
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if sender.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let stderr = thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        });
+        Self {
+            child,
+            stdout: receiver,
+            transcript: String::new(),
+            stderr: Some(stderr),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn send(&mut self, text: &str) {
+        self.child
+            .stdin
+            .as_mut()
+            .expect("uscope stdin")
+            .write_all(text.as_bytes())
+            .expect("write to uscope");
+    }
+
+    fn close_stdin(&mut self) {
+        drop(self.child.stdin.take());
+    }
+
+    /// Reads standard output until a line satisfies `predicate`.
+    fn line(&mut self, what: &str, predicate: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            let line = self
+                .stdout
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "uscope never printed {what} ({error}):\n{}",
+                        self.transcript
+                    )
+                });
+            self.transcript.push_str(&line);
+            self.transcript.push('\n');
+            if predicate(&line) {
+                return line;
             }
         }
-        if Instant::now() >= deadline {
-            return None;
+    }
+
+    /// Waits for uscope to exit and returns everything it printed.
+    fn finish(mut self) -> std::process::Output {
+        let mut status = None;
+        support::wait_until("uscope exits", || {
+            status = self.child.try_wait().expect("poll uscope");
+            status.is_some()
+        });
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            match self
+                .stdout
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(line) => {
+                    self.transcript.push_str(&line);
+                    self.transcript.push('\n');
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("uscope's output never closed:\n{}", self.transcript)
+                }
+            }
         }
-        thread::sleep(Duration::from_millis(10));
+        let stderr = self
+            .stderr
+            .take()
+            .expect("stderr reader")
+            .join()
+            .expect("read uscope stderr");
+        std::process::Output {
+            status: status.expect("exit status"),
+            stdout: std::mem::take(&mut self.transcript).into_bytes(),
+            stderr: stderr.into_bytes(),
+        }
     }
 }
 
-/// Waits until `pid` has exec'd `executable` and is no longer stopped.
-///
-/// A freshly forked child is also running before it execs, and a pause there
-/// completes at the launch's exec stop instead of interrupting running code.
-fn wait_for_running_executable(pid: u32, executable: &Path) {
-    let status = PathBuf::from(format!("/proc/{pid}/status"));
-    let exe = PathBuf::from(format!("/proc/{pid}/exe"));
-    let executable = executable.canonicalize().expect("canonical fixture path");
-    let deadline = Instant::now() + Duration::from_secs(2);
-
-    loop {
-        let execed = fs::read_link(&exe).is_ok_and(|path| path == executable);
-        let contents = fs::read_to_string(&status).expect("read inferior status");
-        let stopped = contents
-            .lines()
-            .find_map(|line| line.strip_prefix("State:"))
-            .is_some_and(|state| state.trim_start().starts_with(['T', 't']));
-        if execed && !stopped {
-            return;
-        }
-        assert!(Instant::now() < deadline, "inferior did not start running");
-        thread::sleep(Duration::from_millis(10));
+impl Drop for Uscope {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
+}
+
+/// Returns the state letter of a live process, or `None` once it is gone.
+fn process_state(pid: u32) -> Option<char> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name may contain anything, so the state follows its last
+    // closing parenthesis.
+    stat.rsplit_once(')')?.1.trim_start().chars().next()
 }
 
 fn uscope(arguments: &[&str]) -> std::process::Output {
@@ -2539,38 +2598,18 @@ fn disassemble_names_the_targets_indirect_branches_read_at_the_stop() {
 
 #[test]
 fn disassemble_says_when_a_restarted_system_call_hides_a_stopped_target() {
-    let mut target = Command::new(fixture("build/test-programs/attach-restart"))
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("spawn attach target");
-    let mut ready = [0_u8; 6];
-    let ready = target
-        .stdout
-        .as_mut()
-        .expect("target stdout")
-        .read_exact(&mut ready)
-        .map(|()| ready);
+    let target = support::ExternalProcess::spawn(&fixture("build/test-programs/attach-restart"));
     // Attaching must interrupt pause(2).
-    let syscall = format!("/proc/{}/syscall", target.id());
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while fs::read_to_string(&syscall).is_ok_and(|text| !text.starts_with("34 "))
-        && Instant::now() < deadline
-    {
-        thread::sleep(Duration::from_millis(1));
-    }
-    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .args([
-            "--batch",
-            "--eval",
-            "disassemble",
-            "--attach",
-            &target.id().to_string(),
-        ])
-        .output()
-        .expect("attach uscope by PID");
-    target.kill().expect("kill attach target");
-    target.wait().expect("reap attach target");
-    assert_eq!(ready.expect("wait for target readiness"), *b"READY\n");
+    support::wait_for_system_call(target.process_id(), 34);
+    let output = Uscope::spawn(Command::new(env!("CARGO_BIN_EXE_uscope")).args([
+        "--batch",
+        "--eval",
+        "disassemble",
+        "--attach",
+        &target.process_id().get().to_string(),
+    ]))
+    .finish();
+    drop(target);
     let stdout = assert_success(output);
     let stopped = stdout
         .lines()
@@ -2841,30 +2880,21 @@ fn the_terminal_launcher_explains_why_it_cannot_run_the_program() {
 fn a_killed_session_leaves_its_flight_recording() {
     let scratch = support::ScratchDir::new("flight-recording");
     let recording = scratch.path().join("recording.log");
-    let mut uscope = Command::new(env!("CARGO_BIN_EXE_uscope"))
-        .env("USCOPE_FLIGHT_RECORDING", &recording)
-        .args(["--eval", "break main", "--eval", "run"])
-        .arg(fixture("build/test-programs/basic"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start uscope");
+    // uscope keeps reading its open standard input after the script.
+    let uscope = Uscope::spawn(
+        Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .env("USCOPE_FLIGHT_RECORDING", &recording)
+            .args(["--eval", "break main", "--eval", "run"])
+            .arg(fixture("build/test-programs/basic")),
+    );
 
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let contents = loop {
-        let contents = fs::read_to_string(&recording).unwrap_or_default();
-        if contents.contains("event InferiorStopped") {
-            break contents;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the recording never showed the stop:\n{contents}"
-        );
-        thread::sleep(Duration::from_millis(10));
-    };
-    uscope.kill().expect("kill uscope");
-    uscope.wait().expect("reap uscope");
+    let mut contents = String::new();
+    support::wait_until("the recording shows the stop", || {
+        contents = fs::read_to_string(&recording).unwrap_or_default();
+        contents.contains("event InferiorStopped")
+    });
+    // Dropping kills uscope and reaps it.
+    drop(uscope);
 
     let position = |needle: &str| {
         contents
@@ -2887,13 +2917,10 @@ fn a_killed_session_leaves_its_flight_recording() {
     // The inferior dies with the debugger that traced it.
     let inferior = contents
         .lines()
-        .find_map(|line| line.split_once("spawned ")?.1.parse::<i32>().ok())
+        .find_map(|line| line.split_once("spawned ")?.1.parse::<u32>().ok())
         .expect("the recording names the inferior");
-    while Path::new(&format!("/proc/{inferior}")).exists() {
-        assert!(
-            Instant::now() < deadline,
-            "inferior {inferior} outlived uscope"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    // Once uscope is gone, init reaps the inferior, if it ever does.
+    support::wait_until(&format!("inferior {inferior} dies with uscope"), || {
+        matches!(process_state(inferior), None | Some('Z'))
+    });
 }

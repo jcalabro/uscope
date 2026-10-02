@@ -1,6 +1,7 @@
 mod support;
 
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use support::Scenario;
 use uscope::{
@@ -65,6 +66,30 @@ async fn breakpoint(scenario: &mut Scenario, id: BreakpointId) -> Breakpoint {
         .find(|breakpoint| breakpoint.id == id)
         .cloned()
         .expect("breakpoint exists")
+}
+
+/// Waits until a running program has reached breakpoint `id` `count` times.
+async fn wait_for_hits(scenario: &Scenario, id: BreakpointId, count: u64) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = scenario
+            .operation("snapshot", scenario.handle().snapshot())
+            .await;
+        let hit_count = snapshot
+            .breakpoints
+            .iter()
+            .find(|breakpoint| breakpoint.id == id)
+            .expect("breakpoint exists")
+            .hit_count;
+        if hit_count >= count {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "breakpoint {id} reached {hit_count} of {count} hits"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
 }
 
 async fn global(scenario: &Scenario, name: &str) -> u64 {
@@ -458,7 +483,8 @@ async fn signals_during_internal_stops_are_reported_and_no_hit_is_lost() {
     );
     assert_eq!(signals, 24);
     let calls = global(&scenario, "calls").await;
-    assert!(calls > 24 * 20, "workers called while signals arrived");
+    // The program sends its last signal once this many calls were made.
+    assert!(calls >= 24 * 20, "workers called while signals arrived");
     assert_eq!(
         breakpoint(&mut scenario, contended.id).await.hit_count,
         calls
@@ -477,9 +503,7 @@ async fn pause_amend_and_shutdown_interrupt_endless_skipped_hits() {
 
     // A pause lands among internal stops and is reported as a pause.
     let running = scenario.start_running().await;
-    while breakpoint(&mut scenario, spun.id).await.hit_count < 100 {
-        tokio::task::yield_now().await;
-    }
+    wait_for_hits(&scenario, spun.id, 100).await;
     scenario.operation("pause", scenario.handle().pause()).await;
     let paused = running.await.expect("run task").expect("run");
     assert_eq!(paused, StopReason::Pause);
@@ -523,15 +547,18 @@ async fn pause_amend_and_shutdown_interrupt_endless_skipped_hits() {
         )
         .await;
     let _running = scenario.start_resuming().await;
-    while breakpoint(&mut scenario, spun.id).await.hit_count < hit.hit_count + 100 {
-        tokio::task::yield_now().await;
-    }
+    wait_for_hits(&scenario, spun.id, hit.hit_count + 100).await;
     scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn attached_processes_skip_hits_and_detach_mid_run_unharmed() {
     let child = support::ExternalProcess::spawn_running(&Scenario::fixture("hit-count-spin"));
+    // Every thread exists before the first attach, so all survive to the second.
+    let tasks = format!("/proc/{}/task", child.process_id());
+    support::wait_until("the fixture started its workers", || {
+        std::fs::read_dir(&tasks).is_ok_and(|entries| entries.count() == 4)
+    });
     let mut scenario = Scenario::attached("attached hit counts", child.attach().await);
     let spun = add(&scenario, "spun", "%50").await;
 
@@ -555,9 +582,7 @@ async fn attached_processes_skip_hits_and_detach_mid_run_unharmed() {
         )
         .await;
     let _running = scenario.start_resuming().await;
-    while breakpoint(&mut scenario, spun.id).await.hit_count < 350 {
-        tokio::task::yield_now().await;
-    }
+    wait_for_hits(&scenario, spun.id, 350).await;
     scenario.shutdown().await;
 
     // A process killed by a leftover trap could not be attached again.
@@ -689,6 +714,9 @@ async fn stepping_one_instruction_through_a_skipped_trap_counts_it_once_and_move
     }
 }
 
+/// How many lines of `hit-counts.c` resolve to code in every variant.
+const MIN_LINE_BREAKPOINTS: usize = 16;
+
 /// Runs a fixed script of steps from the first stop in `caller` and returns
 /// where each stopped. With `skipping`, every source line and function first
 /// gets a breakpoint that skips all of its hits.
@@ -708,16 +736,24 @@ async fn step_script(fixture: &str, skipping: bool) -> (Vec<(StopReason, Virtual
                 path: "hit-counts.c".into(),
                 line: uscope::LineNumber::new(line).expect("one-based"),
             };
-            if let Ok(added) = scenario
+            match scenario
                 .attempt(
                     "skipping line breakpoint",
                     handle.add_breakpoint_with_hit_condition(spec, condition("==1000000")),
                 )
                 .await
             {
-                skipped.push(added.id);
+                Ok(added) => skipped.push(added.id),
+                // Lines outside every function have no code.
+                Err(uscope::Error::SourceLineUnavailable { .. }) => {}
+                Err(error) => panic!("{fixture}: line {line}: {error}"),
             }
         }
+        assert!(
+            skipped.len() >= 3 + MIN_LINE_BREAKPOINTS,
+            "{fixture}: only {} breakpoints skip hits",
+            skipped.len()
+        );
     }
 
     let script = [

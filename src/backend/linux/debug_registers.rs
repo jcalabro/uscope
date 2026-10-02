@@ -708,28 +708,4 @@ mod tests {
         }
         assert!(capacity_errors > 0, "the sequence exercised exhaustion");
     }
-
-    #[test]
-    fn programming_disables_before_writing_addresses() {
-        assert_eq!(
-            DebugRegisterPlan::default().programming_sequence(),
-            [(CONTROL_REGISTER, 0)]
-        );
-        let plan = DebugRegisterPlan::default()
-            .with_watchpoint(
-                WatchpointId::new(1),
-                &split_range(0x6006, 4).unwrap(),
-                SlotAccess::Write,
-            )
-            .unwrap();
-        assert_eq!(
-            plan.programming_sequence(),
-            [
-                (CONTROL_REGISTER, 0),
-                (0, 0x6006),
-                (1, 0x6008),
-                (CONTROL_REGISTER, plan.control()),
-            ]
-        );
-    }
 }

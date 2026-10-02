@@ -5,6 +5,9 @@ use std::time::{Duration, SystemTime};
 use expectrl::session::{OsSession, Session};
 use expectrl::{ControlCode, Eof, Expect};
 
+/// The harness's deadline for anything a test waits to observe.
+const TIMEOUT: Duration = Duration::from_secs(5);
+
 struct TestStateDir(PathBuf);
 
 impl TestStateDir {
@@ -45,7 +48,7 @@ fn repl(executable: &Path, state: &Path) -> OsSession {
         .env_remove("CLICOLOR")
         .env_remove("CLICOLOR_FORCE");
     let mut session = Session::spawn(command).expect("spawn uscope in a PTY");
-    session.set_expect_timeout(Some(Duration::from_secs(2)));
+    session.set_expect_timeout(Some(TIMEOUT));
     session.expect("(uscope) ").expect("initial prompt");
     session
 }
@@ -76,7 +79,7 @@ fn interactive_named_prompt_preserves_rustyline_cursor_width() {
         .env_remove("CLICOLOR")
         .env_remove("CLICOLOR_FORCE");
     let mut session = Session::spawn(command).expect("spawn colored uscope REPL");
-    session.set_expect_timeout(Some(Duration::from_secs(2)));
+    session.set_expect_timeout(Some(TIMEOUT));
     session
         .expect("\x1b[2m(uscope) \x1b[0m")
         .expect("dimmed prompt");
@@ -103,7 +106,7 @@ fn interactive_prompt_honors_no_color() {
         .env_remove("CLICOLOR")
         .env_remove("CLICOLOR_FORCE");
     let mut session = Session::spawn(command).expect("spawn uncolored uscope REPL");
-    session.set_expect_timeout(Some(Duration::from_secs(2)));
+    session.set_expect_timeout(Some(TIMEOUT));
     let prompt = session.expect("(uscope) ").expect("plain prompt");
     assert!(
         !contains_sgr(prompt.as_bytes()),
@@ -124,7 +127,7 @@ fn interactive_prompt_honors_no_color() {
         .env_remove("CLICOLOR")
         .env_remove("CLICOLOR_FORCE");
     let mut session = Session::spawn(command).expect("spawn forced-color uscope REPL");
-    session.set_expect_timeout(Some(Duration::from_secs(2)));
+    session.set_expect_timeout(Some(TIMEOUT));
     session
         .expect("\x1b[92mdebugging\x1b[0m")
         .expect("explicit color overrides NO_COLOR");

@@ -1,22 +1,26 @@
 #define _GNU_SOURCE
+#include <errno.h>
 #include <pthread.h>
-#include <sched.h>
-#include <stdatomic.h>
+#include <semaphore.h>
+#include <stdlib.h>
 #include <sys/prctl.h>
-#include <time.h>
 
 // The main thread creates threads without pause, so an attach is likely to
-// seize it inside clone. Each thread outlives an attach, so one that started
-// untraced is still there to be found.
+// seize it inside clone. Each thread lives until the main thread releases it,
+// LIVE_WORKERS creations later, so one that started untraced is still there
+// to be found while the main thread is stopped.
 enum { LIVE_WORKERS = 128 };
 
-static _Atomic int live;
+struct worker {
+    sem_t release;
+};
 
 static void *worker(void *argument) {
-    (void)argument;
-    const struct timespec lifetime = {.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000};
-    nanosleep(&lifetime, NULL);
-    atomic_fetch_sub_explicit(&live, 1, memory_order_relaxed);
+    struct worker *self = argument;
+    while (sem_wait(&self->release) != 0 && errno == EINTR) {
+    }
+    sem_destroy(&self->release);
+    free(self);
     return NULL;
 }
 
@@ -30,15 +34,18 @@ int main(void) {
         pthread_attr_setstacksize(&attributes, 64 * 1024) != 0) {
         return 2;
     }
-    for (;;) {
-        if (atomic_load_explicit(&live, memory_order_relaxed) >= LIVE_WORKERS) {
-            sched_yield();
-            continue;
-        }
-        atomic_fetch_add_explicit(&live, 1, memory_order_relaxed);
-        pthread_t thread;
-        if (pthread_create(&thread, &attributes, worker, NULL) != 0) {
+    struct worker *workers[LIVE_WORKERS] = {0};
+    for (int slot = 0;; slot = (slot + 1) % LIVE_WORKERS) {
+        if (workers[slot] != NULL && sem_post(&workers[slot]->release) != 0) {
             return 3;
+        }
+        workers[slot] = malloc(sizeof(*workers[slot]));
+        if (workers[slot] == NULL || sem_init(&workers[slot]->release, 0, 0) != 0) {
+            return 4;
+        }
+        pthread_t thread;
+        if (pthread_create(&thread, &attributes, worker, workers[slot]) != 0) {
+            return 5;
         }
     }
 }

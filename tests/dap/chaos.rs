@@ -213,15 +213,22 @@ fn end_program(dap: &mut Dap) {
     if ended(dap) {
         return;
     }
+    // A termination already under way can end the program meanwhile, so
+    // any of these may fail; the terminated event decides either way.
     let path = source("c/hot-calls.c");
-    dap.request(
-        "setBreakpoints",
-        json!({"source": {"path": path}, "breakpoints": []}),
-    );
-    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
-    dap.request("setDataBreakpoints", json!({"breakpoints": []}));
-    dap.request("setExceptionBreakpoints", json!({"filters": []}));
-    dap.request("terminate", Value::Null);
+    for (command, arguments) in [
+        (
+            "setBreakpoints",
+            json!({"source": {"path": path}, "breakpoints": []}),
+        ),
+        ("setFunctionBreakpoints", json!({"breakpoints": []})),
+        ("setDataBreakpoints", json!({"breakpoints": []})),
+        ("setExceptionBreakpoints", json!({"filters": []})),
+        ("terminate", Value::Null),
+    ] {
+        let sent = dap.send(command, arguments);
+        dap.response(sent);
+    }
     loop {
         let (kind, body) = dap.next_event(mark, &["stopped", "terminated"]);
         if kind == "terminated" {

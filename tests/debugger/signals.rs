@@ -313,6 +313,7 @@ async fn go_preemption_signals_never_stop_the_program() {
             Err(_) => break,
         }
     }
-    assert!(preemptions > 0, "the runtime never preempted a goroutine");
+    // The program finishes only once it has received eight.
+    assert!(preemptions >= 8, "only {preemptions} preemption signals");
     scenario.shutdown().await;
 }

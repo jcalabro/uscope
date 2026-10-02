@@ -1392,16 +1392,22 @@ mod tests {
         let renderer = Renderer::new(false);
         let overview = help(renderer);
         for command in COMMANDS {
-            assert!(overview.contains(command.name), "missing {}", command.name);
+            // Each command has one overview row: its name, aliases, summary.
+            let row = overview
+                .lines()
+                .find(|line| line.split_whitespace().next() == Some(command.name))
+                .unwrap_or_else(|| panic!("missing {}:\n{overview}", command.name));
+            assert!(row.ends_with(command.summary), "{row}");
+            let words = row
+                .split_whitespace()
+                .map(|word| word.trim_end_matches(','))
+                .collect::<Vec<_>>();
+            for alias in command.aliases {
+                assert!(words.contains(alias), "{alias} in {row}");
+            }
             let detail = command_help(command, renderer);
             assert!(detail.contains(command.summary));
             assert_eq!(detail.contains("\n  usage:"), command.takes_arguments());
-            for alias in command.aliases {
-                assert!(
-                    overview.contains(alias) && detail.contains(alias),
-                    "{alias}"
-                );
-            }
         }
     }
 

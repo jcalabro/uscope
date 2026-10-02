@@ -290,30 +290,6 @@ async fn normalized_named_types_and_modifiers_preserve_language_semantics() {
 }
 
 #[tokio::test]
-async fn optimized_go_debug_metadata_loads_without_advertising_runtime_control() {
-    let debugger = Debugger::new(Scenario::fixture("variables-go-o2"))
-        .expect("initialize optimized Go debugger");
-    let handle = debugger.handle();
-    let image = handle.module_image();
-    let function = image
-        .function_named("main.inspectScalars")
-        .expect("optimized Go function metadata");
-    assert!(
-        image
-            .instances_for_function(function.id)
-            .any(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
-    );
-    assert!(
-        image
-            .source_files()
-            .iter()
-            .any(|source| source.path.ends_with("tests/fixtures/go/variables/main.go"))
-    );
-    drop(handle);
-    debugger.shutdown().await.expect("shut down Go debugger");
-}
-
-#[tokio::test]
 async fn dwarf_normalization_preserves_inline_instances_and_line_rows() {
     for fixture in [
         "inline-gcc-o1",

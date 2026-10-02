@@ -1,11 +1,17 @@
-// Goroutines that compute long enough for the Go runtime to preempt them
-// asynchronously, which it does by sending the thread SIGURG.
+// Goroutines that compute until the Go runtime has preempted them
+// asynchronously, which it does by sending the thread SIGURG, several times.
 package main
 
 import (
 	"os"
+	"os/signal"
 	"sync"
+	"sync/atomic"
+	"syscall"
 )
+
+// How many SIGURG signals the program receives before it finishes.
+const preemptions = 8
 
 //go:noinline
 func spin(count int) int {
@@ -17,19 +23,32 @@ func spin(count int) int {
 }
 
 func main() {
+	// The runtime passes its preemption signals on to the program too.
+	urgent := make(chan os.Signal, 1)
+	signal.Notify(urgent, syscall.SIGURG)
+	var received atomic.Int64
+	go func() {
+		for range urgent {
+			received.Add(1)
+		}
+	}()
+
+	expected := spin(1_000_000)
 	var group sync.WaitGroup
-	results := make([]int, 4)
-	for worker := range results {
+	var failed atomic.Bool
+	for range 4 {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			results[worker] = spin(200_000_000)
+			for received.Load() < preemptions {
+				if spin(1_000_000) != expected {
+					failed.Store(true)
+				}
+			}
 		}()
 	}
 	group.Wait()
-	for _, result := range results {
-		if result != results[0] {
-			os.Exit(1)
-		}
+	if failed.Load() {
+		os.Exit(1)
 	}
 }
