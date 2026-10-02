@@ -575,9 +575,10 @@ fn resolve_in_image(
                             .any(|other| other.parent == Some(instance.id))
                     })
                     .map(|instance| instance.id);
+                // The line is the innermost instance's code, so a stop there
+                // presents that instance's frame.
                 if innermost.is_none_or(|instance| seen.insert(instance)) {
-                    let ids = code_instances.iter().map(|instance| instance.id).collect();
-                    locations.push((address, ids));
+                    locations.push((address, innermost.into_iter().collect()));
                 }
             }
             Ok(locations)

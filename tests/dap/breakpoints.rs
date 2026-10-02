@@ -400,12 +400,15 @@ fn a_condition_that_cannot_be_evaluated_stops_and_says_why() {
 #[test]
 fn breakpoints_in_libraries_wait_for_them_and_follow_them_in_and_out() {
     let mut dap = Dap::start("library breakpoints");
+    // The program loads a library, unloads it, stops in after_unload, and
+    // loads it again. Without that stop, an unload and reload could pass
+    // before the client hears of either, which leaves nothing to report.
     let started = dap.launch(
         Profile::VsCode,
         &fixture("globals-shared"),
         json!({}),
         &Configuration {
-            functions: vec!["dso_touch".to_owned()],
+            functions: vec!["dso_touch".to_owned(), "after_unload".to_owned()],
             ..Configuration::default()
         },
     );
@@ -434,12 +437,115 @@ fn breakpoints_in_libraries_wait_for_them_and_follow_them_in_and_out() {
         assert_eq!(trace["stackFrames"][0]["name"], "dso_touch");
         let resumed = dap.send("continue", json!({"threadId": stop.thread}));
         dap.success(resumed);
-        // The library unloads: the breakpoint waits again.
+        // The library unloads: the breakpoint waits again, as the client
+        // hears before the next stop or the exit.
         dap.event(resumed.mark, "breakpoint", |body| {
             body["breakpoint"]["id"] == id && body["breakpoint"]["reason"] == "pending"
         });
         mark = resumed.mark;
+        if round == 0 {
+            let unloaded = dap.stopped(mark);
+            assert_eq!(unloaded.reason, "function breakpoint");
+            let resumed = dap.send("continue", json!({"threadId": unloaded.thread}));
+            dap.success(resumed);
+            mark = resumed.mark;
+        }
     }
     assert_eq!(dap.event(mark, "exited", |_| true), json!({"exitCode": 0}));
     dap.finish();
+}
+
+/// Continues a program to its end, returning each stop's innermost frame
+/// and the name of the frame it was inlined into or called from.
+fn stops_until_exit(dap: &mut Dap, mut mark: crate::dap::Mark) -> Vec<(String, i64, String)> {
+    let mut stops = Vec::new();
+    loop {
+        let (kind, body) = dap.next_event(mark, &["stopped", "exited"]);
+        if kind == "exited" {
+            return stops;
+        }
+        let thread = body["threadId"].as_i64().expect("threadId");
+        let trace = dap.request("stackTrace", json!({"threadId": thread, "levels": 2}));
+        let name = |index: usize| {
+            trace["stackFrames"][index]["name"]
+                .as_str()
+                .expect("name")
+                .trim_end_matches(" [inlined]")
+                .to_owned()
+        };
+        stops.push((
+            name(0),
+            trace["stackFrames"][0]["line"].as_i64().expect("line"),
+            name(1),
+        ));
+        let resumed = dap.send("continue", json!({"threadId": thread}));
+        dap.success(resumed);
+        mark = resumed.mark;
+    }
+}
+
+#[test]
+fn breakpoints_in_inlined_code_stop_in_every_inlined_copy_as_gdb_does() {
+    let path = source("c/inline.c");
+    let line = line_of(&path, "inline_sink = incremented;");
+    // gdb stops at the line as often in each build: gcc's line table marks
+    // a statement there in only some of the inlined copies.
+    for (program, line_callers) in [
+        ("inline-gcc-o2", vec!["middle", "caller", "branchy"]),
+        (
+            "inline-clang-o2",
+            vec!["middle", "middle", "caller", "caller", "branchy"],
+        ),
+    ] {
+        // A function breakpoint stops where each copy begins.
+        let mut dap = Dap::start(format!("{program} function"));
+        let started = dap.launch(
+            Profile::Neovim,
+            &fixture(program),
+            json!({}),
+            &Configuration {
+                functions: vec!["leaf".to_owned()],
+                ..Configuration::default()
+            },
+        );
+        assert_eq!(started.function_breakpoints[0]["verified"], true);
+        let stops = stops_until_exit(&mut dap, started.mark);
+        assert!(stops.iter().all(|(name, ..)| name == "leaf"), "{stops:?}");
+        assert_eq!(
+            stops
+                .iter()
+                .map(|(.., caller)| caller.as_str())
+                .collect::<Vec<_>>(),
+            ["middle", "middle", "caller", "caller", "branchy"]
+        );
+        dap.finish();
+
+        // A line in the inlined body stops in the inlined frame.
+        let mut dap = Dap::start(format!("{program} line"));
+        let started = dap.launch(
+            Profile::Neovim,
+            &fixture(program),
+            json!({}),
+            &Configuration {
+                sources: vec![(path.clone(), vec![line])],
+                ..Configuration::default()
+            },
+        );
+        let stops = stops_until_exit(&mut dap, started.mark);
+        let line = i64::try_from(line).expect("line");
+        assert!(
+            stops
+                .iter()
+                .all(|(name, stopped, _)| name == "leaf" && *stopped == line),
+            "{stops:?}"
+        );
+        assert_eq!(
+            stops
+                .iter()
+                .map(|(.., caller)| caller.as_str())
+                .collect::<Vec<_>>(),
+            line_callers
+        );
+        dap.finish();
+    }
 }

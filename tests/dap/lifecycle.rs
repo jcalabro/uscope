@@ -206,7 +206,7 @@ fn requests_out_of_order_are_refused_without_ending_the_session() {
     );
     assert_eq!(
         dap.request_error("stackTrace", json!({"threadId": 1})),
-        "the program is running; this request needs it stopped"
+        "the program is not running"
     );
     assert_eq!(
         dap.request_error("frobnicate", json!({})),

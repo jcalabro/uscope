@@ -152,8 +152,21 @@ fn killing_the_adapter_kills_its_program_and_releases_attached_ones() {
     attached.stopped(started.mark);
     attached.signal(nix::sys::signal::Signal::SIGKILL);
     attached.abandon();
-    // The kernel detaches a dead tracer's tracees; this one was stopped,
-    // and runs on once released.
+    // The kernel detaches a dead tracer's tracees and resumes the ones it
+    // held stopped: this one is untraced and back waiting for its input.
+    let status = std::fs::read_to_string(format!("/proc/{}/status", process.process_id()))
+        .expect("the attached process lives");
+    assert!(
+        status
+            .lines()
+            .any(|line| line.split_whitespace().eq(["TracerPid:", "0"])),
+        "{status}"
+    );
+    let state = status
+        .lines()
+        .find(|line| line.starts_with("State:"))
+        .expect("state");
+    assert!(!state.contains("stopped"), "{state}");
     process.release();
     let status = process.wait();
     assert_eq!(status.code(), Some(23), "{status:?}");

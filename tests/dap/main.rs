@@ -11,6 +11,7 @@ mod chaos;
 mod console;
 mod differential;
 mod execution;
+mod faults;
 mod lifecycle;
 mod memory;
 mod output;

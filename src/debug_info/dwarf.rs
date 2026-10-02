@@ -1292,9 +1292,17 @@ fn load_lines(
                 continue;
             };
 
-            // Rows at one address collapse into a single entry: the last row
-            // provides the location, and the address is a statement boundary
-            // if any collapsed row recommends it.
+            // Rows at one address collapse into a single entry, a statement
+            // boundary if any collapsed row recommends it. Its location is
+            // the last statement row's, as gdb presents it: a later row that
+            // is no statement, such as the line an inlined call came from,
+            // does not describe where execution stands.
+            if let Some((start, _, true)) = &previous
+                && *start == row.address()
+                && !row.is_stmt()
+            {
+                continue;
+            }
             let statement = row.is_stmt()
                 || previous
                     .as_ref()

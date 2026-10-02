@@ -950,7 +950,17 @@ impl Session {
 
     /// The stop the client was told about, for requests that need one.
     pub(super) fn current_stop(&self) -> Result<Stop, ErrorBody> {
-        self.stop.clone().ok_or_else(ErrorBody::not_stopped)
+        self.stop.clone().ok_or_else(|| {
+            if self
+                .target
+                .as_ref()
+                .is_some_and(|target| target.process.is_some())
+            {
+                ErrorBody::not_stopped()
+            } else {
+                ErrorBody::new("the program is not running")
+            }
+        })
     }
 
     /// Whether the client cancelled the request with this `seq`.

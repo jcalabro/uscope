@@ -885,13 +885,13 @@ async fn optimized_inline_variables_preserve_scope_and_computed_values() {
 }
 
 #[tokio::test]
-async fn variable_inspection_refuses_an_ambiguous_inline_presentation() {
+async fn a_line_breakpoint_inside_an_inline_body_presents_the_inline_frame() {
     let mut scenario = Scenario::new(
-        "ambiguous inline stop",
+        "inline line stop",
         Scenario::fixture("variables-inline-gcc-o0"),
     );
-    // A source breakpoint inside the inline body is attributed to both the
-    // caller and the inline instance, so the stop has no single logical frame.
+    // The line is the inline instance's code, as gdb presents it, not also
+    // its caller's.
     scenario
         .add_source_breakpoint("variables-inline.c", 6)
         .await;
@@ -899,10 +899,31 @@ async fn variable_inspection_refuses_an_ambiguous_inline_presentation() {
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
     ));
-    assert!(matches!(
-        scenario.handle().variables().await,
-        Err(Error::VariableContextUnsupported)
-    ));
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let names = trace
+        .frames
+        .iter()
+        .take(2)
+        .map(|frame| {
+            frame
+                .function
+                .as_ref()
+                .map(|function| function.name.to_string())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            Some("inline_target".to_owned()),
+            Some("inline_caller".to_owned())
+        ]
+    );
+    let value = scenario
+        .operation("value", scenario.handle().variable("value"))
+        .await;
+    assert_variable_value(&value, ScalarValue::Signed(8));
     scenario.shutdown().await;
 }
 
