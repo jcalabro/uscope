@@ -4,11 +4,12 @@
 //! the scenario's name, which a failure prints. Whatever is sent, every
 //! request must get exactly one well-formed response, the adapter must keep
 //! working, and the session must end cleanly. `CHAOS_SEEDS=n` runs `n`
-//! other seeds and `CHAOS_ROUNDS=n` sends more bursts, for longer runs.
+//! other seeds, `CHAOS_SEED=hex` reruns one, and `CHAOS_ROUNDS=n` sends
+//! more bursts, for longer runs.
 
 use serde_json::{Value, json};
 
-use crate::dap::{Configuration, Dap, Profile, fixture, source};
+use crate::dap::{Dap, Profile, fixture, source};
 
 /// A small deterministic generator, so no dependency decides the sequence.
 struct Random(u64);
@@ -41,10 +42,12 @@ impl Random {
     }
 }
 
-fn request(random: &mut Random, thread: Option<i64>) -> (&'static str, Value) {
+fn request(random: &mut Random, thread: Option<i64>, started: bool) -> (&'static str, Value) {
     let thread = thread.map_or_else(|| random.number(), Value::from);
     let path = source("c/hot-calls.c");
-    match random.below(24) {
+    // Before a program starts, a launch or attach would wait for
+    // configurationDone like any other.
+    match random.below(if started { 32 } else { 29 }) {
         0 => ("threads", Value::Null),
         1 => (
             "stackTrace",
@@ -101,6 +104,23 @@ fn request(random: &mut Random, thread: Option<i64>) -> (&'static str, Value) {
         ),
         21 => ("exceptionInfo", json!({"threadId": thread})),
         22 => ("configurationDone", Value::Null),
+        23 => ("terminate", Value::Null),
+        24 => ("restart", Value::Null),
+        25 => (
+            "setVariable",
+            json!({"variablesReference": random.number(), "name": random.pick(&["hot_stop", "nope"]), "value": random.pick(&["0", "1", "((", "-1"])}),
+        ),
+        26 => (
+            "setExpression",
+            json!({"expression": random.pick(&["hot_count", "hot_stop", "3"]), "value": random.pick(&["0", "7", "x"]), "frameId": random.number()}),
+        ),
+        27 => (
+            "writeMemory",
+            json!({"memoryReference": random.pick(&["0x0", "0x401000", "junk"]), "data": random.pick(&["AAAA", "", "!!"])}),
+        ),
+        28 => ("cancel", json!({"requestId": random.number()})),
+        29 => ("launch", json!({"program": fixture("spin")})),
+        30 => ("attach", json!({"pid": random.number()})),
         _ => (
             *random.pick(&["frobnicate", "source", "restartFrame", "goto"]),
             json!({"x": random.number()}),
@@ -110,45 +130,105 @@ fn request(random: &mut Random, thread: Option<i64>) -> (&'static str, Value) {
 
 #[test]
 fn random_requests_in_every_state_are_answered_once_and_harm_nothing() {
-    let seeds: Vec<u64> = std::env::var("CHAOS_SEEDS").map_or_else(
-        |_| vec![0x05ee_d001, 0x05ee_d002, 0x05ee_d003, 0x05ee_d004],
-        |count| {
-            (1..=count.parse::<u64>().expect("count"))
-                .map(|seed| seed * 0x9e37_79b9)
-                .collect()
+    let only = std::env::var("CHAOS_SEED")
+        .ok()
+        .map(|seed| u64::from_str_radix(seed.trim_start_matches("0x"), 16).expect("hex seed"));
+    let seeds: Vec<u64> = only.map_or_else(
+        || {
+            std::env::var("CHAOS_SEEDS").map_or_else(
+                |_| vec![0x05ee_d001, 0x05ee_d002, 0x05ee_d003, 0x05ee_d004],
+                |count| {
+                    (1..=count.parse::<u64>().expect("count"))
+                        .map(|seed| seed * 0x9e37_79b9)
+                        .collect()
+                },
+            )
         },
+        |seed| vec![seed],
     );
     for seed in seeds {
         let mut random = Random(seed);
         let mut dap = Dap::start(format!("chaos seed {seed:#x}"));
         dap.relax_ordering_checks();
-        let started = dap.launch(
-            Profile::VsCode,
-            &fixture("hot-calls"),
-            json!({}),
-            &Configuration::default(),
-        );
-        dap.event(started.mark, "process", |_| true);
-        let main_thread = dap.process_id().map(i64::from);
         let rounds =
             std::env::var("CHAOS_ROUNDS").map_or(60, |rounds| rounds.parse().expect("rounds"));
-        for _ in 0..rounds {
-            // Requests go out in bursts, without waiting, as editors send them.
-            let burst = (0..=random.below(3))
-                .map(|_| {
-                    let thread = (random.below(2) == 0).then_some(main_thread).flatten();
-                    let (command, arguments) = request(&mut random, thread);
-                    dap.send(command, arguments)
-                })
-                .collect::<Vec<_>>();
-            for sent in burst {
-                let response = dap.response(sent);
-                assert!(response["success"].is_boolean(), "{response}");
-            }
-        }
+        dap.initialize(Profile::VsCode);
+        // Before anything is launched.
+        bursts(&mut dap, &mut random, 10, false);
+        // While the launch waits for configuration and starts the program.
+        let launch = dap.send("launch", json!({"program": fixture("hot-calls")}));
+        let done = dap.send("configurationDone", Value::Null);
+        bursts(&mut dap, &mut random, 10, true);
+        dap.response(launch);
+        dap.response(done);
+        // While it runs and stops, restarts, or ends.
+        bursts(&mut dap, &mut random, rounds, true);
+        // After it has ended.
+        end_program(&mut dap);
+        bursts(&mut dap, &mut random, 10, true);
         // The adapter still works after all of that.
         let threads = dap.request("threads", Value::Null);
         assert!(!threads["threads"].as_array().expect("threads").is_empty());
         dap.finish();
+    }
+}
+
+/// Sends bursts of random requests without waiting, as editors send them,
+/// and checks each is answered once.
+fn bursts(dap: &mut Dap, random: &mut Random, rounds: usize, started: bool) {
+    for _ in 0..rounds {
+        let main_thread = dap.process_id().map(i64::from);
+        let burst = (0..=random.below(3))
+            .map(|_| {
+                let thread = (random.below(2) == 0).then_some(main_thread).flatten();
+                let (command, arguments) = request(random, thread, started);
+                dap.send(command, arguments)
+            })
+            .collect::<Vec<_>>();
+        for sent in burst {
+            let response = dap.response(sent);
+            assert!(response["success"].is_boolean(), "{response}");
+        }
+    }
+}
+
+/// Whether the latest program has ended.
+fn ended(dap: &mut Dap) -> bool {
+    let messages = dap.messages_since(crate::dap::Mark::START);
+    let started = messages
+        .iter()
+        .rposition(|message| message["event"] == "process")
+        .unwrap_or(0);
+    messages[started..]
+        .iter()
+        .any(|message| message["event"] == "terminated")
+}
+
+/// Ends the program unless it has ended. A thread may still stop for a
+/// breakpoint or signal before the termination signal arrives; the stop is
+/// continued.
+fn end_program(dap: &mut Dap) {
+    // Events from here on decide; one already on its way is not missed.
+    let mark = dap.mark();
+    if ended(dap) {
+        return;
+    }
+    let path = source("c/hot-calls.c");
+    dap.request(
+        "setBreakpoints",
+        json!({"source": {"path": path}, "breakpoints": []}),
+    );
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    dap.request("setDataBreakpoints", json!({"breakpoints": []}));
+    dap.request("setExceptionBreakpoints", json!({"filters": []}));
+    dap.request("terminate", Value::Null);
+    loop {
+        let (kind, body) = dap.next_event(mark, &["stopped", "terminated"]);
+        if kind == "terminated" {
+            return;
+        }
+        // The program may already be gone again.
+        let resumed = dap.send("continue", json!({"threadId": body["threadId"]}));
+        dap.response(resumed);
     }
 }

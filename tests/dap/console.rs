@@ -152,3 +152,53 @@ fn console_output_is_styled_only_for_clients_that_accept_styling() {
         dap.finish();
     }
 }
+
+#[test]
+fn console_commands_print_what_the_cli_prints_at_the_same_stop() {
+    let commands = [
+        "backtrace",
+        "info breakpoints",
+        "print parameter",
+        "list",
+        "disassemble",
+        "registers",
+        "info signals",
+    ];
+    let mut dap = Dap::start("console parity");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("variables-gcc-o0"),
+        json!({}),
+        &Configuration {
+            functions: vec!["pointer_target".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let stop = dap.stopped(started.mark);
+    let trace = dap.request("stackTrace", json!({"threadId": stop.thread, "levels": 1}));
+    let frame = trace["stackFrames"][0]["id"].clone();
+    let console = commands.map(|command| repl(&mut dap, &frame, command));
+    dap.finish();
+
+    for (command, console) in commands.iter().zip(console) {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .arg(fixture("variables-gcc-o0"))
+            .args([
+                "--batch",
+                "-e",
+                "break pointer_target",
+                "-e",
+                "run",
+                "-e",
+                command,
+            ])
+            .output()
+            .expect("run the CLI");
+        let cli = String::from_utf8_lossy(&output.stdout);
+        assert!(!console.trim().is_empty(), "{command} printed nothing");
+        assert!(
+            cli.contains(console.trim_end()),
+            "{command} differs:\nconsole:\n{console}\ncli:\n{cli}"
+        );
+    }
+}

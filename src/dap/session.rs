@@ -5,7 +5,7 @@
 //! request that resumes the inferior is answered before the session reads
 //! the events it causes, a response always precedes the stop it leads to.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -257,7 +257,8 @@ pub struct Session {
     backtraces: HashMap<ThreadId, Arc<Backtrace>>,
     variables: HashMap<(ThreadId, StackFrameId), Arc<VariableSnapshot>>,
     threads: BTreeSet<ThreadId>,
-    pub(super) modules: BTreeSet<ModuleId>,
+    /// The modules the client was told are loaded.
+    pub(super) modules: BTreeMap<ModuleId, uscope::LoadedModuleRecord>,
     /// The execution the client last started, whose resume it already knows.
     resumed: Option<uscope::ExecutionId>,
     /// Whether the program is being restarted, so its end does not end the
@@ -289,7 +290,7 @@ impl Session {
             backtraces: HashMap::new(),
             variables: HashMap::new(),
             threads: BTreeSet::new(),
-            modules: BTreeSet::new(),
+            modules: BTreeMap::new(),
             resumed: None,
             restarting: false,
             queue: std::collections::VecDeque::new(),
@@ -1114,7 +1115,12 @@ impl Session {
                 thread_id,
                 reason,
                 ..
-            } => self.stopped(stop_id, thread_id, reason).await?,
+            } => {
+                // Catching up after missed events may have reported it.
+                if self.stop.as_ref().map(|stop| stop.id) != Some(stop_id) {
+                    self.stopped(stop_id, thread_id, reason).await?;
+                }
+            }
             DebuggerEvent::ThreadStarted { thread_id, .. } => {
                 self.announce_thread(thread_id).await?;
             }
@@ -1130,16 +1136,7 @@ impl Session {
             }
             DebuggerEvent::ModuleLoaded { module, .. } => self.announce_module(&module).await?,
             DebuggerEvent::ModuleUnloaded { module, .. } => {
-                if let Some(target) = self.target.as_mut() {
-                    target.images.remove(&module.module.id);
-                }
-                self.modules.remove(&module.module.id);
-                self.client
-                    .event(
-                        "module",
-                        json!({"reason": "removed", "module": module_json(&module)}),
-                    )
-                    .await?;
+                self.forget_module(module.module.id).await?;
             }
             DebuggerEvent::InferiorExited { status, .. } => self.exited(&status).await?,
             DebuggerEvent::InferiorDetached { .. } => {
@@ -1288,21 +1285,17 @@ impl Session {
             }
         }
         self.leave_stop();
-        let code = match status {
-            ExitStatus::Code(code) => *code,
-            ExitStatus::Terminated(info) => {
-                self.client
-                    .important(format!(
-                        "the program was terminated by {} ({})",
-                        signal_text(info.code),
-                        info.description
-                    ))
-                    .await?;
-                128 + i64::try_from(info.code).unwrap_or(0)
-            }
-        };
+        if let ExitStatus::Terminated(info) = status {
+            self.client
+                .important(format!(
+                    "the program was terminated by {} ({})",
+                    signal_text(info.code),
+                    info.description
+                ))
+                .await?;
+        }
         self.client
-            .event("exited", json!({"exitCode": code}))
+            .event("exited", json!({"exitCode": exit_code(status)}))
             .await?;
         self.ended_target().await
     }
@@ -1363,8 +1356,25 @@ impl Session {
         Ok(())
     }
 
-    /// Catches up after missing events: announces threads, and reports the
-    /// current stop, resume, or exit the client has not heard about.
+    /// Tells the client a module is gone.
+    pub(super) async fn forget_module(&mut self, id: ModuleId) -> Result<(), Closed> {
+        if let Some(target) = self.target.as_mut() {
+            target.images.remove(&id);
+        }
+        let Some(record) = self.modules.remove(&id) else {
+            return Ok(());
+        };
+        self.client
+            .event(
+                "module",
+                json!({"reason": "removed", "module": super::sources::module_json(&record, None)}),
+            )
+            .await
+    }
+
+    /// Catches up after missing events: announces threads and modules, and
+    /// reports the current stop, resume, or exit the client has not heard
+    /// about.
     async fn resync(&mut self) -> Result<(), Closed> {
         let Some(handle) = self.handle().cloned() else {
             return Ok(());
@@ -1373,6 +1383,7 @@ impl Session {
             return Ok(());
         };
         self.announce_threads(&snapshot).await?;
+        self.announce_modules().await?;
         match snapshot.inferior {
             InferiorState::Stopped {
                 stop_id,
@@ -2090,6 +2101,15 @@ pub(super) fn thread_id(id: i64) -> Result<ThreadId, ErrorBody> {
         .ok_or_else(|| ErrorBody::new(format!("there is no thread {id}")))
 }
 
+/// The exit code a client is told: the program's own, or, as a shell
+/// reports it, 128 plus the signal that killed it.
+fn exit_code(status: &ExitStatus) -> i64 {
+    match status {
+        ExitStatus::Code(code) => *code,
+        ExitStatus::Terminated(info) => 128 + i64::try_from(info.code).unwrap_or(0),
+    }
+}
+
 /// The `stopped` event's reason, description, and text for a stop that
 /// needs nothing from the session to describe.
 fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<String>) {
@@ -2150,17 +2170,6 @@ fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<S
 /// A signal's name, or its number when it has none.
 pub(super) fn signal_text(code: u64) -> String {
     uscope::signal_name(code).unwrap_or_else(|| format!("signal {code}"))
-}
-
-fn module_json(module: &uscope::LoadedModuleRecord) -> Value {
-    json!({
-        "id": module.module.id.get().to_string(),
-        "name": module
-            .path
-            .file_name()
-            .map_or_else(|| module.path.display().to_string(), |name| name.to_string_lossy().into_owned()),
-        "path": module.path.display().to_string(),
-    })
 }
 
 #[cfg(test)]
@@ -2234,5 +2243,77 @@ mod tests {
                 Some(format!("there is no thread {invalid}"))
             );
         }
+    }
+
+    #[test]
+    fn stops_and_exits_map_to_the_protocols_reasons_and_codes() {
+        let exception = |code: u64| uscope::ExceptionInfo {
+            code,
+            description: format!("signal {code}").into(),
+        };
+        let cases = [
+            (
+                StopReason::Step {
+                    kind: StepKind::OverSource,
+                },
+                "step",
+                None,
+            ),
+            (StopReason::Pause, "pause", None),
+            (StopReason::Entry, "entry", None),
+            (StopReason::Attach, "entry", None),
+            (
+                StopReason::Exception(exception(11)),
+                "exception",
+                Some("SIGSEGV"),
+            ),
+            (
+                StopReason::CoreDump {
+                    exception: Some(exception(6)),
+                },
+                "exception",
+                Some("SIGABRT"),
+            ),
+            (
+                StopReason::CoreDump { exception: None },
+                "exception",
+                Some("core dump"),
+            ),
+            (
+                StopReason::ThreadExited {
+                    thread_id: ThreadId::new(7),
+                    status: ExitStatus::Code(0),
+                },
+                "step",
+                None,
+            ),
+            (StopReason::Exec { followed: true }, "entry", None),
+            (
+                StopReason::Exec { followed: false },
+                "exception",
+                Some("exec"),
+            ),
+            (
+                StopReason::Unclassifiable {
+                    description: "odd".into(),
+                },
+                "exception",
+                Some("unclassifiable stop"),
+            ),
+            (
+                StopReason::WatchpointArmFailed {
+                    thread_id: ThreadId::new(7),
+                    description: "busy".into(),
+                },
+                "exception",
+                Some("watchpoint failure"),
+            ),
+        ];
+        for (reason, kind, text) in cases {
+            let (described, _, shown) = describe_stop(&reason);
+            assert_eq!((described, shown.as_deref()), (kind, text), "{reason:?}");
+        }
+        assert_eq!(exit_code(&ExitStatus::Code(3)), 3);
+        assert_eq!(exit_code(&ExitStatus::Terminated(exception(9))), 137);
     }
 }

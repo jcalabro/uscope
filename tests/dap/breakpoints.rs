@@ -549,3 +549,88 @@ fn breakpoints_in_inlined_code_stop_in_every_inlined_copy_as_gdb_does() {
         dap.finish();
     }
 }
+
+#[test]
+fn a_function_breakpoint_stops_in_every_overload_and_method_of_the_name() {
+    let mut dap = Dap::start("overloads");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("overloads-cpp-gcc-o0"),
+        json!({}),
+        &Configuration {
+            functions: vec!["pick".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    assert_eq!(started.function_breakpoints[0]["verified"], true);
+    // Each overload and the method, by their lines; frames name functions
+    // as their debug information does, without scope or parameters.
+    let path = source("cpp/overloads.cpp");
+    let stops = stops_until_exit(&mut dap, started.mark);
+    let expected = [
+        "int pick(int value)",
+        "double pick(double value)",
+        "int pick() const",
+    ]
+    .map(|marker| {
+        (
+            "pick".to_owned(),
+            i64::try_from(line_of(&path, marker)).expect("line"),
+            "main".to_owned(),
+        )
+    });
+    assert_eq!(stops, expected);
+    dap.finish();
+}
+
+#[test]
+fn threads_hitting_one_breakpoint_together_are_each_reported_in_turn() {
+    let mut dap = Dap::start("co-hits");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("hot-calls"),
+        json!({}),
+        &Configuration {
+            functions: vec!["hot_function".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    let id = started.function_breakpoints[0]["id"].clone();
+    // Four threads call the function as fast as they can, so their traps
+    // coincide; each continue reports one stop, and a hit held back while
+    // another thread's was reported comes next.
+    let mut reporters = std::collections::BTreeSet::new();
+    let mut mark = started.mark;
+    let mut stop = dap.stopped(mark);
+    for _ in 0..40 {
+        assert_eq!(stop.body["hitBreakpointIds"], json!([id]));
+        let threads = dap.request("threads", Value::Null)["threads"].clone();
+        assert!(
+            threads
+                .as_array()
+                .expect("threads")
+                .iter()
+                .any(|thread| thread["id"] == stop.thread),
+            "{threads}"
+        );
+        reporters.insert(stop.thread);
+        let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+        dap.success(resumed);
+        mark = resumed.mark;
+        stop = dap.stopped(mark);
+    }
+    assert!(reporters.len() > 1, "only {reporters:?} reported hits");
+    // Release the threads and let the program end.
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    dap.request(
+        "setExpression",
+        json!({"expression": "hot_stop", "value": "1"}),
+    );
+    let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+    dap.success(resumed);
+    assert_eq!(
+        dap.event(resumed.mark, "exited", |_| true),
+        json!({"exitCode": 0})
+    );
+    dap.finish();
+}

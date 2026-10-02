@@ -12,6 +12,7 @@ mod console;
 mod differential;
 mod execution;
 mod faults;
+mod languages;
 mod lifecycle;
 mod memory;
 mod output;

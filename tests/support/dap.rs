@@ -155,6 +155,8 @@ pub struct Dap {
     refused_terminal: Option<String>,
     /// Whether this is another adapter, compared with but not checked.
     reference: bool,
+    /// `runInTerminal` requests held unanswered, when holding them.
+    held_terminals: Option<Vec<Value>>,
 }
 
 /// Ordering rules checked on every message.
@@ -169,6 +171,8 @@ struct Checks {
     initialized_event: bool,
     stopped: bool,
     threads: BTreeSet<i64>,
+    /// The modules announced and not removed, by id.
+    modules: BTreeSet<String>,
     /// Chaos clients race requests with stops on purpose.
     relaxed: bool,
 }
@@ -268,6 +272,7 @@ impl Dap {
             terminal_output: mpsc::channel(),
             refused_terminal: None,
             reference: false,
+            held_terminals: None,
         }
     }
 
@@ -275,6 +280,24 @@ impl Dap {
     /// failed does.
     pub fn refuse_terminals(&mut self, message: &str) {
         self.refused_terminal = Some(message.to_owned());
+    }
+
+    /// Leaves `runInTerminal` requests unanswered until released, keeping
+    /// the adapter waiting inside the request that sent them.
+    pub fn hold_terminals(&mut self) {
+        self.held_terminals = Some(Vec::new());
+    }
+
+    /// Waits for a held `runInTerminal` request, then answers every held
+    /// one and stops holding them.
+    pub fn release_terminals(&mut self) {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        while self.held_terminals.as_ref().is_some_and(Vec::is_empty) {
+            self.receive(deadline, "a runInTerminal request");
+        }
+        for request in self.held_terminals.take().unwrap_or_default() {
+            self.run_in_terminal(&request);
+        }
     }
 
     /// Waits for the next line a program run in a terminal writes.
@@ -624,7 +647,10 @@ impl Dap {
             ));
         }
         if message["type"] == "request" {
-            self.run_in_terminal(&message);
+            match &mut self.held_terminals {
+                Some(held) => held.push(message.clone()),
+                None => self.run_in_terminal(&message),
+            }
         }
         if message["event"] == "process" {
             let attached = message["body"]["startMethod"] == "attach";
@@ -744,6 +770,30 @@ impl Dap {
             Some("terminated") => {
                 checks.stopped = false;
                 checks.threads.clear();
+            }
+            Some("module") => {
+                let id = body["module"]["id"]
+                    .as_str()
+                    .ok_or("module without a string id")?
+                    .to_owned();
+                match body["reason"].as_str() {
+                    Some("new") => {
+                        if !checks.modules.insert(id.clone()) {
+                            return Err(format!("module {id} is new twice"));
+                        }
+                    }
+                    Some("changed") => {
+                        if !checks.modules.contains(&id) {
+                            return Err(format!("module {id} changed before it was new"));
+                        }
+                    }
+                    Some("removed") => {
+                        if !checks.modules.remove(&id) {
+                            return Err(format!("module {id} was removed without being new"));
+                        }
+                    }
+                    other => return Err(format!("unexpected module reason {other:?}")),
+                }
             }
             _ => {}
         }
@@ -943,6 +993,16 @@ impl Dap {
                 stopped_frames
             }
         }
+    }
+
+    /// The threads the client was told exist.
+    pub fn known_threads(&self) -> BTreeSet<i64> {
+        self.checks.threads.clone()
+    }
+
+    /// The ids of the modules the client was told are loaded.
+    pub fn known_modules(&self) -> BTreeSet<String> {
+        self.checks.modules.clone()
     }
 
     /// The process the adapter reported in its `process` event.
