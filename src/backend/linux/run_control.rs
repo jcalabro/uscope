@@ -490,15 +490,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             }
             ClassifiedStop::Breakpoint(address) => self.handle_breakpoint_stop(pid, address),
-            ClassifiedStop::Watch(owners) => {
-                let expected = self
-                    .inferior
-                    .as_ref()
-                    .and_then(|inferior| inferior.threads.get(&pid))
-                    .map(|thread| thread.expected.clone())
-                    .ok_or(Error::NotRunning)?;
-                self.finish_watched_instruction(pid, &expected, owners)
-            }
+            ClassifiedStop::Watch(owners) => self.handle_watch_stop(pid, owners),
             ClassifiedStop::Trace { watch } => self.handle_trace_stop(pid, watch),
             ClassifiedStop::SignalDelivery(pending) => self.handle_signal_stop(pid, pending),
             ClassifiedStop::GroupStop(signal) => {
@@ -638,10 +630,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.threads.get_mut(&pid))
             .map(|thread| std::mem::replace(&mut thread.expected, ExpectedStop::None))
             .ok_or(Error::NotRunning)?;
+        let watch = self.reportable_watch_hits(watch);
         if !watch.is_empty() {
             return self.finish_watched_instruction(pid, &expected, watch);
         }
+        self.finish_traced_instruction(pid, expected)
+    }
 
+    /// Completes the single-step a thread was expected to make, which no
+    /// reported watchpoint ended.
+    fn finish_traced_instruction(&mut self, pid: Pid, expected: ExpectedStop) -> Result<()> {
         if self.barrier_active() {
             return self.settle_trace_during_barrier(pid, expected);
         }
@@ -658,11 +656,49 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    /// Handles a debug exception a running thread took after accessing
+    /// watched memory. When every watchpoint it reported watches for a
+    /// change that the access did not make, the thread carries on as if it
+    /// had not trapped.
+    fn handle_watch_stop(&mut self, pid: Pid, owners: BTreeSet<WatchpointId>) -> Result<()> {
+        let expected = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.threads.get_mut(&pid))
+            .map(|thread| std::mem::replace(&mut thread.expected, ExpectedStop::None))
+            .ok_or(Error::NotRunning)?;
+        let owners = self.reportable_watch_hits(owners);
+        if !owners.is_empty() {
+            return self.finish_watched_instruction(pid, &expected, owners);
+        }
+        match expected {
+            ExpectedStop::BreakpointRepair { .. } | ExpectedStop::UserStep { .. } => {
+                self.finish_traced_instruction(pid, expected)
+            }
+            expected => {
+                self.inferior
+                    .as_mut()
+                    .ok_or(Error::NotRunning)?
+                    .thread_mut(pid)?
+                    .expected = expected;
+                if self.barrier_active() {
+                    self.finish_barrier_if_ready()
+                } else {
+                    self.restart_after_internal(pid)
+                }
+            }
+        }
+    }
+
     /// Publishes a watchpoint stop for an instruction that accessed watched
     /// memory. When the instruction was a breakpoint repair step it has
     /// already executed, so its repair is complete; the site is reinstalled
     /// when the stop is published. A thread awaiting its breakpoint after
     /// signal delivery still re-traps there once resumed.
+    ///
+    /// The stop becomes internal if, once every thread is stopped, no hit
+    /// remains to report, so a stepping thread's instruction counts toward
+    /// its step.
     pub(super) fn finish_watched_instruction(
         &mut self,
         pid: Pid,
@@ -674,6 +710,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             inferior.finish_current_repair(pid, address)?;
         }
         inferior.thread_mut(pid)?.watch_hits.extend(owners);
+        if matches!(
+            expected,
+            ExpectedStop::BreakpointRepair { .. } | ExpectedStop::UserStep { .. }
+        ) {
+            self.note_step_progress(pid);
+        }
         self.begin_visible_stop(
             pid,
             StopReason::Watchpoint {

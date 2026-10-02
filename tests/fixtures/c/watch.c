@@ -44,6 +44,8 @@ volatile int32_t pointee_second;
 volatile int32_t *volatile watch_pointer = &pointee_first;
 struct timespec watch_time;
 volatile int64_t watch_sink;
+volatile int32_t watch_steady = 7;
+volatile uint64_t watch_kernel;
 static volatile sig_atomic_t handled;
 
 __attribute__((noinline)) void scalar_stores(void) {
@@ -193,6 +195,42 @@ __attribute__((noinline)) int static_local_counter(void) {
     return calls;
 }
 
+__attribute__((noinline)) void steady_store(void) {
+    watch_steady = 7;
+}
+
+// Stores the value the watched variable already holds on most lines, directly,
+// in calls, and in a loop, so steps cross stores that change nothing.
+__attribute__((noinline)) void steady_stores(void) {
+    watch_steady = 7;
+    steady_store();
+    for (int round = 0; round < 3; ++round) {
+        steady_store();
+        watch_steady = 7;
+    }
+    watch_steady = 7;
+}
+
+__attribute__((noinline)) void steady_change(void) {
+    watch_steady = 8;
+    watch_steady = 8;
+}
+
+// read(2) fills the word inside the kernel, unobserved; the user-mode store
+// of the same value then leaves memory as it was, yet differs from what the
+// debugger last observed.
+__attribute__((noinline)) void kernel_then_same_store(void) {
+    int pipes[2];
+    uint64_t value = 0x99;
+    if (pipe(pipes) != 0 || write(pipes[1], &value, sizeof value) != (ssize_t)sizeof value ||
+        read(pipes[0], (void *)&watch_kernel, sizeof value) != (ssize_t)sizeof value) {
+        _exit(75);
+    }
+    close(pipes[0]);
+    close(pipes[1]);
+    watch_kernel = 0x99;
+}
+
 int main(void) {
     scalar_stores();
     size_stores();
@@ -209,6 +247,9 @@ int main(void) {
     store_then_breakpoint();
     breakpoint_on_store();
     step_over_writer();
+    steady_stores();
+    steady_change();
+    kernel_then_same_store();
     int calls = static_local_counter() + static_local_counter();
-    return watch_i32 == 77 && calls == 3 && pointee_second == 2 ? 0 : 1;
+    return watch_i32 == 77 && calls == 3 && pointee_second == 2 && watch_steady == 8 ? 0 : 1;
 }

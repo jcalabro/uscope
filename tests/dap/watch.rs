@@ -34,7 +34,7 @@ fn next_change(dap: &mut Dap, thread: i64, id: &Value) -> String {
 }
 
 #[test]
-fn data_breakpoints_stop_at_every_store_and_say_what_changed() {
+fn write_data_breakpoints_stop_when_the_value_changes_and_say_how() {
     let mut dap = Dap::start("data breakpoints");
     let (stop, frame) = stopped_in(&mut dap, "watch-gcc-o0", "scalar_stores");
     dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
@@ -59,14 +59,6 @@ fn data_breakpoints_stop_at_every_store_and_say_what_changed() {
         next_change(&mut dap, stop.thread, &id),
         "watch_i32 changed from 0 to 1"
     );
-    assert_eq!(
-        next_change(&mut dap, stop.thread, &id),
-        "watch_i32 changed from 1 to 2"
-    );
-    assert_eq!(
-        next_change(&mut dap, stop.thread, &id),
-        "watch_i32 was accessed; it is 2"
-    );
     // Re-sending the same data breakpoint keeps it and its id.
     let again = dap.request(
         "setDataBreakpoints",
@@ -75,7 +67,32 @@ fn data_breakpoints_stop_at_every_store_and_say_what_changed() {
     assert_eq!(breakpoints(&again)[0]["id"], id);
     assert_eq!(
         next_change(&mut dap, stop.thread, &id),
+        "watch_i32 changed from 1 to 2"
+    );
+    // Clients present `write` as "Break on Value Change": the store of 2
+    // over 2 does not stop.
+    assert_eq!(
+        next_change(&mut dap, stop.thread, &id),
         "watch_i32 changed from 2 to 42"
+    );
+    // An access data breakpoint stops at the load in the next phase that
+    // touches the value.
+    let frame =
+        dap.request("stackTrace", json!({"threadId": stop.thread}))["stackFrames"][0].clone();
+    let info = dap.request(
+        "dataBreakpointInfo",
+        json!({"name": "watch_i32", "frameId": frame["id"]}),
+    );
+    let access = dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [{"dataId": info["dataId"], "accessType": "readWrite"}]}),
+    );
+    assert_eq!(breakpoints(&access)[0]["verified"], true);
+    let access_id = breakpoints(&access)[0]["id"].clone();
+    assert_ne!(access_id, id);
+    assert_eq!(
+        next_change(&mut dap, stop.thread, &access_id),
+        "watch_i32 was accessed; it is 42"
     );
     // Cleared, it no longer stops: the next stop is the next phase's
     // breakpoint, although later phases store to the value again.

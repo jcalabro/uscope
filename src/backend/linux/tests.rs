@@ -9,6 +9,7 @@ use crate::PresentedFrame;
 use crate::ValueExpression;
 use crate::ValuePathStep;
 use crate::VariableQuery;
+use crate::WatchpointHit;
 use crate::WatchpointSpec;
 use crate::debug_info::VariableContext;
 use crate::debug_info::VariableRuntime;
@@ -1338,6 +1339,10 @@ struct DebugRegisterTrace {
     clone: RefCell<Option<(Pid, Pid)>>,
     /// The process's thread list.
     listed_threads: RefCell<Vec<Pid>>,
+    /// Memory words by address; others read as zero.
+    memory: RefCell<BTreeMap<u64, u64>>,
+    /// Words whose reads fail, as unmapped memory's do.
+    unreadable: RefCell<BTreeSet<u64>>,
 }
 
 impl DebugRegisterTrace {
@@ -1370,8 +1375,11 @@ impl DebugRegisterTrace {
 }
 
 impl InspectionOps for DebugRegisterTrace {
-    fn read_word(&self, _pid: Pid, _address: u64) -> Result<u64> {
-        Ok(0)
+    fn read_word(&self, _pid: Pid, address: u64) -> Result<u64> {
+        if self.unreadable.borrow().contains(&address) {
+            return Err(backend_error(LinuxError::System(Errno::EIO)));
+        }
+        Ok(self.memory.borrow().get(&address).copied().unwrap_or(0))
     }
 
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
@@ -1560,13 +1568,27 @@ impl WatchHarness {
     }
 
     fn add(&mut self, address: u64, byte_size: u64) -> Result<Watchpoint> {
+        self.add_watching(address, byte_size, WatchAccess::Write)
+    }
+
+    fn add_watching(
+        &mut self,
+        address: u64,
+        byte_size: u64,
+        access: WatchAccess,
+    ) -> Result<Watchpoint> {
         self.controller.add_watchpoint(
             WatchpointSpec::Location {
                 address: VirtualAddress::new(address),
                 byte_size,
             },
-            WatchAccess::Write,
+            access,
         )
+    }
+
+    /// Stores `value` in the word at `address`, as the inferior would.
+    fn store(&self, address: u64, value: u64) {
+        self.trace().memory.borrow_mut().insert(address, value);
     }
 
     fn thread(&mut self, pid: Pid) -> &mut TraceThread {
@@ -3489,6 +3511,306 @@ fn a_hit_on_a_watchpoint_removed_while_running_is_dropped() {
             |thread| thread.state == NativeThreadState::Running && thread.watch_hits.is_empty()
         )
     );
+}
+
+/// The bytes of a watched word holding `value`.
+fn word(value: u64) -> Arc<[u8]> {
+    Arc::from(value.to_le_bytes())
+}
+
+/// DR6 after a single step whose instruction hit slot 0.
+const STEPPED_SLOT_ZERO: u64 = debug_registers::STATUS_IDLE | 1 << 14 | 0b1;
+
+#[test]
+fn a_store_that_changes_nothing_resumes_only_its_own_thread() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    harness.store(0x1_3000, 7);
+    let watchpoint = harness
+        .add_watching(0x1_3000, 8, WatchAccess::Change)
+        .expect("arm");
+    // Its slot reports stores only, as a write watchpoint's does.
+    assert_eq!(harness.trace().registers_of(first)[7], 0x90001);
+    harness.start_continue();
+    harness.published();
+    harness.trace().take_actions();
+
+    harness
+        .trap(
+            first,
+            TRAP_HARDWARE_BREAKPOINT,
+            debug_registers::STATUS_IDLE | 0b1,
+        )
+        .expect("unchanged store");
+    let actions = harness.trace().take_actions();
+    assert_eq!(
+        actions.last(),
+        Some(&format!("continue {first} None")),
+        "{actions:?}"
+    );
+    assert!(
+        !actions
+            .iter()
+            .any(|action| action.starts_with("request_stop")),
+        "no sibling stops for a store that changed nothing: {actions:?}"
+    );
+    assert_eq!(harness.published(), []);
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(inferior.barrier.is_none());
+    assert!(inferior.threads.values().all(|thread| {
+        thread.state == NativeThreadState::Running && thread.watch_hits.is_empty()
+    }));
+
+    // A store of another value stops every thread and reports the change
+    // from the value observed when execution resumed.
+    harness.store(0x1_3000, 9);
+    harness
+        .trap(
+            second,
+            TRAP_HARDWARE_BREAKPOINT,
+            debug_registers::STATUS_IDLE | 0b1,
+        )
+        .expect("changing store");
+    harness.settle_requested_stops();
+    assert_eq!(
+        harness.public_reason(),
+        Some(StopReason::Watchpoint {
+            hits: Arc::from([WatchpointHit {
+                watchpoint: watchpoint.id,
+                thread: debug_thread_id(second),
+                previous: Some(word(7)),
+                current: Some(word(9)),
+            }]),
+        })
+    );
+}
+
+#[test]
+fn a_change_undone_before_every_thread_stopped_lets_a_stepi_finish_once() {
+    let mut harness = watch_harness(2);
+    let [stepping, sibling] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    harness.store(0x1_4000, 7);
+    harness
+        .add_watching(0x1_4000, 8, WatchAccess::Change)
+        .expect("arm");
+    harness.start_continue();
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.active.as_mut().expect("execution").kind = ActiveKind::Step {
+        thread: stepping,
+        kind: StepKind::Instruction,
+        start: Box::new(StepStart {
+            source: None,
+            code_instance: None,
+            physical_instance: None,
+            activation: None,
+            plan_addresses: BTreeSet::new(),
+            epilogue_traversal: None,
+            return_traversal: None,
+            signal_guard: None,
+            call_return: None,
+        }),
+        progress_owed: false,
+    };
+    inferior.thread_mut(stepping).expect("thread").expected = ExpectedStop::UserStep {
+        kind: StepKind::Instruction,
+    };
+    harness.published();
+
+    // The stepped instruction changes the value, so every thread is stopped
+    // to report it, but the sibling stores the old value back first.
+    harness.store(0x1_4000, 9);
+    harness
+        .trap(stepping, libc::TRAP_TRACE, STEPPED_SLOT_ZERO)
+        .expect("stepped store");
+    assert_eq!(harness.public_reason(), None);
+    harness.trace().take_actions();
+    harness.store(0x1_4000, 7);
+    harness
+        .trap(
+            sibling,
+            TRAP_HARDWARE_BREAKPOINT,
+            debug_registers::STATUS_IDLE | 0b1,
+        )
+        .expect("restoring store");
+
+    // Nothing changed once every thread stopped: the step ends after the one
+    // instruction it executed, without executing another.
+    assert_eq!(
+        harness.public_reason(),
+        Some(StopReason::Step {
+            kind: StepKind::Instruction
+        })
+    );
+    let actions = harness.trace().take_actions();
+    assert!(
+        !actions
+            .iter()
+            .any(|action| action.starts_with("step") || action.starts_with("continue")),
+        "{actions:?}"
+    );
+    let stops = harness
+        .published()
+        .into_iter()
+        .filter(|event| matches!(event, DebuggerEvent::InferiorStopped { .. }))
+        .count();
+    assert_eq!(stops, 1);
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(
+        inferior
+            .threads
+            .values()
+            .all(|thread| thread.watch_hits.is_empty())
+    );
+    assert_eq!(inferior.threads[&sibling].reason, None);
+}
+
+#[test]
+fn a_store_reports_only_the_watchpoints_whose_access_it_matches() {
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    harness.store(0x1_5000, 7);
+    let change = harness
+        .add_watching(0x1_5000, 8, WatchAccess::Change)
+        .expect("change");
+    let write = harness
+        .add_watching(0x1_5000, 8, WatchAccess::Write)
+        .expect("write");
+    for (stored, reported) in [(7, vec![write.id]), (8, vec![change.id, write.id])] {
+        harness.start_continue();
+        harness.store(0x1_5000, stored);
+        // Watchpoints on the same span share its slot.
+        harness
+            .trap(
+                pid,
+                TRAP_HARDWARE_BREAKPOINT,
+                debug_registers::STATUS_IDLE | 0b1,
+            )
+            .expect("store");
+        let Some(StopReason::Watchpoint { hits }) = harness.public_reason() else {
+            panic!("the write watchpoint reports every store");
+        };
+        assert_eq!(
+            hits.iter().map(|hit| hit.watchpoint).collect::<Vec<_>>(),
+            reported
+        );
+        assert!(hits.iter().all(|hit| hit.current == Some(word(stored))));
+    }
+}
+
+#[test]
+fn an_unchanged_store_while_stepping_over_a_breakpoint_finishes_the_repair_and_runs_on() {
+    // Linux reports the step's own trap; a hardware trap alone must not make
+    // the thread step the instruction again either.
+    for (code, status) in [
+        (libc::TRAP_TRACE, STEPPED_SLOT_ZERO),
+        (TRAP_HARDWARE_BREAKPOINT, debug_registers::STATUS_IDLE | 0b1),
+    ] {
+        let mut harness = repairing_harness();
+        let [repairing, waiting] = harness.threads[..] else {
+            unreachable!("two threads");
+        };
+        harness.store(0x1_6000, 7);
+        harness.thread(repairing).state = NativeThreadState::Stopped;
+        harness
+            .add_watching(0x1_6000, 8, WatchAccess::Change)
+            .expect("arm");
+        harness.thread(repairing).state = NativeThreadState::Running;
+        harness.trace().take_actions();
+        harness.published();
+
+        harness.trap(repairing, code, status).expect("repair step");
+        let actions = harness.trace().take_actions();
+        assert!(
+            actions.ends_with(&[
+                "reinstall_site 0x40".to_owned(),
+                format!("continue {repairing} None"),
+                format!("continue {waiting} None"),
+            ]),
+            "{code}: {actions:?}"
+        );
+        assert_eq!(harness.published(), []);
+        let inferior = harness.controller.inferior.as_ref().expect("inferior");
+        assert!(inferior.repairs.is_empty());
+        assert_eq!(inferior.threads[&repairing].stopped_at_breakpoint, None);
+    }
+}
+
+#[test]
+fn watched_bytes_becoming_unreadable_or_readable_are_changes() {
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    harness.store(0x1_8000, 7);
+    let watchpoint = harness
+        .add_watching(0x1_8000, 8, WatchAccess::Change)
+        .expect("arm");
+    for (readable, previous, current) in [(false, Some(word(7)), None), (true, None, Some(word(7)))]
+    {
+        harness.start_continue();
+        if readable {
+            harness.trace().unreadable.borrow_mut().clear();
+        } else {
+            harness.trace().unreadable.borrow_mut().insert(0x1_8000);
+        }
+        harness
+            .trap(
+                pid,
+                TRAP_HARDWARE_BREAKPOINT,
+                debug_registers::STATUS_IDLE | 0b1,
+            )
+            .expect("store");
+        assert_eq!(
+            harness.public_reason(),
+            Some(StopReason::Watchpoint {
+                hits: Arc::from([WatchpointHit {
+                    watchpoint: watchpoint.id,
+                    thread: debug_thread_id(pid),
+                    previous,
+                    current,
+                }]),
+            }),
+            "readable: {readable}"
+        );
+    }
+}
+
+#[test]
+fn an_unchanged_store_during_a_pause_gives_its_thread_no_reason() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    harness.store(0x1_7000, 7);
+    harness
+        .add_watching(0x1_7000, 8, WatchAccess::Change)
+        .expect("arm");
+    harness.start_continue();
+    harness
+        .controller
+        .begin_pause(process_id(first))
+        .expect("pause");
+    harness
+        .trap(
+            second,
+            TRAP_HARDWARE_BREAKPOINT,
+            debug_registers::STATUS_IDLE | 0b1,
+        )
+        .expect("unchanged store during the pause");
+    assert!(
+        !harness
+            .trace()
+            .take_actions()
+            .contains(&format!("continue {second} None")),
+        "a thread stopped by the pause stays stopped"
+    );
+    harness.settle_requested_stops();
+    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert_eq!(inferior.threads[&second].reason, None);
+    assert!(inferior.threads[&second].debugger_stop_pending);
 }
 
 /// Puts the harness's first thread in the middle of stepping over a user

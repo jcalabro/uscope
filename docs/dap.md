@@ -20,7 +20,7 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
   - Breakpoints in shared libraries, kept pending until the library loads and following it through `dlopen` and `dlclose`.
   - Functions without debug information, such as libc's, break at their symbol.
   - Conditions, hit counts, and logpoints.
-  - Data breakpoints (hardware watchpoints) on variables and addresses.
+  - Data breakpoints (hardware watchpoints) on variables and addresses. A `write` data breakpoint stops when a store changes the value, as clients present it ("Break on Value Change"); `readWrite` stops at every load and store.
   - Breakpoints can be edited while the program runs.
 - **Execution.** Continue, pause, step over, into, and out, by line or by instruction. The debugger is all-stop: every thread stops and resumes together. A program that executes itself again is followed with its breakpoints.
 - **Inspection.**

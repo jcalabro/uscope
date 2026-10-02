@@ -105,7 +105,11 @@ pub fn watchpoint_capabilities() -> WatchpointCapabilities {
     WatchpointCapabilities {
         slots: u32::try_from(debug_registers::SLOT_COUNT).expect("slot count fits u32"),
         max_slot_bytes: debug_registers::MAX_SLOT_BYTES,
-        access: Arc::from([WatchAccess::Write, WatchAccess::ReadWrite]),
+        access: Arc::from([
+            WatchAccess::Change,
+            WatchAccess::Write,
+            WatchAccess::ReadWrite,
+        ]),
     }
 }
 

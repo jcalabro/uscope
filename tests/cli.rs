@@ -2267,7 +2267,13 @@ fn watch_script_reports_values_lists_and_deletes_watchpoints() {
     assert!(
         stdout
             .lines()
-            .any(|line| line.starts_with("1  write  watch_i32  4 bytes at 0x")),
+            .any(|line| line.starts_with("1  change  watch_i32  4 bytes at 0x")),
+        "{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("2  write  watch_u64  8 bytes at 0x")),
         "{stdout}"
     );
     for (old, new) in [(0, 1), (1, 2), (2, 42)] {
@@ -2276,15 +2282,26 @@ fn watch_script_reports_values_lists_and_deletes_watchpoints() {
             "missing {old} -> {new}:\n{stdout}"
         );
     }
-    assert!(stdout.contains("\n  value: 2 (unchanged)\n"), "{stdout}");
+    // `watch` skips the store of 2 over 2; `watch -w` reports the failed
+    // compare-exchange's store of the value already there.
     assert_eq!(
         stdout
-            .matches("stopped by watchpoint 1 (write) on watch_i32 in thread ")
+            .matches("stopped by watchpoint 1 (change) on watch_i32 in thread ")
             .count(),
-        4
+        3
+    );
+    assert_eq!(
+        stdout
+            .matches("stopped by watchpoint 2 (write) on watch_u64 in thread ")
+            .count(),
+        2
+    );
+    assert!(
+        stdout.contains("\n  value: 4919131752989213764 (unchanged)\n"),
+        "{stdout}"
     );
     assert!(stdout.contains("deleted watchpoint 1"));
-    assert!(stdout.contains("no watchpoints"));
+    assert!(stdout.contains("deleted 1 watchpoint\n"), "{stdout}");
     assert!(
         stdout.contains("watch.c:"),
         "watch stops show source:\n{stdout}"
@@ -2376,13 +2393,24 @@ fn watch_command_failures_explain_themselves() {
         ),
         (
             &["break scalar_stores", "run", "watch 0x1000:many"][..],
-            "watch <value-path|0xaddress:byte-count>",
+            "watch [-w] <value-path|0xaddress:byte-count>",
+        ),
+        (
+            &["break scalar_stores", "run", "watch -x watch_i32"][..],
+            "watch [-w] <value-path|0xaddress:byte-count>",
         ),
         (
             &["break scalar_stores", "run", "unwatch 9"][..],
             "watchpoint 9 was not found",
         ),
-        (&["watch"][..], "watch <value-path|0xaddress:byte-count>"),
+        (
+            &["watch"][..],
+            "watch [-w] <value-path|0xaddress:byte-count>",
+        ),
+        (
+            &["watch -w"][..],
+            "watch [-w] <value-path|0xaddress:byte-count>",
+        ),
     ] {
         let arguments = commands
             .iter()

@@ -1,14 +1,18 @@
-# Watch a global across its stores, then let the inferior exit.
+# Watch one global's changes and every store to another, then let the
+# inferior exit.
 break scalar_stores
 run
 watch watch_i32
+watch -w watch_u64
 watchpoints
+continue
 continue
 continue
 continue
 continue
 unwatch 1
 watchpoints
+unwatch all
 delete all
 continue
 continue

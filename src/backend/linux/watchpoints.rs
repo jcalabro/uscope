@@ -41,7 +41,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         access: WatchAccess,
     ) -> Result<Watchpoint> {
         let slot_access = match access {
-            WatchAccess::Write => SlotAccess::Write,
+            // A change is judged after the store that the hardware traps.
+            WatchAccess::Change | WatchAccess::Write => SlotAccess::Write,
             WatchAccess::ReadWrite => SlotAccess::ReadWrite,
             WatchAccess::Read => return Err(Error::UnsupportedWatchAccess(access)),
         };
@@ -501,6 +502,41 @@ impl<P: InspectionOps> Controller<P> {
         let read =
             read_logical_memory(&self.ptrace, pid, &inferior.breakpoints, address, size).ok()?;
         matches!(read.completion, MemoryReadCompletion::Complete).then(|| read.bytes.into())
+    }
+
+    /// The change watchpoints among `owners` whose watched bytes equal those
+    /// the debugger last observed, so the access changed nothing. Bytes that
+    /// became unreadable, or readable, count as a change.
+    pub(super) fn unchanged_watchpoints(
+        &self,
+        owners: impl IntoIterator<Item = WatchpointId>,
+    ) -> BTreeSet<WatchpointId> {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return BTreeSet::new();
+        };
+        owners
+            .into_iter()
+            .filter(|id| {
+                inferior.watch.watchpoints.get(id).is_some_and(|record| {
+                    record.watchpoint.access == WatchAccess::Change
+                        && self.read_watched_bytes(
+                            record.watchpoint.address,
+                            record.watchpoint.byte_size,
+                        ) == record.observed
+                })
+            })
+            .collect()
+    }
+
+    /// The watchpoints among a thread's hit `owners` that report its
+    /// access: all but the change watchpoints it left unchanged.
+    pub(super) fn reportable_watch_hits(
+        &self,
+        mut owners: BTreeSet<WatchpointId>,
+    ) -> BTreeSet<WatchpointId> {
+        let unchanged = self.unchanged_watchpoints(owners.iter().copied());
+        owners.retain(|id| !unchanged.contains(id));
+        owners
     }
 
     pub(super) fn watch_invalidation(
