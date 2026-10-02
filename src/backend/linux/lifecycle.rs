@@ -56,11 +56,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     next_execution: 1,
                     // Like a pause requested during launch, an entry stop
                     // completes at the initial exec stop.
-                    barrier: stop_at_entry.then_some(StopBarrier {
-                        execution: Some(execution_id),
-                        triggering_thread: pid,
-                        reason: Some(StopReason::Entry),
-                    }),
+                    barrier: stop_at_entry.then_some(StopBarrier::visible(pid, StopReason::Entry)),
                     ..Inferior::new(
                         InferiorOrigin::Launched,
                         pid,
@@ -83,10 +79,6 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the attach transaction keeps seize rollback and state publication together"
-    )]
     pub(super) fn attach(&mut self, requested: ProcessId, reply: Reply<StopId>) {
         if self.inferior.is_some() || self.launch_reply.is_some() || self.attach_reply.is_some() {
             let _ = reply.send(Err(Error::AlreadyRunning));
@@ -192,11 +184,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.fail_inferior(Error::NotRunning);
             return;
         };
-        inferior.barrier = Some(StopBarrier {
-            execution: None,
-            triggering_thread,
-            reason: Some(StopReason::Attach),
-        });
+        inferior.barrier = Some(StopBarrier::visible(triggering_thread, StopReason::Attach));
     }
 
     pub(super) fn rollback_seized(&self, seized: &BTreeSet<Pid>) {
@@ -297,10 +285,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             // A thread created while a breakpoint site is lifted for a repair
             // waits for the repair; resuming execution then resumes it.
             let should_resume = inferior.repairs.is_empty()
-                && inferior.active.as_ref().is_some_and(|active| {
-                    matches!(active.kind, ActiveKind::Launch | ActiveKind::Continue)
-                        && active.resume_threads.contains(&pid)
-                });
+                && inferior
+                    .active
+                    .as_ref()
+                    .is_some_and(|active| active.resume_threads.contains(&pid));
             (
                 process_id(inferior.tgid),
                 inferior.barrier.is_some(),
@@ -421,8 +409,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .is_none(),
             "clone TID is unique"
         );
+        // A new thread runs with its siblings, unless the execution resumed
+        // one thread alone.
         if let Some(active) = inferior.active.as_mut()
-            && matches!(active.kind, ActiveKind::Launch | ActiveKind::Continue)
             && matches!(active.scope, ResumeScope::Process(_))
         {
             active.resume_threads.insert(child);
@@ -653,20 +642,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.finish_barrier_if_ready();
         }
         if owned_execution {
-            // Every other thread stayed stopped during the thread's execution.
-            let triggering_thread = self
-                .inferior
-                .as_ref()
-                .and_then(|inferior| {
-                    inferior.threads.iter().find_map(|(&pid, thread)| {
-                        matches!(thread.state, NativeThreadState::Stopped).then_some(pid)
-                    })
-                })
-                .ok_or(Error::NotRunning)?;
-            return self.begin_visible_stop(
-                triggering_thread,
-                StopReason::ThreadExited { thread_id, status },
-            );
+            let reason = StopReason::ThreadExited { thread_id, status };
+            let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+            // Every other thread stayed stopped during a single-thread
+            // execution, and one of them presents the stop. During an
+            // all-thread step they may all be running.
+            if let Some(stopped) = inferior.threads.iter().find_map(|(&pid, thread)| {
+                matches!(thread.state, NativeThreadState::Stopped).then_some(pid)
+            }) {
+                return self.begin_visible_stop(stopped, reason);
+            }
+            let running = *inferior.threads.keys().next().ok_or(Error::NotRunning)?;
+            return self.raise_barrier(running, reason);
         }
         if repair_interrupted || ran_alone {
             return self.advance_execution();
@@ -963,12 +950,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             .iter()
             .filter_map(|(&address, site)| site.installed.then_some(address))
             .collect::<Vec<_>>();
+        let pid = inferior.memory_thread();
         for address in installed {
-            record(self.ptrace.remove_breakpoint(
-                inferior.tgid,
-                &mut inferior.breakpoints,
-                address,
-            ));
+            record(
+                self.ptrace
+                    .remove_breakpoint(pid, &mut inferior.breakpoints, address),
+            );
         }
         if let Some(waiter) = inferior.waiter.take() {
             record(waiter.stop_and_join());

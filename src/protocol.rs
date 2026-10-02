@@ -1057,6 +1057,9 @@ pub enum Request {
         /// steps the innermost frame and requires it.
         frame: StackFrameId,
         kind: StepKind,
+        /// The threads that run while the step does: every thread, or only
+        /// the stepping one.
+        scope: ResumeScope,
         exception: ExceptionDisposition,
         reply: Reply<ExecutionId>,
     },

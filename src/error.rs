@@ -134,6 +134,11 @@ pub enum Error {
     },
     #[error("cannot step from the selected frame: {0}")]
     FrameStepUnsupported(Arc<str>),
+    #[error("a step of thread {stepping} cannot resume thread {resumed} alone")]
+    StepScopeMismatch {
+        stepping: crate::ThreadId,
+        resumed: crate::ThreadId,
+    },
     #[error("no source location is available for the stopped instruction")]
     SourceLocationUnavailable,
     #[error("failed to read source file {path}: {error}")]

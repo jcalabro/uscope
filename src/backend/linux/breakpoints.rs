@@ -12,11 +12,12 @@ use crate::protocol::{
 use crate::{BreakpointLocation, Error, Result, VirtualAddress};
 
 use super::native::LinuxTraceOps;
-use super::{
-    BreakpointOwner, Controller, Inferior, LinuxError, backend_error, validate_public_stop,
-};
+use super::{BreakpointOwner, Controller, Inferior, LinuxError, backend_error};
 
 impl<P: LinuxTraceOps> Controller<P> {
+    /// Adds a logical breakpoint. Its traps are installed at once when the
+    /// inferior's sites are live, which requires every thread to be stopped;
+    /// a launching or attaching inferior installs them at its first stop.
     pub(super) fn add_breakpoint(
         &mut self,
         spec: BreakpointSpec,
@@ -40,8 +41,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             ..self.resolve_breakpoint(id, spec)?
         };
 
-        if let Some(inferior) = self.inferior.as_mut() {
-            validate_public_stop(inferior, inferior.public_stop.as_ref().map(|stop| stop.id))?;
+        if self.sites_live() {
+            let inferior = self.inferior.as_mut().expect("live sites have an inferior");
             install_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
         }
 
@@ -178,8 +179,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             .position(|breakpoint| breakpoint.id == id)
             .ok_or(Error::BreakpointNotFound(id.get()))?;
         let breakpoint = self.breakpoints[index].clone();
-        if let Some(inferior) = self.inferior.as_mut() {
-            validate_public_stop(inferior, None)?;
+        if self.sites_live() {
+            let inferior = self.inferior.as_mut().expect("live sites have an inferior");
             remove_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
         }
         self.breakpoints.remove(index);
@@ -191,8 +192,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         if self.breakpoints.is_empty() {
             return Ok(Arc::from([]));
         }
-        if let Some(inferior) = self.inferior.as_mut() {
-            validate_public_stop(inferior, None)?;
+        if self.sites_live() {
+            let inferior = self.inferior.as_mut().expect("live sites have an inferior");
             let stopped_at = inferior
                 .threads
                 .iter()
@@ -353,7 +354,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for address in new_addresses {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             if let Err(error) = self.ptrace.install_breakpoint(
-                inferior.tgid,
+                inferior.memory_thread(),
                 &mut inferior.breakpoints,
                 address,
                 owner,
@@ -386,9 +387,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .filter(|group| group.site_removed)
             .map(|group| group.address)
             .collect();
+        let pid = inferior.memory_thread();
         for address in removed {
             self.ptrace
-                .reinstall_breakpoint(inferior.tgid, &mut inferior.breakpoints, address)?;
+                .reinstall_breakpoint(pid, &mut inferior.breakpoints, address)?;
         }
         inferior.repairs.clear();
         Ok(())
@@ -419,8 +421,9 @@ pub(super) fn install_logical_breakpoint(
     let mut installed = Vec::with_capacity(addresses.len());
 
     for address in addresses {
+        let pid = inferior.memory_thread();
         if let Err(cause) =
-            ptrace.install_breakpoint(inferior.tgid, &mut inferior.breakpoints, address, owner)
+            ptrace.install_breakpoint(pid, &mut inferior.breakpoints, address, owner)
         {
             for installed_address in installed.into_iter().rev() {
                 if let Err(recovery) =
@@ -468,7 +471,7 @@ pub(super) fn remove_logical_breakpoint(
         if let Err(cause) = remove_breakpoint_owner_from(ptrace, inferior, address, owner) {
             for prior in removed.into_iter().rev() {
                 if let Err(recovery) = ptrace.install_breakpoint(
-                    inferior.tgid,
+                    inferior.memory_thread(),
                     &mut inferior.breakpoints,
                     prior,
                     owner,
@@ -483,22 +486,19 @@ pub(super) fn remove_logical_breakpoint(
         }
         removed.push(address);
     }
-    let removed_sites = removed
-        .iter()
-        .copied()
-        .filter(|address| !inferior.breakpoints.contains_key(address))
-        .collect::<BTreeSet<_>>();
+    Ok(())
+}
+
+/// Forgets every repair of a site whose original instruction is restored.
+fn forget_removed_site(inferior: &mut Inferior, address: VirtualAddress) {
     for thread in inferior.threads.values_mut() {
-        if thread
-            .stopped_at_breakpoint
-            .is_some_and(|address| removed_sites.contains(&address))
-        {
+        if thread.stopped_at_breakpoint == Some(address) {
             // Breakpoint PCs are normalized when the trap is classified. With the
             // original instruction restored there is no repair step left to run.
             thread.stopped_at_breakpoint = None;
         }
     }
-    Ok(())
+    inferior.repairs.retain(|group| group.address != address);
 }
 
 pub(super) fn remove_breakpoint_owner_from(
@@ -519,9 +519,11 @@ pub(super) fn remove_breakpoint_owner_from(
     };
 
     if remove_site {
-        ptrace.remove_breakpoint(inferior.tgid, &mut inferior.breakpoints, address)?;
+        let pid = inferior.memory_thread();
+        ptrace.remove_breakpoint(pid, &mut inferior.breakpoints, address)?;
         let removed = inferior.breakpoints.remove(&address);
         assert!(removed.is_some(), "empty breakpoint site existed");
+        forget_removed_site(inferior, address);
     } else {
         let removed = inferior
             .breakpoints

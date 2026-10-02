@@ -2,6 +2,7 @@
 mod support;
 
 mod attach;
+mod concurrency;
 mod execution;
 mod globals;
 mod metadata;

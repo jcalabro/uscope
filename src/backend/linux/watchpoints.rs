@@ -32,7 +32,6 @@ use super::stepping::x86_64_activation_has_returned;
 use super::{
     Controller, ExpressionRoot, ExpressionRootKind, Inferior, LinuxError, NativeThreadState,
     WatchRecord, backend_error, debug_pid, debug_thread_id, validate_image_current,
-    validate_public_stop,
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -47,12 +46,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             WatchAccess::Read => return Err(Error::UnsupportedWatchAccess(access)),
         };
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, inferior.public_stop.as_ref().map(|stop| stop.id))?;
+        if !self.sites_live() {
+            return Err(Error::NotStopped);
+        }
         validate_image_current(inferior)?;
         let (expression, address, byte_size, type_info, scope, frame) = match spec {
             WatchpointSpec::Target(target) => {
                 let target = *target;
-                validate_public_stop(inferior, Some(target.stop_id))?;
+                // A target is armed only at the stop that resolved it, not
+                // at a later stop or while the inferior runs.
+                if inferior.public_stop.as_ref().map(|stop| stop.id) != Some(target.stop_id) {
+                    return Err(Error::StaleStop);
+                }
                 (
                     Some(target.expression),
                     target.address,
@@ -126,7 +131,6 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .filter(|inferior| inferior.watch.watchpoints.contains_key(&id))
             .ok_or(Error::WatchpointNotFound(id.get()))?;
-        validate_public_stop(inferior, None)?;
         let plan = inferior.watch.plan.without_watchpoint(id);
         self.arm_all_threads(plan)?;
         let record = self
@@ -139,14 +143,13 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn remove_all_watchpoints(&mut self) -> Result<Arc<[Watchpoint]>> {
-        let Some(inferior) = self
+        if self
             .inferior
             .as_ref()
-            .filter(|inferior| !inferior.watch.watchpoints.is_empty())
-        else {
+            .is_none_or(|inferior| inferior.watch.watchpoints.is_empty())
+        {
             return Ok(Arc::from([]));
-        };
-        validate_public_stop(inferior, None)?;
+        }
         self.arm_all_threads(DebugRegisterPlan::default())?;
         let removed = std::mem::take(
             &mut self

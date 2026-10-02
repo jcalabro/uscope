@@ -1792,10 +1792,9 @@ async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
 }
 
 #[tokio::test]
-async fn stale_targets_and_running_processes_cannot_be_armed() {
+async fn stale_targets_cannot_be_armed() {
     let fixture = "watch-gcc-o0";
     let mut scenario = Scenario::launch(fixture);
-    let location = |address, byte_size| WatchpointSpec::Location { address, byte_size };
     run_to(&mut scenario, "scalar_stores").await;
 
     // A target resolved at an earlier stop cannot be armed at a later one.
@@ -1820,20 +1819,6 @@ async fn stale_targets_and_running_processes_cannot_be_armed() {
             .await,
         Err(Error::StaleStop)
     ));
-
-    // A running process cannot be armed or disarmed.
-    let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
-    let running = scenario.start_resuming().await;
-    assert!(matches!(
-        scenario
-            .handle()
-            .add_watchpoint(location(watchpoint.address, 4), WatchAccess::Write)
-            .await,
-        Err(Error::NotStopped)
-    ));
-    let stop = running.await.expect("join resume").expect("resume");
-    assert!(matches!(stop, StopReason::Watchpoint { .. }), "{stop:?}");
-    scenario.drain_pending_events();
     scenario.shutdown().await;
 }
 

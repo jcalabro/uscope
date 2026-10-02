@@ -504,16 +504,23 @@ impl DebuggerHandle {
         self.wait_for_execution(&mut events, execution).await
     }
 
-    /// Starts a thread-specific stepping operation.
+    /// Starts stepping one thread.
     ///
     /// [`StepKind::Out`] runs until `frame` returns to its caller; every
     /// other kind steps from the innermost frame, which `frame` must be.
+    ///
+    /// With [`ResumeScope::Process`], every other thread runs while the step
+    /// does, so a step over a call that waits for another thread completes.
+    /// Another thread's stop, such as a breakpoint or a signal, then ends
+    /// the step before it completes. [`ResumeScope::Thread`] naming the
+    /// stepping thread keeps every other thread stopped.
     pub async fn start_step(
         &self,
         stop_id: StopId,
         thread_id: ThreadId,
         frame: StackFrameId,
         kind: StepKind,
+        scope: ResumeScope,
         exception: ExceptionDisposition,
     ) -> Result<ExecutionId> {
         let process_id = self.stopped_selection().await?.process;
@@ -524,13 +531,15 @@ impl DebuggerHandle {
             thread_id,
             frame,
             kind,
+            scope,
             exception,
             reply,
         })
         .await
     }
 
-    /// Steps the selected thread and waits until the operation stops or exits.
+    /// Steps the selected thread, running every other thread too, and waits
+    /// until the operation stops or exits.
     ///
     /// Stepping out leaves the selected frame; every other step begins at
     /// the innermost frame, whichever frame is selected.
@@ -553,7 +562,14 @@ impl DebuggerHandle {
         };
         let mut events = self.subscribe();
         let execution = self
-            .start_step(selection.stop, selection.thread, frame, kind, exception)
+            .start_step(
+                selection.stop,
+                selection.thread,
+                frame,
+                kind,
+                ResumeScope::Process(selection.process),
+                exception,
+            )
             .await?;
 
         self.wait_for_execution(&mut events, execution).await
