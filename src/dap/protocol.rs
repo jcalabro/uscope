@@ -283,6 +283,84 @@ pub struct SetInstructionBreakpointsArguments {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+pub struct BreakpointLocationsArguments {
+    pub source: Source,
+    pub line: i64,
+    pub end_line: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DataBreakpointInfoArguments {
+    pub variables_reference: Option<i64>,
+    pub name: String,
+    pub frame_id: Option<i64>,
+    pub bytes: Option<i64>,
+    pub as_address: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DataBreakpoint {
+    pub data_id: String,
+    pub access_type: Option<String>,
+    pub condition: Option<String>,
+    pub hit_condition: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SetDataBreakpointsArguments {
+    pub breakpoints: Vec<DataBreakpoint>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ReadMemoryArguments {
+    pub memory_reference: String,
+    pub offset: Option<i64>,
+    pub count: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DisassembleArguments {
+    pub memory_reference: String,
+    pub offset: Option<i64>,
+    pub instruction_offset: Option<i64>,
+    pub instruction_count: i64,
+    pub resolve_symbols: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModulesArguments {
+    pub start_module: Option<i64>,
+    pub module_count: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CompletionsArguments {
+    pub frame_id: Option<i64>,
+    pub text: String,
+    pub column: i64,
+    pub line: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StackFrameFormat {
+    pub parameters: Option<bool>,
+    pub parameter_types: Option<bool>,
+    pub parameter_names: Option<bool>,
+    pub parameter_values: Option<bool>,
+    pub line: Option<bool>,
+    pub module: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct ExceptionFilterOptions {
     pub filter_id: String,
     pub condition: Option<String>,
@@ -310,6 +388,7 @@ pub struct StackTraceArguments {
     pub thread_id: i64,
     pub start_frame: Option<i64>,
     pub levels: Option<i64>,
+    pub format: Option<StackFrameFormat>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -371,6 +450,18 @@ pub fn capabilities() -> Value {
         "supportTerminateDebuggee": true,
         "supportsTerminateRequest": true,
         "supportsInstructionBreakpoints": true,
+        "supportsDisassembleRequest": true,
+        "supportsReadMemoryRequest": true,
+        "supportsSteppingGranularity": true,
+        "supportsDataBreakpoints": true,
+        "supportsDataBreakpointBytes": true,
+        "supportsModulesRequest": true,
+        "supportsLoadedSourcesRequest": true,
+        "supportsBreakpointLocationsRequest": true,
+        "supportsValueFormattingOptions": true,
+        "supportsCompletionsRequest": true,
+        "completionTriggerCharacters": [" ", "."],
+        "supportsANSIStyling": true,
         "supportsDelayedStackTraceLoading": true,
     })
 }

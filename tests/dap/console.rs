@@ -126,3 +126,29 @@ fn breakpoints_made_in_the_console_are_announced_and_reported() {
     );
     dap.finish();
 }
+
+#[test]
+fn console_output_is_styled_only_for_clients_that_accept_styling() {
+    for ansi in [false, true] {
+        let mut dap = Dap::start(format!("ansi {ansi}"));
+        let mark = dap.mark();
+        dap.request(
+            "initialize",
+            json!({"adapterID": "uscope", "supportsANSIStyling": ansi}),
+        );
+        dap.event(mark, "initialized", |_| true);
+        let launch = dap.send(
+            "launch",
+            json!({"program": fixture("basic"), "stopOnEntry": true}),
+        );
+        dap.request("configurationDone", Value::Null);
+        dap.success(launch);
+        let stop = dap.stopped(launch.mark);
+        let frame =
+            dap.request("stackTrace", json!({"threadId": stop.thread}))["stackFrames"][0]["id"]
+                .clone();
+        let output = repl(&mut dap, &frame, "bt");
+        assert_eq!(output.contains('\u{1b}'), ansi, "{output:?}");
+        dap.finish();
+    }
+}

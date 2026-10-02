@@ -9,8 +9,8 @@ use uscope::{
 
 use super::handles::{Exhausted, Variables};
 use super::protocol::{
-    ErrorBody, EvaluateArguments, ExceptionInfoArguments, ScopesArguments, StackTraceArguments,
-    VariablesArguments,
+    CompletionsArguments, ErrorBody, EvaluateArguments, ExceptionInfoArguments, ScopesArguments,
+    StackFrameFormat, StackTraceArguments, VariablesArguments,
 };
 use super::session::{Session, error, parse, signal_text, thread_id};
 use super::values::{self, Item, Options};
@@ -70,9 +70,22 @@ impl Session {
             .and_then(|levels| usize::try_from(levels).ok())
             .filter(|levels| *levels != 0)
             .unwrap_or(usize::MAX);
+        let format = arguments.format.unwrap_or_default();
         let mut frames = Vec::new();
         for frame in trace.frames.iter().skip(start).take(levels) {
-            frames.push(self.stack_frame(stop.id, thread, frame).await?);
+            let mut body = self.stack_frame(stop.id, thread, frame).await?;
+            self.decorate(
+                &mut body,
+                frame,
+                &format,
+                StopContext {
+                    stop: stop.id,
+                    thread,
+                    frame: frame.id,
+                },
+            )
+            .await;
+            frames.push(body);
         }
         if abnormal && start + frames.len() < total && frames.len() < levels {
             // A stack cut short says so instead of looking complete.
@@ -132,7 +145,7 @@ impl Session {
             "instructionPointerReference": format!("{:#x}", frame.instruction.get()),
         });
         if let Some(module) = frame.module {
-            body["moduleId"] = module.get().into();
+            body["moduleId"] = module.get().to_string().into();
         }
         let source = match (&frame.source, frame.module) {
             (Some(location), Some(module)) => self.image(module).await.and_then(|image| {
@@ -153,6 +166,67 @@ impl Session {
             None => body["presentationHint"] = "subtle".into(),
         }
         Ok(body)
+    }
+
+    /// Adds what a client's frame format asks for to a frame's name: its
+    /// parameters, line, and module.
+    async fn decorate(
+        &mut self,
+        body: &mut Value,
+        frame: &StackFrame,
+        format: &StackFrameFormat,
+        context: StopContext,
+    ) {
+        let mut name = body["name"].as_str().unwrap_or_default().to_owned();
+        if format.parameters == Some(true) {
+            let names = format.parameter_names.unwrap_or(true);
+            let types = format.parameter_types.unwrap_or(false);
+            let values = format.parameter_values.unwrap_or(true);
+            let parameters = self.frame_variables(context).await.map_or_else(
+                |_| Vec::new(),
+                |snapshot| {
+                    snapshot
+                        .variables
+                        .iter()
+                        .filter(|variable| variable.kind == VariableKind::Parameter)
+                        .map(|variable| {
+                            let mut text = String::new();
+                            if types {
+                                text.push_str(
+                                    variable.type_info.as_ref().map_or("?", |info| &info.name),
+                                );
+                                text.push(' ');
+                            }
+                            if names {
+                                text.push_str(&variable.name);
+                            }
+                            if values {
+                                if names {
+                                    text.push_str(" = ");
+                                }
+                                text.push_str(&crate::cli::value::summary(
+                                    variable.type_info.as_ref(),
+                                    &variable.state,
+                                ));
+                            }
+                            text.trim().to_owned()
+                        })
+                        .collect::<Vec<_>>()
+                },
+            );
+            name = format!("{name}({})", parameters.join(", "));
+        }
+        if format.line == Some(true) && body["line"].as_u64().is_some_and(|line| line != 0) {
+            name = format!("{name} Line {}", body["line"]);
+        }
+        if format.module == Some(true)
+            && let Some(module) = frame.module
+            && let Some(image) = self.image(module).await
+            && let Some(file) = image.path().file_name()
+        {
+            name = format!("{name} [{}]", file.to_string_lossy());
+        }
+        body["name"] = name.into();
     }
 
     pub(super) async fn scopes(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
@@ -206,6 +280,21 @@ impl Session {
                 "expensive": false,
             })),
         }
+        if let Some((module, file)) = self.frame_file(context).await {
+            let reference = self
+                .references
+                .variables(Variables::Statics {
+                    context,
+                    module,
+                    file,
+                })
+                .map_err(exhausted)?;
+            scopes.push(json!({
+                "name": "Statics",
+                "variablesReference": reference,
+                "expensive": true,
+            }));
+        }
         let reference = self
             .references
             .variables(Variables::Registers { context })
@@ -252,6 +341,8 @@ impl Session {
                 .min(MAX_CHILDREN),
             options,
         };
+        let list = arguments.variables_reference;
+        let context = variables.context();
         let rows = match variables {
             Variables::Scope { context, kind } => self.scope_rows(context, kind, window).await?,
             Variables::Registers { context } => {
@@ -262,6 +353,11 @@ impl Session {
                     .map(|value| values::register(value, registers.target.byte_order))
                     .collect()
             }
+            Variables::Statics {
+                context,
+                module,
+                file,
+            } => self.static_rows(context, module, file, window).await?,
             Variables::Children {
                 context,
                 reference,
@@ -285,6 +381,18 @@ impl Session {
                 range,
             } => self.range_rows(context, &expression, range, window).await?,
         };
+        // Data breakpoints name rows by their list and name.
+        for row in &rows {
+            if let (Some(name), Some(path)) = (
+                row.get("name").and_then(Value::as_str),
+                row.get("evaluateName")
+                    .and_then(Value::as_str)
+                    .and_then(super::watch::child_expression),
+            ) {
+                self.references
+                    .record_path(list, name.to_owned(), context, path);
+            }
+        }
         Ok(json!({"variables": rows}))
     }
 
@@ -323,6 +431,70 @@ impl Session {
                 "not every variable was read: the {:?} limit is {}",
                 exhaustion.resource, exhaustion.limit
             )));
+        }
+        Ok(rows)
+    }
+
+    /// The module and source file of a frame's location, when it has one.
+    async fn frame_file(
+        &mut self,
+        context: StopContext,
+    ) -> Option<(uscope::ModuleId, uscope::SourceFileId)> {
+        let stop = self.current_stop().ok()?;
+        let trace = self.backtrace(&stop, context.thread).await.ok()?;
+        let frame = trace
+            .frames
+            .iter()
+            .find(|frame| frame.id == context.frame)?;
+        Some((frame.module?, frame.source.as_ref()?.file))
+    }
+
+    /// Presents the static variables declared in a frame's source file, as
+    /// the frame's thread sees them.
+    async fn static_rows(
+        &mut self,
+        context: StopContext,
+        module: uscope::ModuleId,
+        file: uscope::SourceFileId,
+        window: Window,
+    ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
+        let image = self
+            .image(module)
+            .await
+            .ok_or_else(|| ErrorBody::new("the frame's module is no longer loaded"))?;
+        let handle = self.target_handle()?;
+        let mut rows = Vec::new();
+        let declared = image.globals().iter().filter(|global| {
+            global
+                .declaration
+                .as_ref()
+                .is_some_and(|declaration| declaration.file == file)
+        });
+        for global in window.slice(declared) {
+            let variable = handle
+                .at(context)
+                .global_with_limits(
+                    uscope::GlobalVariableReference {
+                        module,
+                        image: image.id(),
+                        variable: global.id,
+                    },
+                    InspectionLimits::default(),
+                )
+                .await
+                .map_err(error)?;
+            rows.push(self.present(
+                Item {
+                    name: &variable.name,
+                    path: Some(ValueExpression {
+                        steps: [ValuePathStep::Named(variable.name.to_string())].into(),
+                    }),
+                    type_info: variable.type_info.as_ref(),
+                    state: &variable.state,
+                },
+                context,
+                window.options,
+            )?);
         }
         Ok(rows)
     }
@@ -621,6 +793,77 @@ impl Window {
         items
             .skip(usize::try_from(self.start).unwrap_or(usize::MAX))
             .take(usize::try_from(self.count).unwrap_or(usize::MAX))
+    }
+}
+
+impl Session {
+    pub(super) async fn completions(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<CompletionsArguments>(arguments, "completions arguments")?;
+        // Columns count characters; a column past the text completes all of it.
+        let column = usize::try_from(arguments.column).unwrap_or(0);
+        let offset = if self.support().columns_start_at1 {
+            column.saturating_sub(1)
+        } else {
+            column
+        };
+        let typed = arguments.text.chars().take(offset).collect::<String>();
+        let word_start = typed
+            .rfind(|character: char| character.is_whitespace())
+            .map_or(0, |index| index + 1);
+        let word = &typed[word_start..];
+        let first_word = !typed[..word_start]
+            .chars()
+            .any(|character| !character.is_whitespace());
+        let command = typed.split_whitespace().next().unwrap_or_default();
+        let mut candidates = Vec::new();
+        if first_word {
+            for spec in crate::cli::commands::COMMANDS {
+                candidates.push((spec.name.to_owned(), "keyword"));
+            }
+        } else if command == "info" {
+            for subcommand in ["breakpoints", "watchpoints", "signals", "core", "symbol"] {
+                candidates.push((subcommand.to_owned(), "value"));
+            }
+        } else if command == "handle" {
+            for code in uscope::signal_codes() {
+                if let Some(name) = uscope::signal_name(code) {
+                    candidates.push((name, "value"));
+                }
+            }
+        }
+        let context = match arguments.frame_id {
+            Some(frame) => self.references.frame_context(frame),
+            None => self.stop.as_ref().map(|stop| StopContext {
+                stop: stop.id,
+                thread: stop.thread,
+                frame: StackFrameId::INNERMOST,
+            }),
+        };
+        if command != "info"
+            && command != "handle"
+            && let Some(context) = context
+            && let Ok(snapshot) = self.frame_variables(context).await
+        {
+            for variable in snapshot.variables.iter() {
+                candidates.push((variable.name.to_string(), "variable"));
+            }
+        }
+        let start = u64::try_from(typed[..word_start].chars().count()).unwrap_or(0)
+            + u64::from(self.support().columns_start_at1);
+        let mut seen = std::collections::BTreeSet::new();
+        let targets = candidates
+            .into_iter()
+            .filter(|(label, _)| label.starts_with(word) && seen.insert(label.clone()))
+            .map(|(label, kind)| {
+                json!({
+                    "label": label,
+                    "type": kind,
+                    "start": start,
+                    "length": word.chars().count(),
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({"targets": targets}))
     }
 }
 

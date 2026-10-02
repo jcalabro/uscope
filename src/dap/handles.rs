@@ -26,6 +26,12 @@ pub enum Variables {
     },
     /// A frame's registers.
     Registers { context: StopContext },
+    /// The static variables declared in a frame's source file.
+    Statics {
+        context: StopContext,
+        module: uscope::ModuleId,
+        file: uscope::SourceFileId,
+    },
     /// The children of an aggregate, named by `path` when it has a name.
     Children {
         context: StopContext,
@@ -47,6 +53,20 @@ pub enum Variables {
     },
 }
 
+impl Variables {
+    /// The frame whose values the reference expands.
+    pub const fn context(&self) -> StopContext {
+        match self {
+            Self::Scope { context, .. }
+            | Self::Registers { context }
+            | Self::Statics { context, .. }
+            | Self::Children { context, .. }
+            | Self::Pointee { context, .. }
+            | Self::Range { context, .. } => *context,
+        }
+    }
+}
+
 /// The references valid at the current stop.
 #[derive(Debug)]
 pub struct References {
@@ -54,6 +74,9 @@ pub struct References {
     frames: HashMap<i64, StopContext>,
     frame_ids: HashMap<(ThreadId, StackFrameId), i64>,
     variables: HashMap<i64, Variables>,
+    /// The expression of each named row of a variables list, by the list's
+    /// reference and the row's name.
+    paths: HashMap<(i64, String), (StopContext, ValueExpression)>,
 }
 
 /// The session ran out of references, which ends it rather than reusing one.
@@ -68,6 +91,7 @@ impl Default for References {
             frames: HashMap::new(),
             frame_ids: HashMap::new(),
             variables: HashMap::new(),
+            paths: HashMap::new(),
         }
     }
 }
@@ -115,11 +139,28 @@ impl References {
         self.variables.get(&id)
     }
 
+    /// Records the expression a row of a variables list evaluates as.
+    pub fn record_path(
+        &mut self,
+        list: i64,
+        name: String,
+        context: StopContext,
+        path: ValueExpression,
+    ) {
+        self.paths.insert((list, name), (context, path));
+    }
+
+    /// The expression of a row of a variables list, with its frame.
+    pub fn child_path(&self, list: i64, name: &str) -> Option<(StopContext, ValueExpression)> {
+        self.paths.get(&(list, name.to_owned())).cloned()
+    }
+
     /// Drops every reference, as when the inferior resumes.
     pub fn clear(&mut self) {
         self.frames.clear();
         self.frame_ids.clear();
         self.variables.clear();
+        self.paths.clear();
     }
 }
 
