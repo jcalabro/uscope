@@ -238,6 +238,7 @@ pub(super) fn classify_stop_evidence(
                 signal,
                 code: metadata.code,
                 sender: metadata.sender,
+                fault_address: metadata.fault_address,
             })
         }
         Err(Errno::EINVAL) if is_stopping_signal(signal) => ClassifiedStop::GroupStop(signal),

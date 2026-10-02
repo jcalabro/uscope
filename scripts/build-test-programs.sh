@@ -830,6 +830,8 @@ build_fixture gcc "$c_fixtures_dir/threads.c" "$output_dir/threads" \
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/process-environment.c" "$output_dir/process-environment" \
     -O0 -g3 -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/output-streams.c" "$output_dir/output-streams" \
+    -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/line-sliding.c" "$output_dir/line-sliding" \
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/terminate.c" "$output_dir/terminate" \

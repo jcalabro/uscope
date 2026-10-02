@@ -146,14 +146,14 @@ fn exception_info(signal: Signal) -> ExceptionInfo {
 }
 
 fn pending_exception_info(pending: PendingSignal) -> ExceptionInfo {
-    let sender = pending
-        .sender
-        .map_or_else(|| "unavailable".to_owned(), |sender| sender.to_string());
     ExceptionInfo::new(
         pending.signal.code(),
-        format!(
-            "{} (si_code {}, sender {})",
-            pending.signal, pending.code, sender
+        signals::describe(
+            &pending.signal.name(),
+            pending.signal.number(),
+            pending.code,
+            pending.fault_address,
+            pending.sender,
         ),
     )
 }
@@ -278,12 +278,15 @@ struct PendingSignal {
     signal: Signal,
     code: i32,
     sender: Option<i32>,
+    fault_address: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct SignalMetadata {
     code: i32,
     sender: Option<i32>,
+    /// The faulting address of a synchronous fault.
+    fault_address: Option<u64>,
 }
 
 #[derive(Debug)]

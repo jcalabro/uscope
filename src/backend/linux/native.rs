@@ -656,7 +656,14 @@ pub(super) fn signal_metadata(info: &libc::siginfo_t) -> SignalMetadata {
     } else {
         None
     };
-    SignalMetadata { code, sender }
+    let fault_address = siginfo_has_fault_address(info.si_signo, code)
+        // SAFETY: a kernel-raised fault's siginfo layout contains si_addr.
+        .then(|| unsafe { info.si_addr() } as u64);
+    SignalMetadata {
+        code,
+        sender,
+        fault_address,
+    }
 }
 
 /// Whether a signal's siginfo names the process that sent it. Other user

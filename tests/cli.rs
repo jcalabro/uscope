@@ -2625,7 +2625,8 @@ fn handle_shows_and_changes_signal_policies_like_gdb() {
     // Received signals are reported in order before the program exits with
     // every handler but the discarded SIGALRM's.
     let usr1 = line_index(&lines, 0, |line| {
-        line.starts_with("thread ") && line.contains(" received SIGUSR1 (si_code ")
+        line.starts_with("thread ")
+            && line.contains(" received SIGUSR1 (SI_TKILL) sent by process ")
     });
     let alarm = line_index(&lines, usr1, |line| line.contains(" received SIGALRM "));
     let exited = line_index(&lines, alarm, |line| line.contains("exited with status 61"));

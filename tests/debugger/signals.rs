@@ -134,8 +134,11 @@ async fn policies_decide_what_stops_is_reported_and_is_delivered() {
         [code("SIGUSR1"), code("SIGALRM")],
         "only signals whose policy prints are reported: {received:?}"
     );
+    // raise() sends with tgkill, which names the sending process.
     assert!(
-        received[0].1.starts_with("SIGUSR1 (si_code"),
+        received[0]
+            .1
+            .starts_with("SIGUSR1 (SI_TKILL) sent by process "),
         "{received:?}"
     );
     scenario.shutdown().await;

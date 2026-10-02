@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow, bail};
 use uscope::{
     BreakpointId, BreakpointSpec, ByteOrder, Disassembly, DisassemblyQuery, DisassemblyRange,
-    HitComparison, HitCondition, LineNumber, MAX_WINDOW_AFTER, RegisterRole, StackFrameId,
-    StepKind, ThreadId, VirtualAddress, WatchAccess, WatchpointId, WatchpointSpec,
+    HitComparison, HitCondition, LineNumber, MAX_WINDOW_AFTER, RegisterRole, SignalPolicy,
+    StackFrameId, StepKind, ThreadId, VirtualAddress, WatchAccess, WatchpointId, WatchpointSpec,
 };
 
 use super::format::{self, plural};
@@ -460,6 +460,38 @@ impl Cli {
             Command::Quit => return Ok(Control::Quit),
         };
         Ok(Control::Continue(output))
+    }
+
+    /// Runs one command for a client that controls execution itself, such
+    /// as a debug adapter's console, or returns `None` when the line names
+    /// no command. Commands that run the inferior or end the session are
+    /// refused, since the client owns those.
+    pub async fn console(&self, line: &str) -> Result<Option<String>> {
+        let line = line.trim();
+        let Some(spec) = line.split_whitespace().next().and_then(command_named) else {
+            return Ok(None);
+        };
+        if matches!(
+            spec.command,
+            Command::Run
+                | Command::Continue
+                | Command::Step
+                | Command::Next
+                | Command::Stepi
+                | Command::Nexti
+                | Command::Finish
+                | Command::Clear
+                | Command::Quit
+        ) {
+            bail!(
+                "`{}` is not available in the debug console; use the debugger's controls",
+                spec.name
+            );
+        }
+        match self.execute(line).await? {
+            Control::Continue(output) => Ok(Some(output)),
+            Control::ClearScreen | Control::Quit => unreachable!("refused above"),
+        }
     }
 
     async fn address(&self, symbol: &str) -> Result<String> {
@@ -1083,17 +1115,31 @@ fn parse_watch_location(argument: &str, spec: &CommandSpec) -> Result<Option<Wat
 }
 
 fn parse_breakpoint_spec(argument: &str, spec: &CommandSpec) -> Result<BreakpointSpec> {
+    parse_breakpoint_location(argument)?.ok_or_else(|| spec.usage_error())
+}
+
+/// Parses a breakpoint location: a function, `0xaddress`, `file:line`, or
+/// `file:function`, or `None` when a file or its location is missing. The
+/// `::` of a qualified name such as `ns::run` never separates a file.
+pub fn parse_breakpoint_location(argument: &str) -> Result<Option<BreakpointSpec>> {
     if argument.starts_with("0x") {
-        return Ok(BreakpointSpec::Address(parse_address(argument)?));
+        return Ok(Some(BreakpointSpec::Address(parse_address(argument)?)));
     }
-    let Some((path, location)) = argument.rsplit_once(':') else {
-        return Ok(BreakpointSpec::Function(argument.to_owned()));
+    let bytes = argument.as_bytes();
+    let separator = (0..bytes.len()).rev().find(|&index| {
+        bytes[index] == b':'
+            && bytes.get(index + 1) != Some(&b':')
+            && (index == 0 || bytes[index - 1] != b':')
+    });
+    let Some(separator) = separator else {
+        return Ok(Some(BreakpointSpec::Function(argument.to_owned())));
     };
+    let (path, location) = (&argument[..separator], &argument[separator + 1..]);
     if path.is_empty() || location.is_empty() {
-        return Err(spec.usage_error());
+        return Ok(None);
     }
     let path = PathBuf::from(path);
-    Ok(match location.parse::<u64>() {
+    Ok(Some(match location.parse::<u64>() {
         Ok(line) => BreakpointSpec::Source {
             path,
             line: LineNumber::new(line)
@@ -1103,7 +1149,7 @@ fn parse_breakpoint_spec(argument: &str, spec: &CommandSpec) -> Result<Breakpoin
             path,
             function: location.to_owned(),
         },
-    })
+    }))
 }
 
 /// Joins two parts of a command's output, either of which may be empty.
@@ -1131,23 +1177,7 @@ impl Cli {
         let code = uscope::signal_named(name).ok_or_else(|| anyhow!("unknown signal '{name}'"))?;
         let mut policy = self.debugger.signal_policy(code).await?;
         for action in &arguments[1..] {
-            match *action {
-                "stop" => {
-                    policy.stop = true;
-                    policy.print = true;
-                }
-                "nostop" => policy.stop = false,
-                "print" => policy.print = true,
-                "noprint" => {
-                    policy.print = false;
-                    policy.stop = false;
-                }
-                "pass" | "noignore" => policy.pass = true,
-                "nopass" | "ignore" => policy.pass = false,
-                other => bail!(
-                    "unknown signal action '{other}'; use stop, nostop, print, noprint, pass, or nopass"
-                ),
-            }
+            apply_signal_action(&mut policy, action)?;
         }
         if arguments.len() > 1 {
             self.debugger.set_signal_policy(code, policy).await?;
@@ -1157,6 +1187,29 @@ impl Cli {
             self.renderers.stdout,
         ))
     }
+}
+
+/// Changes one aspect of a signal policy as gdb's `handle` does: stopping
+/// implies printing, and not printing implies not stopping.
+pub fn apply_signal_action(policy: &mut SignalPolicy, action: &str) -> Result<()> {
+    match action {
+        "stop" => {
+            policy.stop = true;
+            policy.print = true;
+        }
+        "nostop" => policy.stop = false,
+        "print" => policy.print = true,
+        "noprint" => {
+            policy.print = false;
+            policy.stop = false;
+        }
+        "pass" | "noignore" => policy.pass = true,
+        "nopass" | "ignore" => policy.pass = false,
+        other => bail!(
+            "unknown signal action '{other}'; use stop, nostop, print, noprint, pass, or nopass"
+        ),
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1241,6 +1294,16 @@ mod tests {
         ));
         assert!(parse_breakpoint_spec("main.c:0", spec).is_err());
         assert!(parse_breakpoint_spec(":12", spec).is_err());
+        // Qualified names are functions, also within a file.
+        assert_eq!(
+            parse_breakpoint_spec("ns::Type::run", spec).expect("qualified function"),
+            BreakpointSpec::Function("ns::Type::run".to_owned())
+        );
+        assert!(matches!(
+            parse_breakpoint_spec("main.cpp:ns::run", spec).expect("qualified file function"),
+            BreakpointSpec::FileFunction { path, function }
+                if path == std::path::Path::new("main.cpp") && function == "ns::run"
+        ));
     }
 
     #[test]

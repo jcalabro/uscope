@@ -1,6 +1,7 @@
 //! The `uscope` command-line debugger.
 
 mod cli;
+mod dap;
 
 use std::ffi::OsString;
 use std::io;
@@ -92,6 +93,22 @@ fn parse_environment_variable(text: &str) -> std::result::Result<(OsString, OsSt
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|command| command == "dap")
+    {
+        let args = dap::DapArgs::parse_from(std::env::args_os().skip(1));
+        let code = match dap::run(args).await {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                1
+            }
+        };
+        // Reading stdin blocks a runtime thread that would keep the
+        // runtime from shutting down after the client left.
+        std::process::exit(code);
+    }
     let args = Args::parse();
     let renderers = Renderers::detect(args.color, args.batch);
 
