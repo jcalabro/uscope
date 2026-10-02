@@ -1343,6 +1343,8 @@ struct DebugRegisterTrace {
     memory: RefCell<BTreeMap<u64, u64>>,
     /// Words whose reads fail, as unmapped memory's do.
     unreadable: RefCell<BTreeSet<u64>>,
+    /// Fails every memory read operationally, unlike unmapped memory.
+    read_failure: RefCell<Option<Errno>>,
 }
 
 impl DebugRegisterTrace {
@@ -1380,6 +1382,25 @@ impl InspectionOps for DebugRegisterTrace {
             return Err(backend_error(LinuxError::System(Errno::EIO)));
         }
         Ok(self.memory.borrow().get(&address).copied().unwrap_or(0))
+    }
+
+    fn read_memory_word(
+        &self,
+        pid: Pid,
+        address: u64,
+    ) -> std::result::Result<u64, MemoryAccessError> {
+        let failure = if self.vanished.borrow().contains(&pid) {
+            Some(Errno::ESRCH)
+        } else {
+            *self.read_failure.borrow()
+        };
+        if let Some(errno) = failure {
+            return Err(MemoryAccessError::Fatal(backend_error(LinuxError::System(
+                errno,
+            ))));
+        }
+        self.read_word(pid, address)
+            .map_err(|_| MemoryAccessError::Inaccessible)
     }
 
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
@@ -3818,6 +3839,64 @@ fn watched_bytes_becoming_unreadable_or_readable_are_changes() {
             "readable: {readable}"
         );
     }
+}
+
+#[test]
+fn a_failed_read_of_watched_bytes_is_an_error_rather_than_a_change() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    let is_eperm = |error: &Error| {
+        matches!(
+            error,
+            Error::Backend(error)
+                if matches!(error.downcast_ref::<LinuxError>(), Some(LinuxError::System(Errno::EPERM)))
+        )
+    };
+    harness.store(0x1_9000, 7);
+    // A thread killed out of its stop is passed over for one that can read.
+    harness.trace().vanished.borrow_mut().insert(first);
+    let watchpoint = harness
+        .add_watching(0x1_9000, 8, WatchAccess::Change)
+        .expect("arm");
+    harness.trace().vanished.borrow_mut().clear();
+    assert_eq!(
+        harness
+            .controller
+            .inferior
+            .as_ref()
+            .expect("inferior")
+            .watch
+            .watchpoints[&watchpoint.id]
+            .observed,
+        Some(word(7))
+    );
+
+    // Any other failure is never taken for unreadable bytes: not when a
+    // watchpoint is armed, which then arms nothing,
+    harness.trace().read_failure.replace(Some(Errno::EPERM));
+    let registers = harness.trace().registers_of(first);
+    let error = harness
+        .add_watching(0x1_a000, 8, WatchAccess::Change)
+        .expect_err("unread baseline");
+    assert!(is_eperm(&error), "{error:?}");
+    assert_eq!(harness.trace().registers_of(first), registers);
+    // not when execution resumes,
+    let error = harness.resume().expect_err("unread baseline");
+    assert!(is_eperm(&error), "{error:?}");
+    // and not when a store traps.
+    harness.start_continue();
+    harness.published();
+    let error = harness
+        .trap(
+            second,
+            TRAP_HARDWARE_BREAKPOINT,
+            debug_registers::STATUS_IDLE | 0b1,
+        )
+        .expect_err("unread store");
+    assert!(is_eperm(&error), "{error:?}");
+    assert_eq!(harness.published(), []);
 }
 
 #[test]

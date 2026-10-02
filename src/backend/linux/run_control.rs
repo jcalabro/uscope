@@ -132,7 +132,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         validate_resumable(inferior)?;
         scoped_threads(inferior, scope)?;
         self.sync_debug_registers()?;
-        self.refresh_watch_baselines();
+        self.refresh_watch_baselines()?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
 
         let resume_threads = scoped_threads(inferior, scope)?;
@@ -632,7 +632,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.threads.get_mut(&pid))
             .map(|thread| std::mem::replace(&mut thread.expected, ExpectedStop::None))
             .ok_or(Error::NotRunning)?;
-        let watch = self.reportable_watch_hits(watch);
+        let watch = self.reportable_watch_hits(watch)?;
         if !watch.is_empty() {
             return self.finish_watched_instruction(pid, &expected, watch);
         }
@@ -669,7 +669,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.threads.get_mut(&pid))
             .map(|thread| std::mem::replace(&mut thread.expected, ExpectedStop::None))
             .ok_or(Error::NotRunning)?;
-        let owners = self.reportable_watch_hits(owners);
+        let owners = self.reportable_watch_hits(owners)?;
         if !owners.is_empty() {
             return self.finish_watched_instruction(pid, &expected, owners);
         }
@@ -1142,7 +1142,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for edit in edits {
             self.apply_edit(edit);
         }
-        self.settle_edited_reasons();
+        self.settle_edited_reasons()?;
         if self
             .inferior
             .as_ref()
