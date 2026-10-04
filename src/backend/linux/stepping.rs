@@ -845,12 +845,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.outer_step_out_start(pid, &registers, frame);
         }
         let location = self.image_location(VirtualAddress::new(registers.rip));
-        let presentation = self.presentation_for_stopped_thread(pid)?;
-        let code_instance = location
-            .as_ref()
-            .map(|location| selected_code_instance(location, &presentation))
-            .transpose()?
-            .flatten();
+        // An instruction step executes one instruction whichever frame is
+        // presented, so only source steps need the selected one.
+        let code_instance = if steps_instructions(kind) {
+            None
+        } else {
+            let presentation = self.presentation_for_stopped_thread(pid)?;
+            location
+                .as_ref()
+                .map(|location| selected_code_instance(location, &presentation))
+                .transpose()?
+                .flatten()
+        };
         let source = location.as_ref().and_then(|location| {
             code_instance.and_then(|instance| {
                 source_for_code_instance(&self.module_image, location, instance)

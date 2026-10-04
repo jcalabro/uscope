@@ -1871,3 +1871,47 @@ async fn stepping_over_from_undescribed_code_stops_at_the_first_source_statement
     );
     scenario.shutdown().await;
 }
+
+/// An instruction step needs no inline frame, so it works where the stop
+/// leaves the presented inline frame ambiguous: at the loop clang builds
+/// for the inlined `exit_group` that follows `main` in the simulator's
+/// golden runtime, where breakpoints on two nested inlined functions both
+/// hit. The simulator found such steps refused.
+#[tokio::test]
+async fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
+    let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/straight/straight-clang-O2");
+    let mut scenario = Scenario::new("instruction-step-ambiguous-inline", program);
+    scenario.add_breakpoint("rt_exit_group").await;
+    scenario.add_breakpoint("rt_syscall3").await;
+    let loop_head = VirtualAddress::new(0x40_1334);
+    let mut reason = scenario.run_to_stop().await;
+    for _ in 0..16 {
+        if matches!(&reason, StopReason::Breakpoint { address, hits } if *address == loop_head && hits.len() == 2)
+        {
+            break;
+        }
+        reason = scenario.resume_to_stop().await;
+    }
+    assert!(
+        matches!(&reason, StopReason::Breakpoint { address, .. } if *address == loop_head),
+        "the golden binary changed: {reason:?}"
+    );
+    let presentation = scenario
+        .snapshot()
+        .await
+        .presentation
+        .expect("a presentation");
+    assert!(
+        matches!(presentation.frame, uscope::PresentedFrame::Ambiguous(_)),
+        "the golden binary changed: {presentation:?}"
+    );
+
+    assert_eq!(
+        scenario.step_to_stop(StepKind::Instruction).await,
+        StopReason::Step {
+            kind: StepKind::Instruction
+        }
+    );
+    scenario.shutdown().await;
+}
