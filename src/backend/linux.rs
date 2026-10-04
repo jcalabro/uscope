@@ -49,7 +49,7 @@ use crate::{
 };
 
 use super::{ControllerChannels, ControllerMessage, EventSender, ExecutableSource, FileIdentity};
-use classify::is_stopping_signal;
+use classify::{is_stopping_signal, is_superseded};
 use debug_registers::DebugRegisterPlan;
 use memory::MemoryAccessError;
 use modules::{ModuleMapping, loader_link_maps, mapped_module_load_bias, module_mappings};
@@ -1481,6 +1481,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Routes a `PTRACE_EVENT_STOP`, which seized threads report for several
     /// unrelated reasons.
     fn handle_event_stop(&mut self, pid: Pid, signal: Signal) -> Result<()> {
+        // SIGKILL, typically a sibling's `exit_group`, may have taken the
+        // thread out of the stop since it was reported.
+        if is_superseded(&self.ptrace.signal_metadata(pid)) {
+            return self.handle_classified_stop(pid, ClassifiedStop::Superseded);
+        }
         let thread = self
             .inferior
             .as_ref()

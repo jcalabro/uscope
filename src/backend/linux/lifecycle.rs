@@ -400,8 +400,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             .inferior
             .as_ref()
             .is_some_and(|inferior| inferior.origin.owned());
-        self.ptrace.set_options(pid, exit_kill)?;
-        let arm_failure = self.arm_new_thread(pid);
+        // A sibling's `exit_group` may already have killed the new thread
+        // out of its first stop. Its exit status follows and retires it.
+        let vanished = match self.ptrace.set_options(pid, exit_kill) {
+            Ok(()) => false,
+            Err(error) if is_vanished_tracee(&error) => true,
+            Err(error) => return Err(error),
+        };
+        let arm_failure = if vanished {
+            None
+        } else {
+            self.arm_new_thread(pid)
+        };
         if let Some(inferior) = self.inferior.as_mut() {
             let name = self.ptrace.thread_name(inferior.tgid, pid);
             inferior.thread_mut(pid)?.name = name;
@@ -409,7 +419,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let (process_id, barrier_active, should_resume) = {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             let thread = inferior.thread_mut(pid)?;
-            thread.state = NativeThreadState::Stopped;
+            thread.state = if vanished {
+                NativeThreadState::Exiting
+            } else {
+                NativeThreadState::Stopped
+            };
             thread.expected = ExpectedStop::None;
             // A thread created while a breakpoint site is lifted for a repair
             // waits for the repair; resuming execution then resumes it.
