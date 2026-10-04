@@ -2729,6 +2729,12 @@ fn a_fork_child_loses_each_trap_it_inherited_even_one_lifted_since() {
         format!("step {parent}")
     ]));
 
+    // The child's copy of the code still holds the trap.
+    harness
+        .trace()
+        .memory
+        .borrow_mut()
+        .insert(HIT_SITE, u64::from(BREAKPOINT_OPCODE));
     harness
         .controller
         .process_wait(WaitEvent::Stopped(child, Signal::SIGSTOP))
@@ -2739,6 +2745,92 @@ fn a_fork_child_loses_each_trap_it_inherited_even_one_lifted_since() {
             format!("write_word {child} {HIT_SITE:#x} 0x90"),
             format!("detach {child} None"),
         ]
+    );
+}
+
+#[test]
+fn a_fork_whose_parent_is_killed_before_its_event_still_cleans_the_child() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    let child = Pid::from_raw(6000);
+    // The breakpoint is removed after the parent forked, before the fork
+    // event is handled, and then the parent is killed: the event now
+    // describes its exit, so its message is not the child's identifier.
+    harness
+        .controller
+        .remove_breakpoint_owner(
+            VirtualAddress::new(HIT_SITE),
+            BreakpointOwner::User(BreakpointId::new(1)),
+        )
+        .expect("removed");
+    harness.start_continue();
+    harness.trace().take_actions();
+    harness.trace().sigkill(parent);
+    // The child forked while the trap was installed, so its copy holds it.
+    harness
+        .trace()
+        .memory
+        .borrow_mut()
+        .insert(HIT_SITE, u64::from(BREAKPOINT_OPCODE));
+    for status in [
+        WaitEvent::Stopped(child, Signal::SIGSTOP),
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_FORK),
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Signaled(parent, Signal::SIGKILL, false),
+    ] {
+        assert!(harness.controller.handle_wait(status));
+    }
+    assert!(harness.controller.inferior.is_none());
+    let actions = harness.trace().take_actions();
+    assert!(
+        actions.contains(&format!("write_word {child} {HIT_SITE:#x} 0x90")),
+        "the child loses the trap it inherited: {actions:?}"
+    );
+    assert!(
+        actions.contains(&format!("detach {child} None")),
+        "{actions:?}"
+    );
+    assert!(
+        !actions.iter().any(|action| action.starts_with("kill")),
+        "no process is killed: {actions:?}"
+    );
+}
+
+#[test]
+fn a_fork_child_keeps_code_mapped_where_a_trap_was_removed() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    let child = Pid::from_raw(6000);
+    // The breakpoint's site is removed, and other code is mapped where it
+    // was, as when a library is unloaded and another loaded in its place.
+    // Only then does the parent fork.
+    harness
+        .controller
+        .remove_breakpoint_owner(
+            VirtualAddress::new(HIT_SITE),
+            BreakpointOwner::User(BreakpointId::new(1)),
+        )
+        .expect("removed");
+    harness.trace().memory.borrow_mut().insert(HIT_SITE, 0x55);
+    harness.start_continue();
+    harness.trace().clone.replace(Some((child, child)));
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            parent,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_FORK,
+        ))
+        .expect("fork event");
+    harness.trace().take_actions();
+    harness
+        .controller
+        .process_wait(WaitEvent::Stopped(child, Signal::SIGSTOP))
+        .expect("child's first stop");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("detach {child} None")],
+        "the child's code holds no trap to remove"
     );
 }
 
@@ -3332,6 +3424,29 @@ fn a_repair_whose_process_dies_leaves_its_trap_unrestored() {
             .any(|action| action.starts_with("kill")),
         "the debugger does not give up on the program"
     );
+}
+
+#[test]
+fn a_pause_that_meets_a_fork_event_instead_completes() {
+    let mut harness = watch_harness(1);
+    let parent = harness.threads[0];
+    harness.start_continue();
+    harness
+        .controller
+        .begin_pause(process_id(parent))
+        .expect("pause");
+    // The parent forked before its requested stop was delivered.
+    let child = Pid::from_raw(6200);
+    *harness.trace().clone.borrow_mut() = Some((child, child));
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            parent,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_FORK,
+        ))
+        .expect("fork event");
+    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
 }
 
 /// The trap site of the hit-count harness's one user breakpoint.

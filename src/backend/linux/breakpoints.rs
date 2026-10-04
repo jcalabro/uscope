@@ -848,8 +848,17 @@ pub(super) fn remove_logical_breakpoint(
     Ok(())
 }
 
-/// Forgets every repair of a site whose original instruction is restored.
-pub(super) fn forget_removed_site(inferior: &mut Inferior, address: VirtualAddress) {
+/// Forgets every repair of a site whose original instruction is restored,
+/// remembering the site for processes forked while it was installed.
+pub(super) fn forget_removed_site(
+    inferior: &mut Inferior,
+    address: VirtualAddress,
+    original_byte: u8,
+) {
+    inferior
+        .former_sites
+        .entry(address)
+        .or_insert(original_byte);
     for thread in inferior.threads.values_mut() {
         if thread.stopped_at_breakpoint == Some(address) {
             // Breakpoint PCs are normalized when the trap is classified. With the
@@ -880,9 +889,11 @@ pub(super) fn remove_breakpoint_owner_from(
     if remove_site {
         let pid = inferior.memory_thread();
         ptrace.remove_breakpoint(pid, &mut inferior.breakpoints, address)?;
-        let removed = inferior.breakpoints.remove(&address);
-        assert!(removed.is_some(), "empty breakpoint site existed");
-        forget_removed_site(inferior, address);
+        let removed = inferior
+            .breakpoints
+            .remove(&address)
+            .expect("empty breakpoint site existed");
+        forget_removed_site(inferior, address, removed.original_byte);
     } else {
         let removed = inferior
             .breakpoints

@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::signals::{Signal, WaitEvent};
+use nix::errno::Errno;
 use nix::libc;
 use nix::unistd::Pid;
 
@@ -16,9 +17,10 @@ use crate::{Error, LoadedModule, Result, VirtualAddress};
 use super::breakpoints::install_logical_breakpoint;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
-    ActiveExecution, ActiveKind, ClassifiedStop, Controller, ExpectedStop, Inferior,
-    InferiorOrigin, LinuxError, NativeThreadState, StopBarrier, Terminating, TraceThread, Waiter,
-    backend_error, debug_thread_id, exception_info, process_id,
+    ActiveExecution, ActiveKind, BREAKPOINT_OPCODE, ClassifiedStop, Controller, ExpectedStop,
+    Inferior, InferiorOrigin, LinuxError, MemoryAccessError, NativeThreadState, StopBarrier,
+    Terminating, TraceThread, Waiter, backend_error, debug_thread_id, exception_info,
+    is_superseded, process_id,
 };
 
 /// How many times an attach may find threads it has not traced before it
@@ -492,6 +494,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn handle_ptrace_event(&mut self, pid: Pid, event: i32) -> Result<()> {
+        // SIGKILL may have taken the thread out of an event's stop since it
+        // was reported, and the event message then describes the exit.
+        if event != libc::PTRACE_EVENT_EXIT && is_superseded(&self.ptrace.signal_metadata(pid)) {
+            return self.handle_classified_stop(pid, ClassifiedStop::Superseded);
+        }
         match event {
             libc::PTRACE_EVENT_CLONE => {
                 self.inferior
@@ -631,7 +638,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         if inferior.barrier.is_some() {
-            Ok(())
+            // The child is another process: the parent's stop may be the
+            // last the barrier waited for.
+            self.finish_barrier_if_ready()
         } else {
             self.restart_after_internal(parent)
         }
@@ -647,15 +656,32 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
         let mut cleaned = Ok(());
         for &(address, original_byte) in sites {
+            let word = match self.ptrace.read_memory_word(child, address.get()) {
+                Ok(word) => word,
+                // Memory the child cannot read, such as a library unloaded
+                // since, holds no trap it could execute.
+                Err(MemoryAccessError::Inaccessible) => continue,
+                Err(MemoryAccessError::Fatal(error)) => {
+                    cleaned = Err(error);
+                    break;
+                }
+                // Only a core dump reads part of a word.
+                Err(MemoryAccessError::Partial { .. }) => {
+                    cleaned = Err(backend_error(LinuxError::System(Errno::EIO)));
+                    break;
+                }
+            };
+            let mut bytes = word.to_ne_bytes();
+            // Only a trap is ours to remove. A site removed before the fork,
+            // or whose memory was remapped since, such as an unloaded
+            // library's, holds code the child must keep.
+            if bytes[0] != BREAKPOINT_OPCODE {
+                continue;
+            }
+            bytes[0] = original_byte;
             cleaned = self
                 .ptrace
-                .read_word(child, address.get())
-                .and_then(|word| {
-                    let mut bytes = word.to_ne_bytes();
-                    bytes[0] = original_byte;
-                    self.ptrace
-                        .write_word(child, address.get(), u64::from_ne_bytes(bytes))
-                });
+                .write_word(child, address.get(), u64::from_ne_bytes(bytes));
             if cleaned.is_err() {
                 break;
             }
@@ -710,6 +736,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.retired_threads.remove(&pid);
         inferior.threads.insert(pid, survivor);
         inferior.breakpoints.clear();
+        inferior.former_sites.clear();
         inferior.plan_sites.clear();
         inferior.repairs.clear();
         inferior.loader_site = None;
