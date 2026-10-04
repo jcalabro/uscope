@@ -1341,6 +1341,10 @@ fn type_unit_source_file_id(
     source_file_ids: &mut HashMap<PathBuf, SourceFileId>,
 ) -> SourceFileId {
     if path.is_relative() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "only a unique match is used, which no iteration order changes"
+        )]
         let mut suffix_matches = source_file_ids
             .iter()
             .filter(|(candidate, _)| candidate.is_absolute() && candidate.ends_with(&path))
