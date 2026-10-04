@@ -557,11 +557,27 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    /// The identifier the event stop of `pid` reports, or `None` once SIGKILL
+    /// took the thread out of that stop, even while it was read. A thread
+    /// leaves an event's stop only for its exit, whose message replaces the
+    /// event's, so the stop is checked after the read.
+    fn event_message_of(&self, pid: Pid) -> Result<Option<Pid>> {
+        let message = match self.ptrace.event_message(pid) {
+            Ok(message) => message,
+            Err(error) if is_vanished_tracee(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if is_superseded(&self.ptrace.signal_metadata(pid)) {
+            return Ok(None);
+        }
+        let message = i32::try_from(message).map_err(|_| Error::AddressOverflow)?;
+        Ok(Some(Pid::from_raw(message)))
+    }
+
     pub(super) fn handle_clone_event(&mut self, parent: Pid) -> Result<()> {
-        let child = Pid::from_raw(
-            i32::try_from(self.ptrace.event_message(parent)?)
-                .map_err(|_| Error::AddressOverflow)?,
-        );
+        let Some(child) = self.event_message_of(parent)? else {
+            return self.handle_classified_stop(parent, ClassifiedStop::Superseded);
+        };
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         // A sibling's exit_group can end the new thread before this event
         // announces it.
@@ -632,10 +648,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Releases a forked child, which the debugger does not follow, and
     /// resumes the parent.
     pub(super) fn handle_fork_event(&mut self, parent: Pid) -> Result<()> {
-        let child = Pid::from_raw(
-            i32::try_from(self.ptrace.event_message(parent)?)
-                .map_err(|_| Error::AddressOverflow)?,
-        );
+        let Some(child) = self.event_message_of(parent)? else {
+            return self.handle_classified_stop(parent, ClassifiedStop::Superseded);
+        };
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         // The child's memory is the parent's as it forked; later edits, such
         // as lifting a site to step over it, never reach the child.
@@ -781,9 +796,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn handle_exec_event(&mut self, pid: Pid) -> Result<()> {
-        let old_tid = Pid::from_raw(
-            i32::try_from(self.ptrace.event_message(pid)?).map_err(|_| Error::AddressOverflow)?,
-        );
+        let Some(old_tid) = self.event_message_of(pid)? else {
+            return self.handle_classified_stop(pid, ClassifiedStop::Superseded);
+        };
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let mut survivor = inferior
             .threads
@@ -1269,11 +1284,13 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Records a fork child announced while detaching; its initial stop
     /// releases it, and the detach waits for that.
     fn handle_fork_during_detach(&mut self, parent: Pid) -> Result<()> {
-        let child = Pid::from_raw(
-            i32::try_from(self.ptrace.event_message(parent)?)
-                .map_err(|_| Error::AddressOverflow)?,
-        );
+        let event = self.event_message_of(parent)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        // The killed parent goes on to its exit, which the detach awaits.
+        let Some(child) = event else {
+            inferior.thread_mut(parent)?.state = NativeThreadState::Running;
+            return Ok(());
+        };
         inferior.thread_mut(parent)?.state = NativeThreadState::Stopped;
         let sites = inferior.inherited_sites();
         if inferior.unowned_stops.remove(&child).is_some() {
@@ -1285,11 +1302,13 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn handle_clone_during_detach(&mut self, parent: Pid) -> Result<()> {
-        let child = Pid::from_raw(
-            i32::try_from(self.ptrace.event_message(parent)?)
-                .map_err(|_| Error::AddressOverflow)?,
-        );
+        let event = self.event_message_of(parent)?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        // The killed parent goes on to its exit, which the detach awaits.
+        let Some(child) = event else {
+            inferior.thread_mut(parent)?.state = NativeThreadState::Running;
+            return Ok(());
+        };
         inferior.thread_mut(parent)?.state = NativeThreadState::Stopped;
         // The child's first stop may already have arrived.
         let stopped = inferior.unowned_stops.remove(&child).is_some();
