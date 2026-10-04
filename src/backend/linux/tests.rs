@@ -330,6 +330,9 @@ impl LinuxTraceOps for RecordingTrace {
         Ok(Waiter::external())
     }
 
+    fn traced_children(&self, _process: Pid, _thread: Pid) -> Vec<Pid> {
+        Vec::new()
+    }
     fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
         Self::unexpected("process_threads")
     }
@@ -342,7 +345,7 @@ impl LinuxTraceOps for RecordingTrace {
         Self::unexpected("interrupt")
     }
 
-    fn detach(&self, _pid: Pid, _signal: Option<Signal>) -> Result<()> {
+    fn detach(&self, _pid: Pid, _signal: Option<Signal>) -> Result<bool> {
         Self::unexpected("detach")
     }
 
@@ -1365,6 +1368,8 @@ struct DebugRegisterTrace {
     clone: RefCell<Option<(Pid, Pid)>>,
     /// The process's thread list.
     listed_threads: RefCell<Vec<Pid>>,
+    /// The fork children the tracer still traces.
+    traced_children: RefCell<Vec<Pid>>,
     /// Memory words by address; others read as zero.
     memory: RefCell<BTreeMap<u64, u64>>,
     /// Words whose reads fail, as unmapped memory's do.
@@ -1500,6 +1505,9 @@ impl LinuxTraceOps for DebugRegisterTrace {
     fn spawn_waiter(&self, _messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
         Ok(Waiter::external())
     }
+    fn traced_children(&self, _process: Pid, _thread: Pid) -> Vec<Pid> {
+        self.traced_children.borrow().clone()
+    }
     fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
         Ok(self.listed_threads.borrow().clone())
     }
@@ -1511,9 +1519,11 @@ impl LinuxTraceOps for DebugRegisterTrace {
         self.record(format!("interrupt {pid}"));
         Ok(true)
     }
-    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
+    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<bool> {
         self.record(format!("detach {pid} {signal:?}"));
-        Ok(())
+        // A thread SIGKILL took out of its stop is not released: it stays
+        // traced until it exits.
+        Ok(self.reach(pid, "detach").is_ok())
     }
     fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {
         self.record(format!("kill {pid} {signal}"));
@@ -2831,6 +2841,134 @@ fn a_fork_child_keeps_code_mapped_where_a_trap_was_removed() {
         harness.trace().take_actions(),
         [format!("detach {child} None")],
         "the child's code holds no trap to remove"
+    );
+}
+
+#[test]
+fn a_fork_child_still_starting_when_its_parent_exits_is_released_not_killed() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    let child = Pid::from_raw(6000);
+    harness.start_continue();
+    harness.trace().clone.replace(Some((child, child)));
+    for status in [
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_FORK),
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Exited(parent, 0),
+    ] {
+        assert!(harness.controller.handle_wait(status));
+    }
+    // The program is gone, but the controller still releases its child.
+    assert!(harness.controller.inferior.is_none());
+    assert!(harness.controller.orphans.is_some());
+    harness.trace().take_actions();
+    harness
+        .trace()
+        .memory
+        .borrow_mut()
+        .insert(HIT_SITE, u64::from(BREAKPOINT_OPCODE));
+    assert!(
+        harness
+            .controller
+            .handle_wait(WaitEvent::Stopped(child, Signal::SIGSTOP))
+    );
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            format!("write_word {child} {HIT_SITE:#x} 0x90"),
+            format!("detach {child} None"),
+        ]
+    );
+    assert!(harness.controller.orphans.is_none());
+}
+
+#[test]
+fn a_fork_child_whose_event_was_lost_is_found_as_its_parent_exits() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    let child = Pid::from_raw(6000);
+    harness.start_continue();
+    // SIGKILL took the parent out of its fork event's stop before the event
+    // was reported; the child it forked still stops.
+    harness.trace().traced_children.borrow_mut().push(child);
+    harness.trace().sigkill(parent);
+    harness
+        .trace()
+        .memory
+        .borrow_mut()
+        .insert(HIT_SITE, u64::from(BREAKPOINT_OPCODE));
+    for status in [
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Signaled(parent, Signal::SIGKILL, false),
+        WaitEvent::Stopped(child, Signal::SIGSTOP),
+    ] {
+        assert!(harness.controller.handle_wait(status));
+    }
+    let actions = harness.trace().take_actions();
+    assert!(
+        actions.contains(&format!("write_word {child} {HIT_SITE:#x} 0x90")),
+        "{actions:?}"
+    );
+    assert!(
+        actions.contains(&format!("detach {child} None")),
+        "{actions:?}"
+    );
+    assert!(harness.controller.inferior.is_none());
+    assert!(harness.controller.orphans.is_none());
+}
+
+#[test]
+fn a_fork_child_that_dies_as_it_is_released_is_awaited_until_its_exit() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    let child = Pid::from_raw(6000);
+    harness.start_continue();
+    harness.trace().clone.replace(Some((child, child)));
+    // The parent forks and starts exiting before its child first stops.
+    // SIGKILL then takes the child out of that stop as it is released.
+    harness
+        .trace()
+        .memory
+        .borrow_mut()
+        .insert(HIT_SITE, u64::from(BREAKPOINT_OPCODE));
+    *harness.trace().kill_point.borrow_mut() = Some((child, "detach", 0));
+    for status in [
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_FORK),
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Stopped(child, Signal::SIGSTOP),
+        WaitEvent::Exited(parent, 0),
+    ] {
+        assert!(harness.controller.handle_wait(status));
+    }
+    assert!(
+        harness.trace().kill_point.borrow().is_none(),
+        "the child was scrubbed and detached"
+    );
+    // The program is gone, but its child is still traced: it stops at its
+    // exit event, which waits for the tracer, and only then exits.
+    assert!(harness.controller.inferior.is_none());
+    assert!(
+        harness.controller.orphans.is_some(),
+        "the killed child is still traced"
+    );
+    harness.trace().take_actions();
+    assert!(harness.controller.handle_wait(WaitEvent::PtraceEvent(
+        child,
+        Signal::SIGTRAP,
+        libc::PTRACE_EVENT_EXIT,
+    )));
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("continue {child} None")]
+    );
+    assert!(
+        harness
+            .controller
+            .handle_wait(WaitEvent::Signaled(child, Signal::SIGKILL, false))
+    );
+    assert!(
+        harness.controller.orphans.is_none(),
+        "no child is left to wait for"
     );
 }
 

@@ -598,6 +598,9 @@ struct Inferior {
     /// Fork children announced before their initial stop arrived, with the
     /// breakpoint sites each inherited.
     fork_children: BTreeMap<Pid, Vec<(VirtualAddress, u8)>>,
+    /// Fork children killed, or found dying, as they were released, whose
+    /// exits are still due: another process's exit may follow the leader's.
+    killed_children: BTreeSet<Pid>,
     waiter: Option<Waiter>,
     active: Option<ActiveExecution>,
     repairs: VecDeque<RepairGroup>,
@@ -646,6 +649,7 @@ impl Inferior {
             unseized_threads: BTreeSet::new(),
             former_sites: BTreeMap::new(),
             fork_children: BTreeMap::new(),
+            killed_children: BTreeSet::new(),
             waiter,
             active: None,
             repairs: VecDeque::new(),
@@ -941,8 +945,22 @@ struct Controller<P: InspectionOps> {
     shutdown_reply: Option<Reply<()>>,
     /// The client waiting for a killed inferior to be gone.
     kill_reply: Option<Reply<()>>,
+    /// Fork children still traced after the inferior ended.
+    orphans: Option<Orphans>,
     signals: SignalPolicies,
     revision: u64,
+}
+
+/// Fork children still on their way to their first stop when their parent's
+/// process ended, with the waiter that reports them. Each is scrubbed of the
+/// traps it inherited and released at that stop; the waiter, which would
+/// otherwise poll them forever, is joined once none remains.
+struct Orphans {
+    /// Each child with the traps it may hold.
+    children: BTreeMap<Pid, Vec<(VirtualAddress, u8)>>,
+    /// Children that could not be scrubbed, killed and awaiting their exit.
+    killed: BTreeSet<Pid>,
+    waiter: Option<Waiter>,
 }
 
 pub fn spawn_controller(
@@ -1011,6 +1029,7 @@ impl<P: InspectionOps> Controller<P> {
             shutting_down: false,
             shutdown_reply: None,
             kill_reply: None,
+            orphans: None,
             signals: SignalPolicies::default(),
             revision: 0,
         }
@@ -1161,7 +1180,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             Request::Shutdown { reply } => {
                 self.begin_shutdown(Some(reply));
-                return self.inferior.is_some();
+                return self.inferior.is_some() || self.orphans.is_some();
             }
             Request::Kill { reply } => self.kill(reply),
             Request::Terminate { reply } => {
@@ -1398,6 +1417,9 @@ impl<P: InspectionOps> Controller<P> {
 
 impl<P: LinuxTraceOps> Controller<P> {
     fn handle_wait(&mut self, status: WaitEvent) -> bool {
+        if self.inferior.is_none() && self.orphans.is_some() {
+            return self.handle_orphan_wait(status);
+        }
         if self.shutting_down {
             return self.handle_shutdown_wait(status);
         }
