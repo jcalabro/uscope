@@ -39,8 +39,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .is_some_and(|thread| thread.debugger_stop_pending)
             && siginfo.as_ref().is_ok_and(|metadata| {
                 metadata.code == libc::SI_TKILL
-                    && metadata.sender
-                        == Some(i32::try_from(std::process::id()).unwrap_or(i32::MAX))
+                    && metadata.sender == Some(self.ptrace.tracer_process())
             });
         let expected_trace = signal == Signal::SIGTRAP
             && siginfo.as_ref().is_ok_and(is_single_step_trap)

@@ -759,20 +759,44 @@ impl Inferior {
     }
 }
 
+/// Collects an inferior's wait statuses for the controller: a thread in a
+/// live session, or nothing when whoever drives the controller reports
+/// statuses itself, as test fakes and the simulator do.
 struct Waiter {
+    thread: Option<WaiterThread>,
+}
+
+struct WaiterThread {
     stop: Arc<AtomicBool>,
-    thread: JoinHandle<()>,
+    handle: JoinHandle<()>,
 }
 
 impl Waiter {
+    /// A waiter whose statuses the controller's driver delivers.
+    #[cfg(test)]
+    const fn external() -> Self {
+        Self { thread: None }
+    }
+
     fn stop_and_join(self) -> Result<()> {
-        self.stop.store(true, Ordering::Release);
-        self.thread.thread().unpark();
-        self.thread.join().map_err(|_| Error::BackendThreadPanicked)
+        let Some(thread) = self.thread else {
+            return Ok(());
+        };
+        thread.stop.store(true, Ordering::Release);
+        thread.handle.thread().unpark();
+        thread
+            .handle
+            .join()
+            .map_err(|_| Error::BackendThreadPanicked)
     }
 
     fn join(self) -> Result<()> {
-        self.thread.join().map_err(|_| Error::BackendThreadPanicked)
+        self.thread.map_or(Ok(()), |thread| {
+            thread
+                .handle
+                .join()
+                .map_err(|_| Error::BackendThreadPanicked)
+        })
     }
 }
 
@@ -982,20 +1006,25 @@ impl<P: InspectionOps> Controller<P> {
 impl<P: LinuxTraceOps> Controller<P> {
     fn run(mut self) {
         while let Some(message) = self.messages.blocking_recv() {
-            let keep_running = match message {
-                ControllerMessage::Request(request) => {
-                    record!("request {}", request.describe());
-                    self.handle_request(request)
-                }
-                ControllerMessage::Wait(status) => self.handle_wait(status),
-            };
-
-            if !keep_running {
+            if !self.handle_message(message) {
                 return;
             }
         }
         // The controller holds a request sender for its waiter, so the queue
         // never closes; dropping the `Debugger` sends a shutdown request.
+    }
+
+    /// Serves one queued request or wait status, and returns whether the
+    /// controller keeps running. A driver that owns the queue, such as the
+    /// simulator, delivers messages one at a time through this.
+    fn handle_message(&mut self, message: ControllerMessage) -> bool {
+        match message {
+            ControllerMessage::Request(request) => {
+                record!("request {}", request.describe());
+                self.handle_request(request)
+            }
+            ControllerMessage::Wait(status) => self.handle_wait(status),
+        }
     }
 
     #[expect(

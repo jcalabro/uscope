@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::marker::PhantomData;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -23,16 +23,17 @@ use tokio::sync::mpsc;
 
 use crate::backend::linux::thread_db;
 use crate::backend::{ControllerMessage, FileIdentity};
+use crate::debug_info::DebugInfo;
 use crate::protocol::LaunchOptions;
 use crate::{Error, Result, VirtualAddress};
 
 use super::memory::MemoryAccessError;
-use super::modules::{ModuleMapping, load_bias, module_mappings};
+use super::modules::{ModuleMapping, identify_mapped_module, load_bias, module_mappings};
 use super::registers::{Fxsave, native_fxsave};
 use super::signals::{Signal, WaitEvent};
 use super::{
     BREAKPOINT_OPCODE, BreakpointOwner, BreakpointSite, LinuxError, SignalMetadata,
-    WAITER_THREAD_NAME, Waiter, backend_error,
+    WAITER_THREAD_NAME, Waiter, WaiterThread, backend_error,
 };
 
 /// Read-only access to a stopped target's registers, memory, and thread-local
@@ -78,7 +79,20 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
     fn kill(&self, pid: Pid, signal: Signal) -> Result<()>;
     fn reap(&self, pid: Pid) -> Result<()>;
+    /// Waits for the next status of one tracee, as `waitpid(pid, __WALL)`.
+    fn wait_status(&self, pid: Pid) -> std::result::Result<WaitEvent, Errno>;
     fn thread_group_id(&self, pid: Pid) -> Result<Pid>;
+    /// A process's start time in clock ticks since boot, which tells it
+    /// apart from a later process given the same identifier.
+    fn process_start_time(&self, process: Pid) -> Option<u64>;
+    /// The process identifier signals this debugger sends carry as their
+    /// sender.
+    fn tracer_process(&self) -> i32;
+    /// Resolves the file behind a module mapping and its load bias, or
+    /// `None` when the file cannot be proven to be the mapped one.
+    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)>;
+    /// Loads the debug information of a module file.
+    fn load_module(&self, path: &Path, id: crate::ModuleImageId) -> Result<DebugInfo>;
     fn load_bias(
         &self,
         pid: Pid,
@@ -119,25 +133,76 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         index: usize,
         value: u64,
     ) -> std::result::Result<(), Errno>;
+    /// Adds `owner` to the site at `address`, writing a trap there if no
+    /// site exists yet. Every backend shares this through its word access.
     fn install_breakpoint(
         &self,
         pid: Pid,
         sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
         address: VirtualAddress,
         owner: BreakpointOwner,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        if let Some(site) = sites.get_mut(&address) {
+            site.owners.insert(owner);
+            return Ok(());
+        }
+        let word = self.read_word(pid, address.get())?;
+        let original_byte = word.to_ne_bytes()[0];
+        self.write_word(
+            pid,
+            address.get(),
+            (word & !0xff) | u64::from(BREAKPOINT_OPCODE),
+        )?;
+        sites.insert(
+            address,
+            BreakpointSite {
+                original_byte,
+                installed: true,
+                owners: BTreeSet::from([owner]),
+            },
+        );
+        Ok(())
+    }
+    /// Restores the original byte of an installed site, keeping the site.
     fn remove_breakpoint(
         &self,
         pid: Pid,
         sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
         address: VirtualAddress,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        let site = sites.get_mut(&address).expect("known breakpoint site");
+        if !site.installed {
+            return Ok(());
+        }
+        let word = self.read_word(pid, address.get())?;
+        self.write_word(
+            pid,
+            address.get(),
+            (word & !0xff) | u64::from(site.original_byte),
+        )?;
+        site.installed = false;
+        Ok(())
+    }
+    /// Writes the trap of a site its removal lifted back in place.
     fn reinstall_breakpoint(
         &self,
         pid: Pid,
         sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
         address: VirtualAddress,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        let site = sites.get_mut(&address).expect("known breakpoint site");
+        if site.installed {
+            return Ok(());
+        }
+        let word = self.read_word(pid, address.get())?;
+        self.write_word(
+            pid,
+            address.get(),
+            (word & !0xff) | u64::from(BREAKPOINT_OPCODE),
+        )?;
+        site.installed = true;
+        Ok(())
+    }
 }
 
 pub(super) struct LinuxPtrace {
@@ -229,7 +294,10 @@ impl LinuxTraceOps for LinuxPtrace {
     fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
         self.assert_owner_thread();
         let waiter = spawn_waiter(messages)?;
-        *self.waiter.borrow_mut() = Some(waiter.thread.thread().clone());
+        *self.waiter.borrow_mut() = waiter
+            .thread
+            .as_ref()
+            .map(|thread| thread.handle.thread().clone());
         Ok(waiter)
     }
 
@@ -293,9 +361,36 @@ impl LinuxTraceOps for LinuxPtrace {
             .map_err(|error| backend_error(LinuxError::System(error)))
     }
 
+    fn wait_status(&self, pid: Pid) -> std::result::Result<WaitEvent, Errno> {
+        self.assert_owner_thread();
+        loop {
+            match wait_for(pid, libc::__WALL) {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) | Err(Errno::EINTR) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     fn thread_group_id(&self, pid: Pid) -> Result<Pid> {
         self.assert_owner_thread();
         thread_group_id(pid)
+    }
+
+    fn process_start_time(&self, process: Pid) -> Option<u64> {
+        crate::backend::process_start_time(process.as_raw())
+    }
+
+    fn tracer_process(&self) -> i32 {
+        i32::try_from(std::process::id()).unwrap_or(i32::MAX)
+    }
+
+    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+        identify_mapped_module(mapping)
+    }
+
+    fn load_module(&self, path: &Path, id: crate::ModuleImageId) -> Result<DebugInfo> {
+        crate::debug_info::load_module(path, id)
     }
 
     fn load_bias(
@@ -439,78 +534,6 @@ impl LinuxTraceOps for LinuxPtrace {
             libc::c_long::from_ne_bytes(value.to_ne_bytes()),
         )
     }
-
-    fn install_breakpoint(
-        &self,
-        pid: Pid,
-        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
-        address: VirtualAddress,
-        owner: BreakpointOwner,
-    ) -> Result<()> {
-        self.assert_owner_thread();
-        if let Some(site) = sites.get_mut(&address) {
-            site.owners.insert(owner);
-            return Ok(());
-        }
-        let word = self.read_word(pid, address.get())?;
-        let original_byte = word.to_ne_bytes()[0];
-        self.write_word(
-            pid,
-            address.get(),
-            (word & !0xff) | u64::from(BREAKPOINT_OPCODE),
-        )?;
-        sites.insert(
-            address,
-            BreakpointSite {
-                original_byte,
-                installed: true,
-                owners: BTreeSet::from([owner]),
-            },
-        );
-        Ok(())
-    }
-
-    fn remove_breakpoint(
-        &self,
-        pid: Pid,
-        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
-        address: VirtualAddress,
-    ) -> Result<()> {
-        self.assert_owner_thread();
-        let site = sites.get_mut(&address).expect("known breakpoint site");
-        if !site.installed {
-            return Ok(());
-        }
-        let word = self.read_word(pid, address.get())?;
-        self.write_word(
-            pid,
-            address.get(),
-            (word & !0xff) | u64::from(site.original_byte),
-        )?;
-        site.installed = false;
-        Ok(())
-    }
-
-    fn reinstall_breakpoint(
-        &self,
-        pid: Pid,
-        sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
-        address: VirtualAddress,
-    ) -> Result<()> {
-        self.assert_owner_thread();
-        let site = sites.get_mut(&address).expect("known breakpoint site");
-        if site.installed {
-            return Ok(());
-        }
-        let word = self.read_word(pid, address.get())?;
-        self.write_word(
-            pid,
-            address.get(),
-            (word & !0xff) | u64::from(BREAKPOINT_OPCODE),
-        )?;
-        site.installed = true;
-        Ok(())
-    }
 }
 
 /// Whether a ptrace request failed because the tracee left its ptrace-stop.
@@ -600,7 +623,7 @@ const WAITER_MAX_POLL: Duration = Duration::from_millis(5);
 pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
-    let thread = thread::Builder::new()
+    let handle = thread::Builder::new()
         .name(WAITER_THREAD_NAME.into())
         .spawn(move || {
             let mut interval = WAITER_MIN_POLL;
@@ -631,7 +654,9 @@ pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<
             }
             record!("exited");
         })?;
-    Ok(Waiter { stop, thread })
+    Ok(Waiter {
+        thread: Some(WaiterThread { stop, handle }),
+    })
 }
 
 #[allow(

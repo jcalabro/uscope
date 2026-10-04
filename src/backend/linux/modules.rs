@@ -110,7 +110,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             let module = match self.mapped_modules.remove(&mapping) {
                 Some(module) => module,
-                None => match identify_mapped_module(&mapping) {
+                None => match self.ptrace.identify_module(&mapping) {
                     Some(module) => module,
                     None => continue,
                 },
@@ -162,7 +162,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .checked_add(1)
                 .ok_or_else(|| backend_error(LinuxError::ModuleImageIdExhausted))?;
             // Metadata a module's file cannot provide leaves its frames unnamed.
-            let Ok(debug) = crate::debug_info::load_module(&path, image_id) else {
+            let Ok(debug) = self.ptrace.load_module(&path, image_id) else {
                 continue;
             };
             let loaded = LoadedModule {
