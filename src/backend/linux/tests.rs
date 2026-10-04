@@ -5463,3 +5463,110 @@ fn a_pause_completes_when_the_main_thread_exits_alone() {
         });
     assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
 }
+
+/// A main thread resumed alone that exits leaves its held siblings with no
+/// way to run: its exit is reported only after theirs. A pause then stops
+/// at once with them.
+#[test]
+fn a_pause_after_a_lone_main_thread_exited_stops_at_once() {
+    let mut harness = watch_harness(2);
+    let [leader, worker] = harness.threads[..] else {
+        panic!("two threads");
+    };
+    harness.start_continue();
+    harness.thread(worker).state = NativeThreadState::Stopped;
+    harness.thread(leader).state = NativeThreadState::Exiting;
+    harness.trace().killed.borrow_mut().insert(leader);
+
+    harness
+        .controller
+        .begin_pause(process_id(leader))
+        .expect("the pause is accepted");
+    let stopped = harness
+        .published()
+        .into_iter()
+        .find_map(|event| match event {
+            DebuggerEvent::InferiorStopped {
+                thread_id, reason, ..
+            } => Some((thread_id, reason)),
+            _ => None,
+        });
+    assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
+}
+
+/// A thread that has not reported its first stop stops by itself, so a
+/// pause waits for it, even when no other thread runs: here the main
+/// thread exited right after creating it.
+#[test]
+fn a_pause_waits_for_a_starting_thread_to_stop() {
+    let mut harness = watch_harness(2);
+    let [leader, worker] = harness.threads[..] else {
+        panic!("two threads");
+    };
+    harness.start_continue();
+    harness.thread(worker).state = NativeThreadState::Starting;
+    harness.thread(leader).state = NativeThreadState::Exiting;
+    harness.trace().killed.borrow_mut().insert(leader);
+
+    harness
+        .controller
+        .begin_pause(process_id(leader))
+        .expect("the pause is accepted");
+    assert_eq!(harness.public_reason(), None);
+    harness.trace().siginfo.borrow_mut().insert(
+        worker,
+        SignalMetadata {
+            code: libc::SI_USER,
+            sender: Some(0),
+            fault_address: None,
+        },
+    );
+    harness
+        .controller
+        .process_wait(WaitEvent::Stopped(worker, Signal::SIGSTOP))
+        .expect("the worker's first stop");
+    let stopped = harness
+        .published()
+        .into_iter()
+        .find_map(|event| match event {
+            DebuggerEvent::InferiorStopped {
+                thread_id, reason, ..
+            } => Some((thread_id, reason)),
+            _ => None,
+        });
+    assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
+}
+
+/// A pause that finds no thread to ask, the others being stopped and one
+/// past its exit event, as after a thread resumed alone exited, stops once
+/// that exit is reported.
+#[test]
+fn a_pause_waits_for_an_exiting_thread() {
+    let mut harness = watch_harness(2);
+    let [leader, worker] = harness.threads[..] else {
+        panic!("two threads");
+    };
+    harness.start_continue();
+    harness.thread(leader).state = NativeThreadState::Stopped;
+    harness.thread(worker).state = NativeThreadState::Exiting;
+
+    harness
+        .controller
+        .begin_pause(process_id(leader))
+        .expect("the pause is accepted");
+    assert_eq!(harness.public_reason(), None);
+    harness
+        .controller
+        .process_wait(WaitEvent::Exited(worker, 0))
+        .expect("the worker exits");
+    let stopped = harness
+        .published()
+        .into_iter()
+        .find_map(|event| match event {
+            DebuggerEvent::InferiorStopped {
+                thread_id, reason, ..
+            } => Some((thread_id, reason)),
+            _ => None,
+        });
+    assert_eq!(stopped, Some((debug_thread_id(leader), StopReason::Pause)));
+}

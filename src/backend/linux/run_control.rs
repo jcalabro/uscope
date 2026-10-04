@@ -274,18 +274,28 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(execution_id);
         }
 
-        // A launching thread has no stop to request: its initial exec stop
-        // completes the barrier.
+        // A launching or starting thread has no stop to request: its first
+        // stop completes the barrier.
         let triggering_thread = inferior
             .threads
             .iter()
             .find_map(|(&pid, thread)| {
-                (matches!(thread.state, NativeThreadState::Running)
-                    || matches!(
-                        thread.expected,
-                        ExpectedStop::InitialExec | ExpectedStop::AdoptedExec
-                    ))
+                (matches!(
+                    thread.state,
+                    NativeThreadState::Running | NativeThreadState::Starting
+                ) || matches!(
+                    thread.expected,
+                    ExpectedStop::InitialExec | ExpectedStop::AdoptedExec
+                ))
                 .then_some(pid)
+            })
+            // With no thread to ask, the stopped threads wait only for those
+            // past their exit events, or for none, as when a main thread
+            // resumed alone exited and left its siblings held.
+            .or_else(|| {
+                inferior.threads.iter().find_map(|(&pid, thread)| {
+                    matches!(thread.state, NativeThreadState::Stopped).then_some(pid)
+                })
             })
             .ok_or(Error::NotStopped)?;
         inferior.barrier = Some(StopBarrier::visible(triggering_thread, StopReason::Pause));
