@@ -29,7 +29,7 @@ use super::frames::{default_inline_visible_count, frame_lookup_address};
 use super::inspection::validate_value_expression;
 use super::memory::{MemoryAccessError, read_logical_memory_with};
 use super::modules::{ModuleMapping, parse_maps};
-use super::native::{InspectionOps, LinuxTraceOps, queued_trap_in_status};
+use super::native::{InspectionOps, LinuxTraceOps, interrupt_outcome, queued_trap_in_status};
 use super::*;
 use crate::{AddressRange, ImageAddress};
 
@@ -5316,4 +5316,31 @@ fn an_activation_missing_from_a_wholly_unwound_stack_has_returned() {
             .expect("a complete stack is evidence")
             .is_none()
     );
+}
+
+#[test]
+fn an_interrupt_refused_with_eio_means_gone_only_for_a_thread_that_exited() {
+    // An exited thread, as the waiter can reap one between ptrace's check
+    // that it is traced and the interrupt taking its signal lock. A zombie
+    // keeps its identifier, so nothing else can take it meanwhile.
+    let mut exited = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn a process");
+    let pid = Pid::from_raw(i32::try_from(exited.id()).expect("pid fits i32"));
+    let stat = format!("/proc/{pid}/stat");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !std::fs::read_to_string(&stat).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().next())
+            == Some("Z")
+    }) {
+        assert!(std::time::Instant::now() < deadline, "{pid} did not exit");
+        thread::yield_now();
+    }
+    let gone = interrupt_outcome(pid, Err(Errno::EIO));
+    exited.wait().expect("reap the process");
+    assert!(!gone.expect("an exited thread is gone"));
+
+    // A live thread's EIO is a failure the debugger must not hide.
+    assert!(interrupt_outcome(nix::unistd::gettid(), Err(Errno::EIO)).is_err());
 }
