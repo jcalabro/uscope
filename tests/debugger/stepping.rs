@@ -555,6 +555,320 @@ async fn step_uses_each_marked_epilogue_to_complete_in_the_caller() {
     scenario.shutdown().await;
 }
 
+/// Stepping over a function's last line returns to its caller and stops
+/// there, even when the caller's line calls the function again at the same
+/// stack depth before it reaches a statement: the second call is a new
+/// frame, not the one the step began in. The simulator found such steps
+/// stopping inside the second call.
+#[tokio::test]
+async fn stepping_over_a_return_stops_in_the_caller_before_a_second_call() {
+    let source = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/c/repeated-calls.c"
+    );
+    let text = fs::read_to_string(source).expect("read the fixture");
+    let line_of = |marker: &str| {
+        text.lines()
+            .position(|line| line.contains(marker))
+            .map(|index| u64::try_from(index + 1).expect("line fits u64"))
+            .expect("the fixture marks its lines")
+    };
+    for fixture in ["repeated-calls-gcc-o0", "repeated-calls-clang-o0"] {
+        let mut scenario = Scenario::new(
+            format!("step over a return {fixture}"),
+            Scenario::fixture(fixture),
+        );
+        scenario
+            .add_source_breakpoint("repeated-calls.c", line_of("LOAD_RETURN"))
+            .await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        scenario
+            .operation(
+                "remove the breakpoint",
+                scenario.handle().remove_all_breakpoints(),
+            )
+            .await;
+        // A compiler may give the closing brace a line of its own, which
+        // the first step stops on.
+        let mut location = None;
+        for _ in 0..2 {
+            assert_eq!(
+                scenario.step_to_stop(StepKind::OverSource).await,
+                StopReason::Step {
+                    kind: StepKind::OverSource
+                },
+                "{fixture}"
+            );
+            let here = scenario
+                .operation("location", scenario.handle().current_location())
+                .await;
+            let closing = here.image.source.as_ref().map(|source| source.line.get())
+                == Some(line_of("LOAD_RETURN") + 1);
+            location = Some(here);
+            if !closing {
+                break;
+            }
+        }
+        let location = location.expect("a step was taken");
+        assert_eq!(
+            location
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("main"),
+            "{fixture} stepped over load's return to {location:?}"
+        );
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0)),
+            "{fixture}"
+        );
+        scenario.shutdown().await;
+    }
+}
+
+/// A source step from the last line of a function called by one that
+/// returns right after the call goes back through that caller, which has
+/// no statement left, and on into its caller: it does not run on to the
+/// program's exit. A step over never stops in the caller's next call of
+/// the same function, a new frame where the old one was. The simulator
+/// found steps running past the outer caller's line, and stopping in its
+/// next call.
+#[tokio::test]
+async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
+    let source = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/c/repeated-calls.c"
+    );
+    let text = fs::read_to_string(source).expect("read the fixture");
+    let line_of = |marker: &str| {
+        text.lines()
+            .position(|line| line.contains(marker))
+            .map(|index| u64::try_from(index + 1).expect("line fits u64"))
+            .expect("the fixture marks its lines")
+    };
+    for fixture in ["repeated-calls-gcc-o0", "repeated-calls-clang-o0"] {
+        for kind in [StepKind::IntoSource, StepKind::OverSource] {
+            let mut scenario = Scenario::new(
+                format!("step {kind:?} back through relay {fixture}"),
+                Scenario::fixture(fixture),
+            );
+            scenario
+                .add_source_breakpoint("repeated-calls.c", line_of("RELAY_CALL"))
+                .await;
+            assert!(matches!(
+                scenario.run_to_stop().await,
+                StopReason::Breakpoint { .. }
+            ));
+            // The first call, relay(3), reaches load's last line.
+            scenario
+                .add_source_breakpoint("repeated-calls.c", line_of("LOAD_RETURN"))
+                .await;
+            assert!(matches!(
+                scenario.resume_to_stop().await,
+                StopReason::Breakpoint { .. }
+            ));
+            scenario
+                .operation(
+                    "remove the breakpoints",
+                    scenario.handle().remove_all_breakpoints(),
+                )
+                .await;
+            let mut location = None;
+            for _ in 0..8 {
+                assert_eq!(
+                    scenario.step_to_stop(kind).await,
+                    StopReason::Step { kind },
+                    "{fixture} {kind:?}"
+                );
+                let here = scenario
+                    .operation("location", scenario.handle().current_location())
+                    .await;
+                let function = here
+                    .image
+                    .function
+                    .as_ref()
+                    .map(|function| function.name.to_string());
+                if kind == StepKind::OverSource && function.as_deref() == Some("relay") {
+                    let index = scenario
+                        .operation("relay's index", scenario.handle().variable("index"))
+                        .await;
+                    assert!(
+                        matches!(
+                            &index.state,
+                            uscope::VariableState::Available {
+                                value: uscope::VariableValue::Scalar(ScalarValue::Signed(3)),
+                                ..
+                            }
+                        ),
+                        "{fixture}: stepping over stopped in relay's second call: {index:?}"
+                    );
+                }
+                location = Some(here);
+                if function.as_deref() == Some("main") {
+                    break;
+                }
+            }
+            // Returning into the middle of the call's line, a step may stop
+            // there if the compiler marks it a statement, or at the next.
+            let location = location.expect("a step was taken");
+            let line = location
+                .image
+                .source
+                .as_ref()
+                .map(|source| source.line.get());
+            assert!(
+                [line_of("RELAY_CALL"), line_of("AFTER_RELAY")]
+                    .into_iter()
+                    .any(|expected| line == Some(expected)),
+                "{fixture} {kind:?} returned to {location:?}"
+            );
+            assert_eq!(
+                scenario.resume_to_stop().await,
+                StopReason::Exited(ExitStatus::Code(0)),
+                "{fixture}"
+            );
+            scenario.shutdown().await;
+        }
+    }
+}
+
+/// A step over that returns through the frame it returned to goes on from
+/// that frame's caller. The golden runtime's `rt_start` calls `rt_exit_group`
+/// with what `main` returns, at the depth `main` was, with no statement
+/// between: stepping over `main`'s last call, whose callee returns into
+/// `main`, which returns, must not stop in `rt_exit_group` as though it
+/// were `main`. The simulator found steps stopping there.
+#[tokio::test]
+async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
+    let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/threads/threads-clang-O0");
+    let source = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/threads/threads.c"
+    );
+    let line = fs::read_to_string(source)
+        .expect("read the golden program")
+        .lines()
+        .position(|line| line.contains("return (int)(rt_load(&counter) % 100);"))
+        .map(|index| u64::try_from(index + 1).expect("line fits u64"))
+        .expect("main's last line");
+    let mut scenario = Scenario::new("step over through main's return", program);
+    scenario.add_source_breakpoint("threads.c", line).await;
+    assert!(matches!(
+        scenario
+            .run_with_to_stop(LaunchOptions {
+                arguments: vec!["1".into(), "main".into()],
+                ..LaunchOptions::default()
+            })
+            .await,
+        StopReason::Breakpoint { .. }
+    ));
+    scenario
+        .operation(
+            "remove the breakpoint",
+            scenario.handle().remove_all_breakpoints(),
+        )
+        .await;
+    assert_eq!(
+        scenario.step_to_stop(StepKind::IntoSource).await,
+        StopReason::Step {
+            kind: StepKind::IntoSource
+        }
+    );
+    let location = scenario
+        .operation("location in rt_load", scenario.handle().current_location())
+        .await;
+    assert_eq!(
+        location
+            .image
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some("rt_load"),
+        "the golden binary changed"
+    );
+    // The rest of main and rt_start has no statement before the program
+    // exits its group.
+    let reason = scenario.step_to_stop(StepKind::OverSource).await;
+    if reason != StopReason::Exited(ExitStatus::Code(60)) {
+        let location = scenario
+            .operation("location", scenario.handle().current_location())
+            .await;
+        assert_ne!(
+            location
+                .image
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref()),
+            Some("rt_exit_group"),
+            "stepping over stopped in a new frame: {reason:?} at {location:?}"
+        );
+    }
+    scenario.shutdown().await;
+}
+
+/// Stepping out ends where the frame returns to its caller, at the return
+/// address, even from a line whose epilogue the compiler marked, which a
+/// step over crosses to the caller's next line. The simulator found steps
+/// out that ran past the return address.
+#[tokio::test]
+async fn step_out_across_a_marked_epilogue_stops_at_the_return_address() {
+    let fixture = "stepping-boundaries-clang-o2";
+    let mut scenario = Scenario::new("step out of marked epilogues", Scenario::fixture(fixture));
+    scenario
+        .add_source_breakpoint("stepping-boundaries.c", 11)
+        .await;
+    scenario
+        .add_source_breakpoint("stepping-boundaries.c", 15)
+        .await;
+
+    for return_line in [11, 15] {
+        let reason = if return_line == 11 {
+            scenario.run_to_stop().await
+        } else {
+            scenario.resume_to_stop().await
+        };
+        assert!(
+            matches!(reason, StopReason::Breakpoint { .. }),
+            "did not stop on return line {return_line}: {reason:?}"
+        );
+        let backtrace = scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await;
+        let return_address = backtrace
+            .frames
+            .iter()
+            .filter(|frame| frame.kind != uscope::FrameKind::Inline)
+            .nth(1)
+            .expect("the return line's caller")
+            .instruction;
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Step {
+                kind: StepKind::Out
+            }
+        );
+        let after = scenario
+            .operation("caller after return", scenario.handle().current_location())
+            .await;
+        assert_eq!(
+            after.address, return_address,
+            "stepping out of return line {return_line} ended elsewhere: {after:?}"
+        );
+    }
+
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
 #[tokio::test]
 async fn an_explicit_user_breakpoint_at_an_epilogue_marker_remains_visible() {
     let fixture = "stepping-boundaries-clang-o2";
@@ -1830,7 +2144,19 @@ async fn frames_without_a_trustworthy_caller_step_and_leave_their_program_intact
 /// unharmed.
 #[tokio::test]
 async fn stepping_over_from_undescribed_code_stops_at_the_first_source_statement() {
-    let mut scenario = Scenario::launch("freestanding-entry");
+    step_over_from_the_entry_point("freestanding-entry").await;
+}
+
+/// Stepping over from code without call-frame information, where the
+/// debugger cannot tell which frame it is in, steps as stepping in does.
+/// The simulator found such steps refused.
+#[tokio::test]
+async fn stepping_over_from_code_without_unwind_information_stops_at_the_first_source_statement() {
+    step_over_from_the_entry_point("freestanding-entry-bare").await;
+}
+
+async fn step_over_from_the_entry_point(fixture: &str) {
+    let mut scenario = Scenario::launch(fixture);
     let entry = scenario
         .run_with_to_stop(LaunchOptions {
             stop_at_entry: true,
