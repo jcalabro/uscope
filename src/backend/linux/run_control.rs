@@ -527,6 +527,16 @@ impl<P: LinuxTraceOps> Controller<P> {
                     self.restart_after_internal(pid)
                 }
             }
+            ClassifiedStop::RemovedTrap => {
+                record!("{pid} executed a trap before its site was removed");
+                let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+                inferior.thread_mut(pid)?.reason = None;
+                if inferior.barrier.is_some() {
+                    self.finish_barrier_if_ready()
+                } else {
+                    self.restart_after_internal(pid)
+                }
+            }
             ClassifiedStop::Breakpoint(address) => self.handle_breakpoint_stop(pid, address),
             ClassifiedStop::Watch(owners) => self.handle_watch_stop(pid, owners),
             ClassifiedStop::Trace { watch } => self.handle_trace_stop(pid, watch),
