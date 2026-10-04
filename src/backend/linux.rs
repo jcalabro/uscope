@@ -77,6 +77,8 @@ mod recorded;
 mod registers;
 mod run_control;
 mod signals;
+#[cfg(any(test, feature = "sim"))]
+pub mod sim_edge;
 mod stepping;
 mod thread_db;
 mod watchpoints;
@@ -791,7 +793,7 @@ struct WaiterThread {
 
 impl Waiter {
     /// A waiter whose statuses the controller's driver delivers.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "sim"))]
     const fn external() -> Self {
         Self { thread: None }
     }

@@ -16,6 +16,8 @@ use crate::protocol::{CoreDumpOptions, DebuggerEvent, Request};
 use crate::{Error, ProcessId, Result};
 
 pub use linux::PostMortemSession;
+#[cfg(any(test, feature = "sim"))]
+pub use linux::sim_edge;
 
 /// Identifies a file independently of the path used to open it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
