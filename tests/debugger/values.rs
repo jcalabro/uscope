@@ -2689,3 +2689,51 @@ async fn text_running_into_an_unmapped_page_stops_at_the_page() {
     assert_eq!(address.get() % 4096, 0);
     scenario.shutdown().await;
 }
+
+/// Before a function's prologue its frame base may be meaningless: clang's
+/// unoptimized code bases locations on `rbp`, which still holds the zero
+/// a program's entry point left in it. A location computed from it wraps
+/// the address space, so the variable is unavailable, and the others are
+/// still shown. The simulator found the whole inspection failing there.
+#[tokio::test]
+async fn a_variable_whose_location_wraps_the_address_space_is_unavailable() {
+    let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/golden/straight/straight-clang-O0");
+    let mut scenario = Scenario::new("variables before a prologue", program);
+    let entry = scenario
+        .run_with_to_stop(LaunchOptions {
+            stop_at_entry: true,
+            ..LaunchOptions::default()
+        })
+        .await;
+    assert_eq!(entry, StopReason::Entry);
+    // The entry point clears rbp, aligns the stack, and calls rt_start.
+    for _ in 0..4 {
+        scenario.step_to_stop(StepKind::Instruction).await;
+    }
+    let location = scenario
+        .operation("location", scenario.handle().current_location())
+        .await;
+    assert_eq!(
+        location
+            .image
+            .symbol
+            .as_ref()
+            .map(|symbol| (symbol.name.as_ref(), symbol.offset)),
+        Some(("rt_start", 0)),
+        "the golden binary changed"
+    );
+    let variables = scenario
+        .operation("variables", scenario.handle().variables())
+        .await;
+    let stack = variables
+        .variables
+        .iter()
+        .find(|variable| variable.name.as_ref() == "stack")
+        .expect("rt_start's parameter");
+    assert!(
+        matches!(stack.state, uscope::VariableState::Unavailable(_)),
+        "{stack:?}"
+    );
+    scenario.shutdown().await;
+}

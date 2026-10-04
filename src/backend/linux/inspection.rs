@@ -853,7 +853,17 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         size: usize,
     ) -> std::result::Result<Arc<[u8]>, VariableRuntimeError> {
         let read = read_logical_memory(self.ptrace, self.pid, self.breakpoints, address, size)
-            .map_err(|error| VariableRuntimeError::Fatal(error.to_string().into()))?;
+            .map_err(|error| match error {
+                // A location computed from a meaningless frame base, as
+                // before a prologue, can wrap the address space: that one
+                // value is unavailable.
+                Error::AddressOverflow => {
+                    VariableRuntimeError::Unavailable(VariableUnavailableReason::ValueAccess(
+                        crate::ValueAccessUnavailableReason::AddressOverflow,
+                    ))
+                }
+                error => VariableRuntimeError::Fatal(error.to_string().into()),
+            })?;
         match read.completion {
             MemoryReadCompletion::Complete => Ok(Arc::from(read.bytes)),
             MemoryReadCompletion::Incomplete { next_address, .. } => Err(
