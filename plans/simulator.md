@@ -183,9 +183,9 @@ and each one is enforced rather than hoped for.
 | Hazard | Rule | Enforcement |
 |---|---|---|
 | Random choices | Every choice comes from `Choices`. Nothing else in the run calls a PRNG, `getrandom`, or `RandomState`. | Review; the fingerprint check catches leaks. |
-| Hash iteration order | Never iterate a `HashMap` or `HashSet` where order can affect behavior. Lookups are fine. | `clippy::iter_over_hash_type` denied crate-wide. |
+| Hash iteration order | Never iterate a `HashMap` or `HashSet` where order can affect behavior. Lookups are fine. | `clippy::iter_over_hash_type` denied crate-wide for `for` loops; `clippy.toml` bans the iterator methods (`iter`, `keys`, `values`, `drain`, set operations). An explicit `.into_iter()` still escapes both; the fingerprint check catches what the lints miss. |
 | Time | Simulated code reads no clock. The flight recorder's capture sink omits timestamps. Waiter backoff and client timeouts never run in a session. | The sim's facade constructs no waiter thread and no tokio timer. |
-| Process-wide state | The session lease, `NEXT_STOP_ID`, and the flight recorder's ring are process-global today. Sessions on parallel worker threads must not share them. | P0 moves each behind an injected per-session source (section 16). |
+| Process-wide state | The session lease, `NEXT_STOP_ID`, and the flight recorder's ring are process-global. Sessions on parallel worker threads must not share them. | Simulated controllers take `SessionLease::detached()`; stop IDs come from `LinuxTraceOps::allocate_stop_id`, which `SimTrace` counts per session; each world records under a `flight_recorder::Capture` (section 16). |
 | Threads | A run uses exactly one OS thread. | Nothing in the sim spawns threads. The controller under simulation never calls `spawn_waiter`'s thread path. |
 | Host files and `/proc` | Simulated sessions read no host state except the golden corpus, loaded once and shared read-only. | All controller host access already goes through `LinuxTraceOps` (`5e939d9`). |
 | Pointer identity | Never order or key data by memory address. | Review. |
@@ -602,30 +602,67 @@ trace a person can read in one sitting.
 
 ## 16. Production changes (P0)
 
-These are small, independent commits that make production code simulable
-without behavior change. Each is tested by the existing suite.
+P0 is the changes to the debugger itself that the simulator needs, made
+before any simulator code exists so they can be reviewed apart from it. None
+changes behavior. A change whose only user is simulator code cannot land
+before that code: the crate denies unused items. Such changes are made in
+P1, in the commit that first uses them.
 
-1. **Session lease out of `Controller`.** `spawn_controller` acquires the
-   lease and holds it in the controller thread's closure. The lease guards
-   real ptrace, which a simulated session never touches.
-2. **Stop-ID source.** `Controller` takes its `StopId` allocator as a
-   field. Production passes the process-wide atomic, which keeps IDs unique
-   across sessions. The simulator passes a counter per session.
-3. **Flight-recorder capture scope.** `flight_recorder::capture(|| ...)`
-   sends the current thread's records to a buffer, without timestamps or
-   thread names, for the duration of a closure. Production recording is
-   unchanged.
-4. **`DebugInfo: Clone`.** All its fields are `Arc`s already.
-5. **`DebuggerHandle` from channels.** A crate-private constructor builds a
-   handle on given channels, so the simulator gets the real API without
-   `Debugger::new`'s thread and lease.
-6. **`clippy::iter_over_hash_type`** denied crate-wide, fixing any
-   order-dependent iteration it finds.
-7. **`backend/linux/sim_edge.rs`** (feature `sim`), the facade:
-   - build a `Controller<SimTrace>`;
-   - `handle_message`;
-   - ground-truth queries for oracles: the sites the controller owns, the
-     plan sites, and the public stop.
+Done:
+
+1. **Hash iteration is linted** (section 6). The lints found two loops in
+   DWARF loading whose order cannot change the result: one now uses a
+   `BTreeMap`, the other says why order does not matter. They also found
+   real nondeterminism at the edge: the DAP adapter reported breakpoint
+   changes in hash order. Its groups are now a `BTreeMap`.
+2. **Stop IDs come from the trace edge.** `LinuxTraceOps::allocate_stop_id`
+   draws from the process-wide counter for live sessions and the test
+   fakes. `SimTrace` will count per session. The post-mortem controller,
+   which has no trace edge and is never simulated, calls the counter
+   directly.
+3. **`flight_recorder::Capture`.** While a capture lives, its thread's
+   records go to a buffer of its own, without times or thread names;
+   `take()` returns the lines since the last call. Other threads, and
+   production, record as before. A world holds one for its whole run and
+   takes the lines after each action, for its trace.
+
+Found unnecessary:
+
+- **Moving the session lease out of `Controller`.**
+  `SessionLease::detached()`, which tests and post-mortem sessions already
+  use, holds no global lease. A simulated controller takes one.
+- **`DebugInfo: Clone`.** Its fields are public `Arc`s; the simulator
+  builds each session's `DebugInfo` from the shared parts.
+- **A `DebuggerHandle` constructor.** `DebuggerHandle` is defined in the
+  crate root, so its private fields are visible everywhere in the crate.
+  The simulator builds one around its own channels.
+
+Moved to P1, with their first user:
+
+- **`backend/linux/sim_edge.rs`**, the facade: build a
+  `Controller<SimTrace>`, `handle_message`, and ground-truth queries for
+  oracles (the sites the controller owns, the plan sites, the public stop).
+- **`Waiter::external()`**, test-only today, is compiled for the `sim`
+  feature too: `SimTrace::spawn_waiter` returns it.
+
+Facts P1 must respect, found while preparing P0:
+
+- `LinuxTraceOps` has default methods meant for test fakes:
+  `thread_name` answers `None`, `module_mappings` an empty list, and
+  `queued_trap` `false`. `SimTrace` overrides every one, so no answer is a
+  plausible default.
+- `DebuggerHandle`'s request futures need no runtime. Tokio's channels,
+  `oneshot` replies, `broadcast` events with `Lagged`, backpressure, and
+  `select! { biased; ... }` all work when polled by hand with a no-op
+  waker, which was checked by experiment. `tokio::time` and `tokio::fs` do
+  not: `timeout` panics outside a runtime. The simulated client therefore
+  never calls `Debugger::shutdown` (it sends `Request::Shutdown` itself)
+  or the source-context requests. An unbiased `select!` would draw from
+  tokio's own random generator; every one in the request path is biased.
+- Thread-local-storage lookups (`thread_db`, `glibc_tls`) read `/proc` and
+  module files directly, outside `LinuxTraceOps`. The corpus has no TLS,
+  so the simulator never reaches them. A session that did would read the
+  host, so P1 checks it as a model gap.
 
 ## 17. Phases
 
@@ -634,11 +671,13 @@ Each phase ends with a short demo: a sweep, one failure replayed with
 understandable as it grows, and each phase is reviewed before the next
 begins.
 
-**P0: Seams.** The production changes in section 16. *Exit:* the gate
-passes; there are no behavior changes.
+**P0: Seams.** Done on 2026-10-04; section 16 lists what changed. *Exit:*
+the gate passes; there are no behavior changes.
 
 **P1: One thread, end to end.**
 
+- The `sim` feature, the `sim_edge` facade, and `Waiter::external()` for
+  the feature (section 16).
 - `Choices`, the world loop, and the random-walk scheduler.
 - The kernel for one single-threaded process: launch, traps, single step,
   exit, and SIGKILL.
