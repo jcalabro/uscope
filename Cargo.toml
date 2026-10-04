@@ -25,6 +25,9 @@ all = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
+# Hash iteration order varies between runs, which would make the same input
+# behave differently; clippy.toml bans the iterator methods `for` misses.
+iter_over_hash_type = "deny"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 missing_safety_doc = "deny"

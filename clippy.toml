@@ -1,0 +1,20 @@
+# Iterating a hash collection visits entries in an order that changes from one
+# run to the next, so a simulated session would not replay. Use a BTreeMap or
+# BTreeSet, or `#[expect]` with the reason order cannot matter. The
+# `iter_over_hash_type` lint covers `for` loops.
+disallowed-methods = [
+  { path = "std::collections::HashMap::drain", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashMap::into_keys", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashMap::into_values", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashMap::iter", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashMap::iter_mut", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashMap::keys", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashMap::values", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashMap::values_mut", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashSet::difference", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashSet::drain", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashSet::intersection", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashSet::iter", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashSet::symmetric_difference", reason = "iteration order varies between runs" },
+  { path = "std::collections::HashSet::union", reason = "iteration order varies between runs" },
+]

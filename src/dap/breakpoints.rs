@@ -6,13 +6,13 @@
 //! and the debugger's breakpoints are shared by reference count, since the
 //! debugger merges equal requests into one breakpoint.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use uscope::{BreakpointHit, BreakpointId};
 
 /// A set of breakpoints the client replaces as one.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Group {
     /// The breakpoints of one source file, named by the client's path.
     Source(PathBuf),
@@ -131,7 +131,7 @@ pub enum Change {
 #[derive(Debug)]
 pub struct Breakpoints {
     next_id: i64,
-    groups: HashMap<Group, Vec<Entry>>,
+    groups: BTreeMap<Group, Vec<Entry>>,
     owners: HashMap<BreakpointId, usize>,
 }
 
@@ -139,7 +139,7 @@ impl Default for Breakpoints {
     fn default() -> Self {
         Self {
             next_id: 1,
-            groups: HashMap::new(),
+            groups: BTreeMap::new(),
             owners: HashMap::new(),
         }
     }

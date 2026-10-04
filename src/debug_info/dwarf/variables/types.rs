@@ -1,6 +1,6 @@
 //! Normalizing DWARF type DIEs into the platform-neutral type graph.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1009,7 +1009,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         reason = "Go constant reconstruction keeps producer filtering, validation, budgets, and promotion together"
     )]
     pub(super) fn populate_go_named_constants(&mut self) {
-        let mut constants = HashMap::<TypeId, NamedConstantCollection>::new();
+        let mut constants = BTreeMap::<TypeId, NamedConstantCollection>::new();
         for (unit_index, unit) in self.units.iter().enumerate() {
             let mut entries = unit.entries();
             let Ok(Some(root)) = entries.next_dfs() else {
