@@ -2,7 +2,8 @@
 //!
 //! Each program in `tests/golden` has a manifest, written by
 //! `scripts/golden.sh`, naming its compiled variants and what each run of
-//! it prints and returns.
+//! it prints and returns; facts about each variant from GNU binutils; and
+//! markers in its source, conditions its variables satisfy at their lines.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,7 +11,9 @@ use std::sync::Arc;
 use object::{Object as _, ObjectSymbol as _};
 use serde::Deserialize;
 
+use super::facts::{Facts, ProgramFacts};
 use super::loader::Image;
+use super::markers::{self, Marker};
 use crate::debug_info::{self, DebugInfo};
 
 /// Where the golden programs live, in the source tree this build came from.
@@ -37,6 +40,15 @@ pub enum CorpusError {
     },
     #[error("{path}: {error}")]
     Load { path: PathBuf, error: String },
+}
+
+impl CorpusError {
+    fn load(path: &Path, error: impl Into<String>) -> Self {
+        Self::Load {
+            path: path.to_owned(),
+            error: error.into(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -73,6 +85,8 @@ pub struct Variant {
     pub image: Arc<Image>,
     /// The functions the binary defines, by name.
     pub functions: Vec<String>,
+    /// What binutils say about the binary.
+    pub facts: Facts,
     debug_info: DebugInfo,
 }
 
@@ -100,6 +114,8 @@ pub struct Program {
     pub source: PathBuf,
     /// How many lines the source file has.
     pub source_lines: u64,
+    /// The conditions the source states at its lines.
+    pub markers: Vec<Marker>,
 }
 
 pub struct Corpus {
@@ -130,6 +146,14 @@ impl Corpus {
                     path: path.clone(),
                     error,
                 })?;
+            let facts_path = path.with_file_name("facts.json");
+            let facts_text = std::fs::read_to_string(&facts_path).map_err(io(&facts_path))?;
+            let facts: ProgramFacts =
+                serde_json::from_str(&facts_text).map_err(|error| CorpusError::Manifest {
+                    path: facts_path.clone(),
+                    error,
+                })?;
+            let mut facts = facts.variants.into_iter();
             let mut variants = Vec::new();
             for entry in &manifest.variants {
                 let name = format!("{}-{}", manifest.program, entry.name);
@@ -145,6 +169,14 @@ impl Corpus {
                 let debug_info = debug_info::load_bytes(Path::new(&simulated), &data)
                     .map_err(|error| load(error.to_string()))?;
                 let functions = defined_functions(&data).map_err(load)?;
+                let variant_facts = facts
+                    .next()
+                    .filter(|facts| facts.name == entry.name)
+                    .ok_or_else(|| {
+                        CorpusError::load(&facts_path, format!("no facts for {name}"))
+                    })?;
+                let variant_facts = Facts::new(variant_facts)
+                    .map_err(|error| CorpusError::load(&facts_path, error))?;
                 variants.push(Variant {
                     name,
                     file,
@@ -153,6 +185,7 @@ impl Corpus {
                     data,
                     image: Arc::new(image),
                     functions,
+                    facts: variant_facts,
                     debug_info,
                 });
                 next_inode += 1;
@@ -164,13 +197,14 @@ impl Corpus {
             let source_file = root
                 .join(&manifest.program)
                 .join(format!("{}.c", manifest.program));
-            let source_lines = std::fs::read_to_string(&source_file)
-                .map_err(io(&source_file))?
-                .lines()
-                .count() as u64;
+            let source = std::fs::read_to_string(&source_file).map_err(io(&source_file))?;
+            let source_lines = source.lines().count() as u64;
+            let markers =
+                markers::parse(&source).map_err(|error| CorpusError::load(&source_file, error))?;
             programs.push(Program {
                 source: PathBuf::from(format!("{SIMULATED_ROOT}/{0}/{0}.c", manifest.program)),
                 source_lines,
+                markers,
                 functions: functions.into_iter().collect(),
                 name: manifest.program,
                 variants,

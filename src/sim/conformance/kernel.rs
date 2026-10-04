@@ -22,6 +22,28 @@ fn k_exec_1_a_launched_program_stops_at_its_entry() {
     });
 }
 
+/// K-EXEC-2: a program loads where its image says, or, position-independent
+/// and without an interpreter, as the first mapping below the mmap base,
+/// with randomization off. Its maps name its file at each segment.
+#[test]
+fn k_exec_2_a_program_loads_where_linux_puts_it() {
+    dual_run("frames", &[], |record| {
+        let leader = record.leader();
+        let (registers, _) = record
+            .tracee
+            .registers(leader)
+            .expect("registers at the first stop");
+        record.note(format!("rip: {:#x}", registers.rip));
+        let maps = record.tracee.maps(leader).unwrap_or_default();
+        for line in maps.lines() {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.last().is_some_and(|path| path.contains("/frames-")) {
+                record.note(format!("mapped: {}", fields[..3].join(" ")));
+            }
+        }
+    });
+}
+
 /// K-TRAP-1: `int3` reports SIGTRAP with `SI_KERNEL` and `rip` past the
 /// trap, outside any system call; a single step reports `TRAP_TRACE` at
 /// the next instruction; a single step across `syscall` reports

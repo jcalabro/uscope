@@ -32,15 +32,17 @@ use nix::libc;
 
 use super::audit::Auditor;
 use super::choices::{Choices, Stream};
-use super::client::{Client, Script, Shared};
-use super::corpus::{Corpus, Run, Variant};
+use super::client::{Client, Observation, Script, Shared};
+use super::corpus::{Corpus, Program, Run, Variant};
 use super::faults::{Faults, Plan};
+use super::kernel::shadow::Tracking;
 use super::kernel::{Kernel, State, StopKind, Tid};
 use super::machine::Machine;
 use super::marks::{Mark, Marks};
 use super::oracles;
 use super::report::{Failure, Trace};
 use super::schedule::{Action, Scheduler};
+use super::semantics::{self, Begun, Inspected, Judged, Unwound};
 use super::swarm::Swarm;
 use crate::DebuggerHandle;
 use crate::backend::sim_edge::{
@@ -78,6 +80,16 @@ pub enum Sabotage {
     /// The CPU executes the program's own instruction under a trap the
     /// debugger planted for the user.
     SkipTraps,
+    /// Ptrace reads of a return address where a call pushed it report the
+    /// next address.
+    SkewReturnAddresses,
+    /// A single step of the thread the client steps executes two
+    /// instructions.
+    LateSingleSteps,
+    /// Ptrace reads of small numbers other than zero on the main thread's
+    /// stack report them one greater. Zeros, which end chains of frames,
+    /// and slots where calls pushed return addresses stay as they are.
+    SkewSmallStackWords,
 }
 
 impl Default for Settings {
@@ -195,6 +207,7 @@ type ClientTask = Pin<Box<dyn Future<Output = Result<(), Failure>>>>;
 
 struct World<'a> {
     swarm: Swarm,
+    program: &'a Program,
     variant: &'a Variant,
     run: &'a Run,
     machine: Rc<Machine>,
@@ -208,6 +221,8 @@ struct World<'a> {
     auditor: Auditor,
     /// The traps whose stops the controller heard of, by thread and count.
     counted: BTreeSet<(Tid, u64)>,
+    /// The step the client requested, until it ends.
+    stepping: Option<Begun>,
     trace: Trace,
     #[cfg(debug_assertions)]
     capture: crate::flight_recorder::Capture,
@@ -217,7 +232,7 @@ impl<'a> World<'a> {
     fn new(
         mut choices: Choices,
         swarm: Swarm,
-        program: &'a super::corpus::Program,
+        program: &'a Program,
         variant: &'a Variant,
         run: &'a Run,
         settings: &Settings,
@@ -232,8 +247,7 @@ impl<'a> World<'a> {
         #[cfg(test)]
         {
             let mut kernel = kernel.borrow_mut();
-            kernel.lose_pokes = settings.sabotage == Some(Sabotage::LosePokes);
-            kernel.skip_traps = settings.sabotage == Some(Sabotage::SkipTraps);
+            kernel.sabotage = settings.sabotage;
         }
         let marks = Rc::new(RefCell::new(Marks::default()));
         let shared = Shared::default();
@@ -284,18 +298,7 @@ impl<'a> World<'a> {
             choices,
             marks,
             shared: shared.clone(),
-            script: Script {
-                arguments: run.arguments.clone(),
-                stop_at_entry: swarm.stop_at_entry,
-                requests: swarm.requests,
-                launches: swarm.launches,
-                early_breakpoints: swarm.early_breakpoints,
-                functions: program.functions.clone(),
-                defined: variant.functions.clone(),
-                source: program.source.clone(),
-                source_lines: program.source_lines,
-                image: Arc::clone(&variant.image),
-            },
+            script: script(&swarm, program, variant, run),
             alone: Cell::new(None),
         };
         let woken = Arc::new(Woken(AtomicBool::new(true)));
@@ -307,6 +310,7 @@ impl<'a> World<'a> {
         ));
         Self {
             swarm,
+            program,
             variant,
             run,
             machine,
@@ -317,6 +321,7 @@ impl<'a> World<'a> {
             waker,
             auditor,
             counted: BTreeSet::new(),
+            stepping: None,
             trace,
             #[cfg(debug_assertions)]
             capture,
@@ -382,7 +387,9 @@ impl<'a> World<'a> {
         if action == Action::Poll {
             // The user's breakpoints, as the client now knows them, are what
             // the kernel watches for unseen hits.
-            self.machine.kernel.borrow_mut().user_breakpoints = self.shared.addresses();
+            self.machine.kernel.borrow_mut().user_breakpoints =
+                self.shared.addresses(self.variant.image.bias());
+            self.judge()?;
         }
         #[cfg(test)]
         self.sabotage();
@@ -484,6 +491,130 @@ impl<'a> World<'a> {
         Ok(format!("deliver {description}"))
     }
 
+    /// Judges what the client saw since the last poll by the semantic
+    /// oracles. Nothing the client saw at a stop is judged once the stop is
+    /// over, or while its process is ending, which moves its threads.
+    fn judge(&mut self) -> Result<(), Failure> {
+        let observations = std::mem::take(&mut *self.shared.observations.borrow_mut());
+        for observation in observations {
+            match observation {
+                Observation::Backtrace { stop, backtrace } if self.still_at(stop) => {
+                    let unwound = semantics::backtrace(&self.machine.kernel.borrow(), &backtrace)
+                        .map_err(|message| Failure::debugger("backtrace", message))?;
+                    let mark = match unwound {
+                        Some(Unwound::Whole) => Mark::WholeBacktrace,
+                        Some(Unwound::Truncated) => Mark::TruncatedBacktrace,
+                        Some(Unwound::Corrupt) => Mark::CorruptCaller,
+                        None => continue,
+                    };
+                    self.machine.marks.borrow_mut().hit(mark);
+                }
+                Observation::StepBegins {
+                    thread,
+                    kind,
+                    presentation,
+                } => self.begin_step(thread, kind, presentation.as_ref()),
+                Observation::StepEnded(reason) => self.judge_step(reason.as_ref())?,
+                Observation::Variables {
+                    stop,
+                    variables,
+                    backtrace,
+                } if self.still_at(stop) => {
+                    let source = self
+                        .program
+                        .source
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default();
+                    let inspected = semantics::variables(
+                        &self.machine.kernel.borrow(),
+                        &variables,
+                        &backtrace,
+                        self.variant,
+                        source,
+                        &self.program.markers,
+                    )
+                    .map_err(|message| Failure::debugger("variables", message))?;
+                    if inspected == Some(Inspected::Held) {
+                        self.machine.marks.borrow_mut().hit(Mark::MarkerHeld);
+                    }
+                }
+                Observation::Backtrace { .. } | Observation::Variables { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `stop` is still published, and its process is not ending.
+    fn still_at(&self, stop: crate::StopId) -> bool {
+        let Some(truth) = self.controller.as_ref().map(SimController::truth) else {
+            return false;
+        };
+        truth.public_stop == Some(stop.get())
+            && truth.inferior.is_some_and(|tgid| {
+                self.machine
+                    .kernel
+                    .borrow()
+                    .processes
+                    .get(&tgid)
+                    .is_some_and(|process| process.group_exit.is_none())
+            })
+    }
+
+    /// Notes where a step the client is about to request begins, and starts
+    /// recording where its thread goes.
+    fn begin_step(
+        &mut self,
+        thread: crate::ThreadId,
+        kind: crate::StepKind,
+        presentation: Option<&crate::FramePresentation>,
+    ) {
+        let mut kernel = self.machine.kernel.borrow_mut();
+        let tid = Tid::try_from(thread.get()).expect("a simulated tid fits");
+        let Some(stepped) = kernel.threads.get(&tid) else {
+            return;
+        };
+        let begun = Begun::new(stepped, kind, presentation);
+        kernel.tracking = Some(Tracking {
+            tid,
+            depth: begun.shadow.depth(),
+            positions: Vec::new(),
+        });
+        self.stepping = Some(begun);
+    }
+
+    /// Judges where a step ended, if it ended as the step it was.
+    fn judge_step(&mut self, reason: Option<&crate::StopReason>) -> Result<(), Failure> {
+        let tracking = self.machine.kernel.borrow_mut().tracking.take();
+        let begun = self.stepping.take();
+        let (Some(begun), Some(tracking)) = (begun, tracking) else {
+            return Ok(());
+        };
+        let stop = self
+            .controller
+            .as_ref()
+            .and_then(|controller| controller.truth().public_stop);
+        let ended = matches!(reason, Some(crate::StopReason::Step { kind }) if *kind == begun.kind);
+        if !ended || !stop.is_some_and(|stop| self.still_at(crate::StopId::new(stop))) {
+            return Ok(());
+        }
+        let judged = semantics::step(
+            &self.machine.kernel.borrow(),
+            &begun,
+            &tracking.positions,
+            self.variant,
+        )
+        .map_err(|message| Failure::debugger("stepping", message))?;
+        let mut marks = self.machine.marks.borrow_mut();
+        if judged.is_some() {
+            marks.hit(Mark::StepJudged);
+        }
+        if judged == Some(Judged::Exactly) {
+            marks.hit(Mark::SourceStepExact);
+        }
+        Ok(())
+    }
+
     /// Moves what the controller recorded and what the client did into the
     /// trace.
     fn flush(&mut self) {
@@ -516,8 +647,12 @@ impl<'a> World<'a> {
                 .map_err(|message| Failure::debugger("site ownership", message))?;
             oracles::all_stop(&kernel, &truth)
                 .map_err(|message| Failure::debugger("all-stop", message))?;
-            oracles::user_breakpoints(&kernel, &truth, &self.shared.breakpoints.borrow())
-                .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
+            oracles::user_breakpoints(
+                &kernel,
+                &truth,
+                &self.shared.intent(self.variant.image.bias()),
+            )
+            .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
         }
         oracles::output_so_far(&kernel, self.run)
             .map_err(|message| Failure::debugger("transparency", message))?;
@@ -583,6 +718,23 @@ impl<'a> World<'a> {
             },
         );
         text
+    }
+}
+
+/// What the client knows of the program it debugs.
+fn script(swarm: &Swarm, program: &Program, variant: &Variant, run: &Run) -> Script {
+    Script {
+        arguments: run.arguments.clone(),
+        stop_at_entry: swarm.stop_at_entry,
+        requests: swarm.requests,
+        launches: swarm.launches,
+        early_breakpoints: swarm.early_breakpoints,
+        functions: program.functions.clone(),
+        defined: variant.functions.clone(),
+        source: program.source.clone(),
+        source_lines: program.source_lines,
+        marker_lines: program.markers.iter().map(|marker| marker.line).collect(),
+        image: Arc::clone(&variant.image),
     }
 }
 

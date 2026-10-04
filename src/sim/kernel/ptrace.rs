@@ -53,17 +53,20 @@ impl Kernel {
     /// where nothing is mapped (K-MEM-1).
     pub fn peek(&self, tid: Tid, address: u64) -> Result<u64, Errno> {
         let thread = self.stopped(tid)?;
-        self.processes[&thread.tgid]
+        let word = self.processes[&thread.tgid]
             .space
             .peek(address)
-            .ok_or(Errno::EIO)
+            .ok_or(Errno::EIO)?;
+        #[cfg(test)]
+        let word = self.sabotage_read(thread.tgid, address, word);
+        Ok(word)
     }
 
     /// `PTRACE_POKEDATA` (K-MEM-1).
     pub fn poke(&mut self, tid: Tid, address: u64, value: u64) -> Result<(), Errno> {
         let group = self.stopped(tid)?.tgid;
         #[cfg(test)]
-        if self.lose_pokes {
+        if self.sabotage == Some(super::super::world::Sabotage::LosePokes) {
             return Ok(());
         }
         let space = &mut self

@@ -57,10 +57,24 @@ pub enum Mark {
     KilledNearClone,
     /// A planned SIGKILL from outside landed between two ptrace requests.
     KilledInsideCall,
+    /// A backtrace showed every call its thread made.
+    WholeBacktrace,
+    /// A backtrace stopped, saying why, at a frame without call-frame
+    /// information.
+    TruncatedBacktrace,
+    /// A backtrace ended at a caller read from a return address the program
+    /// overwrote.
+    CorruptCaller,
+    /// The stepping oracle judged where a step ended.
+    StepJudged,
+    /// A source step in unoptimized code passed the exact rules.
+    SourceStepExact,
+    /// A marker's condition held with the values the debugger read.
+    MarkerHeld,
 }
 
 impl Mark {
-    pub const ALL: [Self; 26] = [
+    pub const ALL: [Self; 32] = [
         Self::EntryStop,
         Self::BreakpointStop,
         Self::StepStop,
@@ -87,12 +101,24 @@ impl Mark {
         Self::KilledAtStep,
         Self::KilledNearClone,
         Self::KilledInsideCall,
+        Self::WholeBacktrace,
+        Self::TruncatedBacktrace,
+        Self::CorruptCaller,
+        Self::StepJudged,
+        Self::SourceStepExact,
+        Self::MarkerHeld,
     ];
 }
 
 /// How many times a run reached each mark.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marks([u64; Mark::ALL.len()]);
+
+impl Default for Marks {
+    fn default() -> Self {
+        Self([0; Mark::ALL.len()])
+    }
+}
 
 impl Marks {
     pub const fn hit(&mut self, mark: Mark) {

@@ -134,6 +134,7 @@ fn clone(kernel: &mut Kernel, parent: Tid, flags: u64, stack: u64) {
         return;
     }
     let child = kernel.allocate_tid();
+    let shadow = kernel.new_shadow();
     let creator = &kernel.threads[&parent];
     let mut registers = creator.registers;
     registers.general[RAX] = 0;
@@ -161,6 +162,10 @@ fn clone(kernel: &mut Kernel, parent: Tid, flags: u64, stack: u64) {
         report: None,
         trapped_at: None,
         traps: 0,
+        retired: 0,
+        // The thread begins where its creator returns from the call, but
+        // none of its creator's calls is on its stack.
+        shadow,
     };
     kernel.threads.insert(child, thread);
     kernel.happenings.push(Happening::Cloned { parent, child });
