@@ -1511,6 +1511,9 @@ impl LinuxTraceOps for DebugRegisterTrace {
     }
     fn set_options(&self, pid: Pid, _exit_kill: bool) -> Result<()> {
         self.record(format!("set_options {pid}"));
+        if self.vanished.borrow().contains(&pid) {
+            return Err(backend_error(LinuxError::System(Errno::ESRCH)));
+        }
         Ok(())
     }
     fn event_message(&self, _pid: Pid) -> Result<libc::c_long> {
@@ -2797,6 +2800,106 @@ fn a_seized_thread_whose_start_precedes_its_clone_event_is_armed_before_running(
         .expect("the child was resumed");
     assert!(armed < resumed, "{actions:?}");
     assert_eq!(harness.public_reason(), None, "no unclassifiable stop");
+}
+
+#[test]
+fn a_new_thread_killed_out_of_its_first_stop_is_retired_by_its_exit() {
+    let mut harness = watch_harness(1);
+    let parent = harness.threads[0];
+    harness.start_continue();
+    let child = Pid::from_raw(6100);
+    *harness.trace().clone.borrow_mut() = Some((child, parent));
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            parent,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_CLONE,
+        ))
+        .expect("clone event");
+
+    // The parent resumed and called exit_group before the child's first
+    // stop was handled, killing the child out of that stop.
+    harness.trace().vanished.borrow_mut().insert(child);
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            child,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_STOP,
+        ))
+        .expect("the killed child's start is no failure");
+    assert_eq!(harness.thread(child).state, NativeThreadState::Exiting);
+
+    for pid in [child, parent] {
+        harness
+            .controller
+            .process_wait(WaitEvent::Exited(pid, 0))
+            .expect("exit");
+    }
+    assert!(harness.controller.inferior.is_none());
+}
+
+#[test]
+fn a_requested_stop_that_sigkill_ended_since_is_superseded() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    harness
+        .controller
+        .inferior
+        .as_mut()
+        .expect("inferior")
+        .origin = InferiorOrigin::Attached;
+    harness.start_continue();
+    harness
+        .controller
+        .begin_pause(process_id(first))
+        .expect("pause");
+
+    // A sibling's exit_group killed the second thread out of the stop it
+    // reported, and it now waits at its exit event.
+    harness.trace().siginfo.borrow_mut().insert(
+        second,
+        SignalMetadata {
+            code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
+            sender: None,
+            fault_address: None,
+        },
+    );
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            second,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_STOP,
+        ))
+        .expect("a superseded stop is no failure");
+    assert_eq!(harness.thread(second).state, NativeThreadState::Running);
+
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            first,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_STOP,
+        ))
+        .expect("first stop");
+    assert_eq!(harness.public_reason(), None, "the second thread runs");
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            second,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_EXIT,
+        ))
+        .expect("exit event");
+    harness
+        .controller
+        .process_wait(WaitEvent::Exited(second, 0))
+        .expect("exit");
+    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
 }
 
 /// The trap site of the hit-count harness's one user breakpoint.

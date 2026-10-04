@@ -256,7 +256,7 @@ pub(super) fn classify_stop_evidence(
 /// Nothing else ends a ptrace-stop the tracer did not resume, so its
 /// siginfo is gone while it exits, or describes its exit event once it
 /// stops there.
-fn is_superseded(siginfo: &std::result::Result<SignalMetadata, Errno>) -> bool {
+pub(super) fn is_superseded(siginfo: &std::result::Result<SignalMetadata, Errno>) -> bool {
     const EXIT_EVENT: i32 = libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8);
     match siginfo {
         Ok(metadata) => metadata.code == EXIT_EVENT,
