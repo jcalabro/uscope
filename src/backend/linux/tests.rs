@@ -5385,3 +5385,30 @@ fn an_interrupt_refused_with_eio_means_gone_only_for_a_thread_that_exited() {
     // A live thread's EIO is a failure the debugger must not hide.
     assert!(interrupt_outcome(nix::unistd::gettid(), Err(Errno::EIO)).is_err());
 }
+
+/// A pause that arrives once every thread is past its exit event has no
+/// thread left to stop. It is accepted, and the exit ends the execution it
+/// would have interrupted, as an exit ends a continue.
+#[test]
+fn a_pause_after_every_thread_began_exiting_ends_with_the_exit() {
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    harness.start_continue();
+    harness.thread(pid).state = NativeThreadState::Exiting;
+
+    let execution = harness
+        .controller
+        .begin_pause(process_id(pid))
+        .expect("the pause is accepted");
+    assert_eq!(execution, ExecutionId::new(2));
+    harness
+        .controller
+        .process_wait(WaitEvent::Exited(pid, 0))
+        .expect("exit");
+    let ended =
+        std::iter::from_fn(|| harness.events.try_recv().ok()).find_map(|event| match event {
+            DebuggerEvent::InferiorExited { execution_id, .. } => Some(execution_id),
+            _ => None,
+        });
+    assert_eq!(ended, Some(Some(execution)));
+}
