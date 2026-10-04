@@ -264,6 +264,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(execution_id);
         }
 
+        // Every thread is past its exit event, so none is left to stop: the
+        // exit ends the execution, and with it the pause.
+        if inferior
+            .threads
+            .values()
+            .all(|thread| matches!(thread.state, NativeThreadState::Exiting))
+        {
+            return Ok(execution_id);
+        }
+
         // A launching thread has no stop to request: its initial exec stop
         // completes the barrier.
         let triggering_thread = inferior
