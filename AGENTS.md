@@ -62,6 +62,14 @@ just test                          # run the tests
 just stress                        # run the tests ten times under CPU load
 cargo nextest run --test debugger  # run real debugger scenarios
 just run build/test-programs/basic
+just sim 60                        # simulate random sessions for 60 seconds
+just sim-seed SEED                 # replay one simulated session
+just golden-build NAME             # rebuild a simulator golden program
 ```
+
+The deterministic simulator (`src/sim`, `plans/simulator.md`) runs the
+real controller against a simulated kernel and CPU. Its golden programs in
+`tests/golden` are checked in as source and binaries; rebuild them only on
+purpose, in a commit of their own.
 
 Before committing, run formatting, aggressive Clippy, nextest, and doc tests via `just`. Keep comments concise and useful, document public APIs, group related Rust code with sensible whitespace, and avoid unrelated refactors.

@@ -1,6 +1,6 @@
 # Deterministic Simulation
 
-Status: design, 2026-10-04. Nothing here is implemented yet.
+Status: P0 and P1 done, 2026-10-04 (section 17). P2 onward is design.
 
 uscope's hardest bugs come from orderings: a thread leaves its stop between
 two ptrace requests, a fork event races a pause, SIGKILL lands while a step
@@ -142,35 +142,44 @@ in a real session.
 
 ## 5. Module layout
 
-The simulator lives in the uscope crate, under `src/sim/`, compiled only
-with the `sim` cargo feature. Release builds never contain it. Being in the
-crate lets it use the controller's private types through one narrow facade
-without widening the public API. The cost is that `just` builds the crate
-with `--features sim`, adding the simulator to every test build; P1 measures
-that cost against the fast-iteration budget.
+The simulator lives in the uscope crate, under `src/sim/`, compiled for the
+crate's own tests and with the `sim` cargo feature: `#[cfg(any(test,
+feature = "sim"))]`. The gate's simulator tests therefore need no feature
+flag, and release builds of `uscope` never contain the simulator. The
+feature builds the `uscope-sim` binary. Being in the crate lets the
+simulator reach the controller through one narrow facade without widening
+the public API. Compiling it adds about 0.1 s to the gate.
 
-| Module | Responsibility | Size goal |
+As built in P1, with sizes in lines:
+
+| Module | Responsibility | Lines |
 |---|---|---|
-| `sim/choices.rs` | Seed expansion, PRNG, streams, swarm configuration | 300 |
-| `sim/world.rs` | The step loop, action selection, the controller queue, the waiter actor | 500 |
-| `sim/schedule.rs` | Random-walk and PCT scheduling policies | 200 |
-| `sim/kernel/mod.rs` | Process and thread tables, wait queue, reaping | 500 |
-| `sim/kernel/ptrace.rs` | Per-thread ptrace state machine and request semantics | 600 |
-| `sim/kernel/signals.rs` | Signal generation, delivery stops, SIGKILL and exit zapping | 400 |
-| `sim/kernel/syscalls.rs` | The syscalls the corpus runtime makes | 300 |
-| `sim/kernel/debug_regs.rs` | DR0–DR7 per thread, hit detection, DR6 | 300 |
-| `sim/cpu/mod.rs` | Instruction dispatch and outcomes | 400 |
-| `sim/cpu/ops/*.rs` | Instruction semantics grouped by family | 1,500 total |
-| `sim/memory.rs` | Copy-on-write address spaces and page protections | 250 |
-| `sim/loader.rs` | Loads golden ELF images into an address space | 200 |
-| `sim/trace.rs` | `SimTrace`, the `LinuxTraceOps` implementation | 400 |
-| `sim/client.rs` | Client tasks that drive `DebuggerHandle` | 600 |
-| `sim/oracles/*.rs` | One file per oracle family (section 12) | 1,000 total |
-| `sim/faults.rs` | The fault catalog and fault plans | 250 |
-| `sim/report.rs` | Trace lines, fingerprints, failure reports | 300 |
-| `sim/marks.rs` | Coverage marks and their counts | 100 |
-| `src/bin/uscope-sim.rs` | Sweep, replay, and state-dump commands | 300 |
-| `backend/linux/sim_edge.rs` | The facade: build a controller, deliver a message, read ground truth for oracles | 150 |
+| `sim/choices.rs` | Seed expansion, the PRNG, streams | 233 |
+| `sim/swarm.rs` | The run's shape, chosen before it starts | 98 |
+| `sim/world.rs` | The step loop, action selection, the waiter actor, the event auditor | 675 |
+| `sim/kernel/mod.rs` | Process and thread tables, run states, reaping, traps | 448 |
+| `sim/kernel/ptrace.rs` | Ptrace requests and their errnos | 137 |
+| `sim/kernel/signals.rs` | Signal delivery, SIGKILL, and the exit paths | 236 |
+| `sim/kernel/syscalls.rs` | `write` and `exit_group` | 59 |
+| `sim/cpu/mod.rs` | Registers, decoding, outcomes | 274 |
+| `sim/cpu/ops.rs` | Instruction semantics | 444 |
+| `sim/cpu/flags.rs` | Status flags and conditions | 179 |
+| `sim/memory.rs` | Copy-on-write address spaces and protections | 428 |
+| `sim/loader.rs` | Golden ELF images and the initial stack | 266 |
+| `sim/corpus.rs` | Loads the golden programs and their manifests | 198 |
+| `sim/client.rs` | The client that drives `DebuggerHandle` | 630 |
+| `sim/oracles.rs` | Ground-truth checks | 287 |
+| `sim/marks.rs` | Coverage marks | 77 |
+| `sim/report.rs` | Traces, fingerprints, failures | 128 |
+| `sim/conformance/{cpu,kernel}.rs` | Lockstep and dual-run tests (section 9) | 750 |
+| `sim/tests.rs` | The gate's seeds, determinism, and sabotage tests | 90 |
+| `src/bin/uscope-sim.rs` | Sweep and replay commands | 227 |
+| `backend/linux/sim_edge.rs` | `SimTrace`, the controller facade, ground truth, and the native tracer conformance tests use | 818 |
+
+`SimTrace` lives in the facade rather than in `sim/`: `LinuxTraceOps` is
+private to the Linux backend, so its implementation must be too. It only
+translates; the kernel's semantics live in `sim/kernel`. Later phases add
+`sim/schedule.rs` (PCT), `sim/faults.rs`, and `sim/kernel/debug_regs.rs`.
 
 Size goals are reading budgets, not hard limits. A module that grows well
 past its goal is split along a seam a reader would recognize.
@@ -190,12 +199,14 @@ and each one is enforced rather than hoped for.
 | Host files and `/proc` | Simulated sessions read no host state except the golden corpus, loaded once and shared read-only. | All controller host access already goes through `LinuxTraceOps` (`5e939d9`). |
 | Pointer identity | Never order or key data by memory address. | Review. |
 
-**Fingerprint.** Every action appends a line to the run's trace. That
-includes each `SimTrace` call with its result, through the existing
-`Recorded` wrapper. The fingerprint is a 64-bit FNV-1a hash of the trace.
-The gate replays a sample of seeds twice and compares fingerprints, so a
-determinism leak fails `just` rather than surfacing as an unreproducible
-sweep failure.
+**Fingerprint.** Every action appends a line to the run's trace. In
+development builds that includes each `SimTrace` call with its result,
+through the existing `Recorded` wrapper, and everything else the
+controller records, captured by `flight_recorder::Capture`. The
+fingerprint is a 64-bit FNV-1a hash of the trace. The gate runs the first
+32 seeds, then runs them again in reverse order and compares fingerprints,
+so a determinism leak fails `just` rather than surfacing as an
+unreproducible sweep failure.
 
 ## 7. Choices: the only source of randomness
 
@@ -249,6 +260,7 @@ guesses. The initial rules come from the verified facts:
 
 | ID | Rule |
 |---|---|
+| K-EXEC-1 | A launched program first reports a stop for SIGTRAP with `si_code` `SI_USER` from itself, at its entry point. Its `comm` is its file name cut to 15 bytes. |
 | K-WAIT-1 | A thread has at most one reportable status. A thread woken out of a stop loses an unreported one. Ptrace requests on a thread not in a ptrace-stop fail with ESRCH. |
 | K-WAIT-2 | Which ready status a wait returns is unspecified, so the scheduler chooses. One exception: a group leader's exit is reported after every other thread's. |
 | K-TRAP-1 | `int3` raises SIGTRAP with `si_code` `SI_KERNEL` and `rip` after the trap byte. A single step reports `TRAP_TRACE`. A step across `syscall` reports `TRAP_BRKPT`. |
@@ -268,6 +280,12 @@ guesses. The initial rules come from the verified facts:
 | K-DR-4 | Writing a debug-register address reserves a slot even while disabled, and can fail with ENOSPC. DR7 writes are transactional. |
 | K-DR-5 | `rep stos` and `rep movs` trap once per iteration that touches the watched range, with `rip` still at the instruction. Stores of the same value trap. `POKEDATA` never traps. |
 | K-MEM-1 | `PEEKDATA` and `POKEDATA` ignore page protections and fail only where nothing is mapped. CPU accesses obey protections and fault with `SEGV_MAPERR` or `SEGV_ACCERR`. |
+
+**Probed so far** (`sim/conformance/kernel.rs`, P1): K-EXEC-1, K-TRAP-1,
+K-SIG-1 (for a stop requested while the thread is stopped), K-EXIT-1,
+K-EXIT-3, and K-EXIT-4 (single-threaded forms), K-WAIT-1 (a reaped
+thread), and K-MEM-1. P2 probes the multi-threaded forms before it models
+them.
 
 **Request semantics.** `sim/kernel/ptrace.rs` has one function per
 `LinuxTraceOps` method. Each documents its errno outcomes in terms of the
@@ -426,6 +444,12 @@ manifest records:
 - variable expectations at markers, such as `total == 6 at FIBER_EXIT`,
   written in closed form.
 
+As built in P1, a manifest records the toolchain, the hashes of the
+sources and binaries, each variant's flags, and each run's arguments, exit
+code, and output. A program's `arguments` file lists its runs, one argument
+list per line; `golden-build` runs every variant with each and requires
+them to agree. The other fields arrive with the programs that need them.
+
 **Size budget.** Each binary is a few kilobytes plus its DWARF. The whole
 corpus stays under 2 MB in plain git.
 
@@ -530,23 +554,25 @@ faults and features they cover.
 
 | Command | What it does |
 |---|---|
-| `just` | The gate: `golden-check`; kernel and CPU conformance tests; fixed seeds 0..N over every program and variant (about 2 s of wall time); a determinism double-run of the first 32 seeds; and the coverage-mark check. |
-| `just sim [SECONDS]` | A sweep: random seeds on every core for SECONDS (default 60), run inside `scripts/contained.sh`. Failures are grouped by oracle and site; each group keeps its smallest seed. |
-| `just sim-seed SEED` | Replays one seed. Prints the swarm configuration, the full trace, and the flight recording, and writes them to `target/sim/SEED/`. |
-| `just sim-seed SEED --at STEP` | Replays to STEP and prints the kernel's state there: each thread's registers, stop state, and pending status; the controller queue; and the outstanding requests. |
+| `just` | The gate: `golden-check`; the kernel and CPU conformance tests; 300 fixed seeds over every program and variant (about 0.3 s); a determinism double-run of the first 32 seeds; the coverage-mark check; and two sabotage tests showing the oracles catch lost trap writes and a deaf waiter. |
+| `just sim [SECONDS]` | A sweep: random seeds on every core for SECONDS (default 60), inside `scripts/contained.sh`. Failures are grouped by kind and check; each group keeps its smallest seed's report. |
+| `just sim-seed SEED` | Replays one seed and prints its whole trace, also written to `target/sim/SEED/trace.log`. `--fingerprint` checks the replay against a report's fingerprint. |
+| `just sim-seed SEED --at STEP` | Replays to STEP and prints the state there: each thread's state, report, pending signals, and `rip`; the waiter; the controller's queue; and the client. |
 
 - **Profiles.** The gate uses the test profile. Sweeps use `[profile.sim]`:
   release optimizations with debug assertions, so the flight recorder and
   internal checks stay on.
 - **Parallelism.** A sweep runs one world per worker thread. Worlds share
-  only the immutable corpus: each binary's bytes and its `DebugInfo`, loaded
-  once.
-- **Memory safety.** Sweeps run under a new `scripts/contained.sh`. It runs
-  the sweep in a `systemd-run --user` scope with a memory cap and a high OOM
-  score, so a runaway session cannot exhaust the machine's memory.
-- **Throughput targets**, to be measured and revised in P1:
-  - 1,000 sessions per second per core for `straight`;
-  - 300 per second per core for the threaded programs.
+  only the immutable corpus: each binary's bytes, image, and `DebugInfo`,
+  loaded once.
+- **Memory safety.** Sweeps run under `scripts/contained.sh`: a
+  `systemd-run --user` scope capped at half the memory, without swap, and
+  first in line for the OOM killer, so a runaway session cannot take the
+  machine's memory.
+- **Throughput**, measured in P1 on a 12-core Ryzen AI 9 HX 370 (4 Zen 5
+  and 8 Zen 5c cores): about 1,100 `straight` sessions per second on one
+  thread, and about 7,000 per second in all from 12 threads up. Hyperthreads
+  add nothing. A session averages a few hundred actions.
 - **Where sweeps run.** There is no CI today. Sweeps run locally, before
   merging any lifecycle, run-control, or concurrency change, alongside
   `just stress`.
@@ -674,23 +700,47 @@ begins.
 **P0: Seams.** Done on 2026-10-04; section 16 lists what changed. *Exit:*
 the gate passes; there are no behavior changes.
 
-**P1: One thread, end to end.**
+**P1: One thread, end to end.** Done on 2026-10-04.
 
-- The `sim` feature, the `sim_edge` facade, and `Waiter::external()` for
-  the feature (section 16).
-- `Choices`, the world loop, and the random-walk scheduler.
-- The kernel for one single-threaded process: launch, traps, single step,
-  exit, and SIGKILL.
-- The interpreter for what `straight` needs, with the lockstep test.
-- The loader, `SimTrace`, and a client that launches, sets and removes
-  breakpoints, continues, steps, reads memory, backtraces, kills, and shuts
-  down through `DebuggerHandle`.
-- Oracles: protocol, code integrity, clean exit, transparency, and liveness.
-- The runner, the report, `sim-seed`, the fingerprint, and the gate.
-- `golden-build`, `golden-check`, and the runtime, for `straight`.
+- The golden runtime and `straight` in four variants (GCC and Clang, `-O0`
+  and `-O2`, static), with `just golden-build` and `golden-check`. Builds
+  are reproducible and name sources under `/uscope`, wherever the
+  repository is checked out.
+- The single-threaded kernel: launch, `int3`, single steps, SIGSTOP from
+  the tracer, faults, `write`, `exit_group`, SIGKILL, and the exit event,
+  each rule probed by a dual-run test.
+- The interpreter for every instruction the corpus executes, checked by
+  lockstep over every variant and argument list (about 27,000
+  instructions, 0.2 s).
+- The world, the swarm, the client, the oracles (protocol, code integrity,
+  site ownership, events, transparency, clean exit, liveness), coverage
+  marks, reports, replay, and the gate.
 
-*Exit:* `straight` in all its variants is deterministic under the
-double-run check, and the throughput target is measured.
+Departures from the design, each for a reason recorded where it applies:
+the simulator compiles for tests without a feature flag (section 5);
+`SimTrace` lives in the facade (section 5); and K-EXEC-1 was added
+(section 8).
+
+The first sweeps found two debugger bugs. Each now has a red-first test
+outside the simulator, as section 15 requires:
+
+- A pause that arrived once every thread was past its exit event failed
+  with "the inferior is not stopped". It is now accepted and ends with the
+  exit (`a_pause_after_every_thread_began_exiting_ends_with_the_exit`).
+- An instruction step from a stop whose inline frame is ambiguous was
+  refused, though it needs no frame
+  (`instruction_steps_work_where_the_inline_frame_is_ambiguous`).
+
+The sweeps also showed where the client's expectations were wrong, and
+those were corrected: events share the revision of the state change that
+produced them; explicit refusals are correct for lines without code,
+functions another variant inlined away, a step out of the outermost
+frame, and source steps and backtraces from an ambiguous inline frame;
+and a kill or pause sent while the program runs may meet its exit.
+
+*Exit:* met. `straight` in all its variants is deterministic under the
+double-run check, every mark is reached by the fixed seeds, and 650,000
+swept sessions found nothing more.
 
 **P2: Threads and kills.**
 
@@ -742,8 +792,16 @@ Decided on 2026-10-04: the simulator is in-crate, behind the `sim` feature
 (section 5), and DAP and the CLI stay outside it (section 2).
 
 1. **Corpus storage.** Plain git is assumed while the corpus stays under
-   2 MB. Should a larger budget ever be needed, the choice is between Git
-   LFS and building in Nix with pinned hashes.
+   2 MB (88 KB after P1). Should a larger budget ever be needed, the choice
+   is between Git LFS and building in Nix with pinned hashes.
+2. **Ambiguous stops from nested inline breakpoints.** When breakpoints on
+   two nested inlined functions hit at the same address, as `rt_exit_group`
+   and `rt_syscall3` do in `straight-clang-O2` at `0x401334`, the stop
+   presents its inline frame as ambiguous, so source steps and backtraces
+   there are refused. The hits are consistent: one inline chain holds both.
+   Presenting the innermost hit's frame would keep those requests working.
+   Is the ambiguity intended? The simulator's client accepts the refusals
+   until this is decided.
 
 ## Glossary
 
