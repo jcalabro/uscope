@@ -1399,9 +1399,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             WaitEvent::Exited(..) | WaitEvent::Signaled(..) | WaitEvent::Continued(_)
         ))
         .then(|| status.pid());
+        // A ptrace request failing because SIGKILL took its thread out of a
+        // stop is explained by threads that left their stop, by every
+        // thread having reached its exit, or by the debugger's own kill.
         if let Err(error) = self.process_wait(status)
             && !(is_vanished_tracee(&error)
-                && (self.release_superseded_threads(reported) || self.every_thread_exiting()))
+                && (self.release_superseded_threads(reported)
+                    || self.every_thread_exiting()
+                    || self.kill_reply.is_some()))
         {
             self.fail_inferior(error);
         }
