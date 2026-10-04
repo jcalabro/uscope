@@ -906,6 +906,9 @@ build_fixture gcc "$c_fixtures_dir/step-over-libc.c" "$output_dir/step-over-libc
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/orphan-frames.c" "$output_dir/orphan-frames" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
+# Keeps the assembly after the function before it, as the source places it.
+build_fixture gcc "$c_fixtures_dir/assembly-after-code.c" "$output_dir/assembly-after-code" \
+    -O0 -g3 -fno-toplevel-reorder -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/freestanding-entry.c" "$output_dir/freestanding-entry" \
     -O0 -g3 -static -nostdlib -fno-pie -no-pie -fno-stack-protector
 build_fixture gcc "$c_fixtures_dir/unwind.c" "$output_dir/unwind-o0" \
