@@ -14,6 +14,9 @@ set -euo pipefail
 readonly golden_dir="tests/golden"
 # Debug information places the repository here wherever it is checked out.
 readonly source_root="/uscope"
+# How many more times a build runs each binary to check that it behaves the
+# same however its threads interleave.
+readonly determinism_runs=20
 readonly common_flags="-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror"
 # Vectorized loops would need SSE arithmetic, which the simulator does not
 # model.
@@ -44,9 +47,13 @@ hash_of() {
 }
 
 # The sources a program's binaries are built from, relative to its directory.
+# Programs that include the thread runtime link it too.
 sources_of() {
     local name="$1"
     printf '%s\n' "${name}.c" ../rt/rt.c ../rt/rt.h
+    if grep -q '^#include "../rt/thread.h"$' "${golden_dir}/${name}/${name}.c"; then
+        printf '%s\n' ../rt/thread.c ../rt/thread.h
+    fi
 }
 
 # Prints the manifest the files of program NAME describe now, recording the
@@ -139,6 +146,15 @@ build() {
         >"${directory}/manifest.json.tmp"
     mv "${directory}/manifest.json.tmp" "${directory}/manifest.json"
     printf '[wrote] %s/manifest.json\n' "$directory"
+    # Threads interleave differently on every run; what a program prints and
+    # returns must not depend on how.
+    local run
+    for run in $(seq "$determinism_runs"); do
+        manifest "$name" "$(gcc --version | head -n1)" "$(clang --version | head -n1)" |
+            cmp -s - "${directory}/manifest.json" ||
+            die "${name} behaved differently on run ${run}: its output depends on scheduling"
+    done
+    printf '[checked] %s behaves the same in %s more runs\n' "$name" "$determinism_runs"
 }
 
 check() {

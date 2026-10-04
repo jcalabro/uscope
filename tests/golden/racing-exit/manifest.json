@@ -1,0 +1,25 @@
+{
+  "program": "racing-exit",
+  "toolchain": {
+    "gcc": "gcc (GCC) 15.2.0",
+    "clang": "clang version 21.1.8"
+  },
+  "sources": [
+    {"path": "racing-exit.c", "sha256": "dcd66aa0910d4f275c270088f3cab77c30cc0cc4876d14b662ab5b84e3b71cd0"},
+    {"path": "../rt/rt.c", "sha256": "bf6d2f92e145e6ebda31e922284a86f619ba90cbefc2ecb984dd167f674214dc"},
+    {"path": "../rt/rt.h", "sha256": "9a13639b8e9c28b2f36f9395371eee48dbc5bbd9796cefe4ab8db2efc3e0d624"},
+    {"path": "../rt/thread.c", "sha256": "18cf71a60bdc2e333156496c6229bc9315f52d14c12cd4440425ca485b347f77"},
+    {"path": "../rt/thread.h", "sha256": "44144ad894188e5dd8e34592aea9c3f3f62389424c18c300f273b57f3fb038d5"}
+  ],
+  "variants": [
+    {"name": "gcc-O0", "compiler": "gcc", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O0", "sha256": "b7a922f4084d805e28d77f8a4612ff84a7d778c1da8b63cef9f67c703d35f715"},
+    {"name": "gcc-O2", "compiler": "gcc", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O2 -fno-tree-vectorize", "sha256": "257d34366f2aaabdfc706f903c40505e397824b7d158f65893740508ed772079"},
+    {"name": "clang-O0", "compiler": "clang", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O0", "sha256": "af65dc947c736a94eed2e43c468df7ac5f497fd6e0b1cd58c7f8781f94049fd0"},
+    {"name": "clang-O2", "compiler": "clang", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O2 -fno-vectorize -fno-slp-vectorize", "sha256": "e27147021dbf4ac72661c55ba041e62cf5cb00d882a76167188e9049f32d2c76"}
+  ],
+  "runs": [
+    {"arguments": ["1", "1"], "exit_code": 1, "output": "exit after 1\n"},
+    {"arguments": ["2", "4"], "exit_code": 4, "output": "exit after 4\n"},
+    {"arguments": ["3", "2"], "exit_code": 2, "output": "exit after 2\n"}
+  ]
+}
