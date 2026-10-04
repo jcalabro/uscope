@@ -12,9 +12,9 @@ static inline u64 square(u64 value) {
 __attribute__((noinline)) u64 sum_squares(u64 count) {
     u64 total = 0;
     for (u64 index = 1; index <= count; index++) {
-        total += square(index);
+        total += square(index); // MARK: total == (index - 1) * index * (2 * index - 1) / 6
     }
-    return total;
+    return total; // MARK: total == count * (count + 1) * (2 * count + 1) / 6
 }
 
 __attribute__((noinline)) u64 fib(u64 index) {

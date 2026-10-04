@@ -68,12 +68,13 @@ stress COUNT="10" *ARGS: build-test-programs
     setarch "$(uname -m)" cargo nextest run --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
 
 # Compiles one golden program's variants, used by the simulator, and
-# rewrites its manifest. Commit rebuilt binaries on their own.
+# rewrites its manifest and the facts binutils give about each binary.
+# Commit rebuilt binaries on their own.
 golden-build NAME:
     ./scripts/golden.sh build "$1"
 
 # Fails unless every golden program's manifest matches its sources,
-# binaries, and output.
+# binaries, and output, and its facts match its binaries.
 golden-check:
     ./scripts/golden.sh check
 

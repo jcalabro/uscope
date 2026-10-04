@@ -31,7 +31,7 @@ static u64 finished;
 u64 counter;
 
 __attribute__((noinline)) u64 share(u64 index, u64 round) {
-    return (index + 1) * 10 + round;
+    return (index + 1) * 10 + round; // MARK: index < 4 && round < 5
 }
 
 static void report(void) {
@@ -47,7 +47,7 @@ static void work(void *argument) {
         rt_yield();
     }
     for (u64 round = 0; round < ROUNDS; round++) {
-        rt_add(&counter, share(index, round));
+        rt_add(&counter, share(index, round)); // MARK: index < 4 && round < 5
     }
     if (rt_add(&finished, 1) + 1 == workers && ending != MAIN) {
         report();
