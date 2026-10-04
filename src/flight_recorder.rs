@@ -11,11 +11,12 @@
 //! source tree that built the binary. Release builds compile none of this:
 //! the module is absent and every `record!` expands to dead code.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::fmt::{self, Write as _};
 use std::fs::{self, File};
 use std::io::{self, Seek as _, SeekFrom, Write as _};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once, OnceLock, PoisonError};
 use std::thread;
@@ -56,6 +57,8 @@ thread_local! {
     /// Whether this thread holds the recorder, so a panic while it does
     /// cannot wait for it.
     static HOLDING: Cell<bool> = const { Cell::new(false) };
+    /// The lines this thread captures instead of recording to the ring.
+    static CAPTURED: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
 }
 
 fn with_recorder<T>(change: impl FnOnce(&mut Recorder) -> T) -> T {
@@ -76,15 +79,24 @@ fn with_recorder<T>(change: impl FnOnce(&mut Recorder) -> T) -> T {
 /// Appends one line. Use the crate's `record!` macro, which compiles away in
 /// release builds.
 pub(crate) fn record(message: fmt::Arguments<'_>) {
-    let current = thread::current();
-    let thread = current.name().map_or("unnamed", |name| {
-        name.strip_prefix("uscope-").unwrap_or(name)
-    });
     let mut body = Bounded(String::new());
     if body.write_fmt(message).is_err() {
         body.0.push_str(" …");
     }
-    with_recorder(|recorder| recorder.push(thread, &body.0));
+    let mut body = Some(body.0);
+    CAPTURED.with_borrow_mut(|captured| {
+        if let Some(lines) = captured {
+            lines.extend(body.take());
+        }
+    });
+    let Some(body) = body else {
+        return;
+    };
+    let current = thread::current();
+    let thread = current.name().map_or("unnamed", |name| {
+        name.strip_prefix("uscope-").unwrap_or(name)
+    });
+    with_recorder(|recorder| recorder.push(thread, &body));
 }
 
 /// A message that refuses text past [`MAX_LINE`], which stops formatting
@@ -265,6 +277,46 @@ pub fn record_panics() {
     });
 }
 
+/// Keeps the lines this thread records apart from the ring until dropped.
+///
+/// Captured lines carry no time or thread name, so the same actions always
+/// produce the same lines. Other threads record to the ring as before.
+pub struct Capture {
+    /// Capturing is a property of the thread that started it.
+    _thread: PhantomData<*const ()>,
+}
+
+impl Capture {
+    /// Starts capturing this thread's lines.
+    ///
+    /// # Panics
+    ///
+    /// If this thread is already capturing.
+    #[must_use]
+    pub fn start() -> Self {
+        CAPTURED.with_borrow_mut(|captured| {
+            assert!(captured.is_none(), "this thread is already capturing");
+            *captured = Some(Vec::new());
+        });
+        Self {
+            _thread: PhantomData,
+        }
+    }
+
+    /// Removes and returns the lines captured since the last call.
+    #[must_use]
+    pub fn take(&self) -> Vec<String> {
+        CAPTURED
+            .with_borrow_mut(|captured| captured.as_mut().map(std::mem::take).unwrap_or_default())
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        CAPTURED.set(None);
+    }
+}
+
 fn unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -274,6 +326,32 @@ fn unix_seconds() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A capturing thread's lines go to its capture alone, without time or
+    /// thread, while other threads keep recording to the ring; once the
+    /// capture ends, the thread records to the ring again.
+    #[test]
+    fn a_capture_takes_only_its_own_threads_lines() {
+        let capture = Capture::start();
+        record(format_args!("captured {}", 1));
+        thread::spawn(|| record(format_args!("from another thread")))
+            .join()
+            .expect("record from another thread");
+        record(format_args!("captured {}", 2));
+        assert_eq!(capture.take(), ["captured 1", "captured 2"]);
+        assert_eq!(capture.take(), Vec::<String>::new());
+        drop(capture);
+        record(format_args!("after the capture"));
+
+        let ring = with_recorder(|recorder| recorder.lines.iter().cloned().collect::<Vec<_>>());
+        assert!(
+            !ring.iter().any(|line| line.contains("captured")),
+            "{ring:?}"
+        );
+        for expected in [" from another thread\n", " after the capture\n"] {
+            assert!(ring.iter().any(|line| line.ends_with(expected)), "{ring:?}");
+        }
+    }
 
     /// A stream that outgrows its limit restarts from the ring, so it keeps
     /// the newest lines, and a long line stops formatting at the limit.
