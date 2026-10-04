@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use nix::errno::Errno;
 use nix::libc;
 use nix::unistd::Pid;
 
@@ -28,8 +29,8 @@ use super::memory::read_logical_memory;
 use super::{
     ActiveKind, BreakpointOwner, Controller, EpilogueTraversal, ExpectedStop, Inferior, LinuxError,
     NativeThreadState, Resume, ReturnTraversal, StepStart, allocate_stop_id, backend_error,
-    debug_thread_id, process_id, steps_instructions, validate_process, validate_public_stop,
-    validate_resumable, validate_stopped_thread,
+    debug_thread_id, is_superseded, process_id, steps_instructions, validate_process,
+    validate_public_stop, validate_resumable, validate_stopped_thread,
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -194,10 +195,21 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn complete_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
         match self.advance_user_step(pid, kind) {
             Err(error) if is_lost_step_evidence(&error) && self.thread_is_stopped(pid) => {
+                self.check_still_stopped(pid)?;
                 self.begin_visible_stop(pid, step_incomplete(kind, &error))
             }
             result => result,
         }
+    }
+
+    /// Fails as the ptrace request did when evidence could not be read
+    /// because SIGKILL took the thread out of its stop meanwhile, which is
+    /// no lost frame: its handler then lets the thread run on to its exit.
+    fn check_still_stopped(&self, pid: Pid) -> Result<()> {
+        if is_superseded(&self.ptrace.signal_metadata(pid)) {
+            return Err(backend_error(LinuxError::System(Errno::ESRCH)));
+        }
+        Ok(())
     }
 
     /// The stop a step publishes from where its thread stopped: completion,
@@ -206,7 +218,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         match self.step_is_complete(pid, kind) {
             Ok(true) => Ok(Some(StopReason::Step { kind })),
             Ok(false) => Ok(None),
-            Err(error) if is_lost_step_evidence(&error) => Ok(Some(step_incomplete(kind, &error))),
+            Err(error) if is_lost_step_evidence(&error) => {
+                self.check_still_stopped(pid)?;
+                Ok(Some(step_incomplete(kind, &error)))
+            }
             Err(error) => Err(error),
         }
     }
