@@ -137,6 +137,27 @@ async fn attach_traces_a_process_whose_main_thread_exited() {
     assert_eq!(child.wait().code(), Some(31));
 }
 
+#[tokio::test]
+async fn detaching_waits_for_no_main_thread_that_exited_after_attaching() {
+    let mut child = support::ExternalProcess::spawn(&Scenario::fixture("attach-leader-exits"));
+    let mut scenario = Scenario::attached("detach after the leader exits", child.attach().await);
+    let _resumed = scenario.start_resuming().await;
+    child.release();
+    let stat = format!("/proc/{}/stat", child.process_id());
+    support::wait_until("the main thread exits", || {
+        fs::read_to_string(&stat).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().next())
+                == Some("Z")
+        })
+    });
+    // Linux reports the main thread's exit only after the worker's, so
+    // detaching cannot wait for it.
+    scenario.shutdown().await;
+    child.release();
+    assert_eq!(child.wait().code(), Some(7));
+}
+
 /// The kernel's flag for a thread that has begun to exit.
 const PF_EXITING: u64 = 0x4;
 

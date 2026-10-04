@@ -1326,6 +1326,45 @@ async fn pause_during_launch_ends_the_launch_execution_in_a_coherent_stop() {
 }
 
 #[tokio::test]
+async fn pause_stops_a_process_whose_main_thread_exited() {
+    let mut scenario = Scenario::launch("exited-leader");
+    let _run = scenario.start_running().await;
+    let InferiorState::Running { process_id, .. } = scenario.snapshot().await.inferior else {
+        panic!("the inferior is not running");
+    };
+    // Linux reports the main thread's exit only after the worker's, so the
+    // stop cannot wait for it.
+    let stat = format!("/proc/{}/stat", process_id.get());
+    support::wait_until("the main thread exits", || {
+        fs::read_to_string(&stat).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().next())
+                == Some("Z")
+        })
+    });
+    let reason = scenario.operation("pause", scenario.handle().pause()).await;
+    assert_eq!(reason, StopReason::Pause);
+    // As after attaching, the exited main thread is not listed.
+    let snapshot = scenario.snapshot().await;
+    assert_eq!(snapshot.threads.len(), 1, "{:?}", snapshot.threads);
+    assert!(matches!(
+        snapshot.threads[0].state,
+        ThreadState::Stopped { .. }
+    ));
+    scenario
+        .operation("read the worker's registers", scenario.handle().registers())
+        .await;
+    // A breakpoint added at the stop is in place when the worker resumes.
+    let breakpoint = scenario.add_source_breakpoint("exited-leader.c", 9).await;
+    let reason = scenario.resume_to_stop().await;
+    assert!(
+        matches!(&reason, StopReason::Breakpoint { hits, .. } if hits.iter().map(|hit| hit.breakpoint).eq([breakpoint.id])),
+        "{reason:?}"
+    );
+    scenario.shutdown().await;
+}
+
+#[tokio::test]
 async fn pause_cancels_an_active_source_execution_plan() {
     let mut scenario = Scenario::new("pause source plan", Scenario::fixture("step"));
     scenario.add_breakpoint("step_forever").await;

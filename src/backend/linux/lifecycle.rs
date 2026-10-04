@@ -1257,8 +1257,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let ready = inferior.fork_children.is_empty()
             && inferior
                 .threads
-                .values()
-                .all(|thread| matches!(thread.state, NativeThreadState::Stopped));
+                .iter()
+                .all(|(&pid, thread)| inferior.settled(pid, thread));
         if ready && !self.drain_queued_traps()? {
             self.detach_inferior();
         }

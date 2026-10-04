@@ -1149,8 +1149,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             inferior.barrier.is_some()
                 && inferior
                     .threads
-                    .values()
-                    .all(|thread| matches!(thread.state, NativeThreadState::Stopped))
+                    .iter()
+                    .all(|(&pid, thread)| inferior.settled(pid, thread))
         });
         if !ready {
             return Ok(());
