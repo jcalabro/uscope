@@ -12,6 +12,14 @@ categories = ["command-line-utilities", "development-tools::debugging"]
 [features]
 # Fuzz harnesses synthesize object files from structured input.
 fuzzing = ["object/write"]
+# The deterministic simulator's sweep and replay binary. Its tests run with
+# the library's own.
+sim = []
+
+[[bin]]
+name = "uscope-sim"
+path = "src/bin/uscope-sim.rs"
+required-features = ["sim"]
 
 [lints.rust]
 future_incompatible = { level = "deny", priority = -1 }
@@ -70,6 +78,13 @@ object = { version = "0.39", features = ["read", "write"] }
 [profile.test]
 opt-level = 1
 debug = 1
+
+# Simulation sweeps: optimized, with the debug assertions that keep the
+# flight recorder and internal checks on.
+[profile.sim]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
 
 # Generating debuginfo for this crate more than doubles the incremental rebuild
 # after an edit. Dependencies keep theirs since they are rarely rebuilt. Pass

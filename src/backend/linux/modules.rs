@@ -208,6 +208,17 @@ pub(super) fn load_bias(
     executable_data: &[u8],
     identity: FileIdentity,
 ) -> Result<u64> {
+    load_bias_in(&read_maps(pid)?, executable, executable_data, identity)
+}
+
+/// The load bias of the executable `identity` names in a process whose
+/// memory map is `maps`.
+pub(super) fn load_bias_in(
+    maps: &str,
+    executable: &Path,
+    executable_data: &[u8],
+    identity: FileIdentity,
+) -> Result<u64> {
     let object = object::File::parse(executable_data)
         .map_err(|error| Error::backend(LinuxError::Object(error)))?;
     let image_base = object
@@ -215,8 +226,7 @@ pub(super) fn load_bias(
         .map(|segment| segment.address())
         .min()
         .unwrap_or(0);
-    let maps = read_maps(pid)?;
-    parse_maps(&maps)?
+    parse_maps(maps)?
         .into_iter()
         .find(|mapping| mapping.inode == identity.inode && mapping.file_offset == 0)
         .and_then(|mapping| mapping.start.checked_sub(image_base))

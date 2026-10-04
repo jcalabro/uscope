@@ -77,6 +77,18 @@ golden-build NAME:
 golden-check:
     ./scripts/golden.sh check
 
+# Simulates random sessions on every core for SECONDS, inside a memory cap,
+# and reports each kind of failure with its smallest seed.
+sim SECONDS="60":
+    cargo build --profile sim --features sim --bin uscope-sim
+    ./scripts/contained.sh ./target/sim/uscope-sim sweep --seconds "$1"
+
+# Replays one simulated session and prints its trace. Pass `--at STEP` to
+# stop there and print the state, or the `--fingerprint` a report gave.
+sim-seed SEED *ARGS:
+    cargo build --profile sim --features sim --bin uscope-sim
+    ./target/sim/uscope-sim replay "$1" "${@:2}"
+
 # Runs one fuzz target: value-expression, dwarf-expression, core-dump,
 # elf-symbols, disassembly, debug-register-plan, dap-transport, or
 # dap-request. Arguments go to libFuzzer.

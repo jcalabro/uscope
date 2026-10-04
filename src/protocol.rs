@@ -1364,9 +1364,10 @@ pub enum Request {
     },
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(debug_assertions, test, feature = "sim"))]
 impl Request {
-    /// Names the request and what it acts on, for the flight recorder.
+    /// Names the request and what it acts on, for the flight recorder and
+    /// the simulator's trace.
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Launch { options, .. } => format!("launch {:?}", options.arguments),

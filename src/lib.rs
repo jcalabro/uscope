@@ -22,6 +22,9 @@ pub mod flight_recorder;
 mod inspection;
 pub(crate) mod model;
 mod protocol;
+#[cfg(any(test, feature = "sim"))]
+#[doc(hidden)]
+pub mod sim;
 mod source_map;
 mod unwind;
 
