@@ -8,11 +8,13 @@
 //!   `machine`, what its actions and the controller's calls reach.
 //! - [`kernel`], [`cpu`], [`memory`], [`loader`]: the simulated machine.
 //! - [`client`]: the simulated user, driving `DebuggerHandle`.
-//! - [`oracles`] and `audit`: checks of the debugger against ground truth.
+//! - [`oracles`], `semantics`, and `audit`: checks of the debugger against
+//!   ground truth.
 //! - [`choices`], [`swarm`], [`schedule`]: where every random choice comes
 //!   from, and how the next action is chosen.
 //! - [`faults`]: what the rest of the machine does to a session.
-//! - [`corpus`]: the golden programs.
+//! - [`corpus`]: the golden programs, with [`facts`] about each binary and
+//!   [`markers`] in their sources.
 //! - [`report`]: traces, fingerprints, and failures.
 
 mod audit;
@@ -22,15 +24,18 @@ mod client;
 mod conformance;
 pub mod corpus;
 pub mod cpu;
+pub mod facts;
 pub mod faults;
 pub mod kernel;
 pub mod loader;
 mod machine;
+pub mod markers;
 pub mod marks;
 pub mod memory;
 mod oracles;
 pub mod report;
 pub mod schedule;
+mod semantics;
 pub mod swarm;
 #[cfg(test)]
 mod tests;

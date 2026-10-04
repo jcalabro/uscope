@@ -11,7 +11,9 @@
 mod flags;
 mod ops;
 
-use iced_x86::{Decoder, DecoderOptions, Formatter as _, GasFormatter, Instruction, Register};
+use iced_x86::{
+    Decoder, DecoderOptions, Formatter as _, GasFormatter, Instruction, Mnemonic, Register,
+};
 
 use super::memory::{AddressSpace, MemoryFault};
 
@@ -96,6 +98,20 @@ pub enum Outcome {
     Unsupported(String),
 }
 
+/// How a completed instruction moved between functions, which the kernel's
+/// shadow call stacks follow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    Other,
+    /// A call, which pushed `return_address` at `slot`.
+    Call {
+        return_address: u64,
+        slot: u64,
+    },
+    /// A return, to the address now in `rip`.
+    Return,
+}
+
 /// The effect of an instruction that did not complete normally.
 enum Stop {
     Fault(Fault),
@@ -110,19 +126,33 @@ impl From<MemoryFault> for Stop {
 
 /// Executes the instruction at `registers.rip`.
 pub fn step(registers: &mut Registers, memory: &mut AddressSpace) -> Outcome {
+    execute(registers, memory).0
+}
+
+/// Executes the instruction at `registers.rip`, and says whether it was a
+/// call or a return.
+pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> (Outcome, Flow) {
     let instruction = match decode(registers.rip, memory) {
         Ok(instruction) => instruction,
-        Err(fault) => return Outcome::Fault(fault),
+        Err(fault) => return (Outcome::Fault(fault), Flow::Other),
     };
     let mut next = *registers;
     next.rip = instruction.next_ip();
     match ops::execute(&instruction, &mut next, memory) {
         Ok(outcome) => {
             *registers = next;
-            outcome
+            let flow = match instruction.mnemonic() {
+                Mnemonic::Call => Flow::Call {
+                    return_address: instruction.next_ip(),
+                    slot: registers.general[RSP],
+                },
+                Mnemonic::Ret => Flow::Return,
+                _ => Flow::Other,
+            };
+            (outcome, flow)
         }
-        Err(Stop::Fault(fault)) => Outcome::Fault(fault),
-        Err(Stop::Unsupported) => Outcome::Unsupported(describe(&instruction)),
+        Err(Stop::Fault(fault)) => (Outcome::Fault(fault), Flow::Other),
+        Err(Stop::Unsupported) => (Outcome::Unsupported(describe(&instruction)), Flow::Other),
     }
 }
 

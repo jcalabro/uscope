@@ -27,10 +27,11 @@ use super::report::Failure;
 use crate::backend::ControllerMessage;
 use crate::protocol::Request;
 use crate::{
-    BreakpointId, BreakpointLocation, BreakpointSpec, DebuggerEvent, DebuggerHandle, Error,
-    ExceptionDisposition, ExecutionId, InferiorState, LaunchOptions, LineNumber,
-    MemoryReadCompletion, ModuleId, PresentedFrame, ProcessId, ResumeScope, StateSnapshot,
-    StepKind, StopId, StopReason, ThreadState, UnwindTermination, VirtualAddress,
+    Backtrace, BreakpointId, BreakpointLocation, BreakpointSpec, DebuggerEvent, DebuggerHandle,
+    Error, ExceptionDisposition, ExecutionId, FrameKind, FramePresentation, InferiorState,
+    LaunchOptions, LineNumber, MemoryReadCompletion, ModuleId, PresentedFrame, ProcessId,
+    ResumeScope, StackFrameId, StateSnapshot, StepKind, StopContext, StopId, StopReason, ThreadId,
+    ThreadState, UnwindTermination, VariableSnapshot, VirtualAddress,
 };
 
 /// The most bytes one memory read asks for.
@@ -49,6 +50,8 @@ pub struct Script {
     pub defined: Vec<String>,
     pub source: PathBuf,
     pub source_lines: u64,
+    /// Lines whose markers state conditions on the variables there.
+    pub marker_lines: Vec<u64>,
     /// The image, whose code memory reads must show unchanged.
     pub image: Arc<Image>,
 }
@@ -65,20 +68,52 @@ pub struct Shared {
     /// group, which the world records as it happens.
     pub ending: Rc<RefCell<BTreeSet<Tid>>>,
     /// The user's breakpoints the debugger said it made, and the client has
-    /// not asked to remove, with the addresses of their locations.
+    /// not asked to remove, with the image addresses of their locations.
     pub breakpoints: Rc<RefCell<BTreeMap<u64, BTreeSet<u64>>>>,
+    /// What the client saw that the world's oracles judge, in order.
+    pub observations: Rc<RefCell<Vec<Observation>>>,
+}
+
+/// Something the client saw that an oracle judges against the simulation.
+#[derive(Debug)]
+pub enum Observation {
+    /// A backtrace taken at a stop.
+    Backtrace { stop: StopId, backtrace: Backtrace },
+    /// A step of the selected thread, about to be requested, from where the
+    /// debugger presented it.
+    StepBegins {
+        thread: ThreadId,
+        kind: StepKind,
+        presentation: Option<FramePresentation>,
+    },
+    /// What the step ended with, when it ended without failing.
+    StepEnded(Option<StopReason>),
+    /// The variables of the selected frame at a stop, with the backtrace of
+    /// their thread.
+    Variables {
+        stop: StopId,
+        variables: VariableSnapshot,
+        backtrace: Backtrace,
+    },
 }
 
 impl Shared {
-    /// Every address where a user breakpoint is certainly enabled.
+    /// The user's breakpoints, with their locations where an image loaded
+    /// `bias` above its own addresses puts them.
     #[must_use]
-    pub fn addresses(&self) -> BTreeSet<u64> {
+    pub fn intent(&self, bias: u64) -> BTreeMap<u64, BTreeSet<u64>> {
         self.breakpoints
             .borrow()
-            .values()
-            .flatten()
-            .copied()
+            .iter()
+            .map(|(&id, addresses)| (id, addresses.iter().map(|address| address + bias).collect()))
             .collect()
+    }
+
+    /// Every address where a user breakpoint is certainly enabled, in an
+    /// image loaded `bias` above its own addresses.
+    #[must_use]
+    pub fn addresses(&self, bias: u64) -> BTreeSet<u64> {
+        self.intent(bias).into_values().flatten().collect()
     }
 }
 
@@ -138,6 +173,10 @@ impl Client {
 
     fn mark(&self, mark: Mark) {
         self.marks.borrow_mut().hit(mark);
+    }
+
+    fn observe(&self, observation: Observation) {
+        self.shared.observations.borrow_mut().push(observation);
     }
 
     /// Runs the session to its end: requests, then a shutdown.
@@ -212,6 +251,9 @@ impl Client {
                         if at_breakpoints > 1 {
                             self.mark(Mark::CoHit);
                         }
+                        // The semantic oracles judge every stop.
+                        let result = self.inspect(stop_id).await;
+                        self.excuse(process_id, result)?;
                     }
                     if let Some(previous) = last_stop
                         && previous != stop_id
@@ -311,7 +353,7 @@ impl Client {
             unreachable!("the client acts while stopped on a stopped snapshot")
         };
         let scope = ResumeScope::Process(process_id);
-        match self.draw(12) {
+        match self.draw(13) {
             0 => {
                 self.note("resume");
                 match self.handle.resume().await {
@@ -344,6 +386,7 @@ impl Client {
             }
             9 => self.select_thread(snapshot).await?,
             10 => self.continue_thread(snapshot, stop).await?,
+            11 => self.inspect(stop).await?,
             _ => {
                 if let Some(stale) = stale {
                     self.continue_stale(stale, scope).await?;
@@ -406,11 +449,16 @@ impl Client {
             .await
             .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
         match self.handle.backtrace().await {
-            Ok(backtrace) => self.note(format!(
-                "backtrace: {} frames, {:?}",
-                backtrace.frames.len(),
-                backtrace.termination
-            )),
+            Ok(backtrace) => {
+                self.note(format!(
+                    "backtrace: {} frames, {:?}",
+                    backtrace.frames.len(),
+                    backtrace.termination
+                ));
+                if let Some(stop) = snapshot.stop_id {
+                    self.observe(Observation::Backtrace { stop, backtrace });
+                }
+            }
             Err(Error::AmbiguousInlineFrame) if presented_ambiguously(&snapshot) => {
                 self.note("backtrace from an ambiguous inline frame refused");
             }
@@ -438,20 +486,32 @@ impl Client {
         let ambiguous = kind != StepKind::Instruction
             && kind != StepKind::OverInstruction
             && presented_ambiguously(&before);
-        // Stepping out of a frame the unwind information says has no caller
-        // must be refused, and change nothing.
-        let outermost = if kind == StepKind::Out && !ambiguous {
+        // Stepping out of a frame without a caller to return to must be
+        // refused, and change nothing.
+        let caller = if kind == StepKind::Out && !ambiguous {
             let backtrace = self
                 .handle
                 .backtrace()
                 .await
                 .map_err(|error| protocol(format!("backtrace failed: {error}")))?;
-            (backtrace.frames.len() == 1).then_some(backtrace.termination)
+            let caller = Caller::of(&backtrace);
+            if let Some(stop) = before.stop_id {
+                self.observe(Observation::Backtrace { stop, backtrace });
+            }
+            caller
         } else {
-            None
+            Caller::Trusted
         };
         self.note(format!("step {kind:?}"));
+        if let Some(thread) = before.selected_thread {
+            self.observe(Observation::StepBegins {
+                thread,
+                kind,
+                presentation: before.presentation.clone(),
+            });
+        }
         let result = self.handle.step(kind).await;
+        self.observe(Observation::StepEnded(result.as_ref().ok().cloned()));
         if ambiguous {
             if !matches!(result, Err(Error::AmbiguousInlineFrame)) {
                 return Err(protocol(format!(
@@ -473,12 +533,15 @@ impl Client {
             ));
             return Ok(());
         }
-        match (result, outermost) {
-            (Ok(reason), None | Some(UnwindTermination::NoUnwindInfo { .. })) => {
+        match (result, &caller) {
+            (
+                Ok(reason),
+                Caller::Trusted | Caller::Outermost(UnwindTermination::NoUnwindInfo { .. }),
+            ) => {
                 self.note(format!("stepped: {reason:?}"));
             }
             (Err(Error::EventStreamLagged(_)), _) => self.mark(Mark::ClientLagged),
-            (Err(error), Some(termination)) => {
+            (Err(error), Caller::Outermost(_) | Caller::Corrupt(_)) => {
                 let after = self
                     .handle
                     .snapshot()
@@ -489,18 +552,97 @@ impl Client {
                         "a refused step out changed the state from {before:?} to {after:?}"
                     )));
                 }
-                self.note(format!(
-                    "step out of the outermost frame ({termination}) refused: {error}"
-                ));
+                self.note(format!("step out of a frame {caller} refused: {error}"));
                 self.mark(Mark::StepOutRefused);
             }
-            (Ok(reason), Some(termination)) => {
+            (Ok(reason), caller) => {
                 return Err(protocol(format!(
-                    "stepped out of a frame without a caller ({termination}): {reason:?}"
+                    "stepped out of a frame {caller}: {reason:?}"
                 )));
             }
-            (Err(error), None) => {
+            (Err(error), Caller::Trusted) => {
                 return Err(protocol(format!("step {kind:?} failed: {error}")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads the variables of the selected frame, and the backtrace of its
+    /// thread, which the variables oracle judges where a marker applies.
+    async fn inspect(&self, stop: StopId) -> Result<(), Failure> {
+        let snapshot = self
+            .handle
+            .snapshot()
+            .await
+            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+        let backtrace = match self.handle.backtrace().await {
+            Ok(backtrace) => backtrace,
+            Err(Error::AmbiguousInlineFrame) if presented_ambiguously(&snapshot) => {
+                self.note("inspecting an ambiguous inline frame refused");
+                return Ok(());
+            }
+            Err(error) => return Err(protocol(format!("backtrace failed: {error}"))),
+        };
+        // Code no debug information describes has no variables to show.
+        let undescribed = backtrace
+            .frames
+            .iter()
+            .find(|frame| Some(frame.id) == snapshot.selected_frame)
+            .is_some_and(|frame| frame.function.is_none());
+        let variables = match self.handle.variables().await {
+            Ok(variables) => variables,
+            Err(Error::VariableContextUnsupported) if undescribed => {
+                self.note("variables of code without debug information refused");
+                return Ok(());
+            }
+            Err(error) => return Err(protocol(format!("reading variables failed: {error}"))),
+        };
+        self.note(format!(
+            "variables of frame {} in thread {}: {}",
+            variables.stack_frame,
+            variables.thread,
+            variables
+                .variables
+                .iter()
+                .map(|variable| variable.name.as_ref())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        self.observe(Observation::Backtrace {
+            stop,
+            backtrace: backtrace.clone(),
+        });
+        self.observe(Observation::Variables {
+            stop,
+            variables,
+            backtrace,
+        });
+        // Every other stopped thread's stack, without changing which is
+        // selected.
+        for thread in snapshot.threads.iter() {
+            if Some(thread.id) == snapshot.selected_thread
+                || !matches!(thread.state, ThreadState::Stopped { .. })
+            {
+                continue;
+            }
+            let context = StopContext {
+                stop,
+                thread: thread.id,
+                frame: StackFrameId::new(0),
+            };
+            match self.handle.at(context).backtrace().await {
+                Ok(backtrace) => self.observe(Observation::Backtrace { stop, backtrace }),
+                // Only the selected thread's presentation is in the
+                // snapshot, so another's inline frame may be ambiguous.
+                Err(Error::AmbiguousInlineFrame) => {
+                    self.note(format!("thread {}'s inline frame is ambiguous", thread.id));
+                }
+                Err(error) => {
+                    return Err(protocol(format!(
+                        "backtrace of thread {} failed: {error}",
+                        thread.id
+                    )));
+                }
             }
         }
         Ok(())
@@ -516,7 +658,16 @@ impl Client {
                 .clone();
             BreakpointSpec::Function(function)
         } else {
-            let line = self.draw(self.script.source_lines) + 1;
+            // Half the lines aim at markers, where the variables oracle
+            // judges what the debugger shows.
+            let line = if !self.script.marker_lines.is_empty() && self.draw(2) == 0 {
+                *self
+                    .choices
+                    .borrow_mut()
+                    .pick(Stream::Client, &self.script.marker_lines)
+            } else {
+                self.draw(self.script.source_lines) + 1
+            };
             BreakpointSpec::Source {
                 path: self.script.source.clone(),
                 line: LineNumber::new(line).expect("lines count from one"),
@@ -557,8 +708,6 @@ impl Client {
                 BreakpointLocation::Virtual(_) => None,
             })
             .collect::<Vec<_>>();
-        // Golden programs are static executables, which load where their
-        // images say.
         self.shared
             .breakpoints
             .borrow_mut()
@@ -769,6 +918,47 @@ impl Client {
             .await
             .map_err(|_| protocol("shutdown was never answered"))?
             .map_err(|error| protocol(format!("shutdown failed: {error}")))
+    }
+}
+
+/// What a step out of the innermost frame would return to.
+#[derive(Debug, Clone)]
+enum Caller {
+    /// A caller the unwinder found in the program's code, or none needed:
+    /// an inline frame returns into its physical frame.
+    Trusted,
+    /// The unwinder says the frame has no caller.
+    Outermost(UnwindTermination),
+    /// The caller the stack names lies outside every module, as a corrupt
+    /// return address does.
+    Corrupt(VirtualAddress),
+}
+
+impl Caller {
+    fn of(backtrace: &Backtrace) -> Self {
+        let Some(frame) = backtrace.frames.first() else {
+            return Self::Outermost(backtrace.termination.clone());
+        };
+        if frame.kind == FrameKind::Inline {
+            return Self::Trusted;
+        }
+        match backtrace.frames.get(1) {
+            None => Self::Outermost(backtrace.termination.clone()),
+            Some(caller) if caller.module.is_none() => Self::Corrupt(caller.instruction),
+            Some(_) => Self::Trusted,
+        }
+    }
+}
+
+impl std::fmt::Display for Caller {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Trusted => formatter.write_str("with a caller"),
+            Self::Outermost(termination) => write!(formatter, "without a caller ({termination})"),
+            Self::Corrupt(address) => {
+                write!(formatter, "whose caller {address} is outside every module")
+            }
+        }
     }
 }
 

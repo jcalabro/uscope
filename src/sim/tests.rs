@@ -108,3 +108,30 @@ fn a_skipped_trap_fails_breakpoint_accounting() {
         "breakpoint accounting"
     );
 }
+
+/// A kernel that misreports return addresses makes the debugger unwind to
+/// callers that are not, which the backtrace oracle catches.
+#[test]
+fn skewed_return_addresses_fail_the_backtrace_oracle() {
+    assert_eq!(
+        first_failure_with(Sabotage::SkewReturnAddresses),
+        "backtrace"
+    );
+}
+
+/// A CPU whose single steps run on executes more than a step allows, which
+/// the stepping oracle catches.
+#[test]
+fn late_single_steps_fail_the_stepping_oracle() {
+    assert_eq!(first_failure_with(Sabotage::LateSingleSteps), "stepping");
+}
+
+/// A kernel that misreports small numbers on the stack shows variables
+/// with wrong values, which the variables oracle catches.
+#[test]
+fn skewed_stack_words_fail_the_variables_oracle() {
+    assert_eq!(
+        first_failure_with(Sabotage::SkewSmallStackWords),
+        "variables"
+    );
+}

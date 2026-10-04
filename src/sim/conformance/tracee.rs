@@ -223,8 +223,8 @@ impl Tracee for SimTracee {
     }
 }
 
-/// Addresses a script needs in one variant, and symbols that describe
-/// others.
+/// Addresses a script needs in one variant, where it loaded, and symbols
+/// that describe others.
 pub(super) struct Landmarks {
     pub(super) entry: u64,
     /// The first `syscall` instruction.
@@ -246,13 +246,14 @@ const SYMBOLS: [&str; 7] = [
 ];
 
 impl Landmarks {
-    pub(super) fn of(variant: &Variant) -> Self {
+    /// The landmarks of `variant` loaded `bias` above its own addresses.
+    pub(super) fn of(variant: &Variant, bias: u64) -> Self {
         let file = object::File::parse(&*variant.data).expect("parse the golden binary");
         let symbols = SYMBOLS
             .into_iter()
             .filter_map(|name| {
                 let symbol = file.symbols().find(|symbol| symbol.name() == Ok(name))?;
-                Some((name, symbol.address()))
+                Some((name, symbol.address() + bias))
             })
             .collect();
         let text = file.section_by_name(".text").expect("a text section");
@@ -266,9 +267,10 @@ impl Landmarks {
             .iter()
             .find(|instruction| instruction.mnemonic() == iced_x86::Mnemonic::Syscall)
             .expect("a syscall instruction")
-            .ip();
+            .ip()
+            + bias;
         Self {
-            entry: file.entry(),
+            entry: file.entry() + bias,
             syscall,
             unmapped: 0x1000,
             symbols,
@@ -451,9 +453,16 @@ pub(super) fn dual_run(program: &str, arguments: &[&str], script: impl Fn(&mut R
         .map(|&argument| argument.to_owned())
         .collect::<Vec<_>>();
     for variant in &program.variants {
-        let landmarks = Landmarks::of(variant);
         let observe = |tracee: &mut dyn Tracee, first: WaitStatus| {
             let leader = tracee.leader();
+            // A position-independent program loads wherever the kernel put
+            // it, which K-EXEC-2 checks; the other rules are described
+            // relative to that.
+            let (registers, _) = tracee
+                .registers(leader)
+                .expect("registers at the first stop");
+            let file = object::File::parse(&*variant.data).expect("parse the golden binary");
+            let landmarks = Landmarks::of(variant, registers.rip - file.entry());
             let mut record = Record {
                 tracee,
                 landmarks: &landmarks,

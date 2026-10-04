@@ -11,6 +11,7 @@
 //! - [`syscalls`]: the system calls the golden runtime makes.
 
 pub mod ptrace;
+pub mod shadow;
 pub mod signals;
 mod syscalls;
 
@@ -23,6 +24,9 @@ use nix::libc;
 use super::cpu::{self, Outcome, RAX, Registers};
 use super::loader::Image;
 use super::memory::AddressSpace;
+#[cfg(test)]
+use super::world::Sabotage;
+use shadow::{Shadow, Tracking};
 use signals::{Pending, SIGTRAP};
 
 /// A thread or process identifier.
@@ -209,6 +213,10 @@ pub struct Thread {
     pub trapped_at: Option<u64>,
     /// How many traps the thread executed.
     pub traps: u64,
+    /// How many instructions the thread completed, `syscall` among them.
+    pub retired: u64,
+    /// The calls the thread made and has not returned from.
+    pub shadow: Shadow,
 }
 
 impl Thread {
@@ -290,14 +298,17 @@ pub struct Kernel {
     pub user_breakpoints: BTreeSet<u64>,
     /// Executions at those addresses no trap reported.
     pub unseen_hits: Vec<UnseenHit>,
-    /// Makes `PTRACE_POKEDATA` report success without writing, so tests
-    /// can check that the oracles notice a debugger whose writes are lost.
+    /// Where the thread the client steps has been, while it steps.
+    pub tracking: Option<Tracking>,
+    /// The identifier the next activation takes.
+    next_activation: u64,
+    /// A deliberate defect, so tests can check that the oracles notice.
     #[cfg(test)]
-    pub lose_pokes: bool,
-    /// Makes the CPU execute the program's own instruction under a trap at
-    /// a user breakpoint, so tests can check that the oracles notice.
+    pub sabotage: Option<Sabotage>,
+    /// The thread whose single step went on past one instruction, under
+    /// [`Sabotage::LateSingleSteps`].
     #[cfg(test)]
-    pub skip_traps: bool,
+    late_step: Option<Tid>,
 }
 
 /// What running a thread for a while did.
@@ -323,10 +334,12 @@ impl Kernel {
             happenings: Vec::new(),
             user_breakpoints: BTreeSet::new(),
             unseen_hits: Vec::new(),
+            tracking: None,
+            next_activation: 1,
             #[cfg(test)]
-            lose_pokes: false,
+            sabotage: None,
             #[cfg(test)]
-            skip_traps: false,
+            late_step: None,
         }
     }
 
@@ -347,6 +360,17 @@ impl Kernel {
         tid
     }
 
+    /// The shadow of a thread that has made no call yet.
+    const fn new_shadow(&mut self) -> Shadow {
+        let base = self.next_activation;
+        self.next_activation += 1;
+        Shadow {
+            base,
+            calls: Vec::new(),
+            lost: false,
+        }
+    }
+
     /// Starts `image` as a traced child that has just executed it (K-EXEC-1):
     /// it reports a stop for `SIGTRAP` from itself, at its entry point.
     pub fn spawn(
@@ -357,6 +381,7 @@ impl Kernel {
         random: [u8; 16],
     ) -> Tid {
         let tid = self.allocate_tid();
+        let shadow = self.new_shadow();
         let (space, registers) = image.load(arguments, random);
         let comm = name.rsplit('/').next().unwrap_or(name);
         let comm = &comm[..comm.len().min(15)];
@@ -397,6 +422,8 @@ impl Kernel {
                 report: Some(WaitStatus::Stopped(tid, SIGTRAP)),
                 trapped_at: None,
                 traps: 0,
+                retired: 0,
+                shadow,
             },
         );
         tid
@@ -510,7 +537,9 @@ impl Kernel {
         let address = thread.registers.rip;
         let trap = process.space.peek_bytes(address, 1).as_deref() == Some(&[0xcc]);
         #[cfg(test)]
-        let skipped = trap && self.skip_traps && self.user_breakpoints.contains(&address);
+        let skipped = trap
+            && self.sabotage == Some(Sabotage::SkipTraps)
+            && self.user_breakpoints.contains(&address);
         #[cfg(not(test))]
         let skipped = false;
         if self.user_breakpoints.contains(&address)
@@ -522,13 +551,22 @@ impl Kernel {
         thread.trapped_at = None;
         let single_step = thread.single_step;
         #[cfg(test)]
-        let outcome = if skipped {
+        let (outcome, flow) = if skipped {
             step_under_trap(&mut thread.registers, &mut process.space, &process.image)
         } else {
-            cpu::step(&mut thread.registers, &mut process.space)
+            cpu::execute(&mut thread.registers, &mut process.space)
         };
         #[cfg(not(test))]
-        let outcome = cpu::step(&mut thread.registers, &mut process.space);
+        let (outcome, flow) = cpu::execute(&mut thread.registers, &mut process.space);
+        if matches!(outcome, Outcome::Completed | Outcome::Syscall) {
+            if let Some(tracking) = &mut self.tracking {
+                tracking.note(tid, &thread.shadow, address);
+            }
+            thread.retired += 1;
+            thread
+                .shadow
+                .follow(flow, thread.registers.rip, &mut self.next_activation);
+        }
         if outcome != Outcome::Syscall {
             // Instructions and exceptions enter the kernel, if at all, outside
             // any system call.
@@ -586,11 +624,65 @@ impl Kernel {
             }
         }
         if single_step {
+            #[cfg(test)]
+            if self.step_late(tid) {
+                return Executed::Continue;
+            }
             // K-TRAP-1: a single step reports TRAP_TRACE.
             self.trap(tid, signals::TRAP_TRACE);
             return Executed::Stopped;
         }
         Executed::Continue
+    }
+
+    /// Whether a single step of the thread the client steps goes on to a
+    /// second instruction, under [`Sabotage::LateSingleSteps`].
+    #[cfg(test)]
+    fn step_late(&mut self, tid: Tid) -> bool {
+        let stepped = self
+            .tracking
+            .as_ref()
+            .is_some_and(|tracking| tracking.tid == tid);
+        if self.sabotage != Some(Sabotage::LateSingleSteps) || !stepped {
+            return false;
+        }
+        self.late_step.take() != Some(tid) && {
+            self.late_step = Some(tid);
+            true
+        }
+    }
+
+    /// A word ptrace reads, as a sabotaged kernel reports it.
+    #[cfg(test)]
+    pub(super) fn sabotage_read(&self, tgid: Tid, address: u64, word: u64) -> u64 {
+        let return_slot = |exact: bool| {
+            self.threads_of(tgid).any(|thread| {
+                thread
+                    .shadow
+                    .calls
+                    .iter()
+                    .any(|call| call.slot == address && (!exact || call.return_address == word))
+            })
+        };
+        match self.sabotage {
+            Some(Sabotage::SkewReturnAddresses) if return_slot(true) => word + 1,
+            Some(Sabotage::SkewSmallStackWords)
+                if (1..0x1000).contains(&word)
+                    && !return_slot(false)
+                    && self.processes[&tgid].space.maps().lines().any(|line| {
+                        line.ends_with("[stack]") && {
+                            let range = line.split_whitespace().next().unwrap_or_default();
+                            let (start, end) = range.split_once('-').unwrap_or_default();
+                            (u64::from_str_radix(start, 16).unwrap_or(0)
+                                ..u64::from_str_radix(end, 16).unwrap_or(0))
+                                .contains(&address)
+                        }
+                    }) =>
+            {
+                word + 1
+            }
+            _ => word,
+        }
     }
 
     /// Stops a thread for `SIGTRAP` with `code` at its current `rip`.
@@ -658,21 +750,21 @@ impl Kernel {
 }
 
 /// Executes the program's own instruction at `rip` though a trap covers
-/// it, as a broken CPU would, for [`Kernel::skip_traps`].
+/// it, as a broken CPU would, for [`Sabotage::SkipTraps`].
 #[cfg(test)]
-fn step_under_trap(registers: &mut Registers, space: &mut AddressSpace, image: &Image) -> Outcome {
+fn step_under_trap(
+    registers: &mut Registers,
+    space: &mut AddressSpace,
+    image: &Image,
+) -> (Outcome, cpu::Flow) {
     let address = registers.rip;
     let original = image
-        .code()
-        .find_map(|(start, page)| {
-            let offset = usize::try_from(address.checked_sub(start)?).ok()?;
-            page.get(offset).copied()
-        })
+        .original_byte(address)
         .expect("a trap in the program's code");
     assert!(space.poke_bytes(address, &[original]));
-    let outcome = cpu::step(registers, space);
+    let executed = cpu::execute(registers, space);
     assert!(space.poke_bytes(address, &[0xcc]));
-    outcome
+    executed
 }
 
 /// What executing one instruction did to the thread's run.

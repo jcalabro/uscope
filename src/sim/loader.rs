@@ -1,5 +1,6 @@
 //! Loads golden executables into simulated address spaces as Linux's ELF
-//! loader does for a static executable with address randomization off.
+//! loader does for a static executable, position-dependent or not, with
+//! address randomization off.
 //!
 //! An [`Image`] is prepared once per binary and shared by every session
 //! that runs it; [`Image::load`] gives a session its own address space,
@@ -17,6 +18,10 @@ use super::memory::{AddressSpace, Backing, PAGE_BYTES, PAGE_SIZE, Page, Protecti
 pub const STACK_TOP: u64 = 0x7fff_ffff_f000;
 /// The size of the stack mapping a new process starts with.
 const STACK_SIZE: u64 = 132 * 1024;
+/// Where the mmap area begins, growing down, with randomization off and a
+/// stack limit under 127 MiB: the top of the address space less the
+/// smallest gap Linux leaves for the stack.
+const MMAP_BASE: u64 = STACK_TOP - 128 * 1024 * 1024;
 
 const AT_NULL: u64 = 0;
 const AT_PHDR: u64 = 3;
@@ -42,6 +47,9 @@ pub enum LoadError {
 struct Segment {
     start: u64,
     end: u64,
+    /// Where the pages that hold some of the file's bytes end. The kernel
+    /// maps the rest of the segment anonymously.
+    file_end: u64,
     protection: Protection,
     offset: u64,
     /// Page contents from `start`, one per page.
@@ -52,6 +60,9 @@ struct Segment {
 pub struct Image {
     path: Arc<str>,
     inode: u64,
+    /// What the image's addresses must be increased by to name where it
+    /// loads: zero for a position-dependent executable.
+    bias: u64,
     entry: u64,
     program_headers: u64,
     program_header_count: u64,
@@ -61,20 +72,64 @@ pub struct Image {
 impl Image {
     /// Prepares an executable that the simulated kernel names `path` and
     /// whose file has `inode`.
+    ///
+    /// A static position-independent executable, having no interpreter,
+    /// loads into the mmap area as the first thing mapped there (K-EXEC-2):
+    /// its whole span ends at [`MMAP_BASE`].
     pub fn new(path: &str, inode: u64, data: &[u8]) -> Result<Self, LoadError> {
         let file = object::File::parse(data)?;
         let object::File::Elf64(elf) = &file else {
             return Err(LoadError::Unsupported("not a 64-bit ELF file".into()));
         };
-        if file.kind() != object::ObjectKind::Executable {
-            return Err(LoadError::Unsupported(
-                "only static, position-dependent executables load".into(),
-            ));
-        }
         let header = elf.elf_header();
         let endian = elf.endian();
         let program_header_offset = header.e_phoff.get(endian);
         let program_header_count = u64::from(header.e_phnum.get(endian));
+        let program_header_table = elf
+            .elf_program_headers()
+            .iter()
+            .map(|header| {
+                (
+                    header.p_type.get(endian),
+                    header.p_align.get(endian),
+                    header.p_vaddr.get(endian),
+                    header.p_memsz.get(endian),
+                )
+            })
+            .collect::<Vec<_>>();
+        if program_header_table
+            .iter()
+            .any(|&(kind, ..)| kind == object::elf::PT_INTERP)
+        {
+            return Err(LoadError::Unsupported(
+                "executables with an interpreter do not load".into(),
+            ));
+        }
+        let loads = program_header_table
+            .iter()
+            .filter(|&&(kind, ..)| kind == object::elf::PT_LOAD);
+        let bias = match file.kind() {
+            object::ObjectKind::Executable => 0,
+            object::ObjectKind::Dynamic => {
+                if loads.clone().any(|&(_, align, ..)| align > PAGE_SIZE) {
+                    return Err(LoadError::Unsupported(
+                        "segments aligned beyond a page do not load".into(),
+                    ));
+                }
+                let start = loads.clone().map(|&(_, _, address, _)| address).min();
+                let end = loads.map(|&(_, _, address, size)| address + size).max();
+                let (Some(start), Some(end)) = (start, end) else {
+                    return Err(LoadError::Unsupported("nothing to load".into()));
+                };
+                let span = end.next_multiple_of(PAGE_SIZE) - (start & !(PAGE_SIZE - 1));
+                MMAP_BASE - span - (start & !(PAGE_SIZE - 1))
+            }
+            _ => {
+                return Err(LoadError::Unsupported(
+                    "only static executables load".into(),
+                ));
+            }
+        };
 
         let mut segments = Vec::new();
         let mut program_headers = None;
@@ -83,7 +138,7 @@ impl Image {
                 return Err(LoadError::Unsupported("segment without ELF flags".into()));
             };
             let (file_offset, file_size) = segment.file_range();
-            let address = segment.address();
+            let address = segment.address() + bias;
             if address % PAGE_SIZE != file_offset % PAGE_SIZE {
                 return Err(LoadError::Unsupported("misaligned segment".into()));
             }
@@ -102,7 +157,8 @@ impl Image {
         Ok(Self {
             path: Arc::from(path),
             inode,
-            entry: file.entry(),
+            bias,
+            entry: file.entry() + bias,
             program_headers: program_headers
                 .ok_or_else(|| LoadError::Unsupported("program headers are not loaded".into()))?,
             program_header_count,
@@ -110,9 +166,26 @@ impl Image {
         })
     }
 
+    /// Where the program starts, as loaded.
     #[must_use]
     pub const fn entry(&self) -> u64 {
         self.entry
+    }
+
+    /// What the image's own addresses, which its debug information and
+    /// symbols use, must be increased by to name where it loads.
+    #[must_use]
+    pub const fn bias(&self) -> u64 {
+        self.bias
+    }
+
+    /// The byte of code the image has at `address`, as loaded.
+    #[must_use]
+    pub fn original_byte(&self, address: u64) -> Option<u8> {
+        self.code().find_map(|(start, page)| {
+            let offset = usize::try_from(address.checked_sub(start)?).ok()?;
+            page.get(offset).copied()
+        })
     }
 
     /// Every executable page the image maps, with its address, as loaded.
@@ -136,12 +209,22 @@ impl Image {
     pub fn load(&self, arguments: &[String], random: [u8; 16]) -> (AddressSpace, Registers) {
         let mut space = AddressSpace::default();
         for segment in &self.segments {
-            let backing = Backing::File {
-                path: Arc::clone(&self.path),
-                inode: self.inode,
-                offset: segment.offset,
-            };
-            space.map(segment.start, segment.end, segment.protection, backing);
+            if segment.file_end > segment.start {
+                let backing = Backing::File {
+                    path: Arc::clone(&self.path),
+                    inode: self.inode,
+                    offset: segment.offset,
+                };
+                space.map(segment.start, segment.file_end, segment.protection, backing);
+            }
+            if segment.end > segment.file_end {
+                space.map(
+                    segment.file_end,
+                    segment.end,
+                    segment.protection,
+                    Backing::Anonymous,
+                );
+            }
             for (index, page) in segment.pages.iter().enumerate() {
                 space.share_page(segment.start + index as u64 * PAGE_SIZE, Arc::clone(page));
             }
@@ -259,6 +342,11 @@ fn prepare_segment(
     Ok(Segment {
         start,
         end,
+        file_end: if file_size == 0 {
+            start
+        } else {
+            file_end.next_multiple_of(PAGE_SIZE).min(end)
+        },
         protection,
         offset,
         pages,
