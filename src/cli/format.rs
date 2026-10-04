@@ -355,6 +355,11 @@ pub fn stop(reason: &StopReason, renderer: Renderer) -> String {
         StopReason::Step { kind } => {
             format!("{} after {}", stopped(Role::Current), step_name(*kind))
         }
+        StopReason::StepIncomplete { kind, description } => format!(
+            "{} before the {} completed: {description}",
+            stopped(Role::Warning),
+            step_name(*kind)
+        ),
         StopReason::Pause => format!("inferior {}", renderer.paint(Role::Current, "paused")),
         StopReason::Exception(info) => format!(
             "{} by {}",

@@ -876,6 +876,15 @@ pub enum StopReason {
     },
     /// A stepping operation completed.
     Step { kind: StepKind },
+    /// A stepping operation stopped before it could tell whether it had
+    /// completed, because the debugger lost evidence it follows a step by,
+    /// such as the stepping frame's caller. The thread stopped after the
+    /// last instruction it executed, and may be resumed or stepped again.
+    StepIncomplete {
+        kind: StepKind,
+        /// Why the step could not be followed.
+        description: Arc<str>,
+    },
     /// Execution stopped at the user's request.
     Pause,
     /// Execution stopped because of an exception.

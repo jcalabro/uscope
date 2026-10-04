@@ -962,15 +962,53 @@ pub(super) struct DwarfCallerProvider<'a> {
     pub(super) first: bool,
 }
 
+impl DwarfCallerProvider<'_> {
+    /// The address whose unwind rules describe `current`: its instruction in
+    /// the innermost or a signal frame, and otherwise the byte before its
+    /// return address, which still belongs to the call. `None` means a
+    /// return address of zero, which ends the stack.
+    fn lookup_address(&self, current: &FrameContext) -> Option<VirtualAddress> {
+        if self.first || current.signal_frame {
+            Some(current.instruction)
+        } else {
+            current
+                .instruction
+                .get()
+                .checked_sub(1)
+                .map(VirtualAddress::new)
+        }
+    }
+
+    /// The canonical frame address of `current`, from its own unwind rules.
+    ///
+    /// Identifying an activation needs nothing of its caller, so this works
+    /// for a frame whose return address is unreadable or corrupt, such as
+    /// a coroutine's first frame on a fresh stack.
+    pub(super) fn frame_cfa(
+        &mut self,
+        current: &FrameContext,
+    ) -> std::result::Result<VirtualAddress, UnwindTermination> {
+        let lookup = self
+            .lookup_address(current)
+            .ok_or(UnwindTermination::Complete)?;
+        let (module, image_address) = unwind_module_for(&self.modules, lookup)
+            .ok_or(UnwindTermination::ModuleNotFound { address: lookup })?;
+        module
+            .unwind
+            .cfa(image_address, &self.registers, &mut self.memory)
+            .map_err(|mut termination| {
+                if let UnwindTermination::NoUnwindInfo { address } = &mut termination {
+                    *address = lookup;
+                }
+                termination
+            })
+    }
+}
+
 impl CallerProvider for DwarfCallerProvider<'_> {
     fn caller(&mut self, current: &FrameContext) -> CallerResult {
-        let lookup = if self.first || current.signal_frame {
-            current.instruction
-        } else {
-            let Some(address) = current.instruction.get().checked_sub(1) else {
-                return CallerResult::Finished(UnwindTermination::Complete);
-            };
-            VirtualAddress::new(address)
+        let Some(lookup) = self.lookup_address(current) else {
+            return CallerResult::Finished(UnwindTermination::Complete);
         };
         self.first = false;
         let Some((module, image_address)) = unwind_module_for(&self.modules, lookup) else {

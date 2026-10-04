@@ -277,6 +277,13 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         )
     }
 
+    fn executable(&self, pid: Pid, address: VirtualAddress) -> Result<bool> {
+        queried(
+            format_args!("executable {address} in {pid}"),
+            self.0.executable(pid, address),
+        )
+    }
+
     fn queued_trap(&self, pid: Pid) -> Result<bool> {
         queried(
             format_args!("queued SIGTRAP of {pid}"),
