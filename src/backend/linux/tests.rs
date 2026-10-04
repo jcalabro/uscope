@@ -368,6 +368,9 @@ impl LinuxTraceOps for RecordingTrace {
     fn tracer_process(&self) -> i32 {
         i32::try_from(std::process::id()).expect("pid fits")
     }
+    fn allocate_stop_id(&self) -> StopId {
+        allocate_stop_id()
+    }
     fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
         None
     }
@@ -1540,6 +1543,9 @@ impl LinuxTraceOps for DebugRegisterTrace {
     }
     fn tracer_process(&self) -> i32 {
         i32::try_from(std::process::id()).expect("pid fits")
+    }
+    fn allocate_stop_id(&self) -> StopId {
+        allocate_stop_id()
     }
     fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
         None

@@ -19,7 +19,7 @@ use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
     ActiveExecution, ActiveKind, BreakpointOwner, ClassifiedStop, Controller, ExpectedStop,
     Inferior, LinuxError, NativeThreadState, PendingSignal, PublicStop, RepairGroup, Resume,
-    SignalGuard, StopBarrier, allocate_stop_id, backend_error, debug_thread_id, exception_info,
+    SignalGuard, StopBarrier, backend_error, debug_thread_id, exception_info,
     pending_exception_info, process_id, scoped_threads, steps_instructions, validate_process,
     validate_public_stop, validate_resumable, validate_stopped_thread,
 };
@@ -1201,7 +1201,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|barrier| Some((barrier.triggering_thread, barrier.reason.clone()?)))
             .expect("ready barrier publishes a reason");
         let presentation = self.presentation_for_thread(triggering_thread, Some(&reason))?;
-        let stop_id = allocate_stop_id();
+        let stop_id = self.ptrace.allocate_stop_id();
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         for thread in inferior.threads.values_mut() {
             thread.expected = ExpectedStop::None;

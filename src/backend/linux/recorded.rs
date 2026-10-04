@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::backend::{ControllerMessage, FileIdentity};
 use crate::debug_info::DebugInfo;
-use crate::protocol::LaunchOptions;
+use crate::protocol::{LaunchOptions, StopId};
 use crate::{Result, VirtualAddress};
 
 use super::memory::MemoryAccessError;
@@ -204,6 +204,10 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
 
     fn tracer_process(&self) -> i32 {
         self.0.tracer_process()
+    }
+
+    fn allocate_stop_id(&self) -> StopId {
+        self.0.allocate_stop_id()
     }
 
     fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {

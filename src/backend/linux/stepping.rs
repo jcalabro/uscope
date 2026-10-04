@@ -28,9 +28,9 @@ use crate::disassembly::{AssemblySyntax, ControlFlow, RawDecode, decoder_for};
 use super::memory::read_logical_memory;
 use super::{
     ActiveKind, BreakpointOwner, Controller, EpilogueTraversal, ExpectedStop, Inferior, LinuxError,
-    NativeThreadState, Resume, ReturnTraversal, StepStart, allocate_stop_id, backend_error,
-    debug_thread_id, is_superseded, process_id, steps_instructions, validate_process,
-    validate_public_stop, validate_resumable, validate_stopped_thread,
+    NativeThreadState, Resume, ReturnTraversal, StepStart, backend_error, debug_thread_id,
+    is_superseded, process_id, steps_instructions, validate_process, validate_public_stop,
+    validate_resumable, validate_stopped_thread,
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -79,7 +79,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             (
                 process_id(inferior.tgid),
                 ExecutionId::new(inferior.next_execution.wrapping_add(1)),
-                allocate_stop_id(),
+                self.ptrace.allocate_stop_id(),
                 presentation,
             )
         };

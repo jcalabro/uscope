@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use crate::backend::linux::thread_db;
 use crate::backend::{ControllerMessage, FileIdentity};
 use crate::debug_info::DebugInfo;
-use crate::protocol::LaunchOptions;
+use crate::protocol::{LaunchOptions, StopId};
 use crate::{Error, Result, VirtualAddress};
 
 use super::memory::MemoryAccessError;
@@ -35,7 +35,7 @@ use super::registers::{Fxsave, native_fxsave};
 use super::signals::{Signal, WaitEvent};
 use super::{
     BREAKPOINT_OPCODE, BreakpointOwner, BreakpointSite, LinuxError, SignalMetadata,
-    WAITER_THREAD_NAME, Waiter, WaiterThread, backend_error,
+    WAITER_THREAD_NAME, Waiter, WaiterThread, allocate_stop_id, backend_error,
 };
 
 /// Read-only access to a stopped target's registers, memory, and thread-local
@@ -96,6 +96,11 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     /// The process identifier signals this debugger sends carry as their
     /// sender.
     fn tracer_process(&self) -> i32;
+    /// Allocates the identifier of a new stop. A live edge draws from a
+    /// process-wide counter so no two sessions in a process share one; an
+    /// edge whose sessions share nothing, as a simulation's, may count its
+    /// own so that a session's identifiers do not depend on the others.
+    fn allocate_stop_id(&self) -> StopId;
     /// Resolves the file behind a module mapping and its load bias, or
     /// `None` when the file cannot be proven to be the mapped one.
     fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)>;
@@ -406,6 +411,10 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn tracer_process(&self) -> i32 {
         i32::try_from(std::process::id()).unwrap_or(i32::MAX)
+    }
+
+    fn allocate_stop_id(&self) -> StopId {
+        allocate_stop_id()
     }
 
     fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
