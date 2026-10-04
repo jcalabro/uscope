@@ -3282,6 +3282,8 @@ fn a_stop_whose_thread_sigkill_ends_while_it_is_handled_waits_for_the_exit() {
         thread: stepping,
         kind: StepKind::OverInstruction,
         start: Box::new(StepStart {
+            stack_pointer: 0,
+            returned_to: None,
             source: None,
             code_instance: None,
             physical_instance: None,
@@ -3355,6 +3357,8 @@ fn a_step_whose_threads_sigkill_ends_as_it_begins_runs_into_the_exit() {
             thread: first,
             kind: StepKind::IntoSource,
             start: Box::new(StepStart {
+                stack_pointer: 0,
+                returned_to: None,
                 source: None,
                 code_instance: None,
                 physical_instance: None,
@@ -3427,6 +3431,8 @@ fn plan_traps_a_dying_process_cannot_take_are_not_restored() {
                 thread: pid,
                 kind: StepKind::OverSource,
                 start: Box::new(StepStart {
+                    stack_pointer: 0,
+                    returned_to: None,
                     source: None,
                     code_instance: None,
                     physical_instance: None,
@@ -4225,6 +4231,8 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
             thread: stepping,
             kind: StepKind::OverSource,
             start: Box::new(StepStart {
+                stack_pointer: 0,
+                returned_to: None,
                 source: None,
                 code_instance: None,
                 physical_instance: None,
@@ -4485,6 +4493,8 @@ fn a_change_undone_before_every_thread_stopped_lets_a_stepi_finish_once() {
         thread: stepping,
         kind: StepKind::Instruction,
         start: Box::new(StepStart {
+            stack_pointer: 0,
+            returned_to: None,
             source: None,
             code_instance: None,
             physical_instance: None,
@@ -5073,6 +5083,8 @@ fn lost_frame_harness() -> WatchHarness {
             thread: pid,
             kind: StepKind::OverSource,
             start: Box::new(StepStart {
+                stack_pointer: 0,
+                returned_to: None,
                 source: Some(SourceLocation {
                     file: crate::SourceFileId::new(0),
                     line: crate::LineNumber::new(1).expect("nonzero line"),
@@ -5256,6 +5268,8 @@ fn a_step_whose_thread_exits_while_an_edit_drops_the_other_reason_ends_in_its_ex
         thread: stepping,
         kind: StepKind::OverSource,
         start: Box::new(StepStart {
+            stack_pointer: 0,
+            returned_to: None,
             source: None,
             code_instance: None,
             physical_instance: None,

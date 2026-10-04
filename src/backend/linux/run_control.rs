@@ -621,6 +621,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if !steps_instructions(kind) {
                 self.begin_epilogue_traversal(pid)?;
             }
+            self.note_returned_activation(pid, kind)?;
             if self.source_step_returned_to_undescribed_code(pid, kind)? {
                 self.cleanup_plan_breakpoints(execution)?;
                 // A user breakpoint that declined this hit still owns the

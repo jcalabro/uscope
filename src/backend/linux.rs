@@ -377,6 +377,15 @@ struct StepStart {
     code_instance: Option<CodeInstanceId>,
     physical_instance: Option<CodeInstanceId>,
     activation: Option<VirtualAddress>,
+    /// The stack pointer where the step began. Where no activation is
+    /// known, a frame below it was entered by a call, and code above it was
+    /// returned to.
+    stack_pointer: u64,
+    /// For a step over, the activation its frame returned to, once the
+    /// frame it began in returned short of a source statement. The step
+    /// then goes on by single steps and judges frames by this: a later call
+    /// can make a new activation at the returned one's CFA.
+    returned_to: Option<VirtualAddress>,
     plan_addresses: BTreeSet<VirtualAddress>,
     epilogue_traversal: Option<EpilogueTraversal>,
     return_traversal: Option<ReturnTraversal>,
