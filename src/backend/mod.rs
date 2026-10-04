@@ -45,11 +45,30 @@ pub fn process_executable_source(process: ProcessId) -> Result<ExecutableSource>
         .ok()
         .filter(|raw| *raw > 0)
         .ok_or(Error::InvalidProcessId(process.get()))?;
-    let proc_exe = PathBuf::from(format!("/proc/{raw}/exe"));
-    let display = fs::read_link(&proc_exe)?;
+    let (proc_exe, display) = process_exe_link(raw)?;
     let start_time =
         process_start_time(raw).ok_or(Error::ProcessIdentityUnavailable(process.get()))?;
     read_executable_source(&proc_exe, display, Some(start_time))
+}
+
+/// Finds a process's `exe` link and the path it names. A leader that exited
+/// before the rest of its process has none, so a live thread's is used.
+fn process_exe_link(process: i32) -> std::io::Result<(PathBuf, PathBuf)> {
+    let leader = PathBuf::from(format!("/proc/{process}/exe"));
+    let error = match fs::read_link(&leader) {
+        Ok(display) => return Ok((leader, display)),
+        Err(error) => error,
+    };
+    let Ok(mut threads) = fs::read_dir(format!("/proc/{process}/task")) else {
+        return Err(error);
+    };
+    threads
+        .find_map(|thread| {
+            let link = thread.ok()?.path().join("exe");
+            let display = fs::read_link(&link).ok()?;
+            Some((link, display))
+        })
+        .ok_or(error)
 }
 
 fn read_executable_source(

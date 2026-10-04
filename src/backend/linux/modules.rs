@@ -100,7 +100,8 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// the stop; its frames stay unnamed.
     pub(super) fn refresh_modules(&mut self) -> Result<()> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let pid = inferior.tgid;
+        // The leader may have exited before the rest of its process.
+        let pid = inferior.memory_thread();
         let main_loaded = inferior.loaded_module;
         let mut observed = Vec::<(PathBuf, u64)>::new();
         let mut mapped_modules = BTreeMap::new();
@@ -214,7 +215,7 @@ pub(super) fn load_bias(
         .map(|segment| segment.address())
         .min()
         .unwrap_or(0);
-    let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    let maps = read_maps(pid)?;
     parse_maps(&maps)?
         .into_iter()
         .find(|mapping| mapping.inode == identity.inode && mapping.file_offset == 0)
@@ -222,9 +223,26 @@ pub(super) fn load_bias(
         .ok_or_else(|| backend_error(LinuxError::LoadBias(executable.to_owned())))
 }
 
+/// Reads a process's memory map. A leader that exited before the rest of
+/// its process keeps its `/proc` directory but no memory, so its map reads
+/// empty, and a live thread's describes the process instead.
+pub(super) fn read_maps(pid: Pid) -> std::io::Result<String> {
+    let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    if !maps.is_empty() {
+        return Ok(maps);
+    }
+    let Ok(threads) = fs::read_dir(format!("/proc/{pid}/task")) else {
+        return Ok(maps);
+    };
+    Ok(threads
+        .filter_map(|thread| fs::read_to_string(thread.ok()?.path().join("maps")).ok())
+        .find(|maps| !maps.is_empty())
+        .unwrap_or(maps))
+}
+
 /// Returns the executable mappings of files, which identify loaded modules.
 pub(super) fn module_mappings(pid: Pid) -> Result<Vec<ModuleMapping>> {
-    let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
+    let maps = read_maps(pid)?;
     let mut mappings = parse_maps(&maps)?;
     mappings.retain(|mapping| mapping.executable);
     Ok(mappings)

@@ -28,7 +28,9 @@ use crate::protocol::LaunchOptions;
 use crate::{Error, Result, VirtualAddress};
 
 use super::memory::MemoryAccessError;
-use super::modules::{ModuleMapping, identify_mapped_module, load_bias, module_mappings};
+use super::modules::{
+    ModuleMapping, identify_mapped_module, load_bias, module_mappings, read_maps,
+};
 use super::registers::{Fxsave, native_fxsave};
 use super::signals::{Signal, WaitEvent};
 use super::{
@@ -280,8 +282,10 @@ impl InspectionOps for LinuxPtrace {
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
         self.assert_owner_thread();
         let process = thread_group_id(thread).map_err(|error| Arc::from(error.to_string()))?;
+        // The address space is read through the thread, since the leader
+        // may have exited before the rest of its process.
         thread_db::tls_address(
-            &thread_db::LiveProcess { pid: process },
+            &thread_db::LiveProcess { pid: thread },
             process,
             thread,
             link_map,
@@ -511,7 +515,7 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn executable(&self, pid: Pid, address: VirtualAddress) -> Result<bool> {
         self.assert_owner_thread();
-        let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
+        let maps = read_maps(pid)?;
         Ok(maps_executable(&maps, address))
     }
 
