@@ -11,7 +11,8 @@
     reason = "the world polls the client by hand on its one thread"
 )]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 
 use super::choices::{Choices, Stream};
+use super::kernel::Tid;
 use super::loader::Image;
 use super::marks::{Mark, Marks};
 use super::report::Failure;
@@ -27,8 +29,8 @@ use crate::protocol::Request;
 use crate::{
     BreakpointId, BreakpointLocation, BreakpointSpec, DebuggerEvent, DebuggerHandle, Error,
     ExceptionDisposition, ExecutionId, InferiorState, LaunchOptions, LineNumber,
-    MemoryReadCompletion, ModuleId, PresentedFrame, ResumeScope, StateSnapshot, StepKind, StopId,
-    StopReason, UnwindTermination, VirtualAddress,
+    MemoryReadCompletion, ModuleId, PresentedFrame, ProcessId, ResumeScope, StateSnapshot,
+    StepKind, StopId, StopReason, ThreadState, UnwindTermination, VirtualAddress,
 };
 
 /// The most bytes one memory read asks for.
@@ -51,13 +53,43 @@ pub struct Script {
     pub image: Arc<Image>,
 }
 
+/// What the client shares with the world.
+#[derive(Clone, Default)]
+pub struct Shared {
+    /// What the client did, for the trace.
+    pub notes: Rc<RefCell<Vec<String>>>,
+    /// Processes something outside the session killed, which the world
+    /// records when its fault fires.
+    pub killed: Rc<RefCell<BTreeSet<Tid>>>,
+    /// Processes that began to end as a whole, killed or exiting their
+    /// group, which the world records as it happens.
+    pub ending: Rc<RefCell<BTreeSet<Tid>>>,
+    /// The user's breakpoints the debugger said it made, and the client has
+    /// not asked to remove, with the addresses of their locations.
+    pub breakpoints: Rc<RefCell<BTreeMap<u64, BTreeSet<u64>>>>,
+}
+
+impl Shared {
+    /// Every address where a user breakpoint is certainly enabled.
+    #[must_use]
+    pub fn addresses(&self) -> BTreeSet<u64> {
+        self.breakpoints
+            .borrow()
+            .values()
+            .flatten()
+            .copied()
+            .collect()
+    }
+}
+
 pub struct Client {
     pub handle: DebuggerHandle,
     pub choices: Rc<RefCell<Choices>>,
-    /// What the client did, for the trace.
-    pub notes: Rc<RefCell<Vec<String>>>,
     pub marks: Rc<RefCell<Marks>>,
+    pub shared: Shared,
     pub script: Script,
+    /// The last execution that resumed one thread alone.
+    pub alone: Cell<Option<ExecutionId>>,
 }
 
 /// A breakpoint the client added, with the image addresses of its traps.
@@ -76,7 +108,32 @@ impl Client {
     }
 
     fn note(&self, note: impl Into<String>) {
-        self.notes.borrow_mut().push(note.into());
+        self.shared.notes.borrow_mut().push(note.into());
+    }
+
+    /// Whether something outside the session killed `process`.
+    fn killed(&self, process: ProcessId) -> bool {
+        Tid::try_from(process.get()).is_ok_and(|tgid| self.shared.killed.borrow().contains(&tgid))
+    }
+
+    /// Accepts a failure of a request about `process` if the process began
+    /// to end as a whole: killed from outside, or exiting its group. Such a
+    /// process vanishes under requests about it, even from a stop the
+    /// debugger published just before it heard of the end, so a request
+    /// may fail however it fails.
+    fn excuse(&self, process: ProcessId, result: Result<(), Failure>) -> Result<(), Failure> {
+        let ending = Tid::try_from(process.get())
+            .is_ok_and(|tgid| self.shared.ending.borrow().contains(&tgid));
+        match result {
+            Err(failure) if failure.check == "protocol" && ending => {
+                self.note(format!(
+                    "the program is ending, so this may fail: {}",
+                    failure.message
+                ));
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     fn mark(&self, mark: Mark) {
@@ -99,7 +156,7 @@ impl Client {
                 .snapshot()
                 .await
                 .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
-            match snapshot.inferior {
+            match snapshot.inferior.clone() {
                 InferiorState::NotRunning => {
                     if launches == self.script.launches {
                         break;
@@ -110,9 +167,14 @@ impl Client {
                     }
                     self.launch().await?;
                 }
-                InferiorState::Running { execution_id, .. } => {
-                    self.while_running(execution_id, &mut events, &mut breakpoints)
-                        .await?;
+                InferiorState::Running {
+                    process_id,
+                    execution_id,
+                } => {
+                    let result = self
+                        .while_running(execution_id, &mut events, &mut breakpoints)
+                        .await;
+                    self.excuse(process_id, result)?;
                 }
                 InferiorState::Stopped {
                     process_id,
@@ -126,7 +188,29 @@ impl Client {
                             StopReason::Breakpoint { .. } => self.mark(Mark::BreakpointStop),
                             StopReason::Step { .. } => self.mark(Mark::StepStop),
                             StopReason::Pause => self.mark(Mark::PauseStop),
+                            // No golden program raises a signal or does
+                            // anything the debugger cannot classify.
+                            StopReason::Exception(_) | StopReason::Unclassifiable { .. }
+                                if !self.killed(process_id) =>
+                            {
+                                return Err(protocol(format!("stop {stop_id} reports {reason:?}")));
+                            }
                             _ => {}
+                        }
+                        let at_breakpoints = snapshot
+                            .threads
+                            .iter()
+                            .filter(|thread| {
+                                matches!(
+                                    thread.state,
+                                    ThreadState::Stopped {
+                                        reason: Some(StopReason::Breakpoint { .. })
+                                    }
+                                )
+                            })
+                            .count();
+                        if at_breakpoints > 1 {
+                            self.mark(Mark::CoHit);
                         }
                     }
                     if let Some(previous) = last_stop
@@ -140,9 +224,10 @@ impl Client {
                         stale = Some(previous);
                     }
                     last_stop = Some(stop_id);
-                    let scope = ResumeScope::Process(process_id);
-                    self.while_stopped(stop_id, scope, stale, &mut events, &mut breakpoints)
-                        .await?;
+                    let result = self
+                        .while_stopped(&snapshot, stop_id, stale, &mut events, &mut breakpoints)
+                        .await;
+                    self.excuse(process_id, result)?;
                 }
             }
         }
@@ -155,12 +240,16 @@ impl Client {
             stop_at_entry: self.script.stop_at_entry,
             ..LaunchOptions::default()
         };
-        let execution = self
-            .handle
-            .launch_with(options)
-            .await
-            .map_err(|error| protocol(format!("launch failed: {error}")))?;
-        self.note(format!("launched as execution {execution}"));
+        let killed = self.shared.killed.borrow().len();
+        match self.handle.launch_with(options).await {
+            Ok(execution) => self.note(format!("launched as execution {execution}")),
+            // Killed from outside before its first stop, the program never
+            // finishes launching.
+            Err(error) if self.shared.killed.borrow().len() > killed => {
+                self.note(format!("the program was killed from outside: {error}"));
+            }
+            Err(error) => return Err(protocol(format!("launch failed: {error}"))),
+        }
         Ok(())
     }
 
@@ -196,7 +285,12 @@ impl Client {
                 self.kill(true).await?;
             }
             _ => {
-                if let Some(execution) = execution {
+                // A thread running alone may wait forever for a sibling
+                // that stays stopped, as the program's own lock would make
+                // it, so only an execution of every thread is waited for.
+                if let Some(execution) = execution
+                    && self.alone.get() != Some(execution)
+                {
                     self.note(format!("wait for execution {execution}"));
                     self.wait_for(execution, events).await?;
                 }
@@ -207,13 +301,17 @@ impl Client {
 
     async fn while_stopped(
         &self,
+        snapshot: &StateSnapshot,
         stop: StopId,
-        scope: ResumeScope,
         stale: Option<StopId>,
         events: &mut broadcast::Receiver<DebuggerEvent>,
         breakpoints: &mut Vec<Added>,
     ) -> Result<(), Failure> {
-        match self.draw(10) {
+        let InferiorState::Stopped { process_id, .. } = snapshot.inferior else {
+            unreachable!("the client acts while stopped on a stopped snapshot")
+        };
+        let scope = ResumeScope::Process(process_id);
+        match self.draw(12) {
             0 => {
                 self.note("resume");
                 match self.handle.resume().await {
@@ -244,12 +342,58 @@ impl Client {
                 self.mark(Mark::KilledStopped);
                 self.kill(false).await?;
             }
+            9 => self.select_thread(snapshot).await?,
+            10 => self.continue_thread(snapshot, stop).await?,
             _ => {
                 if let Some(stale) = stale {
                     self.continue_stale(stale, scope).await?;
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Selects one of the stopped threads, which later steps, backtraces,
+    /// and reads use.
+    async fn select_thread(&self, snapshot: &StateSnapshot) -> Result<(), Failure> {
+        let thread = self
+            .choices
+            .borrow_mut()
+            .pick(Stream::Client, &snapshot.threads)
+            .id;
+        self.handle
+            .select_thread(thread)
+            .await
+            .map_err(|error| protocol(format!("selecting thread {thread} failed: {error}")))?;
+        self.note(format!("selected thread {thread}"));
+        if snapshot.selected_thread != Some(thread) {
+            self.mark(Mark::ThreadSelected);
+        }
+        Ok(())
+    }
+
+    /// Resumes one stopped thread alone. Its execution may never end by
+    /// itself, so the client does not wait for it.
+    async fn continue_thread(&self, snapshot: &StateSnapshot, stop: StopId) -> Result<(), Failure> {
+        let thread = self
+            .choices
+            .borrow_mut()
+            .pick(Stream::Client, &snapshot.threads)
+            .id;
+        let execution = self
+            .handle
+            .continue_execution(
+                stop,
+                ResumeScope::Thread(thread),
+                ExceptionDisposition::Pass,
+            )
+            .await
+            .map_err(|error| protocol(format!("continuing thread {thread} failed: {error}")))?;
+        self.note(format!(
+            "continued thread {thread} alone as execution {execution}"
+        ));
+        self.mark(Mark::ThreadContinued);
+        self.alone.set(Some(execution));
         Ok(())
     }
 
@@ -412,7 +556,13 @@ impl Client {
                 BreakpointLocation::Image(address) => Some(address.get()),
                 BreakpointLocation::Virtual(_) => None,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // Golden programs are static executables, which load where their
+        // images say.
+        self.shared
+            .breakpoints
+            .borrow_mut()
+            .insert(breakpoint.id.get(), traps.iter().copied().collect());
         breakpoints.retain(|added| added.id != breakpoint.id);
         breakpoints.push(Added {
             id: breakpoint.id,
@@ -428,6 +578,8 @@ impl Client {
         }
         let index = usize::try_from(self.draw(breakpoints.len() as u64)).expect("small");
         let id = breakpoints.swap_remove(index).id;
+        // From the moment the client asks, the breakpoint may be gone.
+        self.shared.breakpoints.borrow_mut().remove(&id.get());
         self.handle
             .remove_breakpoint(id)
             .await

@@ -8,6 +8,8 @@ use std::fmt;
 
 use super::choices::{Choices, Stream};
 use super::corpus::Corpus;
+use super::faults::Plan;
+use super::schedule::Policy;
 
 /// How likely each kind of action is, relative to the others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +26,13 @@ pub struct Swarm {
     pub variant: usize,
     /// Which of the program's manifest runs, and so which arguments.
     pub run: usize,
-    pub weights: Weights,
+    /// How the world chooses its actions.
+    pub policy: Policy,
+    /// How often, in a thousand, other actors act before a call the
+    /// controller makes into the kernel.
+    pub preempt: u64,
+    /// The fault the run plans, if any.
+    pub fault: Option<Plan>,
     /// The most instructions one `Run` action executes.
     pub burst: u64,
     /// The controller queue's capacity.
@@ -58,11 +66,28 @@ impl Swarm {
             deliver: pick(&weight),
             poll: pick(&weight),
         };
+        let policy = if pick(&[0, 1]) == 0 {
+            Policy::Walk(weights)
+        } else {
+            Policy::Pct {
+                depth: pick(&[1, 2, 3, 4]),
+                horizon: pick(&[64, 512, 4096]),
+            }
+        };
+        let preempt = pick(&[0, 20, 200, 600]);
+        let creates_threads = corpus.programs[program].variants[variant]
+            .functions
+            .iter()
+            .any(|function| function == "rt_clone");
+        let fault = (pick(&[0, 1]) == 1).then(|| Plan::choose(choices, creates_threads));
+        let mut pick = |options: &[u64]| *choices.pick(Stream::Swarm, options);
         Self {
             program,
             variant,
             run,
-            weights,
+            policy,
+            preempt,
+            fault,
             burst: pick(&[1, 8, 64, 512]),
             queue_capacity: usize::try_from(pick(&[1, 2, 8, 32])).expect("small"),
             event_capacity: usize::try_from(pick(&[2, 16, 1024])).expect("small"),
@@ -76,16 +101,14 @@ impl Swarm {
 
 impl fmt::Display for Swarm {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Weights {
-            run,
-            collect,
-            deliver,
-            poll,
-        } = self.weights;
         write!(
             formatter,
-            "weights run={run} collect={collect} deliver={deliver} poll={poll} burst={} \
-             queue={} events={} entry={} requests={} launches={} early-breakpoints={}",
+            "{} preempt={} fault={} burst={} queue={} events={} entry={} requests={} \
+             launches={} early-breakpoints={}",
+            self.policy,
+            self.preempt,
+            self.fault
+                .map_or_else(|| "none".to_owned(), |fault| fault.to_string()),
             self.burst,
             self.queue_capacity,
             self.event_capacity,

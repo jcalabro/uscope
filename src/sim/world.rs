@@ -1,19 +1,25 @@
 //! The world: one session of the real controller and client against the
 //! simulated kernel, advanced one action at a time on one thread.
 //!
-//! Each step lists the enabled actions, lets the `Schedule` stream pick
-//! one, performs it, records it in the trace, and runs the oracles:
+//! Each step lists the enabled actions, lets the scheduler pick one,
+//! performs it, records it in the trace, and runs the oracles:
 //!
 //! - `Run`: a running thread executes a burst of instructions.
 //! - `Collect`: the waiter reaps a status and queues it for the controller.
 //! - `Deliver`: the controller serves the message at the front of its queue.
 //! - `Poll`: the client task runs until it waits again.
 //!
+//! Inside `Deliver`, every call the controller makes into the kernel is a
+//! preemption point, where threads may run and the waiter may reap before
+//! the call takes effect, as on Linux. A planned fault fires as an action of
+//! its own, or at a preemption point.
+//!
 //! The session ends when the client has shut the controller down and
 //! nothing is left to do. A session in which nothing can happen while the
 //! client still waits is stuck, which is a failure.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
@@ -22,18 +28,24 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
-use tokio::sync::broadcast;
+use nix::libc;
 
+use super::audit::Auditor;
 use super::choices::{Choices, Stream};
-use super::client::{Client, Script};
+use super::client::{Client, Script, Shared};
 use super::corpus::{Corpus, Run, Variant};
-use super::kernel::{ExitStatus, Kernel, State, Tid, WaitStatus};
+use super::faults::{Faults, Plan};
+use super::kernel::{Kernel, State, StopKind, Tid};
+use super::machine::Machine;
 use super::marks::{Mark, Marks};
 use super::oracles;
 use super::report::{Failure, Trace};
+use super::schedule::{Action, Scheduler};
 use super::swarm::Swarm;
-use crate::backend::sim_edge::{SimController, SimExecutable, SimLaunch};
-use crate::{DebuggerEvent, DebuggerHandle};
+use crate::DebuggerHandle;
+use crate::backend::sim_edge::{
+    Preemption, SimController, SimExecutable, SimLaunch, SimParts, SimWaiter,
+};
 
 /// The simulated debugger's process identifier.
 const TRACER: i32 = 100;
@@ -60,6 +72,12 @@ pub enum Sabotage {
     LosePokes,
     /// The waiter never reaps a status.
     DeafWaiter,
+    /// Once a stop is published, a stopped thread runs again behind the
+    /// controller's back.
+    ResumeBehindTheController,
+    /// The CPU executes the program's own instruction under a trap the
+    /// debugger planted for the user.
+    SkipTraps,
 }
 
 impl Default for Settings {
@@ -91,6 +109,8 @@ pub struct Outcome {
     pub state: Option<String>,
     /// The interesting states the run reached.
     pub marks: Marks,
+    /// The planned fault, if it never fired.
+    pub unfired: Option<Plan>,
 }
 
 /// Runs the session `seed` names.
@@ -105,63 +125,57 @@ pub fn run(seed: u64, corpus: &Corpus, settings: &Settings) -> Outcome {
     let mut failure = None;
     let mut state = None;
     loop {
-        match catch_panic(|| world.step()) {
+        match catch_panic(|| world.step_once()) {
             Ok(Ok(Progress::Continue)) => {}
             Ok(Ok(Progress::Finished)) => break,
             Ok(Err(mut found)) => {
-                found.step = world.step;
+                found.step = world.step();
                 failure = Some(found);
                 break;
             }
             Err(mut panic) => {
-                panic.step = world.step;
+                panic.step = world.step();
                 world.flush();
                 failure = Some(panic);
                 break;
             }
         }
-        if settings.stop_at == Some(world.step) {
+        if settings.stop_at == Some(world.step()) {
             state = Some(world.dump());
             break;
         }
-        if world.step >= settings.max_steps {
+        if world.step() >= settings.max_steps {
             failure = Some(Failure {
-                step: world.step,
+                step: world.step(),
                 ..Failure::debugger(
                     "liveness",
-                    format!("still going after {} actions", world.step),
+                    format!("still going after {} actions", world.step()),
                 )
             });
             break;
         }
     }
     let (lines, dropped) = world.trace.lines();
+    let faults = world.machine.faults.borrow();
     Outcome {
         seed,
         swarm,
         program: variant.name.clone(),
         arguments: run.arguments.clone(),
         fingerprint: world.trace.fingerprint(),
-        steps: world.step,
+        steps: world.step(),
         failure,
         trace: lines.iter().cloned().collect(),
         dropped,
         state,
-        marks: world.marks.borrow().clone(),
+        marks: world.machine.marks.borrow().clone(),
+        unfired: faults.plan.filter(|_| faults.fired.is_none()),
     }
 }
 
 enum Progress {
     Continue,
     Finished,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Action {
-    Run(Tid),
-    Collect,
-    Deliver,
-    Poll,
 }
 
 /// Whether the client task asked to be polled again.
@@ -179,41 +193,22 @@ impl Wake for Woken {
 
 type ClientTask = Pin<Box<dyn Future<Output = Result<(), Failure>>>>;
 
-/// What the auditor has seen of the event stream.
-#[derive(Default)]
-struct Audit {
-    /// The newest revision of any event.
-    revision: u64,
-    /// The newest revision a `StateChanged` announced.
-    change: u64,
-    stop: u64,
-}
-
 struct World<'a> {
     swarm: Swarm,
     variant: &'a Variant,
     run: &'a Run,
-    choices: Rc<RefCell<Choices>>,
-    kernel: Rc<RefCell<Kernel>>,
-    /// Whether the controller started its waiter.
-    waiter: Rc<Cell<bool>>,
+    machine: Rc<Machine>,
     /// The controller, until it exits.
     controller: Option<SimController>,
-    /// A status the waiter reaped but could not queue yet, the queue being
-    /// full.
-    hand: Option<WaitStatus>,
     /// The client task, until it finishes.
     client: Option<ClientTask>,
+    shared: Shared,
     woken: Arc<Woken>,
     waker: Waker,
-    notes: Rc<RefCell<Vec<String>>>,
-    marks: Rc<RefCell<Marks>>,
-    auditor: broadcast::Receiver<DebuggerEvent>,
-    audit: Audit,
+    auditor: Auditor,
+    /// The traps whose stops the controller heard of, by thread and count.
+    counted: BTreeSet<(Tid, u64)>,
     trace: Trace,
-    step: u64,
-    #[cfg(test)]
-    sabotage: Option<Sabotage>,
     #[cfg(debug_assertions)]
     capture: crate::flight_recorder::Capture,
 }
@@ -231,32 +226,51 @@ impl<'a> World<'a> {
         let capture = crate::flight_recorder::Capture::start();
         let mut random = [0; 16];
         choices.fill(Stream::Program, &mut random);
+        let scheduler = Scheduler::new(swarm.policy, &mut choices);
         let choices = Rc::new(RefCell::new(choices));
         let kernel = Rc::new(RefCell::new(Kernel::new(TRACER)));
         #[cfg(test)]
         {
-            kernel.borrow_mut().lose_pokes = settings.sabotage == Some(Sabotage::LosePokes);
+            let mut kernel = kernel.borrow_mut();
+            kernel.lose_pokes = settings.sabotage == Some(Sabotage::LosePokes);
+            kernel.skip_traps = settings.sabotage == Some(Sabotage::SkipTraps);
         }
-        let waiter = Rc::new(Cell::new(false));
+        let marks = Rc::new(RefCell::new(Marks::default()));
+        let shared = Shared::default();
+        let machine = Rc::new(Machine {
+            kernel: Rc::clone(&kernel),
+            waiter: Rc::new(RefCell::new(SimWaiter::default())),
+            choices: Rc::clone(&choices),
+            scheduler: RefCell::new(scheduler),
+            faults: RefCell::new(Faults::new(swarm.fault)),
+            marks: Rc::clone(&marks),
+            killed: Rc::clone(&shared.killed),
+            ending: Rc::clone(&shared.ending),
+            step: Cell::new(0),
+            preempt: swarm.preempt,
+            #[cfg(test)]
+            sabotage: settings.sabotage,
+        });
         let debug_info = variant.debug_info();
         let module_image = Arc::clone(&debug_info.image);
-        let (controller, channels) = SimController::new(
-            Rc::clone(&kernel),
-            Rc::clone(&waiter),
-            SimLaunch {
+        let (controller, channels) = SimController::new(SimParts {
+            kernel,
+            waiter: Rc::clone(&machine.waiter),
+            preemption: Rc::clone(&machine) as Rc<dyn Preemption>,
+            launch: SimLaunch {
                 image: Arc::clone(&variant.image),
                 path: Arc::clone(&variant.path),
                 random,
             },
-            &SimExecutable {
+            executable: SimExecutable {
                 path: Arc::clone(&variant.path),
                 data: Arc::clone(&variant.data),
                 inode: variant.inode,
             },
             debug_info,
-            swarm.queue_capacity,
-            swarm.event_capacity,
-        );
+            queue_capacity: swarm.queue_capacity,
+            event_capacity: swarm.event_capacity,
+        });
         let handle = DebuggerHandle {
             module_image,
             core_dump: None,
@@ -264,14 +278,12 @@ impl<'a> World<'a> {
             requests: channels.requests,
             events: channels.events,
         };
-        let auditor = handle.subscribe();
-        let notes = Rc::new(RefCell::new(Vec::new()));
-        let marks = Rc::new(RefCell::new(Marks::default()));
+        let auditor = Auditor::new(handle.subscribe());
         let client = Client {
             handle,
-            choices: Rc::clone(&choices),
-            notes: Rc::clone(&notes),
-            marks: Rc::clone(&marks),
+            choices,
+            marks,
+            shared: shared.clone(),
             script: Script {
                 arguments: run.arguments.clone(),
                 stop_at_entry: swarm.stop_at_entry,
@@ -284,6 +296,7 @@ impl<'a> World<'a> {
                 source_lines: program.source_lines,
                 image: Arc::clone(&variant.image),
             },
+            alone: Cell::new(None),
         };
         let woken = Arc::new(Woken(AtomicBool::new(true)));
         let waker = Waker::from(Arc::clone(&woken));
@@ -296,38 +309,34 @@ impl<'a> World<'a> {
             swarm,
             variant,
             run,
-            choices,
-            kernel,
-            waiter,
+            machine,
             controller: Some(controller),
-            hand: None,
             client: Some(Box::pin(client.run())),
+            shared,
             woken,
             waker,
-            notes,
-            marks,
             auditor,
-            audit: Audit::default(),
+            counted: BTreeSet::new(),
             trace,
-            step: 0,
-            #[cfg(test)]
-            sabotage: settings.sabotage,
             #[cfg(debug_assertions)]
             capture,
         }
     }
 
+    fn step(&self) -> u64 {
+        self.machine.step.get()
+    }
+
     fn actions(&self) -> Vec<Action> {
-        let kernel = self.kernel.borrow();
-        let mut actions = kernel.runnable().map(Action::Run).collect::<Vec<_>>();
+        let mut actions = self
+            .machine
+            .kernel
+            .borrow()
+            .runnable()
+            .map(Action::Run)
+            .collect::<Vec<_>>();
         if let Some(controller) = &self.controller {
-            let collect = match self.hand {
-                Some(_) => controller.has_room(),
-                None => self.waiter.get() && kernel.reportable().next().is_some(),
-            };
-            #[cfg(test)]
-            let collect = collect && self.sabotage != Some(Sabotage::DeafWaiter);
-            if collect {
+            if self.machine.can_collect() {
                 actions.push(Action::Collect);
             }
             if controller.has_message() {
@@ -340,50 +349,72 @@ impl<'a> World<'a> {
         actions
     }
 
-    /// Picks an action kind by the swarm's weights, then one action of
-    /// that kind.
-    fn choose(&self, actions: &[Action]) -> Action {
-        let weights = self.swarm.weights;
-        let kinds = [
-            (
-                weights.run,
-                actions
-                    .iter()
-                    .any(|action| matches!(action, Action::Run(_))),
-            ),
-            (weights.collect, actions.contains(&Action::Collect)),
-            (weights.deliver, actions.contains(&Action::Deliver)),
-            (weights.poll, actions.contains(&Action::Poll)),
-        ]
-        .map(|(weight, enabled)| if enabled { weight } else { 0 });
-        let mut choices = self.choices.borrow_mut();
-        match choices.weighted(Stream::Schedule, &kinds) {
-            0 => {
-                let threads = actions
-                    .iter()
-                    .filter(|action| matches!(action, Action::Run(_)))
-                    .copied()
-                    .collect::<Vec<_>>();
-                *choices.pick(Stream::Schedule, &threads)
-            }
-            1 => Action::Collect,
-            2 => Action::Deliver,
-            _ => Action::Poll,
+    fn step_once(&mut self) -> Result<Progress, Failure> {
+        let step = self.step() + 1;
+        let fault_due = self.machine.faults.borrow().at_step(step);
+        if fault_due && let Some(line) = self.machine.kill(Mark::KilledAtStep) {
+            self.machine.step.set(step);
+            self.trace.line(format!("#{step} {line}"));
+            self.check()?;
+            return Ok(Progress::Continue);
         }
-    }
-
-    fn step(&mut self) -> Result<Progress, Failure> {
         let actions = self.actions();
         if actions.is_empty() {
             return self.finish();
         }
-        let action = self.choose(&actions);
-        self.step += 1;
-        let line = self.perform(action)?;
-        self.trace.line(format!("#{} {line}", self.step));
+        let action = self.machine.scheduler.borrow_mut().choose(
+            &actions,
+            step,
+            &mut self.machine.choices.borrow_mut(),
+        );
+        self.machine.step.set(step);
+        let performed = self.perform(action);
+        let line = match &performed {
+            Ok(line) => line.clone(),
+            Err(failure) => format!("{action:?} failed: {}", failure.check),
+        };
+        self.trace.line(format!("#{step} {line}"));
+        for line in self.machine.absorb() {
+            self.trace.line(format!("    {line}"));
+        }
         self.flush();
+        performed?;
+        if action == Action::Poll {
+            // The user's breakpoints, as the client now knows them, are what
+            // the kernel watches for unseen hits.
+            self.machine.kernel.borrow_mut().user_breakpoints = self.shared.addresses();
+        }
+        #[cfg(test)]
+        self.sabotage();
         self.check()?;
         Ok(Progress::Continue)
+    }
+
+    /// Resumes a stopped thread behind the controller's back while a stop
+    /// is published, under [`Sabotage::ResumeBehindTheController`].
+    #[cfg(test)]
+    fn sabotage(&self) {
+        if self.machine.sabotage != Some(Sabotage::ResumeBehindTheController)
+            || self
+                .controller
+                .as_ref()
+                .is_none_or(|controller| controller.truth().public_stop.is_none())
+        {
+            return;
+        }
+        let mut kernel = self.machine.kernel.borrow_mut();
+        if let Some(thread) = kernel.threads.values_mut().find(|thread| {
+            matches!(
+                thread.state,
+                State::Stopped {
+                    kind: StopKind::Signal(_),
+                    ..
+                }
+            )
+        }) {
+            thread.state = State::Running;
+            thread.report = None;
+        }
     }
 
     /// Performs one action, returning its trace line.
@@ -391,55 +422,15 @@ impl<'a> World<'a> {
         match action {
             Action::Run(tid) => {
                 let budget = self
+                    .machine
                     .choices
                     .borrow_mut()
                     .below(Stream::Schedule, self.swarm.burst)
                     + 1;
-                let mut kernel = self.kernel.borrow_mut();
-                let executed = kernel.run(tid, budget);
-                let state = kernel.threads.get(&tid).map(|thread| thread.state);
-                Ok(format!(
-                    "run {tid} x{executed} -> {}",
-                    describe_state(state)
-                ))
+                Ok(self.machine.run_thread(tid, budget))
             }
-            Action::Collect => {
-                let controller = self
-                    .controller
-                    .as_ref()
-                    .expect("collect needs a controller");
-                let mut line = String::from("collect");
-                if self.hand.is_none() {
-                    let mut kernel = self.kernel.borrow_mut();
-                    let ready = kernel.reportable().collect::<Vec<_>>();
-                    let tid = *self.choices.borrow_mut().pick(Stream::Schedule, &ready);
-                    let status = kernel.collect(tid).expect("a reportable thread reports");
-                    let _ = write!(line, " {status}");
-                    self.hand = Some(status);
-                }
-                let status = self.hand.take().expect("the waiter holds a status");
-                if controller.queue_status(status) {
-                    line.push_str(" -> queued");
-                } else {
-                    self.hand = Some(status);
-                    self.marks.borrow_mut().hit(Mark::QueueFull);
-                    line.push_str(" -> held, the queue is full");
-                }
-                Ok(line)
-            }
-            Action::Deliver => {
-                let controller = self
-                    .controller
-                    .as_mut()
-                    .expect("deliver needs a controller");
-                let (description, running) = controller.deliver().expect("deliver needs a message");
-                if running {
-                    Ok(format!("deliver {description}"))
-                } else {
-                    self.controller = None;
-                    Ok(format!("deliver {description} -> controller exited"))
-                }
-            }
+            Action::Collect => Ok(self.machine.collect()),
+            Action::Deliver => self.deliver(),
             Action::Poll => {
                 self.woken.0.store(false, Ordering::Relaxed);
                 let task = self.client.as_mut().expect("poll needs a client");
@@ -455,6 +446,44 @@ impl<'a> World<'a> {
         }
     }
 
+    /// Lets the controller handle the message at the front of its queue,
+    /// and checks the breakpoint hits it counted.
+    fn deliver(&mut self) -> Result<String, Failure> {
+        let controller = self
+            .controller
+            .as_mut()
+            .expect("deliver needs a controller");
+        let delivery = controller.take().expect("deliver needs a message");
+        let description = delivery.description.clone();
+        let before = controller.truth();
+        // A trap whose stop the controller now hears of, once: each trap the
+        // CPU executed is one hit.
+        let trap = delivery
+            .trap
+            .and_then(|tid| trap_address(&self.machine.kernel.borrow(), tid))
+            .filter(|&(tid, _, traps)| self.counted.insert((tid, traps)))
+            .map(|(tid, address, _)| (tid, address));
+        let launch = delivery.launch;
+        let running = controller.handle(delivery);
+        if !running {
+            self.controller = None;
+            return Ok(format!("deliver {description} -> controller exited"));
+        }
+        let after = controller.truth();
+        // A group exit or SIGKILL meanwhile takes the trap's thread out of
+        // its stop, and the controller may never count the hit.
+        let disturbed = trap.is_some_and(|(tid, _)| {
+            self.machine
+                .kernel
+                .borrow()
+                .process_of(tid)
+                .is_none_or(|process| process.group_exit.is_some())
+        });
+        oracles::hit_counts(&before, &after, trap, launch, disturbed)
+            .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
+        Ok(format!("deliver {description}"))
+    }
+
     /// Moves what the controller recorded and what the client did into the
     /// trace.
     fn flush(&mut self) {
@@ -462,100 +491,37 @@ impl<'a> World<'a> {
         for line in self.capture.take() {
             self.trace.line(format!("    | {line}"));
         }
-        for note in self.notes.borrow_mut().drain(..) {
+        for note in self.shared.notes.borrow_mut().drain(..) {
             self.trace.line(format!("    client: {note}"));
         }
     }
 
     /// The checks that run after every action.
     fn check(&mut self) -> Result<(), Failure> {
-        if let Some(gap) = &self.kernel.borrow().gap {
+        if let Some(gap) = &self.machine.kernel.borrow().gap {
             return Err(Failure::model_gap(gap.0.clone()));
         }
-        self.audit()?;
-        let kernel = self.kernel.borrow();
+        self.auditor.check(
+            &self.machine.kernel.borrow(),
+            &mut self.machine.marks.borrow_mut(),
+        )?;
+        let kernel = self.machine.kernel.borrow();
+        oracles::unseen_hits(&kernel)
+            .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
         if let Some(controller) = &self.controller {
             let truth = controller.truth();
             oracles::code_integrity(&kernel, &truth, &self.variant.image)
                 .map_err(|message| Failure::debugger("code integrity", message))?;
-            oracles::site_ownership(&truth)
+            oracles::site_ownership(&kernel, &truth)
                 .map_err(|message| Failure::debugger("site ownership", message))?;
+            oracles::all_stop(&kernel, &truth)
+                .map_err(|message| Failure::debugger("all-stop", message))?;
+            oracles::user_breakpoints(&kernel, &truth, &self.shared.breakpoints.borrow())
+                .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
         }
         oracles::output_so_far(&kernel, self.run)
             .map_err(|message| Failure::debugger("transparency", message))?;
         Ok(())
-    }
-
-    /// Reads the events published since the last action: each state change
-    /// announces a new revision, which the events it produced share, so
-    /// revisions never decrease; stop identifiers only increase; and every
-    /// exit the client hears of is the one the kernel saw.
-    fn audit(&mut self) -> Result<(), Failure> {
-        loop {
-            let event = match self.auditor.try_recv() {
-                Ok(event) => event,
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(_) => return Ok(()),
-            };
-            let revision = event.revision();
-            if revision < self.audit.revision {
-                return Err(Failure::debugger(
-                    "events",
-                    format!(
-                        "revision {revision} follows {} in {event:?}",
-                        self.audit.revision
-                    ),
-                ));
-            }
-            self.audit.revision = revision;
-            match &event {
-                DebuggerEvent::StateChanged { revision } => {
-                    if *revision <= self.audit.change {
-                        return Err(Failure::debugger(
-                            "events",
-                            format!(
-                                "state change {revision} follows state change {}",
-                                self.audit.change
-                            ),
-                        ));
-                    }
-                    self.audit.change = *revision;
-                }
-                DebuggerEvent::InferiorStopped { stop_id, .. } => {
-                    if stop_id.get() <= self.audit.stop {
-                        return Err(Failure::debugger(
-                            "events",
-                            format!("stop {stop_id} follows stop {}", self.audit.stop),
-                        ));
-                    }
-                    self.audit.stop = stop_id.get();
-                }
-                DebuggerEvent::InferiorExited {
-                    process_id, status, ..
-                } => {
-                    let tgid = Tid::try_from(process_id.get()).expect("a simulated pid fits");
-                    let kernel = self.kernel.borrow();
-                    let Some((truth, _)) = kernel.ended.get(&tgid) else {
-                        return Err(Failure::debugger(
-                            "events",
-                            format!("process {tgid} reported {status:?} before it ended"),
-                        ));
-                    };
-                    if matches!(truth, ExitStatus::Code(_)) {
-                        self.marks.borrow_mut().hit(Mark::ProgramExited);
-                    }
-                    if !same_exit(*truth, status) {
-                        return Err(Failure::debugger(
-                            "events",
-                            format!(
-                                "process {tgid} ended {truth:?}, but the client heard {status:?}"
-                            ),
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 
     /// Ends a session in which nothing more can happen.
@@ -572,7 +538,7 @@ impl<'a> World<'a> {
                 "the controller kept running after it answered the shutdown",
             ));
         }
-        let kernel = self.kernel.borrow();
+        let kernel = self.machine.kernel.borrow();
         oracles::clean_exit(&kernel).map_err(|message| Failure::debugger("clean exit", message))?;
         oracles::transparency(&kernel, self.run)
             .map_err(|message| Failure::debugger("transparency", message))?;
@@ -581,7 +547,7 @@ impl<'a> World<'a> {
 
     /// The world's state, for a person to read.
     fn dump(&self) -> String {
-        let kernel = self.kernel.borrow();
+        let kernel = self.machine.kernel.borrow();
         let mut text = String::new();
         for thread in kernel.threads.values() {
             let _ = write!(
@@ -595,15 +561,16 @@ impl<'a> World<'a> {
                 thread.registers.rip
             );
         }
+        let waiter = self.machine.waiter.borrow();
         let _ = write!(
             text,
             "\n  waiter {}, holding {:?}; controller {}; client {}",
-            if self.waiter.get() {
+            if waiter.started() {
                 "started"
             } else {
                 "not started"
             },
-            self.hand,
+            waiter.holding(),
             match &self.controller {
                 Some(controller) if controller.has_message() => "running, with messages queued",
                 Some(_) => "running, queue empty",
@@ -619,25 +586,18 @@ impl<'a> World<'a> {
     }
 }
 
-fn describe_state(state: Option<State>) -> String {
-    match state {
-        None => "reaped".to_owned(),
-        Some(State::Running) => "running".to_owned(),
-        Some(State::Stopped { kind, .. }) => format!("stopped {kind:?}"),
-        Some(State::Exiting(exit)) => format!("exiting {exit:?}"),
-        Some(State::Zombie(exit)) => format!("zombie {exit:?}"),
-    }
-}
-
-fn same_exit(kernel: ExitStatus, reported: &crate::ExitStatus) -> bool {
-    match (kernel, reported) {
-        (ExitStatus::Code(code), crate::ExitStatus::Code(reported)) => {
-            i64::from(code & 0xff) == *reported
-        }
-        (ExitStatus::Signal(signal, _), crate::ExitStatus::Terminated(info)) => {
-            u64::try_from(signal).is_ok_and(|signal| signal == info.code)
-        }
-        _ => false,
+/// The address of the trap whose stop `tid` is in, if its stop is one, and
+/// how many traps the thread executed so far.
+fn trap_address(kernel: &Kernel, tid: Tid) -> Option<(Tid, u64, u64)> {
+    let thread = kernel.threads.get(&tid)?;
+    match thread.state {
+        State::Stopped {
+            kind: StopKind::Signal(libc::SIGTRAP),
+            info,
+        } if info.code == super::cpu::SI_KERNEL => thread
+            .trapped_at
+            .map(|address| (tid, address, thread.traps)),
+        _ => None,
     }
 }
 

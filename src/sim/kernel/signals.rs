@@ -4,7 +4,7 @@
 use nix::errno::Errno;
 use nix::libc;
 
-use super::{ExitStatus, Kernel, SigInfo, State, StopKind, Tid, WaitStatus};
+use super::{ExitStatus, Happening, Kernel, SigInfo, State, StopKind, Tid, WaitStatus};
 
 pub const SIGTRAP: i32 = libc::SIGTRAP;
 pub const SIGKILL: i32 = libc::SIGKILL;
@@ -30,31 +30,46 @@ const SYNCHRONOUS: [i32; 6] = [
     libc::SIGSYS,
 ];
 
-/// A set of standard signals, 1 to 31.
+/// The standard signals, 1 to 31, pending for one thread, each with the
+/// siginfo it will be delivered with. A standard signal already pending is
+/// not queued again: the first one's siginfo stays.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SignalSet(u32);
+pub struct Pending([Option<SigInfo>; 31]);
 
-impl SignalSet {
-    pub const fn insert(&mut self, signal: i32) {
-        self.0 |= 1 << (signal - 1);
-    }
-
-    pub const fn remove(&mut self, signal: i32) {
-        self.0 &= !(1 << (signal - 1));
+impl Pending {
+    /// Makes `info.signal` pending, unless it already is.
+    pub const fn insert(&mut self, info: SigInfo) {
+        let slot = &mut self.0[(info.signal - 1).cast_unsigned() as usize];
+        if slot.is_none() {
+            *slot = Some(info);
+        }
     }
 
     #[must_use]
-    pub const fn contains(self, signal: i32) -> bool {
-        self.0 & (1 << (signal - 1)) != 0
+    pub const fn contains(&self, signal: i32) -> bool {
+        self.0[(signal - 1).cast_unsigned() as usize].is_some()
     }
 
-    /// The signal the kernel delivers next: synchronous signals first, then
-    /// the lowest-numbered.
-    fn next(self) -> Option<i32> {
-        SYNCHRONOUS
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        let mut index = 0;
+        while index < self.0.len() {
+            if self.0[index].is_some() {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+
+    /// Takes the signal the kernel delivers next: synchronous signals
+    /// first, then the lowest-numbered.
+    fn take_next(&mut self) -> Option<SigInfo> {
+        let signal = SYNCHRONOUS
             .into_iter()
             .find(|&signal| self.contains(signal))
-            .or_else(|| (1..32).find(|&signal| self.contains(signal)))
+            .or_else(|| (1..32).find(|&signal| self.contains(signal)))?;
+        self.0[(signal - 1).cast_unsigned() as usize].take()
     }
 }
 
@@ -94,7 +109,7 @@ pub fn name(signal: i32) -> String {
 }
 
 impl Kernel {
-    /// `kill(tgid, signal)`, sent by the tracer.
+    /// `kill(tgid, SIGKILL)`, sent by the tracer.
     pub fn kill(&mut self, group: Tid, signal: i32) -> Result<(), Errno> {
         if !self.processes.contains_key(&group) {
             return Err(Errno::ESRCH);
@@ -107,9 +122,10 @@ impl Kernel {
         Ok(())
     }
 
-    /// `tgkill(tgid, tid, signal)`, sent by the tracer. K-INT-2: a thread
+    /// `tgkill(tgid, tid, SIGSTOP)`, sent by the tracer. K-INT-2: a thread
     /// that has not been reaped, even a zombie, accepts it.
     pub fn tgkill(&mut self, group: Tid, tid: Tid, signal: i32) -> Result<(), Errno> {
+        let tracer = self.tracer;
         let Some(thread) = self
             .threads
             .get_mut(&tid)
@@ -123,59 +139,81 @@ impl Kernel {
         }
         // K-SIG-1: delivered at the thread's next chance as a stop from
         // the tracer.
-        thread.pending.insert(signal);
+        thread.pending.insert(SigInfo {
+            signal,
+            code: SI_TKILL,
+            pid: tracer,
+            address: 0,
+        });
         Ok(())
     }
 
-    /// Ends every thread of a process with `exit` (K-EXIT-3). A thread
-    /// already at its exit event stays there (K-EXIT-4); any other is taken
-    /// out of its stop, losing a status not yet reported (K-WAIT-1), and
-    /// runs to its exit.
+    /// Ends every thread of a process with `exit`, as `exit_group` or a
+    /// fatal signal does (K-EXIT-1, K-EXIT-3). Any thread in a stop is taken
+    /// out of it, losing a status not yet reported (K-WAIT-1, K-EXIT-2):
+    /// one at the exit event of its own `exit` finishes exiting, and any
+    /// other runs to its exit. A group already exiting keeps its status,
+    /// and its threads at their exit events stay there (K-EXIT-4).
     pub(super) fn kill_process(&mut self, group: Tid, exit: ExitStatus) {
-        if let Some(process) = self.processes.get_mut(&group) {
-            process.exit.get_or_insert(exit);
+        let Some(process) = self.processes.get_mut(&group) else {
+            return;
+        };
+        if process.group_exit.is_some() {
+            return;
         }
+        process.group_exit = Some(exit);
+        let mut pulled = Vec::new();
+        let mut finished = Vec::new();
         for thread in self
             .threads
             .values_mut()
             .filter(|thread| thread.tgid == group)
         {
             match thread.state {
-                State::Running
-                | State::Stopped {
-                    kind: StopKind::Signal(_),
+                State::Running => thread.state = State::Exiting(exit),
+                State::Stopped {
+                    kind: StopKind::Signal(_) | StopKind::Event(..),
                     ..
                 } => {
                     thread.state = State::Exiting(exit);
                     thread.report = None;
+                    // A system call the thread stopped inside returns on
+                    // the way out.
+                    if let Some(result) = thread.returning.take() {
+                        thread.registers.general[super::RAX] = result;
+                    }
+                    pulled.push(thread.tid);
                 }
-                State::Stopped { .. } | State::Exiting(_) | State::Zombie(_) => {}
+                State::Stopped {
+                    kind: StopKind::Exit(own),
+                    ..
+                } => finished.push((thread.tid, own)),
+                State::Exiting(_) | State::Zombie(_) => {}
             }
         }
+        for &(tid, own) in &finished {
+            self.become_zombie(tid, own);
+        }
+        self.happenings.extend(
+            pulled
+                .into_iter()
+                .chain(finished.into_iter().map(|(tid, _)| tid))
+                .map(|tid| Happening::PulledFromStop { tid }),
+        );
     }
 
     /// Delivers a running thread's next pending signal, which stops it for
     /// the tracer. Returns whether it stopped.
     pub(super) fn deliver_pending(&mut self, tid: Tid) -> bool {
-        let tracer = self.tracer;
         let thread = self.threads.get_mut(&tid).expect("running thread exists");
-        let Some(signal) = thread.pending.next() else {
+        let Some(info) = thread.pending.take_next() else {
             return false;
         };
-        thread.pending.remove(signal);
-        if signal != SIGSTOP {
-            self.gap(format!("delivering pending {}", name(signal)));
+        if info.signal != SIGSTOP {
+            self.gap(format!("delivering pending {}", name(info.signal)));
             return true;
         }
-        self.signal_stop(
-            tid,
-            SigInfo {
-                signal,
-                code: SI_TKILL,
-                pid: tracer,
-                address: 0,
-            },
-        );
+        self.signal_stop(tid, info);
         true
     }
 
@@ -211,11 +249,7 @@ impl Kernel {
         if thread.options.trace_exit {
             thread.state = State::Stopped {
                 kind: StopKind::Exit(exit),
-                info: SigInfo {
-                    signal: SIGTRAP,
-                    code: SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
-                    ..SigInfo::default()
-                },
+                info: SigInfo::event(tid, libc::PTRACE_EVENT_EXIT),
             };
             thread.report = Some(WaitStatus::Event(tid, libc::PTRACE_EVENT_EXIT));
         } else {
@@ -223,14 +257,25 @@ impl Kernel {
         }
     }
 
-    /// Ends a thread for good; its status waits to be reaped.
+    /// Ends a thread for good; its status waits to be reaped. A leader
+    /// leaving others behind stays a zombie until they are gone (K-EXIT-5).
     pub(super) fn become_zombie(&mut self, tid: Tid, exit: ExitStatus) {
         let thread = self.threads.get_mut(&tid).expect("exiting thread exists");
         let group = thread.tgid;
         thread.state = State::Zombie(exit);
         thread.report = Some(exit.wait_status(tid));
-        if let Some(process) = self.processes.get_mut(&group) {
-            process.exit.get_or_insert(exit);
+        thread.pending = Pending::default();
+        let Some(process) = self.processes.get(&group) else {
+            return;
+        };
+        let alone = process.group_exit.is_none()
+            && self.threads.values().any(|thread| {
+                thread.tgid == group
+                    && thread.tid != tid
+                    && !matches!(thread.state, State::Zombie(_))
+            });
+        if tid == group && alone {
+            self.happenings.push(Happening::LeaderExitedAlone { tid });
         }
     }
 }

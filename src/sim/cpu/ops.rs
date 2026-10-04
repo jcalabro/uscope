@@ -154,6 +154,24 @@ pub(super) fn execute(
             }
             cpu.set_status(status);
         }
+        Mnemonic::Adc => {
+            let bits = cpu.bits(0)?;
+            let (a, b) = (cpu.read(0)?, cpu.read(1)?);
+            let carry = cpu.registers.rflags & CARRY != 0;
+            let (result, status) = flags::add(a, b, carry, bits);
+            cpu.write(0, result)?;
+            cpu.set_status(status);
+        }
+        // A locked exchange-and-add is atomic here as every instruction is:
+        // threads interleave whole instructions.
+        Mnemonic::Xadd => {
+            let bits = cpu.bits(0)?;
+            let (destination, source) = (cpu.read(0)?, cpu.read(1)?);
+            let (result, status) = flags::add(destination, source, false, bits);
+            cpu.write(1, destination)?;
+            cpu.write(0, result)?;
+            cpu.set_status(status);
+        }
         Mnemonic::And | Mnemonic::Or | Mnemonic::Xor | Mnemonic::Test => {
             let bits = cpu.bits(0)?;
             let (a, b) = (cpu.read(0)?, cpu.read(1)?);

@@ -4,10 +4,11 @@
 //! disagreement. An oracle is never loosened to make a run pass; one that
 //! is wrong is fixed in a commit that explains why.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::corpus::Run;
-use super::kernel::{ExitStatus, Kernel};
+use super::kernel::{ExitStatus, Kernel, State, Tid};
 use super::loader::Image;
 use crate::backend::sim_edge::Truth;
 
@@ -84,8 +85,12 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
 }
 
 /// Breakpoint ownership: every site has an owner, and only the execution
-/// in progress owns plan sites. A published stop ended every plan.
-pub fn site_ownership(truth: &Truth) -> Result<(), String> {
+/// in progress owns plan sites. A published stop ended every plan. The
+/// controller restores nothing in a process that is ending as a whole.
+pub fn site_ownership(kernel: &Kernel, truth: &Truth) -> Result<(), String> {
+    if truth.inferior.is_some_and(|tgid| ending(kernel, tgid)) {
+        return Ok(());
+    }
     for (&address, site) in &truth.sites {
         if site.owners == 0 {
             return Err(format!("site {address:#x} has no owner"));
@@ -105,6 +110,164 @@ pub fn site_ownership(truth: &Truth) -> Result<(), String> {
             "stop {:?} is published while plans still record sites: {:?}",
             truth.public_stop, truth.plan_sites
         ));
+    }
+    Ok(())
+}
+
+/// Whether `tgid` is ending as a whole: killed, by the debugger or from
+/// outside, or exiting its group. Its threads then leave their stops
+/// whatever the debugger publishes, until it hears of the exit.
+fn ending(kernel: &Kernel, tgid: Tid) -> bool {
+    kernel
+        .processes
+        .get(&tgid)
+        .is_none_or(|process| process.group_exit.is_some())
+}
+
+/// All-stop: while a stop is published, every thread of the inferior is in
+/// a ptrace-stop or has ended, and the controller knows exactly the stopped
+/// ones.
+pub fn all_stop(kernel: &Kernel, truth: &Truth) -> Result<(), String> {
+    let (Some(stop), Some(tgid)) = (truth.public_stop, truth.inferior) else {
+        return Ok(());
+    };
+    if ending(kernel, tgid) {
+        return Ok(());
+    }
+    let mut stopped = BTreeSet::new();
+    let mut ended = BTreeSet::new();
+    for thread in kernel.threads_of(tgid) {
+        match thread.state {
+            State::Stopped { .. } => {
+                stopped.insert(thread.tid);
+            }
+            State::Zombie(_) => {
+                ended.insert(thread.tid);
+            }
+            state => {
+                return Err(format!(
+                    "stop {stop} is published while thread {} is {state:?}",
+                    thread.tid
+                ));
+            }
+        }
+    }
+    let unknown = stopped.difference(&truth.threads).next().is_some();
+    let vanished = truth
+        .threads
+        .iter()
+        .any(|tid| !stopped.contains(tid) && !ended.contains(tid));
+    if unknown || vanished {
+        return Err(format!(
+            "stop {stop} is published with threads {:?}; the kernel has {stopped:?} stopped \
+             and {ended:?} ended",
+            truth.threads
+        ));
+    }
+    Ok(())
+}
+
+/// Breakpoint accounting, unseen hits: no thread executed the program's own
+/// instruction where the user's breakpoint is enabled, except to step over
+/// the trap it just reported there.
+pub fn unseen_hits(kernel: &Kernel) -> Result<(), String> {
+    kernel.unseen_hits.first().map_or(Ok(()), |hit| {
+        Err(format!(
+            "thread {} executed the instruction at {:#x}, where the user's breakpoint is \
+             enabled, without a trap reporting it",
+            hit.tid, hit.address
+        ))
+    })
+}
+
+/// Breakpoint accounting, hit counts: handling one message counts at most
+/// the one trap it reports. A trap at a site counts one hit for every user
+/// breakpoint owning the site, and nothing else changes a count, except a
+/// launch, which starts every count again. A trap may go uncounted once its
+/// process is exiting as a whole, which takes the thread out of its stop.
+pub fn hit_counts(
+    before: &Truth,
+    after: &Truth,
+    trap: Option<(Tid, u64)>,
+    launch: bool,
+    disturbed: bool,
+) -> Result<(), String> {
+    let owners = trap
+        .and_then(|(_, address)| before.sites.get(&address))
+        .map(|site| site.users.clone())
+        .unwrap_or_default();
+    for (&id, breakpoint) in &after.breakpoints {
+        let previous = before
+            .breakpoints
+            .get(&id)
+            .map_or(0, |earlier| earlier.hit_count);
+        let now = breakpoint.hit_count;
+        let expected = u64::from(owners.contains(&id));
+        let allowed = if launch {
+            now == 0 || now == previous
+        } else if disturbed && expected == 1 {
+            now == previous || now == previous + 1
+        } else {
+            now == previous + expected
+        };
+        if !allowed {
+            let reason = trap.map_or_else(
+                || "the message reported no trap".to_owned(),
+                |(tid, address)| format!("thread {tid} trapped at {address:#x}"),
+            );
+            return Err(format!(
+                "breakpoint {id}'s hit count went from {previous} to {now}; {reason}, and \
+                 the breakpoint {} that site",
+                if expected == 1 {
+                    "owned"
+                } else {
+                    "did not own"
+                }
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Breakpoint accounting, ownership: while a stop is published, every
+/// breakpoint the user was told exists, and has not asked to remove, owns
+/// an installed site at each of its locations.
+pub fn user_breakpoints(
+    kernel: &Kernel,
+    truth: &Truth,
+    intent: &BTreeMap<u64, BTreeSet<u64>>,
+) -> Result<(), String> {
+    let (Some(stop), Some(tgid)) = (truth.public_stop, truth.inferior) else {
+        return Ok(());
+    };
+    if ending(kernel, tgid) {
+        return Ok(());
+    }
+    for (&id, addresses) in intent {
+        let Some(breakpoint) = truth.breakpoints.get(&id) else {
+            return Err(format!(
+                "stop {stop}: the controller forgot breakpoint {id} at {addresses:x?}"
+            ));
+        };
+        if breakpoint.addresses != *addresses {
+            return Err(format!(
+                "stop {stop}: breakpoint {id} was added at {addresses:x?}, but the controller \
+                 has it at {:x?}",
+                breakpoint.addresses
+            ));
+        }
+        for address in addresses {
+            if !truth
+                .sites
+                .get(address)
+                .is_some_and(|site| site.installed && site.users.contains(&id))
+            {
+                return Err(format!(
+                    "stop {stop}: breakpoint {id} owns no installed site at {address:#x}: {:?}",
+                    truth.sites.get(address)
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -164,10 +327,8 @@ pub fn transparency(kernel: &Kernel, run: &Run) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-
     use super::*;
-    use crate::backend::sim_edge::Site;
+    use crate::backend::sim_edge::{Site, UserBreakpoint};
     use crate::sim::corpus::Corpus;
 
     fn site(original_byte: u8, installed: bool, plans: Vec<u64>) -> Site {
@@ -176,6 +337,7 @@ mod tests {
             installed,
             owners: plans.len().max(1),
             plans,
+            users: BTreeSet::new(),
         }
     }
 
@@ -236,30 +398,39 @@ mod tests {
             ..Truth::default()
         };
         assert_eq!(
-            site_ownership(&Truth {
-                active_execution: Some(2),
-                ..owned(vec![2])
-            }),
+            site_ownership(
+                &Kernel::new(100),
+                &Truth {
+                    active_execution: Some(2),
+                    ..owned(vec![2])
+                }
+            ),
             Ok(())
         );
         assert!(
-            site_ownership(&Truth {
-                active_execution: Some(3),
-                ..owned(vec![2])
-            })
+            site_ownership(
+                &Kernel::new(100),
+                &Truth {
+                    active_execution: Some(3),
+                    ..owned(vec![2])
+                }
+            )
             .is_err()
         );
         assert!(
-            site_ownership(&Truth {
-                public_stop: Some(4),
-                plan_sites: BTreeMap::from([(2, BTreeSet::from([0x1000]))]),
-                ..owned(vec![])
-            })
+            site_ownership(
+                &Kernel::new(100),
+                &Truth {
+                    public_stop: Some(4),
+                    plan_sites: BTreeMap::from([(2, BTreeSet::from([0x1000]))]),
+                    ..owned(vec![])
+                }
+            )
             .is_err()
         );
         let mut orphan = owned(vec![]);
         orphan.sites.get_mut(&0x1000).expect("the site").owners = 0;
-        assert!(site_ownership(&orphan).is_err());
+        assert!(site_ownership(&Kernel::new(100), &orphan).is_err());
     }
 
     /// A program that exited by itself must have done exactly what it does
@@ -283,5 +454,117 @@ mod tests {
         assert!(ended(ExitStatus::Code(3), "total 202\n").is_err());
         assert!(ended(ExitStatus::Code(2), "total 20").is_err());
         assert!(ended(ExitStatus::Signal(9, false), "total 9").is_err());
+    }
+
+    /// A user site at 0x1000 owned by breakpoints 1 and 2, with breakpoint
+    /// 3 elsewhere, each with `hits`.
+    fn with_hits(hits: [u64; 3]) -> Truth {
+        let mut users = site(0x55, true, vec![]);
+        users.users = BTreeSet::from([1, 2]);
+        Truth {
+            sites: BTreeMap::from([(0x1000, users)]),
+            breakpoints: (1..=3)
+                .zip(hits)
+                .map(|(id, hit_count)| {
+                    (
+                        id,
+                        UserBreakpoint {
+                            addresses: BTreeSet::from([if id == 3 { 0x2000 } else { 0x1000 }]),
+                            hit_count,
+                        },
+                    )
+                })
+                .collect(),
+            ..Truth::default()
+        }
+    }
+
+    /// A trap counts one hit for each owner of its site and none for any
+    /// other breakpoint; a message without a trap counts none; a launch
+    /// starts the counts again; and a trap a group exit disturbed may go
+    /// uncounted.
+    #[test]
+    fn hit_counts_follow_the_traps_the_controller_hears_of() {
+        let before = with_hits([4, 0, 7]);
+        let trap = Some((1001, 0x1000));
+        assert_eq!(
+            hit_counts(&before, &with_hits([5, 1, 7]), trap, false, false),
+            Ok(())
+        );
+        for after in [[6, 1, 7], [5, 0, 7], [5, 1, 8]] {
+            assert!(hit_counts(&before, &with_hits(after), trap, false, false).is_err());
+        }
+        assert_eq!(hit_counts(&before, &before, None, false, false), Ok(()));
+        assert!(hit_counts(&before, &with_hits([5, 0, 7]), None, false, false).is_err());
+        assert_eq!(
+            hit_counts(&before, &with_hits([0, 0, 0]), None, true, false),
+            Ok(())
+        );
+        assert_eq!(hit_counts(&before, &before, trap, false, true), Ok(()));
+        assert!(hit_counts(&before, &with_hits([6, 1, 7]), trap, false, true).is_err());
+    }
+
+    /// A published stop requires every live thread stopped and known.
+    #[test]
+    fn all_stop_requires_every_live_thread_stopped_and_known() {
+        let corpus = Corpus::load().expect("load the golden corpus");
+        let variant = &corpus.programs[0].variants[0];
+        let mut kernel = Kernel::new(100);
+        let tgid = kernel.spawn(Arc::clone(&variant.image), &variant.path, &[], [0; 16]);
+        let truth = |threads: Vec<Tid>| Truth {
+            public_stop: Some(1),
+            inferior: Some(tgid),
+            threads: threads.into_iter().collect(),
+            ..Truth::default()
+        };
+        assert_eq!(all_stop(&kernel, &truth(vec![tgid])), Ok(()));
+        assert!(all_stop(&kernel, &truth(vec![])).is_err(), "unknown thread");
+        assert!(
+            all_stop(&kernel, &truth(vec![tgid, tgid + 1])).is_err(),
+            "vanished thread"
+        );
+        kernel
+            .resume(tgid, None, false)
+            .expect("resume the stopped thread");
+        assert!(all_stop(&kernel, &truth(vec![tgid])).is_err(), "running");
+        assert_eq!(
+            all_stop(
+                &kernel,
+                &Truth {
+                    public_stop: None,
+                    ..truth(vec![tgid])
+                }
+            ),
+            Ok(())
+        );
+    }
+
+    /// Every breakpoint the user was told exists owns an installed site at
+    /// each of its locations while a stop is published.
+    #[test]
+    fn user_breakpoints_own_their_sites_while_stopped() {
+        let corpus = Corpus::load().expect("load the golden corpus");
+        let variant = &corpus.programs[0].variants[0];
+        let mut kernel = Kernel::new(100);
+        let tgid = kernel.spawn(Arc::clone(&variant.image), &variant.path, &[], [0; 16]);
+        let truth = Truth {
+            public_stop: Some(1),
+            inferior: Some(tgid),
+            ..with_hits([0, 0, 0])
+        };
+        let intent = |entries: Vec<(u64, u64)>| {
+            entries
+                .into_iter()
+                .map(|(id, address)| (id, BTreeSet::from([address])))
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            user_breakpoints(&kernel, &truth, &intent(vec![(1, 0x1000), (2, 0x1000)])),
+            Ok(())
+        );
+        assert!(user_breakpoints(&kernel, &truth, &intent(vec![(4, 0x1000)])).is_err());
+        assert!(user_breakpoints(&kernel, &truth, &intent(vec![(1, 0x3000)])).is_err());
+        // Breakpoint 3's location has no site.
+        assert!(user_breakpoints(&kernel, &truth, &intent(vec![(3, 0x2000)])).is_err());
     }
 }

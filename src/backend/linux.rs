@@ -71,6 +71,8 @@ mod lifecycle;
 mod memory;
 mod modules;
 mod native;
+#[cfg(test)]
+pub mod native_tracee;
 mod post_mortem;
 #[cfg(debug_assertions)]
 mod recorded;

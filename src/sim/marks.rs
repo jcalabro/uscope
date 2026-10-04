@@ -33,10 +33,34 @@ pub enum Mark {
     ClientLagged,
     /// The waiter held a status because the controller's queue was full.
     QueueFull,
+    /// A program created a thread.
+    ThreadCreated,
+    /// The debugger reported a thread exiting while its process ran on.
+    ThreadExited,
+    /// A group leader exited while its other threads ran on.
+    LeaderExitedAlone,
+    /// A program's `exit_group` took a thread out of a ptrace-stop.
+    GroupExitEndedStop,
+    /// A published stop found two threads at breakpoints.
+    CoHit,
+    /// The client resumed one thread alone.
+    ThreadContinued,
+    /// The client selected a thread other than the one that stopped.
+    ThreadSelected,
+    /// A thread ran between two of the controller's calls into the kernel.
+    PreemptedCall,
+    /// The waiter reaped a status between two of the controller's calls.
+    ReapedInsideCall,
+    /// A planned SIGKILL from outside landed at a chosen action.
+    KilledAtStep,
+    /// A planned SIGKILL from outside landed right after a clone.
+    KilledNearClone,
+    /// A planned SIGKILL from outside landed between two ptrace requests.
+    KilledInsideCall,
 }
 
 impl Mark {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 26] = [
         Self::EntryStop,
         Self::BreakpointStop,
         Self::StepStop,
@@ -51,6 +75,18 @@ impl Mark {
         Self::StepOutRefused,
         Self::ClientLagged,
         Self::QueueFull,
+        Self::ThreadCreated,
+        Self::ThreadExited,
+        Self::LeaderExitedAlone,
+        Self::GroupExitEndedStop,
+        Self::CoHit,
+        Self::ThreadContinued,
+        Self::ThreadSelected,
+        Self::PreemptedCall,
+        Self::ReapedInsideCall,
+        Self::KilledAtStep,
+        Self::KilledNearClone,
+        Self::KilledInsideCall,
     ];
 }
 

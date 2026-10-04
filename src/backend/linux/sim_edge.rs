@@ -57,12 +57,99 @@ pub struct SimExecutable {
     pub inode: u64,
 }
 
+/// Lets the rest of the simulated machine act before a call the controller
+/// makes into the simulated kernel takes effect: running threads advance,
+/// the waiter reaps, and planned faults fire, as they can between any two
+/// ptrace requests on Linux.
+pub trait Preemption {
+    fn before_call(&self);
+}
+
+/// The simulated waiter thread: it reaps statuses as `waitpid` does and
+/// queues them for the controller, holding one while the queue is full.
+#[derive(Default)]
+pub struct SimWaiter {
+    /// The controller's queue, once the controller starts its waiter.
+    messages: Option<mpsc::Sender<ControllerMessage>>,
+    /// A status reaped but not yet queued.
+    hand: Option<WaitStatus>,
+}
+
+/// What one collection by the waiter did.
+pub struct Collected {
+    /// The status reaped, if the waiter held none already.
+    pub reaped: Option<WaitStatus>,
+    /// Whether the status is still held, the queue being full.
+    pub held: bool,
+}
+
+impl SimWaiter {
+    /// Whether the controller started its waiter.
+    #[must_use]
+    pub const fn started(&self) -> bool {
+        self.messages.is_some()
+    }
+
+    /// The status reaped but not yet queued.
+    #[must_use]
+    pub const fn holding(&self) -> Option<WaitStatus> {
+        self.hand
+    }
+
+    /// Whether collecting would do anything now.
+    #[must_use]
+    pub fn can_collect(&self, kernel: &Kernel) -> bool {
+        let Some(messages) = self
+            .messages
+            .as_ref()
+            .filter(|messages| !messages.is_closed())
+        else {
+            return false;
+        };
+        match self.hand {
+            Some(_) => messages.capacity() > 0,
+            None => kernel.reportable().next().is_some(),
+        }
+    }
+
+    /// Reaps one ready status, which `choose` picks, unless one is held
+    /// already, and queues it for the controller if the queue has room.
+    pub fn collect(
+        &mut self,
+        kernel: &mut Kernel,
+        choose: impl FnOnce(&[Tid]) -> Tid,
+    ) -> Collected {
+        let mut reaped = None;
+        if self.hand.is_none() {
+            let ready = kernel.reportable().collect::<Vec<_>>();
+            let status = kernel
+                .collect(choose(&ready))
+                .expect("a reportable thread reports");
+            reaped = Some(status);
+            self.hand = Some(status);
+        }
+        let status = self.hand.take().expect("the waiter holds a status");
+        let queued = self.messages.as_ref().is_some_and(|messages| {
+            messages
+                .try_send(ControllerMessage::Wait(wait_event(status)))
+                .is_ok()
+        });
+        if !queued {
+            self.hand = Some(status);
+        }
+        Collected {
+            reaped,
+            held: !queued,
+        }
+    }
+}
+
 /// Answers the controller's host requests from the simulated kernel.
 pub struct SimTrace {
     kernel: Rc<RefCell<Kernel>>,
     launch: SimLaunch,
-    /// Set once the controller starts its waiter.
-    waiter: Rc<Cell<bool>>,
+    waiter: Rc<RefCell<SimWaiter>>,
+    preemption: Rc<dyn Preemption>,
     /// Stop identifiers count per session, so that a session's identifiers
     /// do not depend on any other.
     last_stop_id: Cell<u64>,
@@ -70,6 +157,17 @@ pub struct SimTrace {
 
 fn system(errno: Errno) -> Error {
     backend_error(LinuxError::System(errno))
+}
+
+/// A read that failed. Production's recorder leaves reads out, but a failed
+/// one often explains what the controller did next, so the simulation
+/// records it.
+fn failed_read(request: &str, pid: Pid, errno: Errno) -> Error {
+    #[cfg(debug_assertions)]
+    record!("{request} {pid} -> error {errno}");
+    #[cfg(not(debug_assertions))]
+    let _ = (request, pid);
+    system(errno)
 }
 
 const fn tid(pid: Pid) -> Tid {
@@ -86,11 +184,22 @@ impl SimTrace {
         Err(system(Errno::ENOSYS))
     }
 
+    /// The kernel, once anything due before this call has happened.
+    fn kernel(&self) -> std::cell::Ref<'_, Kernel> {
+        self.preemption.before_call();
+        self.kernel.borrow()
+    }
+
+    fn kernel_mut(&self) -> std::cell::RefMut<'_, Kernel> {
+        self.preemption.before_call();
+        self.kernel.borrow_mut()
+    }
+
     fn maps(&self, pid: Pid) -> Result<String> {
-        self.kernel
-            .borrow()
-            .maps(tid(pid))
-            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound).into())
+        self.kernel().maps(tid(pid)).ok_or_else(|| {
+            record!("read /proc/{pid}/maps -> not found");
+            std::io::Error::from(std::io::ErrorKind::NotFound).into()
+        })
     }
 }
 
@@ -116,8 +225,8 @@ fn signal_metadata(info: SigInfo) -> SignalMetadata {
     }
 }
 
-/// The kernel's registers as `PTRACE_GETREGS` reports them.
-const fn user_registers(registers: &Registers) -> libc::user_regs_struct {
+/// The kernel's registers and `orig_rax` as `PTRACE_GETREGS` reports them.
+pub(super) const fn user_registers(registers: &Registers, orig_rax: u64) -> libc::user_regs_struct {
     let general = &registers.general;
     libc::user_regs_struct {
         r15: general[15],
@@ -135,8 +244,7 @@ const fn user_registers(registers: &Registers) -> libc::user_regs_struct {
         rdx: general[2],
         rsi: general[6],
         rdi: general[7],
-        // Not inside a system call.
-        orig_rax: u64::MAX,
+        orig_rax,
         rip: registers.rip,
         cs: 0x33,
         eflags: registers.rflags,
@@ -153,10 +261,10 @@ const fn user_registers(registers: &Registers) -> libc::user_regs_struct {
 
 /// The flags `PTRACE_SETREGS` lets a tracer change; the rest keep their
 /// values, as Linux's `set_flags` keeps them.
-const SETTABLE_FLAGS: u64 = 0x0005_0dd5;
+pub(super) const SETTABLE_FLAGS: u64 = 0x0005_0dd5;
 
 /// Applies `PTRACE_SETREGS` to the kernel's registers.
-const fn apply_user_registers(registers: &mut Registers, user: &libc::user_regs_struct) {
+pub(super) const fn apply_user_registers(registers: &mut Registers, user: &libc::user_regs_struct) {
     registers.general = [
         user.rax, user.rcx, user.rdx, user.rbx, user.rsp, user.rbp, user.rsi, user.rdi, user.r8,
         user.r9, user.r10, user.r11, user.r12, user.r13, user.r14, user.r15,
@@ -195,7 +303,9 @@ fn wait_status(event: &WaitEvent) -> String {
 
 impl InspectionOps for SimTrace {
     fn read_word(&self, pid: Pid, address: u64) -> Result<u64> {
-        self.kernel.borrow().peek(tid(pid), address).map_err(system)
+        self.kernel()
+            .peek(tid(pid), address)
+            .map_err(|errno| failed_read("PTRACE_PEEKDATA", pid, errno))
     }
 
     fn read_memory_word(
@@ -203,20 +313,23 @@ impl InspectionOps for SimTrace {
         pid: Pid,
         address: u64,
     ) -> std::result::Result<u64, MemoryAccessError> {
-        match self.kernel.borrow().peek(tid(pid), address) {
+        match self.kernel().peek(tid(pid), address) {
             Ok(word) => Ok(word),
             Err(Errno::EIO) => Err(MemoryAccessError::Inaccessible),
-            Err(errno) => Err(MemoryAccessError::Fatal(system(errno))),
+            Err(errno) => Err(MemoryAccessError::Fatal(failed_read(
+                "PTRACE_PEEKDATA",
+                pid,
+                errno,
+            ))),
         }
     }
 
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
-        let registers = self
-            .kernel
-            .borrow()
-            .get_registers(tid(pid))
-            .map_err(system)?;
-        Ok(user_registers(&registers))
+        let (registers, orig_rax) = self
+            .kernel()
+            .get_registers_and_call(tid(pid))
+            .map_err(|errno| failed_read("PTRACE_GETREGS", pid, errno))?;
+        Ok(user_registers(&registers, orig_rax))
     }
 
     fn floating_registers(&self, _pid: Pid) -> Result<Fxsave> {
@@ -256,7 +369,7 @@ impl LinuxTraceOps for SimTrace {
         else {
             return self.gap("arguments that are not UTF-8");
         };
-        let tid = self.kernel.borrow_mut().spawn(
+        let tid = self.kernel_mut().spawn(
             Arc::clone(&self.launch.image),
             &self.launch.path,
             &arguments,
@@ -265,8 +378,8 @@ impl LinuxTraceOps for SimTrace {
         Ok(Pid::from_raw(tid))
     }
 
-    fn spawn_waiter(&self, _messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
-        self.waiter.set(true);
+    fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
+        self.waiter.borrow_mut().messages = Some(messages);
         Ok(Waiter::external())
     }
 
@@ -280,7 +393,7 @@ impl LinuxTraceOps for SimTrace {
     }
 
     fn thread_name(&self, process: Pid, thread: Pid) -> Option<Arc<str>> {
-        let kernel = self.kernel.borrow();
+        let kernel = self.kernel();
         let owner = kernel.process_of(tid(thread))?;
         (owner.tgid == tid(process)).then(|| Arc::clone(&owner.name))
     }
@@ -298,7 +411,7 @@ impl LinuxTraceOps for SimTrace {
     }
 
     fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {
-        match self.kernel.borrow_mut().kill(tid(pid), signal.number()) {
+        match self.kernel_mut().kill(tid(pid), signal.number()) {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
             Err(errno) => Err(system(errno)),
         }
@@ -313,8 +426,11 @@ impl LinuxTraceOps for SimTrace {
         Err(Errno::ENOSYS)
     }
 
-    fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
-        self.gap("thread group lookup")
+    fn thread_group_id(&self, pid: Pid) -> Result<Pid> {
+        self.kernel()
+            .thread_group(tid(pid))
+            .map(Pid::from_raw)
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound).into())
     }
 
     fn process_start_time(&self, _process: Pid) -> Option<u64> {
@@ -323,6 +439,7 @@ impl LinuxTraceOps for SimTrace {
     }
 
     fn tracer_process(&self) -> i32 {
+        // Not a host call: nothing happens meanwhile.
         self.kernel.borrow().tracer()
     }
 
@@ -358,23 +475,20 @@ impl LinuxTraceOps for SimTrace {
     }
 
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()> {
-        self.kernel
-            .borrow_mut()
+        self.kernel_mut()
             .poke(tid(pid), address, value)
             .map_err(system)
     }
 
     fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
-        self.kernel
-            .borrow_mut()
+        self.kernel_mut()
             .resume(tid(pid), signal.map(Signal::number), false)
             .map_err(system)
     }
 
     fn continue_during_shutdown(&self, pid: Pid) -> Result<()> {
         match self
-            .kernel
-            .borrow_mut()
+            .kernel_mut()
             .resume(tid(pid), Some(libc::SIGKILL), false)
         {
             Ok(()) | Err(Errno::ESRCH) => Ok(()),
@@ -383,25 +497,24 @@ impl LinuxTraceOps for SimTrace {
     }
 
     fn step(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
-        self.kernel
-            .borrow_mut()
+        self.kernel_mut()
             .resume(tid(pid), signal.map(Signal::number), true)
             .map_err(system)
     }
 
     fn set_registers(&self, pid: Pid, registers: libc::user_regs_struct) -> Result<()> {
-        let mut kernel = self.kernel.borrow_mut();
+        let mut kernel = self.kernel_mut();
         let mut current = kernel.get_registers(tid(pid)).map_err(system)?;
         apply_user_registers(&mut current, &registers);
         kernel.set_registers(tid(pid), current).map_err(system)
     }
 
     fn set_options(&self, pid: Pid, exit_kill: bool) -> Result<()> {
-        self.kernel
-            .borrow_mut()
+        self.kernel_mut()
             .set_options(
                 tid(pid),
                 Options {
+                    trace_clone: true,
                     trace_exit: true,
                     exit_kill,
                 },
@@ -410,29 +523,24 @@ impl LinuxTraceOps for SimTrace {
     }
 
     fn event_message(&self, pid: Pid) -> Result<libc::c_long> {
-        self.kernel
-            .borrow()
+        self.kernel()
             .event_message(tid(pid))
             .map(u64::cast_signed)
             .map_err(system)
     }
 
     fn signal_metadata(&self, pid: Pid) -> std::result::Result<SignalMetadata, Errno> {
-        self.kernel
-            .borrow()
-            .signal_info(tid(pid))
-            .map(signal_metadata)
+        self.kernel().signal_info(tid(pid)).map(signal_metadata)
     }
 
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()> {
-        self.kernel
-            .borrow_mut()
+        self.kernel_mut()
             .tgkill(tid(process), tid(thread), libc::SIGSTOP)
             .map_err(system)
     }
 
     fn queued_trap(&self, pid: Pid) -> Result<bool> {
-        Ok(self.kernel.borrow().trap_queued(tid(pid)))
+        Ok(self.kernel().trap_queued(tid(pid)))
     }
 
     fn executable(&self, pid: Pid, address: VirtualAddress) -> Result<bool> {
@@ -464,6 +572,16 @@ pub struct Site {
     pub owners: usize,
     /// The executions whose plans own the site.
     pub plans: Vec<u64>,
+    /// The user breakpoints that own the site.
+    pub users: BTreeSet<u64>,
+}
+
+/// A user breakpoint as the controller holds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserBreakpoint {
+    /// Where its locations are in the inferior, while one runs.
+    pub addresses: BTreeSet<u64>,
+    pub hit_count: u64,
 }
 
 /// What the controller believes about the inferior, which oracles compare
@@ -480,14 +598,15 @@ pub struct Truth {
     pub public_stop: Option<u64>,
     /// The process the controller debugs.
     pub inferior: Option<Tid>,
+    /// The inferior's threads the controller knows.
+    pub threads: BTreeSet<Tid>,
+    /// The user's breakpoints, by identifier.
+    pub breakpoints: BTreeMap<u64, UserBreakpoint>,
 }
 
 /// A real controller over the simulated kernel, with the queue it serves.
 pub struct SimController {
     controller: Controller<Edge>,
-    /// The controller's own sender, through which the simulated waiter
-    /// queues statuses.
-    waiter_messages: mpsc::Sender<ControllerMessage>,
 }
 
 /// The channels a simulated client talks to the controller through.
@@ -496,30 +615,48 @@ pub struct ClientChannels {
     pub events: broadcast::Sender<DebuggerEvent>,
 }
 
+/// A message taken from the controller's queue, to be handled.
+pub struct Delivery {
+    message: ControllerMessage,
+    /// What the message is, for the trace.
+    pub description: String,
+    /// The thread a `SIGTRAP` signal-delivery-stop status is about.
+    pub trap: Option<Tid>,
+    /// Whether the message asks for a launch.
+    pub launch: bool,
+}
+
+/// Everything a simulated controller is built from.
+pub struct SimParts {
+    pub kernel: Rc<RefCell<Kernel>>,
+    pub waiter: Rc<RefCell<SimWaiter>>,
+    pub preemption: Rc<dyn Preemption>,
+    pub launch: SimLaunch,
+    pub executable: SimExecutable,
+    pub debug_info: DebugInfo,
+    /// How many messages the controller's queue holds.
+    pub queue_capacity: usize,
+    /// How many events the event channel holds.
+    pub event_capacity: usize,
+}
+
 impl SimController {
-    /// Builds a controller for `executable`, whose request queue holds
-    /// `queue_capacity` messages and whose event channel holds
-    /// `event_capacity` events.
+    /// Builds a controller from `parts`, with the channels a client talks
+    /// to it through.
     #[must_use]
-    pub fn new(
-        kernel: Rc<RefCell<Kernel>>,
-        waiter: Rc<Cell<bool>>,
-        launch: SimLaunch,
-        executable: &SimExecutable,
-        debug_info: DebugInfo,
-        queue_capacity: usize,
-        event_capacity: usize,
-    ) -> (Self, ClientChannels) {
-        let (sender, receiver) = mpsc::channel(queue_capacity);
-        let (events, _) = broadcast::channel(event_capacity);
+    pub fn new(parts: SimParts) -> (Self, ClientChannels) {
+        let (sender, receiver) = mpsc::channel(parts.queue_capacity);
+        let (events, _) = broadcast::channel(parts.event_capacity);
         let trace = SimTrace {
-            kernel,
-            launch,
-            waiter,
+            kernel: parts.kernel,
+            launch: parts.launch,
+            waiter: parts.waiter,
+            preemption: parts.preemption,
             last_stop_id: Cell::new(0),
         };
         #[cfg(debug_assertions)]
         let trace = super::recorded::Recorded(trace);
+        let executable = parts.executable;
         let controller = Controller::new(
             // A simulated session traces nothing real.
             SessionLease::detached(),
@@ -531,7 +668,7 @@ impl SimController {
                 },
                 process_start_time: None,
             },
-            debug_info,
+            parts.debug_info,
             ControllerChannels {
                 sender: sender.clone(),
                 receiver,
@@ -540,10 +677,7 @@ impl SimController {
             trace,
         );
         (
-            Self {
-                controller,
-                waiter_messages: sender.clone(),
-            },
+            Self { controller },
             ClientChannels {
                 requests: sender,
                 events,
@@ -557,59 +691,85 @@ impl SimController {
         !self.controller.messages.is_empty()
     }
 
-    /// Whether the queue has room for another message.
-    #[must_use]
-    pub fn has_room(&self) -> bool {
-        self.waiter_messages.capacity() > 0
-    }
-
-    /// Serves the message at the front of the queue. Returns what it was
-    /// and whether the controller keeps running, or `None` when the queue
-    /// is empty.
-    pub fn deliver(&mut self) -> Option<(String, bool)> {
+    /// Takes the message at the front of the queue, or `None` when the
+    /// queue is empty.
+    pub fn take(&mut self) -> Option<Delivery> {
         let message = self.controller.messages.try_recv().ok()?;
-        let description = match &message {
-            ControllerMessage::Request(request) => request.describe(),
-            ControllerMessage::Wait(event) => format!("wait {}", wait_status(event)),
+        let (description, trap, launch) = match &message {
+            ControllerMessage::Request(request) => (
+                request.describe(),
+                None,
+                matches!(request, crate::protocol::Request::Launch { .. }),
+            ),
+            ControllerMessage::Wait(event) => (
+                format!("wait {}", wait_status(event)),
+                match *event {
+                    WaitEvent::Stopped(pid, Signal::SIGTRAP) => Some(pid.as_raw()),
+                    _ => None,
+                },
+                false,
+            ),
         };
-        Some((description, self.controller.handle_message(message)))
+        Some(Delivery {
+            message,
+            description,
+            trap,
+            launch,
+        })
     }
 
-    /// Queues a status the simulated waiter reaped. Returns whether the
-    /// queue had room.
-    pub fn queue_status(&self, status: WaitStatus) -> bool {
-        self.waiter_messages
-            .try_send(ControllerMessage::Wait(wait_event(status)))
-            .is_ok()
+    /// Handles a message taken from the queue. Returns whether the
+    /// controller keeps running.
+    pub fn handle(&mut self, delivery: Delivery) -> bool {
+        self.controller.handle_message(delivery.message)
     }
 
     /// The controller's beliefs about the inferior.
     #[must_use]
     pub fn truth(&self) -> Truth {
         let Some(inferior) = self.controller.inferior.as_ref() else {
-            return Truth::default();
+            return Truth {
+                breakpoints: self
+                    .controller
+                    .breakpoints
+                    .iter()
+                    .map(|breakpoint| {
+                        (
+                            breakpoint.id.get(),
+                            UserBreakpoint {
+                                addresses: BTreeSet::new(),
+                                hit_count: breakpoint.hit_count,
+                            },
+                        )
+                    })
+                    .collect(),
+                ..Truth::default()
+            };
         };
         Truth {
             sites: inferior
                 .breakpoints
                 .iter()
                 .map(|(address, site)| {
+                    let mut plans = Vec::new();
+                    let mut users = BTreeSet::new();
+                    for owner in &site.owners {
+                        match owner {
+                            super::BreakpointOwner::Plan(execution) => plans.push(execution.get()),
+                            super::BreakpointOwner::User(id) => {
+                                users.insert(id.get());
+                            }
+                            super::BreakpointOwner::Loader => {}
+                        }
+                    }
                     (
                         address.get(),
                         Site {
                             original_byte: site.original_byte,
                             installed: site.installed,
                             owners: site.owners.len(),
-                            plans: site
-                                .owners
-                                .iter()
-                                .filter_map(|owner| match owner {
-                                    super::BreakpointOwner::Plan(execution) => {
-                                        Some(execution.get())
-                                    }
-                                    _ => None,
-                                })
-                                .collect(),
+                            plans,
+                            users,
                         },
                     )
                 })
@@ -627,192 +787,33 @@ impl SimController {
             active_execution: inferior.active.as_ref().map(|active| active.id.get()),
             public_stop: inferior.public_stop.as_ref().map(|stop| stop.id.get()),
             inferior: Some(inferior.tgid.as_raw()),
-        }
-    }
-}
-
-/// A real traced process, for tests that compare the simulation with
-/// Linux. It is killed and reaped when dropped.
-#[cfg(test)]
-pub struct NativeTracee {
-    ptrace: super::native::LinuxPtrace,
-    pid: Pid,
-}
-
-#[cfg(test)]
-impl NativeTracee {
-    /// Launches `executable` traced, as the controller does, and returns
-    /// once it reported its first stop, which is returned too.
-    #[must_use]
-    pub fn spawn(executable: &Path, arguments: &[String]) -> (Self, WaitStatus) {
-        let ptrace = super::native::LinuxPtrace::new();
-        let options = LaunchOptions {
-            arguments: arguments.iter().map(Into::into).collect(),
-            stdout: Some(std::process::Stdio::null()),
-            ..LaunchOptions::default()
-        };
-        let pid = ptrace
-            .spawn(executable, options)
-            .expect("spawn a traced program");
-        let tracee = Self { ptrace, pid };
-        let first = tracee.wait();
-        (tracee, first)
-    }
-
-    #[must_use]
-    pub const fn pid(&self) -> Tid {
-        self.pid.as_raw()
-    }
-
-    /// Waits for the tracee's next status, failing after ten seconds.
-    #[must_use]
-    pub fn wait(&self) -> WaitStatus {
-        let started = std::time::Instant::now();
-        let event = loop {
-            match super::native::wait_for(self.pid, libc::__WALL | libc::WNOHANG) {
-                Ok(Some(event)) => break event,
-                Ok(None) | Err(Errno::EINTR) => {
-                    let waited = started.elapsed();
-                    assert!(
-                        waited < std::time::Duration::from_secs(10),
-                        "{} reported nothing for ten seconds",
-                        self.pid
-                    );
-                    // A single step reports within microseconds.
-                    if waited < std::time::Duration::from_millis(1) {
-                        std::thread::yield_now();
-                    } else {
-                        std::thread::sleep(std::time::Duration::from_micros(100));
-                    }
-                }
-                Err(errno) => panic!("waiting for {} failed: {errno}", self.pid),
-            }
-        };
-        match event {
-            WaitEvent::Exited(pid, code) => WaitStatus::Exited(pid.as_raw(), code),
-            WaitEvent::Signaled(pid, signal, core) => {
-                WaitStatus::Signaled(pid.as_raw(), signal.number(), core)
-            }
-            WaitEvent::Stopped(pid, signal) => WaitStatus::Stopped(pid.as_raw(), signal.number()),
-            WaitEvent::PtraceEvent(pid, _, event) => WaitStatus::Event(pid.as_raw(), event),
-            other => panic!("unexpected status {other:?}"),
-        }
-    }
-
-    pub fn registers(&self) -> std::result::Result<Registers, Errno> {
-        let user = self.ptrace.registers(self.pid).map_err(errno_of)?;
-        let mut registers = Registers::default();
-        apply_user_registers(&mut registers, &user);
-        registers.rflags = user.eflags;
-        Ok(registers)
-    }
-
-    pub fn set_registers(&self, registers: &Registers) -> std::result::Result<(), Errno> {
-        self.ptrace
-            .set_registers(self.pid, user_registers(registers))
-            .map_err(errno_of)
-    }
-
-    /// `PTRACE_GETSIGINFO`, as the controller sees it.
-    pub fn signal_view(&self) -> std::result::Result<(i32, i32, Option<i32>, Option<u64>), Errno> {
-        let raw = nix::sys::ptrace::getsiginfo(self.pid)?;
-        let metadata = super::native::signal_metadata(&raw);
-        Ok((
-            raw.si_signo,
-            metadata.code,
-            metadata.sender,
-            metadata.fault_address,
-        ))
-    }
-
-    pub fn event_message(&self) -> std::result::Result<u64, Errno> {
-        self.ptrace
-            .event_message(self.pid)
-            .map(i64::cast_unsigned)
-            .map_err(errno_of)
-    }
-
-    pub fn set_options(&self, exit_kill: bool) -> std::result::Result<(), Errno> {
-        self.ptrace
-            .set_options(self.pid, exit_kill)
-            .map_err(errno_of)
-    }
-
-    pub fn resume(&self, signal: Option<i32>, single_step: bool) -> std::result::Result<(), Errno> {
-        let signal = signal.map(|number| Signal::new(number).expect("a real signal"));
-        if single_step {
-            self.ptrace.step(self.pid, signal)
-        } else {
-            self.ptrace.continue_execution(self.pid, signal)
-        }
-        .map_err(errno_of)
-    }
-
-    pub fn kill(&self, signal: i32) -> std::result::Result<(), Errno> {
-        nix::sys::signal::kill(self.pid, nix::sys::signal::Signal::try_from(signal)?)
-    }
-
-    pub fn request_stop(&self) -> std::result::Result<(), Errno> {
-        self.ptrace
-            .request_stop(self.pid, self.pid)
-            .map_err(errno_of)
-    }
-
-    pub fn peek(&self, address: u64) -> std::result::Result<u64, Errno> {
-        nix::sys::ptrace::read(self.pid, address as nix::sys::ptrace::AddressType)
-            .map(i64::cast_unsigned)
-    }
-
-    pub fn poke(&self, address: u64, value: u64) -> std::result::Result<(), Errno> {
-        self.ptrace
-            .write_word(self.pid, address, value)
-            .map_err(errno_of)
-    }
-
-    /// `/proc/<pid>/maps`.
-    #[must_use]
-    pub fn maps(&self) -> String {
-        std::fs::read_to_string(format!("/proc/{}/maps", self.pid)).expect("read the maps")
-    }
-
-    /// Reads memory through `/proc/<pid>/mem`, or `None` where the kernel
-    /// refuses.
-    #[must_use]
-    pub fn read_memory(&self, address: u64, length: usize) -> Option<Vec<u8>> {
-        use std::os::unix::fs::FileExt as _;
-        let file = std::fs::File::open(format!("/proc/{}/mem", self.pid)).ok()?;
-        let mut bytes = vec![0; length];
-        file.read_exact_at(&mut bytes, address).ok()?;
-        Some(bytes)
-    }
-}
-
-#[cfg(test)]
-fn errno_of(error: Error) -> Errno {
-    match error {
-        Error::Backend(error) => match error.downcast_ref::<LinuxError>() {
-            Some(LinuxError::System(errno)) => *errno,
-            _ => panic!("not a system error: {error}"),
-        },
-        other => panic!("not a system error: {other}"),
-    }
-}
-
-#[cfg(test)]
-impl Drop for NativeTracee {
-    fn drop(&mut self) {
-        let _ = nix::sys::signal::kill(self.pid, nix::sys::signal::Signal::SIGKILL);
-        // Reap every remaining status, so nothing outlives the test. A
-        // thread in a stop, even one already reported such as its exit
-        // event, waits there until it is continued.
-        loop {
-            let _ = self.ptrace.continue_execution(self.pid, None);
-            match super::native::wait_for(self.pid, libc::__WALL) {
-                Ok(Some(WaitEvent::Exited(..) | WaitEvent::Signaled(..)) | None) | Err(_) => {
-                    break;
-                }
-                Ok(Some(_)) => {}
-            }
+            threads: inferior.threads.keys().map(|pid| pid.as_raw()).collect(),
+            breakpoints: self
+                .controller
+                .breakpoints
+                .iter()
+                .map(|breakpoint| {
+                    let addresses = breakpoint
+                        .locations
+                        .iter()
+                        .filter_map(|resolved| {
+                            super::breakpoints::runtime_breakpoint_address(
+                                inferior,
+                                resolved.location,
+                            )
+                            .ok()
+                        })
+                        .map(VirtualAddress::get)
+                        .collect();
+                    (
+                        breakpoint.id.get(),
+                        UserBreakpoint {
+                            addresses,
+                            hit_count: breakpoint.hit_count,
+                        },
+                    )
+                })
+                .collect(),
         }
     }
 }
