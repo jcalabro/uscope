@@ -1350,9 +1350,12 @@ struct DebugRegisterTrace {
     queued_traps: RefCell<BTreeSet<Pid>>,
     /// Threads a sibling's `exit_group` killed out of their ptrace-stop.
     vanished: RefCell<BTreeSet<Pid>>,
-    /// A thread a sibling's `exit_group` kills out of its stop just before
-    /// the controller reads its registers, leaving it at its exit event.
-    killed_at_registers: RefCell<Option<Pid>>,
+    /// A thread SIGKILL takes out of its stop, leaving it at its exit event,
+    /// when the controller makes the named request of it for the given
+    /// time, counting from zero.
+    kill_point: RefCell<Option<(Pid, &'static str, u32)>>,
+    /// Threads SIGKILL took out of their stop, which refuse every request.
+    killed: RefCell<BTreeSet<Pid>>,
     /// The child reported by the next clone event, in the process `tgid`.
     clone: RefCell<Option<(Pid, Pid)>>,
     /// The process's thread list.
@@ -1368,6 +1371,41 @@ struct DebugRegisterTrace {
 impl DebugRegisterTrace {
     fn record(&self, action: String) {
         self.actions.borrow_mut().push(action);
+    }
+
+    /// Takes a thread out of its stop as SIGKILL does, to its exit event.
+    fn sigkill(&self, pid: Pid) {
+        self.killed.borrow_mut().insert(pid);
+        self.vanished.borrow_mut().insert(pid);
+        self.siginfo.borrow_mut().insert(
+            pid,
+            SignalMetadata {
+                code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
+                sender: None,
+                fault_address: None,
+            },
+        );
+    }
+
+    /// Fails a request of a thread SIGKILL took out of its stop, which this
+    /// request may be the one to do.
+    fn reach(&self, pid: Pid, request: &'static str) -> Result<()> {
+        let mut point = self.kill_point.borrow_mut();
+        if let Some((target, name, remaining)) = point.as_mut()
+            && *target == pid
+            && *name == request
+        {
+            if *remaining == 0 {
+                *point = None;
+                self.sigkill(pid);
+            } else {
+                *remaining -= 1;
+            }
+        }
+        if self.killed.borrow().contains(&pid) {
+            return Err(backend_error(LinuxError::System(Errno::ESRCH)));
+        }
+        Ok(())
     }
 
     fn take_actions(&self) -> Vec<String> {
@@ -1422,23 +1460,7 @@ impl InspectionOps for DebugRegisterTrace {
     }
 
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
-        if self
-            .killed_at_registers
-            .borrow()
-            .is_some_and(|killed| killed == pid)
-        {
-            self.killed_at_registers.borrow_mut().take();
-            self.vanished.borrow_mut().insert(pid);
-            self.siginfo.borrow_mut().insert(
-                pid,
-                SignalMetadata {
-                    code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
-                    sender: None,
-                    fault_address: None,
-                },
-            );
-            return Err(backend_error(LinuxError::System(Errno::ESRCH)));
-        }
+        self.reach(pid, "registers")?;
         let mut registers = RecordingTrace {
             actions: Rc::new(RefCell::new(Vec::new())),
             pid,
@@ -1531,6 +1553,7 @@ impl LinuxTraceOps for DebugRegisterTrace {
     }
     fn set_options(&self, pid: Pid, _exit_kill: bool) -> Result<()> {
         self.record(format!("set_options {pid}"));
+        self.reach(pid, "set_options")?;
         if self.vanished.borrow().contains(&pid) {
             return Err(backend_error(LinuxError::System(Errno::ESRCH)));
         }
@@ -1563,6 +1586,9 @@ impl LinuxTraceOps for DebugRegisterTrace {
     }
     fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno> {
         self.record(format!("read {pid} dr{index}"));
+        if self.reach(pid, "read_debug_register").is_err() {
+            return Err(Errno::ESRCH);
+        }
         Ok(self.registers_of(pid)[index])
     }
     fn write_debug_register(
@@ -1591,11 +1617,12 @@ impl LinuxTraceOps for DebugRegisterTrace {
     }
     fn install_breakpoint(
         &self,
-        _pid: Pid,
+        pid: Pid,
         sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
         address: VirtualAddress,
         owner: BreakpointOwner,
     ) -> Result<()> {
+        self.reach(pid, "install_breakpoint")?;
         if let Some(site) = sites.get_mut(&address) {
             site.owners.insert(owner);
             return Ok(());
@@ -1613,20 +1640,22 @@ impl LinuxTraceOps for DebugRegisterTrace {
     }
     fn remove_breakpoint(
         &self,
-        _pid: Pid,
+        pid: Pid,
         sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
         address: VirtualAddress,
     ) -> Result<()> {
+        self.reach(pid, "remove_breakpoint")?;
         self.record(format!("remove_site {address}"));
         sites.get_mut(&address).expect("known site").installed = false;
         Ok(())
     }
     fn reinstall_breakpoint(
         &self,
-        _pid: Pid,
+        pid: Pid,
         sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
         address: VirtualAddress,
     ) -> Result<()> {
+        self.reach(pid, "reinstall_breakpoint")?;
         self.record(format!("reinstall_site {address}"));
         sites.get_mut(&address).expect("known site").installed = true;
         Ok(())
@@ -2977,7 +3006,7 @@ fn a_stop_whose_thread_sigkill_ends_while_it_is_handled_waits_for_the_exit() {
     };
 
     // The sibling calls exit_group after the step's trap was classified.
-    *harness.trace().killed_at_registers.borrow_mut() = Some(stepping);
+    *harness.trace().kill_point.borrow_mut() = Some((stepping, "registers", 0));
     harness.trace().siginfo.borrow_mut().insert(
         stepping,
         SignalMetadata {
@@ -2992,7 +3021,7 @@ fn a_stop_whose_thread_sigkill_ends_while_it_is_handled_waits_for_the_exit() {
             .handle_wait(WaitEvent::Stopped(stepping, Signal::SIGTRAP))
     );
     assert!(
-        harness.trace().killed_at_registers.borrow().is_none(),
+        harness.trace().kill_point.borrow().is_none(),
         "the handler read the killed thread's registers"
     );
     assert_eq!(harness.thread(stepping).state, NativeThreadState::Running);
@@ -3007,6 +3036,220 @@ fn a_stop_whose_thread_sigkill_ends_while_it_is_handled_waits_for_the_exit() {
         assert!(harness.controller.handle_wait(status));
     }
     assert!(harness.controller.inferior.is_none());
+}
+
+#[test]
+fn a_step_whose_threads_sigkill_ends_as_it_begins_runs_into_the_exit() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    let stop = harness
+        .controller
+        .inferior
+        .as_ref()
+        .and_then(|inferior| inferior.public_stop.as_ref())
+        .expect("stop")
+        .id;
+    // Something outside the debugger kills the program as the step starts.
+    *harness.trace().kill_point.borrow_mut() = Some((first, "registers", 0));
+    harness.trace().sigkill(second);
+    let execution = harness.controller.begin_execution(
+        process_id(first),
+        stop,
+        ResumeScope::Process(process_id(first)),
+        ActiveKind::Step {
+            thread: first,
+            kind: StepKind::IntoSource,
+            start: Box::new(StepStart {
+                source: None,
+                code_instance: None,
+                physical_instance: None,
+                activation: None,
+                plan_addresses: BTreeSet::new(),
+                epilogue_traversal: None,
+                return_traversal: None,
+                signal_guard: None,
+                call_return: None,
+            }),
+            progress_owed: false,
+        },
+        ExceptionDisposition::Pass,
+    );
+    assert!(
+        harness.trace().kill_point.borrow().is_none(),
+        "the step read its thread's registers"
+    );
+    assert!(execution.is_ok(), "{execution:?}");
+    assert!(
+        !harness
+            .trace()
+            .take_actions()
+            .iter()
+            .any(|action| action.starts_with("kill")),
+        "nothing kills the program"
+    );
+}
+
+#[test]
+fn a_trap_whose_thread_sigkill_ends_while_it_is_classified_is_superseded() {
+    let mut harness = watch_harness(1);
+    harness.add(0x1_1000, 8).expect("arm");
+    let pid = harness.threads[0];
+    harness.start_continue();
+    *harness.trace().kill_point.borrow_mut() = Some((pid, "read_debug_register", 0));
+    harness
+        .trap(
+            pid,
+            TRAP_HARDWARE_BREAKPOINT,
+            debug_registers::STATUS_IDLE | 0b1,
+        )
+        .expect("a superseded trap is no failure");
+    assert!(harness.trace().kill_point.borrow().is_none());
+    assert_eq!(harness.thread(pid).state, NativeThreadState::Running);
+    assert_eq!(harness.public_reason(), None);
+}
+
+#[test]
+fn plan_traps_a_dying_process_cannot_take_are_not_restored() {
+    let plan = BTreeSet::from([VirtualAddress::new(0x50), VirtualAddress::new(0x60)]);
+    // As a step begins.
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    let stop = harness
+        .controller
+        .inferior
+        .as_ref()
+        .and_then(|inferior| inferior.public_stop.as_ref())
+        .expect("stop")
+        .id;
+    *harness.trace().kill_point.borrow_mut() = Some((pid, "install_breakpoint", 1));
+    let error = harness
+        .controller
+        .begin_execution(
+            process_id(pid),
+            stop,
+            ResumeScope::Process(process_id(pid)),
+            ActiveKind::Step {
+                thread: pid,
+                kind: StepKind::OverSource,
+                start: Box::new(StepStart {
+                    source: None,
+                    code_instance: None,
+                    physical_instance: None,
+                    activation: None,
+                    plan_addresses: plan.clone(),
+                    epilogue_traversal: None,
+                    return_traversal: None,
+                    signal_guard: None,
+                    call_return: None,
+                }),
+                progress_owed: false,
+            },
+            ExceptionDisposition::Pass,
+        )
+        .expect_err("the second trap fails");
+    assert!(is_vanished_tracee(&error), "{error:?}");
+    assert!(
+        !harness
+            .trace()
+            .take_actions()
+            .iter()
+            .any(|action| action.starts_with("kill") || action.starts_with("remove_site")),
+        "nothing is restored and nothing killed"
+    );
+
+    // And as a step goes on.
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    *harness.trace().kill_point.borrow_mut() = Some((pid, "install_breakpoint", 1));
+    let error = harness
+        .controller
+        .install_additional_plan_breakpoints(ExecutionId::new(9), &plan)
+        .expect_err("the second trap fails");
+    assert!(is_vanished_tracee(&error), "{error:?}");
+    assert!(
+        !harness
+            .trace()
+            .take_actions()
+            .iter()
+            .any(|action| action.starts_with("kill") || action.starts_with("remove_site")),
+        "nothing is restored and nothing killed"
+    );
+}
+
+#[test]
+fn a_launch_killed_at_its_first_stop_ends_in_its_exit() {
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.public_stop = None;
+    inferior.active = Some(ActiveExecution {
+        id: ExecutionId::new(1),
+        kind: ActiveKind::Launch,
+        scope: ResumeScope::Process(process_id(pid)),
+        resume_threads: BTreeSet::from([pid]),
+    });
+    let thread = inferior.thread_mut(pid).expect("thread");
+    thread.state = NativeThreadState::Starting;
+    thread.expected = ExpectedStop::InitialExec;
+    harness.published();
+
+    // Killed before its options were set.
+    harness.trace().sigkill(pid);
+    assert!(
+        harness
+            .controller
+            .handle_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
+    );
+    assert!(
+        harness
+            .controller
+            .handle_wait(WaitEvent::Signaled(pid, Signal::SIGKILL, false))
+    );
+    assert!(harness.controller.inferior.is_none());
+    assert!(
+        !harness
+            .trace()
+            .take_actions()
+            .iter()
+            .any(|action| action.starts_with("kill")),
+        "the debugger does not give up on the program"
+    );
+    assert!(harness.published().iter().any(|event| matches!(
+        event,
+        DebuggerEvent::InferiorExited {
+            status: ExitStatus::Terminated(_),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn a_repair_whose_process_dies_leaves_its_trap_unrestored() {
+    let mut harness = repairing_harness_of(1);
+    let (leader, repairing) = (harness.threads[0], harness.threads[1]);
+    // Something outside the debugger kills the program mid-repair. The
+    // repairing thread's death leaves no thread to restore the trap through.
+    harness.trace().sigkill(leader);
+    harness.trace().sigkill(repairing);
+    for status in [
+        WaitEvent::PtraceEvent(leader, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::PtraceEvent(repairing, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Signaled(repairing, Signal::SIGKILL, false),
+        WaitEvent::Signaled(leader, Signal::SIGKILL, false),
+    ] {
+        assert!(harness.controller.handle_wait(status));
+    }
+    assert!(harness.controller.inferior.is_none());
+    assert!(
+        !harness
+            .trace()
+            .take_actions()
+            .iter()
+            .any(|action| action.starts_with("kill")),
+        "the debugger does not give up on the program"
+    );
 }
 
 /// The trap site of the hit-count harness's one user breakpoint.
@@ -4178,6 +4421,12 @@ fn an_unchanged_store_during_a_pause_gives_its_thread_no_reason() {
 /// Puts the harness's first thread in the middle of stepping over a user
 /// breakpoint at 0x40 while its sibling waits stopped, as a continue does.
 fn repairing_harness() -> WatchHarness {
+    repairing_harness_of(0)
+}
+
+/// Puts one of two threads in the middle of stepping over a user breakpoint
+/// at 0x40 while the other waits stopped, as a continue does.
+fn repairing_harness_of(repairing: usize) -> WatchHarness {
     let mut harness = watch_harness(2);
     harness
         .edit(|reply| Edit::AddBreakpoint {
@@ -4189,7 +4438,7 @@ fn repairing_harness() -> WatchHarness {
         .expect("reply")
         .expect("added");
     harness.start_continue();
-    let repairing = harness.threads[0];
+    let (repairing, waiting) = (harness.threads[repairing], harness.threads[1 - repairing]);
     let inferior = harness.controller.inferior.as_mut().expect("inferior");
     inferior.repairs = VecDeque::from([RepairGroup {
         address: VirtualAddress::new(0x40),
@@ -4207,10 +4456,7 @@ fn repairing_harness() -> WatchHarness {
     thread.expected = ExpectedStop::BreakpointRepair {
         address: VirtualAddress::new(0x40),
     };
-    inferior
-        .thread_mut(harness.threads[1])
-        .expect("thread")
-        .state = NativeThreadState::Stopped;
+    inferior.thread_mut(waiting).expect("thread").state = NativeThreadState::Stopped;
     harness.trace().take_actions();
     harness.published();
     harness

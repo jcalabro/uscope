@@ -61,7 +61,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .then(|| self.normalize_breakpoint_pc(pid))
                 .flatten();
 
-        classify_stop_evidence(
+        match classify_stop_evidence(
             signal,
             status,
             siginfo,
@@ -70,7 +70,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             debugger_requested,
             breakpoint,
             watch,
-        )
+        ) {
+            // SIGKILL may have taken the thread out of its stop while the
+            // evidence was read, which then could not all be read.
+            ClassifiedStop::Unclassifiable(_)
+                if is_superseded(&self.ptrace.signal_metadata(pid)) =>
+            {
+                ClassifiedStop::Superseded
+            }
+            stop => stop,
+        }
     }
 
     /// Reads and consumes DR6 for stops raised by a debug exception.
