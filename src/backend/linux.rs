@@ -588,6 +588,9 @@ struct Inferior {
     unowned_stops: BTreeMap<Pid, WaitEvent>,
     /// Threads that began exiting before the event that announces them.
     vanished_threads: BTreeSet<Pid>,
+    /// Sites removed since the address space began, with their original
+    /// bytes: a process forked before their removal still holds their traps.
+    former_sites: BTreeMap<VirtualAddress, u8>,
     /// Listed threads that exited before an attach could seize them, such
     /// as a leader that exited before the rest of its process. No status
     /// of theirs is due.
@@ -641,6 +644,7 @@ impl Inferior {
             unowned_stops: BTreeMap::new(),
             vanished_threads: BTreeSet::new(),
             unseized_threads: BTreeSet::new(),
+            former_sites: BTreeMap::new(),
             fork_children: BTreeMap::new(),
             waiter,
             active: None,
@@ -737,14 +741,19 @@ impl Inferior {
             .unwrap_or_default()
     }
 
-    /// The breakpoint sites a process forked now inherits, with their
-    /// original bytes. A site lifted for a repair is included, since
-    /// restoring a byte that is already in place changes nothing.
+    /// Every trap a process forked from this one may hold, with its
+    /// original byte: the sites installed now, one lifted for a repair
+    /// among them, and those removed since the address space began, as a
+    /// fork's event may be handled after edits that followed the fork. A
+    /// child is scrubbed only where its memory still holds a trap.
     fn inherited_sites(&self) -> Vec<(VirtualAddress, u8)> {
-        self.breakpoints
-            .iter()
-            .map(|(&address, site)| (address, site.original_byte))
-            .collect()
+        let mut sites = self.former_sites.clone();
+        sites.extend(
+            self.breakpoints
+                .iter()
+                .map(|(&address, site)| (address, site.original_byte)),
+        );
+        sites.into_iter().collect()
     }
 
     /// Ends `pid`'s step over the front repair group's breakpoint at `address`.

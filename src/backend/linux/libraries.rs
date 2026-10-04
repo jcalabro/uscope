@@ -185,7 +185,8 @@ fn forget_owner(inferior: &mut Inferior, address: VirtualAddress, owner: Breakpo
     };
     site.owners.remove(&owner);
     if site.owners.is_empty() {
+        let original_byte = site.original_byte;
         inferior.breakpoints.remove(&address);
-        super::breakpoints::forget_removed_site(inferior, address);
+        super::breakpoints::forget_removed_site(inferior, address, original_byte);
     }
 }
