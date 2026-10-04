@@ -4366,3 +4366,62 @@ fn a_step_whose_thread_exits_while_an_edit_drops_the_other_reason_ends_in_its_ex
         "the program must not be killed"
     );
 }
+
+/// A stack of two frames: the innermost at 0x30 with its CFA at 0x1000,
+/// whose caller at 0x50 is the outermost.
+struct OutermostCallerUnwindInfo;
+
+impl UnwindInfo for OutermostCallerUnwindInfo {
+    fn cfa(
+        &self,
+        address: ImageAddress,
+        _registers: &RegisterFile,
+        _memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<VirtualAddress, UnwindTermination> {
+        match address.get() {
+            0x30 => Ok(VirtualAddress::new(0x1000)),
+            0x4f => Ok(VirtualAddress::new(0x2000)),
+            _ => Err(UnwindTermination::NoUnwindInfo {
+                address: VirtualAddress::new(address.get()),
+            }),
+        }
+    }
+
+    fn unwind(
+        &self,
+        address: ImageAddress,
+        _registers: &RegisterFile,
+        _memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
+        match address.get() {
+            0x30 => Ok(crate::unwind::UnwindStep {
+                registers: RegisterFile::new([(16, 0x50), (7, 0x1000)]),
+                cfa: VirtualAddress::new(0x1000),
+                signal_frame: false,
+            }),
+            _ => Err(UnwindTermination::Complete),
+        }
+    }
+}
+
+#[test]
+fn an_activation_missing_from_a_wholly_unwound_stack_has_returned() {
+    let mut harness = watch_harness(1);
+    harness.controller.unwind_info = Arc::new(OutermostCallerUnwindInfo);
+    let mut registers = harness
+        .trace()
+        .registers(harness.threads[0])
+        .expect("registers");
+    registers.rip = 0x30;
+    registers.rsp = 0x0ff8;
+    // Above every frame of this stack: another stack's activation, as a
+    // raw-cloned thread computes from its creator's frame pointer.
+    let elsewhere = VirtualAddress::new(0x9000);
+    assert!(
+        harness
+            .controller
+            .location_for_activation(harness.threads[0], &registers, elsewhere)
+            .expect("a complete stack is evidence")
+            .is_none()
+    );
+}
