@@ -850,7 +850,7 @@ fn tls_location(variable: &uscope::Variable) -> (u64, i128) {
 
 /// Reads the variable with `libthread_db` and then with glibc's own layout
 /// descriptors, which must agree.
-async fn tls_location_both_ways(scenario: &Scenario, name: &str) -> (u64, i128) {
+pub async fn tls_location_both_ways(scenario: &Scenario, name: &str) -> (u64, i128) {
     uscope::force_internal_tls_lookup(false);
     let thread_library = tls_location(
         &scenario

@@ -588,6 +588,10 @@ struct Inferior {
     unowned_stops: BTreeMap<Pid, WaitEvent>,
     /// Threads that began exiting before the event that announces them.
     vanished_threads: BTreeSet<Pid>,
+    /// Listed threads that exited before an attach could seize them, such
+    /// as a leader that exited before the rest of its process. No status
+    /// of theirs is due.
+    unseized_threads: BTreeSet<Pid>,
     /// Fork children announced before their initial stop arrived, with the
     /// breakpoint sites each inherited.
     fork_children: BTreeMap<Pid, Vec<(VirtualAddress, u8)>>,
@@ -636,6 +640,7 @@ impl Inferior {
             retired_threads: BTreeSet::new(),
             unowned_stops: BTreeMap::new(),
             vanished_threads: BTreeSet::new(),
+            unseized_threads: BTreeSet::new(),
             fork_children: BTreeMap::new(),
             waiter,
             active: None,

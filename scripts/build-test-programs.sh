@@ -575,6 +575,8 @@ build_fixture gcc "$c_fixtures_dir/attach-threads.c" "$output_dir/attach-threads
     -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/attach-clones.c" "$output_dir/attach-clones" \
     -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/attach-exited-leader.c" "$output_dir/attach-exited-leader" \
+    -O0 -g3 -fPIE -pie -pthread
 build_fixture gcc "$c_fixtures_dir/attach-restart.c" "$output_dir/attach-restart" \
     -O0 -g3 -fPIE -pie
 build_c_fixture_directory gcc "$c_fixtures_dir/pointer-memory" \

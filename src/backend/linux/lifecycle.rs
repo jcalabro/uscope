@@ -105,10 +105,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         // could not find them all, and would find threads already traced
         // through their creator's clone event, which cannot be seized.
         let mut seized = BTreeSet::new();
+        let mut unseized = BTreeSet::new();
         let result = (|| -> Result<()> {
             for tid in self.ptrace.process_threads(tgid)? {
                 if self.ptrace.seize(tid, false)? {
                     seized.insert(tid);
+                } else {
+                    unseized.insert(tid);
                 }
             }
             Ok(())
@@ -144,13 +147,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             .map(|&pid| (pid, TraceThread::starting(ExpectedStop::InitialAttach)))
             .collect();
         self.reset_breakpoint_hit_counts();
-        self.inferior = Some(Inferior::new(
+        let mut inferior = Inferior::new(
             InferiorOrigin::Attached,
             tgid,
             LoadedModule::main(self.module_image.id(), 0),
             threads,
             Some(waiter),
-        ));
+        );
+        inferior.unseized_threads = unseized;
+        self.inferior = Some(inferior);
         self.attach_reply = Some(reply);
         self.attach_rescans = 0;
 
@@ -361,6 +366,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     !inferior.threads.contains_key(tid)
                         && !inferior.retired_threads.contains(tid)
                         && !inferior.vanished_threads.contains(tid)
+                        && !inferior.unseized_threads.contains(tid)
                         && !inferior.unowned_stops.contains_key(tid)
                 })
                 .collect::<Vec<_>>();
@@ -375,6 +381,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             let mut waiting = false;
             for tid in untraced {
                 if !self.ptrace.seize(tid, false)? {
+                    inferior.unseized_threads.insert(tid);
                     continue;
                 }
                 if self.ptrace.interrupt(tid)? {

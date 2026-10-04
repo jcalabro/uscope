@@ -106,6 +106,37 @@ async fn attach_stops_and_detaches_every_existing_native_thread() {
     assert_eq!(exit_code(child), Some(0));
 }
 
+#[tokio::test]
+async fn attach_traces_a_process_whose_main_thread_exited() {
+    let mut child = support::ExternalProcess::spawn(&Scenario::fixture("attach-exited-leader"));
+    // The zombie leader stays listed but can never be seized.
+    let stat = format!("/proc/{}/stat", child.process_id());
+    support::wait_until("the main thread exits", || {
+        fs::read_to_string(&stat).is_ok_and(|stat| {
+            stat.rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().next())
+                == Some("Z")
+        })
+    });
+    let mut scenario = Scenario::attached("attach without a leader", child.attach().await);
+    let snapshot = scenario.snapshot().await;
+    assert!(matches!(
+        snapshot.inferior,
+        InferiorState::Stopped {
+            reason: StopReason::Attach,
+            ..
+        }
+    ));
+    assert_eq!(snapshot.threads.len(), 1, "{:?}", snapshot.threads);
+    // Both TLS lookups read the address space through the worker.
+    let (_, value) = super::globals::tls_location_both_ways(&scenario, "worker_value").await;
+    assert_eq!(value, 31);
+
+    scenario.shutdown().await;
+    child.release();
+    assert_eq!(child.wait().code(), Some(31));
+}
+
 /// The kernel's flag for a thread that has begun to exit.
 const PF_EXITING: u64 = 0x4;
 
