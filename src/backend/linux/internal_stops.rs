@@ -55,6 +55,19 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    /// Answers the edits an internal stop still held when its process
+    /// ended. They change the logical breakpoints and watchpoints, which
+    /// outlive any process, unless the session is ending.
+    pub(super) fn settle_pending_edits(&mut self, edits: Vec<Edit>) {
+        for edit in edits {
+            if self.shutting_down {
+                edit.reject(Error::RequestCancelled);
+            } else {
+                self.apply_edit(edit);
+            }
+        }
+    }
+
     /// Whether breakpoint traps and debug registers can be written now:
     /// the inferior has completed its first stop and every thread is
     /// stopped.
@@ -118,6 +131,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             triggering_thread,
             reason: None,
             paused: false,
+            ended: None,
             edits: Vec::new(),
         });
         self.request_stops()
@@ -276,7 +290,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         }
         // The published hit is gone; another thread's reason, if any, takes
-        // its place, and a pause the hit outranked otherwise.
+        // its place, then the end of an execution that cannot resume, and a
+        // pause the hit outranked otherwise.
         if let Some((pid, reason)) = inferior
             .threads
             .iter()
@@ -285,6 +300,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             .max_by_key(|(_, reason)| visible_stop_priority(reason))
         {
             barrier.triggering_thread = pid;
+            barrier.reason = Some(reason);
+        } else if let Some(reason) = barrier.ended.clone() {
             barrier.reason = Some(reason);
         } else if barrier.paused {
             barrier.reason = Some(StopReason::Pause);

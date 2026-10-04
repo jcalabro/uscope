@@ -126,7 +126,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if uses_plan_breakpoints {
             return self.continue_thread(pid);
         }
-        if kind == StepKind::IntoSource
+        if matches!(kind, StepKind::IntoSource | StepKind::OverSource)
             && self.stopped_outside_described_code(pid)?
             && self.escape_undescribed_code(pid)?
         {
@@ -684,7 +684,8 @@ impl<P: LinuxTraceOps> Controller<P> {
                     return Err(Error::LocationUnavailable);
                 };
                 let Some(code_instance) = start.code_instance else {
-                    return Err(Error::LocationUnavailable);
+                    return self
+                        .undescribed_step_is_complete(pid, &registers, start, activation, kind);
                 };
                 let Some(location) = self.location_for_activation(pid, &registers, activation)?
                 else {
@@ -711,6 +712,32 @@ impl<P: LinuxTraceOps> Controller<P> {
                     && source_line_changed(start.source.as_ref(), source.as_ref()))
             }
         }
+    }
+
+    /// Whether a step over or out begun in code no debug information
+    /// describes, such as a program's entry point, is complete. It has no
+    /// source line to step over: it ends at the first source statement it
+    /// reaches, as stepping in does, or, stepping out, once its activation
+    /// has returned to one.
+    fn undescribed_step_is_complete(
+        &self,
+        pid: Pid,
+        registers: &libc::user_regs_struct,
+        start: &StepStart,
+        activation: VirtualAddress,
+        kind: StepKind,
+    ) -> Result<bool> {
+        if kind == StepKind::OverSource {
+            return self.step_into_source_is_complete(pid, registers, start);
+        }
+        Ok(self
+            .location_for_activation(pid, registers, activation)?
+            .is_none()
+            && self
+                .image_location(VirtualAddress::new(registers.rip))
+                .is_some_and(|location| {
+                    source_step_destination(&self.module_image, &location, kind)
+                }))
     }
 
     pub(super) fn step_into_source_is_complete(

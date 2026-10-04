@@ -791,6 +791,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.discard_watchpoints();
             self.abandon_fork_children();
             let mut inferior = self.inferior.take().expect("inferior exists");
+            let edits = inferior.take_pending_edits();
             if let Some(waiter) = inferior.waiter.take() {
                 waiter.join()?;
             }
@@ -817,6 +818,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             if let Some(reply) = self.kill_reply.take() {
                 let _ = reply.send(Ok(()));
             }
+            self.settle_pending_edits(edits);
             return Ok(());
         }
 
@@ -846,10 +848,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .inferior
                     .as_mut()
                     .and_then(|inferior| inferior.barrier.as_mut())
-                    .filter(|barrier| barrier.reason.is_none())
             {
-                // An internal stop has no execution left to resume.
-                barrier.reason = Some(StopReason::ThreadExited { thread_id, status });
+                // The execution has no thread left to resume, so the stop
+                // ends in this exit unless it publishes something that
+                // matters more, and even if an edit drops that.
+                let reason = StopReason::ThreadExited { thread_id, status };
+                barrier.ended = Some(reason.clone());
+                barrier.reason.get_or_insert(reason);
             }
             return self.finish_barrier_if_ready();
         }
@@ -1113,6 +1118,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             revision: self.revision,
             process_id: process_id(inferior.tgid),
         });
+        self.settle_pending_edits(inferior.take_pending_edits());
         self.finish_shutdown(outcome);
     }
 
@@ -1198,6 +1204,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             revision: self.revision,
             process_id: process_id(inferior.tgid),
         });
+        self.settle_pending_edits(inferior.take_pending_edits());
         self.finish_shutdown(first_error.map_or(Ok(()), Err));
     }
 

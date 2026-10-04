@@ -4266,3 +4266,103 @@ fn a_step_that_loses_its_frame_stops_explicitly_and_leaves_the_program_alone() {
         "the step's plan sites are removed"
     );
 }
+
+#[test]
+fn an_edit_waiting_for_an_internal_stop_is_answered_when_the_process_ends_first() {
+    let mut harness = watch_harness(2);
+    harness.start_continue();
+    harness.published();
+    let mut added = harness.edit(|reply| Edit::AddBreakpoint {
+        spec: address_breakpoint(0x40),
+        options: Box::default(),
+        reply,
+    });
+    assert!(added.try_recv().is_err(), "the edit waits for every thread");
+
+    // The program exits before either thread stops for the edit.
+    for pid in [harness.threads[1], harness.threads[0]] {
+        harness
+            .controller
+            .process_wait(WaitEvent::Exited(pid, 0))
+            .expect("an exit is handled");
+    }
+    assert!(harness.controller.inferior.is_none());
+    let breakpoint = added
+        .try_recv()
+        .expect("the edit is answered")
+        .expect("a breakpoint outlives the process it was set in");
+    assert_eq!(
+        harness
+            .controller
+            .breakpoints
+            .iter()
+            .map(|breakpoint| breakpoint.id)
+            .collect::<Vec<_>>(),
+        [breakpoint.id]
+    );
+}
+
+#[test]
+fn a_step_whose_thread_exits_while_an_edit_drops_the_other_reason_ends_in_its_exit() {
+    let mut harness = watch_harness(2);
+    let (other, stepping) = (harness.threads[0], harness.threads[1]);
+    let breakpoint = harness
+        .edit(|reply| Edit::AddBreakpoint {
+            spec: address_breakpoint(0x40),
+            options: Box::default(),
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("added at the stop");
+    harness.start_continue();
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.active.as_mut().expect("an execution").kind = ActiveKind::Step {
+        thread: stepping,
+        kind: StepKind::OverSource,
+        start: Box::new(StepStart {
+            source: None,
+            code_instance: None,
+            physical_instance: None,
+            activation: Some(VirtualAddress::new(0x7000)),
+            plan_addresses: BTreeSet::new(),
+            epilogue_traversal: None,
+            return_traversal: None,
+            signal_guard: None,
+            call_return: None,
+        }),
+        progress_owed: false,
+    };
+    harness.published();
+
+    // The edit stops every thread; meanwhile the other thread hits the
+    // breakpoint being removed, and the stepping thread exits.
+    let mut removed = harness.edit(|reply| Edit::RemoveBreakpoint {
+        id: breakpoint.id,
+        reply,
+    });
+    harness.hit_at(other, 0x40).expect("breakpoint trap");
+    harness
+        .controller
+        .process_wait(WaitEvent::Exited(stepping, 0))
+        .expect("the stepping thread's exit is handled");
+    removed.try_recv().expect("reply").expect("removed");
+
+    // The hit died with its breakpoint, but the step cannot resume without
+    // its thread: it ends in that thread's exit.
+    assert_eq!(
+        harness.public_reason(),
+        Some(StopReason::ThreadExited {
+            thread_id: debug_thread_id(stepping),
+            status: ExitStatus::Code(0),
+        })
+    );
+    assert!(
+        !harness
+            .trace()
+            .take_actions()
+            .iter()
+            .any(|action| action.starts_with("kill")),
+        "the program must not be killed"
+    );
+}
