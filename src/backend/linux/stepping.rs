@@ -1096,6 +1096,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             context = match provider.caller(&context) {
                 CallerResult::Caller(caller) => caller,
+                // The whole stack was walked without meeting the activation,
+                // so it is not live, as for a thread whose first frame began
+                // in its creator's function after a raw clone.
+                CallerResult::Finished(crate::UnwindTermination::Complete) => return Ok(None),
                 CallerResult::Finished(reason) => {
                     return Err(backend_error(LinuxError::CallerUnavailable(reason)));
                 }
