@@ -1,0 +1,26 @@
+{
+  "program": "threads",
+  "toolchain": {
+    "gcc": "gcc (GCC) 15.2.0",
+    "clang": "clang version 21.1.8"
+  },
+  "sources": [
+    {"path": "threads.c", "sha256": "aa7de3c346b36738a98e6fe44164ba9314add09e4263d7c4cdcfb6b95bcd4e81"},
+    {"path": "../rt/rt.c", "sha256": "bf6d2f92e145e6ebda31e922284a86f619ba90cbefc2ecb984dd167f674214dc"},
+    {"path": "../rt/rt.h", "sha256": "9a13639b8e9c28b2f36f9395371eee48dbc5bbd9796cefe4ab8db2efc3e0d624"},
+    {"path": "../rt/thread.c", "sha256": "18cf71a60bdc2e333156496c6229bc9315f52d14c12cd4440425ca485b347f77"},
+    {"path": "../rt/thread.h", "sha256": "44144ad894188e5dd8e34592aea9c3f3f62389424c18c300f273b57f3fb038d5"}
+  ],
+  "variants": [
+    {"name": "gcc-O0", "compiler": "gcc", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O0", "sha256": "d4fb9845a899508b346cce734f9ee855cdd522b1728ee7e342ad3944f63966f6"},
+    {"name": "gcc-O2", "compiler": "gcc", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O2 -fno-tree-vectorize", "sha256": "bb0a21f14c740d93175d105c2e4f0bdd7adf5f3f6ae4afc2fd01556d4a4a337c"},
+    {"name": "clang-O0", "compiler": "clang", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O0", "sha256": "a32e3baac09cd610caec4fc0e4464e0459b1f9d8aaa13192191ec5401eaceb89"},
+    {"name": "clang-O2", "compiler": "clang", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O2 -fno-vectorize -fno-slp-vectorize", "sha256": "c54d6de945cb59e72e6bf9b925a7296b42ebca023203c5846fbbcf15987f3b0a"}
+  ],
+  "runs": [
+    {"arguments": ["1", "main"], "exit_code": 60, "output": "total 60\n"},
+    {"arguments": ["3", "main"], "exit_code": 30, "output": "total 330\n"},
+    {"arguments": ["2", "worker"], "exit_code": 70, "output": "total 170\n"},
+    {"arguments": ["3", "leader"], "exit_code": 3, "output": "total 330\n"}
+  ]
+}
