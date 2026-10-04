@@ -140,27 +140,37 @@ impl<P: LinuxTraceOps> Controller<P> {
         let execution_id = ExecutionId::new(inferior.next_execution);
         let owner = BreakpointOwner::Plan(execution_id);
         let mut installed = Vec::new();
+        let mut failure = None;
         if let ActiveKind::Step { start, .. } = &kind {
             for &address in &start.plan_addresses {
                 if let Err(error) =
                     install_plan_breakpoint(&self.ptrace, inferior, address, execution_id)
                 {
-                    for address in installed.into_iter().rev() {
-                        if let Err(recovery) =
-                            remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)
-                        {
-                            let _ = self.ptrace.kill(inferior.tgid, Signal::SIGKILL);
-                            return Err(backend_error(LinuxError::ResumeRecovery {
-                                cause: error.to_string(),
-                                recovery: recovery.to_string(),
-                            }));
-                        }
-                    }
-                    return Err(error);
+                    failure = Some(error);
+                    break;
                 }
                 installed.push(address);
             }
         }
+        if let Some(error) = failure {
+            if self.lost_to_sigkill(&error) {
+                return Err(error);
+            }
+            let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+            for address in installed.into_iter().rev() {
+                if let Err(recovery) =
+                    remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)
+                {
+                    let _ = self.ptrace.kill(inferior.tgid, Signal::SIGKILL);
+                    return Err(backend_error(LinuxError::ResumeRecovery {
+                        cause: error.to_string(),
+                        recovery: recovery.to_string(),
+                    }));
+                }
+            }
+            return Err(error);
+        }
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let mut suppressed = Vec::new();
         if exception == ExceptionDisposition::Suppress {
             for &pid in &resume_threads {
@@ -180,6 +190,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.repairs = collect_repairs(inferior);
 
         if let Err(error) = self.advance_execution() {
+            // SIGKILL took threads out of the stop as they were resumed: the
+            // execution has begun, and runs on into the program's end.
+            if is_vanished_tracee(&error) && self.release_superseded_threads(None) {
+                self.bump_revision();
+                return Ok(execution_id);
+            }
             self.restore_unconsumed_signals(&suppressed);
             let cause = error.to_string();
             if let Err(recovery) = self.recover_partial_resume() {

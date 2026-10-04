@@ -544,6 +544,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             if let Err(error) = install_plan_breakpoint(&self.ptrace, inferior, address, execution)
             {
+                if self.lost_to_sigkill(&error) {
+                    return Err(error);
+                }
+                let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
                 for address in installed.into_iter().rev() {
                     if let Err(recovery) =
                         remove_breakpoint_owner_from(&self.ptrace, inferior, address, owner)

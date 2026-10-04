@@ -1393,8 +1393,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.handle_shutdown_wait(status);
         }
 
+        // The status reported a stop, whatever its thread is counted as.
+        let reported = (!matches!(
+            status,
+            WaitEvent::Exited(..) | WaitEvent::Signaled(..) | WaitEvent::Continued(_)
+        ))
+        .then(|| status.pid());
         if let Err(error) = self.process_wait(status)
-            && !(is_vanished_tracee(&error) && self.release_superseded_threads())
+            && !(is_vanished_tracee(&error)
+                && (self.release_superseded_threads(reported) || self.every_thread_exiting()))
         {
             self.fail_inferior(error);
         }
@@ -1402,17 +1409,42 @@ impl<P: LinuxTraceOps> Controller<P> {
         true
     }
 
-    /// Finds the threads counted as stopped that SIGKILL took out of their
-    /// stop, typically a sibling's `exit_group` while a stop was handled,
-    /// which explains a ptrace request failing with ESRCH. Each runs on to
-    /// its exit event, which retires it. Returns whether any was found.
-    fn release_superseded_threads(&mut self) -> bool {
+    /// Whether `error` came from SIGKILL taking threads out of the stop the
+    /// controller counts them in, so the address space is dying and needs
+    /// nothing restored. The failure's handler releases them.
+    fn lost_to_sigkill(&self, error: &Error) -> bool {
+        is_vanished_tracee(error)
+            && self.inferior.as_ref().is_some_and(|inferior| {
+                inferior.threads.iter().any(|(&pid, thread)| {
+                    matches!(thread.state, NativeThreadState::Stopped)
+                        && is_superseded(&self.ptrace.signal_metadata(pid))
+                })
+            })
+    }
+
+    /// Whether every live thread passed its exit event, leaving none to
+    /// read or write the dying address space through.
+    fn every_thread_exiting(&self) -> bool {
+        self.inferior.as_ref().is_some_and(|inferior| {
+            inferior
+                .threads
+                .values()
+                .all(|thread| matches!(thread.state, NativeThreadState::Exiting))
+        })
+    }
+
+    /// Finds the threads counted as stopped, or whose reported stop is
+    /// being handled, that SIGKILL took out of their stop, typically a
+    /// sibling's `exit_group` while a stop was handled, which explains a
+    /// ptrace request failing with ESRCH. Each runs on to its exit, which
+    /// retires it. Returns whether any was found.
+    fn release_superseded_threads(&mut self, handled: Option<Pid>) -> bool {
         let Some(inferior) = self.inferior.as_mut() else {
             return false;
         };
         let mut found = false;
         for (&pid, thread) in &mut inferior.threads {
-            if matches!(thread.state, NativeThreadState::Stopped)
+            if (matches!(thread.state, NativeThreadState::Stopped) || handled == Some(pid))
                 && is_superseded(&self.ptrace.signal_metadata(pid))
             {
                 record!("{pid} left its stop while it was handled");
