@@ -146,6 +146,12 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         waiter
     }
 
+    fn traced_children(&self, process: Pid, thread: Pid) -> Vec<Pid> {
+        let children = self.0.traced_children(process, thread);
+        record!("traced children of {thread} -> {children:?}");
+        children
+    }
+
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>> {
         queried(
             format_args!("list threads of {process}"),
@@ -171,10 +177,11 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
         })
     }
 
-    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
-        issued(format_args!("PTRACE_DETACH {pid} {signal:?}"), &(), || {
-            self.0.detach(pid, signal)
-        })
+    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<bool> {
+        queried(
+            format_args!("PTRACE_DETACH {pid} {signal:?}"),
+            self.0.detach(pid, signal),
+        )
     }
 
     fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {

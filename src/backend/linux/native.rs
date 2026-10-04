@@ -69,6 +69,10 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn spawn(&self, executable: &Path, options: LaunchOptions) -> Result<Pid>;
     fn spawn_waiter(&self, messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter>;
     fn process_threads(&self, process: Pid) -> Result<Vec<Pid>>;
+    /// The children `thread` of `process` forked that this tracer still
+    /// traces. A child whose fork event was lost is found here while its
+    /// parent thread exits.
+    fn traced_children(&self, process: Pid, thread: Pid) -> Vec<Pid>;
     /// Reads the name a thread gave itself, if it is still readable.
     fn thread_name(&self, _process: Pid, _thread: Pid) -> Option<Arc<str>> {
         // Deterministic effect fakes have no names. The production edge
@@ -78,7 +82,9 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     /// Seizes a thread, killing it with the tracer when `exit_kill` is set.
     fn seize(&self, pid: Pid, exit_kill: bool) -> Result<bool>;
     fn interrupt(&self, pid: Pid) -> Result<bool>;
-    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
+    /// Releases a stopped thread, returning whether it was still in its
+    /// stop. One SIGKILL took out of it stays traced until it exits.
+    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<bool>;
     fn kill(&self, pid: Pid, signal: Signal) -> Result<()>;
     fn reap(&self, pid: Pid) -> Result<()>;
     /// Waits for the next status of one tracee, as `waitpid(pid, __WALL)`.
@@ -310,6 +316,21 @@ impl LinuxTraceOps for LinuxPtrace {
         process_threads(process)
     }
 
+    fn traced_children(&self, process: Pid, thread: Pid) -> Vec<Pid> {
+        self.assert_owner_thread();
+        // The tracer is this thread, the one that traced the parent.
+        let tracer = nix::unistd::gettid();
+        let Ok(children) = fs::read_to_string(format!("/proc/{process}/task/{thread}/children"))
+        else {
+            return Vec::new();
+        };
+        children
+            .split_whitespace()
+            .filter_map(|child| child.parse().ok().map(Pid::from_raw))
+            .filter(|&child| tracer_of(child) == Some(tracer))
+            .collect()
+    }
+
     fn thread_name(&self, process: Pid, thread: Pid) -> Option<Arc<str>> {
         let name = fs::read_to_string(format!("/proc/{process}/task/{thread}/comm")).ok()?;
         let name = name.strip_suffix('\n').unwrap_or(&name);
@@ -338,10 +359,11 @@ impl LinuxTraceOps for LinuxPtrace {
         }
     }
 
-    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
+    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<bool> {
         self.assert_owner_thread();
         match ptrace_with_signal(libc::PTRACE_DETACH, pid, signal) {
-            Ok(()) | Err(Errno::ESRCH) => Ok(()),
+            Ok(()) => Ok(true),
+            Err(Errno::ESRCH) => Ok(false),
             Err(error) => Err(backend_error(LinuxError::System(error))),
         }
     }
@@ -829,6 +851,19 @@ pub(super) fn process_threads(process: Pid) -> Result<Vec<Pid>> {
         .collect::<Vec<_>>();
     threads.sort_unstable();
     Ok(threads)
+}
+
+/// The thread tracing `pid`, from its `/proc` status.
+fn tracer_of(pid: Pid) -> Option<Pid> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("TracerPid:"))?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|&tracer| tracer != 0)
+        .map(Pid::from_raw)
 }
 
 /// Whether a thread is gone or has finished exiting. Such a thread stays

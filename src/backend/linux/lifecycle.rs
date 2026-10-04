@@ -18,8 +18,8 @@ use super::breakpoints::install_logical_breakpoint;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
     ActiveExecution, ActiveKind, BREAKPOINT_OPCODE, ClassifiedStop, Controller, ExpectedStop,
-    Inferior, InferiorOrigin, LinuxError, MemoryAccessError, NativeThreadState, StopBarrier,
-    Terminating, TraceThread, Waiter, backend_error, debug_thread_id, exception_info,
+    Inferior, InferiorOrigin, LinuxError, MemoryAccessError, NativeThreadState, Orphans,
+    StopBarrier, Terminating, TraceThread, Waiter, backend_error, debug_thread_id, exception_info,
     is_superseded, process_id,
 };
 
@@ -29,7 +29,7 @@ const MAX_ATTACH_RESCANS: u32 = 128;
 
 impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn launch(&mut self, options: LaunchOptions, reply: Reply<ExecutionId>) {
-        if self.inferior.is_some() || self.launch_reply.is_some() {
+        if self.inferior.is_some() || self.launch_reply.is_some() || self.orphans.is_some() {
             let _ = reply.send(Err(Error::AlreadyRunning));
             return;
         }
@@ -83,7 +83,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn attach(&mut self, requested: ProcessId, reply: Reply<StopId>) {
-        if self.inferior.is_some() || self.launch_reply.is_some() || self.attach_reply.is_some() {
+        if self.inferior.is_some()
+            || self.launch_reply.is_some()
+            || self.attach_reply.is_some()
+            || self.orphans.is_some()
+        {
             let _ = reply.send(Err(Error::AlreadyRunning));
             return;
         }
@@ -199,7 +203,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         release: Box<dyn FnOnce() + Send>,
         reply: Reply<ExecutionId>,
     ) {
-        if self.inferior.is_some() || self.launch_reply.is_some() || self.attach_reply.is_some() {
+        if self.inferior.is_some()
+            || self.launch_reply.is_some()
+            || self.attach_reply.is_some()
+            || self.orphans.is_some()
+        {
             let _ = reply.send(Err(Error::AlreadyRunning));
             return;
         }
@@ -527,6 +535,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             libc::PTRACE_EVENT_EXIT => {
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
                 inferior.thread_mut(pid)?.state = NativeThreadState::Exiting;
+                self.adopt_unannounced_fork_children(pid);
                 self.release_exiting_thread(pid)
             }
             other => self.begin_visible_stop(
@@ -651,9 +660,18 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// untraced. Debug registers are not inherited across fork. A child that
     /// cannot be cleaned is killed rather than released with traps in place.
     pub(super) fn release_fork_child(&mut self, child: Pid, sites: &[(VirtualAddress, u8)]) {
-        let Some(inferior) = self.inferior.as_mut() else {
-            return;
-        };
+        if !self.scrub_and_release(child, sites)
+            && let Some(inferior) = self.inferior.as_mut()
+        {
+            inferior.killed_children.insert(child);
+        }
+    }
+
+    /// Restores the bytes the traps in `sites` replaced in a stopped fork
+    /// child and detaches it. A child that cannot be scrubbed is killed
+    /// rather than released with traps in place. Returns whether it was
+    /// released; one that was not stays traced until it exits.
+    fn scrub_and_release(&self, child: Pid, sites: &[(VirtualAddress, u8)]) -> bool {
         let mut cleaned = Ok(());
         for &(address, original_byte) in sites {
             let word = match self.ptrace.read_memory_word(child, address.get()) {
@@ -686,13 +704,80 @@ impl<P: LinuxTraceOps> Controller<P> {
                 break;
             }
         }
-        if cleaned
+        cleaned
             .and_then(|()| self.ptrace.detach(child, None))
-            .is_err()
-        {
-            let _ = self.ptrace.kill(child, Signal::SIGKILL);
-            inferior.retired_threads.insert(child);
+            .unwrap_or_else(|_| {
+                let _ = self.ptrace.kill(child, Signal::SIGKILL);
+                false
+            })
+    }
+
+    /// Finds the children `thread` forked whose fork events SIGKILL took
+    /// away, while they are still its children, so they are scrubbed and
+    /// released like any other.
+    fn adopt_unannounced_fork_children(&mut self, thread: Pid) {
+        let Some(inferior) = self.inferior.as_ref() else {
+            return;
+        };
+        let sites = inferior.inherited_sites();
+        for child in self.ptrace.traced_children(inferior.tgid, thread) {
+            let Some(inferior) = self.inferior.as_mut() else {
+                return;
+            };
+            if inferior.fork_children.contains_key(&child)
+                || inferior.killed_children.contains(&child)
+                || inferior.threads.contains_key(&child)
+            {
+                continue;
+            }
+            if inferior.unowned_stops.remove(&child).is_some() {
+                self.release_fork_child(child, &sites);
+            } else {
+                inferior.fork_children.insert(child, sites.clone());
+            }
         }
+    }
+
+    /// Handles a status of a fork child that outlived the inferior.
+    pub(super) fn handle_orphan_wait(&mut self, status: WaitEvent) -> bool {
+        let pid = status.pid();
+        let orphans = self.orphans.as_mut().expect("orphans exist");
+        match status {
+            WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_STOP) => {
+                let sites = orphans.children.remove(&pid);
+                if let Some(sites) = sites
+                    && !self.scrub_and_release(pid, &sites)
+                {
+                    self.orphans
+                        .as_mut()
+                        .expect("orphans exist")
+                        .killed
+                        .insert(pid);
+                }
+            }
+            WaitEvent::PtraceEvent(_, _, libc::PTRACE_EVENT_EXIT) => {
+                let _ = self.release_exiting_thread(pid);
+            }
+            WaitEvent::Exited(..) | WaitEvent::Signaled(..) => {
+                orphans.children.remove(&pid);
+                orphans.killed.remove(&pid);
+            }
+            _ => {}
+        }
+        let orphans = self.orphans.as_ref().expect("orphans exist");
+        if !orphans.children.is_empty() || !orphans.killed.is_empty() {
+            return true;
+        }
+        let orphans = self.orphans.take().expect("orphans exist");
+        // The program is gone, so a failure has no one to report to.
+        if orphans.waiter.is_some_and(|waiter| waiter.join().is_err()) {
+            record!("the waiter of the orphaned children panicked");
+        }
+        if self.shutting_down {
+            self.finish_shutdown(Ok(()));
+            return false;
+        }
+        true
     }
 
     pub(super) fn handle_exec_event(&mut self, pid: Pid) -> Result<()> {
@@ -831,11 +916,23 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         if inferior.threads.is_empty() {
             self.discard_watchpoints();
-            self.abandon_fork_children();
+            let pending = self.release_stopped_fork_children();
             let mut inferior = self.inferior.take().expect("inferior exists");
             let edits = inferior.take_pending_edits();
-            if let Some(waiter) = inferior.waiter.take() {
-                waiter.join()?;
+            let killed = std::mem::take(&mut inferior.killed_children);
+            let waiter = inferior.waiter.take();
+            if pending.is_empty() && killed.is_empty() {
+                if let Some(waiter) = waiter {
+                    waiter.join()?;
+                }
+            } else {
+                // The waiter reports the children's first stops, at which
+                // they are released, and the exits of those killed.
+                self.orphans = Some(Orphans {
+                    children: pending,
+                    killed,
+                    waiter,
+                });
             }
             self.reset_runtime_modules();
             self.bump_revision();
@@ -933,7 +1030,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             .map(|reply| reply.send(Err(Error::RequestCancelled)));
 
         let Some(inferior) = self.inferior.as_ref() else {
-            self.finish_shutdown(Ok(()));
+            // Children the ended inferior forked are released first.
+            if self.orphans.is_none() {
+                self.finish_shutdown(Ok(()));
+            }
             return;
         };
         if inferior.origin != InferiorOrigin::Attached {
@@ -992,9 +1092,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         match status {
             WaitEvent::Exited(..) | WaitEvent::Signaled(..) => {
                 // A thread no event announced yet exited; one may still come.
-                if !inferior.retired_threads.remove(&pid)
-                    && inferior.fork_children.remove(&pid).is_none()
-                {
+                // Every record of the pid ends with it.
+                let retired = inferior.retired_threads.remove(&pid);
+                let killed = inferior.killed_children.remove(&pid);
+                let forked = inferior.fork_children.remove(&pid).is_some();
+                if !(retired || killed || forked) {
                     inferior.vanished_threads.insert(pid);
                 }
                 inferior.unowned_stops.remove(&pid);
@@ -1021,9 +1123,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// still on their way to it. Once the process has exited no event will
     /// announce them, and a traced child left stopped would keep the waiter
     /// from ever finishing.
-    fn abandon_fork_children(&mut self) {
+    fn release_stopped_fork_children(&mut self) -> BTreeMap<Pid, Vec<(VirtualAddress, u8)>> {
         let Some(inferior) = self.inferior.as_mut() else {
-            return;
+            return BTreeMap::new();
         };
         let stopped = std::mem::take(&mut inferior.unowned_stops);
         let pending = std::mem::take(&mut inferior.fork_children);
@@ -1031,9 +1133,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         for &pid in stopped.keys() {
             self.release_fork_child(pid, &sites);
         }
-        for &pid in pending.keys() {
-            let _ = self.ptrace.kill(pid, Signal::SIGKILL);
-        }
+        pending
     }
 
     pub(super) fn handle_shutdown_wait(&mut self, status: WaitEvent) -> bool {
@@ -1046,7 +1146,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.finish_shutdown(Err(error));
                 return false;
             }
-            return self.inferior.is_some();
+            return self.inferior.is_some() || self.orphans.is_some();
         }
         if attached {
             return self.handle_detach_wait(status);
@@ -1059,6 +1159,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.handle_terminal(pid, ExitStatus::Terminated(exception_info(signal)))
             }
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
+                self.adopt_unannounced_fork_children(pid);
                 self.ptrace.continue_during_shutdown(pid)
             }
             WaitEvent::Stopped(pid, _) | WaitEvent::PtraceEvent(pid, _, _) => self
@@ -1072,7 +1173,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.finish_shutdown(Err(error));
             return false;
         }
-        self.inferior.is_some()
+        self.inferior.is_some() || self.orphans.is_some()
     }
 
     pub(super) fn handle_detach_wait(&mut self, status: WaitEvent) -> bool {
@@ -1084,6 +1185,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.handle_terminal(pid, ExitStatus::Terminated(exception_info(signal)))
             }
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
+                self.adopt_unannounced_fork_children(pid);
                 self.release_exiting_thread(pid)
             }
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_CLONE => {
@@ -1119,7 +1221,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.finish_shutdown(Err(error));
             return false;
         }
-        self.inferior.is_some()
+        self.inferior.is_some() || self.orphans.is_some()
     }
 
     /// Detaches once every live thread is stopped, every fork child has
@@ -1235,7 +1337,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .pending_signal
                 .map(|pending| pending.signal)
                 .filter(|signal| self.signals.get(*signal).pass);
-            record(self.ptrace.detach(pid, signal));
+            record(self.ptrace.detach(pid, signal).map(drop));
         }
         if !inferior.watch.watchpoints.is_empty() {
             self.publish_watchpoints_changed();
