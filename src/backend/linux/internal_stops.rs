@@ -70,15 +70,15 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     /// Whether breakpoint traps and debug registers can be written now:
     /// the inferior has completed its first stop and every thread is
-    /// stopped.
+    /// settled.
     pub(super) fn sites_live(&self) -> bool {
         self.launch_reply.is_none()
             && self.attach_reply.is_none()
             && self.inferior.as_ref().is_some_and(|inferior| {
                 inferior
                     .threads
-                    .values()
-                    .all(|thread| matches!(thread.state, NativeThreadState::Stopped))
+                    .iter()
+                    .all(|(&pid, thread)| inferior.settled(pid, thread))
             })
     }
 
@@ -336,5 +336,5 @@ fn others_stopped(inferior: &Inferior, pid: Pid) -> bool {
     inferior
         .threads
         .iter()
-        .all(|(&other, thread)| other == pid || matches!(thread.state, NativeThreadState::Stopped))
+        .all(|(&other, thread)| other == pid || inferior.settled(other, thread))
 }

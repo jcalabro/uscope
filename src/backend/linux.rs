@@ -666,6 +666,21 @@ impl Inferior {
         }
     }
 
+    /// Whether `pid` is a group leader that exited while other threads run
+    /// on. Linux reports its exit only after every other thread's, so no
+    /// stop waits for it, and none lists it.
+    fn exited_leader(&self, pid: Pid, thread: &TraceThread) -> bool {
+        pid == self.tgid
+            && matches!(thread.state, NativeThreadState::Exiting)
+            && self.threads.len() > 1
+    }
+
+    /// Whether a thread is where a coherent stop needs it: stopped, or an
+    /// exited leader.
+    fn settled(&self, pid: Pid, thread: &TraceThread) -> bool {
+        matches!(thread.state, NativeThreadState::Stopped) || self.exited_leader(pid, thread)
+    }
+
     /// A stopped thread through which to read and write the shared address
     /// space: the leader when it is stopped, otherwise any stopped thread.
     /// While some threads run, only a stopped thread accepts ptrace requests.
@@ -1647,6 +1662,7 @@ impl<P: InspectionOps> Controller<P> {
         let threads = inferior
             .threads
             .iter()
+            .filter(|&(&pid, thread)| !inferior.exited_leader(pid, thread))
             .map(|(&pid, thread)| ThreadSnapshot {
                 id: debug_thread_id(pid),
                 name: thread.name.clone(),
