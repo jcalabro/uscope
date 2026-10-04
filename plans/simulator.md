@@ -1,6 +1,6 @@
 # Deterministic Simulation
 
-Status: P0, P1, and P2 done, 2026-10-04 (section 17). P3 onward is design.
+Status: P0 through P3 done, 2026-10-04 (section 17). P4 onward is design.
 
 uscope's hardest bugs come from orderings: a thread leaves its stop between
 two ptrace requests, a fork event races a pause, SIGKILL lands while a step
@@ -150,7 +150,7 @@ feature builds the `uscope-sim` binary. Being in the crate lets the
 simulator reach the controller through one narrow facade without widening
 the public API. Compiling it adds about 0.1 s to the gate.
 
-As built in P2, with sizes in lines:
+As built in P3, with sizes in lines:
 
 | Module | Responsibility | Lines |
 |---|---|---|
@@ -158,32 +158,38 @@ As built in P2, with sizes in lines:
 | `sim/swarm.rs` | The run's shape, chosen before it starts | 121 |
 | `sim/schedule.rs` | The random walk and PCT | 222 |
 | `sim/faults.rs` | Fault plans | 97 |
-| `sim/world.rs` | The step loop, delivery, checks after each action | 635 |
+| `sim/world.rs` | The step loop, delivery, checks after each action | 787 |
 | `sim/machine.rs` | What actions and preemption points reach: running threads, the waiter, faults | 230 |
 | `sim/audit.rs` | The event auditor | 135 |
-| `sim/kernel/mod.rs` | Process and thread tables, run states, reaping, traps | 683 |
-| `sim/kernel/ptrace.rs` | Ptrace requests and their errnos | 163 |
+| `sim/kernel/mod.rs` | Process and thread tables, run states, reaping, traps | 775 |
+| `sim/kernel/ptrace.rs` | Ptrace requests and their errnos | 166 |
 | `sim/kernel/signals.rs` | Signal delivery, group exits, and the exit paths | 281 |
-| `sim/kernel/syscalls.rs` | `write`, `sched_yield`, `clone`, `exit`, and `exit_group` | 169 |
-| `sim/cpu/mod.rs` | Registers, decoding, outcomes | 274 |
+| `sim/kernel/syscalls.rs` | `write`, `sched_yield`, `clone`, `exit`, and `exit_group` | 174 |
+| `sim/kernel/shadow.rs` | Shadow call stacks, and where a stepping thread went | 111 |
+| `sim/cpu/mod.rs` | Registers, decoding, outcomes, calls and returns | 304 |
 | `sim/cpu/ops.rs` | Instruction semantics | 462 |
 | `sim/cpu/flags.rs` | Status flags and conditions | 179 |
 | `sim/memory.rs` | Copy-on-write address spaces and protections | 428 |
-| `sim/loader.rs` | Golden ELF images and the initial stack | 266 |
-| `sim/corpus.rs` | Loads the golden programs and their manifests | 198 |
-| `sim/client.rs` | The client that drives `DebuggerHandle` | 782 |
+| `sim/loader.rs` | Golden ELF images, static or static-PIE, and the initial stack | 354 |
+| `sim/corpus.rs` | Loads the golden programs, their manifests, facts, and markers | 232 |
+| `sim/facts.rs` | What binutils say about each binary's lines and functions | 266 |
+| `sim/markers.rs` | Conditions on variables, from source comments | 317 |
+| `sim/client.rs` | The client that drives `DebuggerHandle` | 972 |
 | `sim/oracles.rs` | Ground-truth checks | 570 |
-| `sim/marks.rs` | Coverage marks | 113 |
+| `sim/semantics.rs` | The backtrace, stepping, and variables oracles | 748 |
+| `sim/marks.rs` | Coverage marks | 139 |
 | `sim/report.rs` | Traces, fingerprints, failures | 128 |
-| `sim/conformance/tracee.rs` | The dual-run harness: one script, native and simulated | 478 |
-| `sim/conformance/{cpu,kernel}.rs` | Lockstep and the kernel's rules (section 9) | 860 |
-| `sim/tests.rs` | The gate's seeds, determinism, and sabotage tests | 110 |
+| `sim/conformance/tracee.rs` | The dual-run harness: one script, native and simulated | 487 |
+| `sim/conformance/{cpu,kernel}.rs` | Lockstep and the kernel's rules (section 9) | 882 |
+| `sim/tests.rs` | The gate's seeds, determinism, and sabotage tests | 137 |
 | `src/bin/uscope-sim.rs` | Sweep and replay commands | 240 |
 | `backend/linux/sim_edge.rs` | `SimTrace`, the simulated waiter, the controller facade, and ground truth | 819 |
 | `backend/linux/native_tracee.rs` | The real traced process conformance tests drive | 302 |
 
-The client and the oracles grew past their goals with the multi-threaded
-checks; each still reads as one concern.
+The client, the world, and the oracles grew past their goals with the
+multi-threaded and semantic checks; each still reads as one concern. The
+client is the first to split when it grows again: its inspection of stops
+and its steps are seams a reader would recognize.
 
 `SimTrace` lives in the facade rather than in `sim/`: `LinuxTraceOps` is
 private to the Linux backend, so its implementation must be too. It only
@@ -270,6 +276,7 @@ guesses. The initial rules come from the verified facts:
 | ID | Rule |
 |---|---|
 | K-EXEC-1 | A launched program first reports a stop for SIGTRAP with `si_code` `SI_USER` from itself, at its entry point, with `orig_rax` naming `execve`. Its `comm` is its file name cut to 15 bytes. |
+| K-EXEC-2 | With randomization off, a static executable loads where its image says. A static-PIE one, having no interpreter, is the first mapping in the mmap area: its whole span ends at the mmap base, `0x7ffff7fff000` while the stack limit is under 127 MiB. Each segment's file pages are mapped from the file; the rest of a segment, and a segment with no file bytes, are anonymous. |
 | K-WAIT-1 | A thread has at most one reportable status. A thread woken out of a stop loses an unreported one. Ptrace requests on a thread not in a ptrace-stop fail with ESRCH. |
 | K-WAIT-2 | Which ready status a wait returns is unspecified, so the scheduler chooses. One exception: a group leader's exit is reported after every other thread's. |
 | K-TRAP-1 | `int3` raises SIGTRAP with `si_code` `SI_KERNEL` and `rip` after the trap byte, outside any system call (`orig_rax` is -1). A single step reports `TRAP_TRACE`. A step across `syscall` reports `TRAP_BRKPT` at the call's exit, with `orig_rax` naming the call. |
@@ -291,7 +298,7 @@ guesses. The initial rules come from the verified facts:
 | K-DR-5 | `rep stos` and `rep movs` trap once per iteration that touches the watched range, with `rip` still at the instruction. Stores of the same value trap. `POKEDATA` never traps. |
 | K-MEM-1 | `PEEKDATA` and `POKEDATA` ignore page protections and fail only where nothing is mapped. CPU accesses obey protections and fault with `SEGV_MAPERR` or `SEGV_ACCERR`. |
 
-**Probed so far** (`sim/conformance/kernel.rs`): K-EXEC-1, K-TRAP-1,
+**Probed so far** (`sim/conformance/kernel.rs`): K-EXEC-1, K-EXEC-2, K-TRAP-1,
 K-SIG-1, K-WAIT-1, K-WAIT-2 (the leader's exit is held back), K-EXIT-1 to
 K-EXIT-6, K-CLONE-1, and K-MEM-1, each in its multi-threaded form where
 one exists. Two P2 probes corrected the model before any session used it:
@@ -382,6 +389,24 @@ the debugger must not be able to see or change:
   is currently enabled;
 - the log of stores to watched ranges.
 
+As built in P3, the kernel keeps the shadow state (`sim/kernel/shadow.rs`),
+from the calls and returns the interpreter reports:
+
+- Each thread's shadow call stack holds, for every call not yet returned
+  from, its return address, the slot it was pushed to, and an identifier
+  for the activation it began. A new thread begins with none of its
+  creator's calls. A return to anywhere but the top call's return address
+  marks the shadow lost, and no oracle then judges that thread.
+- Each thread counts the instructions it completed, `syscall` among them.
+  A trap is not an instruction completed.
+- While the client steps a thread, the kernel records each instruction the
+  thread completed no deeper than where the step began, with the depth and
+  activation it ran in. The stepping oracle reads where the thread went
+  from these.
+
+P2's executions at user breakpoints became the unseen-hits check (section
+12); the store log arrives with watchpoints in P4.
+
 **Memory.** An address space is a map of 4 KiB pages with protections.
 Pages loaded from a golden image are shared, and copied on first write, so
 a session costs little more than its stack and the pages its program
@@ -392,9 +417,9 @@ protections; ptrace accesses do not (K-MEM-1).
 executable, builds the initial stack (`argc`, `argv`, an empty environment,
 and a minimal auxiliary vector: `AT_PAGESZ`, `AT_ENTRY`, `AT_PHDR`,
 `AT_RANDOM` from the seed), and sets `rip` to the entry point. ASLR is off,
-as uscope launches programs. Static-PIE images load at the address Linux
-uses for an unrandomized `ET_DYN` executable, and their runtime relocates
-itself.
+as uscope launches programs. A static-PIE image loads where K-EXEC-2 says,
+just below the mmap base, and its runtime relocates itself. A segment's
+pages beyond its file bytes are anonymous mappings, as Linux maps them.
 
 ## 11. The golden corpus
 
@@ -407,7 +432,7 @@ tests/golden/
   straight/
     straight.c            the source, with marker comments (// MARK: name)
     manifest.json         variants, hashes, expected behavior
-    facts.json            line table and symbols from llvm-dwarfdump and nm
+    facts.json            functions and line tables from binutils (as built)
     straight-gcc-O0       one binary per variant
     straight-clang-O2-nofp
     ...
@@ -479,6 +504,10 @@ corpus stays under 2 MB in plain git.
 | `threads` | Workers created with raw `clone`, barriers, shared counters, and workers ending by `exit` and by `exit_group`. |
 | `racing-exit` | `exit_group` while siblings run and hit breakpoints. |
 
+| `fork` | A fork child that outlives its parent, a child reaped by the parent, and forks racing breakpoint edits. |
+| `stores` | Global stores, same-value stores, `rep stos`, and adjacent watched ranges. |
+| `frames` | Tail calls, `-O2` frames without frame pointers, and the hand-written orphan and CFI-less frames. |
+
 As built in P2, threads come from `rt/thread.{c,h}`: `rt_spawn` makes a
 raw `clone` on a stack the caller provides, whose top holds a zero return
 address so unwinders stop there, and `rt_thread_start`, marked outermost
@@ -490,9 +519,40 @@ alone first (`leader`). In `leader` mode every thread exits with status 3,
 since the thread that begins to exit last decides the status (K-EXIT-6).
 `racing-exit WORKERS ROUNDS` has every thread call `tick` until worker 0
 exits the group after its own ticks.
-| `fork` | A fork child that outlives its parent, a child reaped by the parent, and forks racing breakpoint edits. |
-| `stores` | Global stores, same-value stores, `rep stos`, and adjacent watched ranges. |
-| `frames` | Tail calls, `-O2` frames without frame pointers, and the hand-written orphan and CFI-less frames. |
+
+**As built in P3.**
+
+- *Variants.* Ten per program: GCC and Clang at `-O0` and `-O2`, each with
+  and without frame pointers, all static, and two static-PIE builds
+  (`gcc-O2-pie` without frame pointers, `clang-O0-pie` with them). Every
+  variant names its frame-pointer choice: the Nix toolchain keeps frame
+  pointers unless told otherwise, so the P1 and P2 `-O2` builds had them.
+  A static-PIE build links with `-static-pie`, and `rt_start` applies its
+  relative relocations before anything reads a pointer they cover.
+- *Facts.* `facts.json` holds, for every variant, its functions from `nm`,
+  its line table rows from `readelf --debug-dump=decodedline`, the
+  addresses `readelf --debug-dump=rawline` marks `epilogue_begin`, whether
+  it was optimized, and how many inlined calls its DWARF describes.
+  `golden-build` writes it and `golden-check` regenerates and compares it.
+  GNU binutils stand in for `llvm-dwarfdump`, which the Nix shell lacks;
+  they are as independent of uscope. Rows at one address collapse as gdb
+  collapses them, the convention uscope documents too, and a row never
+  describes code past the start of another function: GCC's last row before
+  hand-written assembly runs on through it.
+- *Markers.* A condition on a line's variables is written beside the line,
+  as `// MARK: total == (index - 1) * index * (2 * index - 1) / 6`, rather
+  than in the manifest: it stays next to the code it describes, and the
+  source hash already covers it. Conditions compare integer expressions
+  over variables in scope, joined by `&&` (`sim/markers.rs`).
+- *The `frames` program.* `frames ROUNDS` calls through a table of function
+  pointers (relocations in its PIE builds), recurses, and makes a call
+  optimized builds turn into a jump. Its hand-written frames are top-level
+  assembly in `frames.c`, without line information, rather than separate
+  programs: `bare_call`, with no CFI; `scribbled_call`, which overwrites its
+  own return address while it calls back into C; and `orphan_spawn`, whose
+  thread begins in the middle of it, on a stack topped by a zero return
+  address. The orphan thread runs `descend` under both of the others.
+- *Size.* 1.2 MB, of which 364 KB is facts, for 40 binaries.
 
 ## 12. Oracles
 
@@ -579,6 +639,50 @@ accepts any failed request about it.
 The client also fails a run on any `Exception` or `Unclassifiable` stop of
 a process not killed from outside: no golden program raises a signal.
 
+**As built in P3.** The semantic oracles run in every session
+(`sim/semantics.rs`). At each new stop the client inspects: the selected
+frame's variables, and the backtrace of every stopped thread, through
+`DebuggerHandle::at` for those not selected. It reports what it saw, and
+each step it begins and ends, and the world judges after the poll, by the
+kernel's shadow state and `facts.json`. Nothing is judged once its stop is
+over or its process is ending.
+
+- *Backtrace:* the physical frames are the thread's `rip` and then the
+  return addresses of its calls, innermost first. A backtrace may stop
+  early only with a termination other than `Complete`; one that is
+  complete shows every call. Where the program overwrote a return address,
+  the frame may show what the slot holds, as the last frame, never as a
+  complete stack.
+- *Stepping:* a step whose result is `Step { kind }` left its thread where
+  the kind says:
+  - an instruction step completed one instruction, or, begun inside a
+    system call, finished the call (K-TRAP-1);
+  - stepping over a call returned to its return address in the same frame;
+    over anything else, one instruction;
+  - stepping out of a physical frame returned to its return address, or,
+    where no line describes that, went on through undescribed code to the
+    caller's first described instruction; out of an inline frame, it stayed
+    in the physical frame or returned from it;
+  - a source step stopped in a statement row with a line, never at an
+    epilogue marker; stepping over never stopped in a callee; stepping into
+    an inline frame hidden at the stop moved nothing; and a step over begun
+    in code no line describes steps as stepping in does.
+
+  In unoptimized code, which has no inlining, jumps between functions, or
+  split functions, source steps are judged exactly too. A step within its
+  frame changed line, and the thread passed no place where the step had to
+  stop: the start of a statement row of another line in the frame it began
+  in, or in a caller, of a line other than the one the caller called from,
+  short of an epilogue marker it crossed.
+- *Variables:* where a thread stands at the start of a row of a marker's
+  line, and the debugger presents that line in its innermost frame, the
+  variables it shows satisfy the marker's condition. In unoptimized code,
+  every variable a condition names has a value.
+
+Each new oracle has a sabotage test: a kernel that misreports return
+addresses fails backtraces, a CPU whose single steps run on fails steps,
+and a kernel that misreports small numbers on the stack fails variables.
+
 ## 13. Faults
 
 Faults are things the real world can do to a debugging session. Each one
@@ -633,13 +737,16 @@ the sweep reaches what it claims to test. Marks are added alongside the
 faults and features they cover. P2 has 26 (`sim/marks.rs`), among them a
 thread created, a leader exiting alone, a group exit taking a thread out
 of its stop, two threads stopped at breakpoints in one stop, a thread run
-or a status reaped inside a controller call, and each kind of SIGKILL.
+or a status reaped inside a controller call, and each kind of SIGKILL. P3
+adds six: a whole backtrace, one stopped at a frame without CFI, one ended
+at an overwritten return address, a step judged, a source step judged
+exactly, and a marker's condition holding.
 
 ## 14. Running the simulator
 
 | Command | What it does |
 |---|---|
-| `just` | The gate: `golden-check`; the kernel and CPU conformance tests; 300 fixed seeds over every program and variant (about 0.3 s); a determinism double-run of the first 32 seeds; the coverage-mark check; and four sabotage tests showing the oracles catch lost trap writes, a deaf waiter, a thread resumed behind the controller's back, and a trap the CPU skips. |
+| `just` | The gate: `golden-check`; the kernel and CPU conformance tests; 300 fixed seeds over every program and variant (about 0.4 s); a determinism double-run of the first 32 seeds; the coverage-mark check; and seven sabotage tests showing the oracles catch lost trap writes, a deaf waiter, a thread resumed behind the controller's back, a trap the CPU skips, misreported return addresses, single steps that run on, and misreported stack values. |
 | `just sim [SECONDS]` | A sweep: random seeds on every core for SECONDS (default 60), inside `scripts/contained.sh`. Failures are grouped by kind and check; each group keeps its smallest seed's report. |
 | `just sim-seed SEED` | Replays one seed and prints its whole trace, also written to `target/sim/SEED/trace.log`. `--fingerprint` checks the replay against a report's fingerprint. |
 | `just sim-seed SEED --at STEP` | Replays to STEP and prints the state there: each thread's state, report, pending signals, and `rip`; the waiter; the controller's queue; and the client. |
@@ -654,10 +761,11 @@ or a status reaped inside a controller call, and each kind of SIGKILL.
   `systemd-run --user` scope capped at half the memory, without swap, and
   first in line for the OOM killer, so a runaway session cannot take the
   machine's memory.
-- **Throughput**, measured in P2 on a 12-core Ryzen AI 9 HX 370 (4 Zen 5
-  and 8 Zen 5c cores) over all three programs: about 1,400 sessions per
-  second on one thread, about 9,600 per second in all on 12 threads, and
-  about 9,100 on 24. A one-minute sweep runs over half a million sessions.
+- **Throughput**, measured in P3 on a 12-core Ryzen AI 9 HX 370 (4 Zen 5
+  and 8 Zen 5c cores) over all four programs and ten variants: about 1,100
+  sessions per second on one thread (1,400 in P2, before the semantic
+  oracles), about 9,000 per second in all on 12 threads, and about 8,600
+  on 24. A one-minute sweep runs half a million sessions.
 - **Where sweeps run.** There is no CI today. Sweeps run locally, before
   merging any lifecycle, run-control, or concurrency change, alongside
   `just stress`.
@@ -888,16 +996,69 @@ before hearing of the end.
 reached by the fixed seeds, and 2.7 million swept sessions found nothing
 more.
 
-**P3: Compiler breadth and semantic oracles.**
+**P3: Compiler breadth and semantic oracles.** Done on 2026-10-04.
 
-- GCC and Clang, at `-O0` and `-O2`, with and without frame pointers, and
-  static-PIE.
-- The interpreter grows under lockstep.
-- `facts.json`; the stepping, backtrace, and variable oracles.
-- The `frames` program and the hand-written assembly programs.
+- Ten variants of every program: GCC and Clang, at `-O0` and `-O2`, with
+  and without frame pointers, and two static-PIE builds whose runtime
+  relocates itself (section 11). The loader places static-PIE images as
+  Linux does, which K-EXEC-2 pins on every variant (section 8).
+- The interpreter passed lockstep on all 40 binaries without a new
+  instruction: the new flags produced nothing the corpus had not used.
+- `facts.json` from GNU binutils, markers in the sources, the kernel's
+  shadow state, and the backtrace, stepping, and variables oracles, each
+  with a sabotage test and the two subtlest with unit tests (sections 10
+  to 12). Six coverage marks prove the sweep reaches them.
+- The `frames` program, with its hand-written frames (section 11).
 
-*Exit:* every variant passes lockstep, and the semantic oracles run in
-every session.
+Departures from the design, each for a reason recorded where it applies:
+binutils stand in for `llvm-dwarfdump` (section 11); markers live in the
+sources, not the manifest (section 11); and the hand-written assembly is
+part of `frames.c` rather than programs of its own (section 11).
+
+The sweeps found six debugger bugs. Each now has a red-first test outside
+the simulator, as section 15 requires:
+
+- A step over begun in code without call-frame information was refused,
+  though uscope documents that it steps as stepping in does there
+  (`stepping_over_from_code_without_unwind_information_stops_at_the_first_source_statement`).
+  Stepping in from such code stopped at a function's opening line, before
+  its prologue: without a starting frame, it now recognizes a function it
+  entered by the stack pointer the step began at.
+- A step out from a line Clang marks as ending in an epilogue ran one
+  instruction past the return address, crossing to the caller's next line
+  as a step over does
+  (`step_out_across_a_marked_epilogue_stops_at_the_return_address`).
+- A step over a function's last line returned into the middle of a caller
+  that called the function again, and stopped inside the second call: the
+  controller knows frames by their CFA, and the new frame had the old one's
+  (`stepping_over_a_return_stops_in_the_caller_before_a_second_call`). Once
+  its frame has returned, a step over now records the frame it returned
+  to, judges by that, and guards callees' returns; when that frame returns
+  too, it moves outward
+  (`a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was`).
+- A step in from a callee's last line, after crossing its epilogue to a
+  caller that returned before reaching any statement, ran on past the outer
+  caller's lines, to the program's exit
+  (`source_steps_return_through_a_caller_with_nothing_left_to_run`).
+- Variables read at a function's first instruction, where Clang's
+  unoptimized frame base is still the zero `_start` left in `rbp`, failed
+  the whole request with an address overflow; that variable is now
+  unavailable (`a_variable_whose_location_wraps_the_address_space_is_unavailable`).
+- Hand-written assembly placed after a C function was presented as that
+  function's last line, since GCC's last row runs on through it, and a step
+  in could stop there. No line entry now runs past the start of a function
+  (`hand_written_assembly_after_a_function_has_no_source_line`).
+
+The sweeps also corrected the oracles and the client before trusting them:
+rows at one address collapse as gdb collapses them; a source step never
+stops at an epilogue marker; a step from inside a system call may only
+finish the call; a step out goes on past a return address no line
+describes; and stepping out of a frame whose caller is outside every
+module, or reading the variables of undescribed code, is refused.
+
+*Exit:* met. Every variant passes lockstep; the semantic oracles run at
+every stop of every session, all 32 marks are reached by the fixed seeds,
+and 6.5 million swept sessions found nothing more.
 
 **P4: Fork, attach, and watchpoints.**
 
@@ -926,7 +1087,7 @@ Decided on 2026-10-04: the simulator is in-crate, behind the `sim` feature
 (section 5), and DAP and the CLI stay outside it (section 2).
 
 1. **Corpus storage.** Plain git is assumed while the corpus stays under
-   2 MB (272 KB after P2). Should a larger budget ever be needed, the choice
+   2 MB (1.2 MB after P3). Should a larger budget ever be needed, the choice
    is between Git LFS and building in Nix with pinned hashes.
 2. **Ambiguous stops from nested inline breakpoints.** When breakpoints on
    two nested inlined functions hit at the same address, as `rt_exit_group`
