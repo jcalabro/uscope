@@ -5412,3 +5412,54 @@ fn a_pause_after_every_thread_began_exiting_ends_with_the_exit() {
         });
     assert_eq!(ended, Some(Some(execution)));
 }
+
+/// A main thread that exits alone while a pause stops the others never
+/// stops: Linux reports its exit only after every other thread's. Once its
+/// exit event is handled, the pause publishes with the threads that remain.
+#[test]
+fn a_pause_completes_when_the_main_thread_exits_alone() {
+    let mut harness = watch_harness(2);
+    let [leader, worker] = harness.threads[..] else {
+        panic!("two threads");
+    };
+    harness.start_continue();
+    harness
+        .controller
+        .begin_pause(process_id(leader))
+        .expect("the pause is accepted");
+    harness.trace().siginfo.borrow_mut().insert(
+        worker,
+        SignalMetadata {
+            code: libc::SI_TKILL,
+            sender: Some(i32::try_from(std::process::id()).expect("pid fits")),
+            fault_address: None,
+        },
+    );
+    harness
+        .controller
+        .process_wait(WaitEvent::Stopped(worker, Signal::SIGSTOP))
+        .expect("the worker stops");
+    assert_eq!(harness.public_reason(), None);
+
+    // Continued from its exit event, the leader is a zombie that answers no
+    // request.
+    harness.trace().killed.borrow_mut().insert(leader);
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            leader,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_EXIT,
+        ))
+        .expect("the leader exits");
+    let stopped = harness
+        .published()
+        .into_iter()
+        .find_map(|event| match event {
+            DebuggerEvent::InferiorStopped {
+                thread_id, reason, ..
+            } => Some((thread_id, reason)),
+            _ => None,
+        });
+    assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
+}
