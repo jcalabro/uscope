@@ -1,6 +1,6 @@
 # Deterministic Simulation
 
-Status: P0 and P1 done, 2026-10-04 (section 17). P2 onward is design.
+Status: P0, P1, and P2 done, 2026-10-04 (section 17). P3 onward is design.
 
 uscope's hardest bugs come from orderings: a thread leaves its stop between
 two ptrace requests, a fork event races a pause, SIGKILL lands while a step
@@ -150,36 +150,45 @@ feature builds the `uscope-sim` binary. Being in the crate lets the
 simulator reach the controller through one narrow facade without widening
 the public API. Compiling it adds about 0.1 s to the gate.
 
-As built in P1, with sizes in lines:
+As built in P2, with sizes in lines:
 
 | Module | Responsibility | Lines |
 |---|---|---|
-| `sim/choices.rs` | Seed expansion, the PRNG, streams | 233 |
-| `sim/swarm.rs` | The run's shape, chosen before it starts | 98 |
-| `sim/world.rs` | The step loop, action selection, the waiter actor, the event auditor | 675 |
-| `sim/kernel/mod.rs` | Process and thread tables, run states, reaping, traps | 448 |
-| `sim/kernel/ptrace.rs` | Ptrace requests and their errnos | 137 |
-| `sim/kernel/signals.rs` | Signal delivery, SIGKILL, and the exit paths | 236 |
-| `sim/kernel/syscalls.rs` | `write` and `exit_group` | 59 |
+| `sim/choices.rs` | Seed expansion, the PRNG, streams | 246 |
+| `sim/swarm.rs` | The run's shape, chosen before it starts | 121 |
+| `sim/schedule.rs` | The random walk and PCT | 222 |
+| `sim/faults.rs` | Fault plans | 97 |
+| `sim/world.rs` | The step loop, delivery, checks after each action | 635 |
+| `sim/machine.rs` | What actions and preemption points reach: running threads, the waiter, faults | 230 |
+| `sim/audit.rs` | The event auditor | 135 |
+| `sim/kernel/mod.rs` | Process and thread tables, run states, reaping, traps | 683 |
+| `sim/kernel/ptrace.rs` | Ptrace requests and their errnos | 163 |
+| `sim/kernel/signals.rs` | Signal delivery, group exits, and the exit paths | 281 |
+| `sim/kernel/syscalls.rs` | `write`, `sched_yield`, `clone`, `exit`, and `exit_group` | 169 |
 | `sim/cpu/mod.rs` | Registers, decoding, outcomes | 274 |
-| `sim/cpu/ops.rs` | Instruction semantics | 444 |
+| `sim/cpu/ops.rs` | Instruction semantics | 462 |
 | `sim/cpu/flags.rs` | Status flags and conditions | 179 |
 | `sim/memory.rs` | Copy-on-write address spaces and protections | 428 |
 | `sim/loader.rs` | Golden ELF images and the initial stack | 266 |
 | `sim/corpus.rs` | Loads the golden programs and their manifests | 198 |
-| `sim/client.rs` | The client that drives `DebuggerHandle` | 630 |
-| `sim/oracles.rs` | Ground-truth checks | 287 |
-| `sim/marks.rs` | Coverage marks | 77 |
+| `sim/client.rs` | The client that drives `DebuggerHandle` | 782 |
+| `sim/oracles.rs` | Ground-truth checks | 570 |
+| `sim/marks.rs` | Coverage marks | 113 |
 | `sim/report.rs` | Traces, fingerprints, failures | 128 |
-| `sim/conformance/{cpu,kernel}.rs` | Lockstep and dual-run tests (section 9) | 750 |
-| `sim/tests.rs` | The gate's seeds, determinism, and sabotage tests | 90 |
-| `src/bin/uscope-sim.rs` | Sweep and replay commands | 227 |
-| `backend/linux/sim_edge.rs` | `SimTrace`, the controller facade, ground truth, and the native tracer conformance tests use | 818 |
+| `sim/conformance/tracee.rs` | The dual-run harness: one script, native and simulated | 478 |
+| `sim/conformance/{cpu,kernel}.rs` | Lockstep and the kernel's rules (section 9) | 860 |
+| `sim/tests.rs` | The gate's seeds, determinism, and sabotage tests | 110 |
+| `src/bin/uscope-sim.rs` | Sweep and replay commands | 240 |
+| `backend/linux/sim_edge.rs` | `SimTrace`, the simulated waiter, the controller facade, and ground truth | 819 |
+| `backend/linux/native_tracee.rs` | The real traced process conformance tests drive | 302 |
+
+The client and the oracles grew past their goals with the multi-threaded
+checks; each still reads as one concern.
 
 `SimTrace` lives in the facade rather than in `sim/`: `LinuxTraceOps` is
 private to the Linux backend, so its implementation must be too. It only
-translates; the kernel's semantics live in `sim/kernel`. Later phases add
-`sim/schedule.rs` (PCT), `sim/faults.rs`, and `sim/kernel/debug_regs.rs`.
+translates; the kernel's semantics live in `sim/kernel`. P4 adds
+`sim/kernel/debug_regs.rs`.
 
 Size goals are reading budgets, not hard limits. A module that grows well
 past its goal is split along a seam a reader would recognize.
@@ -260,19 +269,20 @@ guesses. The initial rules come from the verified facts:
 
 | ID | Rule |
 |---|---|
-| K-EXEC-1 | A launched program first reports a stop for SIGTRAP with `si_code` `SI_USER` from itself, at its entry point. Its `comm` is its file name cut to 15 bytes. |
+| K-EXEC-1 | A launched program first reports a stop for SIGTRAP with `si_code` `SI_USER` from itself, at its entry point, with `orig_rax` naming `execve`. Its `comm` is its file name cut to 15 bytes. |
 | K-WAIT-1 | A thread has at most one reportable status. A thread woken out of a stop loses an unreported one. Ptrace requests on a thread not in a ptrace-stop fail with ESRCH. |
 | K-WAIT-2 | Which ready status a wait returns is unspecified, so the scheduler chooses. One exception: a group leader's exit is reported after every other thread's. |
-| K-TRAP-1 | `int3` raises SIGTRAP with `si_code` `SI_KERNEL` and `rip` after the trap byte. A single step reports `TRAP_TRACE`. A step across `syscall` reports `TRAP_BRKPT`. |
-| K-SIG-1 | The tracer's `tgkill(SIGSTOP)` produces a signal-delivery stop with `si_code` `SI_TKILL` and the tracer's process as sender. |
+| K-TRAP-1 | `int3` raises SIGTRAP with `si_code` `SI_KERNEL` and `rip` after the trap byte, outside any system call (`orig_rax` is -1). A single step reports `TRAP_TRACE`. A step across `syscall` reports `TRAP_BRKPT` at the call's exit, with `orig_rax` naming the call. |
+| K-SIG-1 | The tracer's `tgkill(SIGSTOP)` produces a signal-delivery stop with `si_code` `SI_TKILL` and the tracer's process as sender, whether the thread was running or stopped when it was sent. |
 | K-INT-1 | `PTRACE_INTERRUPT` stops a running thread at its next kernel entry with `PTRACE_EVENT_STOP`. One sent to a thread that is already stopped stays pending until the thread resumes, and the thread's next stop of any kind consumes it. |
 | K-INT-2 | `PTRACE_INTERRUPT` and `tgkill` return 0 for a thread at its exit event or an unreaped zombie, and ESRCH once it is reaped. When the reap lands inside the interrupt's own window, the interrupt fails with EIO (a fault, section 13). |
-| K-EXIT-1 | `exit_group` with running siblings: every thread stops at `PTRACE_EVENT_EXIT`, with message `code << 8` and `si_code` `0x605`. After `PTRACE_CONT`, each reports its exit, the leader's last. |
-| K-EXIT-2 | Siblings held in signal-delivery stops are pulled out of them and stop at `PTRACE_EVENT_EXIT` too. |
+| K-EXIT-1 | `exit_group` with running siblings: every thread stops at `PTRACE_EVENT_EXIT`, with message `code << 8` and `si_code` `0x605`; the caller stops inside the call (`rax` is `-ENOSYS`, `orig_rax` names it). After `PTRACE_CONT`, each reports its exit, the leader's last. A thread ending alone with `exit` stops the same way. |
+| K-EXIT-2 | Siblings held in any ptrace-stop, signal-delivery or event, are pulled out of them and stop at `PTRACE_EVENT_EXIT` too. One pulled from a clone event returns from the call on the way out. |
 | K-EXIT-3 | SIGKILL from anywhere: every thread stops at `PTRACE_EVENT_EXIT` with message 9, then is reported killed by signal 9. |
-| K-EXIT-4 | A thread already at its exit stop is not released by SIGKILL. It answers `GETREGS` and memory reads, and waits for `PTRACE_CONT`. |
-| K-EXIT-5 | A leader that exits alone stays a zombie until the last thread exits. Its `exe` link is gone, its maps read empty, and ptrace requests on it fail. Seizing a zombie fails with EPERM. |
-| K-CLONE-1 | Whether a clone's child is traced is decided at the syscall, from the parent's options at that moment. The child's first stop and the parent's clone event become reportable in either order. |
+| K-EXIT-4 | Once a group is exiting, a thread already at its exit stop is not released by SIGKILL. It answers `GETREGS` and memory reads, and waits for `PTRACE_CONT`. A thread at the exit stop of its own `exit` is released when its group starts exiting, by `exit_group` or SIGKILL: it finishes exiting without another stop. |
+| K-EXIT-5 | A leader that exits alone stays a zombie until the last thread exits. Its `exe` link is gone, its maps read empty, ptrace requests on it fail with ESRCH, and `tgkill` still succeeds. Seizing a zombie fails with EPERM. |
+| K-EXIT-6 | The thread that begins to exit last, before its exit stop, starts a group exit with its own status (the kernel's `synchronize_group_exit`). Once a group is exiting, every thread reaped reports the group's status, even one that exited alone earlier with another. A leader held at its exit stop therefore changes nothing; one that begins to exit last decides the status. |
+| K-CLONE-1 | A creator tracing clones stops at `PTRACE_EVENT_CLONE` inside the call (`si_code` `0x305`, message the new thread's id, `rax` `-ENOSYS`); continuing it returns the id. The new thread is traced with the creator's options, starts where the creator returns, with `rax` zero and `orig_rax` naming `clone`, and first stops for a SIGSTOP with `SI_USER` from nobody. The two stops become reportable in either order. A clone by a thread not tracing clones is a model gap. |
 | K-FORK-1 | A fork child gets a copy of the parent's address space, traps included. It is auto-attached with the parent's options and starts in a stop. |
 | K-DR-1 | A watch hit raises SIGTRAP with `TRAP_HWBKPT` and `rip` after the instruction. DR6 changes only at debug exceptions and is stale at every other stop. |
 | K-DR-2 | Single-stepping over a watched store gives one stop: `TRAP_TRACE`, with DR6 holding both the single-step bit and the watch bit. |
@@ -281,11 +291,15 @@ guesses. The initial rules come from the verified facts:
 | K-DR-5 | `rep stos` and `rep movs` trap once per iteration that touches the watched range, with `rip` still at the instruction. Stores of the same value trap. `POKEDATA` never traps. |
 | K-MEM-1 | `PEEKDATA` and `POKEDATA` ignore page protections and fail only where nothing is mapped. CPU accesses obey protections and fault with `SEGV_MAPERR` or `SEGV_ACCERR`. |
 
-**Probed so far** (`sim/conformance/kernel.rs`, P1): K-EXEC-1, K-TRAP-1,
-K-SIG-1 (for a stop requested while the thread is stopped), K-EXIT-1,
-K-EXIT-3, and K-EXIT-4 (single-threaded forms), K-WAIT-1 (a reaped
-thread), and K-MEM-1. P2 probes the multi-threaded forms before it models
-them.
+**Probed so far** (`sim/conformance/kernel.rs`): K-EXEC-1, K-TRAP-1,
+K-SIG-1, K-WAIT-1, K-WAIT-2 (the leader's exit is held back), K-EXIT-1 to
+K-EXIT-6, K-CLONE-1, and K-MEM-1, each in its multi-threaded form where
+one exists. Two P2 probes corrected the model before any session used it:
+K-EXIT-4 had said a thread at its exit stop is never released, and the
+leader's status had been modeled as its own until the last thread finished
+exiting (K-EXIT-6). K-INT-1 and K-INT-2 are not modeled yet: a launched
+process is stopped with `tgkill`, and `PTRACE_INTERRUPT` serves attached
+processes, which P4 brings.
 
 **Request semantics.** `sim/kernel/ptrace.rs` has one function per
 `LinuxTraceOps` method. Each documents its errno outcomes in terms of the
@@ -295,10 +309,10 @@ simulator does not support yet return a model-gap failure, never a
 plausible default.
 
 **Syscalls** modeled for the corpus runtime: `write` (captured as the
-program's output), `exit`, `exit_group`, `clone` (threads and fork),
-`wait4` (for forking programs), `mmap` and `munmap` (anonymous only),
-`sched_yield`, `getpid`, `gettid`, `tgkill`, and `nanosleep` (yields
-without consuming time). Any other syscall is a model gap.
+program's output), `exit`, `exit_group`, `clone` (threads, with the flags
+`pthread_create` passes, without the TLS and tid bookkeeping), and
+`sched_yield`. Thread stacks are static arrays, so `mmap` is not needed.
+P4 adds what forking programs use. Any other syscall is a model gap.
 
 **The world, not the kernel, chooses.** Wherever Linux leaves an order
 open (which thread runs, which status a wait returns, when a pending
@@ -449,6 +463,10 @@ sources and binaries, each variant's flags, and each run's arguments, exit
 code, and output. A program's `arguments` file lists its runs, one argument
 list per line; `golden-build` runs every variant with each and requires
 them to agree. The other fields arrive with the programs that need them.
+Threads interleave differently on every run, so `golden-build` runs each
+binary 20 more times and fails if anything it prints or returns changes:
+a program's behavior must not depend on scheduling, or transparency would
+fail sessions for nothing.
 
 **Size budget.** Each binary is a few kilobytes plus its DWARF. The whole
 corpus stays under 2 MB in plain git.
@@ -460,6 +478,18 @@ corpus stays under 2 MB in plain git.
 | `straight` | Loops, calls, recursion, and inlining in one thread. |
 | `threads` | Workers created with raw `clone`, barriers, shared counters, and workers ending by `exit` and by `exit_group`. |
 | `racing-exit` | `exit_group` while siblings run and hit breakpoints. |
+
+As built in P2, threads come from `rt/thread.{c,h}`: `rt_spawn` makes a
+raw `clone` on a stack the caller provides, whose top holds a zero return
+address so unwinders stop there, and `rt_thread_start`, marked outermost
+in its CFI, runs the thread's function and exits it. `threads WORKERS
+ENDING` ends with the main thread exiting the group after the workers
+exit one by one (`main`), with the last worker exiting the group while
+others may still be exiting (`worker`), or with the main thread exiting
+alone first (`leader`). In `leader` mode every thread exits with status 3,
+since the thread that begins to exit last decides the status (K-EXIT-6).
+`racing-exit WORKERS ROUNDS` has every thread call `tick` until worker 0
+exits the group after its own ticks.
 | `fork` | A fork child that outlives its parent, a child reaped by the parent, and forks racing breakpoint edits. |
 | `stores` | Global stores, same-value stores, `rep stos`, and adjacent watched ranges. |
 | `frames` | Tail calls, `-O2` frames without frame pointers, and the hand-written orphan and CFI-less frames. |
@@ -521,6 +551,34 @@ afterwards, and must reach the same result.
   is still owed. This is how the v1 simulator found the fork-barrier hang.
 - A step budget, two million by default, ends runaway sessions.
 
+**As built in P2.** The world checks after every action:
+
+- *All-stop:* while a stop is published, every thread of the inferior is
+  in a ptrace-stop or a zombie, and the controller's threads are exactly
+  the stopped ones and those zombies.
+- *Breakpoint accounting*, in three parts. Unseen hits: the kernel watches
+  every address where a user breakpoint is certainly enabled, from the
+  client's add reply until it asks to remove it, and no thread may execute
+  the program's own instruction there except to step over the trap it just
+  reported. Hit counts: when the controller handles a status reporting a
+  trap the CPU executed, every user breakpoint owning that site gains
+  exactly one hit; nothing else changes a count, except a launch, which
+  starts them again. Ownership: while a stop is published, every
+  breakpoint the client was told exists owns an installed site at each of
+  its locations.
+- *Thread exits:* every `ThreadExited` event reports the status the kernel
+  reported for that thread, as `InferiorExited` does for the process.
+
+Once a process is ending as a whole (killed, by the debugger or from
+outside, or exiting its group), its threads leave their stops whatever the
+debugger last published, and the controller deliberately restores nothing
+in its address space. All-stop, ownership, and site ownership are not
+checked for it, a trap reported in it may go uncounted, and the client
+accepts any failed request about it.
+
+The client also fails a run on any `Exception` or `Unclassifiable` stop of
+a process not killed from outside: no golden program raises a signal.
+
 ## 13. Faults
 
 Faults are things the real world can do to a debugging session. Each one
@@ -544,17 +602,44 @@ stop". This aims faults at interesting moments far more often than uniform
 chance would. Every planned fault must fire, or the run reports it as
 unfired. A sweep where faults silently never happen is useless.
 
+As built in P2, half the seeds plan one SIGKILL from outside: at the
+first action from a chosen one (1 to 300) while a program runs; between
+two ptrace requests, before the Nth call into the kernel (1 to 100) takes
+effect; or, for programs that create threads, right after the first or
+second clone. A report names a plan that never fired, and a sweep prints,
+for each kind, how many of the sessions that planned it saw it fire
+(about half: many sessions end first). A sibling's `exit_group` is not
+injected: `threads` and `racing-exit` exit their groups themselves, and
+preemption points let the exit land between any two of the controller's
+calls.
+
+**Preemption points.** With a per-seed chance (0, 2, 20, or 60 percent),
+each call the controller makes into the kernel is preceded by one to
+three of: a running thread executing up to 8 instructions, or the waiter
+reaping a status. Their lines appear in the trace among the controller's
+own, marked `preempt:`.
+
+**Scheduling.** Half the seeds use the random walk of P1; the other half
+use PCT with 0 to 3 change points among the first 64, 512, or 4,096
+actions. The waiter, the controller, the client, and each thread are
+actors with priorities. A thread that calls `sched_yield` drops below
+every other actor, or a thread spinning on a barrier would starve the one
+it waits for.
+
 **Coverage marks.** `sim_mark!("fork child released after parent exit")`
 counts how often a run reaches an interesting state. The gate requires
 every mark to be reached at least once across its fixed seeds. That proves
 the sweep reaches what it claims to test. Marks are added alongside the
-faults and features they cover.
+faults and features they cover. P2 has 26 (`sim/marks.rs`), among them a
+thread created, a leader exiting alone, a group exit taking a thread out
+of its stop, two threads stopped at breakpoints in one stop, a thread run
+or a status reaped inside a controller call, and each kind of SIGKILL.
 
 ## 14. Running the simulator
 
 | Command | What it does |
 |---|---|
-| `just` | The gate: `golden-check`; the kernel and CPU conformance tests; 300 fixed seeds over every program and variant (about 0.3 s); a determinism double-run of the first 32 seeds; the coverage-mark check; and two sabotage tests showing the oracles catch lost trap writes and a deaf waiter. |
+| `just` | The gate: `golden-check`; the kernel and CPU conformance tests; 300 fixed seeds over every program and variant (about 0.3 s); a determinism double-run of the first 32 seeds; the coverage-mark check; and four sabotage tests showing the oracles catch lost trap writes, a deaf waiter, a thread resumed behind the controller's back, and a trap the CPU skips. |
 | `just sim [SECONDS]` | A sweep: random seeds on every core for SECONDS (default 60), inside `scripts/contained.sh`. Failures are grouped by kind and check; each group keeps its smallest seed's report. |
 | `just sim-seed SEED` | Replays one seed and prints its whole trace, also written to `target/sim/SEED/trace.log`. `--fingerprint` checks the replay against a report's fingerprint. |
 | `just sim-seed SEED --at STEP` | Replays to STEP and prints the state there: each thread's state, report, pending signals, and `rip`; the waiter; the controller's queue; and the client. |
@@ -569,10 +654,10 @@ faults and features they cover.
   `systemd-run --user` scope capped at half the memory, without swap, and
   first in line for the OOM killer, so a runaway session cannot take the
   machine's memory.
-- **Throughput**, measured in P1 on a 12-core Ryzen AI 9 HX 370 (4 Zen 5
-  and 8 Zen 5c cores): about 1,100 `straight` sessions per second on one
-  thread, and about 7,000 per second in all from 12 threads up. Hyperthreads
-  add nothing. A session averages a few hundred actions.
+- **Throughput**, measured in P2 on a 12-core Ryzen AI 9 HX 370 (4 Zen 5
+  and 8 Zen 5c cores) over all three programs: about 1,400 sessions per
+  second on one thread, about 9,600 per second in all on 12 threads, and
+  about 9,100 on 24. A one-minute sweep runs over half a million sessions.
 - **Where sweeps run.** There is no CI today. Sweeps run locally, before
   merging any lifecycle, run-control, or concurrency change, alongside
   `just stress`.
@@ -742,18 +827,66 @@ and a kill or pause sent while the program runs may meet its exit.
 double-run check, every mark is reached by the fixed seeds, and 650,000
 swept sessions found nothing more.
 
-**P2: Threads and kills.**
+**P2: Threads and kills.** Done on 2026-10-04.
 
-- `clone`, `exit`, and `exit_group`.
-- Pause and stop barriers; `PTRACE_INTERRUPT`; preemption points.
-- PCT scheduling.
-- External SIGKILL and `exit_group` faults, with plans and coverage marks.
-- Dual-run kernel conformance tests for every rule used.
-- The all-stop and breakpoint-accounting oracles.
-- The `threads` and `racing-exit` programs.
+- `clone`, `exit`, and `exit_group`, with the kernel modeling `orig_rax`,
+  system calls a thread stops inside, siginfo per pending signal, a
+  leader's delayed exit, and group exits (section 8).
+- Pause and stop barriers, through the controller's `tgkill` requests;
+  preemption points inside every controller call (section 13).
+- PCT scheduling beside the random walk (section 13).
+- External SIGKILL faults with plans, firing counts, and coverage marks;
+  programs exit their own groups (section 13).
+- Dual-run kernel conformance tests for every rule used: 15 probes over
+  every variant. The lockstep test follows threads (section 9 and
+  `sim/conformance/cpu.rs`) and checks `xadd` and `adc` too.
+- The all-stop, breakpoint-accounting, and thread-exit oracles
+  (section 12), each with a unit test, and a sabotage test for each of the
+  first two.
+- The `threads` and `racing-exit` programs, on the thread runtime
+  (section 11).
 
-*Exit:* every K-* rule in use has a passing probe, and every mark is
-reached.
+Departures from the design, each for a reason recorded where it applies:
+`PTRACE_INTERRUPT` moves to P4 with attach, the only sessions that use it
+(section 8); thread stacks are static, so `mmap` is not modeled; and the
+`exit_group` fault is the programs' own (section 13).
+
+The sweeps found four debugger bugs. Each now has a red-first test
+outside the simulator, as section 15 requires:
+
+- A pause never completed once the main thread had exited alone, since
+  Linux reports its exit only after every other thread's
+  (`pause_stops_a_process_whose_main_thread_exited`, a scenario). A
+  breakpoint added at that stop was never written, and detaching an
+  attached process in that state never finished
+  (`detaching_waits_for_no_main_thread_that_exited_after_attaching`).
+  Such a leader now settles every stop, and stops no longer list it, as
+  attaching already did not.
+- A pause that met such a leader's exit event never re-checked its
+  barrier, and then tried to present the stop through the zombie leader
+  (`a_pause_completes_when_the_main_thread_exits_alone`).
+- A pause failed with "not stopped" when no thread was left to ask: the
+  others held after a thread resumed alone exited, or still to report
+  their first stop, or one past its exit event
+  (`a_pause_after_a_lone_main_thread_exited_stops_at_once`,
+  `a_pause_waits_for_a_starting_thread_to_stop`,
+  `a_pause_waits_for_an_exiting_thread`).
+- A step whose plan ended while siblings ran removed its sites although a
+  sibling had already executed one of their traps. That trap was then
+  published as unclassifiable, with the thread's `rip` one byte into an
+  instruction. A trap one byte past a removed site now rewinds the thread,
+  which runs on (`a_trap_reported_after_its_site_was_removed_runs_on`).
+
+Two probes corrected the model before any session relied on it (section
+8). The sweeps also corrected the client: a thread resumed alone may wait
+forever for a sibling it holds, so the client pauses such an execution
+rather than waiting; and a request about a process ending as a whole may
+fail however it fails, since the debugger may have published a stop just
+before hearing of the end.
+
+*Exit:* met. Every rule in use has a passing probe, all 26 marks are
+reached by the fixed seeds, and 2.7 million swept sessions found nothing
+more.
 
 **P3: Compiler breadth and semantic oracles.**
 
@@ -769,7 +902,8 @@ every session.
 **P4: Fork, attach, and watchpoints.**
 
 - Fork children and their release.
-- Attach after an untraced run.
+- Attach after an untraced run, with `PTRACE_INTERRUPT` (K-INT-1, K-INT-2)
+  probed and modeled.
 - Debug registers in their three behaviors, and the watch-accounting
   oracle.
 - Hit counts and conditions in the client.
@@ -792,7 +926,7 @@ Decided on 2026-10-04: the simulator is in-crate, behind the `sim` feature
 (section 5), and DAP and the CLI stay outside it (section 2).
 
 1. **Corpus storage.** Plain git is assumed while the corpus stays under
-   2 MB (88 KB after P1). Should a larger budget ever be needed, the choice
+   2 MB (272 KB after P2). Should a larger budget ever be needed, the choice
    is between Git LFS and building in Nix with pinned hashes.
 2. **Ambiguous stops from nested inline breakpoints.** When breakpoints on
    two nested inlined functions hit at the same address, as `rt_exit_group`
@@ -802,6 +936,13 @@ Decided on 2026-10-04: the simulator is in-crate, behind the `sim` feature
    Presenting the innermost hit's frame would keep those requests working.
    Is the ambiguity intended? The simulator's client accepts the refusals
    until this is decided.
+3. **An execution whose only thread exited alone as the leader.** When the
+   client resumes the main thread alone and it exits while others live,
+   Linux reports its exit only after theirs, and they are held stopped, so
+   the execution can never end by itself; a pause stops it at once. gdb
+   reports a thread exit and stops instead. Should uscope end such an
+   execution with `ThreadExited` when the leader passes its exit event? Its
+   final status is not known then (K-EXIT-6).
 
 ## Glossary
 
