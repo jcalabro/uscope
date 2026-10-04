@@ -22,7 +22,7 @@ __attribute__((noinline)) void tick(u64 *count) {
 static void spin(void *argument) {
     u64 index = (u64)argument;
     for (;;) {
-        tick(&ticks[index]);
+        tick(&ticks[index]); // MARK: index < 4
         if (index == 0 && rt_load(&ticks[0]) == rounds) {
             rt_print("exit after ");
             rt_print_u64(rounds);

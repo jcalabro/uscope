@@ -5,15 +5,21 @@
     "clang": "clang version 21.1.8"
   },
   "sources": [
-    {"path": "straight.c", "sha256": "91ff53246791a4b31089bb0e027a04dc33bdf0379e567ef9c386805eb36657cf"},
-    {"path": "../rt/rt.c", "sha256": "bf6d2f92e145e6ebda31e922284a86f619ba90cbefc2ecb984dd167f674214dc"},
+    {"path": "straight.c", "sha256": "405567d4cc73662a26aa3fe0eaa0f9eee60239fd340f60f48368caf4b23cac84"},
+    {"path": "../rt/rt.c", "sha256": "858982e67daf319c0435e304d59c6ef63741b72ba7a7c2a04a9c0c5f9b09ae6e"},
     {"path": "../rt/rt.h", "sha256": "9a13639b8e9c28b2f36f9395371eee48dbc5bbd9796cefe4ab8db2efc3e0d624"}
   ],
   "variants": [
-    {"name": "gcc-O0", "compiler": "gcc", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O0", "sha256": "2c9e68f7d2cd25a223b364855b310510ace8204a8aa2ff048f98cd7331936623"},
-    {"name": "gcc-O2", "compiler": "gcc", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O2 -fno-tree-vectorize", "sha256": "4e0e444705bd648acf183ed0221bbcb71382e4a3a257085b6b5e27370d09c91e"},
-    {"name": "clang-O0", "compiler": "clang", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O0", "sha256": "31f4c5f21d9cb7c4ef0d5742be5e79d2c892555ef2c173085759010f6db3c729"},
-    {"name": "clang-O2", "compiler": "clang", "flags": "-std=c11 -g -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -fno-pie -Wall -Wextra -Werror -O2 -fno-vectorize -fno-slp-vectorize", "sha256": "102ea9f50264c94aa7fd8c85433fecc3109887c59d6ee47bb3a8f2e81f1e2193"}
+    {"name": "gcc-O0", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fno-omit-frame-pointer -static -fno-pie", "sha256": "6810bd8d510509e0d1afb6bbe0d1949133ccc02629353823b2377d76c65bfd96"},
+    {"name": "gcc-O0-nofp", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fomit-frame-pointer -static -fno-pie", "sha256": "62b81ea541d0207e1016a7217feb94ed635271c6d9ff96ef3b2e68024a4b9f3e"},
+    {"name": "gcc-O2", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-tree-vectorize -fno-omit-frame-pointer -static -fno-pie", "sha256": "c55f6b3d0fe3519df57ca2ee70d42232580b5b7c3282ad679326797e68c11a42"},
+    {"name": "gcc-O2-nofp", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-tree-vectorize -fomit-frame-pointer -static -fno-pie", "sha256": "39c835e507d76f604442f9656298135a88d24912814877002f30ec794c9d3628"},
+    {"name": "gcc-O2-pie", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-tree-vectorize -fomit-frame-pointer -static-pie -fpie", "sha256": "8476066af4952c0ba77149dae090e203b72275ade3cae29ae8bf76ec7999e1c2"},
+    {"name": "clang-O0", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fno-omit-frame-pointer -static -fno-pie", "sha256": "694dde4fbaece503fe165d3babb01455a00b2ed20ac14104fd82869ef355f303"},
+    {"name": "clang-O0-nofp", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fomit-frame-pointer -static -fno-pie", "sha256": "e01b545a24089331408cb14dba45ce77ed1761ae9b562060fc861ec59899706d"},
+    {"name": "clang-O0-pie", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fno-omit-frame-pointer -static-pie -fpie", "sha256": "1b88bf720e3a2843fa0a7fcf663bb4daad4beb84778b6835475a4fc0062dc14e"},
+    {"name": "clang-O2", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-vectorize -fno-slp-vectorize -fno-omit-frame-pointer -static -fno-pie", "sha256": "33b9bc50396a78774b20824aeac94214e0d452d413e4b489615f928d60333ca3"},
+    {"name": "clang-O2-nofp", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-vectorize -fno-slp-vectorize -fomit-frame-pointer -static -fno-pie", "sha256": "4d18f91ed839e9a4eb632a21d315043219d8f19c7680fb475828669cd4830b61"}
   ],
   "runs": [
     {"arguments": [], "exit_code": 2, "output": "total 202\n"},
