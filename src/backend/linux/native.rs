@@ -107,6 +107,9 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         // ptrace edge overrides this method.
         Ok(false)
     }
+    /// Whether `address` lies in memory the process may execute, where a
+    /// trap byte replaces code rather than data.
+    fn executable(&self, pid: Pid, address: VirtualAddress) -> Result<bool>;
     /// Reads one x86-64 debug register from a stopped thread's user area.
     fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno>;
     /// Writes one x86-64 debug register in a stopped thread's user area.
@@ -411,6 +414,12 @@ impl LinuxTraceOps for LinuxPtrace {
         Ok(queued_trap_in_status(&status))
     }
 
+    fn executable(&self, pid: Pid, address: VirtualAddress) -> Result<bool> {
+        self.assert_owner_thread();
+        let maps = fs::read_to_string(format!("/proc/{pid}/maps"))?;
+        Ok(maps_executable(&maps, address))
+    }
+
     fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno> {
         self.assert_owner_thread();
         ptrace::read_user(pid, debug_register_offset(index))
@@ -511,6 +520,25 @@ pub(super) fn is_vanished_tracee(error: &Error) -> bool {
         Error::Backend(error)
             if matches!(error.downcast_ref::<LinuxError>(), Some(LinuxError::System(Errno::ESRCH)))
     )
+}
+
+/// Whether the mapping of `/proc/<pid>/maps` containing `address` is
+/// executable. A malformed line describes no executable memory.
+pub(super) fn maps_executable(maps: &str, address: VirtualAddress) -> bool {
+    maps.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let (Some(range), Some(permissions)) = (fields.next(), fields.next()) else {
+            return false;
+        };
+        let Some((start, end)) = range.split_once('-') else {
+            return false;
+        };
+        let (Ok(start), Ok(end)) = (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16))
+        else {
+            return false;
+        };
+        (start..end).contains(&address.get()) && permissions.as_bytes().get(2) == Some(&b'x')
+    })
 }
 
 /// Whether `/proc/<tid>/status` shows SIGTRAP pending for the thread itself

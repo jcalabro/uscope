@@ -1726,3 +1726,100 @@ async fn next_instruction_runs_a_recursive_call_until_this_activation_returns() 
     );
     scenario.shutdown().await;
 }
+
+/// The line of `orphan-frames.c` that `marker` labels.
+fn orphan_line(marker: &str) -> u64 {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/c/orphan-frames.c"
+    );
+    let text = fs::read_to_string(path).expect("read orphan-frames.c");
+    text.lines()
+        .position(|line| line.contains(marker))
+        .map_or_else(
+            || panic!("orphan-frames.c has no {marker} line"),
+            |index| u64::try_from(index + 1).expect("line fits u64"),
+        )
+}
+
+async fn current_line(scenario: &Scenario) -> Option<u64> {
+    scenario
+        .operation("location", scenario.handle().current_location())
+        .await
+        .image
+        .source
+        .map(|source| source.line.get())
+}
+
+/// Steps `kind` and checks that it stops on the line `marker` labels.
+async fn step_to_orphan_line(scenario: &mut Scenario, kind: StepKind, marker: &str) {
+    assert_eq!(scenario.step_to_stop(kind).await, StopReason::Step { kind });
+    assert_eq!(current_line(scenario).await, Some(orphan_line(marker)));
+}
+
+/// Stepping out of a frame whose caller cannot be unwound is refused, and
+/// leaves the program stopped where it was.
+async fn assert_finish_refused(scenario: &Scenario, marker: &str) {
+    let refused = scenario
+        .attempt("finish", scenario.handle().step(StepKind::Out))
+        .await
+        .expect_err("stepping out of a frame without a trustworthy caller is refused");
+    assert!(
+        refused.to_string().contains("caller"),
+        "the refusal explains the caller is unknown: {refused}"
+    );
+    assert_eq!(current_line(scenario).await, Some(orphan_line(marker)));
+}
+
+/// A frame whose caller cannot be unwound still steps by source line, and
+/// its program runs on unharmed. A fiber started on a fresh stack has no
+/// readable return address; a frame whose return address a stack overflow
+/// overwrote points into program data, where no trap may be planted.
+#[tokio::test]
+async fn frames_without_a_trustworthy_caller_step_and_leave_their_program_intact() {
+    let mut scenario = Scenario::launch("orphan-frames");
+    scenario.add_breakpoint("fiber_main").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert_eq!(
+        current_line(&scenario).await,
+        Some(orphan_line("FIBER_FIRST"))
+    );
+    step_to_orphan_line(&mut scenario, StepKind::IntoSource, "FIBER_SECOND").await;
+    step_to_orphan_line(&mut scenario, StepKind::OverSource, "FIBER_THIRD").await;
+    assert_finish_refused(&scenario, "FIBER_THIRD").await;
+    step_to_orphan_line(&mut scenario, StepKind::OverSource, "FIBER_EXIT").await;
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+
+    let mut scenario = Scenario::new("orphan-frames smash", Scenario::fixture("orphan-frames"));
+    scenario.add_breakpoint("smash").await;
+    let options = LaunchOptions {
+        arguments: vec!["smash".into()],
+        ..LaunchOptions::default()
+    };
+    assert!(matches!(
+        scenario.run_with_to_stop(options).await,
+        StopReason::Breakpoint { .. }
+    ));
+    assert_eq!(
+        current_line(&scenario).await,
+        Some(orphan_line("FRAME_ADDRESS"))
+    );
+    step_to_orphan_line(&mut scenario, StepKind::OverSource, "OVERWRITE_RETURN").await;
+    step_to_orphan_line(&mut scenario, StepKind::OverSource, "READ_CANARY").await;
+    assert_finish_refused(&scenario, "READ_CANARY").await;
+    step_to_orphan_line(&mut scenario, StepKind::OverSource, "CHECK_CANARY").await;
+    // The program exits with 0 only if the data its smashed return address
+    // points to still holds what it stored.
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}

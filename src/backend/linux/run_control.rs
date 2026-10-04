@@ -594,10 +594,10 @@ impl<P: LinuxTraceOps> Controller<P> {
                     self.continue_thread(pid)
                 };
             }
-            if self.step_is_complete(pid, kind)? {
+            if let Some(reason) = self.user_step_stop(pid, kind)? {
                 // The plan's sites, this one among them, are removed when
                 // the stop is published.
-                return self.begin_visible_stop(pid, StopReason::Step { kind });
+                return self.begin_visible_stop(pid, reason);
             }
 
             self.mark_epilogue_return_for_retirement(address);
@@ -610,9 +610,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         // onto a declined site may end there, with the hit counted once.
         if let Some((_, kind)) = step
             && !steps_instructions(kind)
-            && self.step_is_complete(pid, kind)?
+            && let Some(reason) = self.user_step_stop(pid, kind)?
         {
-            return self.begin_visible_stop(pid, StopReason::Step { kind });
+            return self.begin_visible_stop(pid, reason);
         }
         if self.barrier_active() {
             self.finish_barrier_if_ready()

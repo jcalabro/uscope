@@ -898,6 +898,8 @@ require_tail_jump "$output_dir/tail-calls-clang-o2" outer_chain chain_helper
 require_tail_jump "$output_dir/tail-calls-clang-o2" descend_tail mutual_tail
 build_fixture gcc "$c_fixtures_dir/step-over-libc.c" "$output_dir/step-over-libc" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/orphan-frames.c" "$output_dir/orphan-frames" \
+    -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/unwind.c" "$output_dir/unwind-o0" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/unwind.c" "$output_dir/unwind-o2" \

@@ -417,6 +417,9 @@ impl LinuxTraceOps for RecordingTrace {
         Self::unexpected("request_stop")
     }
 
+    fn executable(&self, _pid: Pid, _address: VirtualAddress) -> Result<bool> {
+        Ok(true)
+    }
     fn read_debug_register(&self, _pid: Pid, _index: usize) -> std::result::Result<u64, Errno> {
         Self::unexpected("read_debug_register")
     }
@@ -1504,6 +1507,9 @@ impl LinuxTraceOps for DebugRegisterTrace {
     }
     fn queued_trap(&self, pid: Pid) -> Result<bool> {
         Ok(self.queued_traps.borrow().contains(&pid))
+    }
+    fn executable(&self, _pid: Pid, _address: VirtualAddress) -> Result<bool> {
+        Ok(true)
     }
     fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno> {
         self.record(format!("read {pid} dr{index}"));
@@ -4150,4 +4156,113 @@ fn threads_ending_before_their_announcement_never_become_live() {
             ..
         }
     )));
+}
+
+/// Call-frame information whose rules read a stack slot no read reaches,
+/// as a corrupted stack's do.
+struct LostUnwindInfo;
+
+impl UnwindInfo for LostUnwindInfo {
+    fn cfa(
+        &self,
+        _address: ImageAddress,
+        _registers: &RegisterFile,
+        _memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<VirtualAddress, UnwindTermination> {
+        Err(UnwindTermination::MemoryReadFailed {
+            address: VirtualAddress::new(0x7ff8),
+        })
+    }
+
+    fn unwind(
+        &self,
+        address: ImageAddress,
+        registers: &RegisterFile,
+        memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
+        Err(self
+            .cfa(address, registers, memory)
+            .expect_err("no rule resolves"))
+    }
+}
+
+#[test]
+fn a_step_that_loses_its_frame_stops_explicitly_and_leaves_the_program_alone() {
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    let site = VirtualAddress::new(0x30);
+    let execution = ExecutionId::new(2);
+    let controller = &mut harness.controller;
+    controller.unwind_info = Arc::new(LostUnwindInfo);
+    let inferior = controller.inferior.as_mut().expect("inferior");
+    controller
+        .ptrace
+        .install_breakpoint(
+            pid,
+            &mut inferior.breakpoints,
+            site,
+            BreakpointOwner::Plan(execution),
+        )
+        .expect("plan site");
+    inferior
+        .plan_sites
+        .insert(execution, BTreeSet::from([site]));
+    inferior.public_stop = None;
+    inferior.active = Some(ActiveExecution {
+        id: execution,
+        kind: ActiveKind::Step {
+            thread: pid,
+            kind: StepKind::OverSource,
+            start: Box::new(StepStart {
+                source: Some(SourceLocation {
+                    file: crate::SourceFileId::new(0),
+                    line: crate::LineNumber::new(1).expect("nonzero line"),
+                    column: None,
+                }),
+                code_instance: Some(CodeInstanceId::new(0)),
+                physical_instance: Some(CodeInstanceId::new(0)),
+                activation: Some(VirtualAddress::new(0x7000)),
+                plan_addresses: BTreeSet::from([site]),
+                epilogue_traversal: None,
+                return_traversal: None,
+                signal_guard: None,
+                call_return: None,
+            }),
+            progress_owed: false,
+        },
+        scope: ResumeScope::Thread(debug_thread_id(pid)),
+        resume_threads: BTreeSet::from([pid]),
+    });
+    let thread = harness.thread(pid);
+    thread.state = NativeThreadState::Running;
+    thread.reason = None;
+    harness.trace().take_actions();
+
+    // The step's plan site traps, but where the step's frame went can no
+    // longer be told.
+    harness.hit_at(pid, site.get()).expect("the hit is handled");
+
+    match harness.public_reason() {
+        Some(StopReason::StepIncomplete { kind, description }) => {
+            assert_eq!(kind, StepKind::OverSource);
+            assert!(description.contains("caller"), "{description}");
+        }
+        other => panic!("expected an incomplete step, got {other:?}"),
+    }
+    let actions = harness.trace().take_actions();
+    assert!(
+        !actions.iter().any(|action| action.starts_with("kill")),
+        "the program must not be killed: {actions:?}"
+    );
+    assert!(
+        harness
+            .controller
+            .inferior
+            .as_ref()
+            .expect("inferior")
+            .breakpoints
+            .values()
+            .all(|site| !site.installed),
+        "the step's plan sites are removed"
+    );
 }

@@ -184,7 +184,41 @@ impl<P: LinuxTraceOps> Controller<P> {
 }
 
 impl<P: LinuxTraceOps> Controller<P> {
+    /// Advances a user step after its thread stopped, publishing the step's
+    /// stop once it completes.
+    ///
+    /// A step the debugger can no longer follow, because evidence such as
+    /// the stepping frame's caller cannot be gathered, stops where its
+    /// thread is with [`StopReason::StepIncomplete`]. The program is never
+    /// harmed for the debugger's lack of evidence.
     pub(super) fn complete_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
+        match self.advance_user_step(pid, kind) {
+            Err(error) if is_lost_step_evidence(&error) && self.thread_is_stopped(pid) => {
+                self.begin_visible_stop(pid, step_incomplete(kind, &error))
+            }
+            result => result,
+        }
+    }
+
+    /// The stop a step publishes from where its thread stopped: completion,
+    /// an explicit stop where it lost track of its frame, or `None` to go on.
+    pub(super) fn user_step_stop(&self, pid: Pid, kind: StepKind) -> Result<Option<StopReason>> {
+        match self.step_is_complete(pid, kind) {
+            Ok(true) => Ok(Some(StopReason::Step { kind })),
+            Ok(false) => Ok(None),
+            Err(error) if is_lost_step_evidence(&error) => Ok(Some(step_incomplete(kind, &error))),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn thread_is_stopped(&self, pid: Pid) -> bool {
+        self.inferior
+            .as_ref()
+            .and_then(|inferior| inferior.threads.get(&pid))
+            .is_some_and(|thread| matches!(thread.state, NativeThreadState::Stopped))
+    }
+
+    fn advance_user_step(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
         self.retire_return_guard()?;
         self.retire_epilogue_return_guard()?;
         if !steps_instructions(kind) && self.begin_epilogue_traversal(pid)? {
@@ -207,21 +241,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                 // An unavailable unwind (tail call into a shared library, PLT
                 // stub, or CFI-less code) is expected lack of evidence, not a
                 // controller failure. Stay on the instruction-stepping path.
-                Err(Error::Backend(error))
-                    if matches!(
-                        error.downcast_ref::<LinuxError>(),
-                        Some(LinuxError::CallerUnavailable(_))
-                    ) =>
-                {
+                Err(error) if is_caller_unavailable(&error) => {
                     return self.start_user_step(pid, kind);
                 }
                 Err(error) => return Err(error),
             }
         }
-        if self.step_is_complete(pid, kind)? {
-            self.begin_visible_stop(pid, StopReason::Step { kind })
-        } else {
-            self.start_user_step(pid, kind)
+        match self.user_step_stop(pid, kind)? {
+            Some(reason) => self.begin_visible_stop(pid, reason),
+            None => self.start_user_step(pid, kind),
         }
     }
 
@@ -715,7 +743,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 source_for_code_instance(&self.module_image, location, instance)
             })
         });
-        let activation = self.top_activation(pid, registers)?;
+        // As when it starts, stepping in never requires the activation: code
+        // without unwind information is judged by its location alone.
+        let activation = self.top_activation(pid, registers).ok();
         let statement = location.as_ref().is_some_and(|location| {
             self.module_image
                 .line_entry_containing(location.address)
@@ -724,8 +754,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         let current_physical = location
             .as_ref()
             .and_then(|location| location.physical_instance);
+        let activation_changed = activation
+            .zip(start.activation)
+            .is_some_and(|(current, start)| current != start);
         let entered_physical_activation = match start.activation {
-            Some(start_activation) if start_activation != activation => self
+            Some(start_activation) if activation_changed => self
                 .location_for_activation(pid, registers, start_activation)?
                 .is_some(),
             Some(_) => current_physical.is_some() && current_physical != start.physical_instance,
@@ -748,7 +781,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         Ok(
             (statement || entered_physical_activation && at_recommended_entry)
-                && (activation != start.activation.unwrap_or(activation)
+                && (activation_changed
                     || current_instance != start.code_instance
                     || source_line_changed(start.source.as_ref(), source.as_ref())),
         )
@@ -811,7 +844,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             && let (Some(source), Some(instance_id)) = (&source, code_instance)
             && let Some(instance) = self.module_image.code_instance(instance_id)
         {
-            let return_address = self.caller_address(pid, &registers)?;
+            // A frame without a trustworthy caller, such as a coroutine's
+            // first frame or one a stack overflow corrupted, still steps by
+            // line. Its return, if it comes, is then followed like a return
+            // into code without source.
+            let return_address = match self.caller_address(pid, &registers) {
+                Ok(address) => Some(address),
+                Err(error) if is_caller_unavailable(&error) => None,
+                Err(error) => return Err(error),
+            };
             for line in self.module_image.line_entries() {
                 if !line.statement || !instance.contains(line.range.start) {
                     continue;
@@ -824,7 +865,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                         .insert(inferior.loaded_module.virtual_address(line.range.start)?);
                 }
             }
-            plan_addresses.insert(return_address);
+            plan_addresses.extend(return_address);
         }
 
         Ok(StepStart {
@@ -934,7 +975,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .get(resolved.activation + 1)
                 .map(|caller| caller.context.instruction)
                 .ok_or_else(|| caller_unavailable(stack.termination.clone()))?;
-            plan_addresses.insert(return_address);
+            plan_addresses.insert(self.executable_return_address(pid, return_address)?);
             activation
         };
 
@@ -972,12 +1013,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             first: true,
         };
 
-        match provider.caller(&current) {
-            CallerResult::Caller(caller) => caller.cfa.ok_or(Error::LocationUnavailable),
-            CallerResult::Finished(reason) => {
-                Err(backend_error(LinuxError::CallerUnavailable(reason)))
-            }
-        }
+        provider
+            .frame_cfa(&current)
+            .map_err(|reason| backend_error(LinuxError::CallerUnavailable(reason)))
     }
 
     pub(super) fn location_for_activation(
@@ -1010,13 +1048,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
 
         for level in 0..DEFAULT_MAX_FRAMES {
-            let caller = match provider.caller(&context) {
-                CallerResult::Caller(caller) => caller,
-                CallerResult::Finished(reason) => {
-                    return Err(backend_error(LinuxError::CallerUnavailable(reason)));
-                }
-            };
-            if caller.cfa == Some(activation) {
+            // Each frame is known by its own CFA, so the starting activation
+            // is recognized even when its return address cannot be read.
+            let cfa = provider
+                .frame_cfa(&context)
+                .map_err(|reason| backend_error(LinuxError::CallerUnavailable(reason)))?;
+            if cfa == activation {
                 let level = u32::try_from(level).expect("frame limit fits u32");
                 let location = frame_lookup_address(level, &context)
                     .and_then(|address| inferior.loaded_module.image_address(address).ok())
@@ -1027,15 +1064,22 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             // This backend only supports x86-64's downward-growing ordinary stack. Once
             // unwinding passes the starting CFA, that activation has returned.
-            if caller.cfa.is_some_and(|cfa| cfa > activation) {
+            if cfa > activation {
                 return Ok(None);
             }
-            context = caller;
+            context = match provider.caller(&context) {
+                CallerResult::Caller(caller) => caller,
+                CallerResult::Finished(reason) => {
+                    return Err(backend_error(LinuxError::CallerUnavailable(reason)));
+                }
+            };
         }
 
         Ok(None)
     }
 
+    /// The innermost activation's return address, where a step plants a
+    /// trap to regain control once the activation returns.
     pub(super) fn caller_address(
         &self,
         pid: Pid,
@@ -1058,11 +1102,29 @@ impl<P: LinuxTraceOps> Controller<P> {
         };
 
         match provider.caller(&current) {
-            CallerResult::Caller(caller) => Ok(caller.instruction),
+            CallerResult::Caller(caller) => self.executable_return_address(pid, caller.instruction),
             CallerResult::Finished(reason) => {
                 Err(backend_error(LinuxError::CallerUnavailable(reason)))
             }
         }
+    }
+
+    /// Accepts an unwound return address as a trap site only where the
+    /// process executes code. A corrupted stack can name any address,
+    /// and a trap planted in data would change what the program reads.
+    pub(super) fn executable_return_address(
+        &self,
+        pid: Pid,
+        address: VirtualAddress,
+    ) -> Result<VirtualAddress> {
+        if self.ptrace.executable(pid, address)? {
+            return Ok(address);
+        }
+        Err(backend_error(LinuxError::CallerUnavailable(
+            crate::UnwindTermination::InvalidCaller {
+                description: format!("return address {address} is not in executable memory").into(),
+            },
+        )))
     }
 
     pub(super) fn image_location(&self, address: VirtualAddress) -> Option<ImageLocation> {
@@ -1077,4 +1139,32 @@ pub(super) const fn x86_64_activation_has_returned(
     activation_cfa: VirtualAddress,
 ) -> bool {
     stack_pointer >= activation_cfa.get()
+}
+
+/// Whether unwinding found no caller the debugger can trust.
+fn is_caller_unavailable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Backend(error)
+            if matches!(error.downcast_ref::<LinuxError>(), Some(LinuxError::CallerUnavailable(_)))
+    )
+}
+
+/// Whether a step failed for lack of the evidence it is followed by, such
+/// as a frame's caller or location, rather than because tracing failed.
+fn is_lost_step_evidence(error: &Error) -> bool {
+    matches!(error, Error::LocationUnavailable) || is_caller_unavailable(error)
+}
+
+fn step_incomplete(kind: StepKind, error: &Error) -> StopReason {
+    // A backend error's own message, without the prefix naming its layer.
+    let description = match error {
+        Error::Backend(inner) => inner.to_string(),
+        other => other.to_string(),
+    };
+    record!("step {kind:?} lost track of its frame: {description}");
+    StopReason::StepIncomplete {
+        kind,
+        description: description.into(),
+    }
 }

@@ -1107,6 +1107,7 @@ impl Cli {
             reason,
             uscope::StopReason::Breakpoint { .. }
                 | uscope::StopReason::Step { .. }
+                | uscope::StopReason::StepIncomplete { .. }
                 | uscope::StopReason::Watchpoint { .. }
         ) {
             match self.debugger.source_context(SOURCE_CONTEXT_RADIUS).await {

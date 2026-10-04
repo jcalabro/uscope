@@ -2115,6 +2115,13 @@ fn exit_code(status: &ExitStatus) -> i64 {
 fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<String>) {
     match reason {
         StopReason::Step { .. } => ("step", None, None),
+        StopReason::StepIncomplete { description, .. } => (
+            "step",
+            Some(format!(
+                "the step stopped before it completed: {description}"
+            )),
+            Some("step incomplete".to_owned()),
+        ),
         StopReason::Pause => ("pause", None, None),
         StopReason::Entry | StopReason::Attach => ("entry", None, None),
         StopReason::Exception(info)
@@ -2307,6 +2314,14 @@ mod tests {
                 },
                 "exception",
                 Some("watchpoint failure"),
+            ),
+            (
+                StopReason::StepIncomplete {
+                    kind: StepKind::IntoSource,
+                    description: "no caller".into(),
+                },
+                "step",
+                Some("step incomplete"),
             ),
         ];
         for (reason, kind, text) in cases {
