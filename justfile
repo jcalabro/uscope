@@ -8,8 +8,9 @@ max_test_threads := "16"
 # Lints the Rust code and runs the complete test suite.
 default: check
 
-# Checks formatting, runs Clippy, and runs the complete test suite.
-check: lint test
+# Checks formatting, runs Clippy, checks the golden programs, and runs the
+# complete test suite.
+check: lint golden-check test
 
 # Enters the Nix development shell.
 dev *ARGS="":
@@ -65,6 +66,16 @@ stress COUNT="10" *ARGS: build-test-programs
     trap 'kill "${burners[@]}" 2>/dev/null || true' EXIT
     for (( i = 0; i < cpus / 2; i++ )); do (while :; do :; done) & burners+=($!); done
     setarch "$(uname -m)" cargo nextest run --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
+
+# Compiles one golden program's variants, used by the simulator, and
+# rewrites its manifest. Commit rebuilt binaries on their own.
+golden-build NAME:
+    ./scripts/golden.sh build "$1"
+
+# Fails unless every golden program's manifest matches its sources,
+# binaries, and output.
+golden-check:
+    ./scripts/golden.sh check
 
 # Runs one fuzz target: value-expression, dwarf-expression, core-dump,
 # elf-symbols, disassembly, debug-register-plan, dap-transport, or
