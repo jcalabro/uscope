@@ -13,8 +13,8 @@ use crate::protocol::{StopReason, WatchpointId};
 
 use super::native::LinuxTraceOps;
 use super::{
-    ClassifiedStop, Controller, ExpectedStop, NativeThreadState, PendingSignal, RawStopRecord,
-    SignalMetadata, TRAP_HARDWARE_BREAKPOINT, TRAP_UNKNOWN,
+    BREAKPOINT_OPCODE, ClassifiedStop, Controller, ExpectedStop, NativeThreadState, PendingSignal,
+    RawStopRecord, SignalMetadata, TRAP_HARDWARE_BREAKPOINT, TRAP_UNKNOWN,
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -56,10 +56,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         // Only an int3 reports SI_KERNEL. Watchpoint traps and SIGTRAPs sent
         // by a process also stop after an instruction, and rewinding the PC
         // for them would execute that instruction twice.
-        let breakpoint =
-            (signal == Signal::SIGTRAP && !expected_trace && code == Some(libc::SI_KERNEL))
-                .then(|| self.normalize_breakpoint_pc(pid))
-                .flatten();
+        let trap = signal == Signal::SIGTRAP && !expected_trace && code == Some(libc::SI_KERNEL);
+        let breakpoint = trap.then(|| self.normalize_breakpoint_pc(pid)).flatten();
+        let removed = trap && breakpoint.is_none() && self.rewind_removed_trap(pid);
 
         match classify_stop_evidence(
             signal,
@@ -69,6 +68,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             starting,
             debugger_requested,
             breakpoint,
+            removed,
             watch,
         ) {
             // SIGKILL may have taken the thread out of its stop while the
@@ -137,6 +137,26 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.ptrace.set_registers(pid, registers).ok()?;
         Some(address)
     }
+
+    /// Rewinds a thread over a trap whose site was removed after the thread
+    /// executed it, as when a step's plan ends while siblings run through
+    /// the same address, so that the restored instruction runs when it
+    /// resumes. Only a site's own trap can stop there: the program's code
+    /// held another byte. Returns whether the thread was rewound.
+    pub(super) fn rewind_removed_trap(&self, pid: Pid) -> bool {
+        let rewind = || {
+            let inferior = self.inferior.as_ref()?;
+            let mut registers = self.ptrace.registers(pid).ok()?;
+            let address = VirtualAddress::new(registers.rip.checked_sub(1)?);
+            let original = *inferior.former_sites.get(&address)?;
+            if original == BREAKPOINT_OPCODE || inferior.breakpoints.contains_key(&address) {
+                return None;
+            }
+            registers.rip = address.get();
+            self.ptrace.set_registers(pid, registers).ok()
+        };
+        rewind().is_some()
+    }
 }
 
 /// Chooses the one primary reason published for coincident all-stop events.
@@ -192,6 +212,7 @@ pub(super) fn classify_stop_evidence(
     starting: bool,
     debugger_requested: bool,
     breakpoint: Option<VirtualAddress>,
+    removed: bool,
     watch: WatchStatus,
 ) -> ClassifiedStop {
     if is_superseded(&siginfo) {
@@ -242,6 +263,9 @@ pub(super) fn classify_stop_evidence(
     }
     if let Some(address) = breakpoint {
         return ClassifiedStop::Breakpoint(address);
+    }
+    if removed {
+        return ClassifiedStop::RemovedTrap;
     }
 
     match siginfo {

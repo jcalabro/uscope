@@ -361,6 +361,9 @@ enum ClassifiedStop {
         watch: BTreeSet<WatchpointId>,
     },
     DebuggerRequested,
+    /// The thread executed a trap whose site was removed before its report
+    /// was handled; it has been rewound to the restored instruction.
+    RemovedTrap,
     /// SIGKILL took the thread out of the reported stop; its exit follows.
     Superseded,
     Unclassifiable(RawStopRecord),

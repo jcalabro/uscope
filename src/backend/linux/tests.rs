@@ -1229,6 +1229,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
             false,
             false,
             breakpoint,
+            false,
             WatchStatus::Absent,
         )
     };
@@ -1322,6 +1323,7 @@ fn stop_classifier_treats_a_thread_killed_from_its_stop_as_exiting() {
             false,
             false,
             None,
+            false,
             WatchStatus::Absent,
         )
     };
@@ -5411,6 +5413,40 @@ fn a_pause_after_every_thread_began_exiting_ends_with_the_exit() {
             _ => None,
         });
     assert_eq!(ended, Some(Some(execution)));
+}
+
+/// A thread can execute a trap just before another thread's stop removes
+/// its site, as when a step's plan ends while siblings run through the same
+/// return address. The trap's report then names a site that is gone: the
+/// thread re-executes the restored instruction and runs on, and nothing is
+/// published.
+#[test]
+fn a_trap_reported_after_its_site_was_removed_runs_on() {
+    let mut harness = watch_harness(2);
+    let [first, _] = harness.threads[..] else {
+        panic!("two threads");
+    };
+    harness.start_continue();
+    harness
+        .controller
+        .inferior
+        .as_mut()
+        .expect("inferior")
+        .former_sites
+        .insert(VirtualAddress::new(HIT_SITE), 0x90);
+    harness.trace().take_actions();
+
+    harness.hit(first).expect("late trap");
+    let actions = harness.trace().take_actions();
+    assert_eq!(
+        actions,
+        [
+            format!("set_registers {first} rip={HIT_SITE:#x}"),
+            format!("continue {first} None"),
+        ],
+        "{actions:?}"
+    );
+    assert_eq!(harness.published_stops(), 0);
 }
 
 /// A main thread that exits alone while a pause stops the others never
