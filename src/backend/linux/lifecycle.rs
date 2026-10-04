@@ -536,7 +536,13 @@ impl<P: LinuxTraceOps> Controller<P> {
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
                 inferior.thread_mut(pid)?.state = NativeThreadState::Exiting;
                 self.adopt_unannounced_fork_children(pid);
-                self.release_exiting_thread(pid)
+                self.release_exiting_thread(pid)?;
+                // A leader exiting alone gives a stop in progress nothing
+                // more to wait for.
+                if self.barrier_active() {
+                    self.finish_barrier_if_ready()?;
+                }
+                Ok(())
             }
             other => self.begin_visible_stop(
                 pid,

@@ -1144,6 +1144,26 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(())
     }
 
+    /// The thread that presents a stop `triggering_thread` caused. A leader
+    /// that exited alone, as one a pause asked to stop, has no frame to
+    /// present; a stopped thread presents the stop instead.
+    fn presenting_thread(&self, triggering_thread: Pid) -> Pid {
+        self.inferior
+            .as_ref()
+            .filter(|inferior| {
+                inferior
+                    .threads
+                    .get(&triggering_thread)
+                    .is_some_and(|thread| inferior.exited_leader(triggering_thread, thread))
+            })
+            .and_then(|inferior| {
+                inferior.threads.iter().find_map(|(&pid, thread)| {
+                    matches!(thread.state, NativeThreadState::Stopped).then_some(pid)
+                })
+            })
+            .unwrap_or(triggering_thread)
+    }
+
     pub(super) fn finish_barrier_if_ready(&mut self) -> Result<()> {
         let ready = self.inferior.as_ref().is_some_and(|inferior| {
             inferior.barrier.is_some()
@@ -1210,6 +1230,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.barrier.as_ref())
             .and_then(|barrier| Some((barrier.triggering_thread, barrier.reason.clone()?)))
             .expect("ready barrier publishes a reason");
+        let triggering_thread = self.presenting_thread(triggering_thread);
         let presentation = self.presentation_for_thread(triggering_thread, Some(&reason))?;
         let stop_id = self.ptrace.allocate_stop_id();
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
