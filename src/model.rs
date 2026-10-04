@@ -2744,6 +2744,29 @@ fn build_control_boundary_indexes(
     }
 }
 
+/// Ends each line entry where a function symbol begins inside it. A line
+/// program describes every function it covers from the function's first
+/// instruction, but its last row before code it does not describe, such as
+/// hand-written assembly placed after a compiled function, runs on to the
+/// next row: that code has no source line.
+fn clip_lines_at_functions(lines: &mut [LineEntry], symbols: &[SymbolInfo]) {
+    let mut starts = symbols
+        .iter()
+        .filter(|symbol| symbol.kind == SymbolKind::Function && symbol.extent.is_some())
+        .map(|symbol| symbol.address)
+        .collect::<Vec<_>>();
+    starts.sort_unstable();
+    starts.dedup();
+    for line in lines {
+        let after = starts.partition_point(|start| *start <= line.range.start);
+        if let Some(&start) = starts.get(after)
+            && start < line.range.end
+        {
+            line.range.end = start;
+        }
+    }
+}
+
 fn validate_dense_ids(metadata: &ModuleMetadata) {
     for (index, function) in metadata.functions.iter().enumerate() {
         assert_eq!(
@@ -2852,9 +2875,10 @@ impl ModuleImage {
         path: PathBuf,
         target: TargetDescription,
         address_range: AddressRange<ImageAddress>,
-        metadata: ModuleMetadata,
+        mut metadata: ModuleMetadata,
     ) -> Self {
         validate_dense_ids(&metadata);
+        clip_lines_at_functions(&mut metadata.lines, &metadata.symbols);
         let code_range_index =
             RangeIndex::new(metadata.code_instances.iter().flat_map(|instance| {
                 instance

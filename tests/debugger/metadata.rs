@@ -341,3 +341,41 @@ async fn line_zero_rows_do_not_extend_the_previous_source_line() {
 
     debugger.shutdown().await.expect("shutdown debugger");
 }
+
+/// A line table's last row for a function runs on, to the next row,
+/// through code the compiler did not describe, such as hand-written
+/// assembly placed after it. That code has no source line: the simulator
+/// found a step stopping in such assembly, presented as the closing brace
+/// of the C function before it.
+#[tokio::test]
+async fn hand_written_assembly_after_a_function_has_no_source_line() {
+    let image = load_fixture_image("assembly-after-code").await;
+    let bare = image
+        .symbols()
+        .iter()
+        .find(|symbol| symbol.name.as_ref() == "bare")
+        .expect("the fixture defines bare");
+    let extent = bare.extent.expect("bare has a size").range;
+    // The fixture's layout: no row begins in bare, and the row before it
+    // runs on past it.
+    let rows = image.statement_rows();
+    assert!(
+        rows.iter().all(|row| !extent.contains(row.address)),
+        "a row describes bare"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.address < extent.start && row.location.is_some())
+            && rows
+                .iter()
+                .filter(|row| row.address >= extent.start)
+                .all(|row| row.address >= extent.end),
+        "bare does not follow a described function"
+    );
+    let located = image.locate(extent.start);
+    assert_eq!(located.source, None, "{located:?}");
+    assert!(located.function.is_none());
+    // The row before still describes the function it belongs to.
+    let before = uscope::ImageAddress::new(extent.start.get() - 1);
+    assert!(image.locate(before).source.is_some());
+}
