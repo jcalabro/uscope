@@ -4,26 +4,33 @@
 //! Linux kernel and x86-64 CPU, so that one seed names one complete,
 //! reproducible session.
 //!
-//! - [`world`]: the step loop that schedules every action of a session.
+//! - [`world`]: the step loop that schedules every action of a session, and
+//!   `machine`, what its actions and the controller's calls reach.
 //! - [`kernel`], [`cpu`], [`memory`], [`loader`]: the simulated machine.
 //! - [`client`]: the simulated user, driving `DebuggerHandle`.
-//! - [`oracles`]: checks of the debugger against ground truth.
-//! - [`choices`], [`swarm`]: where every random choice comes from.
+//! - [`oracles`] and `audit`: checks of the debugger against ground truth.
+//! - [`choices`], [`swarm`], [`schedule`]: where every random choice comes
+//!   from, and how the next action is chosen.
+//! - [`faults`]: what the rest of the machine does to a session.
 //! - [`corpus`]: the golden programs.
 //! - [`report`]: traces, fingerprints, and failures.
 
+mod audit;
 pub mod choices;
 mod client;
 #[cfg(test)]
 mod conformance;
 pub mod corpus;
 pub mod cpu;
+pub mod faults;
 pub mod kernel;
 pub mod loader;
+mod machine;
 pub mod marks;
 pub mod memory;
 mod oracles;
 pub mod report;
+pub mod schedule;
 pub mod swarm;
 #[cfg(test)]
 mod tests;
@@ -51,6 +58,9 @@ pub fn describe_failure(outcome: &Outcome) -> String {
             "{}  #{} {}",
             failure.check, failure.step, failure.message
         );
+    }
+    if let Some(plan) = outcome.unfired {
+        let _ = writeln!(text, "fault    {plan} never fired");
     }
     if outcome.dropped > 0 {
         let _ = writeln!(text, "  ... {} earlier lines", outcome.dropped);

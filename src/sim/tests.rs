@@ -88,3 +88,23 @@ fn lost_writes_fail_code_integrity() {
 fn a_deaf_waiter_fails_liveness() {
     assert_eq!(first_failure_with(Sabotage::DeafWaiter), "liveness");
 }
+
+/// A thread that runs again while a stop is published, behind the
+/// controller's back, breaks all-stop, which the oracle catches.
+#[test]
+fn a_thread_resumed_behind_the_controller_fails_all_stop() {
+    assert_eq!(
+        first_failure_with(Sabotage::ResumeBehindTheController),
+        "all-stop"
+    );
+}
+
+/// A CPU that executes the program's own instruction under a user's trap
+/// lets a hit go unseen, which breakpoint accounting catches.
+#[test]
+fn a_skipped_trap_fails_breakpoint_accounting() {
+    assert_eq!(
+        first_failure_with(Sabotage::SkipTraps),
+        "breakpoint accounting"
+    );
+}

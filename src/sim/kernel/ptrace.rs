@@ -86,15 +86,32 @@ impl Kernel {
         }
     }
 
-    /// `PTRACE_GETEVENTMSG`: the message of the event stop, or zero.
+    /// `PTRACE_GETREGS`, with `orig_rax`.
+    pub fn get_registers_and_call(&self, tid: Tid) -> Result<(Registers, u64), Errno> {
+        let thread = self.stopped(tid)?;
+        Ok((thread.registers, thread.orig_rax))
+    }
+
+    /// `PTRACE_GETEVENTMSG`: the message of the latest event stop, or zero.
     pub fn event_message(&self, tid: Tid) -> Result<u64, Errno> {
         match self.stopped(tid)?.state {
             State::Stopped {
                 kind: StopKind::Exit(exit),
                 ..
             } => Ok(exit.event_message()),
+            State::Stopped {
+                kind: StopKind::Event(_, message),
+                ..
+            } => Ok(message),
             _ => Ok(0),
         }
+    }
+
+    /// The thread group `/proc/<tid>/status` names, until the thread is
+    /// reaped.
+    #[must_use]
+    pub fn thread_group(&self, tid: Tid) -> Option<Tid> {
+        self.threads.get(&tid).map(|thread| thread.tgid)
     }
 
     /// `PTRACE_SETOPTIONS`.
@@ -104,7 +121,9 @@ impl Kernel {
     }
 
     /// `PTRACE_CONT` with `signal`, delivered only from a
-    /// signal-delivery-stop. A thread at its exit event goes on to exit.
+    /// signal-delivery-stop. A thread at an event stop returns from the
+    /// system call it stopped in when it next runs; one at its exit event
+    /// goes on to exit.
     pub fn resume(
         &mut self,
         tid: Tid,
@@ -118,6 +137,13 @@ impl Kernel {
                 kind: StopKind::Signal(_),
                 ..
             } => self.resume_with(tid, signal),
+            State::Stopped {
+                kind: StopKind::Event(..),
+                ..
+            } => {
+                thread.state = State::Running;
+                thread.report = None;
+            }
             State::Stopped {
                 kind: StopKind::Exit(exit),
                 ..

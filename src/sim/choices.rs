@@ -18,10 +18,21 @@ pub enum Stream {
     Client,
     /// What the program sees of the outside world, such as `AT_RANDOM`.
     Program,
+    /// What happens between two of the controller's calls into the kernel.
+    Preempt,
+    /// When planned faults fire.
+    Fault,
 }
 
 impl Stream {
-    const ALL: [Self; 4] = [Self::Swarm, Self::Schedule, Self::Client, Self::Program];
+    const ALL: [Self; 6] = [
+        Self::Swarm,
+        Self::Schedule,
+        Self::Client,
+        Self::Program,
+        Self::Preempt,
+        Self::Fault,
+    ];
 
     const fn name(self) -> &'static str {
         match self {
@@ -29,6 +40,8 @@ impl Stream {
             Self::Schedule => "schedule",
             Self::Client => "client",
             Self::Program => "program",
+            Self::Preempt => "preempt",
+            Self::Fault => "fault",
         }
     }
 

@@ -127,6 +127,9 @@ fn sweep(
     let done = AtomicBool::new(false);
     let sessions = AtomicU64::new(0);
     let groups = Mutex::new(BTreeMap::<String, Group>::new());
+    // How many sessions planned each kind of fault, and how many of those
+    // fired.
+    let faults = Mutex::new(BTreeMap::<&'static str, (u64, u64)>::new());
     let began = Instant::now();
     let settings = Settings::default();
     std::thread::scope(|scope| {
@@ -136,6 +139,13 @@ fn sweep(
                     let seed = start.wrapping_add(next.fetch_add(1, Ordering::Relaxed));
                     let outcome = run(seed, corpus, &settings);
                     sessions.fetch_add(1, Ordering::Relaxed);
+                    if let Some(plan) = outcome.swarm.fault {
+                        let mut faults = faults.lock().unwrap_or_else(PoisonError::into_inner);
+                        let counts = faults.entry(plan.kind()).or_default();
+                        counts.0 += 1;
+                        counts.1 += u64::from(outcome.unfired.is_none());
+                        drop(faults);
+                    }
                     if let Some(failure) = &outcome.failure {
                         let key = format!("{} {}", failure.kind, failure.check);
                         record_failure(&groups, key, seed, describe_failure(&outcome));
@@ -161,6 +171,9 @@ fn sweep(
         began.elapsed().as_secs_f64(),
         rate(count, began.elapsed(), threads)
     );
+    for (kind, (planned, fired)) in faults.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        println!("{kind}: fired in {fired} of {planned} sessions that planned it");
+    }
     if groups.is_empty() {
         println!("no failures");
         return ExitCode::SUCCESS;

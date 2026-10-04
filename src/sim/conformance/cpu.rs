@@ -7,21 +7,29 @@
 //! flags it leaves undefined are copied from the CPU. At a system call the
 //! kernel's result is copied in and writable memory must agree. The test
 //! fails at the first instruction that diverges, and prints it.
+//!
+//! Threads take turns: the current one runs until it makes a system call,
+//! then the next in creation order runs. Every other thread waits in a
+//! ptrace-stop meanwhile, so the program interleaves on the CPU exactly as
+//! in the interpreter. A new thread starts from the registers Linux gave
+//! it, which the kernel's conformance tests check.
 
 use iced_x86::{Instruction, RflagsBits};
 use nix::libc;
 
-use crate::backend::sim_edge::NativeTracee;
+use crate::backend::native_tracee::NativeTracee;
 use crate::sim::corpus::{Corpus, Variant};
 use crate::sim::cpu::{
     self, ADJUST, CARRY, DIRECTION, OVERFLOW, Outcome, PARITY, R11, RAX, RDI, Registers, SIGN,
     STATUS_FLAGS, TRAP, ZERO,
 };
-use crate::sim::kernel::WaitStatus;
+use crate::sim::kernel::{Tid, WaitStatus};
 use crate::sim::memory::{AddressSpace, Backing, Protection};
 
 /// More instructions than any golden run executes.
 const MAX_STEPS: u64 = 1_000_000;
+const SYS_CLONE: u64 = 56;
+const SYS_EXIT: u64 = 60;
 const SYS_EXIT_GROUP: u64 = 231;
 /// The resume flag, which the CPU may set as an instruction completes.
 const RESUME: u64 = 1 << 16;
@@ -52,48 +60,94 @@ fn the_interpreter_executes_every_golden_program_as_the_cpu_does() {
 /// instructions were compared.
 fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
     let (native, first) = NativeTracee::spawn(&variant.file, arguments);
-    if first != WaitStatus::Stopped(native.pid(), libc::SIGTRAP) {
+    let leader = native.pid();
+    if first != WaitStatus::Stopped(leader, libc::SIGTRAP) {
         return Err(format!("the first stop was {first}"));
     }
-    let mut registers = native.registers().map_err(|error| error.to_string())?;
+    let failed = |error: nix::errno::Errno| error.to_string();
+    // Trace clones and exits, so that every thread stops where the
+    // interpreter's does.
+    native.set_options(leader, true).map_err(failed)?;
+    let mut threads: Vec<(Tid, Registers)> =
+        vec![(leader, native.registers(leader).map_err(failed)?)];
     let mut memory = copy_memory(&native);
+    let mut current = 0;
 
     for step in 1..=MAX_STEPS {
+        let (tid, mut registers) = threads[current];
         let instruction = cpu::decode(registers.rip, &memory)
             .map_err(|fault| format!("decoding at {:#x} faulted: {fault:?}", registers.rip))?;
         let before = registers;
         let outcome = cpu::step(&mut registers, &mut memory);
-        native
-            .resume(None, true)
-            .map_err(|error| error.to_string())?;
-        let status = native.wait();
-        let at = cpu::describe(&instruction);
+        native.resume(tid, None, true).map_err(failed)?;
+        let mut status = native.wait(tid);
+        let at = format!("thread {tid}: {}", cpu::describe(&instruction));
         match outcome {
             Outcome::Completed => {}
             Outcome::Syscall => {
-                if before.general[RAX] == SYS_EXIT_GROUP {
-                    #[expect(clippy::cast_possible_truncation, reason = "exit codes are ints")]
-                    let code = (before.general[RDI] as i32) & 0xff;
-                    return if status == WaitStatus::Exited(native.pid(), code) {
-                        Ok(step)
-                    } else {
-                        Err(format!(
-                            "{at}: exit_group({code}), but the CPU reported {status}"
-                        ))
-                    };
+                #[expect(clippy::cast_possible_truncation, reason = "exit codes are ints")]
+                let code = (before.general[RDI] as i32) & 0xff;
+                match before.general[RAX] {
+                    SYS_EXIT_GROUP => {
+                        return expect_exit_event(&native, tid, status, code)
+                            .map(|()| step)
+                            .map_err(|difference| format!("{at}: {difference}"));
+                    }
+                    SYS_EXIT => {
+                        expect_exit_event(&native, tid, status, code)
+                            .map_err(|difference| format!("{at}: {difference}"))?;
+                        native.resume(tid, None, false).map_err(failed)?;
+                        threads.remove(current);
+                        if tid != leader {
+                            let exited = native.wait(tid);
+                            if exited != WaitStatus::Exited(tid, code) {
+                                return Err(format!("{at}: then it reported {exited}"));
+                            }
+                        }
+                        if threads.is_empty() {
+                            // The leader reports last, with how the last
+                            // thread ended.
+                            let ended = native.wait(leader);
+                            return if ended == WaitStatus::Exited(leader, code) {
+                                Ok(step)
+                            } else {
+                                Err(format!("{at}: the process ended {ended}"))
+                            };
+                        }
+                        current %= threads.len();
+                        continue;
+                    }
+                    SYS_CLONE => {
+                        if status != WaitStatus::Event(tid, libc::PTRACE_EVENT_CLONE) {
+                            return Err(format!("{at}: the CPU reported {status}"));
+                        }
+                        let child =
+                            native
+                                .event_message(tid)
+                                .map_err(failed)
+                                .and_then(|message| {
+                                    Tid::try_from(message).map_err(|error| error.to_string())
+                                })?;
+                        // The step completes at the call's exit.
+                        native.resume(tid, None, true).map_err(failed)?;
+                        status = native.wait(tid);
+                        let started = native.wait(child);
+                        if started != WaitStatus::Stopped(child, libc::SIGSTOP) {
+                            return Err(format!("{at}: the new thread reported {started}"));
+                        }
+                        threads.push((child, native.registers(child).map_err(failed)?));
+                    }
+                    _ => {}
                 }
                 // The kernel served the call natively; take its result.
-                registers.general[RAX] = native
-                    .registers()
-                    .map_err(|error| error.to_string())?
-                    .general[RAX];
+                registers.general[RAX] = native.registers(tid).map_err(failed)?.general[RAX];
             }
             other => return Err(format!("{at}: the interpreter reported {other:?}")),
         }
-        if status != WaitStatus::Stopped(native.pid(), libc::SIGTRAP) {
+        if status != WaitStatus::Stopped(tid, libc::SIGTRAP) {
             return Err(format!("{at}: the CPU reported {status}"));
         }
-        let expected = native.registers().map_err(|error| error.to_string())?;
+        let expected = native.registers(tid).map_err(failed)?;
         compare(
             &instruction,
             outcome == Outcome::Syscall,
@@ -101,11 +155,34 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
             &expected,
         )
         .map_err(|difference| format!("{at}: {difference}"))?;
+        threads[current].1 = registers;
         if outcome == Outcome::Syscall {
             compare_memory(&native, &memory).map_err(|difference| format!("{at}: {difference}"))?;
+            current = (current + 1) % threads.len();
         }
     }
     Err(format!("still running after {MAX_STEPS} instructions"))
+}
+
+/// Requires `status` to be `tid`'s exit event for an exit with `code`.
+fn expect_exit_event(
+    native: &NativeTracee,
+    tid: Tid,
+    status: WaitStatus,
+    code: i32,
+) -> Result<(), String> {
+    if status != WaitStatus::Event(tid, libc::PTRACE_EVENT_EXIT) {
+        return Err(format!("exiting with {code}, the CPU reported {status}"));
+    }
+    let message = native
+        .event_message(tid)
+        .map_err(|error| error.to_string())?;
+    if message != u64::from(code.cast_unsigned()) << 8 {
+        return Err(format!(
+            "exiting with {code}, the exit event says {message:#x}"
+        ));
+    }
+    Ok(())
 }
 
 /// Compares the interpreter's registers with the CPU's after
@@ -224,7 +301,8 @@ struct Region {
 
 fn regions(native: &NativeTracee) -> impl Iterator<Item = Region> {
     native
-        .maps()
+        .maps(native.pid())
+        .unwrap_or_default()
         .lines()
         .map(|line| {
             let mut fields = line.split_whitespace();
