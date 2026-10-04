@@ -1350,6 +1350,9 @@ struct DebugRegisterTrace {
     queued_traps: RefCell<BTreeSet<Pid>>,
     /// Threads a sibling's `exit_group` killed out of their ptrace-stop.
     vanished: RefCell<BTreeSet<Pid>>,
+    /// A thread a sibling's `exit_group` kills out of its stop just before
+    /// the controller reads its registers, leaving it at its exit event.
+    killed_at_registers: RefCell<Option<Pid>>,
     /// The child reported by the next clone event, in the process `tgid`.
     clone: RefCell<Option<(Pid, Pid)>>,
     /// The process's thread list.
@@ -1419,6 +1422,23 @@ impl InspectionOps for DebugRegisterTrace {
     }
 
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
+        if self
+            .killed_at_registers
+            .borrow()
+            .is_some_and(|killed| killed == pid)
+        {
+            self.killed_at_registers.borrow_mut().take();
+            self.vanished.borrow_mut().insert(pid);
+            self.siginfo.borrow_mut().insert(
+                pid,
+                SignalMetadata {
+                    code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
+                    sender: None,
+                    fault_address: None,
+                },
+            );
+            return Err(backend_error(LinuxError::System(Errno::ESRCH)));
+        }
         let mut registers = RecordingTrace {
             actions: Rc::new(RefCell::new(Vec::new())),
             pid,
@@ -1530,6 +1550,9 @@ impl LinuxTraceOps for DebugRegisterTrace {
     }
     fn request_stop(&self, _process: Pid, thread: Pid) -> Result<()> {
         self.record(format!("request_stop {thread}"));
+        if self.vanished.borrow().contains(&thread) {
+            return Err(backend_error(LinuxError::System(Errno::ESRCH)));
+        }
         Ok(())
     }
     fn queued_trap(&self, pid: Pid) -> Result<bool> {
@@ -2900,6 +2923,90 @@ fn a_requested_stop_that_sigkill_ended_since_is_superseded() {
         .process_wait(WaitEvent::Exited(second, 0))
         .expect("exit");
     assert_eq!(harness.public_reason(), Some(StopReason::Pause));
+}
+
+#[test]
+fn a_pause_ends_once_a_thread_reaped_before_its_request_is_retired() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    harness.start_continue();
+    // The waiter reaped the second thread, whose exit status is still on
+    // its way to the controller.
+    harness.trace().vanished.borrow_mut().insert(second);
+    harness
+        .controller
+        .begin_pause(process_id(first))
+        .expect("a reaped thread does not fail the pause");
+    harness.trace().vanished.borrow_mut().clear();
+    harness
+        .controller
+        .process_wait(WaitEvent::Exited(second, 0))
+        .expect("exit");
+    harness.settle_requested_stops();
+    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
+}
+
+#[test]
+fn a_stop_whose_thread_sigkill_ends_while_it_is_handled_waits_for_the_exit() {
+    let mut harness = watch_harness(2);
+    let [stepping, sibling] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    harness.start_continue();
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.active.as_mut().expect("execution").kind = ActiveKind::Step {
+        thread: stepping,
+        kind: StepKind::OverInstruction,
+        start: Box::new(StepStart {
+            source: None,
+            code_instance: None,
+            physical_instance: None,
+            activation: None,
+            plan_addresses: BTreeSet::new(),
+            epilogue_traversal: None,
+            return_traversal: None,
+            signal_guard: None,
+            call_return: None,
+        }),
+        progress_owed: false,
+    };
+    inferior.thread_mut(stepping).expect("thread").expected = ExpectedStop::UserStep {
+        kind: StepKind::OverInstruction,
+    };
+
+    // The sibling calls exit_group after the step's trap was classified.
+    *harness.trace().killed_at_registers.borrow_mut() = Some(stepping);
+    harness.trace().siginfo.borrow_mut().insert(
+        stepping,
+        SignalMetadata {
+            code: libc::TRAP_TRACE,
+            sender: None,
+            fault_address: None,
+        },
+    );
+    assert!(
+        harness
+            .controller
+            .handle_wait(WaitEvent::Stopped(stepping, Signal::SIGTRAP))
+    );
+    assert!(
+        harness.trace().killed_at_registers.borrow().is_none(),
+        "the handler read the killed thread's registers"
+    );
+    assert_eq!(harness.thread(stepping).state, NativeThreadState::Running);
+
+    // Both threads exit, and the session ends with the process.
+    for status in [
+        WaitEvent::PtraceEvent(stepping, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::PtraceEvent(sibling, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Exited(stepping, 0),
+        WaitEvent::Exited(sibling, 0),
+    ] {
+        assert!(harness.controller.handle_wait(status));
+    }
+    assert!(harness.controller.inferior.is_none());
 }
 
 /// The trap site of the hit-count harness's one user breakpoint.

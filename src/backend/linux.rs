@@ -53,7 +53,7 @@ use classify::{is_stopping_signal, is_superseded};
 use debug_registers::DebugRegisterPlan;
 use memory::MemoryAccessError;
 use modules::{ModuleMapping, loader_link_maps, mapped_module_load_bias, module_mappings};
-use native::{InspectionOps, LinuxPtrace, LinuxTraceOps};
+use native::{InspectionOps, LinuxPtrace, LinuxTraceOps, is_vanished_tracee};
 use registers::Fxsave;
 
 mod breakpoints;
@@ -1393,11 +1393,34 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.handle_shutdown_wait(status);
         }
 
-        if let Err(error) = self.process_wait(status) {
+        if let Err(error) = self.process_wait(status)
+            && !(is_vanished_tracee(&error) && self.release_superseded_threads())
+        {
             self.fail_inferior(error);
         }
 
         true
+    }
+
+    /// Finds the threads counted as stopped that SIGKILL took out of their
+    /// stop, typically a sibling's `exit_group` while a stop was handled,
+    /// which explains a ptrace request failing with ESRCH. Each runs on to
+    /// its exit event, which retires it. Returns whether any was found.
+    fn release_superseded_threads(&mut self) -> bool {
+        let Some(inferior) = self.inferior.as_mut() else {
+            return false;
+        };
+        let mut found = false;
+        for (&pid, thread) in &mut inferior.threads {
+            if matches!(thread.state, NativeThreadState::Stopped)
+                && is_superseded(&self.ptrace.signal_metadata(pid))
+            {
+                record!("{pid} left its stop while it was handled");
+                thread.state = NativeThreadState::Running;
+                found = true;
+            }
+        }
+        found
     }
 
     fn process_wait(&mut self, status: WaitEvent) -> Result<()> {

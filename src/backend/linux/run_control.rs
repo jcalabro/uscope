@@ -1105,7 +1105,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 // delivered. Standard signals coalesce, so retain that
                 // outstanding request instead of sending an indistinguishable
                 // duplicate for the next barrier.
-                self.ptrace.request_stop(tgid, pid)?;
+                match self.ptrace.request_stop(tgid, pid) {
+                    // The waiter already reaped the thread, whose exit
+                    // status is on its way and retires it.
+                    Err(error) if is_vanished_tracee(&error) => {}
+                    result => result?,
+                }
             }
             thread.debugger_stop_pending = true;
             thread.state = NativeThreadState::StopRequested;
