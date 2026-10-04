@@ -349,14 +349,11 @@ impl LinuxTraceOps for LinuxPtrace {
 
     fn interrupt(&self, pid: Pid) -> Result<bool> {
         self.assert_owner_thread();
-        match ptrace::interrupt(pid) {
-            Ok(()) => {
-                self.wake_waiter();
-                Ok(true)
-            }
-            Err(Errno::ESRCH) => Ok(false),
-            Err(error) => Err(backend_error(LinuxError::System(error))),
+        let interrupted = interrupt_outcome(pid, ptrace::interrupt(pid))?;
+        if interrupted {
+            self.wake_waiter();
         }
+        Ok(interrupted)
     }
 
     fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<bool> {
@@ -851,6 +848,20 @@ pub(super) fn process_threads(process: Pid) -> Result<Vec<Pid>> {
         .collect::<Vec<_>>();
     threads.sort_unstable();
     Ok(threads)
+}
+
+/// Whether `PTRACE_INTERRUPT` reached `pid`, or `false` when the thread is
+/// gone.
+pub(super) fn interrupt_outcome(pid: Pid, result: nix::Result<()>) -> Result<bool> {
+    match result {
+        Ok(()) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        // The waiter can reap the thread between ptrace's check that it is
+        // traced and the interrupt taking its signal lock, which then fails
+        // with EIO. As seize's EPERM, that means the thread is gone.
+        Err(Errno::EIO) if thread_has_exited(pid) => Ok(false),
+        Err(error) => Err(backend_error(LinuxError::System(error))),
+    }
 }
 
 /// The thread tracing `pid`, from its `/proc` status.
