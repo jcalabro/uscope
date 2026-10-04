@@ -1589,7 +1589,11 @@ impl LinuxTraceOps for DebugRegisterTrace {
         }
         Ok(())
     }
-    fn event_message(&self, _pid: Pid) -> Result<libc::c_long> {
+    fn event_message(&self, pid: Pid) -> Result<libc::c_long> {
+        // A thread SIGKILL moved to its exit stop reports the kill there.
+        if self.reach(pid, "event_message").is_err() {
+            return Ok(libc::c_long::from(libc::SIGKILL));
+        }
         Ok(libc::c_long::from(
             self.clone.borrow().expect("a clone is pending").0.as_raw(),
         ))
@@ -2970,6 +2974,37 @@ fn a_fork_child_that_dies_as_it_is_released_is_awaited_until_its_exit() {
         harness.controller.orphans.is_none(),
         "no child is left to wait for"
     );
+}
+
+#[test]
+fn a_fork_event_whose_thread_is_killed_as_its_message_is_read_is_superseded() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    harness.start_continue();
+    harness.trace().siginfo.borrow_mut().insert(
+        parent,
+        SignalMetadata {
+            code: libc::SIGTRAP | (libc::PTRACE_EVENT_FORK << 8),
+            sender: None,
+            fault_address: None,
+        },
+    );
+    // SIGKILL lands after the stop was seen to be the fork's, so the message
+    // read is the exit's, not the child's identifier.
+    *harness.trace().kill_point.borrow_mut() = Some((parent, "event_message", 0));
+    assert!(harness.controller.handle_wait(WaitEvent::PtraceEvent(
+        parent,
+        Signal::SIGTRAP,
+        libc::PTRACE_EVENT_FORK,
+    )));
+    assert!(harness.trace().kill_point.borrow().is_none());
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert!(
+        inferior.fork_children.is_empty(),
+        "no child is expected: {:?}",
+        inferior.fork_children.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(harness.thread(parent).state, NativeThreadState::Running);
 }
 
 #[test]
