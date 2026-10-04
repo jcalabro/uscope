@@ -461,6 +461,10 @@ struct StopBarrier {
     /// Whether a client paused, so the stop is published as a pause when
     /// every reason it would have published is dropped.
     paused: bool,
+    /// Why the active execution ended during the stop, such as its
+    /// stepping thread exiting. The execution cannot resume, so the stop
+    /// publishes this when every other reason is dropped.
+    ended: Option<StopReason>,
     /// Client edits applied once every thread is stopped.
     edits: Vec<Edit>,
 }
@@ -472,6 +476,7 @@ impl StopBarrier {
             triggering_thread,
             paused: reason == StopReason::Pause,
             reason: Some(reason),
+            ended: None,
             edits: Vec::new(),
         }
     }
@@ -717,6 +722,14 @@ impl Inferior {
             }
         }
         interrupted
+    }
+
+    /// The edits an internal stop holds until every thread stopped.
+    fn take_pending_edits(&mut self) -> Vec<Edit> {
+        self.barrier
+            .as_mut()
+            .map(|barrier| std::mem::take(&mut barrier.edits))
+            .unwrap_or_default()
     }
 
     /// The breakpoint sites a process forked now inherits, with their

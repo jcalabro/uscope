@@ -1823,3 +1823,51 @@ async fn frames_without_a_trustworthy_caller_step_and_leave_their_program_intact
     );
     scenario.shutdown().await;
 }
+
+/// Stepping over a line from an instruction no debug information
+/// describes, such as a program's entry point, runs to the first source
+/// statement it reaches, as stepping in does, and the program carries on
+/// unharmed.
+#[tokio::test]
+async fn stepping_over_from_undescribed_code_stops_at_the_first_source_statement() {
+    let mut scenario = Scenario::launch("freestanding-entry");
+    let entry = scenario
+        .run_with_to_stop(LaunchOptions {
+            stop_at_entry: true,
+            ..LaunchOptions::default()
+        })
+        .await;
+    assert_eq!(entry, StopReason::Entry);
+    assert_eq!(
+        scenario.step_to_stop(StepKind::OverSource).await,
+        StopReason::Step {
+            kind: StepKind::OverSource
+        }
+    );
+    let location = scenario
+        .operation("location", scenario.handle().current_location())
+        .await;
+    assert_eq!(
+        location
+            .image
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some("main")
+    );
+    let source = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/c/freestanding-entry.c"
+    );
+    let first = fs::read_to_string(source)
+        .expect("read the fixture")
+        .lines()
+        .position(|line| line.contains("FIRST_STATEMENT"))
+        .map(|index| u64::try_from(index + 1).expect("line fits u64"));
+    assert_eq!(location.image.source.map(|source| source.line.get()), first);
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(3))
+    );
+    scenario.shutdown().await;
+}
