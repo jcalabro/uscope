@@ -1354,6 +1354,11 @@ struct DebugRegisterTrace {
     /// when the controller makes the named request of it for the given
     /// time, counting from zero.
     kill_point: RefCell<Option<(Pid, &'static str, u32)>>,
+    /// A thread SIGKILL takes out of its stop as the controller reads the
+    /// given address of it, such as a stack slot unwinding needs. That read
+    /// fails while the thread runs to its exit event; once there, it answers
+    /// requests again, as Linux's threads do at that stop.
+    kill_at_read: RefCell<Option<(Pid, u64)>>,
     /// Threads SIGKILL took out of their stop, which refuse every request.
     killed: RefCell<BTreeSet<Pid>>,
     /// The child reported by the next clone event, in the process `tgid`.
@@ -1433,7 +1438,20 @@ impl DebugRegisterTrace {
 }
 
 impl InspectionOps for DebugRegisterTrace {
-    fn read_word(&self, _pid: Pid, address: u64) -> Result<u64> {
+    fn read_word(&self, pid: Pid, address: u64) -> Result<u64> {
+        if *self.kill_at_read.borrow() == Some((pid, address)) {
+            self.kill_at_read.borrow_mut().take();
+            self.siginfo.borrow_mut().insert(
+                pid,
+                SignalMetadata {
+                    code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
+                    sender: None,
+                    fault_address: None,
+                },
+            );
+            return Err(backend_error(LinuxError::System(Errno::ESRCH)));
+        }
+        self.reach(pid, "read_word")?;
         if self.unreadable.borrow().contains(&address) {
             return Err(backend_error(LinuxError::System(Errno::EIO)));
         }
@@ -1445,7 +1463,9 @@ impl InspectionOps for DebugRegisterTrace {
         pid: Pid,
         address: u64,
     ) -> std::result::Result<u64, MemoryAccessError> {
-        let failure = if self.vanished.borrow().contains(&pid) {
+        let failure = if self.reach(pid, "read_memory_word").is_err()
+            || self.vanished.borrow().contains(&pid)
+        {
             Some(Errno::ESRCH)
         } else {
             *self.read_failure.borrow()
@@ -4666,8 +4686,9 @@ impl UnwindInfo for LostUnwindInfo {
     }
 }
 
-#[test]
-fn a_step_that_loses_its_frame_stops_explicitly_and_leaves_the_program_alone() {
+/// A thread stepping over a source line whose plan site at 0x30 traps where
+/// its frame can no longer be unwound.
+fn lost_frame_harness() -> WatchHarness {
     let mut harness = watch_harness(1);
     let pid = harness.threads[0];
     let site = VirtualAddress::new(0x30);
@@ -4718,9 +4739,85 @@ fn a_step_that_loses_its_frame_stops_explicitly_and_leaves_the_program_alone() {
     thread.reason = None;
     harness.trace().take_actions();
 
+    harness
+}
+
+/// Call-frame information whose one rule reads the stack, as a real
+/// frame's does, so unwinding fails only when that read does.
+struct StackReadingUnwindInfo;
+
+impl StackReadingUnwindInfo {
+    const SLOT: VirtualAddress = VirtualAddress::new(0x7ff8);
+}
+
+impl UnwindInfo for StackReadingUnwindInfo {
+    fn cfa(
+        &self,
+        _address: ImageAddress,
+        _registers: &RegisterFile,
+        memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<VirtualAddress, UnwindTermination> {
+        memory
+            .read_u64(Self::SLOT)
+            .map(|_| VirtualAddress::new(0x8000))
+            .ok_or(UnwindTermination::MemoryReadFailed {
+                address: Self::SLOT,
+            })
+    }
+
+    fn unwind(
+        &self,
+        address: ImageAddress,
+        registers: &RegisterFile,
+        memory: &mut dyn MemoryReader,
+    ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
+        self.cfa(address, registers, memory)?;
+        Err(UnwindTermination::Complete)
+    }
+}
+
+#[test]
+fn a_step_whose_thread_sigkill_ends_as_it_unwinds_publishes_no_lost_frame() {
+    let mut harness = lost_frame_harness();
+    let pid = harness.threads[0];
+    // Something outside the debugger kills the program after the hit is
+    // classified, as the step reads its frame from the stack.
+    harness.controller.unwind_info = Arc::new(StackReadingUnwindInfo);
+    *harness.trace().kill_at_read.borrow_mut() = Some((pid, StackReadingUnwindInfo::SLOT.get()));
+    harness
+        .trace()
+        .program_counters
+        .borrow_mut()
+        .insert(pid, 0x31);
+    harness.trace().siginfo.borrow_mut().insert(
+        pid,
+        SignalMetadata {
+            code: libc::SI_KERNEL,
+            sender: None,
+            fault_address: None,
+        },
+    );
+    assert!(
+        harness
+            .controller
+            .handle_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
+    );
+    assert!(
+        harness.trace().kill_at_read.borrow().is_none(),
+        "the step read its frame"
+    );
+    assert_eq!(harness.public_reason(), None, "no lost frame is published");
+    assert_eq!(harness.thread(pid).state, NativeThreadState::Running);
+}
+
+#[test]
+fn a_step_that_loses_its_frame_stops_explicitly_and_leaves_the_program_alone() {
+    let mut harness = lost_frame_harness();
+    let pid = harness.threads[0];
+
     // The step's plan site traps, but where the step's frame went can no
     // longer be told.
-    harness.hit_at(pid, site.get()).expect("the hit is handled");
+    harness.hit_at(pid, 0x30).expect("the hit is handled");
 
     match harness.public_reason() {
         Some(StopReason::StepIncomplete { kind, description }) => {
