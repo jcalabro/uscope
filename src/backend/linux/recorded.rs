@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Arguments, Debug, Display, Formatter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nix::errno::Errno;
@@ -18,6 +18,7 @@ use nix::unistd::Pid;
 use tokio::sync::mpsc;
 
 use crate::backend::{ControllerMessage, FileIdentity};
+use crate::debug_info::DebugInfo;
 use crate::protocol::LaunchOptions;
 use crate::{Result, VirtualAddress};
 
@@ -184,6 +185,26 @@ impl<P: LinuxTraceOps> LinuxTraceOps for Recorded<P> {
 
     fn reap(&self, pid: Pid) -> Result<()> {
         issued(format_args!("reap {pid}"), &(), || self.0.reap(pid))
+    }
+
+    fn wait_status(&self, pid: Pid) -> std::result::Result<WaitEvent, Errno> {
+        self.0.wait_status(pid)
+    }
+
+    fn process_start_time(&self, process: Pid) -> Option<u64> {
+        self.0.process_start_time(process)
+    }
+
+    fn tracer_process(&self) -> i32 {
+        self.0.tracer_process()
+    }
+
+    fn identify_module(&self, mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+        self.0.identify_module(mapping)
+    }
+
+    fn load_module(&self, path: &Path, id: crate::ModuleImageId) -> Result<DebugInfo> {
+        self.0.load_module(path, id)
     }
 
     fn thread_group_id(&self, pid: Pid) -> Result<Pid> {

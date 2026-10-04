@@ -327,10 +327,7 @@ impl LinuxTraceOps for RecordingTrace {
 
     fn spawn_waiter(&self, _messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
         self.record("spawn_waiter");
-        Ok(Waiter {
-            stop: Arc::new(AtomicBool::new(false)),
-            thread: thread::spawn(|| {}),
-        })
+        Ok(Waiter::external())
     }
 
     fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
@@ -358,6 +355,21 @@ impl LinuxTraceOps for RecordingTrace {
 
     fn reap(&self, _pid: Pid) -> Result<()> {
         Self::unexpected("reap")
+    }
+    fn wait_status(&self, _pid: Pid) -> std::result::Result<WaitEvent, Errno> {
+        Self::unexpected("wait_status")
+    }
+    fn process_start_time(&self, _process: Pid) -> Option<u64> {
+        None
+    }
+    fn tracer_process(&self) -> i32 {
+        i32::try_from(std::process::id()).expect("pid fits")
+    }
+    fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+        None
+    }
+    fn load_module(&self, _path: &Path, _id: crate::ModuleImageId) -> Result<DebugInfo> {
+        Self::unexpected("load_module")
     }
 
     fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
@@ -1424,10 +1436,7 @@ impl LinuxTraceOps for DebugRegisterTrace {
         RecordingTrace::unexpected("spawn")
     }
     fn spawn_waiter(&self, _messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
-        Ok(Waiter {
-            stop: Arc::new(AtomicBool::new(false)),
-            thread: thread::spawn(|| {}),
-        })
+        Ok(Waiter::external())
     }
     fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
         Ok(self.listed_threads.borrow().clone())
@@ -1450,6 +1459,21 @@ impl LinuxTraceOps for DebugRegisterTrace {
     }
     fn reap(&self, _pid: Pid) -> Result<()> {
         RecordingTrace::unexpected("reap")
+    }
+    fn wait_status(&self, _pid: Pid) -> std::result::Result<WaitEvent, Errno> {
+        RecordingTrace::unexpected("wait_status")
+    }
+    fn process_start_time(&self, _process: Pid) -> Option<u64> {
+        None
+    }
+    fn tracer_process(&self) -> i32 {
+        i32::try_from(std::process::id()).expect("pid fits")
+    }
+    fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
+        None
+    }
+    fn load_module(&self, _path: &Path, _id: crate::ModuleImageId) -> Result<DebugInfo> {
+        RecordingTrace::unexpected("load_module")
     }
     fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
         Ok(self.clone.borrow().expect("a clone is pending").1)

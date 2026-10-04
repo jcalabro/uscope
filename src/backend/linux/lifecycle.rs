@@ -4,11 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::signals::{Signal, WaitEvent};
-use nix::errno::Errno;
 use nix::libc;
 use nix::unistd::Pid;
 
-use crate::backend::process_start_time;
 use crate::protocol::{
     DebuggerEvent, ExceptionDisposition, ExecutionId, ExitStatus, LaunchOptions, ProcessId, Reply,
     ResumeScope, StopId, StopReason,
@@ -16,7 +14,7 @@ use crate::protocol::{
 use crate::{Error, LoadedModule, Result, VirtualAddress};
 
 use super::breakpoints::install_logical_breakpoint;
-use super::native::{LinuxTraceOps, is_vanished_tracee, wait_for};
+use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
     ActiveExecution, ActiveKind, ClassifiedStop, Controller, ExpectedStop, Inferior,
     InferiorOrigin, LinuxError, NativeThreadState, StopBarrier, Terminating, TraceThread, Waiter,
@@ -122,7 +120,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         if self
             .expected_process_start_time
-            .is_some_and(|expected| process_start_time(tgid.as_raw()) != Some(expected))
+            .is_some_and(|expected| self.ptrace.process_start_time(tgid) != Some(expected))
         {
             self.rollback_seized(&seized);
             let _ = reply.send(Err(Error::TargetChangedDuringAttach));
@@ -260,17 +258,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         for &pid in seized {
             loop {
-                match wait_for(pid, libc::__WALL) {
-                    Ok(Some(WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(..))) => {
+                match self.ptrace.wait_status(pid) {
+                    Ok(WaitEvent::Stopped(..) | WaitEvent::PtraceEvent(..)) => {
                         let _ = self.ptrace.detach(pid, None);
                         break;
                     }
-                    Ok(Some(WaitEvent::Exited(..) | WaitEvent::Signaled(..)))
-                    | Err(Errno::ECHILD) => {
-                        break;
-                    }
-                    Ok(_) | Err(Errno::EINTR) => {}
-                    Err(_) => break,
+                    Ok(WaitEvent::Exited(..) | WaitEvent::Signaled(..)) | Err(_) => break,
+                    Ok(_) => {}
                 }
             }
         }
