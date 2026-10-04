@@ -3246,6 +3246,68 @@ fn a_launch_killed_at_its_first_stop_ends_in_its_exit() {
 }
 
 #[test]
+fn repairs_after_the_debuggers_own_kill_are_left_undone() {
+    let mut harness = watch_harness(3);
+    harness
+        .edit(|reply| Edit::AddBreakpoint {
+            spec: address_breakpoint(0x40),
+            options: Box::default(),
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("added");
+    harness.start_continue();
+    let [leader, repairing, running] = harness.threads[..] else {
+        unreachable!("three threads");
+    };
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.repairs = VecDeque::from([RepairGroup {
+        address: VirtualAddress::new(0x40),
+        remaining: VecDeque::from([running]),
+        current: Some(repairing),
+        // Lifting the trap already failed as the kill landed.
+        site_removed: false,
+    }]);
+    let thread = inferior.thread_mut(repairing).expect("thread");
+    thread.stopped_at_breakpoint = Some(VirtualAddress::new(0x40));
+    thread.expected = ExpectedStop::BreakpointRepair {
+        address: VirtualAddress::new(0x40),
+    };
+    inferior
+        .thread_mut(running)
+        .expect("thread")
+        .stopped_at_breakpoint = Some(VirtualAddress::new(0x40));
+
+    // The client kills the program mid-repair. When the repairing thread's
+    // death arrives, the next repair has no stopped thread to lift the
+    // trap through.
+    let (reply, mut killed) = tokio::sync::oneshot::channel();
+    harness.controller.kill(reply);
+    for pid in [leader, repairing, running] {
+        harness.trace().sigkill(pid);
+    }
+    for status in [
+        WaitEvent::PtraceEvent(leader, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Signaled(repairing, Signal::SIGKILL, false),
+        WaitEvent::PtraceEvent(running, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Signaled(running, Signal::SIGKILL, false),
+        WaitEvent::Signaled(leader, Signal::SIGKILL, false),
+    ] {
+        assert!(harness.controller.handle_wait(status));
+    }
+    assert!(harness.controller.inferior.is_none());
+    assert!(matches!(killed.try_recv(), Ok(Ok(()))), "the kill succeeds");
+    let kills = harness
+        .trace()
+        .take_actions()
+        .into_iter()
+        .filter(|action| action.starts_with("kill"))
+        .count();
+    assert_eq!(kills, 1, "the debugger does not give up on its own kill");
+}
+
+#[test]
 fn a_repair_whose_process_dies_leaves_its_trap_unrestored() {
     let mut harness = repairing_harness_of(1);
     let (leader, repairing) = (harness.threads[0], harness.threads[1]);
