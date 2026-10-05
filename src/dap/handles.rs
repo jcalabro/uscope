@@ -36,6 +36,8 @@ pub enum Variables {
         context: StopContext,
         reference: Arc<ValueChildrenReference>,
         path: Option<uscope::Expression>,
+        /// Whether the children are elements rather than named members.
+        indexed: bool,
     },
     /// What a pointer or reference refers to.
     Pointee {
@@ -52,6 +54,18 @@ pub enum Variables {
 }
 
 impl Variables {
+    /// Whether the list's rows are elements, which a client asks for with
+    /// the `indexed` filter, rather than named rows, which it asks for with
+    /// `named`. `None` when a client has no count to page by.
+    pub const fn indexed(&self) -> Option<bool> {
+        match self {
+            Self::Scope { .. } | Self::Registers { .. } | Self::Statics { .. } => Some(false),
+            Self::Children { indexed, .. } => Some(*indexed),
+            Self::Range { .. } => Some(true),
+            Self::Pointee { .. } => None,
+        }
+    }
+
     /// The frame whose values the reference expands.
     pub const fn context(&self) -> StopContext {
         match self {

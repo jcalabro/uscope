@@ -264,6 +264,8 @@ pub struct Session {
     /// Whether the program is being restarted, so its end does not end the
     /// session.
     restarting: bool,
+    /// How values show when a request does not say.
+    pub(super) display: super::values::Display,
     /// Requests read ahead of the one being handled.
     queue: std::collections::VecDeque<Inbound>,
     /// The `seq` of each request the client cancelled, as text.
@@ -293,6 +295,7 @@ impl Session {
             modules: BTreeMap::new(),
             resumed: None,
             restarting: false,
+            display: super::values::Display::default(),
             queue: std::collections::VecDeque::new(),
             ended: false,
         }
@@ -442,6 +445,7 @@ impl Session {
             "completions" => self.completions(arguments).await?,
             "setDataBreakpoints" => self.set_data_breakpoints(arguments).await?,
             "disassemble" => self.disassemble(arguments).await?,
+            "uscope/setValueFormat" => self.set_value_format(arguments).await?,
             "source" => {
                 return Err(ErrorBody::new(
                     "source contents are not available from the debugger; open the file locally",
@@ -1965,6 +1969,22 @@ impl Session {
         );
         self.backtraces.insert(thread, Arc::clone(&trace));
         Ok(trace)
+    }
+
+    /// Chooses how values show when a request does not say, and has the
+    /// client read them again when that changes.
+    async fn set_value_format(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<protocol::SetValueFormatArguments>(
+            arguments,
+            "uscope/setValueFormat arguments",
+        )?;
+        if self.display.hex != arguments.hex {
+            self.display.hex = arguments.hex;
+            if self.stop.is_some() {
+                self.invalidate_values().await;
+            }
+        }
+        Ok(json!({}))
     }
 
     /// Tells a client that shows values to read them again, after a write

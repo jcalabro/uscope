@@ -426,6 +426,7 @@ pub struct StackFrameFormat {
     pub parameter_values: Option<bool>,
     pub line: Option<bool>,
     pub module: Option<bool>,
+    pub hex: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -497,6 +498,14 @@ pub struct DisconnectArguments {
     pub restart: Option<bool>,
     pub terminate_debuggee: Option<bool>,
     pub suspend_debuggee: Option<bool>,
+}
+
+/// `uscope/setValueFormat` arguments: how values are shown when a request
+/// does not say.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct SetValueFormatArguments {
+    pub hex: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
