@@ -11,16 +11,14 @@ use nix::unistd::Pid;
 use crate::backend::linux::debug_registers;
 use crate::debug_info::StorageClass;
 use crate::debug_info::VariableRuntimeError;
-use crate::inspection::InspectionBudget;
 use crate::protocol::{
-    DebuggerEvent, FrameScopeEvidence, InvalidatedWatchpoint, StopId, StopReason, WatchAccess,
-    WatchScope, WatchTarget, Watchpoint, WatchpointHit, WatchpointId, WatchpointInvalidation,
-    WatchpointSpec,
+    DebuggerEvent, FrameScopeEvidence, InvalidatedWatchpoint, StopReason, WatchAccess, WatchScope,
+    Watchpoint, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
 };
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
 use crate::{
-    AddressRange, Error, InspectedValue, MemoryReadCompletion, Result, StackFrameId,
-    UnwindTermination, ValueExpression, VariableValueSource, VirtualAddress,
+    AddressRange, Error, ImageAddress, InspectedValue, MemoryReadCompletion, Result, StackFrameId,
+    UnwindTermination, VariableValueSource, VirtualAddress,
 };
 
 use super::debug_registers::{DebugRegisterPlan, SlotAccess};
@@ -30,8 +28,8 @@ use super::native::{InspectionOps, LinuxTraceOps, is_vanished_tracee};
 use super::registers::x86_64_registers;
 use super::stepping::x86_64_activation_has_returned;
 use super::{
-    Controller, ExpressionRoot, ExpressionRootKind, Inferior, LinuxError, NativeThreadState,
-    WatchRecord, backend_error, debug_pid, debug_thread_id, validate_image_current,
+    Controller, Inferior, LinuxError, NativeThreadState, WatchRecord, backend_error, debug_pid,
+    debug_thread_id, validate_image_current,
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -650,90 +648,18 @@ impl<P: InspectionOps> Controller<P> {
         Ok(unproven)
     }
 
-    /// Resolves an expression at the stop to the memory it occupies and the
-    /// lifetime of that storage.
-    pub(super) fn resolve_watch_target(
-        &self,
-        stop_id: StopId,
-        pid: Pid,
-        frame: StackFrameId,
-        expression: &ValueExpression,
-    ) -> Result<WatchTarget> {
-        let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
-        let (value, root) = self.inspect_with_root(stop_id, pid, frame, expression, &mut budget)?;
-        let (address, byte_size) = watchable_storage(&value)?;
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-
-        // A path that leaves the root object, through a pointer or a slice's
-        // data, watches wherever that storage happened to be.
-        let contained = if root.components == expression.steps.len() {
-            true
-        } else {
-            let root_expression = ValueExpression {
-                steps: expression.steps[..root.components].into(),
-            };
-            let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
-            let (root_value, _) =
-                self.inspect_with_root(stop_id, pid, frame, &root_expression, &mut budget)?;
-            watchable_storage(&root_value).is_ok_and(|(root_address, root_size)| {
-                let end = address.get().checked_add(byte_size);
-                let root_end = root_address.get().checked_add(root_size);
-                matches!(
-                    (end, root_end),
-                    (Some(end), Some(root_end)) if address >= root_address && end <= root_end
-                )
-            })
-        };
-        let (scope, frame) = if contained {
-            self.root_watch_scope(inferior, pid, frame, &root)?
-        } else {
-            (WatchScope::Location, None)
-        };
-
-        Ok(WatchTarget {
-            stop_id,
-            expression: expression.clone(),
-            address,
-            byte_size,
-            type_info: value.type_info,
-            scope,
-            frame,
-        })
-    }
-
+    /// The lifetime of a data object's storage, which a watch of memory
+    /// inside it shares. `local` is the frame's address in the object's
+    /// image when the object is a local or parameter of the frame.
     pub(super) fn root_watch_scope(
         &self,
         inferior: &Inferior,
         pid: Pid,
         frame: StackFrameId,
-        root: &ExpressionRoot,
+        module: crate::ModuleId,
+        storage: crate::debug_info::ObjectStorage,
+        local: Option<ImageAddress>,
     ) -> Result<(WatchScope, Option<FrameScopeEvidence>)> {
-        let (storage, module) = match &root.kind {
-            ExpressionRootKind::Local {
-                name,
-                module,
-                address,
-                selected,
-            } => (
-                self.modules
-                    .get(module)
-                    .ok_or(Error::ModuleNotLoaded(*module))?
-                    .variables
-                    .local_storage(*address, *selected, name)?,
-                *module,
-            ),
-            ExpressionRootKind::Global(global) => {
-                let module = self
-                    .modules
-                    .get(&global.module)
-                    .filter(|module| module.loaded.image == global.image)
-                    .ok_or(Error::StaleModuleImage)?;
-                (
-                    module.variables.global_storage(global.variable)?,
-                    global.module,
-                )
-            }
-        };
         match storage.class {
             StorageClass::Static => Ok((WatchScope::Static { module }, None)),
             StorageClass::ThreadLocal => Ok((
@@ -755,7 +681,7 @@ impl<P: InspectionOps> Controller<P> {
                     .into(),
             )),
             StorageClass::Frame { .. } => {
-                let ExpressionRootKind::Local { address, .. } = &root.kind else {
+                let Some(address) = local else {
                     return Err(Error::WatchTargetUnsupported(
                         "a frame-relative global has no owning activation".into(),
                     ));
@@ -780,7 +706,7 @@ impl<P: InspectionOps> Controller<P> {
                                 format!("the declaring activation is unavailable: {reason}").into(),
                             )
                         })?;
-                let function = image.locate(*address).physical_instance.ok_or_else(|| {
+                let function = image.locate(address).physical_instance.ok_or_else(|| {
                     Error::WatchTargetUnsupported(
                         "no function describes the declaring activation".into(),
                     )

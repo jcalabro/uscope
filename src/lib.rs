@@ -19,7 +19,6 @@ mod error;
     reason = "the evaluator is wired in by a later phase of plans/expressions.md"
 )]
 mod eval;
-mod expression;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
 pub mod flight_recorder;
@@ -59,7 +58,6 @@ pub use eval::Evaluation;
 pub use eval::bind::Mode as EvaluationMode;
 pub use eval::error::{ErrorKind as ExpressionErrorKind, ExpressionError};
 pub use eval::syntax::{Expression, Span};
-pub use expression::parse_value_expression;
 pub use model::{
     Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArrayDimension,
     Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry,
@@ -74,8 +72,8 @@ pub use model::{
     InspectionUsage, IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo,
     LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
     MemoryReadUnavailableReason, ModuleAddress, ModuleId, ModuleImage, ModuleImageId,
-    NamedTypeRelationship, OptimizedOutReason, ParsedValueExpression, PointerWidth, RecordKind,
-    RecordMember, RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
+    NamedTypeRelationship, OptimizedOutReason, PointerWidth, RecordKind, RecordMember,
+    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
     RegisterSnapshot, RegisterValue, ScalarValue, SectionId, SectionInfo, SectionLocation,
     SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId,
     StatementFlags, StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId,
@@ -83,11 +81,11 @@ pub use model::{
     TextSummary, ThreadId, TlsUnavailableReason, TypeId, TypeInfo, TypeKind, TypeModifier,
     TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
     ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
-    ValueChildRelationship, ValueChildren, ValueChildrenReference, ValueExpression,
-    ValueIndexRange, ValuePageCompletion, ValuePathStep, Variable, VariableInvalidReason,
-    VariableKind, VariableMalformedKind, VariableMalformedReason, VariableSnapshot, VariableState,
-    VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
-    VariantSelection, VariantSelector, VariantStorageKind, VirtualAddress,
+    ValueChildRelationship, ValueChildren, ValueChildrenReference, ValuePageCompletion, Variable,
+    VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
+    VariableSnapshot, VariableState, VariableUnavailableReason, VariableValue, VariableValueSource,
+    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
+    VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CoreDumpInfo,
@@ -476,7 +474,7 @@ impl DebuggerHandle {
 
     /// Resolves an expression in the selected thread's selected frame to the
     /// memory it occupies and the lifetime of that storage.
-    pub async fn resolve_watch_target(&self, expression: ValueExpression) -> Result<WatchTarget> {
+    pub async fn resolve_watch_target(&self, expression: &Expression) -> Result<WatchTarget> {
         self.selected()
             .await?
             .resolve_watch_target(expression)
@@ -501,11 +499,7 @@ impl DebuggerHandle {
     }
 
     /// Resolves an expression at the current stop and watches its memory.
-    pub async fn watch(
-        &self,
-        expression: ValueExpression,
-        access: WatchAccess,
-    ) -> Result<Watchpoint> {
+    pub async fn watch(&self, expression: &Expression, access: WatchAccess) -> Result<Watchpoint> {
         let target = self.resolve_watch_target(expression).await?;
         self.add_watchpoint(WatchpointSpec::Target(Box::new(target)), access)
             .await
@@ -1035,46 +1029,22 @@ impl DebuggerHandle {
         self.selected().await?.expression_type(expression).await
     }
 
-    /// Atomically inspects one structural value expression in the selected
-    /// frame of the selected stopped thread.
-    pub async fn inspect(&self, expression: ValueExpression) -> Result<InspectedValue> {
+    /// Evaluates an expression in the selected frame of the selected stopped
+    /// thread and returns its value; see [`StopView::inspect`].
+    pub async fn inspect(&self, expression: &Expression) -> Result<InspectedValue> {
         self.inspect_with_limits(expression, InspectionLimits::default())
             .await
     }
 
-    /// Inspects one structural expression under explicit bounded resource limits.
+    /// Evaluates an expression for its value under explicit resource limits.
     pub async fn inspect_with_limits(
         &self,
-        expression: ValueExpression,
+        expression: &Expression,
         limits: InspectionLimits,
     ) -> Result<InspectedValue> {
         self.selected()
             .await?
             .inspect_with_limits(expression, limits)
-            .await
-    }
-
-    /// Inspects a one-dimensional array or slice expression and returns one
-    /// bounded half-open source-index range from the same stopped snapshot.
-    pub async fn inspect_range(
-        &self,
-        expression: ValueExpression,
-        range: ValueIndexRange,
-    ) -> Result<ValueChildPage> {
-        self.inspect_range_with_limits(expression, range, InspectionLimits::default())
-            .await
-    }
-
-    /// Inspects one bounded range under explicit resource limits.
-    pub async fn inspect_range_with_limits(
-        &self,
-        expression: ValueExpression,
-        range: ValueIndexRange,
-        limits: InspectionLimits,
-    ) -> Result<ValueChildPage> {
-        self.selected()
-            .await?
-            .inspect_range_with_limits(expression, range, limits)
             .await
     }
 
@@ -1493,57 +1463,35 @@ impl StopView<'_> {
             .await
     }
 
-    /// Atomically inspects one structural value expression in the frame.
-    pub async fn inspect(&self, expression: ValueExpression) -> Result<InspectedValue> {
+    /// Evaluates an expression in the frame for its value, reading only. A
+    /// range has no single value; evaluate it for its page of elements.
+    pub async fn inspect(&self, expression: &Expression) -> Result<InspectedValue> {
         self.inspect_with_limits(expression, InspectionLimits::default())
             .await
     }
 
-    /// Inspects one structural expression under explicit resource limits.
+    /// Evaluates an expression for its value under explicit resource limits.
     pub async fn inspect_with_limits(
         &self,
-        expression: ValueExpression,
+        expression: &Expression,
         limits: InspectionLimits,
     ) -> Result<InspectedValue> {
-        let context = self.context;
-        self.handle
-            .request(|reply| Request::Inspect {
-                expression,
-                limits,
-                stop_id: context.stop,
-                thread_id: context.thread,
-                frame: context.frame,
-                reply,
-            })
-            .await
-    }
-
-    /// Inspects one bounded range of a one-dimensional array or slice
-    /// expression under explicit resource limits.
-    pub async fn inspect_range_with_limits(
-        &self,
-        expression: ValueExpression,
-        range: ValueIndexRange,
-        limits: InspectionLimits,
-    ) -> Result<ValueChildPage> {
-        let context = self.context;
-        self.handle
-            .request(|reply| Request::InspectRange {
-                expression,
-                range,
-                limits,
-                stop_id: context.stop,
-                thread_id: context.thread,
-                frame: context.frame,
-                reply,
-            })
-            .await
+        match self
+            .evaluate_with(expression, EvaluationMode::Read, limits)
+            .await?
+        {
+            Evaluation::Value { value, .. } => Ok(value),
+            _ => Err(Error::InvalidValueRange(
+                "a range has no single value; evaluate it for its elements".into(),
+            )),
+        }
     }
 
     /// Resolves an expression in the frame to the memory it occupies and
     /// the lifetime of that storage.
-    pub async fn resolve_watch_target(&self, expression: ValueExpression) -> Result<WatchTarget> {
+    pub async fn resolve_watch_target(&self, expression: &Expression) -> Result<WatchTarget> {
         let context = self.context;
+        let expression = expression.clone();
         self.handle
             .request(|reply| Request::ResolveWatchTarget {
                 expression,

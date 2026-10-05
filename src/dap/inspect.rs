@@ -1,10 +1,12 @@
 //! Requests that inspect a stop: threads, stacks, scopes, variables, and
 //! expressions.
 
+use std::fmt::Write as _;
+
 use serde_json::{Map, Value, json};
 use uscope::{
     InspectionLimits, StackFrame, StackFrameId, StopContext, StopReason, UnwindTermination,
-    ValueChildQuery, ValueExpression, ValueIndexRange, ValuePathStep, VariableKind, VariableState,
+    ValueChildQuery, VariableKind, VariableState,
 };
 
 use super::handles::{Exhausted, Variables};
@@ -379,8 +381,7 @@ impl Session {
             Variables::Range {
                 context,
                 expression,
-                range,
-            } => self.range_rows(context, &expression, range, window).await?,
+            } => self.range_rows(context, &expression, window).await?,
         };
         // Data breakpoints name rows by their list and name.
         for row in &rows {
@@ -415,9 +416,7 @@ impl Session {
             rows.push(self.present(
                 Item {
                     name: &variable.name,
-                    path: Some(ValueExpression {
-                        steps: [ValuePathStep::Named(variable.name.to_string())].into(),
-                    }),
+                    path: uscope::Expression::name(&variable.name),
                     type_info: variable.type_info.as_ref(),
                     state: &variable.state,
                 },
@@ -487,9 +486,7 @@ impl Session {
             rows.push(self.present(
                 Item {
                     name: &variable.name,
-                    path: Some(ValueExpression {
-                        steps: [ValuePathStep::Named(variable.name.to_string())].into(),
-                    }),
+                    path: uscope::Expression::name(&variable.name),
                     type_info: variable.type_info.as_ref(),
                     state: &variable.state,
                 },
@@ -507,12 +504,12 @@ impl Session {
         context: StopContext,
         reference: uscope::DereferenceReference,
         name: &str,
-        path: Option<ValueExpression>,
+        path: Option<uscope::Expression>,
         window: Window,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
         let handle = self.target_handle()?;
         let pointee = handle.dereference(reference).await.map_err(error)?;
-        let path = path.map(|path| values::extended(&path, vec![ValuePathStep::Dereference]));
+        let path = path.and_then(|path| path.dereferenced());
         if let VariableState::Available {
             children: uscope::ValueChildren::Available(children),
             ..
@@ -541,37 +538,37 @@ impl Session {
     async fn range_rows(
         &mut self,
         context: StopContext,
-        expression: &ValueExpression,
-        range: ValueIndexRange,
+        expression: &uscope::Expression,
         window: Window,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
-        let first = range.start.saturating_add(i128::from(window.start));
-        let end = range
-            .end
-            .min(first.saturating_add(i128::from(window.count.min(PAGE * 4))));
-        let mut rows = Vec::new();
-        if first >= end {
-            return Ok(rows);
-        }
         let handle = self.target_handle()?;
-        let page = handle
+        let evaluation = handle
             .at(context)
-            .inspect_range_with_limits(
-                expression.clone(),
-                ValueIndexRange { start: first, end },
-                InspectionLimits::default(),
-            )
+            .evaluate(expression)
             .await
             .map_err(error)?;
-        for (offset, child) in page.children.iter().enumerate() {
-            let index = first + i128::try_from(offset).unwrap_or(0);
+        let uscope::Evaluation::Range(page) = evaluation else {
+            return Err(ErrorBody::new("the range no longer evaluates to elements"));
+        };
+        let base = expression.range_base();
+        let mut rows = Vec::new();
+        let start = usize::try_from(window.start).unwrap_or(usize::MAX);
+        let count = usize::try_from(window.count).unwrap_or(usize::MAX);
+        for child in page.children.iter().skip(start).take(count) {
+            let name = match &child.relationship {
+                uscope::ValueChildRelationship::ArrayElement { indices, .. } => {
+                    indices.iter().fold(String::new(), |mut name, index| {
+                        let _ = write!(name, "[{index}]");
+                        name
+                    })
+                }
+                uscope::ValueChildRelationship::SliceElement { index } => format!("[{index}]"),
+                _ => "?".to_owned(),
+            };
             rows.push(self.present(
                 Item {
-                    name: &format!("[{index}]"),
-                    path: Some(values::extended(
-                        expression,
-                        vec![ValuePathStep::Index(index)],
-                    )),
+                    name: &name,
+                    path: values::child_path(base.as_ref(), child),
                     type_info: Some(&child.type_info),
                     state: &child.state,
                 },
@@ -590,7 +587,7 @@ impl Session {
         &mut self,
         context: StopContext,
         reference: std::sync::Arc<uscope::ValueChildrenReference>,
-        path: Option<&ValueExpression>,
+        path: Option<&uscope::Expression>,
         window: Window,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
         let handle = self.target_handle()?;
@@ -680,68 +677,47 @@ impl Session {
         };
         let computed = uscope::Expression::parse(expression)
             .map_err(|failure| error(uscope::Error::Expression(failure)))?;
-        // A structural path also names the result's children for later
-        // requests; any other expression is computed.
-        let structural = uscope::parse_value_expression(expression).ok();
         let handle = self.target_handle()?;
-        let mut body = if let Some(parsed) =
-            structural.as_ref().filter(|parsed| parsed.range.is_some())
-            && let Some(range) = parsed.range
-        {
-            let parsed = parsed.clone();
-            let length = range.end.saturating_sub(range.start).max(0);
-            let reference = self
-                .references
-                .variables(Variables::Range {
-                    context,
-                    expression: parsed.expression,
-                    range,
-                })
-                .map_err(exhausted)?;
-            let mut body = Map::new();
-            body.insert("value".to_owned(), format!("[<{length} elements>]").into());
-            body.insert("variablesReference".to_owned(), reference.into());
-            body.insert(
-                "indexedVariables".to_owned(),
-                u64::try_from(length).unwrap_or(0).into(),
-            );
-            body
+        let mode = if arguments.context.as_deref() == Some("repl") {
+            uscope::EvaluationMode::Assign
         } else {
-            let mode = if arguments.context.as_deref() == Some("repl") {
-                uscope::EvaluationMode::Assign
-            } else {
-                uscope::EvaluationMode::Read
-            };
-            let evaluation = handle
-                .at(context)
-                .evaluate_with(&computed, mode, uscope::InspectionLimits::default())
-                .await
-                .map_err(error)?;
-            match evaluation {
-                uscope::Evaluation::Value { value, .. } => self.present(
-                    Item {
-                        name: expression,
-                        path: structural.map(|parsed| parsed.expression),
-                        type_info: value.type_info.as_ref(),
-                        state: &value.state,
-                    },
-                    context,
-                    options,
-                )?,
-                uscope::Evaluation::Range(page) => {
-                    let mut body = Map::new();
-                    body.insert(
-                        "value".to_owned(),
-                        format!("[<{} elements>]", page.children.len()).into(),
-                    );
-                    body.insert("variablesReference".to_owned(), 0.into());
-                    body
-                }
-                _ => {
-                    return Err(ErrorBody::new(
-                        "the evaluation produced an unknown kind of result",
-                    ));
-                }
+            uscope::EvaluationMode::Read
+        };
+        let evaluation = handle
+            .at(context)
+            .evaluate_with(&computed, mode, uscope::InspectionLimits::default())
+            .await
+            .map_err(error)?;
+        let mut body = match evaluation {
+            uscope::Evaluation::Value { value, .. } => self.present(
+                Item {
+                    name: expression,
+                    path: Some(computed),
+                    type_info: value.type_info.as_ref(),
+                    state: &value.state,
+                },
+                context,
+                options,
+            )?,
+            uscope::Evaluation::Range(page) => {
+                let length = page.children.len();
+                let reference = self
+                    .references
+                    .variables(Variables::Range {
+                        context,
+                        expression: computed,
+                    })
+                    .map_err(exhausted)?;
+                let mut body = Map::new();
+                body.insert("value".to_owned(), format!("[<{length} elements>]").into());
+                body.insert("variablesReference".to_owned(), reference.into());
+                body.insert("indexedVariables".to_owned(), length.into());
+                body
+            }
+            _ => {
+                return Err(ErrorBody::new(
+                    "the evaluation produced an unknown kind of result",
+                ));
             }
         };
         // An evaluation result names its value `result`.
@@ -862,10 +838,8 @@ impl Session {
                 frame: StackFrameId::INNERMOST,
             },
         };
-        let parsed = uscope::parse_value_expression(arguments.expression.trim()).map_err(error)?;
-        if parsed.range.is_some() {
-            return Err(ErrorBody::new("a range cannot be assigned"));
-        }
+        let parsed = uscope::Expression::parse(arguments.expression.trim())
+            .map_err(|failure| error(uscope::Error::Expression(failure)))?;
         let hex = arguments
             .format
             .and_then(|format| format.hex)
@@ -873,7 +847,7 @@ impl Session {
         self.assign(
             context,
             arguments.expression.trim(),
-            parsed.expression,
+            parsed,
             &arguments.value,
             hex,
         )
@@ -885,7 +859,7 @@ impl Session {
         &mut self,
         context: StopContext,
         name: &str,
-        path: ValueExpression,
+        path: uscope::Expression,
         value: &str,
         hex: bool,
     ) -> Result<Value, ErrorBody> {

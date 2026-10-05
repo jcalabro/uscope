@@ -1496,69 +1496,6 @@ pub enum VariableState {
     Malformed(VariableMalformedReason),
 }
 
-/// One ordered operation in a bounded structural value expression.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ValuePathStep {
-    /// A source-level name. The controller resolves the longest initial run as
-    /// the data-object root; later names select aggregate members.
-    Named(String),
-    /// One source-language array or slice index.
-    Index(i128),
-    /// One explicit pointer or reference dereference.
-    Dereference,
-}
-
-/// One bounded, structural value expression evaluated at a stopped snapshot.
-///
-/// Dots embedded in source-level object names are preserved by the
-/// controller's longest-prefix root lookup.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValueExpression {
-    /// Operations in evaluation order, beginning with at least one name.
-    pub steps: Arc<[ValuePathStep]>,
-}
-
-/// Renders the expression in source syntax, parenthesizing each dereference.
-impl fmt::Display for ValueExpression {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use fmt::Write as _;
-
-        let mut output = String::new();
-        for step in self.steps.iter() {
-            match step {
-                ValuePathStep::Named(name) => {
-                    if !output.is_empty() {
-                        output.push('.');
-                    }
-                    output.push_str(name);
-                }
-                ValuePathStep::Index(index) => write!(output, "[{index}]")?,
-                ValuePathStep::Dereference => output = format!("(*{output})"),
-            }
-        }
-        formatter.write_str(&output)
-    }
-}
-
-/// One half-open source-index range selected from a one-dimensional array or slice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ValueIndexRange {
-    /// First source index included in the page.
-    pub start: i128,
-    /// First source index excluded from the page.
-    pub end: i128,
-}
-
-/// A parsed structural expression and its optional terminal range view.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedValueExpression {
-    /// The value or aggregate containing the terminal range.
-    pub expression: ValueExpression,
-    /// A terminal bounded range; absent when the expression selects one value.
-    pub range: Option<ValueIndexRange>,
-}
-
 /// The terminal value produced by structural expression inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InspectedValue {

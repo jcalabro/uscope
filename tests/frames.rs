@@ -1184,13 +1184,11 @@ async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
     ));
     let depth_one = level_of(&frames, "frames_recurse", 1);
     select(&mut scenario, depth_one).await;
-    let below = uscope::parse_value_expression("below")
-        .expect("expression")
-        .expression;
+    let below = uscope::Expression::parse("below").expect("expression");
     let target = scenario
         .operation(
             "resolve below",
-            scenario.handle().resolve_watch_target(below.clone()),
+            scenario.handle().resolve_watch_target(&below),
         )
         .await;
     let WatchScope::Frame { activation, .. } = *target.scope() else {
@@ -1203,7 +1201,7 @@ async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
     let inner = scenario
         .operation(
             "resolve inner below",
-            scenario.handle().resolve_watch_target(below.clone()),
+            scenario.handle().resolve_watch_target(&below),
         )
         .await;
     let WatchScope::Frame {
@@ -1220,7 +1218,7 @@ async fn a_caller_frames_local_can_be_watched_until_its_activation_ends() {
     let watchpoint = scenario
         .operation(
             "watch below",
-            scenario.handle().watch(below, WatchAccess::Write),
+            scenario.handle().watch(&below, WatchAccess::Write),
         )
         .await;
     assert_eq!(watchpoint.address, target.address());

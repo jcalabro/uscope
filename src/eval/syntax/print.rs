@@ -62,7 +62,7 @@ pub fn path_text(path: &Path) -> String {
 }
 
 /// A name, in backticks unless it reads back as itself.
-fn name_text(name: &str) -> String {
+pub fn name_text(name: &str) -> String {
     let plain = name
         .bytes()
         .next()

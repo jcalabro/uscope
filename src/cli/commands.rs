@@ -739,11 +739,11 @@ impl Cli {
         let watchpoint = if let Some(location) = parse_watch_location(argument, spec)? {
             self.debugger.add_watchpoint(location, access).await?
         } else {
-            let parsed = uscope::parse_value_expression(argument)?;
-            if parsed.range.is_some() {
-                bail!("cannot watch a range; watch one value or 0xaddress:byte-count");
-            }
-            self.debugger.watch(parsed.expression, access).await?
+            let expression = parse_expression(argument)?;
+            self.debugger
+                .watch(&expression, access)
+                .await
+                .map_err(|error| expression_error(argument, error))?
         };
         Ok(format::watchpoint_set(&watchpoint, self.renderers.stdout))
     }

@@ -102,19 +102,6 @@ impl InspectionBudget {
         self.reserve(&[(InspectionLimit::ExpressionWork, amount)])
     }
 
-    /// Records the deepest aggregate level reached, which is a high-water
-    /// mark rather than a sum.
-    pub fn observe_aggregate_depth(&mut self, depth: u64) -> Result<(), InspectionExhaustion> {
-        if let Some(exhaustion) = self.exhaustion {
-            return Err(exhaustion);
-        }
-        if depth > self.limits.aggregate_depth {
-            return Err(self.exhaust(InspectionLimit::AggregateDepth, depth));
-        }
-        self.usage.aggregate_depth = self.usage.aggregate_depth.max(depth);
-        Ok(())
-    }
-
     /// Reserves every request or, if any would exceed its limit, none.
     fn reserve(&mut self, requests: &[(InspectionLimit, u64)]) -> Result<(), InspectionExhaustion> {
         if let Some(exhaustion) = self.exhaustion {

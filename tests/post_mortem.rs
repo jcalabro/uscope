@@ -329,11 +329,9 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
         let record = scenario
             .operation(
                 "record id",
-                scenario.handle().inspect(
-                    uscope::parse_value_expression("(*record).id")
-                        .unwrap()
-                        .expression,
-                ),
+                scenario
+                    .handle()
+                    .inspect(&uscope::Expression::parse("(*record).id").unwrap()),
             )
             .await;
         if variant == "gcc-o2-nopie" {

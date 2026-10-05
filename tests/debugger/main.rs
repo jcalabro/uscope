@@ -138,24 +138,36 @@ async fn assert_dereferenced_record(
     record_page(scenario, &value.state, minimum_children, context).await;
 }
 
-fn value_expression(components: &[&str]) -> uscope::ValueExpression {
-    uscope::ValueExpression {
-        steps: components
-            .iter()
-            .map(|component| uscope::ValuePathStep::Named((*component).to_owned()))
-            .collect::<Vec<_>>()
-            .into(),
+fn value_expression(components: &[&str]) -> uscope::Expression {
+    let (first, rest) = components.split_first().expect("a name");
+    rest.iter().fold(
+        uscope::Expression::name(first).expect("a name"),
+        |expression, member| expression.member(member).expect("a member"),
+    )
+}
+
+/// The page of elements a range expression selects.
+async fn evaluate_range(
+    handle: &uscope::DebuggerHandle,
+    text: &str,
+    limits: uscope::InspectionLimits,
+) -> uscope::Result<uscope::ValueChildPage> {
+    match handle
+        .evaluate_with(
+            &parsed_value_expression(text),
+            uscope::EvaluationMode::Read,
+            limits,
+        )
+        .await?
+    {
+        uscope::Evaluation::Range(page) => Ok(page),
+        other => panic!("`{text}` is not a range: {other:?}"),
     }
 }
 
-fn parsed_value_expression(expression: &str) -> uscope::ValueExpression {
-    let parsed = uscope::parse_value_expression(expression)
-        .unwrap_or_else(|error| panic!("parse test value expression {expression:?}: {error}"));
-    assert_eq!(
-        parsed.range, None,
-        "test expression unexpectedly selected a range"
-    );
-    parsed.expression
+fn parsed_value_expression(expression: &str) -> uscope::Expression {
+    uscope::Expression::parse(expression)
+        .unwrap_or_else(|error| panic!("parse test expression {expression:?}: {error}"))
 }
 
 fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {

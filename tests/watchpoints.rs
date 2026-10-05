@@ -6,25 +6,23 @@ use std::sync::Arc;
 use support::Scenario;
 use uscope::{
     BreakpointSpec, DebuggerEvent, Error, ExitStatus, InferiorState, RegisterRole, StepKind,
-    StopReason, ThreadId, ThreadState, ValueExpression, VirtualAddress, WatchAccess, WatchScope,
-    Watchpoint, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
+    StopReason, ThreadId, ThreadState, VirtualAddress, WatchAccess, WatchScope, Watchpoint,
+    WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
 };
 
 /// The single-threaded fixture across the compiler, optimization, and PIE
 /// matrix. Each phase function performs one kind of access.
 const MATRIX: [&str; 3] = ["watch-gcc-o0", "watch-clang-o2", "watch-gcc-o2-nopie"];
 
-fn expression(text: &str) -> ValueExpression {
-    let parsed = uscope::parse_value_expression(text).expect("valid test expression");
-    assert!(parsed.range.is_none(), "watch expressions select one value");
-    parsed.expression
+fn expression(text: &str) -> uscope::Expression {
+    uscope::Expression::parse(text).expect("valid test expression")
 }
 
 async fn watch(scenario: &Scenario, text: &str, access: WatchAccess) -> Watchpoint {
     scenario
         .operation(
             &format!("watch {text}"),
-            scenario.handle().watch(expression(text), access),
+            scenario.handle().watch(&expression(text), access),
         )
         .await
 }
@@ -287,7 +285,7 @@ async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
 
         let oversized = scenario
             .handle()
-            .watch(expression("watch_oversized"), WatchAccess::Write)
+            .watch(&expression("watch_oversized"), WatchAccess::Write)
             .await;
         assert!(
             matches!(oversized, Err(Error::WatchpointCapacity { required, available: 4 }) if required > 4),
@@ -303,7 +301,7 @@ async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
         );
         let packed = scenario
             .handle()
-            .watch(expression("watch_packed.field"), WatchAccess::Write)
+            .watch(&expression("watch_packed.field"), WatchAccess::Write)
             .await;
         assert!(
             matches!(
@@ -341,7 +339,7 @@ async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
         assert!(matches!(
             scenario
                 .handle()
-                .watch(expression("watch_array[3]"), WatchAccess::Write)
+                .watch(&expression("watch_array[3]"), WatchAccess::Write)
                 .await,
             Err(Error::WatchpointCapacity {
                 required: 1,
@@ -386,7 +384,7 @@ async fn whole_arrays_are_watched_by_their_elements_size() {
         run_to(&mut scenario, "size_stores").await;
         let bytes = scenario
             .handle()
-            .watch(expression("watch_oversized.bytes"), WatchAccess::Write)
+            .watch(&expression("watch_oversized.bytes"), WatchAccess::Write)
             .await;
         assert!(
             matches!(bytes, Err(Error::WatchpointCapacity { required, available: 4 }) if required > 4),
@@ -423,7 +421,7 @@ async fn one_store_reports_every_watchpoint_it_touches() {
         assert!(matches!(
             scenario
                 .handle()
-                .watch(expression("watch_u8"), WatchAccess::Write)
+                .watch(&expression("watch_u8"), WatchAccess::Write)
                 .await,
             Err(Error::WatchpointCapacity {
                 required: 1,
@@ -535,7 +533,7 @@ async fn access_watchpoints_report_loads_and_read_only_watches_are_refused() {
         for result in [
             scenario
                 .handle()
-                .watch(expression("watch_i32"), WatchAccess::Read)
+                .watch(&expression("watch_i32"), WatchAccess::Read)
                 .await,
             scenario
                 .handle()
@@ -588,7 +586,7 @@ async fn expression_watchpoints_keep_watching_the_location_they_resolved() {
                 "resolve pointee",
                 scenario
                     .handle()
-                    .resolve_watch_target(expression("*watch_pointer")),
+                    .resolve_watch_target(&expression("*watch_pointer")),
             )
             .await;
         assert_eq!(target.address(), symbol(&scenario, "pointee_first").await);
@@ -1157,7 +1155,7 @@ async fn thread_local_watchpoints_watch_one_threads_instance_until_it_exits() {
             "resolve tls",
             scenario
                 .handle()
-                .resolve_watch_target(expression("tls_value")),
+                .resolve_watch_target(&expression("tls_value")),
         )
         .await;
     assert_eq!(target.scope(), &WatchScope::ThreadLocal { thread: owner });
@@ -1502,7 +1500,7 @@ async fn kernel_capacity_exhaustion_is_reported_without_arming_anything() {
     let first = watch(&scenario, "thief_target[0]", WatchAccess::Write).await;
     let refused = scenario
         .handle()
-        .watch(expression("thief_target[1]"), WatchAccess::Write)
+        .watch(&expression("thief_target[1]"), WatchAccess::Write)
         .await;
     assert!(
         matches!(refused, Err(Error::WatchpointHardwareBusy { thread }) if thread == main),
@@ -1537,7 +1535,7 @@ async fn arming_rolls_back_every_thread_when_a_later_thread_has_no_capacity() {
 
     let refused = scenario
         .handle()
-        .watch(expression("thief_target[0]"), WatchAccess::Write)
+        .watch(&expression("thief_target[0]"), WatchAccess::Write)
         .await;
     assert!(
         matches!(refused, Err(Error::WatchpointHardwareBusy { thread }) if thread != main),
@@ -1633,7 +1631,7 @@ async fn detaching_disarms_watchpoints_even_while_they_are_being_hit() {
         let debugger = target.process.attach().await;
         let handle = debugger.handle();
         let watchpoint = handle
-            .watch(expression("attach_watched"), WatchAccess::Write)
+            .watch(&expression("attach_watched"), WatchAccess::Write)
             .await
             .expect("watch attached global");
         assert_eq!(watchpoint.address.get(), target.watched);
@@ -1763,7 +1761,7 @@ async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_obje
         if fixture == "watch-go-o0" {
             let refused = scenario
                 .handle()
-                .watch(expression("local"), WatchAccess::Write)
+                .watch(&expression("local"), WatchAccess::Write)
                 .await;
             assert!(
                 matches!(refused, Err(Error::WatchTargetUnsupported(_))),
@@ -1807,7 +1805,7 @@ async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
     assert!(matches!(
         scenario
             .handle()
-            .resolve_watch_target(expression("watch_i32"))
+            .resolve_watch_target(&expression("watch_i32"))
             .await,
         Err(Error::NotRunning)
     ));
@@ -1873,9 +1871,9 @@ async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
     assert!(matches!(
         scenario
             .handle()
-            .watch(expression("no_such_global"), WatchAccess::Write)
+            .watch(&expression("no_such_global"), WatchAccess::Write)
             .await,
-        Err(Error::VariableNotFound(_))
+        Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::UnknownName
     ));
     assert!(scenario.snapshot().await.watchpoints.is_empty());
     assert!(
@@ -1898,7 +1896,7 @@ async fn stale_targets_cannot_be_armed() {
             "resolve",
             scenario
                 .handle()
-                .resolve_watch_target(expression("watch_i32")),
+                .resolve_watch_target(&expression("watch_i32")),
         )
         .await;
     assert_eq!(
@@ -1939,7 +1937,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
         ));
         let result = scenario
             .handle()
-            .resolve_watch_target(expression(name))
+            .resolve_watch_target(&expression(name))
             .await;
         match (expected, &result) {
             ("register", Err(Error::WatchTargetNotInMemory(reason))) => {
@@ -1961,7 +1959,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
     run_to(&mut scenario, "inspect_records").await;
     let result = scenario
         .handle()
-        .resolve_watch_target(expression("bits.second"))
+        .resolve_watch_target(&expression("bits.second"))
         .await;
     assert!(
         matches!(&result, Err(Error::WatchTargetNotInMemory(reason)) if reason.contains("bit-field")),
@@ -1972,7 +1970,9 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
     let pointer = scenario
         .operation(
             "resolve record pointer",
-            scenario.handle().resolve_watch_target(expression("record")),
+            scenario
+                .handle()
+                .resolve_watch_target(&expression("record")),
         )
         .await;
     assert_eq!(pointer.byte_size(), 8);
@@ -1985,7 +1985,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
             "resolve record member",
             scenario
                 .handle()
-                .resolve_watch_target(expression("record.inner")),
+                .resolve_watch_target(&expression("record.inner")),
         )
         .await;
     assert_eq!(member.byte_size(), 8);
@@ -1998,7 +1998,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
     run_to(&mut scenario, "inspect_globals").await;
     let result = scenario
         .handle()
-        .resolve_watch_target(expression("fixture::Holder::constexpr_member"))
+        .resolve_watch_target(&expression("fixture::Holder::constexpr_member"))
         .await;
     assert!(
         matches!(&result, Err(Error::WatchTargetNotInMemory(reason)) if reason.contains("constant")),
@@ -2014,7 +2014,7 @@ async fn post_mortem_targets_refuse_watchpoints() {
     assert!(matches!(
         scenario
             .handle()
-            .watch(expression("main"), WatchAccess::Write)
+            .watch(&expression("main"), WatchAccess::Write)
             .await,
         Err(Error::PostMortemTarget)
     ));
@@ -2124,7 +2124,7 @@ async fn attached_processes_arm_threads_they_create_later() {
         .selected_thread
         .expect("selected thread");
     let watchpoint = handle
-        .watch(expression("attach_watched"), WatchAccess::Write)
+        .watch(&expression("attach_watched"), WatchAccess::Write)
         .await
         .expect("watch attached global");
     target.process.release();
