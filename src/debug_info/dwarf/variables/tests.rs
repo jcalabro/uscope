@@ -807,6 +807,24 @@ fn fixed_form_constants_zero_extend_and_signed_forms_sign_extend() {
             .as_ref(),
         &[0xff, 0xff, 0xff, 0xff]
     );
+    // Clang writes an unsigned short's 65535 as the 64-bit sign extension
+    // of its pattern, in an unsigned form.
+    assert_eq!(
+        materialize_constant(&ConstantValue::Unsigned(u128::from(u64::MAX)), 2, little)
+            .expect("a sign-extended pattern in an unsigned form")
+            .as_ref(),
+        &[0xff, 0xff]
+    );
+    // A value that is neither the pattern nor its extension does not fit.
+    assert!(materialize_constant(&ConstantValue::Unsigned(0x1_0000), 2, little).is_err());
+    assert!(
+        materialize_constant(
+            &ConstantValue::Unsigned(u128::from(u64::MAX - 1) << 1),
+            2,
+            little
+        )
+        .is_err()
+    );
 }
 
 #[test]
