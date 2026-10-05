@@ -1038,24 +1038,125 @@ What P1 built, and what it learned:
 - `ptype` qualifies C, C++, and Rust names with their path, says `class` for
   classes, and ends with an `arguments:` line.
 
-**P2 The engine and contiguous shapes.**
+**P2 The engine and contiguous shapes.** *Done 2026-10-05.*
 
-- The `src/view` parser and binder (`or`, types, checks).
-- Random-access sequences, `text`, `value`, `empty`, `if`, and fields.
-- The `Presentation` model, the view children reference, and `[raw]`.
-- Scheduling and cancellation (§3.11), and the hostile fuzz target.
-- CLI `print`, `print/r`, `info view`; DAP counts, `filter`, and hints.
-- `v[i]` and `len(v)` through views.
-- Built-in views that replace `string_parts`:
-  - C++ strings: libstdc++, the old ABI, and libc++ in short and long
+- [x] Prerequisite found in research: a member name is found through C++
+  base classes and C/C++ anonymous members (`v._M_impl`, libc++'s
+  `__cap_`), virtual bases included. The expression fixtures check it
+  against the compilers.
+- [x] Prerequisite: the evaluator's view dialect: `inner()`, values a scope
+  binds once (`let`), and constants (captured values).
+- [x] The `src/view` parser and binder (`or`, types, checks).
+- [x] Random-access sequences, `text`, `value`, `empty`, `if`, and fields.
+- [x] The `Presentation` model, the view children reference, and `[raw]`.
+- [x] Scheduling and cancellation (§3.11).
+- [x] The hostile fuzz target (`just fuzz views`), with a proptest of the
+  same harness in the suite.
+- [x] CLI `print`, `print/r`, `info view`, `set views on|off`; DAP counts,
+  `filter`, and hints.
+- [x] `v[i]` and `len(v)` through views, including assignment to an
+  element and `&v[i]`.
+- [x] Built-in views that replace `string_parts`:
+  - [x] C++ strings: libstdc++, the old ABI, and libc++ in short and long
     forms;
-  - Rust `String`, `Box<str>`, `PathBuf`, `OsString`, `CString`.
-- Further built-in views:
-  - C++ `std::vector` (not `<bool>`), `std::array`, `std::span`,
+  - [x] Rust `String`, `Box<str>` (text at layer 1 since P1), `PathBuf`,
+    `OsString`, `CString`.
+- [x] Further built-in views:
+  - [x] C++ `std::vector` (not `<bool>`), `std::array`, `std::span`,
     `std::string_view`;
-  - Rust `Vec`, `VecDeque`;
-  - Zig `ArrayList`, `ArrayListUnmanaged`.
-- `docs/views.md`, with executable examples.
+  - [x] Rust `Vec`, `VecDeque`;
+  - [x] Zig `ArrayList`, `ArrayListUnmanaged` (0.16's `array_list.Aligned`
+    and `array_list.AlignedManaged`).
+- [x] `containers` fixtures per language with `VIEW:` markers, corrupted
+  instances, and "every built-in view binds" (`tests/debugger/views.rs`).
+- [x] `docs/views.md`, with executable examples.
+- [x] End of phase: `/roast` (two findings, both declined: the provider's
+  own reads are bounded and were never interruptible, which §3.11 does not
+  ask for; `print` shows a sequence's elements, not its fields, by
+  design), `just`, `just sim 60`, and 15 minutes of `just fuzz views`
+  (one overflow found and fixed).
+- [x] The long run, since scheduling changes run control: `just all` and
+  `just sim 600`. `just all` passed (886 tests, stress 10 of 10), and the
+  sweep ran 3,375,451 sessions in 600 seconds without a failure.
+
+What P2 built, and what it learned:
+
+- **Where it lives.** `src/view` is pure, under the same boundary test as
+  `src/eval`: `syntax` (view files), `pattern` (matching identities),
+  `bind` (a view scope over a module's types, and binding), `run` (a view
+  machine over the evaluator's `Machine`), `summary` (the neutral style,
+  which the CLI and DAP now render values with too), and `fuzz`.
+  `src/backend/linux/presentation.rs` is the glue: the view each type has,
+  cached per view set, presentations for every inspection path, and view
+  children. The built-in library is `views/{libstdc++,libc++,rust-std,
+  zig-std}.views`.
+- **The evaluator** gained the view dialect (`Expression::parse_view`,
+  `inner()`), values a scope binds once (`Lookup::Bound`, `Machine::bound`,
+  `interp::value`, `bind_value`), constants (`Lookup::Constant`), and
+  `Machine::presented_length`. A record is indexed through
+  `Scope::plan(Index)`, which a frame answers with its view, so `v[i]` is a
+  place: it can be assigned and its address taken.
+- **Member lookup** now finds names through base classes and anonymous
+  members, as C and C++ do, with a virtual base reached along two paths
+  being one object. libstdc++'s `_M_impl` and libc++'s `__cap_` need it.
+- **The model.** `VariableState::Available` gained `presentation`, and its
+  `children` stay the stored value's. A presentation's own `children` are
+  its elements, fields, and `[raw]` (`ValueChildRelationship::{Element,
+  Field, Raw}`, `ValueChildrenReference::elements()`); a `value` view
+  lends the children of the value it presents. A view that fails is
+  `PresentedShape::Raw` with its `ViewProblem`. A text view also sets the
+  state's `text`, so the string tests stayed unchanged, and a pointer or
+  reference to such a value carries the text, as the provider did before.
+- **Binding.** `let`s and `type`s bind in order; checks, fields, the
+  summary, and the shape see them all. A check of `a && b` is two checks,
+  so a failure names the comparison that failed and its sides (`check
+  \`end <= storage_end\` failed: \`end\` is 0x…24, \`storage_end\` is
+  0x…10`). A capitalized pattern argument captures a type or a value;
+  `std::span`'s extent and `std::array`'s size are captured values.
+  Patterns anchor at the root, and `**` spans any run of segments.
+- **Budgets.** A presentation runs on `InspectionBudget::share()`, a
+  quarter of what remains, and its usage is then absorbed, so running out
+  ends a summary early without failing the inspection. A page of children
+  ends at the first child its budget cannot afford.
+- **Scheduling (§3.11).** `next_message` serves messages in arrival order,
+  except that one that reads one stop (`reads_one_stop`) waits behind run
+  control or a wait event queued after it (`preempts_inspection`), and so
+  fails as a request for an old stop does. Expression evaluation and
+  presentation in such a request check every 64 units of work whether run
+  control is waiting; if it is, the request is served again after it
+  (`serve_later`). The provider's own reads of a frame's variables, bounded
+  by the budget as before P2, are not interrupted. Conditions and log
+  messages, which run control evaluates itself, and assignments are never
+  interrupted. The live, post-mortem, and simulated controllers share
+  `next_message`. The DAP session handles requests one at a time and
+  already cancels queued inspection on a resume, so the scheduling serves
+  pipelining clients.
+- **Library facts the views rely on.** The old ABI's string keeps its
+  length and capacity in a three-word header before its characters, which
+  its DWARF does not describe. libc++ stores a long string's capacity
+  halved on little-endian targets. libc++'s empty `std::array` is presented
+  by libstdc++.views's view, which reads nothing. Zig 0.16 names
+  `std.ArrayList` `array_list.Aligned` and the managed list
+  `array_list.AlignedManaged`. Rust's `ManuallyDrop` now wraps
+  `MaybeDangling`; wrappers are P4's.
+- **Found on the way.** Clang at `-O2` emits a nameless subprogram with no
+  code only to scope a function's local types (libstdc++'s `_Guard`); the
+  loader refused every such binary, and now ignores these.
+- **Tests.** `tests/debugger/views.rs` runs the `containers` fixtures'
+  `VIEW:` markers over gcc and clang with libstdc++, libc++, the old ABI,
+  Rust, and Zig, at `-O0` and `-O2`, checking summaries, children, pages of
+  any size, element names that evaluate back, `[raw]`, corrupted instances,
+  and that every built-in view binds; session views; and inspection sent
+  beside run control. `tests/cli.rs`, `tests/dap/variables.rs`, the
+  scheduling unit test, the views' fake-world tests, and the reference's
+  examples cover the rest.
+- **Deferred.** Text is read up to 256 bytes everywhere, as for C strings;
+  §3.9's 4096 bytes when printed needs a per-request text limit. Views do
+  not index values through other views inside a view. A page of 256
+  children slightly exceeds the default 256 reads, so a client asking for
+  more than about 250 elements at once gets a truncated page (VS Code asks
+  for 100). Session view files from the CLI and DAP are P5;
+  `DebuggerHandle::load_views` exists for them.
 
 **P3 Scans and maps.**
 

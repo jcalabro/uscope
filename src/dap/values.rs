@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 
 use serde_json::{Map, Value, json};
 use uscope::{
-    IntegerValue, RegisterValue, ScalarValue, StopContext, TypeInfo, ValueChild,
+    IntegerValue, PresentedShape, RegisterValue, ScalarValue, StopContext, TypeInfo, ValueChild,
     ValueChildRelationship, ValueChildren, VariableState, VariableValue, VariableValueSource,
 };
 
@@ -77,19 +77,18 @@ pub fn variable(
         value,
         dereference,
         children,
+        presentation,
         ..
     } = item.state
     {
+        // A value a view presents expands to its elements, its fields, and
+        // `[raw]`, the value as stored.
+        let presented = presentation
+            .as_deref()
+            .filter(|presentation| presentation.shape != PresentedShape::Raw);
+        let children = presented.map_or(children, |presentation| &presentation.children);
         if let ValueChildren::Available(children) = children {
-            let total = children.total();
-            match value {
-                VariableValue::Array { .. } | VariableValue::Slice { .. } => {
-                    variable.insert("indexedVariables".to_owned(), total.into());
-                }
-                _ => {
-                    variable.insert("namedVariables".to_owned(), total.into());
-                }
-            }
+            insert_counts(&mut variable, children, value);
             reference = references.variables(Variables::Children {
                 context,
                 reference: children.clone(),
@@ -117,7 +116,10 @@ pub fn variable(
                 );
             }
         }
-        let attributes = attributes(source, value, context, whole, named);
+        let mut attributes = attributes(source, value, context, whole, named);
+        if presented.is_some_and(|presentation| presentation.shape == PresentedShape::Text) {
+            attributes.push("rawString");
+        }
         let kind = match value {
             VariableValue::Record | VariableValue::Union | VariableValue::Variant { .. } => "class",
             _ => "data",
@@ -129,6 +131,34 @@ pub fn variable(
     }
     variable.insert("variablesReference".to_owned(), reference.into());
     Ok(variable)
+}
+
+/// How many children a value has: a view's elements are indexed and its
+/// fields and `[raw]` named; an array's or slice's children are indexed,
+/// and anything else's named.
+fn insert_counts(
+    variable: &mut Map<String, Value>,
+    children: &uscope::ValueChildrenReference,
+    value: &VariableValue,
+) {
+    let total = children.total();
+    match (children.elements(), value) {
+        (Some(elements), _) => {
+            if elements != 0 {
+                variable.insert("indexedVariables".to_owned(), elements.into());
+            }
+            variable.insert(
+                "namedVariables".to_owned(),
+                total.saturating_sub(elements).into(),
+            );
+        }
+        (None, VariableValue::Array { .. } | VariableValue::Slice { .. }) => {
+            variable.insert("indexedVariables".to_owned(), total.into());
+        }
+        (None, _) => {
+            variable.insert("namedVariables".to_owned(), total.into());
+        }
+    }
 }
 
 /// A value's presentation attributes: whether it can be changed, which
@@ -204,10 +234,15 @@ pub fn child_name(child: &ValueChild) -> String {
                 name
             })
         }
-        ValueChildRelationship::SliceElement { index } => format!("[{index}]"),
+        ValueChildRelationship::SliceElement { index }
+        | ValueChildRelationship::Element { index } => {
+            format!("[{index}]")
+        }
         ValueChildRelationship::Member(member) => {
             member.name.as_deref().unwrap_or("<anonymous>").to_owned()
         }
+        ValueChildRelationship::Field { name } => name.to_string(),
+        ValueChildRelationship::Raw => "[raw]".to_owned(),
         ValueChildRelationship::Base(_) => format!("<base {}>", child.type_info.name),
         _ => "<child>".to_owned(),
     }
@@ -228,8 +263,11 @@ pub fn child_path(
     let parent = parent?;
     match &child.relationship {
         ValueChildRelationship::ArrayElement { indices, .. } => parent.indexed(indices),
-        ValueChildRelationship::SliceElement { index } => parent.indexed(&[i128::from(*index)]),
+        ValueChildRelationship::SliceElement { index }
+        | ValueChildRelationship::Element { index } => parent.indexed(&[i128::from(*index)]),
         ValueChildRelationship::Member(member) => parent.member(member.name.as_deref()?),
+        // The value as stored is the parent's value.
+        ValueChildRelationship::Raw => Some(parent.clone()),
         _ => None,
     }
 }
@@ -276,6 +314,7 @@ mod tests {
             dereference: uscope::DereferenceState::NotApplicable,
             children: ValueChildren::NotApplicable,
             text: None,
+            presentation: None,
         };
         let signed = state(VariableValue::Scalar(ScalarValue::Signed(-1)));
         assert_eq!(hex(Some(4), &signed).as_deref(), Some("0xffffffff"));

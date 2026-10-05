@@ -142,7 +142,10 @@ From loosest to tightest:
 Bit operations bind tighter than comparisons, so `x & 1 == 0` means
 `(x & 1) == 0`, and comparisons do not chain. `.` selects a member, and also
 selects through one pointer; `->` selects through a pointer as in C;
-`t.0` selects a tuple's field. `a[start..end]` is a half-open range of an
+`t.0` selects a tuple's field. A member of an anonymous struct or union, or
+of a base class, is selected by its own name, as C and C++ select it: a
+record's own members hide its bases', and a name that two paths reach in
+different objects is ambiguous. `a[start..end]` is a half-open range of an
 array or slice, and must be the whole expression. `len(x)` is a length and
 `sizeof(x)` a size. The language does not call functions.
 

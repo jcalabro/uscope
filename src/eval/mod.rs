@@ -8,8 +8,8 @@
 
 pub mod bind;
 pub mod error;
-#[cfg(test)]
-mod fake;
+#[cfg(any(test, feature = "fuzzing"))]
+pub mod fake;
 pub mod interp;
 pub mod ir;
 pub mod number;

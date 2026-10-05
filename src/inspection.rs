@@ -79,6 +79,34 @@ impl InspectionBudget {
             .saturating_sub(self.usage.memory_bytes)
     }
 
+    /// A budget of a quarter of what remains, for work such as a view's
+    /// summary, whose exhaustion must not end the operation: the operation
+    /// then [`absorb`](Self::absorb)s what it used.
+    pub fn share(&self) -> Self {
+        let remaining = self.limits.remaining_after(self.usage);
+        let quarter = |value: u64| value / 4;
+        Self::new(InspectionLimits {
+            variables: quarter(remaining.variables),
+            value_nodes: quarter(remaining.value_nodes),
+            aggregate_depth: remaining.aggregate_depth,
+            memory_reads: quarter(remaining.memory_reads),
+            memory_bytes: quarter(remaining.memory_bytes),
+            expression_work: quarter(remaining.expression_work),
+        })
+    }
+
+    /// Charges what a [`share`](Self::share)d budget used, which never
+    /// exceeds what remained.
+    pub fn absorb(&mut self, used: InspectionUsage) {
+        let usage = &mut self.usage;
+        usage.variables = usage.variables.saturating_add(used.variables);
+        usage.value_nodes = usage.value_nodes.saturating_add(used.value_nodes);
+        usage.aggregate_depth = usage.aggregate_depth.max(used.aggregate_depth);
+        usage.memory_reads = usage.memory_reads.saturating_add(used.memory_reads);
+        usage.memory_bytes = usage.memory_bytes.saturating_add(used.memory_bytes);
+        usage.expression_work = usage.expression_work.saturating_add(used.expression_work);
+    }
+
     pub fn consume_variable_value(&mut self) -> Result<(), InspectionExhaustion> {
         self.reserve(&[
             (InspectionLimit::Variables, 1),

@@ -143,8 +143,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Info,
         "info",
         [],
-        "info breakpoints|watchpoints|signals|core|symbol [0xaddress]",
-        "Show debugger information, or the symbol and section containing an address"
+        "info breakpoints|watchpoints|signals|core|symbol|view [argument...]",
+        "Show debugger information, the symbol and section containing an address, or which view presents an expression's value and why"
     ),
     command!(
         Handle,
@@ -230,7 +230,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "print",
         ["p"],
         "print [expression...]",
-        "Print an expression's value, or every variable; print/x shows integers in hexadecimal"
+        "Print an expression's value, or every variable; print/x shows integers in hexadecimal, and print/r values as stored, without views"
     ),
     command!(
         Whatis,
@@ -251,7 +251,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "set",
         [],
         "set [var] <assignment...>",
-        "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1"
+        "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1; set views on|off shows values as their views present them or as stored"
     ),
     command!(
         Globals,
@@ -425,6 +425,10 @@ impl Cli {
                     renderer,
                 ),
                 ("signals" | "handle", None) => self.list_signals().await?,
+                ("view", Some(_)) => {
+                    let text = rest.trim_start()["view".len()..].trim();
+                    self.explain_view(text).await?
+                }
                 _ => return Err(spec.usage_error()),
             },
             Command::Handle => self.handle_signal(&arguments).await?,
@@ -451,7 +455,7 @@ impl Cli {
                 join_lines(&signals, &self.stop_with_source(&reason).await)
             }
             Command::Print => match first {
-                Some(_) => self.print(rest, format == "x").await?,
+                Some(_) => self.print(rest, format == "x", format == "r").await?,
                 None => value::variables(&debugger.variables().await?, renderer),
             },
             Command::Whatis => self.whatis(rest).await?,
@@ -748,7 +752,7 @@ impl Cli {
         Ok(format::watchpoint_set(&watchpoint, self.renderers.stdout))
     }
 
-    async fn print(&self, text: &str, hexadecimal: bool) -> Result<String> {
+    async fn print(&self, text: &str, hexadecimal: bool, raw: bool) -> Result<String> {
         let renderer = self.renderers.stdout;
         let expression = parse_expression(text)?;
         let evaluation = self
@@ -772,6 +776,7 @@ impl Cli {
                     text,
                     &inspected.state,
                     uscope::InspectionLimits::default().remaining_after(inspected.usage),
+                    raw,
                     renderer,
                 )
                 .await?
@@ -793,6 +798,22 @@ impl Cli {
             );
         }
         Ok(output)
+    }
+
+    /// Which view presents an expression's value, from where, and why each
+    /// view tried before it did not bind.
+    async fn explain_view(&self, text: &str) -> Result<String> {
+        let expression = parse_expression(text)?;
+        let explanation = self
+            .debugger
+            .explain_view(&expression)
+            .await
+            .map_err(|error| expression_error(text, error))?;
+        Ok(format::view_explanation(
+            text,
+            &explanation,
+            self.renderers.stdout,
+        ))
     }
 
     async fn whatis(&self, text: &str) -> Result<String> {
@@ -846,6 +867,17 @@ impl Cli {
 
     /// Assigns a value in the selected frame, as gdb's `set var` does.
     async fn set(&self, text: &str, spec: &CommandSpec) -> Result<String> {
+        if let Some(setting @ ("on" | "off")) = text.strip_prefix("views ").map(str::trim) {
+            self.debugger.enable_views(setting == "on").await?;
+            return Ok(format!(
+                "values show {}",
+                if setting == "on" {
+                    "as their views present them"
+                } else {
+                    "as stored"
+                }
+            ));
+        }
         let text = text.strip_prefix("var ").map_or(text, str::trim);
         let expression = parse_expression(text)?;
         let Some(target) = expression.assignment_target() else {
@@ -1408,8 +1440,8 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
     let spec = command_named(entered)
         .ok_or_else(|| anyhow!("unknown command '{entered}'; type `help` for a list"))?;
     let arguments = words.collect::<Vec<_>>();
-    if !format.is_empty() && (spec.command != Command::Print || format != "x") {
-        bail!("unknown format '/{format}'; print takes /x");
+    if !format.is_empty() && (spec.command != Command::Print || !matches!(format, "x" | "r")) {
+        bail!("unknown format '/{format}'; print takes /x or /r");
     }
     let (minimum, maximum) = spec.arity();
     if !(minimum..=maximum).contains(&arguments.len()) {
@@ -1460,7 +1492,7 @@ mod tests {
         }
         assert_eq!(spec(Command::Run).arity(), (0, 0));
         assert_eq!(spec(Command::Break).arity(), (1, 2));
-        assert_eq!(spec(Command::Info).arity(), (1, 2));
+        assert_eq!(spec(Command::Info).arity(), (1, usize::MAX));
         assert_eq!(spec(Command::Print).arity(), (0, usize::MAX));
         assert_eq!(spec(Command::Whatis).arity(), (1, usize::MAX));
         assert_eq!(spec(Command::Examine).arity(), (1, 2));

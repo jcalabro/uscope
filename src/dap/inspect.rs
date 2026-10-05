@@ -343,6 +343,11 @@ impl Session {
                 .unwrap_or(u64::MAX)
                 .min(MAX_CHILDREN),
             options,
+            filter: match arguments.filter.as_deref() {
+                Some("indexed") => Some(Filter::Indexed),
+                Some("named") => Some(Filter::Named),
+                _ => None,
+            },
         };
         let list = arguments.variables_reference;
         let context = variables.context();
@@ -511,13 +516,20 @@ impl Session {
         let pointee = handle.dereference(reference).await.map_err(error)?;
         let path = path.and_then(|path| path.dereferenced());
         if let VariableState::Available {
-            children: uscope::ValueChildren::Available(children),
+            children,
+            presentation,
             ..
         } = &pointee.state
         {
-            return self
-                .children(context, children.clone(), path.as_ref(), window)
-                .await;
+            let children = presentation
+                .as_deref()
+                .filter(|presentation| presentation.shape != uscope::PresentedShape::Raw)
+                .map_or(children, |presentation| &presentation.children);
+            if let uscope::ValueChildren::Available(children) = children {
+                return self
+                    .children(context, children.clone(), path.as_ref(), window)
+                    .await;
+            }
         }
         if window.start != 0 {
             return Ok(Vec::new());
@@ -591,11 +603,18 @@ impl Session {
         window: Window,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
         let handle = self.target_handle()?;
-        let end = reference
-            .total()
-            .min(window.start.saturating_add(window.count));
+        // A view's elements come first and its named children after them;
+        // anything else's children are all of one kind.
+        let (start, end) = match (window.filter, reference.elements()) {
+            (Some(Filter::Indexed), Some(elements)) => (window.start, elements),
+            (Some(Filter::Named), Some(elements)) => {
+                (elements.saturating_add(window.start), reference.total())
+            }
+            _ => (window.start, reference.total()),
+        };
+        let end = end.min(start.saturating_add(window.count));
         let mut rows = Vec::new();
-        let mut offset = window.start;
+        let mut offset = start;
         while offset < end {
             let limit = (end - offset).min(PAGE);
             let page = handle
@@ -796,6 +815,15 @@ struct Window {
     start: u64,
     count: u64,
     options: Options,
+    /// Which children the client asked for: a view's elements, which it
+    /// calls indexed, or its named children.
+    filter: Option<Filter>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    Indexed,
+    Named,
 }
 
 impl Window {

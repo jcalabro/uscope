@@ -849,6 +849,12 @@ fn load_function_metadata(
         .collect();
     let mut functions = Vec::new();
     let mut function_ids = HashMap::new();
+    // The definitions code belongs to. Clang also emits subprograms with
+    // no code and no name, only to scope a function's local types.
+    let mut concrete = HashSet::new();
+    for function in raw.iter().filter(|function| !function.ranges.is_empty()) {
+        concrete.insert(definition_key(function.key, &raw, &by_key)?);
+    }
 
     for function in &raw {
         let definition = definition_key(function.key, &raw, &by_key)?;
@@ -856,8 +862,14 @@ fn load_function_metadata(
         if function_ids.contains_key(&definition) {
             continue;
         }
-        let name = inherited_value(definition, &raw, &by_key, |function| function.name.clone())?
-            .ok_or(DwarfError::MissingFunctionName)?;
+        let Some(name) =
+            inherited_value(definition, &raw, &by_key, |function| function.name.clone())?
+        else {
+            if concrete.contains(&definition) {
+                return Err(DwarfError::MissingFunctionName);
+            }
+            continue;
+        };
         let linkage_name = inherited_value(definition, &raw, &by_key, |function| {
             function.linkage_name.clone()
         })?;

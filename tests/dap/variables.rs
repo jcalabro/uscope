@@ -535,3 +535,107 @@ fn strings_show_their_text_and_still_expand() {
     );
     dap.finish();
 }
+
+/// A value a view presents shows its summary, counts its elements as
+/// indexed and its fields and `[raw]` as named, pages its elements by the
+/// client's filter, and its elements evaluate back and can be changed.
+#[test]
+fn views_present_containers_with_paged_elements_and_raw_one_step_away() {
+    let mut dap = Dap::start("views");
+    let stop = stopped_at(
+        &mut dap,
+        "containers-rust-o0",
+        "rust/containers.rs",
+        "barrier(std::ptr",
+    );
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let scopes = scopes(&mut dap, &frame);
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+
+    let text = named(&locals, "text");
+    assert_eq!(text["value"], r#""hello, world""#);
+    assert!(
+        text["presentationHint"]["attributes"]
+            .as_array()
+            .is_some_and(|attributes| attributes.contains(&json!("rawString"))),
+        "{text}"
+    );
+
+    let many = named(&locals, "many");
+    assert_eq!(
+        many["value"],
+        "len=300 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, …]"
+    );
+    assert_eq!(
+        (&many["indexedVariables"], &many["namedVariables"]),
+        (&json!(300), &json!(2))
+    );
+    let page = |dap: &mut Dap, filter: &str, start: u64, count: u64| {
+        dap.request(
+            "variables",
+            json!({
+                "variablesReference": many["variablesReference"],
+                "filter": filter,
+                "start": start,
+                "count": count,
+            }),
+        )["variables"]
+            .as_array()
+            .expect("variables")
+            .clone()
+    };
+    let indexed = page(&mut dap, "indexed", 100, 50);
+    assert_eq!(indexed.len(), 50);
+    for (offset, row) in indexed.iter().enumerate() {
+        let index = 100 + offset;
+        assert_eq!(
+            (&row["name"], &row["value"], &row["evaluateName"]),
+            (
+                &json!(format!("[{index}]")),
+                &json!(index.to_string()),
+                &json!(format!("many[{index}]"))
+            ),
+        );
+    }
+    let named_rows = page(&mut dap, "named", 0, 10);
+    assert_eq!(
+        values(&named_rows),
+        [
+            ("capacity".to_owned(), "300".to_owned()),
+            ("[raw]".to_owned(), "{<2 fields>}".to_owned()),
+        ]
+    );
+    let raw = variables(&mut dap, &named_rows[1]["variablesReference"]);
+    assert_eq!(
+        raw.iter()
+            .map(|row| row["name"].clone())
+            .collect::<Vec<_>>(),
+        [json!("buf"), json!("len")]
+    );
+
+    // An element in memory is changed through its view.
+    let ints = named(&locals, "ints");
+    let elements = variables(&mut dap, &ints["variablesReference"]);
+    assert_eq!(
+        values(&elements[..3]),
+        [
+            ("[0]".to_owned(), "1".to_owned()),
+            ("[1]".to_owned(), "2".to_owned()),
+            ("[2]".to_owned(), "3".to_owned()),
+        ]
+    );
+    let changed = dap.request(
+        "setVariable",
+        json!({"variablesReference": ints["variablesReference"], "name": "[1]", "value": "20"}),
+    );
+    assert_eq!(changed["value"], "20");
+    let evaluated = dap.request(
+        "evaluate",
+        json!({"expression": "ints", "frameId": frame["id"], "context": "watch"}),
+    );
+    assert_eq!(
+        (&evaluated["result"], &evaluated["indexedVariables"]),
+        (&json!("len=3 [1, 20, 3]"), &json!(3))
+    );
+    dap.finish();
+}

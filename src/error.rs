@@ -241,6 +241,13 @@ pub enum Error {
     BackendThreadPanicked,
     #[error("debugger request was cancelled")]
     RequestCancelled,
+    #[error("the view failed: {0}")]
+    ViewFailed(Arc<str>),
+    /// Inspection stopped for run control waiting behind it; the controller
+    /// serves the request again after the run control, and no client sees
+    /// this error.
+    #[error("inspection was interrupted by run control")]
+    Interrupted,
     #[error("debugger request queue is closed")]
     RequestQueueClosed,
     #[error("debugger event subscriber fell behind by {0} events")]

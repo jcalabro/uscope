@@ -1,0 +1,18 @@
+uscope-views 1
+
+# Zig's standard library. Verified against zig 0.16.0 with the LLVM
+# backend, by tests/fixtures/zig/containers.zig.
+
+# std.ArrayList (array_list.Aligned) and the managed list keep the elements
+# in use in `items`.
+view zig array_list.Aligned(T, _) {
+    check len(items) <= capacity
+    show sequence(len(items)) for i in range(len(items)) => items[i]
+    field capacity = capacity
+}
+
+view zig array_list.AlignedManaged(T, _) {
+    check len(items) <= capacity
+    show sequence(len(items)) for i in range(len(items)) => items[i]
+    field capacity = capacity
+}

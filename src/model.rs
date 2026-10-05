@@ -920,6 +920,18 @@ pub enum ValueChildRelationship {
     Member(RecordMember),
     /// One base-class subobject.
     Base(BaseClass),
+    /// One element of a value a view presents as a sequence.
+    Element {
+        /// The zero-based position in the sequence.
+        index: u64,
+    },
+    /// One named child a view computes, such as a vector's capacity.
+    Field {
+        /// The name the view gives it.
+        name: Arc<str>,
+    },
+    /// The value as it is stored, without its view.
+    Raw,
 }
 
 /// Which bounded resource prevented complete value materialization.
@@ -1071,7 +1083,45 @@ pub struct ValueChildrenReference {
     pub(crate) storage: ValueStorage,
     pub(crate) total: u64,
     pub(crate) active_variant: Option<usize>,
+    /// The view whose children these are, rather than the stored value's.
+    pub(crate) view: Option<ViewChildren>,
 }
+
+/// The view a children capability presents through: its elements, then its
+/// fields, then a `[raw]` child.
+#[derive(Clone)]
+pub struct ViewChildren {
+    /// The bound view, which only the backend that bound it reads.
+    pub(crate) bound: Arc<dyn std::any::Any + Send + Sync>,
+    /// How many elements precede the fields.
+    pub(crate) elements: u64,
+    /// How many fields precede the `[raw]` child.
+    pub(crate) fields: u64,
+    /// For a view presenting the value as another, that value's children,
+    /// which are the elements.
+    pub(crate) inner: Option<Arc<ValueChildrenReference>>,
+}
+
+impl fmt::Debug for ViewChildren {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ViewChildren")
+            .field("elements", &self.elements)
+            .field("fields", &self.fields)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ViewChildren {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.bound, &other.bound)
+            && self.elements == other.elements
+            && self.fields == other.fields
+            && self.inner == other.inner
+    }
+}
+
+impl Eq for ViewChildren {}
 
 impl ValueChildrenReference {
     /// Returns the stopped snapshot that owns this capability.
@@ -1090,6 +1140,16 @@ impl ValueChildrenReference {
     #[must_use]
     pub const fn total(&self) -> u64 {
         self.total
+    }
+
+    /// For the children a view presents, how many of the first are its
+    /// elements; its named children, the fields and `[raw]`, follow them.
+    #[must_use]
+    pub const fn elements(&self) -> Option<u64> {
+        match &self.view {
+            Some(view) => Some(view.elements),
+            None => None,
+        }
     }
 }
 
@@ -1630,6 +1690,109 @@ pub enum TextCompletion {
     },
 }
 
+/// Which view presents a value: where it was written and what it matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewName {
+    /// The view file, or the built-in library it came from.
+    pub source: Arc<str>,
+    /// The line of its `view` keyword.
+    pub line: u32,
+    /// Its language and pattern, as written.
+    pub header: Arc<str>,
+}
+
+impl fmt::Display for ViewName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}:{} `{}`", self.source, self.line, self.header)
+    }
+}
+
+/// What a view presents a value as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PresentedShape {
+    /// Text, in the state's `text`.
+    Text,
+    /// Another value, standing for this one.
+    Value,
+    /// Nothing, described by the summary, such as `None`.
+    Empty,
+    /// Elements, which are children.
+    Sequence,
+    /// The view failed, for the reason in `problem`, so the value shows as
+    /// it is stored.
+    Raw,
+}
+
+/// How many elements a presented sequence holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PresentedCount {
+    Exact(u64),
+}
+
+/// Why a view could not present a value, or presented only part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ViewProblem {
+    /// One of the view's invariants does not hold, so the value is not
+    /// what the view describes.
+    CheckFailed {
+        check: Arc<str>,
+        /// The values of the check's sides, when it compares.
+        detail: Option<Arc<str>>,
+    },
+    /// The program state could not provide a value the view needed.
+    Unavailable(VariableUnavailableReason),
+    /// The view asked for something the debugger refuses at this stop.
+    Refused(Arc<str>),
+    /// The view declares one count and generates another.
+    CountMismatch { declared: u64, generated: u64 },
+    /// The debugger failed presenting the value; a defect in uscope.
+    Internal(Arc<str>),
+}
+
+impl fmt::Display for ViewProblem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CheckFailed {
+                check,
+                detail: Some(detail),
+            } => write!(formatter, "check `{check}` failed: {detail}"),
+            Self::CheckFailed {
+                check,
+                detail: None,
+            } => write!(formatter, "check `{check}` failed"),
+            Self::Unavailable(reason) => reason.fmt(formatter),
+            Self::Refused(message) | Self::Internal(message) => formatter.write_str(message),
+            Self::CountMismatch {
+                declared,
+                generated,
+            } => write!(
+                formatter,
+                "the view declares {declared} elements and generates {generated}"
+            ),
+        }
+    }
+}
+
+/// How a view presents a value as what it stands for (`docs/views.md`).
+/// The stored value beside it is untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Presentation {
+    pub view: Arc<ViewName>,
+    pub shape: PresentedShape,
+    /// The elements a sequence holds; `None` for other shapes.
+    pub count: Option<PresentedCount>,
+    /// A bounded one-line rendering, in one style for every language.
+    pub summary: Arc<str>,
+    /// The elements, the view's fields, and a `[raw]` child.
+    pub children: ValueChildren,
+    /// With [`PresentedShape::Raw`], why the view failed; otherwise why the
+    /// summary stopped short.
+    pub problem: Option<ViewProblem>,
+}
+
 /// The inspection state of one visible variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariableState {
@@ -1649,6 +1812,8 @@ pub enum VariableState {
         /// The text the value holds, for values that are strings: a pointer
         /// to characters, a character array, or a language's string type.
         text: Option<Arc<TextSummary>>,
+        /// How a view presents the value, when one applies.
+        presentation: Option<Arc<Presentation>>,
     },
     /// Valid metadata does not provide a supported readable value here.
     Unavailable(VariableUnavailableReason),

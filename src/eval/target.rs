@@ -4,6 +4,7 @@
 use std::fmt;
 
 use super::error::ErrorKind;
+use super::interp::Value;
 use super::number::Exact;
 use super::syntax::ast::Tag;
 use super::types::TypeSource;
@@ -39,6 +40,15 @@ pub enum Lookup<O> {
     Enumerator {
         value: Exact,
         ty: TypeReference,
+    },
+    /// An exact integer the scope knows, such as an argument a view's
+    /// pattern captured.
+    Constant(Exact),
+    /// A value the scope's machine computes once and keeps, of any type,
+    /// such as a view's `let`: never a place.
+    Bound {
+        object: O,
+        ty: super::types::Ty,
     },
     /// Several things the name could mean, each written as it is selected.
     Ambiguous(Vec<String>),
@@ -201,4 +211,21 @@ pub trait Machine: TypeSource {
     /// The inspection's completion and usage so far, for results the
     /// evaluator builds itself.
     fn finish(&self, type_info: Option<TypeInfo>, state: VariableState) -> InspectedValue;
+
+    /// How many elements a value with no length of its own holds, or the
+    /// length of its text, as a view presents it; `None` when no view
+    /// presents its type.
+    fn presented_length(&mut self, at: &Self::Place) -> Result<Option<u64>, Stop> {
+        let _ = at;
+        Ok(None)
+    }
+
+    /// The value a scope bound to `object` with [`Lookup::Bound`].
+    fn bound(&mut self, object: &Self::Object) -> Result<Value<Self::Place>, Stop> {
+        let _ = object;
+        Err(Stop::Refused(Refusal::new(
+            ErrorKind::Unsupported,
+            "this machine computes no bound values",
+        )))
+    }
 }

@@ -70,3 +70,10 @@ path = "fuzz_targets/dap_request.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "views"
+path = "fuzz_targets/views.rs"
+test = false
+doc = false
+bench = false

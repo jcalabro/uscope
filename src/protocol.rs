@@ -61,6 +61,28 @@ impl Default for ValueChildQuery {
     }
 }
 
+/// A view a value's type was matched against, in the order views are
+/// tried, and why it did not bind, when it did not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewCandidate {
+    pub view: Arc<crate::ViewName>,
+    pub rejection: Option<Arc<str>>,
+}
+
+/// Why a value is presented as it is: the views its type matched, and how
+/// the one that binds presents the value at this stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewExplanation {
+    /// The value's type.
+    pub type_info: Option<crate::TypeInfo>,
+    /// Whether views present values at all.
+    pub enabled: bool,
+    /// The views whose patterns name the type, until the first that binds.
+    pub candidates: Arc<[ViewCandidate]>,
+    /// The value's presentation at this stop, when a view binds.
+    pub presentation: Option<Arc<crate::Presentation>>,
+}
+
 /// A user-facing request for a logical breakpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BreakpointSpec {
@@ -1329,6 +1351,23 @@ pub enum Request {
         query: GlobalVariableQuery,
         reply: Reply<GlobalVariablePage>,
     },
+    /// Presents values with another set of views from now on.
+    SetViews {
+        views: Arc<crate::view::ViewSet>,
+        reply: Reply<()>,
+    },
+    /// Turns presenting values with views on or off.
+    EnableViews {
+        enabled: bool,
+        reply: Reply<()>,
+    },
+    ExplainView {
+        expression: crate::Expression,
+        stop_id: StopId,
+        thread_id: ThreadId,
+        frame: StackFrameId,
+        reply: Reply<ViewExplanation>,
+    },
     SelectThread {
         stop_id: StopId,
         thread_id: ThreadId,
@@ -1435,6 +1474,11 @@ impl Request {
             Self::Dereference { .. } => "dereference".to_owned(),
             Self::ValueChildren { .. } => "value children".to_owned(),
             Self::Globals { .. } => "globals".to_owned(),
+            Self::SetViews { .. } => "set views".to_owned(),
+            Self::EnableViews { enabled, .. } => format!("enable views {enabled}"),
+            Self::ExplainView { expression, .. } => {
+                format!("explain the view of `{}`", expression.text())
+            }
             Self::SelectThread { .. } => "select thread".to_owned(),
             Self::SelectFrame { .. } => "select frame".to_owned(),
             Self::SignalPolicy { .. } => "signal policy".to_owned(),

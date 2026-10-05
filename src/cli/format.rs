@@ -1354,6 +1354,62 @@ pub fn signal_policies(policies: &[(u64, uscope::SignalPolicy)], renderer: Rende
     .join("\n")
 }
 
+/// Says which view presents a value, and why each view tried before it did
+/// not bind.
+pub fn view_explanation(
+    expression: &str,
+    explanation: &uscope::ViewExplanation,
+    renderer: Renderer,
+) -> String {
+    let type_name = explanation
+        .type_info
+        .as_ref()
+        .map_or("<unknown type>", |info| &info.name);
+    let mut lines = vec![format!(
+        "`{expression}` has type {}",
+        renderer.paint(Role::Type, type_name)
+    )];
+    match &explanation.presentation {
+        Some(presentation) if presentation.shape == uscope::PresentedShape::Raw => {
+            lines.push(format!(
+                "{} binds, but shows the value as stored: {}",
+                presentation.view,
+                presentation
+                    .problem
+                    .as_ref()
+                    .map_or_else(|| "it failed".to_owned(), ToString::to_string)
+            ));
+        }
+        Some(presentation) => {
+            lines.push(format!("presented by {}", presentation.view));
+            lines.push(format!(
+                "as {}",
+                renderer.paint(Role::Value, &presentation.summary)
+            ));
+            if let Some(problem) = &presentation.problem {
+                lines.push(format!("the summary stopped short: {problem}"));
+            }
+        }
+        None if !explanation.enabled => lines
+            .push("views are off, so it shows as stored; `set views on` turns them on".to_owned()),
+        None if explanation.candidates.is_empty() => {
+            lines.push("no view's pattern names the type, so it shows as stored".to_owned());
+        }
+        None => lines.push("no view binds, so it shows as stored".to_owned()),
+    }
+    if !explanation.candidates.is_empty() {
+        lines.push("views tried, in order:".to_owned());
+        for candidate in explanation.candidates.iter() {
+            lines.push(format!(
+                "  {}: {}",
+                candidate.view,
+                candidate.rejection.as_deref().unwrap_or("binds")
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
 /// Reports a signal that did not stop the inferior.
 /// Renders a logged message with the values it shows.
 pub fn log_message(parts: &[uscope::LogPart]) -> String {

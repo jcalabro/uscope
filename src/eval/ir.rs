@@ -20,6 +20,12 @@ impl<O, S> Program<O, S> {
         &self.root.ty
     }
 
+    /// Whether the program's result is a place: storage that is read only
+    /// when a value is needed.
+    pub const fn is_place(&self) -> bool {
+        self.root.is_place()
+    }
+
     /// The data object whose storage holds the result, when the result is
     /// part of one: reached from it through members and array elements
     /// only, never through a pointer.
@@ -117,6 +123,8 @@ pub enum Length {
 pub enum Op<O, S> {
     /// A data object's storage.
     Object(O),
+    /// A value the machine computes once and keeps, which is not a place.
+    Bound(O),
     /// A structural step from a place, with its index values. A step that
     /// `follows` a pointer, as a dereference or a slice's element does,
     /// leaves the storage of the place it starts from.

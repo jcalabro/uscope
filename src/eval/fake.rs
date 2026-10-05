@@ -276,6 +276,31 @@ impl World {
         )
     }
 
+    /// Gives a type the identity a view's pattern matches.
+    pub fn identify(
+        &mut self,
+        ty: TypeReference,
+        language: crate::SourceLanguage,
+        path: &[&str],
+        base: &str,
+        arguments: Vec<crate::TypeArgument>,
+    ) {
+        let index = usize::try_from(ty.id.get()).expect("small ids");
+        self.types[index].identity = Some(Arc::new(crate::TypeIdentity {
+            language,
+            path: path.iter().map(|segment| Arc::from(*segment)).collect(),
+            inline_namespaces: Arc::default(),
+            base: base.into(),
+            origin: if arguments.is_empty() {
+                crate::ArgumentOrigin::None
+            } else {
+                crate::ArgumentOrigin::Dwarf
+            },
+            arguments: arguments.into(),
+            go: None,
+        }));
+    }
+
     pub fn typedef(&mut self, name: &str, target: TypeReference) -> TypeReference {
         let size = self.info(target).byte_size;
         self.add(
@@ -307,6 +332,11 @@ impl World {
         self.memory.insert(address, bytes.to_vec());
         self.next += (bytes.len() as u64).div_ceil(16) * 16 + 16;
         address
+    }
+
+    /// Maps `bytes` at `address`, which nothing else may use.
+    pub fn map(&mut self, address: u64, bytes: &[u8]) {
+        self.memory.insert(address, bytes.to_vec());
     }
 
     /// A variable in memory, returning its address.
@@ -391,6 +421,14 @@ impl World {
     /// Makes reading `[address, address + size)` fail the test.
     pub fn poison(&mut self, address: u64, size: u64) {
         self.poisoned.push((address, address + size));
+    }
+
+    /// The type of the variable `name`.
+    pub fn type_of(&self, name: &str) -> TypeReference {
+        self.objects
+            .iter()
+            .find(|object| object.name == name)
+            .map_or_else(|| panic!("no variable `{name}`"), |object| object.ty)
     }
 
     pub fn address_of(&self, name: &str) -> u64 {
@@ -536,6 +574,7 @@ impl World {
             dereference: DereferenceState::NotApplicable,
             children: ValueChildren::NotApplicable,
             text: None,
+            presentation: None,
         }
     }
 
@@ -1003,6 +1042,7 @@ impl Machine for World {
                 dereference: DereferenceState::NotApplicable,
                 children: ValueChildren::NotApplicable,
                 text: None,
+                presentation: None,
             },
         ))
     }

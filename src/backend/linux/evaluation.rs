@@ -49,45 +49,53 @@ pub(super) struct StopObject {
     local: bool,
 }
 
-/// A structural step planned in one module's image.
+/// A structural step planned from types alone.
 #[derive(Clone)]
-pub(super) struct StopStep {
-    module: ModuleId,
-    step: PlannedStep,
+pub(super) enum StopStep {
+    /// A step one module's image planned.
+    Provider { module: ModuleId, step: PlannedStep },
+    /// To an element of a value a view presents as a sequence.
+    Element(Arc<ViewBound>),
 }
+
+/// A view bound against one type, whose steps are a stop's.
+pub(super) type ViewBound = crate::view::bind::BoundView<StopStep>;
 
 impl fmt::Debug for StopStep {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "StopStep({:?})", self.module)
+        match self {
+            Self::Provider { module, .. } => write!(formatter, "StopStep({module:?})"),
+            Self::Element(bound) => write!(formatter, "StopStep(element of {})", bound.view.header),
+        }
     }
 }
 
 /// Where a value of one module's types is.
 #[derive(Debug, Clone)]
 pub(super) struct StopPlace {
-    module: ModuleId,
-    located: Located,
+    pub(super) module: ModuleId,
+    pub(super) located: Located,
 }
 
 /// One frame of a stop, as expressions see it.
-struct Frame<'a, P: InspectionOps> {
-    controller: &'a Controller<P>,
-    inferior: &'a Inferior,
-    pid: Pid,
-    stop_id: StopId,
-    resolved: &'a ResolvedFrame,
+pub(super) struct Frame<'a, P: InspectionOps> {
+    pub(super) controller: &'a Controller<P>,
+    pub(super) inferior: &'a Inferior,
+    pub(super) pid: Pid,
+    pub(super) stop_id: StopId,
+    pub(super) resolved: &'a ResolvedFrame,
     /// The frame's module, address, and inline instance, when it has debug
     /// information.
-    code: Option<(&'a RuntimeModule, ImageAddress, Option<CodeInstanceId>)>,
+    pub(super) code: Option<(&'a RuntimeModule, ImageAddress, Option<CodeInstanceId>)>,
     registers: OnceCell<Option<RegisterSnapshot>>,
 }
 
 impl<'a, P: InspectionOps> Frame<'a, P> {
-    fn module(&self, id: ModuleId) -> Option<&'a RuntimeModule> {
+    pub(super) fn module(&self, id: ModuleId) -> Option<&'a RuntimeModule> {
         self.controller.modules.get(&id)
     }
 
-    fn module_of(&self, ty: TypeReference) -> Option<&'a RuntimeModule> {
+    pub(super) fn module_of(&self, ty: TypeReference) -> Option<&'a RuntimeModule> {
         self.controller
             .modules
             .values()
@@ -229,6 +237,79 @@ fn refusal(error: &Error) -> Refusal {
     Refusal::new(kind, error.to_string())
 }
 
+/// Plans one step from a value of `from` in the image of its module.
+pub(super) fn plan_in<P: InspectionOps>(
+    controller: &Controller<P>,
+    from: TypeReference,
+    step: StepKind<'_>,
+) -> std::result::Result<Planned<StopStep>, Refusal> {
+    let module = controller
+        .modules
+        .values()
+        .find(|module| module.loaded.image == from.image)
+        .ok_or_else(|| Refusal::new(ErrorKind::Unsupported, "the type's module is not loaded"))?;
+    let step = match step {
+        StepKind::Deref => Step::Deref,
+        StepKind::Member(name) => Step::Member(name),
+        StepKind::Index { available } => Step::Index { available },
+    };
+    let planned = module
+        .variables
+        .plan_step(from.id, step)
+        .map_err(|error| refusal(&error))?;
+    Ok(Planned {
+        result: planned.result().map(|id| TypeReference {
+            image: module.loaded.image,
+            id,
+        }),
+        consumed: planned.consumed(),
+        step: StopStep::Provider {
+            module: module.loaded.id,
+            step: planned,
+        },
+    })
+}
+
+/// The types a name means in one module, through its image's identity
+/// index: a name may omit outer path segments and trailing arguments. One
+/// type defined alike in several units is one type, and so is a synonym
+/// that only renames another candidate, as Go's typedefs of its named
+/// types do.
+pub(super) fn lookup_type_in(module: &RuntimeModule, query: &TypeQuery) -> TypeLookup {
+    let candidates = module
+        .image
+        .types_named(&query.name)
+        .into_iter()
+        .filter_map(|reference| module.image.type_info(reference))
+        .filter(|info| tag_matches(query.tag, &info.kind))
+        .collect::<Vec<_>>();
+    let mut found: Vec<(String, TypeReference)> = candidates
+        .iter()
+        .filter(|info| {
+            !matches!(
+                info.kind,
+                TypeKind::Named { target: Some(target), .. }
+                    if candidates.iter().any(|other| {
+                        other.reference == target && other.name == info.name
+                    })
+            )
+        })
+        .map(|info| (definition(&module.image, info), info.reference))
+        .collect();
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    found.dedup_by(|left, right| left.0 == right.0);
+    match found.as_slice() {
+        [] => TypeLookup::NotFound,
+        [(_, ty)] => TypeLookup::Found(*ty),
+        _ => TypeLookup::Ambiguous(
+            found
+                .into_iter()
+                .map(|(definition, _)| definition)
+                .collect(),
+        ),
+    }
+}
+
 impl<P: InspectionOps> Scope for Frame<'_, P> {
     type Object = StopObject;
     type Step = StopStep;
@@ -362,46 +443,12 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
         Ok(Lookup::NotFound)
     }
 
-    /// The types a name means, through each image's identity index: a name
-    /// may omit outer path segments and trailing arguments. One type
-    /// defined alike in several units is one type, and so is a synonym
-    /// that only renames another candidate, as Go's typedefs of its named
-    /// types do.
+    /// The types a name means, in the frame's module first.
     fn lookup_type(&self, query: &TypeQuery) -> TypeLookup {
         for module in self.modules() {
-            let candidates = module
-                .image
-                .types_named(&query.name)
-                .into_iter()
-                .filter_map(|reference| module.image.type_info(reference))
-                .filter(|info| tag_matches(query.tag, &info.kind))
-                .collect::<Vec<_>>();
-            let mut found: Vec<(String, TypeReference)> = candidates
-                .iter()
-                .filter(|info| {
-                    !matches!(
-                        info.kind,
-                        TypeKind::Named { target: Some(target), .. }
-                            if candidates.iter().any(|other| {
-                                other.reference == target && other.name == info.name
-                            })
-                    )
-                })
-                .map(|info| (definition(&module.image, info), info.reference))
-                .collect();
-            found.sort_by(|left, right| left.0.cmp(&right.0));
-            found.dedup_by(|left, right| left.0 == right.0);
-            match found.as_slice() {
-                [] => {}
-                [(_, ty)] => return TypeLookup::Found(*ty),
-                _ => {
-                    return TypeLookup::Ambiguous(
-                        found
-                            .into_iter()
-                            .map(|(definition, _)| definition)
-                            .collect(),
-                    );
-                }
+            match lookup_type_in(module, query) {
+                TypeLookup::NotFound => {}
+                found => return found,
             }
         }
         TypeLookup::NotFound
@@ -412,26 +459,15 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
         from: TypeReference,
         step: StepKind<'_>,
     ) -> std::result::Result<Planned<StopStep>, Refusal> {
-        let module = self.module_of(from).ok_or_else(|| {
-            Refusal::new(ErrorKind::Unsupported, "the type's module is not loaded")
-        })?;
-        let step = match step {
-            StepKind::Deref => Step::Deref,
-            StepKind::Member(name) => Step::Member(name),
-            StepKind::Index { available } => Step::Index { available },
-        };
-        let planned = module
-            .variables
-            .plan_step(from.id, step)
-            .map_err(|error| refusal(&error))?;
-        Ok(Planned {
-            result: planned.result().map(|id| Self::reference(module, id)),
-            consumed: planned.consumed(),
-            step: StopStep {
-                module: module.loaded.id,
-                step: planned,
-            },
-        })
+        let planned = plan_in(self.controller, from, step);
+        // A value with no indexing of its own is indexed through the view
+        // that presents it as a sequence.
+        match (&planned, step) {
+            (Err(_), StepKind::Index { .. }) => {
+                self.controller.view_index(from).map_or(planned, Ok)
+            }
+            _ => planned,
+        }
     }
 
     fn register(&self, name: &str) -> Option<Register> {
@@ -455,17 +491,42 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
 }
 
 /// A frame's state at one stop, which a bound program runs against.
-struct StopMachine<'a, 'b, P: InspectionOps> {
-    frame: &'b Frame<'a, P>,
-    budget: &'b mut InspectionBudget,
+pub(super) struct StopMachine<'a, 'b, P: InspectionOps> {
+    pub(super) frame: &'b Frame<'a, P>,
+    pub(super) budget: &'b mut InspectionBudget,
+    /// How many views are presenting the values this machine presents, one
+    /// inside another.
+    pub(super) depth: u8,
+    /// Whether a run-control request waiting ends the work, which then
+    /// runs again after it; false for work run control itself does.
+    pub(super) interruptible: bool,
+    charges: u32,
 }
+
+/// How many units of work a machine does between checks for waiting run
+/// control.
+const INTERRUPT_INTERVAL: u32 = 64;
 
 const fn failed(error: Error) -> Stop {
     Stop::Failed(error)
 }
 
-impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
-    fn module(&self, id: ModuleId) -> std::result::Result<&'a RuntimeModule, Stop> {
+impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
+    pub(super) const fn new(
+        frame: &'b Frame<'a, P>,
+        budget: &'b mut InspectionBudget,
+        interruptible: bool,
+    ) -> Self {
+        Self {
+            frame,
+            budget,
+            depth: 0,
+            interruptible,
+            charges: 0,
+        }
+    }
+
+    pub(super) fn module(&self, id: ModuleId) -> std::result::Result<&'a RuntimeModule, Stop> {
         self.frame
             .module(id)
             .ok_or_else(|| failed(Error::ModuleNotLoaded(id)))
@@ -486,7 +547,8 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         )
     }
 
-    fn materialize(
+    /// A value as it is stored, without a view.
+    pub(super) fn materialize(
         &mut self,
         module: &RuntimeModule,
         located: &Located,
@@ -543,7 +605,15 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     fn charge(&mut self) -> std::result::Result<(), Stop> {
         self.budget
             .consume_expression_work(1)
-            .map_err(|exhaustion| Stop::missing(VariableState::Unavailable(exhaustion.into())))
+            .map_err(|exhaustion| Stop::missing(VariableState::Unavailable(exhaustion.into())))?;
+        self.charges = self.charges.wrapping_add(1);
+        if self.interruptible
+            && self.charges.is_multiple_of(INTERRUPT_INTERVAL)
+            && self.frame.controller.run_control_waiting()
+        {
+            return Err(failed(Error::Interrupted));
+        }
+        Ok(())
     }
 
     fn locate(&mut self, object: &StopObject) -> std::result::Result<StopPlace, Stop> {
@@ -563,9 +633,12 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     }
 
     fn check_indices(&self, step: &StopStep, indices: &[i128]) -> std::result::Result<(), Stop> {
-        step.step
-            .check_indices(indices)
-            .map_err(|error| Stop::Refused(refusal(&error)))
+        match step {
+            StopStep::Provider { step, .. } => step
+                .check_indices(indices)
+                .map_err(|error| Stop::Refused(refusal(&error))),
+            StopStep::Element(_) => Ok(()),
+        }
     }
 
     fn step(
@@ -574,7 +647,19 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         step: &StopStep,
         indices: &[i128],
     ) -> std::result::Result<StopPlace, Stop> {
-        let module = self.module(step.module)?;
+        let (module_id, step) = match step {
+            StopStep::Provider { module, step } => (*module, step),
+            StopStep::Element(bound) => {
+                let [index] = indices else {
+                    return Err(Stop::Refused(Refusal::new(
+                        ErrorKind::Type,
+                        "a view's elements take one index",
+                    )));
+                };
+                return self.view_element(bound, from, *index);
+            }
+        };
+        let module = self.module(module_id)?;
         let address = self.address(module);
         let mut runtime = self.frame.controller.frame_runtime(
             self.frame.inferior,
@@ -586,7 +671,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             .variables
             .apply(
                 &from.located,
-                &step.step,
+                step,
                 indices,
                 address,
                 &mut runtime,
@@ -596,7 +681,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 Error::ValueIndexOutOfBounds { .. } => Stop::Refused(refusal(&error)),
                 error => failed(error),
             })?;
-        Self::accessed(accessed, step.module)
+        Self::accessed(accessed, module_id)
     }
 
     fn place_at(
@@ -690,8 +775,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     }
 
     fn text(&mut self, at: &StopPlace) -> std::result::Result<Option<TextSummary>, Stop> {
-        let module = self.module(at.module)?;
-        let value = self.materialize(module, &at.located)?;
+        let value = self.present(at)?;
         match value.state {
             VariableState::Available { text, .. } => Ok(text.map(|text| (*text).clone())),
             state => Err(Stop::missing(state)),
@@ -706,6 +790,10 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 "the value is not a slice",
             ))),
         }
+    }
+
+    fn presented_length(&mut self, at: &StopPlace) -> std::result::Result<Option<u64>, Stop> {
+        self.view_length(at)
     }
 
     fn register(&mut self, register: &Register) -> std::result::Result<u128, Stop> {
@@ -731,7 +819,8 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
 
     fn present(&mut self, at: &StopPlace) -> std::result::Result<InspectedValue, Stop> {
         let module = self.module(at.module)?;
-        self.materialize(module, &at.located)
+        let value = self.materialize(module, &at.located)?;
+        self.presented(value)
     }
 
     fn present_bytes(
@@ -755,7 +844,8 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 address: None,
             },
         };
-        self.materialize(module, &located)
+        let value = self.materialize(module, &located)?;
+        self.presented(value)
     }
 
     fn present_pointer(
@@ -806,6 +896,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 dereference,
                 children: ValueChildren::NotApplicable,
                 text: None,
+                presentation: None,
             },
         ))
     }
@@ -993,10 +1084,8 @@ impl<P: InspectionOps> Controller<P> {
             bind(expression, &scope, Mode::Read)
         }
         .map_err(Error::Expression)?;
-        let mut machine = StopMachine {
-            frame: &scope,
-            budget: &mut budget,
-        };
+        // Run control is evaluating, so nothing interrupts it.
+        let mut machine = StopMachine::new(&scope, &mut budget, false);
         let outcome = run(&program, &mut machine);
         record!("evaluate `{}` at a hit: {outcome:?}", expression.text());
         match outcome {
@@ -1029,10 +1118,7 @@ impl<P: InspectionOps> Controller<P> {
         let scope = self.frame_for(inferior, stop_id, pid, &resolved);
         let program = bind(expression, &scope, Mode::Read).map_err(Error::Expression)?;
         let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
-        let mut machine = StopMachine {
-            frame: &scope,
-            budget: &mut budget,
-        };
+        let mut machine = StopMachine::new(&scope, &mut budget, false);
         let value = match run(&program, &mut machine) {
             Ok(Outcome::Value { value, .. }) => value,
             Ok(_) => {
@@ -1088,7 +1174,7 @@ impl<P: InspectionOps> Controller<P> {
         Ok(type_info(&scope, program.result()))
     }
 
-    fn frame_for<'a>(
+    pub(super) fn frame_for<'a>(
         &'a self,
         inferior: &'a Inferior,
         stop_id: StopId,
@@ -1122,10 +1208,9 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Result<Evaluated> {
         let scope = self.frame_for(inferior, stop_id, pid, resolved);
         let program = bind(expression, &scope, mode).map_err(Error::Expression)?;
-        let mut machine = StopMachine {
-            frame: &scope,
-            budget,
-        };
+        // Reading may wait for run control; an assignment, which changes
+        // the stop, may not.
+        let mut machine = StopMachine::new(&scope, budget, mode == Mode::Read);
         let outcome = run(&program, &mut machine);
         record!("evaluate `{}`: {outcome:?}", expression.text());
         match outcome {

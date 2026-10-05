@@ -33,6 +33,7 @@ mod source_map;
 mod test_memory;
 mod type_identity;
 mod unwind;
+mod view;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -73,20 +74,21 @@ pub use model::{
     InspectionLimits, InspectionUsage, IntegerValue, LineNumber, LineSequenceId,
     LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead,
     MemoryReadCompletion, MemoryReadUnavailableReason, ModuleAddress, ModuleId, ModuleImage,
-    ModuleImageId, NamedTypeRelationship, OptimizedOutReason, PointerWidth, RecordKind,
-    RecordMember, RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, ScalarValue, SectionId, SectionInfo, SectionLocation,
-    SourceContext, SourceFile, SourceFileId, SourceLanguage, SourceLine, SourceLocation,
-    StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolBinding, SymbolExtent,
-    SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources,
-    TargetDescription, TextCompletion, TextSummary, ThreadId, TlsUnavailableReason, TypeArgument,
-    TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
-    UnsupportedVariableFeature, UnwindTermination, ValueAccessUnavailableReason, ValueBitRange,
-    ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
-    ValuePageCompletion, Variable, VariableInvalidReason, VariableKind, VariableMalformedKind,
-    VariableMalformedReason, VariableSnapshot, VariableState, VariableUnavailableReason,
-    VariableValue, VariableValueSource, Variant, VariantDiscriminant, VariantSelection,
-    VariantSelector, VariantStorageKind, VirtualAddress,
+    ModuleImageId, NamedTypeRelationship, OptimizedOutReason, PointerWidth, Presentation,
+    PresentedCount, PresentedShape, RecordKind, RecordMember, RecordMemberLayout, ReferenceKind,
+    RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue, ScalarValue,
+    SectionId, SectionInfo, SectionLocation, SourceContext, SourceFile, SourceFileId,
+    SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags,
+    StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo,
+    SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TextCompletion, TextSummary,
+    ThreadId, TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind,
+    TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
+    ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
+    ValueChildRelationship, ValueChildren, ValueChildrenReference, ValuePageCompletion, Variable,
+    VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
+    VariableSnapshot, VariableState, VariableUnavailableReason, VariableValue, VariableValueSource,
+    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind, ViewName,
+    ViewProblem, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CoreDumpInfo,
@@ -95,10 +97,25 @@ pub use protocol::{
     HitCondition, InferiorState, InvalidatedWatchpoint, LaunchOptions, LogPart, ModuleIdentity,
     PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope, SignalPolicy,
     StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState, ValueChildQuery,
-    VariableQuery, WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities,
-    WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
+    VariableQuery, ViewCandidate, ViewExplanation, WatchAccess, WatchScope, WatchTarget,
+    Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation,
+    WatchpointSpec,
 };
 pub use source_map::SourcePathMap;
+pub use view::summary::{
+    float as float_text, integer as integer_text, quoted as quoted_text, scalar as scalar_text,
+};
+pub use view::syntax::Error as ViewFileError;
+
+/// The views built into uscope, in the order they are tried.
+#[must_use]
+pub fn built_in_views() -> Vec<Arc<ViewName>> {
+    view::ViewSet::built_in()
+        .views()
+        .iter()
+        .map(|view| view::name_of(view))
+        .collect()
+}
 
 /// Finds a signal's exception code by name, with or without its `SIG`
 /// prefix and in any case, or by number: `SIGUSR1`, `usr1`, `10`, `SIG34`.
@@ -156,6 +173,15 @@ pub fn fuzz_elf_symbols(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_disassembly(data: &[u8]) {
     disassembly::fuzz(data);
+}
+
+/// Runs every built-in view, and a view file made of the input's tail,
+/// over memory made of its bytes, for the hostile fuzz harness
+/// (`plans/views.md` §3.14).
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_views(data: &[u8]) {
+    view::fuzz::hostile(data);
 }
 
 /// Checks the expression parser's invariants on `text` for the fuzz
@@ -1030,6 +1056,30 @@ impl DebuggerHandle {
         self.selected().await?.expression_type(expression).await
     }
 
+    /// Why an expression's value in the selected frame is presented as it
+    /// is: the views its type matched, and how the one that binds presents
+    /// it.
+    pub async fn explain_view(&self, expression: &Expression) -> Result<ViewExplanation> {
+        self.selected().await?.explain_view(expression).await
+    }
+
+    /// Presents values with these view files ahead of the built-in views,
+    /// replacing any loaded before, and returns what kept parts of them
+    /// out. Files are parsed here, before the debugger sees them.
+    pub async fn load_views(&self, files: &[(&str, &str)]) -> Result<Arc<[ViewFileError]>> {
+        let views = Arc::new(view::ViewSet::with_session(files.iter().copied()));
+        let errors: Arc<[ViewFileError]> = views.errors().into();
+        self.request(|reply| Request::SetViews { views, reply })
+            .await?;
+        Ok(errors)
+    }
+
+    /// Turns presenting values with views on or off.
+    pub async fn enable_views(&self, enabled: bool) -> Result<()> {
+        self.request(|reply| Request::EnableViews { enabled, reply })
+            .await
+    }
+
     /// Evaluates an expression in the selected frame of the selected stopped
     /// thread and returns its value; see [`StopView::inspect`].
     pub async fn inspect(&self, expression: &Expression) -> Result<InspectedValue> {
@@ -1441,6 +1491,21 @@ impl StopView<'_> {
                 expression,
                 mode,
                 limits,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Why an expression's value in the frame is presented as it is.
+    pub async fn explain_view(&self, expression: &Expression) -> Result<ViewExplanation> {
+        let context = self.context;
+        let expression = expression.clone();
+        self.handle
+            .request(|reply| Request::ExplainView {
+                expression,
                 stop_id: context.stop,
                 thread_id: context.thread,
                 frame: context.frame,

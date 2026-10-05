@@ -1,6 +1,6 @@
 //! The text string values hold: C strings, character arrays, the slices a
-//! language makes its text of, and the string types of Go, Rust, and C++'s
-//! libstdc++.
+//! language makes its text of, and Go's strings. The string classes of
+//! libraries are views (`views/`).
 //!
 //! Text is read for display, bounded per value and never across a page that
 //! cannot be read, so a corrupt pointer or length costs at most a few reads.
@@ -329,72 +329,19 @@ impl DwarfVariableInfo {
     }
 
     /// The byte offsets of a string type's pointer to its bytes and of its
-    /// length, for the string types whose layout is known.
+    /// length: Go's strings, whose kind says what they are. The string
+    /// classes of libraries, whose layouts are private, are views
+    /// (`views/`).
     fn string_parts(&self, record: TypeId, members: &[RecordMember]) -> Option<(u64, u64)> {
         let info = self.type_info(record).ok()?;
-        let name = info.name.as_ref();
-        let at = |path: &[&str]| self.member_path(members, path);
         let go_kind = info
             .identity
             .as_ref()
             .and_then(|identity| identity.go)
             .map(|go| go.kind);
-        if go_kind == Some(GoKind::String) {
-            // Go's string header.
-            return Some((at(&["str"])?, at(&["len"])?));
-        }
-        // Records are named without their namespaces: Rust's
-        // `alloc::string::String` is `String`.
-        if name == "String" {
-            // Rust's String wraps a Vec<u8>, whose buffer type changes
-            // between releases; its one pointer is the bytes.
-            let (buffer, buffer_type) = member(members, "vec").and_then(|(vec, vec_type)| {
-                let (offset, id) = member(&self.record_members(vec_type)?, "buf")?;
-                Some((vec + offset, id))
-            })?;
-            let length = at(&["vec", "len"])?;
-            return Some((buffer + self.first_pointer(buffer_type, 0)?, length));
-        }
-        // libstdc++'s `std::string`, when the program's debug information
-        // defines it rather than only declaring it.
-        if name.starts_with("basic_string<char,") {
-            return Some((at(&["_M_dataplus", "_M_p"])?, at(&["_M_string_length"])?));
-        }
-        None
-    }
-
-    fn record_members(&self, id: TypeId) -> Option<Arc<[RecordMember]>> {
-        match self.value_shape(id).ok()?.kind {
-            ValueShapeKind::Record { members, .. } => Some(members),
-            _ => None,
-        }
-    }
-
-    /// The byte offset of a nested member.
-    fn member_path(&self, members: &[RecordMember], path: &[&str]) -> Option<u64> {
-        let (first, rest) = path.split_first()?;
-        let (offset, id) = member(members, first)?;
-        if rest.is_empty() {
-            return Some(offset);
-        }
-        Some(offset + self.member_path(&self.record_members(id)?, rest)?)
-    }
-
-    /// The byte offset of the first pointer within a type.
-    fn first_pointer(&self, id: TypeId, depth: usize) -> Option<u64> {
-        if depth > MAX_STRING_DEPTH {
-            return None;
-        }
-        match self.value_shape(id).ok()?.kind {
-            ValueShapeKind::Indirection { .. } => Some(0),
-            ValueShapeKind::Record { members, .. } => members.iter().find_map(|member| {
-                let RecordMemberLayout::ByteOffset(offset) = member.layout else {
-                    return None;
-                };
-                Some(offset + self.first_pointer(member.type_ref.id, depth + 1)?)
-            }),
-            _ => None,
-        }
+        (go_kind == Some(GoKind::String)).then_some(())?;
+        // Go's string header.
+        Some((member(members, "str")?.0, member(members, "len")?.0))
     }
 
     const fn pointer_bytes(&self) -> usize {

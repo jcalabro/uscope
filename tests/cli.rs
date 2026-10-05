@@ -418,6 +418,59 @@ fn strings_print_as_quoted_escaped_text() {
     );
 }
 
+/// `print` shows a value as its view presents it, with its elements up to
+/// the inspection's budget; `print/r` and `set views off` show it as
+/// stored; and `info view` says which view presents it, or why none does.
+#[test]
+fn views_present_values_raw_is_one_step_away_and_info_view_explains() {
+    let stdout = batch(
+        "containers-rust-o0",
+        &["--color", "never"],
+        &[
+            "break barrier",
+            "run",
+            "up",
+            "print ints",
+            "print many",
+            "print/r ints",
+            "print words",
+            "info view ints",
+            "info view past_capacity.value.0",
+            "set views off",
+            "print ints",
+            "info view ints",
+            "set views on",
+            "print ints[1] + len(ints)",
+            "print",
+        ],
+    );
+    let raw_ints = "(Vec<i32, alloc::alloc::Global>) ints = {buf = {inner = {ptr = ";
+    assert_in_order(
+        &stdout,
+        &[
+            "(Vec<i32, alloc::alloc::Global>) ints = len=3 [1, 2, 3]\n",
+            "(Vec<u32, alloc::alloc::Global>) many = len=300 [0, 1, 2, 3, ",
+            " 249, 250, <truncated: MemoryReads limit 256 after 256; requested 1>, <49 omitted>]\n",
+            raw_ints,
+            "}, len = 3}\n",
+            "(Vec<alloc::string::String, alloc::alloc::Global>) words = len=2 [\"one\", \"two\"]\n",
+            "`ints` has type Vec<i32, alloc::alloc::Global>\n",
+            "presented by rust-std.views:",
+            " `rust alloc::vec::Vec<T, _>`\nas len=3 [1, 2, 3]\nviews tried, in order:\n",
+            "`past_capacity.value.0` has type Vec<i32, alloc::alloc::Global>\n",
+            "binds, but shows the value as stored: check `len <= capacity` failed: \
+             `len` is 9, `capacity` is 8\n",
+            "values show as stored\n",
+            raw_ints,
+            "views are off, so it shows as stored; `set views on` turns them on\n",
+            "values show as their views present them\n",
+            "(integer) ints[1] + len(ints) = 5\n",
+            "(PathBuf) path = \"/tmp/uscope\"\n",
+            "(VecDeque<i32, alloc::alloc::Global>) ring = len=4 [1, 2, 3, 4]\n",
+        ],
+    );
+}
+
 /// `ptype` names a type with its path and lists its arguments, whatever
 /// the producer called it.
 #[test]
@@ -1279,8 +1332,9 @@ fn command_argument_errors_use_the_registered_canonical_usage() {
         "{stderr}"
     );
 
-    // Only `info symbol` takes an address, and it requires one.
-    for command in ["info symbol", "info breakpoints 0x10"] {
+    // Only `info symbol` and `info view` take an argument, and they require
+    // one.
+    for command in ["info symbol", "info view", "info breakpoints 0x10"] {
         let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
             .args(["--batch", "--eval", command])
             .arg(&executable)
@@ -1289,7 +1343,9 @@ fn command_argument_errors_use_the_registered_canonical_usage() {
         let stderr = String::from_utf8(output.stderr).expect("UTF-8 error output");
         assert!(!output.status.success(), "{command}");
         assert!(
-            stderr.contains("usage: info breakpoints|watchpoints|signals|core|symbol [0xaddress]"),
+            stderr.contains(
+                "usage: info breakpoints|watchpoints|signals|core|symbol|view [argument...]"
+            ),
             "{command}: {stderr}"
         );
     }
