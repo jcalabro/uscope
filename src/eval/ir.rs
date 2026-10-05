@@ -1,0 +1,198 @@
+//! A bound expression: a tree whose every node has a type, whose every
+//! conversion is explicit, and whose names are resolved.
+
+use super::number::{BitOperator, Float, FloatFormat, FloatOperator, IntType, Integer};
+use super::syntax::Span;
+use super::syntax::ast::BinaryOp;
+use super::target::Register;
+use super::types::Ty;
+use crate::TypeReference;
+
+/// A program bound in one scope, which runs at any stop in that scope.
+#[derive(Debug, Clone)]
+pub struct Program<O, S> {
+    pub(super) root: Node<O, S>,
+}
+
+impl<O, S> Program<O, S> {
+    /// The type of the program's result.
+    pub const fn result(&self) -> &Ty {
+        &self.root.ty
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Node<O, S> {
+    pub op: Op<O, S>,
+    pub ty: Ty,
+    pub span: Span,
+}
+
+impl<O, S> Node<O, S> {
+    /// Whether the node is a place: storage that is read only when a value
+    /// is needed.
+    pub const fn is_place(&self) -> bool {
+        matches!(
+            self.op,
+            Op::Object(_) | Op::Step { .. } | Op::At { .. } | Op::Raw { .. }
+        ) || matches!(&self.op, Op::Choose { places: true, .. })
+    }
+}
+
+/// A constant the binder computed.
+#[derive(Debug, Clone)]
+pub enum Constant {
+    Integer(Integer),
+    Float(Float),
+    Bool(bool),
+    /// A pointer's address, `0` for `null`.
+    Pointer(u64),
+    Text(Vec<u8>),
+}
+
+/// How a comparison compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Comparison {
+    Integers,
+    Floats,
+    /// A float on the left, an integer on the right.
+    FloatInteger,
+    /// An integer on the left, a float on the right.
+    IntegerFloat,
+    Addresses,
+    Bools,
+    /// A place's text on the left, a string on the right.
+    Text,
+}
+
+/// A conversion of a value to another type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Conversion {
+    /// Truncates an integer to a type's width.
+    Truncate(IntType),
+    /// Rounds an integer to the nearest float.
+    IntegerToFloat(FloatFormat),
+    /// Truncates toward zero and saturates; NaN is refused.
+    FloatToInteger(IntType),
+    FloatToFloat(FloatFormat),
+    /// Whether a value is nonzero.
+    Truth,
+    BoolToInteger(IntType),
+    /// An address as an integer of a type's width.
+    PointerToInteger(IntType),
+    /// An integer as an address.
+    IntegerToPointer,
+    /// A pointer as another pointer: the address is kept.
+    PointerToPointer,
+}
+
+/// How `len` measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Length {
+    /// A slice's run-time length.
+    Slice,
+    /// The length in bytes of text.
+    Text,
+}
+
+#[derive(Debug, Clone)]
+pub enum Op<O, S> {
+    /// A data object's storage.
+    Object(O),
+    /// A structural step from a place, with its index values.
+    Step {
+        base: Box<Node<O, S>>,
+        step: S,
+        indices: Vec<Node<O, S>>,
+    },
+    /// The place a computed pointer to a program type points at.
+    At {
+        address: Box<Node<O, S>>,
+        pointee: TypeReference,
+    },
+    /// The place a computed pointer to a language type points at.
+    Raw {
+        address: Box<Node<O, S>>,
+    },
+    /// The value at a place.
+    Load(Box<Node<O, S>>),
+    Register(Register),
+    Constant(Constant),
+    /// The address of a place.
+    AddressOf(Box<Node<O, S>>),
+    /// The address of an array's first element.
+    Decay(Box<Node<O, S>>),
+    /// Exact negation of an integer.
+    Negate(Box<Node<O, S>>),
+    FloatNegate(Box<Node<O, S>>),
+    Not(Box<Node<O, S>>),
+    BitNot(Box<Node<O, S>>),
+    /// Exact `+ - * / %`.
+    Arithmetic {
+        op: BinaryOp,
+        left: Box<Node<O, S>>,
+        right: Box<Node<O, S>>,
+    },
+    /// Float arithmetic in the node's format.
+    FloatArithmetic {
+        op: FloatOperator,
+        left: Box<Node<O, S>>,
+        right: Box<Node<O, S>>,
+    },
+    Bitwise {
+        op: BitOperator,
+        left: Box<Node<O, S>>,
+        right: Box<Node<O, S>>,
+    },
+    Shift {
+        left: bool,
+        value: Box<Node<O, S>>,
+        amount: Box<Node<O, S>>,
+    },
+    Compare {
+        op: BinaryOp,
+        how: Comparison,
+        left: Box<Node<O, S>>,
+        right: Box<Node<O, S>>,
+    },
+    /// `&&` when `and`, otherwise `||`, of truth values.
+    Logical {
+        and: bool,
+        left: Box<Node<O, S>>,
+        right: Box<Node<O, S>>,
+    },
+    /// `?:`; `places` when both branches are places of one type.
+    Choose {
+        condition: Box<Node<O, S>>,
+        then: Box<Node<O, S>>,
+        otherwise: Box<Node<O, S>>,
+        places: bool,
+    },
+    Convert {
+        operand: Box<Node<O, S>>,
+        conversion: Conversion,
+    },
+    /// A pointer moved by a number of elements of `scale` bytes.
+    Offset {
+        pointer: Box<Node<O, S>>,
+        count: Box<Node<O, S>>,
+        scale: u64,
+        backward: bool,
+    },
+    /// How many elements of `scale` bytes lie between two pointers.
+    Difference {
+        left: Box<Node<O, S>>,
+        right: Box<Node<O, S>>,
+        scale: u64,
+    },
+    Length {
+        operand: Box<Node<O, S>>,
+        how: Length,
+    },
+    /// `base[start..end]`.
+    Range {
+        base: Box<Node<O, S>>,
+        start: Box<Node<O, S>>,
+        end: Box<Node<O, S>>,
+    },
+}
