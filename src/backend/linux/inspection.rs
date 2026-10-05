@@ -341,15 +341,18 @@ impl<P: InspectionOps> Controller<P> {
             let local = match (scope, runtime.as_mut()) {
                 (Some((module, address, selected)), Some(runtime)) => module
                     .variables
-                    .inspect_path(
-                        address,
-                        selected,
-                        &root,
-                        selectors,
-                        variable_context(stop_id, pid, frame, module, Some(address)),
-                        runtime,
-                        budget,
-                    )
+                    .visible_object(address, selected, &root)
+                    .and_then(|object| {
+                        crate::debug_info::inspect_path(
+                            module.variables.as_ref(),
+                            object,
+                            selectors,
+                            Some(address),
+                            variable_context(stop_id, pid, frame, module, Some(address)),
+                            runtime,
+                            budget,
+                        )
+                    })
                     .map(|value| {
                         (
                             value,
@@ -580,10 +583,12 @@ impl<P: InspectionOps> Controller<P> {
         }
         let context_address = global_context_address(frame, module);
         let mut runtime = self.frame_runtime(inferior, pid, frame, module);
-        module.variables.inspect_global_path(
-            global.variable,
-            context_address,
+        let object = module.variables.global_object(global.variable)?;
+        crate::debug_info::inspect_path(
+            module.variables.as_ref(),
+            object,
             selectors,
+            context_address,
             variable_context(
                 public_stop_id(inferior),
                 pid,

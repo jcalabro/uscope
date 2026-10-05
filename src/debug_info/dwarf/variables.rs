@@ -17,13 +17,16 @@ use std::sync::Arc;
 
 use gimli::RunTimeEndian;
 
-use crate::debug_info::{ObjectStorage, VariableContext, VariableInfo, VariableRuntime};
+use crate::debug_info::{
+    Accessed, Located, ObjectKey, ObjectStorage, PlannedStep, Step, VariableContext, VariableInfo,
+    VariableRuntime,
+};
 use crate::inspection::InspectionBudget;
 use crate::{
     AddressRange, ByteOrder, CodeInstanceId, DereferenceReference, DereferencedValue, Error,
     GlobalVariableId, GlobalVariableInfo, ImageAddress, InspectedValue, ModuleImageId, Result,
     SourceFile, SourceFileId, SourceLocation, TargetDescription, TypeId, TypeInfo, TypeNode,
-    TypeReference, ValueChildPage, ValueChildrenReference, ValuePathStep, Variable, VariableKind,
+    TypeReference, ValueChildPage, ValueChildrenReference, Variable, VariableKind,
     VariableMalformedKind, VariableMalformedReason, VariableQuery, VariableState,
 };
 
@@ -34,7 +37,8 @@ use die::{
 };
 use evaluate::FrameBaseCache;
 use globals::{load_globals, public_global_type};
-use inspect::{inspected_value, unavailable};
+pub(in crate::debug_info) use inspect::PathStep;
+use inspect::{inspected_value, path_error_state, unavailable};
 use location::{
     EvaluationUnit, Expression, LocationDescription, copy_data_object_value,
     copy_optional_location, load_evaluation_units,
@@ -560,51 +564,147 @@ impl VariableInfo for DwarfVariableInfo {
         Ok(variables)
     }
 
-    fn inspect_path(
+    fn visible_object(
         &self,
         address: ImageAddress,
         selected: Option<CodeInstanceId>,
-        root: &str,
-        selectors: &[ValuePathStep],
+        name: &str,
+    ) -> Result<ObjectKey> {
+        self.visible_object(address, selected, name).map(ObjectKey)
+    }
+
+    fn global_object(&self, id: GlobalVariableId) -> Result<ObjectKey> {
+        self.globals
+            .get(id.index())
+            .map(|&index| ObjectKey(index))
+            .ok_or_else(|| Error::VariableNotFound(id.to_string()))
+    }
+
+    fn object_type(&self, object: ObjectKey) -> std::result::Result<TypeId, Arc<str>> {
+        match &self.objects[object.0].type_info {
+            TypeResolution::Resolved(id) => Ok(*id),
+            TypeResolution::Malformed(description) => Err(Arc::clone(description)),
+        }
+    }
+
+    fn type_info(&self, id: TypeId) -> std::result::Result<TypeInfo, Arc<str>> {
+        Self::type_info(self, id).cloned()
+    }
+
+    fn plan_step(&self, from: TypeId, step: Step<'_>) -> Result<PlannedStep> {
+        Self::plan_step(self, from, step)
+    }
+
+    fn inspect_object(
+        &self,
+        object: ObjectKey,
+        address: Option<ImageAddress>,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Variable> {
+        let mut frame_base = FrameBaseCache::Empty;
+        self.inspect_data_object(
+            &self.objects[object.0],
+            address,
+            context,
+            runtime,
+            &mut frame_base,
+            budget,
+        )
+    }
+
+    fn locate(
+        &self,
+        object: ObjectKey,
+        address: Option<ImageAddress>,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Accessed> {
+        let variable = &self.objects[object.0];
+        let mut frame_base = FrameBaseCache::Empty;
+        let ty = match &variable.type_info {
+            TypeResolution::Resolved(id) => *id,
+            TypeResolution::Malformed(description) => {
+                return Ok(Err(VariableState::Malformed(malformed_reason(
+                    VariableMalformedKind::InvalidTypeGraph,
+                    Arc::clone(description),
+                ))));
+            }
+        };
+        match self.located_data_object(variable, address, runtime, &mut frame_base, budget) {
+            Ok(storage) => Ok(Ok(Located {
+                ty,
+                storage: Self::retained_storage(&storage),
+            })),
+            Err(error) => path_error_state(error).map(Err),
+        }
+    }
+
+    fn apply(
+        &self,
+        from: &Located,
+        step: &PlannedStep,
+        indices: &[i128],
+        address: Option<ImageAddress>,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Accessed> {
+        let mut frame_base = FrameBaseCache::Empty;
+        let storage = Self::restored_storage(&from.storage);
+        match self.apply_steps(
+            storage,
+            &step.steps,
+            indices,
+            address,
+            runtime,
+            &mut frame_base,
+            budget,
+        )? {
+            Ok(storage) => {
+                let Some(ty) = step.result else {
+                    return Ok(Err(VariableState::Malformed(malformed_reason(
+                        VariableMalformedKind::InvalidExpression,
+                        "an untyped step unexpectedly reached storage".into(),
+                    ))));
+                };
+                Ok(Ok(Located {
+                    ty,
+                    storage: Self::retained_storage(&storage),
+                }))
+            }
+            Err(error) => path_error_state(error).map(Err),
+        }
+    }
+
+    fn materialize(
+        &self,
+        at: &Located,
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<InspectedValue> {
-        let object = self.visible_object(address, selected, root)?;
-        if let Err(exhaustion) = budget.consume_variable_value() {
-            return Ok(inspected_value(
-                None,
-                VariableState::Unavailable(exhaustion.into()),
-                budget,
-            ));
-        }
-        if selectors.is_empty() {
-            let mut frame_base = FrameBaseCache::Empty;
-            let variable = self.inspect_data_object(
-                object,
-                Some(address),
-                context,
-                runtime,
-                &mut frame_base,
-                budget,
-            )?;
-            return Ok(inspected_value(variable.type_info, variable.state, budget));
-        }
-        let root_type = match &object.type_info {
-            TypeResolution::Resolved(id) => *id,
-            TypeResolution::Malformed(description) => {
+        let type_info = match Self::type_info(self, at.ty) {
+            Ok(info) => info.clone(),
+            Err(description) => {
                 return Ok(inspected_value(
                     None,
                     VariableState::Malformed(malformed_reason(
                         VariableMalformedKind::InvalidTypeGraph,
-                        Arc::clone(description),
+                        description,
                     )),
                     budget,
                 ));
             }
         };
-        let plan = self.plan_path(root_type, selectors)?;
-        self.evaluate_path(object, plan, Some(address), context, runtime, budget)
+        self.materialize_inspected_value(
+            at.ty,
+            type_info,
+            &Self::restored_storage(&at.storage),
+            context,
+            runtime,
+            budget,
+        )
     }
 
     fn local_storage(
@@ -613,7 +713,7 @@ impl VariableInfo for DwarfVariableInfo {
         selected: Option<CodeInstanceId>,
         root: &str,
     ) -> Result<ObjectStorage> {
-        Ok(self.object_storage(self.visible_object(address, selected, root)?))
+        Ok(self.object_storage(&self.objects[self.visible_object(address, selected, root)?]))
     }
 
     fn global_storage(&self, id: GlobalVariableId) -> Result<ObjectStorage> {
@@ -644,57 +744,6 @@ impl VariableInfo for DwarfVariableInfo {
         }
         let mut frame_base = FrameBaseCache::Empty;
         self.inspect_data_object(object, address, context, runtime, &mut frame_base, budget)
-    }
-
-    fn inspect_global_path(
-        &self,
-        id: GlobalVariableId,
-        address: Option<ImageAddress>,
-        selectors: &[ValuePathStep],
-        context: VariableContext,
-        runtime: &mut dyn VariableRuntime,
-        budget: &mut InspectionBudget,
-    ) -> Result<InspectedValue> {
-        let global_index = id.index();
-        let object_index = *self
-            .globals
-            .get(global_index)
-            .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
-        let object = &self.objects[object_index];
-        if let Err(exhaustion) = budget.consume_variable_value() {
-            return Ok(inspected_value(
-                None,
-                VariableState::Unavailable(exhaustion.into()),
-                budget,
-            ));
-        }
-        if selectors.is_empty() {
-            let mut frame_base = FrameBaseCache::Empty;
-            let variable = self.inspect_data_object(
-                object,
-                address,
-                context,
-                runtime,
-                &mut frame_base,
-                budget,
-            )?;
-            return Ok(inspected_value(variable.type_info, variable.state, budget));
-        }
-        let root_type = match &object.type_info {
-            TypeResolution::Resolved(id) => *id,
-            TypeResolution::Malformed(description) => {
-                return Ok(inspected_value(
-                    None,
-                    VariableState::Malformed(malformed_reason(
-                        VariableMalformedKind::InvalidTypeGraph,
-                        Arc::clone(description),
-                    )),
-                    budget,
-                ));
-            }
-        };
-        let plan = self.plan_path(root_type, selectors)?;
-        self.evaluate_path(object, plan, address, context, runtime, budget)
     }
 
     fn dereference(

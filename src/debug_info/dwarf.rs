@@ -127,6 +127,8 @@ fn die_code_ranges<'data>(
 
 mod variables;
 
+pub(in crate::debug_info) use variables::PathStep;
+
 #[cfg(feature = "fuzzing")]
 pub(super) fn fuzz_expression(data: &[u8]) {
     variables::fuzz_expression(data);
