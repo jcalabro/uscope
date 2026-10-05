@@ -535,3 +535,141 @@ fn strings_show_their_text_and_still_expand() {
     );
     dap.finish();
 }
+
+#[test]
+fn statics_a_local_shadows_still_name_the_static() {
+    let mut dap = Dap::start("shadowed statics");
+    let stop = stopped_at(
+        &mut dap,
+        "command-names",
+        "c/command-names.c",
+        "volatile int sink",
+    );
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let scopes = scopes(&mut dap, &frame);
+    let statics = variables(&mut dap, &scopes["Statics"]["variablesReference"]);
+    let row = named(&statics, "shadowed");
+    assert_eq!(row["value"], "7");
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+    assert_eq!(named(&locals, "shadowed")["value"], "-1");
+
+    // Every way a client uses the row's name reaches the static.
+    let evaluate_name = row["evaluateName"].clone();
+    let watched = dap.request(
+        "evaluate",
+        json!({"expression": evaluate_name, "frameId": frame["id"], "context": "watch"}),
+    );
+    assert_eq!(watched["result"], "7", "{evaluate_name}");
+    let changed = dap.request(
+        "setVariable",
+        json!({"variablesReference": scopes["Statics"]["variablesReference"], "name": "shadowed", "value": "8"}),
+    );
+    assert_eq!(changed["value"], "8");
+    let statics = variables(&mut dap, &scopes["Statics"]["variablesReference"]);
+    assert_eq!(named(&statics, "shadowed")["value"], "8");
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+    assert_eq!(named(&locals, "shadowed")["value"], "-1");
+    let info = dap.request(
+        "dataBreakpointInfo",
+        json!({"variablesReference": scopes["Statics"]["variablesReference"], "name": "shadowed", "frameId": frame["id"]}),
+    );
+    assert!(
+        info["description"]
+            .as_str()
+            .is_some_and(|text| !text.contains("until its function returns")),
+        "{info}"
+    );
+    dap.finish();
+}
+
+#[test]
+fn statics_that_files_share_a_name_with_evaluate_to_their_own_files_value() {
+    let mut dap = Dap::start("statics of two files");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("globals-c-gcc-o0"),
+        json!({}),
+        &Configuration {
+            functions: vec![
+                "inspect_globals".to_owned(),
+                "file_one_value".to_owned(),
+                "file_two_value".to_owned(),
+            ],
+            ..Configuration::default()
+        },
+    );
+    let mut mark = started.mark;
+    for (variable, value) in [
+        ("external_value", "101"),
+        ("duplicate", "201"),
+        ("duplicate", "202"),
+    ] {
+        let stop = dap.stopped(mark);
+        let frame = frames(&mut dap, stop.thread)[0].clone();
+        let scopes = scopes(&mut dap, &frame);
+        let statics = variables(&mut dap, &scopes["Statics"]["variablesReference"]);
+        let row = named(&statics, variable);
+        assert_eq!(row["value"], value);
+        let watched = dap.request(
+            "evaluate",
+            json!({"expression": row["evaluateName"], "frameId": frame["id"], "context": "watch"}),
+        );
+        assert_eq!(watched["result"], value, "{}", row["evaluateName"]);
+        let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+        dap.success(resumed);
+        mark = resumed.mark;
+    }
+    dap.event(mark, "exited", |_| true);
+    dap.finish();
+}
+
+#[test]
+fn a_variable_an_inner_block_hides_cannot_be_named() {
+    let mut dap = Dap::start("hidden variables");
+    let stop = stopped_at(
+        &mut dap,
+        "variables-gcc-o0",
+        "c/variables.c",
+        "shadowed += 1;",
+    );
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let scopes = scopes(&mut dap, &frame);
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+    let rows = locals
+        .iter()
+        .filter(|row| row["name"] == "shadowed")
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 2, "{locals:?}");
+    let (hidden, visible) = if rows[0]["value"] == "100" {
+        (rows[0], rows[1])
+    } else {
+        (rows[1], rows[0])
+    };
+    assert_eq!(
+        (&hidden["value"], &visible["value"]),
+        (&json!("100"), &json!("200"))
+    );
+    // The name means the inner variable, so only its row has it.
+    assert_eq!(visible["evaluateName"], "shadowed");
+    assert!(hidden.get("evaluateName").is_none(), "{hidden}");
+    assert!(
+        hidden["presentationHint"]["attributes"]
+            .as_array()
+            .is_some_and(|attributes| attributes.contains(&json!("readOnly"))),
+        "{hidden}"
+    );
+    let changed = dap.request(
+        "setVariable",
+        json!({"variablesReference": scopes["Locals"]["variablesReference"], "name": "shadowed", "value": "7"}),
+    );
+    assert_eq!(changed["value"], "7");
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+    let mut values = locals
+        .iter()
+        .filter(|row| row["name"] == "shadowed")
+        .map(|row| row["value"].as_str().expect("value").to_owned())
+        .collect::<Vec<_>>();
+    values.sort();
+    assert_eq!(values, ["100", "7"]);
+    dap.finish();
+}
