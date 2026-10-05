@@ -706,7 +706,7 @@ fn print_and_p_render_stack_scalars_and_generated_alias_help() {
         .expect("run uscope");
     let stdout = assert_success(output);
 
-    assert!(stdout.contains("print [value-path]\n"), "{stdout}");
+    assert!(stdout.contains("print [expression...]\n"), "{stdout}");
     assert!(stdout.contains("aliases: p"), "{stdout}");
     assert!(
         stdout.contains("  Show the selected frame's execution location"),
@@ -819,7 +819,7 @@ fn print_and_p_render_parameters_and_locals() {
     let stdout = assert_success(output);
 
     assert!(
-        stdout.contains("Print variables, indexed values, members, or one bounded range"),
+        stdout.contains("Print an expression's value, or every variable"),
         "{stdout}"
     );
     assert_eq!(stdout.matches("(int) signed_int = -1234567").count(), 2);
@@ -833,6 +833,21 @@ fn print_and_p_render_parameters_and_locals() {
 #[test]
 fn print_explicitly_dereferences_pointer_chains_and_reports_typed_failures() {
     let executable = fixture("build/test-programs/variables-gcc-o0");
+    let run = |expression: &str| {
+        Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .args([
+                "--batch",
+                "--eval",
+                "break variables.c:68",
+                "--eval",
+                "run",
+                "--eval",
+                expression,
+            ])
+            .arg(&executable)
+            .output()
+            .expect("run a pointer print command")
+    };
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
         .args([
             "--batch",
@@ -849,15 +864,9 @@ fn print_explicitly_dereferences_pointer_chains_and_reports_typed_failures() {
             "--eval",
             "p *null_pointer",
             "--eval",
-            "p *void_pointer",
-            "--eval",
-            "p *pointee",
-            "--eval",
-            "p **pointer",
-            "--eval",
             "p *invalid_pointer",
         ])
-        .arg(executable)
+        .arg(&executable)
         .output()
         .expect("run pointer print commands");
     let stdout = assert_success(output);
@@ -874,18 +883,34 @@ fn print_explicitly_dereferences_pointer_chains_and_reports_typed_failures() {
         !stdout.contains("(int *) *null_pointer"),
         "failed dereference must not render the pointer's own type: {stdout}"
     );
-    assert!(stdout.contains("no concrete pointee type"), "{stdout}");
-    assert!(
-        stdout
-            .matches("the value is not a pointer or reference")
-            .count()
-            >= 2,
-        "{stdout}"
-    );
     assert!(
         stdout.contains("*invalid_pointer = <unavailable:"),
         "{stdout}"
     );
+    // Dereferencing what cannot be dereferenced is the expression's error,
+    // pointed at.
+    for (expression, message, caret) in [
+        (
+            "p *void_pointer",
+            "`void_pointer` points at void",
+            "     ^^^^^^^^^^^^",
+        ),
+        ("p *pointee", "`pointee` is not a pointer", "     ^^^^^^^"),
+        (
+            "p **pointer",
+            "`*pointer` is not a pointer",
+            "     ^^^^^^^^",
+        ),
+    ] {
+        let output = run(expression);
+        assert!(!output.status.success(), "{expression}");
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+        assert!(stderr.contains(message), "{expression}: {stderr}");
+        assert!(
+            stderr.contains(&format!("{caret}\n")),
+            "{expression}: {stderr}"
+        );
+    }
 }
 
 #[test]
@@ -1166,7 +1191,7 @@ fn globals_lists_metadata_and_print_accepts_exact_qualification() {
         .expect("run ambiguous global command");
     assert!(!ambiguous.status.success());
     let stderr = String::from_utf8(ambiguous.stderr).expect("UTF-8 stderr");
-    assert!(stderr.contains("global variable selector 'duplicate' is ambiguous"));
+    assert!(stderr.contains("`duplicate` is ambiguous"), "{stderr}");
     assert!(stderr.contains("one.c"), "{stderr}");
     assert!(stderr.contains("two.c"), "{stderr}");
 }
@@ -2951,4 +2976,91 @@ fn a_killed_session_leaves_its_flight_recording() {
     support::wait_until(&format!("inferior {inferior} dies with uscope"), || {
         matches!(process_state(inferior), None | Some('Z'))
     });
+}
+
+/// Runs `commands` through uscope's standard input, which reports each
+/// failed command and carries on, returning stdout and stderr.
+fn piped(executable: &Path, commands: &[&str]) -> (String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .arg(executable)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start uscope");
+    let mut stdin = child.stdin.take().expect("uscope's stdin");
+    for command in commands {
+        writeln!(stdin, "{command}").expect("write a command");
+    }
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for uscope");
+    (
+        String::from_utf8(output.stdout).expect("UTF-8 stdout"),
+        String::from_utf8(output.stderr).expect("UTF-8 stderr"),
+    )
+}
+
+#[test]
+fn expressions_print_compute_and_point_at_their_errors() {
+    let executable = fixture("build/test-programs/expressions-c-gcc-o0-pie");
+    let (stdout, stderr) = piped(
+        &executable,
+        &[
+            "break barrier",
+            "run",
+            "up",
+            "print f.u8 + 10",
+            "print (u8)(f.u8 + 10)",
+            "print f.u32 * f.u32",
+            "print/x f.i32",
+            "print/x -1",
+            "print f.arr[1..3]",
+            "print f.head->next->value",
+            "print gone + 1",
+            "print f.arr[9]",
+            "print 1 / 0",
+            "print f.nope",
+            "print (1 < 2 < 3)",
+            "print \"é\" == f.zzz",
+            "whatis f.u8 + 1",
+            "whatis f.inner",
+            "whatis (short)f.i32",
+            "ptype struct inner",
+            "ptype f.color",
+            "print 017",
+        ],
+    );
+    for expected in [
+        "(integer) f.u8 + 10 = 260",
+        "(u8) (u8)(f.u8 + 10) = 4",
+        "(integer) f.u32 * f.u32 = 16000000000000000000",
+        "(int32_t) f.i32 = 0xfffeee90",
+        "(integer) -1 = -0x1",
+        "20, 30",
+        "(int) f.head->next->value = 2",
+        "type = integer",
+        "type = inner\n",
+        "type = short int\n",
+        "type = struct inner {\n    short int s;\n    long long int ll;\n}",
+        "type = enum color {RED = 0, GREEN = 5, BLUE = 7}",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing `{expected}` in:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+    for expected in [
+        "no variable is named `gone` here\n    gone + 1\n    ^^^^\n",
+        "index 9 is outside the source bounds starting at 0 with 5 elements\n    f.arr[9]\n    ^^^^^^^^\n",
+        "division by zero\n    1 / 0\n    ^^^^^\n",
+        "has no member named 'nope'\n    f.nope\n      ^^^^\n",
+        "comparisons do not chain\n    (1 < 2 < 3)\n           ^\nhint: join comparisons with `&&`",
+        "no member named 'zzz'\n    \"é\" == f.zzz\n             ^^^\n",
+        "an integer cannot begin with 0\n    017\n    ^^^\nhint: write 0o17 for octal or 17 for decimal",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing `{expected}` in:\n{stderr}"
+        );
+    }
 }

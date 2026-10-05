@@ -41,6 +41,8 @@ pub enum Command {
     Run,
     Continue,
     Print,
+    Whatis,
+    Ptype,
     Set,
     Globals,
     Stepi,
@@ -87,6 +89,8 @@ impl CommandSpec {
             .fold((0, 0), |(minimum, maximum), word| {
                 if word.ends_with("...]") {
                     (minimum, usize::MAX)
+                } else if word.ends_with("...>") {
+                    (minimum + 1, usize::MAX)
                 } else if word.starts_with('[') {
                     (minimum, maximum + 1)
                 } else {
@@ -225,8 +229,22 @@ pub const COMMANDS: &[CommandSpec] = &[
         Print,
         "print",
         ["p"],
-        "print [value-path]",
-        "Print variables, indexed values, members, or one bounded range"
+        "print [expression...]",
+        "Print an expression's value, or every variable; print/x shows integers in hexadecimal"
+    ),
+    command!(
+        Whatis,
+        "whatis",
+        [],
+        "whatis <expression...>",
+        "Show an expression's type"
+    ),
+    command!(
+        Ptype,
+        "ptype",
+        [],
+        "ptype <expression-or-type...>",
+        "Show a type's definition, or the definition of an expression's type"
     ),
     command!(
         Set,
@@ -384,15 +402,7 @@ pub fn command_named(name: &str) -> Option<&'static CommandSpec> {
 impl Cli {
     /// Parses and executes one non-empty command line.
     pub(super) async fn execute(&self, line: &str) -> Result<Control> {
-        let mut words = line.split_whitespace();
-        let entered = words.next().unwrap_or_default();
-        let spec = command_named(entered)
-            .ok_or_else(|| anyhow!("unknown command '{entered}'; type `help` for a list"))?;
-        let arguments = words.collect::<Vec<_>>();
-        let (minimum, maximum) = spec.arity();
-        if !(minimum..=maximum).contains(&arguments.len()) {
-            return Err(spec.usage_error());
-        }
+        let (spec, format, rest, arguments) = command_line(line)?;
         let first = arguments.first().copied();
         let renderer = self.renderers.stdout;
         let debugger = &self.debugger;
@@ -441,9 +451,11 @@ impl Cli {
                 join_lines(&signals, &self.stop_with_source(&reason).await)
             }
             Command::Print => match first {
-                Some(expression) => self.print(expression).await?,
+                Some(_) => self.print(rest, format == "x").await?,
                 None => value::variables(&debugger.variables().await?, renderer),
             },
+            Command::Whatis => self.whatis(rest).await?,
+            Command::Ptype => self.ptype(rest).await?,
             Command::Globals => self.globals(first).await?,
             Command::Set => self.set(arguments[0], &arguments[1..], spec).await?,
             Command::Stepi => self.step(StepKind::Instruction).await?,
@@ -736,31 +748,100 @@ impl Cli {
         Ok(format::watchpoint_set(&watchpoint, self.renderers.stdout))
     }
 
-    async fn print(&self, expression: &str) -> Result<String> {
+    async fn print(&self, text: &str, hexadecimal: bool) -> Result<String> {
         let renderer = self.renderers.stdout;
-        let parsed = uscope::parse_value_expression(expression)?;
-        if let Some(range) = parsed.range {
-            let page = self
-                .debugger
-                .inspect_range(parsed.expression, range)
-                .await?;
-            return Ok(value::range(expression, &page, renderer));
-        }
-        let inspected = self.debugger.inspect(parsed.expression).await?;
-        Ok(match &inspected.type_info {
+        let expression = parse_expression(text)?;
+        let evaluation = self
+            .debugger
+            .evaluate(&expression)
+            .await
+            .map_err(|error| expression_error(text, error))?;
+        let (inspected, cause) = match evaluation {
+            uscope::Evaluation::Range(page) => return Ok(value::range(text, &page, renderer)),
+            uscope::Evaluation::Value { value, cause } => (value, cause),
+            _ => bail!("the evaluation produced an unknown kind of result"),
+        };
+        let mut output = match &inspected.type_info {
+            Some(type_info) if hexadecimal => {
+                value::hexadecimal(type_info, text, &inspected.state, renderer)
+            }
             Some(type_info) => {
                 value::expanded(
                     &self.debugger,
                     type_info,
-                    expression,
+                    text,
                     &inspected.state,
                     uscope::InspectionLimits::default().remaining_after(inspected.usage),
                     renderer,
                 )
                 .await?
             }
-            None => value::untyped(expression, &inspected.state, renderer),
-        })
+            None => value::untyped(text, &inspected.state, renderer),
+        };
+        // Say which operand the program could not provide, when it is not
+        // the whole expression.
+        if let Some(cause) = cause
+            && cause.text(text) != text
+        {
+            let _ = write!(
+                output,
+                " {}",
+                renderer.paint(
+                    Role::Metadata,
+                    format!("(because of `{}`)", cause.text(text))
+                )
+            );
+        }
+        Ok(output)
+    }
+
+    async fn whatis(&self, text: &str) -> Result<String> {
+        let expression = parse_expression(text)?;
+        let type_info = self
+            .debugger
+            .expression_type(&expression)
+            .await
+            .map_err(|error| expression_error(text, error))?;
+        Ok(format!(
+            "type = {}",
+            self.renderers.stdout.paint(Role::Type, &type_info.name)
+        ))
+    }
+
+    /// Shows a type's definition: of a type named, or of an expression's.
+    async fn ptype(&self, text: &str) -> Result<String> {
+        let as_expression = match uscope::Expression::parse(text) {
+            Ok(expression) => self.debugger.expression_type(&expression).await,
+            Err(error) => Err(uscope::Error::Expression(error)),
+        };
+        let type_info = match as_expression {
+            Ok(type_info) => type_info,
+            Err(expression_failure) => {
+                // A type is measured through a pointer to it, which reads
+                // nothing.
+                let through = uscope::Expression::parse(&format!("*({text}*)null"));
+                let found = match through {
+                    Ok(expression) => self.debugger.expression_type(&expression).await.ok(),
+                    Err(_) => None,
+                };
+                found.ok_or_else(|| expression_error(text, expression_failure))?
+            }
+        };
+        let images = self.module_images().await?;
+        Ok(value::type_definition(
+            &type_info,
+            &images,
+            self.renderers.stdout,
+        ))
+    }
+
+    async fn module_images(&self) -> Result<Vec<std::sync::Arc<uscope::ModuleImage>>> {
+        let modules = self.debugger.loaded_modules().await?;
+        let mut images = Vec::new();
+        for module in modules.modules.iter() {
+            images.push(self.debugger.loaded_module_image(module.module.id).await?);
+        }
+        Ok(images)
     }
 
     /// Assigns a value in the selected frame, as gdb's `set var` does.
@@ -1307,6 +1388,39 @@ pub fn apply_signal_action(policy: &mut SignalPolicy, action: &str) -> Result<()
     Ok(())
 }
 
+fn parse_expression(text: &str) -> Result<uscope::Expression> {
+    uscope::Expression::parse(text).map_err(|error| anyhow!(format::expression_error(text, &error)))
+}
+
+/// Splits a command line into its command, the format written after it as
+/// in `print/x`, the rest of the line as written, and its words.
+fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&str>)> {
+    let mut words = line.split_whitespace();
+    let written = words.next().unwrap_or_default();
+    let (entered, format) = written.split_once('/').unwrap_or((written, ""));
+    let rest = line.trim_start()[written.len()..].trim();
+    let spec = command_named(entered)
+        .ok_or_else(|| anyhow!("unknown command '{entered}'; type `help` for a list"))?;
+    let arguments = words.collect::<Vec<_>>();
+    if !format.is_empty() && (spec.command != Command::Print || format != "x") {
+        bail!("unknown format '/{format}'; print takes /x");
+    }
+    let (minimum, maximum) = spec.arity();
+    if !(minimum..=maximum).contains(&arguments.len()) {
+        return Err(spec.usage_error());
+    }
+    Ok((spec, format, rest, arguments))
+}
+
+/// An evaluation's failure, pointing into the expression when it is the
+/// expression's.
+fn expression_error(text: &str, error: uscope::Error) -> anyhow::Error {
+    match error {
+        uscope::Error::Expression(error) => anyhow!(format::expression_error(text, &error)),
+        error => error.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1341,7 +1455,8 @@ mod tests {
         assert_eq!(spec(Command::Run).arity(), (0, 0));
         assert_eq!(spec(Command::Break).arity(), (1, 2));
         assert_eq!(spec(Command::Info).arity(), (1, 2));
-        assert_eq!(spec(Command::Print).arity(), (0, 1));
+        assert_eq!(spec(Command::Print).arity(), (0, usize::MAX));
+        assert_eq!(spec(Command::Whatis).arity(), (1, usize::MAX));
         assert_eq!(spec(Command::Examine).arity(), (1, 2));
         assert_eq!(spec(Command::Disassemble).arity(), (0, 2));
         assert!(spec(Command::Next).repeatable);

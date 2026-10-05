@@ -431,10 +431,6 @@ impl<P: InspectionOps> Controller<P> {
         ))
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "range validation and selection preserve one atomic inspection budget"
-    )]
     pub(super) fn inspect_range(
         &self,
         stop_id: StopId,
@@ -449,28 +445,34 @@ impl<P: InspectionOps> Controller<P> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
         validate_stopped_thread(inferior, pid)?;
-        let length = range
-            .end
-            .checked_sub(range.start)
-            .ok_or_else(|| Error::InvalidValueRange("the range end precedes its start".into()))?;
-        if length < 0 {
-            return Err(Error::InvalidValueRange(
-                "the range end precedes its start".into(),
-            ));
-        }
-        if length > i128::from(MAX_VALUE_CHILD_PAGE_LIMIT) {
-            return Err(Error::InvalidValueRange(
-                format!("a range may contain at most {MAX_VALUE_CHILD_PAGE_LIMIT} elements").into(),
-            ));
-        }
+        validate_range_length(range.start, range.end)?;
         let inspected = self.inspect_with_budget(stop_id, pid, frame, expression, &mut budget)?;
+        self.range_page(stop_id, &inspected, range.start, range.end, &mut budget)
+    }
+
+    /// The elements `start..end` of an inspected array or slice, by source
+    /// index.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "range validation and selection preserve one atomic inspection budget"
+    )]
+    pub(super) fn range_page(
+        &self,
+        stop_id: StopId,
+        inspected: &InspectedValue,
+        start: i128,
+        end: i128,
+        budget: &mut InspectionBudget,
+    ) -> Result<crate::ValueChildPage> {
+        let length = validate_range_length(start, end)?;
+        let range = ValueIndexRange { start, end };
         let type_name = inspected
             .type_info
             .as_ref()
             .map_or_else(|| Arc::from("<unknown>"), |info| Arc::clone(&info.name));
-        let (lower_bound, count, reference) = match inspected.state {
+        let (lower_bound, count, reference) = match &inspected.state {
             crate::VariableState::Available {
-                value: crate::VariableValue::Array { ref dimensions, .. },
+                value: crate::VariableValue::Array { dimensions, .. },
                 children: crate::ValueChildren::Available(reference),
                 ..
             } => {
@@ -479,13 +481,17 @@ impl<P: InspectionOps> Controller<P> {
                         "ranges currently require a one-dimensional array".into(),
                     ));
                 };
-                (dimension.lower_bound, dimension.count, reference)
+                (
+                    dimension.lower_bound,
+                    dimension.count,
+                    Arc::clone(reference),
+                )
             }
             crate::VariableState::Available {
                 value: crate::VariableValue::Slice { length, .. },
                 children: crate::ValueChildren::Available(reference),
                 ..
-            } => (0, length, reference),
+            } => (0, *length, Arc::clone(reference)),
             crate::VariableState::Available { .. } => {
                 return Err(Error::IndexAccessOnNonIndexable { type_name });
             }
@@ -561,7 +567,7 @@ impl<P: InspectionOps> Controller<P> {
                 offset,
                 limit: u32::try_from(length).expect("validated range length fits u32"),
             },
-            &mut budget,
+            budget,
         )
     }
 
@@ -920,6 +926,20 @@ pub(super) fn validate_value_expression(expression: &ValueExpression) -> Result<
         )));
     }
     Ok(())
+}
+
+/// The number of elements `start..end` holds, at most a page.
+fn validate_range_length(start: i128, end: i128) -> Result<i128> {
+    let length = end
+        .checked_sub(start)
+        .filter(|length| *length >= 0)
+        .ok_or_else(|| Error::InvalidValueRange("the range end precedes its start".into()))?;
+    if length > i128::from(MAX_VALUE_CHILD_PAGE_LIMIT) {
+        return Err(Error::InvalidValueRange(
+            format!("a range may contain at most {MAX_VALUE_CHILD_PAGE_LIMIT} elements").into(),
+        ));
+    }
+    Ok(length)
 }
 
 pub(super) fn validate_inspection_limits(limits: crate::InspectionLimits) -> Result<()> {

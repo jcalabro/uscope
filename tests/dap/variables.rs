@@ -375,6 +375,32 @@ fn expressions_evaluate_for_watches_hovers_ranges_and_without_a_frame() {
             "{context}"
         );
     }
+    // Expressions compute, in every context.
+    for context in ["watch", "hover", "clipboard", "variables", "repl"] {
+        let result = dap.request(
+            "evaluate",
+            json!({"expression": "pair.second * 2 + array[0]", "frameId": frame, "context": context}),
+        );
+        assert_eq!(
+            (&result["result"], &result["type"]),
+            (&json!("64"), &json!("integer")),
+            "{context}"
+        );
+    }
+    assert_eq!(
+        dap.request(
+            "evaluate",
+            json!({"expression": "(char)(pair.second + 300)", "frameId": frame, "context": "hover"})
+        )["type"],
+        "char"
+    );
+    assert_eq!(
+        dap.request_error(
+            "evaluate",
+            json!({"expression": "pair.second / 0", "frameId": frame, "context": "watch"})
+        ),
+        "division by zero"
+    );
     // Without a frame, the stopped thread's innermost frame is used.
     assert_eq!(
         dap.request(
@@ -403,7 +429,7 @@ fn expressions_evaluate_for_watches_hovers_ranges_and_without_a_frame() {
             "evaluate",
             json!({"expression": "pair.", "frameId": frame, "context": "watch"})
         ),
-        "invalid value expression: expression names must not be empty"
+        "expected a member name, found the end of the expression"
     );
     let unknown = dap.request_error(
         "evaluate",

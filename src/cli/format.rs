@@ -22,6 +22,28 @@ use super::value::{self, bound_output};
 
 const HEX_DUMP_BYTES_PER_LINE: usize = 16;
 
+/// An expression's error, with a caret line under the text it is about and
+/// the hint that rewrites it, when there is one.
+pub fn expression_error(text: &str, error: &uscope::ExpressionError) -> String {
+    let start = (error.span.start as usize).min(text.len());
+    let end = (error.span.end as usize).clamp(start, text.len());
+    let column = text.get(..start).map_or(0, |prefix| prefix.chars().count());
+    let width = text
+        .get(start..end)
+        .map_or(0, |span| span.chars().count())
+        .max(1);
+    let mut output = format!(
+        "{}\n    {text}\n    {}{}",
+        error.message,
+        " ".repeat(column),
+        "^".repeat(width)
+    );
+    if let Some(hint) = &error.hint {
+        let _ = write!(output, "\nhint: {hint}");
+    }
+    output
+}
+
 /// Returns `count noun`, adding an `s` unless the count is one.
 pub fn plural(count: u64, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
