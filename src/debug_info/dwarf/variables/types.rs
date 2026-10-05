@@ -23,7 +23,7 @@ use super::die::{
     index_type_is_signed, origin_chain, strict_flag, unsigned_constant,
 };
 use super::identity::{
-    IdentityParts, ScopePath, ScopeSegment, inline_namespace_path, scope_segment,
+    IdentityParts, ScopePath, ScopeSegment, inline_namespace_path, scope_segment, source_language,
 };
 use super::location::{Expression, copy_expression};
 use super::variant::{
@@ -113,27 +113,23 @@ pub(super) enum DynamicAggregateChild {
 
 /// Whether an aggregate's child DIE describes its scope, such as a method,
 /// nested type, static member, or template parameter, rather than bytes of
-/// an instance.
+/// an instance. Any type may be declared in a scope: GCC nests the
+/// qualified types a class's methods use in the class.
 pub(super) const fn is_scope_only_child(tag: gimli::DwTag) -> bool {
-    matches!(
-        tag,
-        gimli::DW_TAG_subprogram
-            | gimli::DW_TAG_variable
-            | gimli::DW_TAG_typedef
-            | gimli::DW_TAG_structure_type
-            | gimli::DW_TAG_class_type
-            | gimli::DW_TAG_union_type
-            | gimli::DW_TAG_enumeration_type
-            | gimli::DW_TAG_template_type_parameter
-            | gimli::DW_TAG_template_value_parameter
-            | gimli::DW_TAG_GNU_template_parameter_pack
-            | gimli::DW_TAG_GNU_template_template_param
-            | gimli::DW_TAG_template_alias
-            | gimli::DW_TAG_friend
-            | gimli::DW_TAG_imported_declaration
-            | gimli::DW_TAG_imported_module
-            | gimli::DW_TAG_access_declaration
-    )
+    is_type_die_tag(tag)
+        || matches!(
+            tag,
+            gimli::DW_TAG_subprogram
+                | gimli::DW_TAG_variable
+                | gimli::DW_TAG_template_type_parameter
+                | gimli::DW_TAG_template_value_parameter
+                | gimli::DW_TAG_GNU_template_parameter_pack
+                | gimli::DW_TAG_GNU_template_template_param
+                | gimli::DW_TAG_friend
+                | gimli::DW_TAG_imported_declaration
+                | gimli::DW_TAG_imported_module
+                | gimli::DW_TAG_access_declaration
+        )
 }
 
 pub(super) fn zig_optional_payload_name(name: &str) -> Option<&str> {
@@ -174,6 +170,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             let mut offsets = HashSet::new();
             let mut language = None;
             let mut zig_producer = false;
+            let mut cpp = false;
             let mut first = true;
             let mut scopes = Vec::<(isize, ScopeSegment)>::new();
             // The current scopes, shared by the types declared in them.
@@ -181,6 +178,18 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             let mut entries = unit.entries();
             while let Ok(Some(entry)) = entries.next_dfs() {
                 offsets.insert(entry.offset().0);
+                if first {
+                    first = false;
+                    language = match entry.attr_value(gimli::DW_AT_language) {
+                        Some(gimli::AttributeValue::Language(language)) => Some(language),
+                        _ => None,
+                    };
+                    zig_producer = entry
+                        .attr_value(gimli::DW_AT_producer)
+                        .and_then(|value| dwarf.attr_string(unit, value).ok())
+                        .is_some_and(|producer| producer.to_string_lossy().starts_with("zig "));
+                    cpp = source_language(language, zig_producer) == SourceLanguage::Cpp;
+                }
                 let depth = entry.depth();
                 while scopes.last().is_some_and(|(scope, _)| *scope >= depth) {
                     scopes.pop();
@@ -198,23 +207,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     });
                     scoped_types.push((key, Arc::clone(segments)));
                 }
-                if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry) {
+                if let Some(segment) = scope_segment(dwarf, unit, unit_index, entry, cpp) {
                     if let ScopeSegment::Inline(name) = &segment {
                         inline_namespaces.insert(inline_namespace_path(&scopes, name));
                     }
                     scopes.push((depth, segment));
                     current = None;
-                }
-                if first {
-                    first = false;
-                    language = match entry.attr_value(gimli::DW_AT_language) {
-                        Some(gimli::AttributeValue::Language(language)) => Some(language),
-                        _ => None,
-                    };
-                    zig_producer = entry
-                        .attr_value(gimli::DW_AT_producer)
-                        .and_then(|value| dwarf.attr_string(unit, value).ok())
-                        .is_some_and(|producer| producer.to_string_lossy().starts_with("zig "));
                 }
                 if !is_type_die_tag(entry.tag()) {
                     continue;
@@ -3282,15 +3280,14 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             SourceLanguage::Zig => name
                 .is_some_and(|name| name.starts_with("[]") || name.starts_with("[:"))
                 .then_some(SliceLayout::Zig),
-            SourceLanguage::Rust => {
+            SourceLanguage::Rust if !self.type_scopes.contains_key(&key) => {
                 let members = self.member_types(entry, key.unit)?;
                 let [(first, data), (second, _)] = members.as_slice() else {
                     return None;
                 };
                 (first.as_ref() == "data_ptr"
                     && second.as_ref() == "length"
-                    && !self.type_scopes.contains_key(&key)
-                    && !data.is_none_or(|data| self.points_to_unsized(data, 0)))
+                    && !data.is_none_or(|data| self.points_to_unsized(data)))
                 .then_some(SliceLayout::Rust)
             }
             _ => None,
@@ -3332,7 +3329,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
     /// Whether a pointer DIE points to a type whose last member is unsized,
     /// such as `Path` or `RcInner<str>`. Anything unreadable counts as
     /// unsized, so that a doubtful pointer is never presented as a slice.
-    fn points_to_unsized(&self, pointer: DieKey, depth: usize) -> bool {
+    fn points_to_unsized(&self, pointer: DieKey) -> bool {
         const MAX_DEPTH: usize = 16;
         let target = |key: DieKey| -> Option<(
             gimli::DebuggingInformationEntry<Reader<'data>>,
@@ -3355,7 +3352,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         if pointer_entry.tag() != gimli::DW_TAG_pointer_type {
             return true;
         }
-        for _ in depth..MAX_DEPTH {
+        for _ in 0..MAX_DEPTH {
             let Some((entry, next)) = target(current) else {
                 return true;
             };

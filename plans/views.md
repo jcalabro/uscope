@@ -300,9 +300,11 @@ pub enum TypeArgument { Type(TypeReference), Value(IntegerValue), Unknown(Arc<st
 
 - **Inline namespaces collapse structurally.** gcc 15 and clang 21 both mark
   `std::__cxx11` and libc++'s `std::__1` with `DW_AT_export_symbols` (checked
-  on this machine). A DWARF 4 fallback list (`__1`, `__Cr`, `__ndk1`,
-  `__cxx11`, `__8`, `__debug`, `__cxx1998`) applies only when the attribute
-  is absent.
+  on this machine). A fallback list (`__1`, `__Cr`, `__ndk1`, `__cxx11`,
+  `__8`, `__debug`) applies only to C++ units older than DWARF 5, and only
+  when no unit in the image marks any namespace, since an unmarked namespace
+  from a producer that marks is not inline. libstdc++'s `__cxx1998` is never
+  inline, and `__debug` is inline only in debug mode.
 - **Template arguments come from `DW_TAG_template_*_parameter` and
   `GNU_template_parameter_pack` DIEs**, by position. The DIE's names differ
   by library (`_Tp, _Nm` against `_Tp, _Size`). Building them makes their
@@ -319,7 +321,7 @@ pub enum TypeArgument { Type(TypeReference), Value(IntegerValue), Unknown(Arc<st
 - **Go** keeps `go_kind`, `go_key`, `go_elem`, and `go_runtime_type`. A Go
   map, channel, slice, string, or interface is identified by kind. Its key
   and element are its arguments, whatever it is named.
-- **The type index.** Each image gets a lazily built index from
+- **The type index.** Each image gets an index, built at load, from
   `(language, path, base)` to instances. It answers "the
   `std::_Rb_tree_node` whose argument is `std::pair<const K, V>`" by
   comparing argument *identities*, never by spelling a name. This replaces
@@ -959,7 +961,7 @@ Each phase is test-first, lands on `next` on its own, and is reviewed
   `just sim 600`.
 
 **P1 Compliant DWARF and type identity.** This phase is in the provider and
-changes little that users see. *Done 2026-10-05, uncommitted on `views`.*
+changes little that users see. *Done 2026-10-05.*
 
 - [x] §3.1 fat pointers by shape, which fixes `*const [T]` at `-O`.
 - [x] Zig `[]const u8` text, and text charged to the budget.
@@ -999,14 +1001,22 @@ What P1 built, and what it learned:
 - **Arguments.** rustc describes type parameters but omits const ones, so
   the name's integers fill the positions the parameter DIEs skip. GCC omits
   `std::allocator<T>`'s parameters; its name is parsed and each argument
-  resolves only when exactly one type matches it. Go maps, channels,
-  slices, arrays, and pointers take their arguments from `go_key` and
-  `go_elem`; Go generics and Zig instances are parsed.
+  resolves only when the types it could name share one identity. Go maps,
+  channels, slices, arrays, and pointers take their arguments from `go_key`
+  and `go_elem`; Go generics and Zig instances are parsed.
 - **Inline namespaces.** The identity's path omits them, and
   `TypeIdentity.inline_namespaces` keeps them so a name may spell them
-  (`outer::v1::Thing`). GCC copies namespaces into DWARF 4 type units
-  without their `DW_AT_export_symbols`, so a namespace is inline when any
-  unit marks the namespace with the same full path inline.
+  (`outer::v1::Thing`). GCC copies namespaces into type units, DWARF 4 and
+  5 alike, without their `DW_AT_export_symbols`, so a namespace is inline
+  when any unit marks the namespace with the same full path inline. The
+  name list (§3.2) is only for producers that mark nothing:
+  `std::__debug::vector`, libstdc++'s checked vector, is a different type
+  from `std::vector` outside debug mode, and `templates.cpp` holds one.
+- **Anonymous namespaces** are each unit's own, so a type in one, and an
+  instance over it, has an identity no other unit's type shares.
+- **Types nested in records.** GCC declares the qualified types a class's
+  methods use inside the class, which made libstdc++'s classes opaque; any
+  type entry nested in a record now only scopes it.
 - **Type names in expressions** resolve through the index: outer path
   segments and trailing (defaulted) arguments may be omitted, as in
   `` std::`vector<int>` ``. Go emits same-named typedefs over its named
@@ -1234,7 +1244,8 @@ main.main.func1 {s string = "hello, world"}
 
 | Fact | Evidence |
 |---|---|
-| Inline namespaces carry `DW_AT_export_symbols` | gcc 15 `std::__cxx11`; clang 21 `std::__cxx11` and `std::__1` |
+| Inline namespaces carry `DW_AT_export_symbols` | gcc 15 `std::__cxx11`; clang 21 `std::__cxx11` and `std::__1`, also with `-gdwarf-4`; gcc's type-unit copies omit it |
+| `std::__debug` is an ordinary namespace outside debug mode | `__gnu_debug::vector<int>` is 56 bytes, `std::vector<int>` 24 (gcc 15) |
 | Container definitions carry template parameter DIEs | gcc, clang, both libraries; gcc omits them on `std::allocator<T>`, iterators, 39 of 309 templates |
 | libc++ default debug info leaves helpers declaration-only | `__shared_weak_count` (shared_ptr counts), iterators; `-fstandalone-debug` restores them |
 | Rust enums are `variant_part` with `discr_value`; the variant without one is the default | `Option<&T>`, `Result<u32, String>` (niche 0xffff…ff), never `DW_AT_discr_list` |

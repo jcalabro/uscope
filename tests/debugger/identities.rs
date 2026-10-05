@@ -108,7 +108,13 @@ async fn cpp_template_identities_do_not_depend_on_the_compiler_or_library() {
     ] {
         let image = load_fixture_image(fixture).await;
 
-        let vector = identity(only(&image, Cpp, &["std"], "vector"));
+        let vector = only(&image, Cpp, &["std"], "vector");
+        // A type a class declares in its scope adds nothing to its layout.
+        assert!(
+            matches!(vector.kind, TypeKind::Record { .. }),
+            "{fixture}: {vector:?}"
+        );
+        let vector = identity(vector);
         assert_eq!(vector.language, Cpp, "{fixture}");
         assert_eq!(vector.origin, ArgumentOrigin::Dwarf, "{fixture}");
         assert_eq!(vector.arguments.len(), 2, "{fixture}: {vector:?}");
@@ -125,6 +131,10 @@ async fn cpp_template_identities_do_not_depend_on_the_compiler_or_library() {
             "{fixture}"
         );
         assert_eq!(argument_names(&image, allocator), ["int"], "{fixture}");
+
+        // Type units copy namespaces without their inline marks, which
+        // the units that define them carry.
+        only(&image, Cpp, &["std"], "basic_string");
 
         let map = identity(only(&image, Cpp, &["std"], "map"));
         assert_eq!(map.arguments.len(), 4, "{fixture}: {map:?}");
@@ -367,9 +377,27 @@ async fn expressions_name_types_by_their_identities() {
             "cpp/templates.cpp",
             &[
                 ("sizeof(std::`vector<int>`)", 24),
-                ("sizeof(`vector<int>`)", 24),
                 ("sizeof(outer::Thing)", 4),
                 ("sizeof(`Fixed<3, short>`)", 6),
+                // A namespace no unit marks inline is not inline, even when
+                // a library names its inline namespaces alike elsewhere.
+                ("sizeof(std::__debug::`vector<int>`)", 56),
+            ][..],
+        ),
+        (
+            "templates-cpp-gcc-dwarf4",
+            "cpp/templates.cpp",
+            &[
+                ("sizeof(std::`vector<int>`)", 24),
+                ("sizeof(std::__debug::`vector<int>`)", 56),
+            ][..],
+        ),
+        (
+            "templates-cpp-clang-o0",
+            "cpp/templates.cpp",
+            &[
+                ("sizeof(std::`vector<int>`)", 24),
+                ("sizeof(std::__debug::`vector<int>`)", 56),
             ][..],
         ),
         (
@@ -377,6 +405,7 @@ async fn expressions_name_types_by_their_identities() {
             "cpp/templates.cpp",
             &[
                 ("sizeof(std::`vector<int>`)", 24),
+                ("sizeof(`vector<int>`)", 24),
                 ("sizeof(outer::v1::Thing)", 4),
             ][..],
         ),
@@ -499,7 +528,7 @@ async fn text_the_budget_cannot_afford_is_cut_short_without_failing_the_inspecti
         panic!("{full:?}");
     };
     assert_eq!(text.as_deref().cloned(), Some(complete("hello")));
-    // Two bytes short of the last three.
+    // Three bytes short of the whole text.
     let limits = uscope::InspectionLimits {
         memory_bytes: full.usage.memory_bytes - 3,
         ..uscope::InspectionLimits::default()

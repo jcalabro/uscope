@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::debug_info::dwarf::{DieKey, Reader, die_reference_with_signatures};
 use crate::type_identity::{
-    INLINE_NAMESPACES, NameSyntax, TypeIndex, TypeLookup, TypeName, parse_integer,
+    ANONYMOUS_NAMESPACE, NameSyntax, TypeIndex, TypeLookup, TypeName, parse_integer,
 };
 use crate::{
     ArgumentOrigin, GoKind, GoTypeAttributes, SourceLanguage, TypeArgument, TypeId, TypeIdentity,
@@ -27,6 +27,11 @@ const DW_AT_GO_KIND: gimli::DwAt = gimli::DwAt(0x2900);
 const DW_AT_GO_KEY: gimli::DwAt = gimli::DwAt(0x2901);
 const DW_AT_GO_ELEM: gimli::DwAt = gimli::DwAt(0x2902);
 const DW_AT_GO_RUNTIME_TYPE: gimli::DwAt = gimli::DwAt(0x2904);
+
+/// The inline namespaces of C++ standard libraries, for units older than
+/// DWARF 5's `DW_AT_export_symbols`. libstdc++'s `__cxx1998` is not one: it
+/// holds the containers that debug mode's inline `__debug` replaces.
+const INLINE_NAMESPACES: [&str; 6] = ["__1", "__Cr", "__ndk1", "__cxx11", "__8", "__debug"];
 
 /// The scopes enclosing a type DIE, outermost first.
 #[derive(Clone, Default)]
@@ -64,8 +69,10 @@ pub(super) enum ScopeSegment {
     /// A named type, whose nested types it scopes.
     Named(Arc<str>),
     /// A namespace not marked inline here, which may still be inline: GCC
-    /// copies namespaces into DWARF 4 type units without their marks.
-    Namespace(Arc<str>),
+    /// copies namespaces into type units without their marks. `listed`
+    /// when its unit predates the mark and its name is in
+    /// [`INLINE_NAMESPACES`].
+    Namespace { name: Arc<str>, listed: bool },
     /// A function, whose name may live on its declaration.
     Function(DieKey),
     /// An inline namespace, which names need not spell.
@@ -102,12 +109,13 @@ pub(super) const fn source_language(language: Option<gimli::DwLang>, zig: bool) 
 }
 
 /// How a DIE scopes the types nested in it, or `None` when it is not a
-/// scope.
+/// scope. `cpp` when the DIE's unit is C++.
 pub(super) fn scope_segment(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit: &gimli::Unit<Reader<'_>>,
     unit_index: usize,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    cpp: bool,
 ) -> Option<ScopeSegment> {
     let name = || {
         entry
@@ -121,14 +129,20 @@ pub(super) fn scope_segment(
             let inline = strict_flag(entry, gimli::DW_AT_export_symbols).unwrap_or(false);
             Some(match name() {
                 Some(name) if inline => ScopeSegment::Inline(name),
-                // Producers that cannot mark inline namespaces still use
-                // these names for them.
-                Some(name) if exported.is_none() && INLINE_NAMESPACES.contains(&name.as_ref()) => {
-                    ScopeSegment::Inline(name)
-                }
                 None if inline => ScopeSegment::Transparent,
-                Some(name) => ScopeSegment::Namespace(name),
-                None => ScopeSegment::Namespace(Arc::from("(anonymous namespace)")),
+                Some(name) => ScopeSegment::Namespace {
+                    // Producers older than the mark still use these names
+                    // for inline namespaces.
+                    listed: cpp
+                        && unit.encoding().version < 5
+                        && exported.is_none()
+                        && INLINE_NAMESPACES.contains(&name.as_ref()),
+                    name,
+                },
+                None => ScopeSegment::Namespace {
+                    name: Arc::from(ANONYMOUS_NAMESPACE),
+                    listed: false,
+                },
             })
         }
         gimli::DW_TAG_structure_type
@@ -155,7 +169,7 @@ pub(super) fn inline_namespace_path(
         .iter()
         .filter_map(|(_, segment)| match segment {
             ScopeSegment::Named(name)
-            | ScopeSegment::Namespace(name)
+            | ScopeSegment::Namespace { name, .. }
             | ScopeSegment::Inline(name) => Some(Arc::clone(name)),
             ScopeSegment::Function(_) | ScopeSegment::Transparent => None,
         })
@@ -188,9 +202,9 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         None
     }
 
-    /// Resolves a scope stack into a path.
     /// Resolves a scope stack into a path. A namespace is inline when any
-    /// unit marks the namespace with the same full path inline.
+    /// unit marks the namespace with the same full path inline, or when no
+    /// unit marks any namespace and its own unit lists it.
     pub(super) fn scope_path(
         &self,
         segments: &[ScopeSegment],
@@ -205,9 +219,10 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                     full.push(Arc::clone(name));
                     path.push(Arc::clone(name));
                 }
-                ScopeSegment::Namespace(name) => {
+                ScopeSegment::Namespace { name, listed } => {
                     full.push(Arc::clone(name));
-                    if inline_namespaces.contains(&full) {
+                    if inline_namespaces.contains(&full) || *listed && inline_namespaces.is_empty()
+                    {
                         inline.push(Arc::clone(name));
                     } else {
                         path.push(Arc::clone(name));
@@ -445,14 +460,9 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             let name = Arc::clone(&info.name);
             let parsed = TypeName::parse(&name, syntax);
             let scopes = self.type_path(parts.die);
+            // Only Go and Zig names spell their packages and modules.
             let mut path = scopes.path.to_vec();
-            path.extend(
-                parsed
-                    .path
-                    .iter()
-                    .filter(|segment| !INLINE_NAMESPACES.contains(segment))
-                    .map(|segment| Arc::<str>::from(*segment)),
-            );
+            path.extend(parsed.path.iter().map(|segment| Arc::<str>::from(*segment)));
             let (arguments, origin, pending) = merge_arguments(parts, parsed.arguments.as_deref());
             if !pending.is_empty() {
                 unresolved.push((index, language, pending));
@@ -616,7 +626,8 @@ fn merge_arguments(
 }
 
 /// What a parsed argument spells: a value, or the one type it names in the
-/// type's own language. Several distinct types, or none, leave it unknown.
+/// type's own language. Types several units define alike are one type;
+/// several distinct types, or none, leave it unknown.
 fn resolve_argument(
     text: &str,
     language: SourceLanguage,
@@ -637,13 +648,8 @@ fn resolve_argument(
         })
         .collect::<Vec<_>>();
     let first = candidates.first()?;
-    let same = |info: &&TypeInfo| {
-        info.name == first.name
-            && info.identity.as_ref().map(|identity| &identity.path)
-                == first.identity.as_ref().map(|identity| &identity.path)
-    };
     candidates
         .iter()
-        .all(same)
+        .all(|other| index.same_type(first.reference, other.reference))
         .then_some(TypeArgument::Type(first.reference))
 }
