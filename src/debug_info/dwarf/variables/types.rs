@@ -2891,6 +2891,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             Err(error) => return TypeEntry::Malformed(error.to_string().into()),
         };
         let mut dimensions = Vec::new();
+        let mut strided = has_stride(entry);
         let mut children = root.children();
         loop {
             let child = match children.next() {
@@ -2902,6 +2903,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 continue;
             }
             let child = child.entry();
+            strided |= has_stride(child);
             let signed_index = index_type_is_signed(unit, child);
             let lower = child
                 .attr(gimli::DW_AT_lower_bound)
@@ -2934,10 +2936,24 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
         let name =
             explicit_name.unwrap_or_else(|| Arc::from(format!("{}[]", self.target_name(element))));
+        // Producers rarely give a C array a size of its own: it is its
+        // elements', laid end to end unless a stride spaces them.
+        let byte_size = explicit_size.or_else(|| {
+            let element_size = match self.entries.get(element.id.index())? {
+                TypeEntry::Resolved(info) => info.byte_size?,
+                TypeEntry::Building | TypeEntry::Malformed(_) => return None,
+            };
+            if strided {
+                return None;
+            }
+            dimensions.iter().try_fold(element_size, |size, dimension| {
+                size.checked_mul(dimension.count)
+            })
+        });
         TypeEntry::Resolved(TypeInfo {
             reference,
             name,
-            byte_size: explicit_size,
+            byte_size,
             kind: TypeKind::Array {
                 element,
                 dimensions: dimensions.into(),
@@ -3470,4 +3486,9 @@ pub(super) fn modifier_type_name(
     } else {
         format!("{keyword} {target}")
     }
+}
+
+/// Whether an array or one of its dimensions spaces its elements apart.
+fn has_stride(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) -> bool {
+    entry.attr(gimli::DW_AT_byte_stride).is_some() || entry.attr(gimli::DW_AT_bit_stride).is_some()
 }

@@ -293,7 +293,6 @@ async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
             matches!(oversized, Err(Error::WatchpointCapacity { required, available: 4 }) if required > 4),
             "{fixture}: {oversized:?}"
         );
-
         let byte = watch(&scenario, "watch_u8", WatchAccess::Write).await;
         let half = watch(&scenario, "watch_u16", WatchAccess::Write).await;
         let word = watch(&scenario, "watch_u64", WatchAccess::Write).await;
@@ -374,6 +373,34 @@ async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
             )
             .await;
         assert_eq!(removed.len(), 2);
+        resume_to_exit(&mut scenario).await;
+        scenario.shutdown().await;
+    }
+}
+
+/// C arrays carry no size of their own: theirs is their elements'.
+#[tokio::test]
+async fn whole_arrays_are_watched_by_their_elements_size() {
+    for fixture in MATRIX {
+        let mut scenario = Scenario::launch(fixture);
+        run_to(&mut scenario, "size_stores").await;
+        let bytes = scenario
+            .handle()
+            .watch(expression("watch_oversized.bytes"), WatchAccess::Write)
+            .await;
+        assert!(
+            matches!(bytes, Err(Error::WatchpointCapacity { required, available: 4 }) if required > 4),
+            "{fixture}: {bytes:?}"
+        );
+        let words = watch(&scenario, "watch_wide.words", WatchAccess::Write).await;
+        assert_eq!(
+            (words.byte_size, words.coverage.len()),
+            (32, 4),
+            "{fixture}"
+        );
+        scenario
+            .operation("free slots", scenario.handle().remove_watchpoint(words.id))
+            .await;
         resume_to_exit(&mut scenario).await;
         scenario.shutdown().await;
     }
