@@ -63,15 +63,17 @@ fn rendered(kind: &str, value: &VariableValue) -> Option<String> {
 /// Runs a fixture to `barrier`, selects its caller, and checks every
 /// expectation. In optimized builds a row may be explicitly unavailable;
 /// a different value always fails.
-async fn check_fixture(fixture: &str, optimized: bool) {
+async fn check_fixture(fixture: &str, barrier: &str, optimized: bool) {
     let scratch = ScratchDir::new("expressions");
     let output_path = scratch.path().join("stdout");
     let output = std::fs::File::create(&output_path).expect("create the fixture's output");
+    let errors = output.try_clone().expect("share the fixture's output");
     let mut scenario = Scenario::launch(fixture);
-    scenario.add_breakpoint("barrier").await;
+    scenario.add_breakpoint(barrier).await;
     let reason = scenario
         .run_with_to_stop(LaunchOptions {
             stdout: Some(Stdio::from(output)),
+            stderr: Some(Stdio::from(errors)),
             ..LaunchOptions::default()
         })
         .await;
@@ -83,7 +85,7 @@ async fn check_fixture(fixture: &str, optimized: bool) {
     let printed = std::fs::read_to_string(&output_path).expect("read the fixture's output");
     let expectations = expectations(&printed);
     assert!(
-        expectations.len() > 40,
+        expectations.len() >= 10,
         "{fixture} printed its expectations: {printed}"
     );
 
@@ -139,8 +141,24 @@ async fn c_expressions_agree_with_the_program_across_the_compiler_matrix() {
         for optimization in ["o0", "o2"] {
             for linking in ["pie", "nopie"] {
                 let fixture = format!("expressions-c-{compiler}-{optimization}-{linking}");
-                check_fixture(&fixture, optimization == "o2").await;
+                check_fixture(&fixture, "barrier", optimization == "o2").await;
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn cpp_rust_go_and_zig_expressions_agree_with_their_programs() {
+    for (fixture, barrier, optimized) in [
+        ("expressions-cpp-gcc-o0", "barrier", false),
+        ("expressions-cpp-clang-o2", "barrier", true),
+        ("expressions-rust-o0", "barrier", false),
+        ("expressions-rust-o2", "barrier", true),
+        ("expressions-go-o0", "main.barrier", false),
+        ("expressions-go-o2", "main.barrier", true),
+        ("expressions-zig-o0", "barrier", false),
+        ("expressions-zig-o2", "barrier", true),
+    ] {
+        check_fixture(fixture, barrier, optimized).await;
     }
 }

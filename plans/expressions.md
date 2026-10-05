@@ -286,10 +286,13 @@ by side.
   oracles, and the `data` golden program.
   Delete `condition.rs`, `expression.rs`, `assign.rs`, and the old public path
   types and requests, with their superseded tests.
-- **P5 Data shapes**, one commit each: Rust enums and `Option`; Go strings,
-  slices, and embedded fields; Zig optionals and error unions; C++ `this`,
-  bases, references, and static members; Go interface conversion
-  (`err as *main.myError`).
+- **P5 Data shapes**: deferred by decision (2026-10-05): per-language
+  support stays minimal, the most common types only (scalars, records,
+  arrays, pointers, and the strings and slices the provider already reads).
+  C++ static members and bases, Go interface conversion, Rust enum
+  payloads, and standard-library container views wait until there is a
+  need, one at a time. Native fixtures for C++, Rust, Go, and Zig are
+  small: a dozen rows each over those common types.
 
 ## 5. Testing
 
