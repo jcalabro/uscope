@@ -39,6 +39,10 @@ pub enum Mark {
     ThreadExited,
     /// A group leader exited while its other threads ran on.
     LeaderExitedAlone,
+    /// The debugger reported a leader's exit at its exit event.
+    LeaderExitReported,
+    /// An execution of a leader alone ended in its exit.
+    LeaderExitEndedExecution,
     /// A program's `exit_group` took a thread out of a ptrace-stop.
     GroupExitEndedStop,
     /// A published stop found two threads at breakpoints.
@@ -128,7 +132,7 @@ pub enum Mark {
 }
 
 impl Mark {
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 59] = [
         Self::EntryStop,
         Self::BreakpointStop,
         Self::StepStop,
@@ -146,6 +150,8 @@ impl Mark {
         Self::ThreadCreated,
         Self::ThreadExited,
         Self::LeaderExitedAlone,
+        Self::LeaderExitReported,
+        Self::LeaderExitEndedExecution,
         Self::GroupExitEndedStop,
         Self::CoHit,
         Self::ThreadContinued,

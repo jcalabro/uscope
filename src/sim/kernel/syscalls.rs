@@ -75,6 +75,9 @@ pub(super) fn serve(kernel: &mut Kernel, tid: Tid) -> bool {
                     .group_exit
                     .get_or_insert(ExitStatus::Code(code));
             }
+            if tid == group {
+                kernel.leader_exits.insert(tid, code);
+            }
             kernel.reach_exit(tid, ExitStatus::Code(code));
             return false;
         }

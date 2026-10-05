@@ -644,3 +644,92 @@ async fn threads_are_named_as_they_name_themselves() {
         scenario.shutdown().await;
     }
 }
+
+/// A main thread continued alone that exits while other threads live ends
+/// its execution at its exit event, with the code it passed to `exit`, as
+/// any other thread's execution ends when its thread exits. Linux reports
+/// the main thread's exit status only once every other thread has exited,
+/// which threads held stopped never do, so the execution never ended. The
+/// process's own status comes when it exits, and however the session then
+/// ends, nothing is left behind.
+#[tokio::test]
+async fn a_main_thread_continued_alone_ends_its_execution_when_it_exits() {
+    let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build/golden/threads/threads-gcc-O0");
+    let source = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/golden/threads/threads.c"
+    );
+    // The main thread's call, the last of the two.
+    let main_exits = fs::read_to_string(source)
+        .expect("read the golden program")
+        .lines()
+        .collect::<Vec<_>>()
+        .iter()
+        .rposition(|line| line.contains("rt_exit(LEADER_STATUS);"))
+        .map(|index| u64::try_from(index + 1).expect("line fits u64"))
+        .expect("main's exit");
+    for ending in ["exits", "is killed", "is shut down"] {
+        let mut scenario = Scenario::new(
+            format!("main thread exits alone, then the process {ending}"),
+            &program,
+        );
+        // Every worker must call `share` before it can exit.
+        scenario.add_breakpoint("share").await;
+        let exit = scenario
+            .add_source_breakpoint("threads.c", main_exits)
+            .await;
+        let reason = scenario
+            .run_with_to_stop(LaunchOptions {
+                arguments: vec!["2".into(), "leader".into()],
+                ..LaunchOptions::default()
+            })
+            .await;
+        assert!(
+            matches!(reason, StopReason::Breakpoint { .. }),
+            "{reason:?}"
+        );
+        let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
+            panic!("expected a stop");
+        };
+        let main = ThreadId::new(process_id.get());
+        let at_exit = |snapshot: &uscope::StateSnapshot| {
+            snapshot.threads.iter().any(|thread| {
+                thread.id == main
+                    && matches!(&thread.state, ThreadState::Stopped {
+                        reason: Some(StopReason::Breakpoint { hits, .. }),
+                    } if hits.iter().any(|hit| hit.breakpoint == exit.id))
+            })
+        };
+        if !at_exit(&scenario.snapshot().await) {
+            let reason = scenario.continue_alone_to_stop(main).await;
+            assert!(at_exit(&scenario.snapshot().await), "{reason:?}");
+        }
+        scenario.remove_all_breakpoints().await;
+
+        assert_eq!(
+            scenario.continue_alone_to_stop(main).await,
+            StopReason::ThreadExited {
+                thread_id: main,
+                status: ExitStatus::Code(3),
+            },
+            "{ending}"
+        );
+        let threads = scenario.snapshot().await.threads;
+        assert!(
+            !threads.is_empty() && threads.iter().all(|thread| thread.id != main),
+            "{ending}: {threads:?}"
+        );
+        match ending {
+            "exits" => assert_eq!(
+                scenario.resume_to_stop().await,
+                StopReason::Exited(ExitStatus::Code(3))
+            ),
+            "is killed" => {
+                scenario.operation("kill", scenario.handle().kill()).await;
+            }
+            _ => {}
+        }
+        scenario.shutdown().await;
+    }
+}

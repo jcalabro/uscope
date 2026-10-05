@@ -24,7 +24,7 @@ use tokio::time::timeout;
 use uscope::{
     Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
     DebuggerHandle, ExceptionDisposition, ExitStatus, LaunchOptions, LineNumber, ProcessId, Result,
-    ResumeScope, StackFrameId, StateSnapshot, StepKind, StopReason, VirtualAddress,
+    ResumeScope, StackFrameId, StateSnapshot, StepKind, StopReason, ThreadId, VirtualAddress,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -424,6 +424,47 @@ impl Scenario {
             }
         });
         self.wait_for_request(task, "step").await
+    }
+
+    /// Continues `thread` while every other thread stays stopped, until its
+    /// execution stops or ends.
+    pub async fn continue_alone_to_stop(&mut self, thread: ThreadId) -> StopReason {
+        self.drain_events();
+        self.transcript
+            .push(format!("request: continue thread {thread} alone"));
+        let handle = self.handle.clone();
+        let task = tokio::spawn(async move {
+            let stop = handle
+                .snapshot()
+                .await?
+                .stop_id
+                .ok_or(uscope::Error::NotStopped)?;
+            let mut events = handle.subscribe();
+            let execution = handle
+                .continue_execution(
+                    stop,
+                    ResumeScope::Thread(thread),
+                    ExceptionDisposition::Pass,
+                )
+                .await?;
+            loop {
+                match events.recv().await {
+                    Ok(DebuggerEvent::InferiorStopped {
+                        execution_id: Some(id),
+                        reason,
+                        ..
+                    }) if id == execution => return Ok(reason),
+                    Ok(DebuggerEvent::InferiorExited {
+                        execution_id: Some(id),
+                        status,
+                        ..
+                    }) if id == execution => return Ok(StopReason::Exited(status)),
+                    Ok(_) => {}
+                    Err(error) => panic!("event stream failed: {error}"),
+                }
+            }
+        });
+        self.wait_for_request(task, "continue").await
     }
 
     async fn run_request(&mut self, launch: bool) -> StopReason {

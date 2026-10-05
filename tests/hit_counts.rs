@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use support::Scenario;
 use uscope::{
-    Breakpoint, BreakpointHit, BreakpointId, BreakpointLocation, BreakpointSpec, DebuggerEvent,
+    Breakpoint, BreakpointHit, BreakpointId, BreakpointLocation, BreakpointSpec,
     ExceptionDisposition, ExitStatus, HitCondition, InferiorState, ResumeScope, StepKind,
     StopReason, ThreadId, ThreadState, VirtualAddress,
 };
@@ -280,37 +280,6 @@ async fn only_a_thread_that_hit_a_breakpoint_steps_over_one_added_where_it_stand
     }
 }
 
-/// Continues one thread alone and waits for the stop its execution ends in.
-async fn continue_alone(scenario: &mut Scenario, thread: ThreadId) -> StopReason {
-    let handle = scenario.handle().clone();
-    let stop = scenario.snapshot().await.stop_id.expect("stopped");
-    let mut events = handle.subscribe();
-    let execution = scenario
-        .operation(
-            "continue alone",
-            handle.continue_execution(
-                stop,
-                ResumeScope::Thread(thread),
-                ExceptionDisposition::Pass,
-            ),
-        )
-        .await;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, events.recv()).await {
-            Ok(Ok(DebuggerEvent::InferiorStopped {
-                execution_id: Some(id),
-                reason,
-                ..
-            })) if id == execution => return reason,
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => panic!("event stream failed: {error}"),
-            Err(elapsed) => panic!("thread {thread} did not stop: {elapsed}"),
-        }
-    }
-}
-
 /// A thread that hit a breakpoint and has not run since steps over the
 /// trap there, whichever breakpoint it is by then, though another thread
 /// ran while the breakpoint was replaced.
@@ -348,7 +317,7 @@ async fn a_thread_kept_stopped_steps_over_a_breakpoint_replaced_where_it_hit_one
 
     let total = global(&scenario, "total").await;
     assert_eq!(
-        hits(&continue_alone(&mut scenario, worker).await),
+        hits(&scenario.continue_alone_to_stop(worker).await),
         [BreakpointHit {
             breakpoint: second.id,
             hit_count: 1,
