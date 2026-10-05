@@ -289,9 +289,11 @@ Views match on identity, which the provider keeps alongside `name`:
 pub struct TypeIdentity {
     pub language: SourceLanguage,       // DW_AT_language of the defining unit
     pub path: Arc<[Arc<str>]>,          // namespaces, inline ones removed
+    pub inline_namespaces: Arc<[Arc<str>]>, // the removed ones, which names may spell
     pub base: Arc<str>,                 // "vector", "Vec", "Aligned"
     pub arguments: Arc<[TypeArgument]>, // by position, packs flattened
     pub origin: ArgumentOrigin,         // Dwarf | ParsedName | None
+    pub go: Option<GoTypeAttributes>,   // go_kind and go_runtime_type
 }
 pub enum TypeArgument { Type(TypeReference), Value(IntegerValue), Unknown(Arc<str>) }
 ```
@@ -957,19 +959,74 @@ Each phase is test-first, lands on `next` on its own, and is reviewed
   `just sim 600`.
 
 **P1 Compliant DWARF and type identity.** This phase is in the provider and
-changes little that users see.
+changes little that users see. *Done 2026-10-05, uncommitted on `views`.*
 
-- §3.1 fat pointers by shape, which fixes `*const [T]` at `-O`.
-- Zig `[]const u8` text, and text charged to the budget.
-- §3.2 identity:
-  - the language;
-  - the path, with `DW_AT_export_symbols` collapsing;
-  - template arguments, including packs;
-  - name parsing where DWARF has no parameters;
-  - Go's attributes.
-- The per-image identity index.
-- libc++ in the dev shell (D4).
-- `ptype` shows template arguments.
+- [x] §3.1 fat pointers by shape, which fixes `*const [T]` at `-O`.
+- [x] Zig `[]const u8` text, and text charged to the budget.
+- [x] §3.2 identity:
+  - [x] the language;
+  - [x] the path, with `DW_AT_export_symbols` collapsing;
+  - [x] template arguments, including packs;
+  - [x] name parsing where DWARF has no parameters;
+  - [x] Go's attributes.
+- [x] The per-image identity index.
+- [x] libc++ in the dev shell (D4).
+- [x] `ptype` shows template arguments.
+
+What P1 built, and what it learned:
+
+- **Where it lives.** `TypeInfo.identity` holds a `TypeIdentity`
+  (`src/model.rs`). `src/type_identity.rs` is the neutral part: the name
+  parser for the three syntaxes (`a::b<T>`, Go's `pkg.T[A]`, Zig's
+  `mod.T(A)`), argument matching, and the per-image `TypeIndex`. The DWARF
+  side is `variables/identity.rs`. `ModuleImage::type_instances`,
+  `types_named`, and `same_type` are the index's API.
+- **Fixtures.** `cpp/templates.cpp` (gcc, gcc DWARF 4 type units, clang,
+  clang with libc++), `rust/generics.rs` (-O0 and -O2), `go/generics` (both),
+  `zig/generics.zig`. Tests: `tests/debugger/identities.rs`, and
+  `ptype_shows_qualified_names_and_template_arguments` in `tests/cli.rs`.
+- **libc++** is `clang++-libc++` in the dev shell, a wrapper around the
+  shell's clang with nixpkgs' libc++ 21.1.8.
+- **Rust fat pointers.** rustc emits every pointer to a slice or `str` as a
+  structure `{data_ptr, length}` outside every module, whatever it names it.
+  A pointer to a type with an unsized tail (`&Path`, `&CStr`,
+  `*const RcInner<str>`, a user's DST) has the same shape, but its data
+  pointer targets the whole type and its length counts the tail, so it stays
+  a record; P4's unsized tails take it from there. `TypeKind::Slice` gained
+  `text` for Rust's `str` and Zig's `[]const u8`, `[:0]const u8`, `[:0]u8`.
+  Zig's LLVM backend has no `DW_AT_ZIG_sentinel`, so `[*:0]const u8` is
+  recognized by Zig's own spelling.
+- **Arguments.** rustc describes type parameters but omits const ones, so
+  the name's integers fill the positions the parameter DIEs skip. GCC omits
+  `std::allocator<T>`'s parameters; its name is parsed and each argument
+  resolves only when exactly one type matches it. Go maps, channels,
+  slices, arrays, and pointers take their arguments from `go_key` and
+  `go_elem`; Go generics and Zig instances are parsed.
+- **Inline namespaces.** The identity's path omits them, and
+  `TypeIdentity.inline_namespaces` keeps them so a name may spell them
+  (`outer::v1::Thing`). GCC copies namespaces into DWARF 4 type units
+  without their `DW_AT_export_symbols`, so a namespace is inline when any
+  unit marks the namespace with the same full path inline.
+- **Type names in expressions** resolve through the index: outer path
+  segments and trailing (defaulted) arguments may be omitted, as in
+  `` std::`vector<int>` ``. Go emits same-named typedefs over its named
+  types, and a synonym of another candidate with the same name is that
+  candidate. A dotted Go name in `sizeof` still binds as a value path, so it
+  needs backticks; the binder is unchanged.
+- **Budgets.** Text reads are charged. Text the budget cannot afford ends
+  in `TextCompletion::Limited` without exhausting the inspection, so the
+  values after it are still read. The default per-operation limits rose to
+  64 KiB and 256 reads (§3.9); the per-top-level-value budget remains P2.
+- **The index is built at load**, not lazily: resolving parsed arguments
+  needs it, and building it measured no load-time or memory difference on
+  Rust-with-std, Go, Zig, and C++ binaries.
+- **For P3.** The type graph holds only types reachable from data and, now,
+  from template arguments and Go's attributes. A type reachable only through
+  member functions, such as libstdc++'s `_Rb_tree_node<V>`, is not built,
+  so the index cannot find it yet. P3 must make such types reachable before
+  map views can name their nodes.
+- `ptype` qualifies C, C++, and Rust names with their path, says `class` for
+  classes, and ends with an `arguments:` line.
 
 **P2 The engine and contiguous shapes.**
 

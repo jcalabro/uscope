@@ -333,6 +333,13 @@ accepted and ignored. A pointer type is `T*` inside a cast's parentheses,
 where `(*p)` dereferences, and `*T` after `as`, where a trailing `*` would
 multiply.
 
+A program type is named by what it is, not by how its compiler spelled it.
+Its outer namespaces, modules, and packages may be left off, as may inline
+namespaces such as libc++'s `std::__1`, and a template's trailing arguments,
+which C++ fills with defaults: `` std::`vector<int>` `` names
+`std::vector<int, std::allocator<int> >`. A name that fits several different
+types is ambiguous, and the error lists them.
+
 `(name) - 1` subtracts when `name` is a value and casts `-1` when it is a
 type, and the two readings group the rest of the expression differently:
 `(n) - a * b` is `n - (a * b)`, while `(T) - a * b` is `((T)(-a)) * b`. Such a

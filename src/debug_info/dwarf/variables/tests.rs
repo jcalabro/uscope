@@ -746,7 +746,10 @@ fn expression_memory_reads_are_strictly_bounded() {
             &mut FrameBase::Unsupported,
             &units([]),
             &mut runtime,
-            &mut InspectionBudget::default(),
+            &mut InspectionBudget::new(crate::InspectionLimits {
+                memory_reads: 64,
+                ..crate::InspectionLimits::default()
+            }),
         ),
         Err(
             VariableUnavailableReason::InspectionLimit(crate::InspectionExhaustion {
@@ -1106,6 +1109,7 @@ fn type_graph_rejects_wrapper_cycles_but_permits_recursive_pointer_edges() {
                 target: Some(reference(1)),
                 relationship: NamedTypeRelationship::Synonym,
             },
+            identity: None,
         }),
         TypeEntry::Resolved(TypeInfo {
             reference: reference(1),
@@ -1115,6 +1119,7 @@ fn type_graph_rejects_wrapper_cycles_but_permits_recursive_pointer_edges() {
                 modifier: TypeModifier::Const,
                 target: reference(0),
             },
+            identity: None,
         }),
     ];
     let cycle_error = value_shape_from(&cycle, TypeId::new(0)).unwrap_err();
@@ -1131,6 +1136,7 @@ fn type_graph_rejects_wrapper_cycles_but_permits_recursive_pointer_edges() {
             target: Some(reference(0)),
             address_class: 0,
         },
+        identity: None,
     })];
     assert!(matches!(
         value_shape_from(&recursive_pointer, TypeId::new(0)),
@@ -1158,6 +1164,7 @@ fn graph_finalization_propagates_wrapper_sizes_to_a_fixpoint() {
                 target: Some(reference(1)),
                 relationship: NamedTypeRelationship::Synonym,
             },
+            identity: None,
         }),
         TypeEntry::Resolved(TypeInfo {
             reference: reference(1),
@@ -1167,6 +1174,7 @@ fn graph_finalization_propagates_wrapper_sizes_to_a_fixpoint() {
                 modifier: TypeModifier::Const,
                 target: reference(2),
             },
+            identity: None,
         }),
         TypeEntry::Resolved(TypeInfo {
             reference: reference(2),
@@ -1175,6 +1183,7 @@ fn graph_finalization_propagates_wrapper_sizes_to_a_fixpoint() {
             kind: TypeKind::Opaque {
                 description: "test representation".into(),
             },
+            identity: None,
         }),
     ];
 
@@ -1204,6 +1213,7 @@ fn inline_cycle_analysis_distinguishes_storage_from_indirection() {
                 target: Some(reference(1)),
                 relationship: NamedTypeRelationship::Synonym,
             },
+            identity: None,
         }),
         TypeEntry::Resolved(TypeInfo {
             reference: reference(1),
@@ -1213,6 +1223,7 @@ fn inline_cycle_analysis_distinguishes_storage_from_indirection() {
                 modifier: TypeModifier::Const,
                 target: reference(0),
             },
+            identity: None,
         }),
     ];
     let mut cycle_nodes = inline_storage_cycle_nodes(&by_value_cycle);
@@ -1238,6 +1249,7 @@ fn inline_cycle_analysis_distinguishes_storage_from_indirection() {
                 bases: Arc::default(),
                 incomplete: false,
             },
+            identity: None,
         }),
         TypeEntry::Resolved(TypeInfo {
             reference: reference(1),
@@ -1247,6 +1259,7 @@ fn inline_cycle_analysis_distinguishes_storage_from_indirection() {
                 target: Some(reference(0)),
                 address_class: 0,
             },
+            identity: None,
         }),
     ];
     assert!(inline_storage_cycle_nodes(&pointer_recursion).is_empty());
@@ -1268,6 +1281,7 @@ fn transparent_wrappers_reject_incompatible_storage_sizes() {
                 target: Some(reference(1)),
                 relationship: NamedTypeRelationship::Encoding,
             },
+            identity: None,
         }),
         TypeEntry::Resolved(TypeInfo {
             reference: reference(1),
@@ -1276,6 +1290,7 @@ fn transparent_wrappers_reject_incompatible_storage_sizes() {
             kind: TypeKind::Opaque {
                 description: "test representation".into(),
             },
+            identity: None,
         }),
     ];
 
@@ -1304,6 +1319,7 @@ fn transparent_wrappers_reject_incompatible_storage_sizes() {
                 modifier: TypeModifier::Shared,
                 target: reference(1),
             },
+            identity: None,
         }),
         types[1].clone(),
     ];
@@ -1338,6 +1354,7 @@ fn sizeless_pointers_separate_unsupported_address_classes_from_defective_metadat
                 target: Some(reference(0)),
                 address_class,
             },
+            identity: None,
         })]
     };
 
@@ -1369,6 +1386,7 @@ fn sizeless_pointers_separate_unsupported_address_classes_from_defective_metadat
             target: Some(reference(0)),
             address_class: 0,
         },
+        identity: None,
     })];
     let zero_error = value_shape_from(&zero_sized, TypeId::new(0)).unwrap_err();
     assert!(
@@ -1383,6 +1401,7 @@ fn sizeless_pointers_separate_unsupported_address_classes_from_defective_metadat
         name: "empty".into(),
         byte_size: Some(0),
         kind: TypeKind::Base(scalar_type(BaseTypeEncoding::Unsigned, 0)),
+        identity: None,
     })];
     let zero_scalar_error = value_shape_from(&zero_scalar, TypeId::new(0)).unwrap_err();
     assert!(
@@ -1402,6 +1421,7 @@ fn sizeless_pointers_separate_unsupported_address_classes_from_defective_metadat
             target: Some(reference(0)),
             address_class: 0,
         },
+        identity: None,
     })];
     let oversized_error = value_shape_from(&oversized, TypeId::new(0)).unwrap_err();
     assert!(

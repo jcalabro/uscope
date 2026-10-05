@@ -31,6 +31,7 @@ pub mod sim;
 mod source_map;
 #[cfg(test)]
 mod test_memory;
+mod type_identity;
 mod unwind;
 
 use std::path::{Path, PathBuf};
@@ -59,33 +60,33 @@ pub use eval::bind::Mode as EvaluationMode;
 pub use eval::error::{ErrorKind as ExpressionErrorKind, ExpressionError};
 pub use eval::syntax::{Expression, Span};
 pub use model::{
-    Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArrayDimension,
-    Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry,
-    BreakpointLocation, ByteOrder, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo,
-    CodeInstanceKind, ColumnNumber, DereferenceReference, DereferenceState,
+    Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArgumentOrigin,
+    ArrayDimension, Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding,
+    BreakpointEntry, BreakpointLocation, ByteOrder, CallFrameUnavailableReason, CodeInstanceId,
+    CodeInstanceInfo, CodeInstanceKind, ColumnNumber, DereferenceReference, DereferenceState,
     DereferenceUnavailableReason, DereferencedValue, EmbeddedSymbolTable, EntryProvenance,
     EnumerationOrigin, Enumerator, ExecutionLocation, FloatValue, FrameKind, FunctionId,
     FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
     GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
-    ImageAddress, ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup,
-    InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits,
-    InspectionUsage, IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo,
-    LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
-    MemoryReadUnavailableReason, ModuleAddress, ModuleId, ModuleImage, ModuleImageId,
-    NamedTypeRelationship, OptimizedOutReason, PointerWidth, RecordKind, RecordMember,
-    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
+    GoKind, GoTypeAttributes, ImageAddress, ImageAddressDescription, ImageLocation, InlineChain,
+    InlineFrameLookup, InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit,
+    InspectionLimits, InspectionUsage, IntegerValue, LineNumber, LineSequenceId,
+    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead,
+    MemoryReadCompletion, MemoryReadUnavailableReason, ModuleAddress, ModuleId, ModuleImage,
+    ModuleImageId, NamedTypeRelationship, OptimizedOutReason, PointerWidth, RecordKind,
+    RecordMember, RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
     RegisterSnapshot, RegisterValue, ScalarValue, SectionId, SectionInfo, SectionLocation,
-    SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId,
-    StatementFlags, StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId,
-    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TextCompletion,
-    TextSummary, ThreadId, TlsUnavailableReason, TypeId, TypeInfo, TypeKind, TypeModifier,
-    TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
-    ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
-    ValueChildRelationship, ValueChildren, ValueChildrenReference, ValuePageCompletion, Variable,
-    VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
-    VariableSnapshot, VariableState, VariableUnavailableReason, VariableValue, VariableValueSource,
-    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
-    VirtualAddress,
+    SourceContext, SourceFile, SourceFileId, SourceLanguage, SourceLine, SourceLocation,
+    StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolBinding, SymbolExtent,
+    SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources,
+    TargetDescription, TextCompletion, TextSummary, ThreadId, TlsUnavailableReason, TypeArgument,
+    TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier, TypeNode, TypeReference,
+    UnsupportedVariableFeature, UnwindTermination, ValueAccessUnavailableReason, ValueBitRange,
+    ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren, ValueChildrenReference,
+    ValuePageCompletion, Variable, VariableInvalidReason, VariableKind, VariableMalformedKind,
+    VariableMalformedReason, VariableSnapshot, VariableState, VariableUnavailableReason,
+    VariableValue, VariableValueSource, Variant, VariantDiscriminant, VariantSelection,
+    VariantSelector, VariantStorageKind, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CoreDumpInfo,

@@ -29,6 +29,7 @@ pub(super) fn variant_metadata_limit_type(
         kind: TypeKind::Opaque {
             description: "variant metadata exceeds its resource limit".into(),
         },
+        identity: None,
     })
 }
 
