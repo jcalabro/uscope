@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::corpus::Run;
-use super::kernel::{ExitStatus, Kernel, State, Tid};
+use super::kernel::{ExitStatus, Kernel, Parent, State, Tid};
 use super::loader::Image;
 use crate::backend::sim_edge::Truth;
 
@@ -180,49 +180,78 @@ pub fn unseen_hits(kernel: &Kernel) -> Result<(), String> {
     })
 }
 
+/// A trap whose stop the controller hears of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeardTrap {
+    pub tid: Tid,
+    pub address: u64,
+    /// When the thread executes the trap again, having executed nothing
+    /// since it last trapped there, the breakpoints that counted its
+    /// arrival.
+    pub again: Option<BTreeSet<u64>>,
+    /// Whether the controller had begun to shut down.
+    pub in_shutdown: bool,
+}
+
 /// Breakpoint accounting, hit counts: handling one message counts at most
-/// the one trap it reports. A trap at a site counts one hit for every user
-/// breakpoint owning the site, and nothing else changes a count, except a
-/// launch, which starts every count again. A trap may go uncounted once its
-/// process is exiting as a whole, which takes the thread out of its stop.
+/// the one trap it reports. A thread's arrival at a trap counts one hit for
+/// every user breakpoint owning the site then, and no more. Executed again
+/// before the thread has executed anything else, as when a signal
+/// interrupts the step over it, the trap counts nothing for a breakpoint
+/// that counted the arrival, and may count it once for one that came to
+/// the site since: whether a thread resumed there ever ran, a debugger can
+/// only guess. Nothing else changes a count, except a new inferior,
+/// launched or attached, which starts every count again, whatever message
+/// started it. A trap may go uncounted once its process is exiting as a
+/// whole, which takes the thread out of its stop. One heard during a
+/// shutdown is no hit: the controller kills a launched process, and
+/// releases an attached one with the thread rewound to execute the
+/// instruction once untraced, as if the breakpoint had gone first.
 pub fn hit_counts(
     before: &Truth,
     after: &Truth,
-    trap: Option<(Tid, u64)>,
-    launch: bool,
+    trap: Option<&HeardTrap>,
     disturbed: bool,
 ) -> Result<(), String> {
+    let started = after.inferior.is_some() && after.inferior != before.inferior;
     let owners = trap
-        .and_then(|(_, address)| before.sites.get(&address))
+        .and_then(|trap| before.sites.get(&trap.address))
         .map(|site| site.users.clone())
         .unwrap_or_default();
+    let again = trap.and_then(|trap| trap.again.as_ref());
+    let in_shutdown = trap.is_some_and(|trap| trap.in_shutdown);
     for (&id, breakpoint) in &after.breakpoints {
         let previous = before
             .breakpoints
             .get(&id)
             .map_or(0, |earlier| earlier.hit_count);
         let now = breakpoint.hit_count;
-        let expected = u64::from(owners.contains(&id));
-        let allowed = if launch {
-            now == 0 || now == previous
-        } else if disturbed && expected == 1 {
+        let owned = owners.contains(&id);
+        let allowed = if started {
+            now == 0
+        } else if !owned || in_shutdown || again.is_some_and(|counted| counted.contains(&id)) {
+            now == previous
+        } else if disturbed || again.is_some() {
             now == previous || now == previous + 1
         } else {
-            now == previous + expected
+            now == previous + 1
         };
         if !allowed {
             let reason = trap.map_or_else(
                 || "the message reported no trap".to_owned(),
-                |(tid, address)| format!("thread {tid} trapped at {address:#x}"),
+                |trap| {
+                    format!(
+                        "thread {} trapped at {:#x}{}",
+                        trap.tid,
+                        trap.address,
+                        if again.is_some() { " again" } else { "" }
+                    )
+                },
             );
             return Err(format!(
                 "breakpoint {id}'s hit count went from {previous} to {now}; {reason}, and \
                  the breakpoint {} that site",
-                if expected == 1 {
-                    "owned"
-                } else {
-                    "did not own"
-                }
+                if owned { "owned" } else { "did not own" }
             ));
         }
     }
@@ -275,11 +304,11 @@ pub fn user_breakpoints(
 /// Transparency, while the program runs: what it wrote so far begins what
 /// it writes undisturbed.
 pub fn output_so_far(kernel: &Kernel, run: &Run) -> Result<(), String> {
-    for process in kernel.processes.values() {
-        if !run.output.as_bytes().starts_with(&process.output) {
+    for output in kernel.outputs.values() {
+        if !run.output.as_bytes().starts_with(output) {
             return Err(format!(
                 "the program wrote {:?}, which does not begin {:?}",
-                String::from_utf8_lossy(&process.output),
+                String::from_utf8_lossy(output),
                 run.output
             ));
         }
@@ -287,7 +316,8 @@ pub fn output_so_far(kernel: &Kernel, run: &Run) -> Result<(), String> {
     Ok(())
 }
 
-/// Clean exit: when the session is over, no simulated process remains.
+/// Clean exit: when the session is over, no simulated process remains,
+/// not even one waiting to be reaped.
 pub fn clean_exit(kernel: &Kernel) -> Result<(), String> {
     if let Some(thread) = kernel.threads.values().next() {
         return Err(format!(
@@ -295,14 +325,38 @@ pub fn clean_exit(kernel: &Kernel) -> Result<(), String> {
             thread.tid, thread.tgid, thread.state
         ));
     }
+    if let Some((tgid, zombie)) = kernel.zombies.iter().next() {
+        return Err(format!(
+            "process {tgid} outlived the session unreaped by {}",
+            zombie.parent
+        ));
+    }
     Ok(())
 }
 
-/// Transparency, once the program ended: a program that exited by itself
-/// did exactly what it does undisturbed, and one killed had written only a
-/// beginning of that.
+/// Transparency, once the program ended. A process the tracer launched or
+/// attached to that exited by itself wrote, with the children it forked,
+/// exactly what it writes undisturbed, and exited as it does; one killed
+/// wrote only a beginning of that. A child its parent reaped shows in what the parent
+/// wrote. A child init reaped ran on alone once released: the corpus's
+/// children check their own work and exit 0 when it is right.
 pub fn transparency(kernel: &Kernel, run: &Run) -> Result<(), String> {
-    for (tgid, (status, output)) in &kernel.ended {
+    for (tgid, ended) in &kernel.ended {
+        match ended.reaper {
+            Parent::Tracer | Parent::Launcher => {}
+            Parent::Init if !ended.killed_externally && ended.status != ExitStatus::Code(0) => {
+                return Err(format!(
+                    "child {tgid}, released and orphaned, ended {:?}; undisturbed it exits 0",
+                    ended.status
+                ));
+            }
+            Parent::Init | Parent::Process(_) => continue,
+        }
+        let status = &ended.status;
+        let output = kernel
+            .outputs
+            .get(&ended.root)
+            .map_or(&[][..], Vec::as_slice);
         if !run.output.as_bytes().starts_with(output) {
             return Err(format!(
                 "process {tgid} wrote {:?}, which does not begin {:?}",
@@ -311,7 +365,7 @@ pub fn transparency(kernel: &Kernel, run: &Run) -> Result<(), String> {
             ));
         }
         if let ExitStatus::Code(code) = *status
-            && (code & 0xff != run.exit_code || output.as_slice() != run.output.as_bytes())
+            && (code & 0xff != run.exit_code || output != run.output.as_bytes())
         {
             return Err(format!(
                 "process {tgid} exited {code} after writing {:?}; undisturbed it exits {} \
@@ -330,6 +384,7 @@ mod tests {
     use super::*;
     use crate::backend::sim_edge::{Site, UserBreakpoint};
     use crate::sim::corpus::Corpus;
+    use crate::sim::kernel::Ended;
 
     fn site(original_byte: u8, installed: bool, plans: Vec<u64>) -> Site {
         Site {
@@ -444,9 +499,16 @@ mod tests {
         };
         let ended = |status, output: &str| {
             let mut kernel = Kernel::new(100);
-            kernel
-                .ended
-                .insert(1000, (status, output.as_bytes().to_vec()));
+            kernel.ended.insert(
+                1000,
+                Ended {
+                    status,
+                    root: 1000,
+                    reaper: Parent::Tracer,
+                    killed_externally: false,
+                },
+            );
+            kernel.outputs.insert(1000, output.as_bytes().to_vec());
             transparency(&kernel, &run)
         };
         assert_eq!(ended(ExitStatus::Code(2), "total 202\n"), Ok(()));
@@ -475,33 +537,72 @@ mod tests {
                     )
                 })
                 .collect(),
+            inferior: Some(1000),
             ..Truth::default()
         }
     }
 
-    /// A trap counts one hit for each owner of its site and none for any
-    /// other breakpoint; a message without a trap counts none; a launch
-    /// starts the counts again; and a trap a group exit disturbed may go
-    /// uncounted.
+    /// An arrival at a trap counts one hit for each owner of its site and
+    /// none for any other breakpoint; the trap executed again counts none
+    /// for a breakpoint that counted the arrival and at most one for any
+    /// other owner; a message without a trap counts none; a new inferior
+    /// starts the counts again; a trap a group exit disturbed may go
+    /// uncounted; and one heard during a shutdown counts none.
     #[test]
     fn hit_counts_follow_the_traps_the_controller_hears_of() {
         let before = with_hits([4, 0, 7]);
-        let trap = Some((1001, 0x1000));
+        let arrival = HeardTrap {
+            tid: 1001,
+            address: 0x1000,
+            again: None,
+            in_shutdown: false,
+        };
+        let trap = Some(&arrival);
         assert_eq!(
-            hit_counts(&before, &with_hits([5, 1, 7]), trap, false, false),
+            hit_counts(&before, &with_hits([5, 1, 7]), trap, false),
             Ok(())
         );
         for after in [[6, 1, 7], [5, 0, 7], [5, 1, 8]] {
-            assert!(hit_counts(&before, &with_hits(after), trap, false, false).is_err());
+            assert!(hit_counts(&before, &with_hits(after), trap, false).is_err());
         }
-        assert_eq!(hit_counts(&before, &before, None, false, false), Ok(()));
-        assert!(hit_counts(&before, &with_hits([5, 0, 7]), None, false, false).is_err());
+
+        let again = HeardTrap {
+            again: Some(BTreeSet::from([1])),
+            ..arrival.clone()
+        };
+        for after in [[4, 0, 7], [4, 1, 7]] {
+            assert_eq!(
+                hit_counts(&before, &with_hits(after), Some(&again), false),
+                Ok(())
+            );
+        }
+        for after in [[5, 0, 7], [4, 2, 7], [4, 0, 8]] {
+            assert!(hit_counts(&before, &with_hits(after), Some(&again), false).is_err());
+        }
+
+        assert_eq!(hit_counts(&before, &before, None, false), Ok(()));
+        assert!(hit_counts(&before, &with_hits([5, 0, 7]), None, false).is_err());
+        let relaunched = |hits| Truth {
+            inferior: Some(1002),
+            ..with_hits(hits)
+        };
         assert_eq!(
-            hit_counts(&before, &with_hits([0, 0, 0]), None, true, false),
+            hit_counts(&before, &relaunched([0, 0, 0]), None, false),
             Ok(())
         );
-        assert_eq!(hit_counts(&before, &before, trap, false, true), Ok(()));
-        assert!(hit_counts(&before, &with_hits([6, 1, 7]), trap, false, true).is_err());
+        assert!(hit_counts(&before, &relaunched([4, 0, 7]), None, false).is_err());
+        assert_eq!(hit_counts(&before, &before, trap, true), Ok(()));
+        assert!(hit_counts(&before, &with_hits([6, 1, 7]), trap, true).is_err());
+
+        let in_shutdown = HeardTrap {
+            in_shutdown: true,
+            ..arrival
+        };
+        assert_eq!(
+            hit_counts(&before, &before, Some(&in_shutdown), false),
+            Ok(())
+        );
+        assert!(hit_counts(&before, &with_hits([5, 1, 7]), Some(&in_shutdown), false).is_err());
     }
 
     /// A published stop requires every live thread stopped and known.

@@ -4,6 +4,10 @@
 
 use tokio::sync::broadcast;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use super::hits::Published;
 use super::kernel::{ExitStatus, Kernel, Tid, WaitStatus};
 use super::marks::{Mark, Marks};
 use super::report::Failure;
@@ -11,6 +15,8 @@ use crate::DebuggerEvent;
 
 pub struct Auditor {
     events: broadcast::Receiver<DebuggerEvent>,
+    /// The hit events counted for the client's checks.
+    published: Rc<RefCell<Published>>,
     /// The newest revision of any event.
     revision: u64,
     /// The newest revision a `StateChanged` announced.
@@ -24,9 +30,13 @@ fn failure(message: String) -> Failure {
 }
 
 impl Auditor {
-    pub const fn new(events: broadcast::Receiver<DebuggerEvent>) -> Self {
+    pub const fn new(
+        events: broadcast::Receiver<DebuggerEvent>,
+        published: Rc<RefCell<Published>>,
+    ) -> Self {
         Self {
             events,
+            published,
             revision: 0,
             change: 0,
             stop: 0,
@@ -37,12 +47,16 @@ impl Auditor {
     /// announces a new revision, which the events it produced share, so
     /// revisions never decrease; stop identifiers only increase; and every
     /// exit the client hears of, of a thread or of the process, is the one
-    /// the kernel reported.
+    /// the kernel reported. It counts the messages hits logged and the
+    /// conditions that failed to evaluate, for the client's checks.
     pub fn check(&mut self, kernel: &Kernel, marks: &mut Marks) -> Result<(), Failure> {
         loop {
             let event = match self.events.try_recv() {
                 Ok(event) => event,
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                    self.published.borrow_mut().gaps += 1;
+                    continue;
+                }
                 Err(_) => return Ok(()),
             };
             let revision = event.revision();
@@ -92,7 +106,7 @@ impl Auditor {
                     process_id, status, ..
                 } => {
                     let tgid = Tid::try_from(process_id.get()).expect("a simulated pid fits");
-                    let Some((truth, _)) = kernel.ended.get(&tgid) else {
+                    let Some(truth) = kernel.ended.get(&tgid).map(|ended| &ended.status) else {
                         return Err(failure(format!(
                             "process {tgid} reported {status:?} before it ended"
                         )));
@@ -105,6 +119,22 @@ impl Auditor {
                             "process {tgid} ended {truth:?}, but the client heard {status:?}"
                         )));
                     }
+                }
+                DebuggerEvent::LogMessage { breakpoint, .. } => {
+                    *self
+                        .published
+                        .borrow_mut()
+                        .logged
+                        .entry(breakpoint.get())
+                        .or_default() += 1;
+                }
+                DebuggerEvent::ConditionFailed { breakpoint, .. } => {
+                    *self
+                        .published
+                        .borrow_mut()
+                        .condition_failures
+                        .entry(breakpoint.get())
+                        .or_default() += 1;
                 }
                 _ => {}
             }

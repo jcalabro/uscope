@@ -4,12 +4,14 @@
 //! before it returns, so one that faults leaves the caller's registers as
 //! they were: [`super::step`] works on a copy and keeps it only on success.
 
+use std::cell::Cell;
+
 use iced_x86::{Instruction, Mnemonic, OpKind, Register};
 
 use super::flags::{self, mask, sign_extend, with_status};
 use super::{
-    CARRY, FPE_INTDIV, Fault, Outcome, R11, RAX, RBP, RCX, RDX, RSP, Registers, SI_KERNEL, SIGFPE,
-    SIGSEGV, Stop,
+    Access, Accesses, CARRY, DIRECTION, FPE_INTDIV, Fault, Outcome, R11, RAX, RBP, RCX, RDI, RDX,
+    RSI, RSP, Registers, SI_KERNEL, SIGFPE, SIGSEGV, Stop,
 };
 use crate::sim::memory::AddressSpace;
 
@@ -61,11 +63,13 @@ pub(super) fn execute(
     instruction: &Instruction,
     registers: &mut Registers,
     memory: &mut AddressSpace,
+    accesses: &Cell<Accesses>,
 ) -> Step {
     let mut cpu = Cpu {
         instruction,
         registers,
         memory,
+        accesses,
     };
     if instruction.is_jcc_short_or_near() {
         if cpu.holds()? {
@@ -154,11 +158,15 @@ pub(super) fn execute(
             }
             cpu.set_status(status);
         }
-        Mnemonic::Adc => {
+        Mnemonic::Adc | Mnemonic::Sbb => {
             let bits = cpu.bits(0)?;
             let (a, b) = (cpu.read(0)?, cpu.read(1)?);
             let carry = cpu.registers.rflags & CARRY != 0;
-            let (result, status) = flags::add(a, b, carry, bits);
+            let (result, status) = if instruction.mnemonic() == Mnemonic::Adc {
+                flags::add(a, b, carry, bits)
+            } else {
+                flags::sub(a, b, carry, bits)
+            };
             cpu.write(0, result)?;
             cpu.set_status(status);
         }
@@ -236,6 +244,14 @@ pub(super) fn execute(
             return Ok(Outcome::Syscall);
         }
         Mnemonic::Int3 => return Ok(Outcome::Breakpoint),
+        Mnemonic::Stosb => cpu.string(1, false)?,
+        Mnemonic::Stosw => cpu.string(2, false)?,
+        Mnemonic::Stosd => cpu.string(4, false)?,
+        Mnemonic::Stosq => cpu.string(8, false)?,
+        Mnemonic::Movsb => cpu.string(1, true)?,
+        Mnemonic::Movsw => cpu.string(2, true)?,
+        Mnemonic::Movsd => cpu.string(4, true)?,
+        Mnemonic::Movsq => cpu.string(8, true)?,
         // A privileged instruction in user mode: a general-protection fault.
         Mnemonic::Hlt => {
             return Err(Stop::Fault(Fault {
@@ -253,9 +269,69 @@ struct Cpu<'a> {
     instruction: &'a Instruction,
     registers: &'a mut Registers,
     memory: &'a mut AddressSpace,
+    accesses: &'a Cell<Accesses>,
 }
 
 impl Cpu<'_> {
+    /// Records a data access that completed.
+    fn accessed(&self, address: u64, size: usize, write: bool) {
+        let mut accesses = self.accesses.get();
+        accesses.push(Access {
+            address,
+            size: size as u64,
+            write,
+        });
+        self.accesses.set(accesses);
+    }
+
+    /// Reads `size` bytes at `address`, zero-extended.
+    fn load(&self, address: u64, size: usize) -> Result<u64, Stop> {
+        let mut bytes = [0; 8];
+        self.memory.read(address, &mut bytes[..size])?;
+        self.accessed(address, size, false);
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    /// Writes the low `size` bytes of `value` at `address`.
+    fn store(&mut self, address: u64, size: usize, value: u64) -> Result<(), Stop> {
+        self.memory.write(address, &value.to_le_bytes()[..size])?;
+        self.accessed(address, size, true);
+        Ok(())
+    }
+
+    /// One iteration of `stos` or `movs`, or all of a repeated one that
+    /// has none left. The CPU traps between iterations of a repeated one,
+    /// with `rip` still at it.
+    fn string(&mut self, size: usize, copies: bool) -> Result<(), Stop> {
+        let repeated = self.instruction.has_rep_prefix();
+        if repeated && self.registers.general[RCX] == 0 {
+            return Ok(());
+        }
+        let delta = if self.registers.rflags & DIRECTION == 0 {
+            size as u64
+        } else {
+            (size as u64).wrapping_neg()
+        };
+        let destination = self.registers.general[RDI];
+        let value = if copies {
+            let source = self.registers.general[RSI];
+            let value = self.load(source, size)?;
+            self.registers.general[RSI] = source.wrapping_add(delta);
+            value
+        } else {
+            self.registers.general[RAX] & mask(size * 8)
+        };
+        self.store(destination, size, value)?;
+        self.registers.general[RDI] = destination.wrapping_add(delta);
+        if repeated {
+            self.registers.general[RCX] -= 1;
+            if self.registers.general[RCX] != 0 {
+                self.registers.rip = self.instruction.ip();
+            }
+        }
+        Ok(())
+    }
+
     /// The width in bits of an operand.
     fn bits(&self, operand: u32) -> Result<usize, Stop> {
         Ok(match self.instruction.op_kind(operand) {
@@ -279,12 +355,10 @@ impl Cpu<'_> {
             OpKind::Memory => {
                 let address = self.address(operand)?;
                 let size = self.instruction.memory_size().size();
-                let mut bytes = [0; 8];
-                if size > bytes.len() {
+                if size > 8 {
                     return Err(Stop::Unsupported);
                 }
-                self.memory.read(address, &mut bytes[..size])?;
-                Ok(u64::from_le_bytes(bytes))
+                self.load(address, size)
             }
             _ => {
                 let bits = self.bits(operand)?;
@@ -305,8 +379,7 @@ impl Cpu<'_> {
                 if size > 8 {
                     return Err(Stop::Unsupported);
                 }
-                self.memory.write(address, &value.to_le_bytes()[..size])?;
-                Ok(())
+                self.store(address, size, value)
             }
             _ => Err(Stop::Unsupported),
         }
@@ -350,17 +423,16 @@ impl Cpu<'_> {
 
     fn push(&mut self, value: u64) -> Result<(), Stop> {
         let top = self.registers.general[RSP].wrapping_sub(8);
-        self.memory.write(top, &value.to_le_bytes())?;
+        self.store(top, 8, value)?;
         self.registers.general[RSP] = top;
         Ok(())
     }
 
     fn pop(&mut self) -> Result<u64, Stop> {
         let top = self.registers.general[RSP];
-        let mut bytes = [0; 8];
-        self.memory.read(top, &mut bytes)?;
+        let value = self.load(top, 8)?;
         self.registers.general[RSP] = top.wrapping_add(8);
-        Ok(u64::from_le_bytes(bytes))
+        Ok(value)
     }
 
     /// `imul` in its one-, two-, and three-operand forms.

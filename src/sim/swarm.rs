@@ -9,6 +9,7 @@ use std::fmt;
 use super::choices::{Choices, Stream};
 use super::corpus::Corpus;
 use super::faults::Plan;
+use super::kernel::DebugBehavior;
 use super::schedule::Policy;
 
 /// How likely each kind of action is, relative to the others.
@@ -47,6 +48,14 @@ pub struct Swarm {
     pub launches: u64,
     /// Breakpoints the client adds before its first launch.
     pub early_breakpoints: u64,
+    /// How the debug registers answer the tracer.
+    pub debug: DebugBehavior,
+    /// Whether the client favors watching memory.
+    pub watching: bool,
+    /// Whether the program starts untraced, for the client to attach to
+    /// before it launches anything, and how many instructions the program
+    /// runs before the client acts.
+    pub attach: Option<u64>,
 }
 
 impl Swarm {
@@ -79,7 +88,11 @@ impl Swarm {
             .functions
             .iter()
             .any(|function| function == "rt_clone");
-        let fault = (pick(&[0, 1]) == 1).then(|| Plan::choose(choices, creates_threads));
+        let forks = corpus.programs[program].variants[variant]
+            .functions
+            .iter()
+            .any(|function| function == "rt_fork");
+        let fault = (pick(&[0, 1]) == 1).then(|| Plan::choose(choices, creates_threads, forks));
         let mut pick = |options: &[u64]| *choices.pick(Stream::Swarm, options);
         Self {
             program,
@@ -92,9 +105,16 @@ impl Swarm {
             queue_capacity: usize::try_from(pick(&[1, 2, 8, 32])).expect("small"),
             event_capacity: usize::try_from(pick(&[2, 16, 1024])).expect("small"),
             stop_at_entry: pick(&[0, 1]) == 1,
-            requests: pick(&[4, 16, 48]),
+            requests: pick(&[4, 16, 48, 128]),
             launches: pick(&[1, 2]),
             early_breakpoints: pick(&[0, 1, 3]),
+            debug: match pick(&[0, 0, 0, 0, 1, 2, 2, 2]) {
+                0 => DebugBehavior::Faithful,
+                1 => DebugBehavior::Discarding,
+                _ => DebugBehavior::Contended(usize::try_from(pick(&[2, 3, 4, 4])).expect("small")),
+            },
+            watching: pick(&[0, 1]) == 1,
+            attach: (pick(&[0, 0, 1]) == 1).then(|| choices.below(Stream::Swarm, 1000)),
         }
     }
 }
@@ -104,7 +124,7 @@ impl fmt::Display for Swarm {
         write!(
             formatter,
             "{} preempt={} fault={} burst={} queue={} events={} entry={} requests={} \
-             launches={} early-breakpoints={}",
+             launches={} early-breakpoints={} debug={:?} watching={} attach={}",
             self.policy,
             self.preempt,
             self.fault
@@ -116,6 +136,10 @@ impl fmt::Display for Swarm {
             self.requests,
             self.launches,
             self.early_breakpoints,
+            self.debug,
+            self.watching,
+            self.attach
+                .map_or_else(|| "none".to_owned(), |after| format!("after({after})")),
         )
     }
 }

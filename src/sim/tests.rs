@@ -7,7 +7,7 @@ use super::world::Sabotage;
 use super::{Corpus, Settings, describe_failure, run};
 
 /// How many fixed seeds the gate runs.
-const GATE_SEEDS: u64 = 300;
+const GATE_SEEDS: u64 = 1000;
 /// How many seeds the determinism check runs twice.
 const DETERMINISM_SEEDS: u64 = 32;
 
@@ -126,12 +126,67 @@ fn late_single_steps_fail_the_stepping_oracle() {
     assert_eq!(first_failure_with(Sabotage::LateSingleSteps), "stepping");
 }
 
+/// Runs fixed seeds with `sabotage` until one fails `check`, requiring
+/// every failure on the way to be one of `allowed`.
+fn some_failure_with(sabotage: Sabotage, check: &str, allowed: &[&str]) {
+    let corpus = Corpus::load().expect("load the golden corpus");
+    let settings = Settings {
+        sabotage: Some(sabotage),
+        ..Settings::default()
+    };
+    for seed in 0..GATE_SEEDS {
+        let Some(failure) = run(seed, &corpus, &settings).failure else {
+            continue;
+        };
+        assert_eq!(failure.kind, FailureKind::Debugger, "{failure}");
+        assert!(allowed.contains(&failure.check), "{failure}");
+        if failure.check == check {
+            return;
+        }
+    }
+    panic!("no sabotaged run failed {check}");
+}
+
 /// A kernel that misreports small numbers on the stack shows variables
-/// with wrong values, which the variables oracle catches.
+/// with wrong values, which the variables oracle catches. Breakpoint
+/// conditions read the same values, and may catch it first.
 #[test]
 fn skewed_stack_words_fail_the_variables_oracle() {
+    some_failure_with(
+        Sabotage::SkewSmallStackWords,
+        "variables",
+        &["variables", "breakpoint conditions"],
+    );
+}
+
+/// The same misreported values make conditions the client knows hold or
+/// fail decide hits wrongly, which the breakpoint-conditions check catches.
+#[test]
+fn skewed_stack_words_fail_breakpoint_conditions() {
+    some_failure_with(
+        Sabotage::SkewSmallStackWords,
+        "breakpoint conditions",
+        &["variables", "breakpoint conditions"],
+    );
+}
+
+/// A kernel that keeps a thread's debug-register writes in a copy that
+/// reads them back arms nothing, so the thread's accesses to watched
+/// memory go unseen, which watch accounting catches.
+#[test]
+fn phantom_debug_registers_fail_watch_accounting() {
     assert_eq!(
-        first_failure_with(Sabotage::SkewSmallStackWords),
-        "variables"
+        first_failure_with(Sabotage::PhantomArming),
+        "watch accounting"
+    );
+}
+
+/// A CPU that takes no debug exception for a watched access lets the
+/// debugger report no hit, which watch accounting catches.
+#[test]
+fn missed_watch_traps_fail_watch_accounting() {
+    assert_eq!(
+        first_failure_with(Sabotage::MissWatchTraps),
+        "watch accounting"
     );
 }

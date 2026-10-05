@@ -98,6 +98,9 @@ pub struct Variant {
     pub functions: Vec<String>,
     /// What binutils say about the binary.
     pub facts: Facts,
+    /// The data objects the symbol table defines, up to a page: name,
+    /// image address, size.
+    pub globals: Vec<(String, u64, u64)>,
     debug_info: DebugInfo,
 }
 
@@ -190,6 +193,7 @@ impl Corpus {
                 let debug_info = debug_info::load_bytes(Path::new(&simulated), &data)
                     .map_err(|error| load(error.to_string()))?;
                 let functions = defined_functions(&data).map_err(load)?;
+                let globals = watchable_objects(&data).map_err(load)?;
                 let variant_facts = facts
                     .next()
                     .filter(|facts| facts.name == entry.name)
@@ -207,6 +211,7 @@ impl Corpus {
                     image: Arc::new(image),
                     functions,
                     facts: variant_facts,
+                    globals,
                     debug_info,
                 });
                 next_inode += 1;
@@ -234,6 +239,24 @@ impl Corpus {
         }
         Ok(Self { programs })
     }
+}
+
+/// The data objects a binary's symbol table defines, up to a page, by
+/// name.
+fn watchable_objects(data: &[u8]) -> Result<Vec<(String, u64, u64)>, String> {
+    let file = object::File::parse(data).map_err(|error| error.to_string())?;
+    let mut objects = file
+        .symbols()
+        .filter(|symbol| symbol.kind() == object::SymbolKind::Data)
+        .filter(|symbol| (1..=4096).contains(&symbol.size()))
+        .filter_map(|symbol| {
+            let name = symbol.name().ok()?;
+            (!name.starts_with('_')).then(|| (name.to_owned(), symbol.address(), symbol.size()))
+        })
+        .collect::<Vec<_>>();
+    objects.sort();
+    objects.dedup();
+    Ok(objects)
 }
 
 /// The functions a binary's symbol table defines, other than the

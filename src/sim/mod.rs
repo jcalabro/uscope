@@ -26,6 +26,7 @@ pub mod corpus;
 pub mod cpu;
 pub mod facts;
 pub mod faults;
+mod hits;
 pub mod kernel;
 pub mod loader;
 mod machine;
@@ -39,6 +40,7 @@ mod semantics;
 pub mod swarm;
 #[cfg(test)]
 mod tests;
+mod watches;
 pub mod world;
 
 use std::fmt::Write as _;

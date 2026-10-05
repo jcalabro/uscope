@@ -6,6 +6,10 @@
 //! state the debugger is in when it asks; an error the request cannot
 //! legitimately produce in that state fails the run. The world polls the
 //! task by hand, so it never runs except as a scheduled action.
+//!
+//! The session loop and the program's lifecycle live here; the user's
+//! breakpoints and watchpoints in `breakpoints`, and what the client
+//! inspects at a stop for the semantic oracles in `stops`.
 #![expect(
     clippy::future_not_send,
     reason = "the world polls the client by hand on its one thread"
@@ -19,20 +23,26 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, oneshot};
 
+use self::breakpoints::Added;
 use super::choices::{Choices, Stream};
+use super::hits::{Baseline, Published};
+use super::kernel::DebugBehavior;
 use super::kernel::Tid;
 use super::loader::Image;
 use super::marks::{Mark, Marks};
 use super::report::Failure;
+use super::watches::Intent;
 use crate::backend::ControllerMessage;
 use crate::protocol::Request;
 use crate::{
-    Backtrace, BreakpointId, BreakpointLocation, BreakpointSpec, DebuggerEvent, DebuggerHandle,
-    Error, ExceptionDisposition, ExecutionId, FrameKind, FramePresentation, InferiorState,
-    LaunchOptions, LineNumber, MemoryReadCompletion, ModuleId, PresentedFrame, ProcessId,
-    ResumeScope, StackFrameId, StateSnapshot, StepKind, StopContext, StopId, StopReason, ThreadId,
-    ThreadState, UnwindTermination, VariableSnapshot, VirtualAddress,
+    Backtrace, DebuggerEvent, DebuggerHandle, Error, ExceptionDisposition, ExecutionId,
+    FramePresentation, InferiorState, LaunchOptions, MemoryReadCompletion, ModuleId, ProcessId,
+    ResumeScope, StateSnapshot, StepKind, StopId, StopReason, ThreadId, ThreadState,
+    VariableSnapshot, VirtualAddress,
 };
+
+mod breakpoints;
+mod stops;
 
 /// The most bytes one memory read asks for.
 const MAX_READ: u64 = 64;
@@ -44,6 +54,8 @@ pub struct Script {
     pub requests: u64,
     pub launches: u64,
     pub early_breakpoints: u64,
+    /// Whether to favor watching memory.
+    pub watching: bool,
     /// Functions the program defines in some variant.
     pub functions: Vec<String>,
     /// Functions this variant defines, which must resolve.
@@ -52,8 +64,21 @@ pub struct Script {
     pub source_lines: u64,
     /// Lines whose markers state conditions on the variables there.
     pub marker_lines: Vec<u64>,
+    /// Each marker's condition, by line.
+    pub markers: BTreeMap<u64, String>,
+    /// In unoptimized code, the image addresses where a row of a marker's
+    /// line starts, with the line: where its condition holds at every hit.
+    pub marker_rows: BTreeMap<u64, u64>,
     /// The image, whose code memory reads must show unchanged.
     pub image: Arc<Image>,
+    /// Small objects the program defines, which it may watch: name, image
+    /// address, and size.
+    pub globals: Vec<(String, u64, u64)>,
+    /// How the kernel answers debug-register requests.
+    pub debug: DebugBehavior,
+    /// The program the world started untraced, which the client attaches
+    /// to rather than launching it first.
+    pub attach: Option<ProcessId>,
 }
 
 /// What the client shares with the world.
@@ -72,6 +97,12 @@ pub struct Shared {
     pub breakpoints: Rc<RefCell<BTreeMap<u64, BTreeSet<u64>>>>,
     /// What the client saw that the world's oracles judge, in order.
     pub observations: Rc<RefCell<Vec<Observation>>>,
+    /// The events about breakpoint hits the debugger published, which the
+    /// world's auditor counts.
+    pub published: Rc<RefCell<Published>>,
+    /// The watchpoints the debugger said it armed, and the client has not
+    /// asked to remove, by identifier.
+    pub watches: Rc<RefCell<BTreeMap<u64, Intent>>>,
 }
 
 /// Something the client saw that an oracle judges against the simulation.
@@ -125,12 +156,9 @@ pub struct Client {
     pub script: Script,
     /// The last execution that resumed one thread alone.
     pub alone: Cell<Option<ExecutionId>>,
-}
-
-/// A breakpoint the client added, with the image addresses of its traps.
-struct Added {
-    id: BreakpointId,
-    traps: Vec<u64>,
+    /// What the client saw at the last stop, which the hits since are
+    /// judged against.
+    pub baseline: RefCell<Option<Baseline>>,
 }
 
 fn protocol(message: impl Into<String>) -> Failure {
@@ -157,10 +185,8 @@ impl Client {
     /// debugger published just before it heard of the end, so a request
     /// may fail however it fails.
     fn excuse(&self, process: ProcessId, result: Result<(), Failure>) -> Result<(), Failure> {
-        let ending = Tid::try_from(process.get())
-            .is_ok_and(|tgid| self.shared.ending.borrow().contains(&tgid));
         match result {
-            Err(failure) if failure.check == "protocol" && ending => {
+            Err(failure) if failure.check == "protocol" && self.ending(process) => {
                 self.note(format!(
                     "the program is ending, so this may fail: {}",
                     failure.message
@@ -169,6 +195,32 @@ impl Client {
             }
             result => result,
         }
+    }
+
+    /// Whether the program the client attached to began to end. A debugger
+    /// whose attached program fails under it, as when killed from outside,
+    /// detaches and exits.
+    fn attached_program_ending(&self) -> bool {
+        self.script
+            .attach
+            .is_some_and(|process| self.ending(process))
+    }
+
+    /// The debugger's state, or `None` once it detached and exited.
+    async fn state(&self) -> Result<Option<StateSnapshot>, Failure> {
+        match self.handle.snapshot().await {
+            Ok(snapshot) => Ok(Some(snapshot)),
+            Err(Error::RequestQueueClosed) if self.attached_program_ending() => {
+                self.note("the debugger detached and exited");
+                Ok(None)
+            }
+            Err(error) => Err(protocol(format!("snapshot failed: {error}"))),
+        }
+    }
+
+    /// Whether `process` began to end as a whole.
+    fn ending(&self, process: ProcessId) -> bool {
+        Tid::try_from(process.get()).is_ok_and(|tgid| self.shared.ending.borrow().contains(&tgid))
     }
 
     fn mark(&self, mark: Mark) {
@@ -187,14 +239,13 @@ impl Client {
             self.add_breakpoint(&mut breakpoints).await?;
         }
         let mut launches = 0;
+        let mut watched_launch = 0;
         let mut last_stop: Option<StopId> = None;
         let mut stale: Option<StopId> = None;
         for _ in 0..self.script.requests {
-            let snapshot = self
-                .handle
-                .snapshot()
-                .await
-                .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+            let Some(snapshot) = self.state().await? else {
+                return Ok(());
+            };
             match snapshot.inferior.clone() {
                 InferiorState::NotRunning => {
                     if launches == self.script.launches {
@@ -204,7 +255,10 @@ impl Client {
                     if launches > 1 {
                         self.mark(Mark::Relaunched);
                     }
-                    self.launch().await?;
+                    match self.script.attach.filter(|_| launches == 1) {
+                        Some(process) => self.attach(process).await?,
+                        None => self.launch().await?,
+                    }
                 }
                 InferiorState::Running {
                     process_id,
@@ -222,20 +276,7 @@ impl Client {
                     ..
                 } => {
                     if last_stop != Some(stop_id) {
-                        match reason {
-                            StopReason::Entry => self.mark(Mark::EntryStop),
-                            StopReason::Breakpoint { .. } => self.mark(Mark::BreakpointStop),
-                            StopReason::Step { .. } => self.mark(Mark::StepStop),
-                            StopReason::Pause => self.mark(Mark::PauseStop),
-                            // No golden program raises a signal or does
-                            // anything the debugger cannot classify.
-                            StopReason::Exception(_) | StopReason::Unclassifiable { .. }
-                                if !self.killed(process_id) =>
-                            {
-                                return Err(protocol(format!("stop {stop_id} reports {reason:?}")));
-                            }
-                            _ => {}
-                        }
+                        self.note_stop(stop_id, process_id, &reason)?;
                         let at_breakpoints = snapshot
                             .threads
                             .iter()
@@ -251,9 +292,20 @@ impl Client {
                         if at_breakpoints > 1 {
                             self.mark(Mark::CoHit);
                         }
+                        self.judge_hits(process_id, &snapshot, &mut breakpoints)?;
                         // The semantic oracles judge every stop.
                         let result = self.inspect(stop_id).await;
                         self.excuse(process_id, result)?;
+                        if matches!(reason, StopReason::WatchpointArmFailed { .. }) {
+                            let result = self.resume_unarmed().await;
+                            self.excuse(process_id, result)?;
+                        }
+                        // A watch from the first stop sees the whole run.
+                        if self.script.watching && watched_launch != launches {
+                            watched_launch = launches;
+                            let result = self.add_watch().await;
+                            self.excuse(process_id, result)?;
+                        }
                     }
                     if let Some(previous) = last_stop
                         && previous != stop_id
@@ -276,7 +328,58 @@ impl Client {
         self.shutdown().await
     }
 
+    /// Marks what a new stop reports, failing on what no golden program
+    /// does.
+    fn note_stop(
+        &self,
+        stop_id: StopId,
+        process_id: ProcessId,
+        reason: &StopReason,
+    ) -> Result<(), Failure> {
+        match reason {
+            StopReason::Entry => self.mark(Mark::EntryStop),
+            StopReason::Breakpoint { .. } => self.mark(Mark::BreakpointStop),
+            StopReason::Step { .. } => self.mark(Mark::StepStop),
+            StopReason::Pause => self.mark(Mark::PauseStop),
+            // No golden program raises a signal or does
+            // anything the debugger cannot classify.
+            StopReason::Exception(_) | StopReason::Unclassifiable { .. }
+                if !self.killed(process_id) =>
+            {
+                return Err(protocol(format!("stop {stop_id} reports {reason:?}")));
+            }
+            StopReason::Watchpoint { .. } => self.mark(Mark::WatchpointStop),
+            // Only slots others hold refuse a new thread.
+            StopReason::WatchpointArmFailed { .. } => {
+                if !matches!(self.script.debug, DebugBehavior::Contended(_)) {
+                    return Err(protocol(format!("stop {stop_id} reports {reason:?}")));
+                }
+                self.mark(Mark::WatchArmFailed);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Attaches to the program running untraced, which may have begun to
+    /// end before the client asked.
+    async fn attach(&self, process: ProcessId) -> Result<(), Failure> {
+        match self.handle.attach_process(process).await {
+            Ok(stop) => {
+                self.mark(Mark::Attached);
+                self.note(format!("attached to {process} at stop {stop}"));
+            }
+            Err(error) if self.ending(process) => {
+                self.note(format!("attaching to an ending program failed: {error}"));
+            }
+            Err(error) => return Err(protocol(format!("attaching failed: {error}"))),
+        }
+        Ok(())
+    }
+
     async fn launch(&self) -> Result<(), Failure> {
+        // A process's watchpoints end with it.
+        self.shared.watches.borrow_mut().clear();
         let options = LaunchOptions {
             arguments: self.script.arguments.iter().map(Into::into).collect(),
             stop_at_entry: self.script.stop_at_entry,
@@ -301,7 +404,7 @@ impl Client {
         events: &mut broadcast::Receiver<DebuggerEvent>,
         breakpoints: &mut Vec<Added>,
     ) -> Result<(), Failure> {
-        match self.draw(6) {
+        match self.draw(7) {
             0 => {
                 self.note("pause");
                 match self.handle.pause().await {
@@ -326,6 +429,7 @@ impl Client {
                 self.mark(Mark::KilledRunning);
                 self.kill(true).await?;
             }
+            4 => self.amend_breakpoint(breakpoints).await?,
             _ => {
                 // A thread running alone may wait forever for a sibling
                 // that stays stopped, as the program's own lock would make
@@ -353,23 +457,31 @@ impl Client {
             unreachable!("the client acts while stopped on a stopped snapshot")
         };
         let scope = ResumeScope::Process(process_id);
-        match self.draw(13) {
+        match self.draw(if self.script.watching { 20 } else { 16 }) {
             0 => {
                 self.note("resume");
                 match self.handle.resume().await {
                     Ok(reason) => self.note(format!("resumed until {reason:?}")),
                     Err(Error::EventStreamLagged(_)) => self.mark(Mark::ClientLagged),
+                    Err(error) if self.refused_unarmed(&error).await? => {}
                     Err(error) => return Err(protocol(format!("resume failed: {error}"))),
                 }
             }
             1 => {
-                let execution = self
+                match self
                     .handle
                     .continue_execution(stop, scope, ExceptionDisposition::Pass)
                     .await
-                    .map_err(|error| protocol(format!("continue from {stop} failed: {error}")))?;
-                self.note(format!("continued from {stop} as execution {execution}"));
-                self.wait_for(execution, events).await?;
+                {
+                    Ok(execution) => {
+                        self.note(format!("continued from {stop} as execution {execution}"));
+                        self.wait_for(execution, events).await?;
+                    }
+                    Err(error) if self.refused_unarmed(&error).await? => {}
+                    Err(error) => {
+                        return Err(protocol(format!("continue from {stop} failed: {error}")));
+                    }
+                }
             }
             2 | 3 => self.step().await?,
             4 => {
@@ -387,6 +499,9 @@ impl Client {
             9 => self.select_thread(snapshot).await?,
             10 => self.continue_thread(snapshot, stop).await?,
             11 => self.inspect(stop).await?,
+            12 => self.amend_breakpoint(breakpoints).await?,
+            13 | 16..=18 => self.add_watch().await?,
+            14 | 19 => self.remove_watch().await?,
             _ => {
                 if let Some(stale) = stale {
                     self.continue_stale(stale, scope).await?;
@@ -423,7 +538,7 @@ impl Client {
             .borrow_mut()
             .pick(Stream::Client, &snapshot.threads)
             .id;
-        let execution = self
+        let execution = match self
             .handle
             .continue_execution(
                 stop,
@@ -431,310 +546,21 @@ impl Client {
                 ExceptionDisposition::Pass,
             )
             .await
-            .map_err(|error| protocol(format!("continuing thread {thread} failed: {error}")))?;
+        {
+            Ok(execution) => execution,
+            Err(error) if self.refused_unarmed(&error).await? => return Ok(()),
+            Err(error) => {
+                return Err(protocol(format!(
+                    "continuing thread {thread} failed: {error}"
+                )));
+            }
+        };
         self.note(format!(
             "continued thread {thread} alone as execution {execution}"
         ));
         self.mark(Mark::ThreadContinued);
         self.alone.set(Some(execution));
         Ok(())
-    }
-
-    /// Takes a backtrace, which a stop whose inline frame is ambiguous
-    /// cannot present.
-    async fn backtrace(&self) -> Result<(), Failure> {
-        let snapshot = self
-            .handle
-            .snapshot()
-            .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
-        match self.handle.backtrace().await {
-            Ok(backtrace) => {
-                self.note(format!(
-                    "backtrace: {} frames, {:?}",
-                    backtrace.frames.len(),
-                    backtrace.termination
-                ));
-                if let Some(stop) = snapshot.stop_id {
-                    self.observe(Observation::Backtrace { stop, backtrace });
-                }
-            }
-            Err(Error::AmbiguousInlineFrame) if presented_ambiguously(&snapshot) => {
-                self.note("backtrace from an ambiguous inline frame refused");
-            }
-            Err(error) => return Err(protocol(format!("backtrace failed: {error}"))),
-        }
-        Ok(())
-    }
-
-    async fn step(&self) -> Result<(), Failure> {
-        let kinds = [
-            StepKind::Instruction,
-            StepKind::OverInstruction,
-            StepKind::IntoSource,
-            StepKind::OverSource,
-            StepKind::Out,
-        ];
-        let kind = *self.choices.borrow_mut().pick(Stream::Client, &kinds);
-        let before = self
-            .handle
-            .snapshot()
-            .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
-        // A source step must know which frame it starts in, so one from a
-        // stop whose inline frame is ambiguous is refused, not guessed.
-        let ambiguous = kind != StepKind::Instruction
-            && kind != StepKind::OverInstruction
-            && presented_ambiguously(&before);
-        // Stepping out of a frame without a caller to return to must be
-        // refused, and change nothing.
-        let caller = if kind == StepKind::Out && !ambiguous {
-            let backtrace = self
-                .handle
-                .backtrace()
-                .await
-                .map_err(|error| protocol(format!("backtrace failed: {error}")))?;
-            let caller = Caller::of(&backtrace);
-            if let Some(stop) = before.stop_id {
-                self.observe(Observation::Backtrace { stop, backtrace });
-            }
-            caller
-        } else {
-            Caller::Trusted
-        };
-        self.note(format!("step {kind:?}"));
-        if let Some(thread) = before.selected_thread {
-            self.observe(Observation::StepBegins {
-                thread,
-                kind,
-                presentation: before.presentation.clone(),
-            });
-        }
-        let result = self.handle.step(kind).await;
-        self.observe(Observation::StepEnded(result.as_ref().ok().cloned()));
-        if ambiguous {
-            if !matches!(result, Err(Error::AmbiguousInlineFrame)) {
-                return Err(protocol(format!(
-                    "step {kind:?} from an ambiguous inline frame returned {result:?}"
-                )));
-            }
-            let after = self
-                .handle
-                .snapshot()
-                .await
-                .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
-            if after != before {
-                return Err(protocol(format!(
-                    "a refused step changed the state from {before:?} to {after:?}"
-                )));
-            }
-            self.note(format!(
-                "step {kind:?} from an ambiguous inline frame refused"
-            ));
-            return Ok(());
-        }
-        match (result, &caller) {
-            (
-                Ok(reason),
-                Caller::Trusted | Caller::Outermost(UnwindTermination::NoUnwindInfo { .. }),
-            ) => {
-                self.note(format!("stepped: {reason:?}"));
-            }
-            (Err(Error::EventStreamLagged(_)), _) => self.mark(Mark::ClientLagged),
-            (Err(error), Caller::Outermost(_) | Caller::Corrupt(_)) => {
-                let after = self
-                    .handle
-                    .snapshot()
-                    .await
-                    .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
-                if after != before {
-                    return Err(protocol(format!(
-                        "a refused step out changed the state from {before:?} to {after:?}"
-                    )));
-                }
-                self.note(format!("step out of a frame {caller} refused: {error}"));
-                self.mark(Mark::StepOutRefused);
-            }
-            (Ok(reason), caller) => {
-                return Err(protocol(format!(
-                    "stepped out of a frame {caller}: {reason:?}"
-                )));
-            }
-            (Err(error), Caller::Trusted) => {
-                return Err(protocol(format!("step {kind:?} failed: {error}")));
-            }
-        }
-        Ok(())
-    }
-
-    /// Reads the variables of the selected frame, and the backtrace of its
-    /// thread, which the variables oracle judges where a marker applies.
-    async fn inspect(&self, stop: StopId) -> Result<(), Failure> {
-        let snapshot = self
-            .handle
-            .snapshot()
-            .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
-        let backtrace = match self.handle.backtrace().await {
-            Ok(backtrace) => backtrace,
-            Err(Error::AmbiguousInlineFrame) if presented_ambiguously(&snapshot) => {
-                self.note("inspecting an ambiguous inline frame refused");
-                return Ok(());
-            }
-            Err(error) => return Err(protocol(format!("backtrace failed: {error}"))),
-        };
-        // Code no debug information describes has no variables to show.
-        let undescribed = backtrace
-            .frames
-            .iter()
-            .find(|frame| Some(frame.id) == snapshot.selected_frame)
-            .is_some_and(|frame| frame.function.is_none());
-        let variables = match self.handle.variables().await {
-            Ok(variables) => variables,
-            Err(Error::VariableContextUnsupported) if undescribed => {
-                self.note("variables of code without debug information refused");
-                return Ok(());
-            }
-            Err(error) => return Err(protocol(format!("reading variables failed: {error}"))),
-        };
-        self.note(format!(
-            "variables of frame {} in thread {}: {}",
-            variables.stack_frame,
-            variables.thread,
-            variables
-                .variables
-                .iter()
-                .map(|variable| variable.name.as_ref())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        self.observe(Observation::Backtrace {
-            stop,
-            backtrace: backtrace.clone(),
-        });
-        self.observe(Observation::Variables {
-            stop,
-            variables,
-            backtrace,
-        });
-        // Every other stopped thread's stack, without changing which is
-        // selected.
-        for thread in snapshot.threads.iter() {
-            if Some(thread.id) == snapshot.selected_thread
-                || !matches!(thread.state, ThreadState::Stopped { .. })
-            {
-                continue;
-            }
-            let context = StopContext {
-                stop,
-                thread: thread.id,
-                frame: StackFrameId::new(0),
-            };
-            match self.handle.at(context).backtrace().await {
-                Ok(backtrace) => self.observe(Observation::Backtrace { stop, backtrace }),
-                // Only the selected thread's presentation is in the
-                // snapshot, so another's inline frame may be ambiguous.
-                Err(Error::AmbiguousInlineFrame) => {
-                    self.note(format!("thread {}'s inline frame is ambiguous", thread.id));
-                }
-                Err(error) => {
-                    return Err(protocol(format!(
-                        "backtrace of thread {} failed: {error}",
-                        thread.id
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Adds a breakpoint, returning whether the debugger made one.
-    async fn add_breakpoint(&self, breakpoints: &mut Vec<Added>) -> Result<bool, Failure> {
-        let spec = if self.draw(2) == 0 {
-            let function = self
-                .choices
-                .borrow_mut()
-                .pick(Stream::Client, &self.script.functions)
-                .clone();
-            BreakpointSpec::Function(function)
-        } else {
-            // Half the lines aim at markers, where the variables oracle
-            // judges what the debugger shows.
-            let line = if !self.script.marker_lines.is_empty() && self.draw(2) == 0 {
-                *self
-                    .choices
-                    .borrow_mut()
-                    .pick(Stream::Client, &self.script.marker_lines)
-            } else {
-                self.draw(self.script.source_lines) + 1
-            };
-            BreakpointSpec::Source {
-                path: self.script.source.clone(),
-                line: LineNumber::new(line).expect("lines count from one"),
-            }
-        };
-        let breakpoint = match self.handle.add_breakpoint(spec.clone()).await {
-            Ok(breakpoint) => breakpoint,
-            // A line outside every function names no code.
-            Err(Error::SourceLineUnavailable { line, .. }) if matches!(&spec, BreakpointSpec::Source { line: wanted, .. } if wanted.get() == line) =>
-            {
-                self.note(format!("{spec} has no code"));
-                return Ok(false);
-            }
-            // Another variant may define a function this one inlined away.
-            Err(Error::FunctionNotFound(name) | Error::SymbolNotFound(name))
-                if matches!(&spec, BreakpointSpec::Function(wanted) if *wanted == name)
-                    && !self.script.defined.contains(&name) =>
-            {
-                self.note(format!("{name} is not in this variant"));
-                return Ok(false);
-            }
-            Err(error) => {
-                return Err(protocol(format!(
-                    "adding a breakpoint at {spec} failed: {error}"
-                )));
-            }
-        };
-        self.note(format!(
-            "breakpoint {} at {spec}: {} locations",
-            breakpoint.id,
-            breakpoint.locations.len()
-        ));
-        let traps = breakpoint
-            .locations
-            .iter()
-            .filter_map(|location| match location.location {
-                BreakpointLocation::Image(address) => Some(address.get()),
-                BreakpointLocation::Virtual(_) => None,
-            })
-            .collect::<Vec<_>>();
-        self.shared
-            .breakpoints
-            .borrow_mut()
-            .insert(breakpoint.id.get(), traps.iter().copied().collect());
-        breakpoints.retain(|added| added.id != breakpoint.id);
-        breakpoints.push(Added {
-            id: breakpoint.id,
-            traps,
-        });
-        Ok(true)
-    }
-
-    /// Removes a breakpoint, returning whether there was one to remove.
-    async fn remove_breakpoint(&self, breakpoints: &mut Vec<Added>) -> Result<bool, Failure> {
-        if breakpoints.is_empty() {
-            return Ok(false);
-        }
-        let index = usize::try_from(self.draw(breakpoints.len() as u64)).expect("small");
-        let id = breakpoints.swap_remove(index).id;
-        // From the moment the client asks, the breakpoint may be gone.
-        self.shared.breakpoints.borrow_mut().remove(&id.get());
-        self.handle
-            .remove_breakpoint(id)
-            .await
-            .map_err(|error| protocol(format!("removing breakpoint {id} failed: {error}")))?;
-        self.note(format!("removed breakpoint {id}"));
-        Ok(true)
     }
 
     /// The load bias of the main executable.
@@ -909,64 +735,19 @@ impl Client {
     async fn shutdown(&self) -> Result<(), Failure> {
         self.note("shutdown");
         let (reply, answer) = oneshot::channel();
-        self.handle
+        let sent = self
+            .handle
             .requests
             .send(ControllerMessage::Request(Request::Shutdown { reply }))
-            .await
-            .map_err(|_| protocol("the request queue closed before shutdown"))?;
+            .await;
+        if sent.is_err() && self.attached_program_ending() {
+            self.note("the debugger detached and exited");
+            return Ok(());
+        }
+        sent.map_err(|_| protocol("the request queue closed before shutdown"))?;
         answer
             .await
             .map_err(|_| protocol("shutdown was never answered"))?
             .map_err(|error| protocol(format!("shutdown failed: {error}")))
     }
-}
-
-/// What a step out of the innermost frame would return to.
-#[derive(Debug, Clone)]
-enum Caller {
-    /// A caller the unwinder found in the program's code, or none needed:
-    /// an inline frame returns into its physical frame.
-    Trusted,
-    /// The unwinder says the frame has no caller.
-    Outermost(UnwindTermination),
-    /// The caller the stack names lies outside every module, as a corrupt
-    /// return address does.
-    Corrupt(VirtualAddress),
-}
-
-impl Caller {
-    fn of(backtrace: &Backtrace) -> Self {
-        let Some(frame) = backtrace.frames.first() else {
-            return Self::Outermost(backtrace.termination.clone());
-        };
-        if frame.kind == FrameKind::Inline {
-            return Self::Trusted;
-        }
-        match backtrace.frames.get(1) {
-            None => Self::Outermost(backtrace.termination.clone()),
-            Some(caller) if caller.module.is_none() => Self::Corrupt(caller.instruction),
-            Some(_) => Self::Trusted,
-        }
-    }
-}
-
-impl std::fmt::Display for Caller {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Trusted => formatter.write_str("with a caller"),
-            Self::Outermost(termination) => write!(formatter, "without a caller ({termination})"),
-            Self::Corrupt(address) => {
-                write!(formatter, "whose caller {address} is outside every module")
-            }
-        }
-    }
-}
-
-/// Whether a stop presents its selected thread in an inline frame the
-/// debug information leaves ambiguous.
-fn presented_ambiguously(snapshot: &StateSnapshot) -> bool {
-    snapshot
-        .presentation
-        .as_ref()
-        .is_some_and(|presentation| matches!(presentation.frame, PresentedFrame::Ambiguous(_)))
 }

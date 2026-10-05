@@ -12,7 +12,11 @@
 //! then the next in creation order runs. Every other thread waits in a
 //! ptrace-stop meanwhile, so the program interleaves on the CPU exactly as
 //! in the interpreter. A new thread starts from the registers Linux gave
-//! it, which the kernel's conformance tests check.
+//! it, which the kernel's conformance tests check. A fork child takes its
+//! turn too, in a copy of the interpreter's memory, and its exit sends its
+//! parent a SIGCHLD the program ignores.
+
+use std::collections::BTreeMap;
 
 use iced_x86::{Instruction, RflagsBits};
 use nix::libc;
@@ -20,7 +24,7 @@ use nix::libc;
 use crate::backend::native_tracee::NativeTracee;
 use crate::sim::corpus::{Corpus, Variant};
 use crate::sim::cpu::{
-    self, ADJUST, CARRY, DIRECTION, OVERFLOW, Outcome, PARITY, R11, RAX, RDI, Registers, SIGN,
+    self, ADJUST, CARRY, DIRECTION, OVERFLOW, Outcome, PARITY, R11, RAX, RDI, RSI, Registers, SIGN,
     STATUS_FLAGS, TRAP, ZERO,
 };
 use crate::sim::kernel::{Tid, WaitStatus};
@@ -29,7 +33,9 @@ use crate::sim::memory::{AddressSpace, Backing, Protection};
 /// More instructions than any golden run executes.
 const MAX_STEPS: u64 = 1_000_000;
 const SYS_CLONE: u64 = 56;
+const SYS_FORK: u64 = 57;
 const SYS_EXIT: u64 = 60;
+const SYS_WAIT4: u64 = 61;
 const SYS_EXIT_GROUP: u64 = 231;
 /// The resume flag, which the CPU may set as an instruction completes.
 const RESUME: u64 = 1 << 16;
@@ -56,8 +62,20 @@ fn the_interpreter_executes_every_golden_program_as_the_cpu_does() {
     assert!(checked > 0, "no instruction was checked");
 }
 
-/// Runs one program in lockstep to its exit, returning how many
-/// instructions were compared.
+/// A thread the lockstep runs, in the process it belongs to.
+#[derive(Clone, Copy)]
+struct Stepped {
+    tid: Tid,
+    process: Tid,
+    registers: Registers,
+}
+
+/// Runs one program in lockstep to its exit, and every child it forks to
+/// theirs, returning how many instructions were compared.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one loop follows every way a step can end, as the CPU reports it"
+)]
 fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
     let (native, first) = NativeTracee::spawn(&variant.file, arguments);
     let leader = native.pid();
@@ -65,22 +83,38 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
         return Err(format!("the first stop was {first}"));
     }
     let failed = |error: nix::errno::Errno| error.to_string();
-    // Trace clones and exits, so that every thread stops where the
+    // Trace clones, forks, and exits, so that every thread stops where the
     // interpreter's does.
     native.set_options(leader, true).map_err(failed)?;
-    let mut threads: Vec<(Tid, Registers)> =
-        vec![(leader, native.registers(leader).map_err(failed)?)];
-    let mut memory = copy_memory(&native);
+    let mut threads = vec![Stepped {
+        tid: leader,
+        process: leader,
+        registers: native.registers(leader).map_err(failed)?,
+    }];
+    let mut memories = BTreeMap::from([(leader, copy_memory(&native, leader))]);
     let mut current = 0;
 
     for step in 1..=MAX_STEPS {
-        let (tid, mut registers) = threads[current];
-        let instruction = cpu::decode(registers.rip, &memory)
+        let Stepped {
+            tid,
+            process,
+            mut registers,
+        } = threads[current];
+        let memory = memories.get_mut(&process).expect("a process has memory");
+        let instruction = cpu::decode(registers.rip, memory)
             .map_err(|fault| format!("decoding at {:#x} faulted: {fault:?}", registers.rip))?;
         let before = registers;
-        let outcome = cpu::step(&mut registers, &mut memory);
+        let outcome = cpu::step(&mut registers, memory);
         native.resume(tid, None, true).map_err(failed)?;
         let mut status = native.wait(tid);
+        // A child's end, which the program ignores, stops the thread before
+        // the instruction runs.
+        while status == WaitStatus::Stopped(tid, libc::SIGCHLD) {
+            native
+                .resume(tid, Some(libc::SIGCHLD), true)
+                .map_err(failed)?;
+            status = native.wait(tid);
+        }
         let at = format!("thread {tid}: {}", cpu::describe(&instruction));
         match outcome {
             Outcome::Completed => {}
@@ -89,36 +123,63 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
                 let code = (before.general[RDI] as i32) & 0xff;
                 match before.general[RAX] {
                     SYS_EXIT_GROUP => {
-                        return expect_exit_event(&native, tid, status, code)
-                            .map(|()| step)
-                            .map_err(|difference| format!("{at}: {difference}"));
+                        expect_exit_event(&native, tid, status, code)
+                            .map_err(|difference| format!("{at}: {difference}"))?;
+                        if threads.iter().all(|thread| thread.process == process) {
+                            return Ok(step);
+                        }
+                        if threads
+                            .iter()
+                            .any(|thread| thread.process == process && thread.tid != tid)
+                        {
+                            return Err(format!(
+                                "{at}: a process exited its group with threads running while \
+                                 another process runs, which the lockstep does not follow"
+                            ));
+                        }
+                        native.resume(tid, None, false).map_err(failed)?;
+                        let ended = native.wait(tid);
+                        if ended != WaitStatus::Exited(tid, code) {
+                            return Err(format!("{at}: the process ended {ended}"));
+                        }
+                        threads.remove(current);
+                        memories.remove(&process);
+                        current %= threads.len();
+                        continue;
                     }
                     SYS_EXIT => {
                         expect_exit_event(&native, tid, status, code)
                             .map_err(|difference| format!("{at}: {difference}"))?;
                         native.resume(tid, None, false).map_err(failed)?;
                         threads.remove(current);
-                        if tid != leader {
+                        if tid != process {
                             let exited = native.wait(tid);
                             if exited != WaitStatus::Exited(tid, code) {
                                 return Err(format!("{at}: then it reported {exited}"));
                             }
                         }
-                        if threads.is_empty() {
+                        if threads.iter().all(|thread| thread.process != process) {
                             // The leader reports last, with how the last
                             // thread ended.
-                            let ended = native.wait(leader);
-                            return if ended == WaitStatus::Exited(leader, code) {
-                                Ok(step)
-                            } else {
-                                Err(format!("{at}: the process ended {ended}"))
-                            };
+                            let ended = native.wait(process);
+                            if ended != WaitStatus::Exited(process, code) {
+                                return Err(format!("{at}: the process ended {ended}"));
+                            }
+                            memories.remove(&process);
+                            if threads.is_empty() {
+                                return Ok(step);
+                            }
                         }
                         current %= threads.len();
                         continue;
                     }
-                    SYS_CLONE => {
-                        if status != WaitStatus::Event(tid, libc::PTRACE_EVENT_CLONE) {
+                    SYS_CLONE | SYS_FORK => {
+                        let event = if before.general[RAX] == SYS_CLONE {
+                            libc::PTRACE_EVENT_CLONE
+                        } else {
+                            libc::PTRACE_EVENT_FORK
+                        };
+                        if status != WaitStatus::Event(tid, event) {
                             return Err(format!("{at}: the CPU reported {status}"));
                         }
                         let child =
@@ -135,12 +196,31 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
                         if started != WaitStatus::Stopped(child, libc::SIGSTOP) {
                             return Err(format!("{at}: the new thread reported {started}"));
                         }
-                        threads.push((child, native.registers(child).map_err(failed)?));
+                        let child_process = if event == libc::PTRACE_EVENT_FORK {
+                            // A fork child starts in a copy of its parent's
+                            // memory, as it was at the call.
+                            let copy = memories[&process].clone();
+                            memories.insert(child, copy);
+                            child
+                        } else {
+                            process
+                        };
+                        threads.push(Stepped {
+                            tid: child,
+                            process: child_process,
+                            registers: native.registers(child).map_err(failed)?,
+                        });
                     }
                     _ => {}
                 }
-                // The kernel served the call natively; take its result.
-                registers.general[RAX] = native.registers(tid).map_err(failed)?.general[RAX];
+                // The kernel served the call natively; take its result, and
+                // what it stored for the program.
+                let result = native.registers(tid).map_err(failed)?.general[RAX];
+                registers.general[RAX] = result;
+                if before.general[RAX] == SYS_WAIT4 && result == before.general[RDI] {
+                    copy_stored(&native, process, &mut memories, before.general[RSI], 4)
+                        .map_err(|difference| format!("{at}: {difference}"))?;
+                }
             }
             other => return Err(format!("{at}: the interpreter reported {other:?}")),
         }
@@ -155,13 +235,39 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
             &expected,
         )
         .map_err(|difference| format!("{at}: {difference}"))?;
-        threads[current].1 = registers;
+        threads[current].registers = registers;
         if outcome == Outcome::Syscall {
-            compare_memory(&native, &memory).map_err(|difference| format!("{at}: {difference}"))?;
+            compare_memory(&native, process, &memories[&process])
+                .map_err(|difference| format!("{at}: {difference}"))?;
             current = (current + 1) % threads.len();
         }
     }
     Err(format!("still running after {MAX_STEPS} instructions"))
+}
+
+/// Copies `length` bytes the kernel stored at `address` in `process` into
+/// the interpreter's memory, as a system call's result.
+fn copy_stored(
+    native: &NativeTracee,
+    process: Tid,
+    memories: &mut BTreeMap<Tid, AddressSpace>,
+    address: u64,
+    length: usize,
+) -> Result<(), String> {
+    if address == 0 {
+        return Ok(());
+    }
+    let bytes = native
+        .read_memory(process, address, length)
+        .ok_or_else(|| format!("the kernel stored at {address:#x}, which cannot be read"))?;
+    let memory = memories.get_mut(&process).expect("a process has memory");
+    if memory.poke_bytes(address, &bytes) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the kernel stored at {address:#x}, which the interpreter has not mapped"
+        ))
+    }
 }
 
 /// Requires `status` to be `tid`'s exit event for an exit with `code`.
@@ -245,10 +351,10 @@ fn undefined_flags(instruction: &Instruction) -> u64 {
     .fold(0, |flags, (_, flag)| flags | flag)
 }
 
-/// The tracee's memory, mapped as `/proc/<pid>/maps` describes it.
-fn copy_memory(native: &NativeTracee) -> AddressSpace {
+/// The memory of `process`, mapped as `/proc/<pid>/maps` describes it.
+fn copy_memory(native: &NativeTracee, process: Tid) -> AddressSpace {
     let mut memory = AddressSpace::default();
-    for region in regions(native) {
+    for region in regions(native, process) {
         if region.name == "[vsyscall]" {
             continue;
         }
@@ -260,7 +366,7 @@ fn copy_memory(native: &NativeTracee) -> AddressSpace {
         );
         let length = usize::try_from(region.end - region.start).expect("a mapping fits usize");
         // The kernel refuses reads of some special mappings, such as vvar.
-        if let Some(bytes) = native.read_memory(region.start, length) {
+        if let Some(bytes) = native.read_memory(process, region.start, length) {
             assert!(
                 memory.poke_bytes(region.start, &bytes),
                 "the region was just mapped"
@@ -270,11 +376,16 @@ fn copy_memory(native: &NativeTracee) -> AddressSpace {
     memory
 }
 
-/// Requires the interpreter's writable memory to equal the tracee's.
-fn compare_memory(native: &NativeTracee, memory: &AddressSpace) -> Result<(), String> {
-    for region in regions(native).filter(|region| region.protection.write) {
+/// Requires the interpreter's writable memory of `process` to equal the
+/// tracee's.
+fn compare_memory(
+    native: &NativeTracee,
+    process: Tid,
+    memory: &AddressSpace,
+) -> Result<(), String> {
+    for region in regions(native, process).filter(|region| region.protection.write) {
         let length = usize::try_from(region.end - region.start).expect("a mapping fits usize");
-        let Some(wanted) = native.read_memory(region.start, length) else {
+        let Some(wanted) = native.read_memory(process, region.start, length) else {
             continue;
         };
         let actual = memory
@@ -299,9 +410,9 @@ struct Region {
     name: String,
 }
 
-fn regions(native: &NativeTracee) -> impl Iterator<Item = Region> {
+fn regions(native: &NativeTracee, process: Tid) -> impl Iterator<Item = Region> {
     native
-        .maps(native.pid())
+        .maps(process)
         .unwrap_or_default()
         .lines()
         .map(|line| {

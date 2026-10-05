@@ -112,6 +112,45 @@ pub enum Flow {
     Return,
 }
 
+/// A data access an instruction made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Access {
+    pub address: u64,
+    pub size: u64,
+    pub write: bool,
+}
+
+/// The data accesses one instruction made, in order: few enough for a
+/// fixed array, so executing allocates nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Accesses {
+    items: [Option<Access>; 4],
+}
+
+impl Accesses {
+    pub fn push(&mut self, access: Access) {
+        let slot = self
+            .items
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .expect("an instruction makes at most four data accesses");
+        *slot = Some(access);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Access> + '_ {
+        self.items.iter().map_while(|access| *access)
+    }
+}
+
+/// What executing one instruction did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Executed {
+    pub outcome: Outcome,
+    pub flow: Flow,
+    /// The accesses of an instruction that completed.
+    pub accesses: Accesses,
+}
+
 /// The effect of an instruction that did not complete normally.
 enum Stop {
     Fault(Fault),
@@ -125,20 +164,30 @@ impl From<MemoryFault> for Stop {
 }
 
 /// Executes the instruction at `registers.rip`.
+///
+/// A string instruction with a repeat prefix executes one iteration,
+/// leaving `rip` at itself until its count runs out, as the CPU does when
+/// it traps between iterations.
 pub fn step(registers: &mut Registers, memory: &mut AddressSpace) -> Outcome {
-    execute(registers, memory).0
+    execute(registers, memory).outcome
 }
 
-/// Executes the instruction at `registers.rip`, and says whether it was a
-/// call or a return.
-pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> (Outcome, Flow) {
+/// Executes the instruction at `registers.rip`, as [`step`] does, and says
+/// whether it was a call or a return and what data it accessed.
+pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> Executed {
+    let failed = |outcome| Executed {
+        outcome,
+        flow: Flow::Other,
+        accesses: Accesses::default(),
+    };
     let instruction = match decode(registers.rip, memory) {
         Ok(instruction) => instruction,
-        Err(fault) => return (Outcome::Fault(fault), Flow::Other),
+        Err(fault) => return failed(Outcome::Fault(fault)),
     };
     let mut next = *registers;
     next.rip = instruction.next_ip();
-    match ops::execute(&instruction, &mut next, memory) {
+    let accesses = std::cell::Cell::new(Accesses::default());
+    match ops::execute(&instruction, &mut next, memory, &accesses) {
         Ok(outcome) => {
             *registers = next;
             let flow = match instruction.mnemonic() {
@@ -149,10 +198,14 @@ pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> (Outcome
                 Mnemonic::Ret => Flow::Return,
                 _ => Flow::Other,
             };
-            (outcome, flow)
+            Executed {
+                outcome,
+                flow,
+                accesses: accesses.get(),
+            }
         }
-        Err(Stop::Fault(fault)) => (Outcome::Fault(fault), Flow::Other),
-        Err(Stop::Unsupported) => (Outcome::Unsupported(describe(&instruction)), Flow::Other),
+        Err(Stop::Fault(fault)) => failed(Outcome::Fault(fault)),
+        Err(Stop::Unsupported) => failed(Outcome::Unsupported(describe(&instruction))),
     }
 }
 

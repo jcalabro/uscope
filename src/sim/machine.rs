@@ -14,7 +14,7 @@ use nix::libc;
 
 use super::choices::{Choices, Stream};
 use super::faults::Faults;
-use super::kernel::{Happening, Kernel, State, Tid};
+use super::kernel::{Happening, Kernel, Parent, Planted, State, Tid};
 use super::marks::{Mark, Marks};
 use super::schedule::{Action, Scheduler};
 #[cfg(test)]
@@ -38,8 +38,13 @@ pub struct Machine {
     pub killed: Rc<RefCell<BTreeSet<Tid>>>,
     /// Processes that began to end as a whole.
     pub ending: Rc<RefCell<BTreeSet<Tid>>>,
+    /// Threads the debugger released with code not the program's: the
+    /// address, the byte there, and the program's.
+    pub unclean: RefCell<Vec<(Tid, Planted)>>,
     /// The action in progress.
     pub step: Cell<u64>,
+    /// How many instructions threads executed so far.
+    pub ran: Cell<u64>,
     /// How often, in a thousand, a call is preempted.
     pub preempt: u64,
     #[cfg(test)]
@@ -51,21 +56,24 @@ impl Machine {
     /// planned for a new thread. Returns lines for the trace.
     pub fn absorb(&self) -> Vec<String> {
         // The client may see any request about a process ending as a whole
-        // fail.
-        self.ending.borrow_mut().extend(
-            self.kernel
-                .borrow()
-                .processes
-                .values()
-                .filter(|process| process.group_exit.is_some())
-                .map(|process| process.tgid),
-        );
+        // fail, or about one already gone: an untraced process can end
+        // within one action.
+        let kernel = self.kernel.borrow();
+        let exiting = kernel
+            .processes
+            .values()
+            .filter(|process| process.group_exit.is_some())
+            .map(|process| process.tgid);
+        let gone = kernel.ended.keys().chain(kernel.zombies.keys()).copied();
+        self.ending.borrow_mut().extend(exiting.chain(gone));
+        drop(kernel);
         let happenings = std::mem::take(&mut self.kernel.borrow_mut().happenings);
         let mut lines = Vec::new();
         for happening in happenings {
             match happening {
                 Happening::Cloned { parent, child } => {
                     self.marks.borrow_mut().hit(Mark::ThreadCreated);
+                    self.note_seized_child(child);
                     lines.push(format!("{parent} created {child}"));
                     if self.faults.borrow_mut().cloned() {
                         lines.extend(self.kill(Mark::KilledNearClone));
@@ -88,9 +96,75 @@ impl Machine {
                     lines.push(format!("leader {tid} exited alone"));
                 }
                 Happening::Yielded { tid } => self.scheduler.borrow_mut().yielded(tid),
+                Happening::Forked { parent, child } => {
+                    let mut marks = self.marks.borrow_mut();
+                    marks.hit(Mark::Forked);
+                    if self
+                        .kernel
+                        .borrow()
+                        .process_of(parent)
+                        .is_some_and(|process| process.tgid != parent)
+                    {
+                        marks.hit(Mark::ForkedFromThread);
+                    }
+                    drop(marks);
+                    self.note_seized_child(child);
+                    lines.push(format!("{parent} forked {child}"));
+                    if self.faults.borrow_mut().forked() {
+                        lines.extend(self.kill(Mark::KilledNearFork));
+                    }
+                }
+                Happening::Released { tid, planted } => {
+                    let kernel = self.kernel.borrow();
+                    let mut marks = self.marks.borrow_mut();
+                    match kernel.process_of(tid).map(|process| process.parent) {
+                        Some(Parent::Launcher) => marks.hit(Mark::Detached),
+                        Some(Parent::Process(_)) => marks.hit(Mark::ForkChildReleased),
+                        Some(Parent::Init) => {
+                            marks.hit(Mark::ForkChildReleased);
+                            marks.hit(Mark::ReleasedAfterParentExit);
+                        }
+                        Some(Parent::Tracer) | None => {}
+                    }
+                    drop(marks);
+                    if let Some(planted) = planted {
+                        self.unclean.borrow_mut().push((tid, planted));
+                    }
+                    lines.push(format!("{tid} was released"));
+                }
+                Happening::ReapedChild { parent, child } => {
+                    self.marks.borrow_mut().hit(Mark::ChildReaped);
+                    lines.push(format!("{parent} reaped {child}"));
+                }
+                Happening::ReapedOrphan { tgid } => {
+                    self.marks.borrow_mut().hit(Mark::OrphanReaped);
+                    lines.push(format!("init reaped {tgid}"));
+                }
+                Happening::SeizeRefused { tid } => {
+                    self.marks.borrow_mut().hit(Mark::SeizeRefused);
+                    lines.push(format!("{tid} could not be seized"));
+                }
+                Happening::InterruptWaits { tid } => {
+                    self.marks.borrow_mut().hit(Mark::InterruptWaited);
+                    lines.push(format!("an interrupt waits for stopped {tid}"));
+                }
             }
         }
         lines
+    }
+
+    /// Marks a new thread or process that starts in an interrupt's stop,
+    /// its creator seized.
+    fn note_seized_child(&self, child: Tid) {
+        if self
+            .kernel
+            .borrow()
+            .threads
+            .get(&child)
+            .is_some_and(super::kernel::Thread::seized)
+        {
+            self.marks.borrow_mut().hit(Mark::SeizedChildStarted);
+        }
     }
 
     /// Kills the running program from outside, as the planned fault.
@@ -100,7 +174,10 @@ impl Machine {
         let tgid = *kernel
             .processes
             .iter()
-            .find(|(_, process)| process.group_exit.is_none())?
+            .find(|(_, process)| {
+                matches!(process.parent, Parent::Tracer | Parent::Launcher)
+                    && process.group_exit.is_none()
+            })?
             .0;
         kernel.processes.get_mut(&tgid)?.killed_externally = true;
         kernel
@@ -146,6 +223,7 @@ impl Machine {
     pub fn run_thread(&self, tid: Tid, budget: u64) -> String {
         let mut kernel = self.kernel.borrow_mut();
         let ran = kernel.run(tid, budget);
+        self.ran.set(self.ran.get() + ran.executed);
         let state = kernel.threads.get(&tid).map(|thread| thread.state);
         format!(
             "run {tid} x{}{} -> {}",
