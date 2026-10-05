@@ -162,11 +162,15 @@ impl<P: InspectionOps> Controller<P> {
             BreakpointOwner::User(id) => Some(*id),
             BreakpointOwner::Plan(_) | BreakpointOwner::Loader => None,
         }) {
-            let breakpoint = self
+            // A breakpoint removed while sites could not be edited, as SIGKILL
+            // tears the process down, leaves its owner on the trap.
+            let Some(breakpoint) = self
                 .breakpoints
                 .iter()
                 .find(|breakpoint| breakpoint.id == id)
-                .expect("physical user owner references a logical breakpoint");
+            else {
+                continue;
+            };
             for resolved in breakpoint.locations.iter() {
                 if runtime_breakpoint_address(inferior, resolved.location)? == address {
                     instances.extend(resolved.code_instances.iter().copied());

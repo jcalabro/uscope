@@ -17,10 +17,10 @@ use crate::{Error, LoadedModule, Result, VirtualAddress};
 use super::breakpoints::install_logical_breakpoint;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
-    ActiveExecution, ActiveKind, BREAKPOINT_OPCODE, ClassifiedStop, Controller, ExpectedStop,
-    Inferior, InferiorOrigin, LinuxError, MemoryAccessError, NativeThreadState, Orphans,
-    StopBarrier, Terminating, TraceThread, Waiter, backend_error, debug_thread_id, exception_info,
-    is_superseded, process_id,
+    ActiveExecution, ActiveKind, BREAKPOINT_OPCODE, ClassifiedStop, Controller, DeferredStart,
+    ExpectedStop, Inferior, InferiorOrigin, LinuxError, MemoryAccessError, NativeThreadState,
+    Orphans, StopBarrier, Terminating, TraceThread, Waiter, backend_error, debug_thread_id,
+    exception_info, is_superseded, process_id,
 };
 
 /// How many times an attach may find threads it has not traced before it
@@ -28,7 +28,43 @@ use super::{
 const MAX_ATTACH_RESCANS: u32 = 128;
 
 impl<P: LinuxTraceOps> Controller<P> {
+    /// Holds `start` until the children the last program forked are
+    /// released, or returns it when no release is in progress or another
+    /// start already waits.
+    fn defer_start(&mut self, start: DeferredStart) -> Option<DeferredStart> {
+        if self.orphans.is_none()
+            || self.inferior.is_some()
+            || self.deferred_start.is_some()
+            || self.shutting_down
+        {
+            return Some(start);
+        }
+        self.deferred_start = Some(start);
+        None
+    }
+
+    /// Begins the launch or attach that waited for fork children to be
+    /// released.
+    fn start_deferred(&mut self) {
+        match self.deferred_start.take() {
+            Some(DeferredStart::Launch(options, reply)) => self.launch(options, reply),
+            Some(DeferredStart::Attach(requested, reply)) => self.attach(requested, reply),
+            Some(DeferredStart::LaunchByExec {
+                requested,
+                stop_at_entry,
+                release,
+                reply,
+            }) => self.launch_by_exec(requested, stop_at_entry, release, reply),
+            None => {}
+        }
+    }
+
     pub(super) fn launch(&mut self, options: LaunchOptions, reply: Reply<ExecutionId>) {
+        let Some(DeferredStart::Launch(options, reply)) =
+            self.defer_start(DeferredStart::Launch(options, reply))
+        else {
+            return;
+        };
         if self.inferior.is_some() || self.launch_reply.is_some() || self.orphans.is_some() {
             let _ = reply.send(Err(Error::AlreadyRunning));
             return;
@@ -83,6 +119,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn attach(&mut self, requested: ProcessId, reply: Reply<StopId>) {
+        let Some(DeferredStart::Attach(requested, reply)) =
+            self.defer_start(DeferredStart::Attach(requested, reply))
+        else {
+            return;
+        };
         if self.inferior.is_some()
             || self.launch_reply.is_some()
             || self.attach_reply.is_some()
@@ -106,27 +147,13 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         };
 
-        // Threads created while these are seized are found once every seized
-        // thread has stopped; see `seize_untraced_threads`. Listing again now
-        // could not find them all, and would find threads already traced
-        // through their creator's clone event, which cannot be seized.
-        let mut seized = BTreeSet::new();
-        let mut unseized = BTreeSet::new();
-        let result = (|| -> Result<()> {
-            for tid in self.ptrace.process_threads(tgid)? {
-                if self.ptrace.seize(tid, false)? {
-                    seized.insert(tid);
-                } else {
-                    unseized.insert(tid);
-                }
+        let (seized, unseized) = match self.seize_listed_threads(tgid) {
+            Ok(threads) => threads,
+            Err(error) => {
+                let _ = reply.send(Err(error));
+                return;
             }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            self.rollback_seized(&seized);
-            let _ = reply.send(Err(error));
-            return;
-        }
+        };
         if self
             .expected_process_start_time
             .is_some_and(|expected| self.ptrace.process_start_time(tgid) != Some(expected))
@@ -203,6 +230,20 @@ impl<P: LinuxTraceOps> Controller<P> {
         release: Box<dyn FnOnce() + Send>,
         reply: Reply<ExecutionId>,
     ) {
+        let Some(DeferredStart::LaunchByExec {
+            requested,
+            stop_at_entry,
+            release,
+            reply,
+        }) = self.defer_start(DeferredStart::LaunchByExec {
+            requested,
+            stop_at_entry,
+            release,
+            reply,
+        })
+        else {
+            return;
+        };
         if self.inferior.is_some()
             || self.launch_reply.is_some()
             || self.attach_reply.is_some()
@@ -265,6 +306,33 @@ impl<P: LinuxTraceOps> Controller<P> {
             execution_id,
         });
         release();
+    }
+
+    /// Seizes every thread `tgid` lists, returning those seized and those
+    /// that had finished exiting. A failure releases those seized.
+    ///
+    /// Threads created while these are seized are found once every seized
+    /// thread has stopped; see `seize_untraced_threads`. Listing again now
+    /// could not find them all, and would find threads already traced
+    /// through their creator's clone event, which cannot be seized.
+    fn seize_listed_threads(&self, tgid: Pid) -> Result<(BTreeSet<Pid>, BTreeSet<Pid>)> {
+        let mut seized = BTreeSet::new();
+        let mut unseized = BTreeSet::new();
+        let result = (|| -> Result<()> {
+            for tid in self.ptrace.process_threads(tgid)? {
+                if self.ptrace.seize(tid, false)? {
+                    seized.insert(tid);
+                } else {
+                    unseized.insert(tid);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.rollback_seized(&seized);
+            return Err(error);
+        }
+        Ok((seized, unseized))
     }
 
     pub(super) fn rollback_seized(&self, seized: &BTreeSet<Pid>) {
@@ -798,6 +866,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.finish_shutdown(Ok(()));
             return false;
         }
+        self.start_deferred();
         true
     }
 
@@ -835,6 +904,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         survivor.expected = ExpectedStop::None;
         survivor.pending_signal = None;
         survivor.stopped_at_breakpoint = None;
+        survivor.trapped_at = None;
         survivor.awaiting_breakpoint = None;
         survivor.debugger_stop_pending = false;
         // The execing thread takes over the leader's TID, whose exit the
@@ -1043,6 +1113,15 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn begin_shutdown(&mut self, reply: Option<Reply<()>>) {
         self.shutting_down = true;
         self.shutdown_reply = reply;
+        match self.deferred_start.take() {
+            Some(DeferredStart::Launch(_, reply) | DeferredStart::LaunchByExec { reply, .. }) => {
+                let _ = reply.send(Err(Error::RequestCancelled));
+            }
+            Some(DeferredStart::Attach(_, reply)) => {
+                let _ = reply.send(Err(Error::RequestCancelled));
+            }
+            None => {}
+        }
         self.launch_reply
             .take()
             .map(|reply| reply.send(Err(Error::RequestCancelled)));
@@ -1183,9 +1262,14 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.adopt_unannounced_fork_children(pid);
                 self.ptrace.continue_during_shutdown(pid)
             }
-            WaitEvent::Stopped(pid, _) | WaitEvent::PtraceEvent(pid, _, _) => self
-                .kill_inferior()
-                .and_then(|()| self.ptrace.continue_during_shutdown(pid)),
+            // SIGKILL may have moved the thread on to its exit stop since
+            // this status, so continuing it may let it exit: the children it
+            // forked are found while `/proc` still lists them.
+            WaitEvent::Stopped(pid, _) | WaitEvent::PtraceEvent(pid, _, _) => {
+                self.adopt_unannounced_fork_children(pid);
+                self.kill_inferior()
+                    .and_then(|()| self.ptrace.continue_during_shutdown(pid))
+            }
             other => Err(backend_error(LinuxError::UnexpectedWait(format!(
                 "{other:?}"
             )))),
@@ -1207,6 +1291,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_EXIT => {
                 self.adopt_unannounced_fork_children(pid);
+                // An exiting leader settles the detach: Linux reports its
+                // exit only after every other thread's.
+                if let Some(thread) = self
+                    .inferior
+                    .as_mut()
+                    .and_then(|inferior| inferior.threads.get_mut(&pid))
+                {
+                    thread.state = NativeThreadState::Exiting;
+                }
                 self.release_exiting_thread(pid)
             }
             WaitEvent::PtraceEvent(pid, _, event) if event == libc::PTRACE_EVENT_CLONE => {
@@ -1335,9 +1428,17 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// with breakpoints or debug registers still armed. The first failure is
     /// reported in the shutdown reply.
     pub(super) fn detach_inferior(&mut self) {
-        let mut first_error = self.disarm_for_detach().err();
+        // Every thread was stopped, and only SIGKILL takes one out of its
+        // stop: a thread that refuses to be written belongs to a process
+        // that is ending, where what is left can never run.
+        let mut first_error = self
+            .disarm_for_detach()
+            .err()
+            .filter(|error| !is_vanished_tracee(error));
         let mut record = |result: Result<()>| {
-            if let Err(error) = result {
+            if let Err(error) = result
+                && !is_vanished_tracee(&error)
+            {
                 first_error.get_or_insert(error);
             }
         };

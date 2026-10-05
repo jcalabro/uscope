@@ -353,6 +353,17 @@ impl<P: LinuxTraceOps> Controller<P> {
                 progress_owed,
                 ..
             } => {
+                // A stepping thread that is exiting can step no further. A
+                // leader exiting alone is reported only after every other
+                // thread, which run on in the step's scope meanwhile.
+                let exiting = self
+                    .inferior
+                    .as_ref()
+                    .and_then(|inferior| inferior.threads.get(&thread))
+                    .is_none_or(|stepping| matches!(stepping.state, NativeThreadState::Exiting));
+                if exiting {
+                    return self.continue_scope_threads();
+                }
                 if progress_owed {
                     if let Some(ActiveKind::Step { progress_owed, .. }) = self
                         .inferior
@@ -380,10 +391,26 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn start_next_repair(&mut self) -> Result<()> {
         let next = {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-            let group = inferior.repairs.front_mut().expect("repair group exists");
+            // A thread that is exiting, as when SIGKILL ends its process,
+            // steps over nothing.
+            let exiting = |inferior: &Inferior, pid: &Pid| {
+                inferior
+                    .threads
+                    .get(pid)
+                    .is_none_or(|thread| matches!(thread.state, NativeThreadState::Exiting))
+            };
+            let group = inferior.repairs.front().expect("repair group exists");
             if group.current.is_some() {
                 return Ok(());
             }
+            let remaining = group
+                .remaining
+                .iter()
+                .copied()
+                .filter(|pid| !exiting(inferior, pid))
+                .collect::<VecDeque<_>>();
+            let group = inferior.repairs.front_mut().expect("repair group exists");
+            group.remaining = remaining;
             group.remaining.pop_front().map(|pid| {
                 group.current = Some(pid);
                 (pid, group.address, !group.site_removed)
@@ -504,6 +531,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         thread.expected = expected;
         thread.reason = None;
+        // With no step over its trap left to run, the thread runs on.
+        if thread.stopped_at_breakpoint.is_none() {
+            thread.trapped_at = None;
+        }
         Ok(())
     }
 
@@ -571,6 +602,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             let thread = inferior.thread_mut(pid)?;
             thread.stopped_at_breakpoint = Some(address);
+            thread.trapped_at = Some(address);
             let awaited = thread.awaiting_breakpoint == Some(address)
                 && matches!(thread.expected, ExpectedStop::AwaitBreakpoint { address: expected } if expected == address);
             if awaited {
@@ -614,7 +646,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .get(&address)
                 .is_some_and(|site| site.owners.contains(&BreakpointOwner::Plan(*execution)))
         });
-        if let Some((execution, kind)) = planned {
+        if let Some((_, kind)) = planned {
             if self.reach_signal_guard(pid, address)? {
                 return Ok(());
             }
@@ -623,7 +655,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
             self.note_returned_activation(pid, kind)?;
             if self.source_step_returned_to_undescribed_code(pid, kind)? {
-                self.cleanup_plan_breakpoints(execution)?;
+                self.let_step_run_on()?;
                 // A user breakpoint that declined this hit still owns the
                 // site, which the thread then steps over.
                 let lifted = self
@@ -877,6 +909,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
             let thread = inferior.thread_mut(pid)?;
             thread.stopped_at_breakpoint = None;
+            thread.trapped_at = None;
             thread.awaiting_breakpoint = Some(address);
         }
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
@@ -925,6 +958,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         let thread = inferior.thread_mut(pid)?;
         thread.stopped_at_breakpoint = None;
+        thread.trapped_at = None;
         thread.awaiting_breakpoint = Some(address);
         thread.pending_signal = Some(pending);
         thread.expected = ExpectedStop::None;
@@ -1038,9 +1072,21 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(false);
         }
         // Removing the guard restores the interrupted instruction, which the
-        // step now executes.
+        // step now executes, unless a breakpoint still owns the site: then
+        // the thread hit that breakpoint, and steps over its trap.
         self.remove_breakpoint_owner(address, BreakpointOwner::Plan(execution))?;
-        self.start_user_step(pid, kind)?;
+        let trapped = self
+            .inferior
+            .as_ref()
+            .ok_or(Error::NotRunning)?
+            .thread(pid)?
+            .stopped_at_breakpoint
+            .is_some();
+        if trapped {
+            self.repair_when_alone(pid, address)?;
+        } else {
+            self.start_user_step(pid, kind)?;
+        }
         Ok(true)
     }
 }

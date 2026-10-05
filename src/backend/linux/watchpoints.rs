@@ -179,17 +179,22 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Installs `plan` on every stopped thread or on none of them.
     ///
     /// A thread that has already begun exiting is skipped; its exit is
-    /// processed normally. Rolling a thread back only rewrites slots the plan
+    /// processed normally. So is one that does not carry the current plan,
+    /// its arming having failed: it cannot run until it is armed before a
+    /// resume. Rolling a thread back therefore only rewrites slots the plan
     /// it previously carried already reserved, so rollback needs no new
     /// kernel capacity.
     pub(super) fn arm_all_threads(&mut self, plan: DebugRegisterPlan) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let previous = inferior.watch.plan.clone();
+        let generation = inferior.watch.generation;
         let threads = inferior
             .threads
             .iter()
             .filter_map(|(&pid, thread)| {
-                matches!(thread.state, NativeThreadState::Stopped).then_some(pid)
+                (matches!(thread.state, NativeThreadState::Stopped)
+                    && thread.armed == Some(generation))
+                .then_some(pid)
             })
             .collect::<Vec<_>>();
         let mut programmed = Vec::with_capacity(threads.len());

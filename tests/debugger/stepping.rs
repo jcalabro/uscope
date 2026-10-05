@@ -812,6 +812,82 @@ async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
     scenario.shutdown().await;
 }
 
+/// A step out of a function called from code without debug information
+/// runs on from the return, to be ended by a stop the user sees. A later
+/// hit its breakpoint's hit condition declines is no such stop: the
+/// simulator found such steps completing there.
+#[tokio::test]
+async fn a_step_out_to_undescribed_code_does_not_end_at_a_declined_hit() {
+    let mut scenario = Scenario::launch("undescribed-caller");
+    let breakpoint = scenario.add_breakpoint("callback").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    // The first hit came through the assembly; the second, from main, is
+    // declined.
+    scenario
+        .operation(
+            "decline later hits",
+            scenario.handle().set_breakpoint_hit_condition(
+                breakpoint.id,
+                Some(
+                    uscope::HitCondition::new(uscope::HitComparison::GreaterOrEqual, 3)
+                        .expect("a valid hit condition"),
+                ),
+            ),
+        )
+        .await;
+    assert_eq!(
+        scenario.step_to_stop(StepKind::Out).await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}
+
+/// Stepping out to a return address no line describes goes on, by single
+/// steps, to the caller's first instruction a line describes. Clang marks
+/// the code after `main`'s call of `orphan_spawn` in the golden `frames`
+/// program as line 0. The simulator found such steps running freely past
+/// the caller instead.
+#[tokio::test]
+async fn a_step_out_to_undescribed_code_in_the_caller_stops_in_the_caller() {
+    let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build/golden/frames/frames-clang-O2-nofp");
+    let mut scenario = Scenario::new("step out to line 0", program);
+    scenario.add_breakpoint("orphan_spawn").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    scenario
+        .operation(
+            "remove the breakpoint",
+            scenario.handle().remove_all_breakpoints(),
+        )
+        .await;
+    assert_eq!(
+        scenario.step_to_stop(StepKind::Out).await,
+        StopReason::Step {
+            kind: StepKind::Out
+        }
+    );
+    let location = scenario
+        .operation("location", scenario.handle().current_location())
+        .await;
+    assert_eq!(
+        location
+            .image
+            .function
+            .as_ref()
+            .map(|function| function.name.as_ref()),
+        Some("main"),
+        "{location:?}"
+    );
+    assert!(location.image.source.is_some(), "{location:?}");
+    scenario.shutdown().await;
+}
+
 /// Stepping out ends where the frame returns to its caller, at the return
 /// address, even from a line whose epilogue the compiler marked, which a
 /// step over crosses to the caller's next line. The simulator found steps

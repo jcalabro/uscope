@@ -922,6 +922,7 @@ fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
             pending_signal: None,
             reason: None,
             stopped_at_breakpoint: None,
+            trapped_at: None,
             awaiting_breakpoint: None,
             debugger_stop_pending: false,
             armed: None,
@@ -937,6 +938,7 @@ fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
             pending_signal: None,
             reason: None,
             stopped_at_breakpoint: None,
+            trapped_at: None,
             awaiting_breakpoint: None,
             debugger_stop_pending: true,
             armed: None,
@@ -1146,6 +1148,7 @@ fn virtual_step_inferior(pid: Pid, image: &ModuleImage, stop_id: StopId) -> Infe
                     pending_signal: None,
                     reason: Some(StopReason::Pause),
                     stopped_at_breakpoint: None,
+                    trapped_at: None,
                     awaiting_breakpoint: None,
                     debugger_stop_pending: false,
                     armed: None,
@@ -1350,6 +1353,9 @@ struct DebugRegisterTrace {
     /// Fails a write of `(thread, register)` after skipping that many
     /// successful writes.
     failures: RefCell<BTreeMap<(Pid, usize), (u32, Errno)>>,
+    /// Debug-register writes that always fail, as for slots another user
+    /// holds.
+    refusals: RefCell<BTreeMap<(Pid, usize), Errno>>,
     /// Accepts writes without storing them, like gVisor.
     discard_writes: bool,
     siginfo: RefCell<BTreeMap<Pid, SignalMetadata>>,
@@ -1440,6 +1446,11 @@ impl DebugRegisterTrace {
         ])
     }
 
+    /// Fails every write of `register` in `pid` with `error`.
+    fn refuse(&self, pid: Pid, register: usize, error: Errno) {
+        self.refusals.borrow_mut().insert((pid, register), error);
+    }
+
     fn fail_after(&self, pid: Pid, register: usize, skips: u32, error: Errno) {
         self.failures
             .borrow_mut()
@@ -1505,7 +1516,8 @@ impl InspectionOps for DebugRegisterTrace {
 
 impl LinuxTraceOps for DebugRegisterTrace {
     fn spawn(&self, _executable: &Path, _options: LaunchOptions) -> Result<Pid> {
-        RecordingTrace::unexpected("spawn")
+        self.record("spawn".to_owned());
+        Ok(Pid::from_raw(7000))
     }
     fn spawn_waiter(&self, _messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
         Ok(Waiter::external())
@@ -1578,8 +1590,9 @@ impl LinuxTraceOps for DebugRegisterTrace {
         }
         Ok(())
     }
-    fn continue_during_shutdown(&self, _pid: Pid) -> Result<()> {
-        RecordingTrace::unexpected("continue_during_shutdown")
+    fn continue_during_shutdown(&self, pid: Pid) -> Result<()> {
+        self.record(format!("continue {pid} to shut down"));
+        Ok(())
     }
     fn step(&self, pid: Pid, _signal: Option<Signal>) -> Result<()> {
         self.record(format!("step {pid}"));
@@ -1640,6 +1653,9 @@ impl LinuxTraceOps for DebugRegisterTrace {
         value: u64,
     ) -> std::result::Result<(), Errno> {
         self.record(format!("write {pid} dr{index}={value:#x}"));
+        if let Some(&error) = self.refusals.borrow().get(&(pid, index)) {
+            return Err(error);
+        }
         let mut failures = self.failures.borrow_mut();
         if let Some((skips, error)) = failures.get_mut(&(pid, index)) {
             if *skips == 0 {
@@ -1999,6 +2015,41 @@ fn a_failed_rollback_kills_the_inferior_and_reports_both_failures() {
         "an inferior with unknown debug registers is not left running"
     );
     assert_eq!(harness.watch_events(), 0);
+}
+
+/// A thread that does not carry the current watchpoints, its slots taken
+/// by another user, cannot run until it is armed before a resume, so
+/// editing watchpoints leaves it to that: removing one succeeds for every
+/// other thread, and nothing is killed.
+#[test]
+fn editing_watchpoints_leaves_a_thread_that_lost_its_slots_to_the_resume() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    let kept = harness.add(0x9000, 8).expect("arm");
+    let removed = harness.add(0xa000, 8).expect("arm");
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.thread_mut(second).expect("thread").armed = None;
+    harness.trace().refuse(second, 0, Errno::ENOSPC);
+    harness.trace().take_actions();
+
+    harness
+        .controller
+        .remove_watchpoint(removed.id)
+        .expect("remove");
+    let actions = harness.trace().take_actions();
+    assert!(
+        !actions
+            .iter()
+            .any(|action| action.starts_with("kill") || action.contains(&format!(" {second} "))),
+        "{actions:?}"
+    );
+    assert!(
+        actions.contains(&format!("write {first} dr7=0x90001")),
+        "{actions:?}"
+    );
+    let _ = kept;
 }
 
 #[test]
@@ -2468,6 +2519,107 @@ fn a_failed_disarm_still_detaches_and_publishes_the_detach() {
     assert_eq!(detached, 1, "clients learn the process is gone");
 }
 
+/// SIGKILL from outside took every thread of an attached process out of its
+/// stop before the session ends: none can be written, but its process is
+/// ending, so the traps left in it can never run and the detach succeeds.
+#[test]
+fn detaching_a_process_killed_from_outside_succeeds() {
+    let mut harness = watch_harness(2);
+    harness
+        .edit(|reply| Edit::AddBreakpoint {
+            spec: address_breakpoint(0x40),
+            options: Box::default(),
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("added");
+    harness
+        .controller
+        .inferior
+        .as_mut()
+        .expect("inferior")
+        .origin = InferiorOrigin::Attached;
+    for &pid in &harness.threads {
+        harness.trace().sigkill(pid);
+    }
+    harness.trace().take_actions();
+    while harness.events.try_recv().is_ok() {}
+
+    let (reply, result) = tokio::sync::oneshot::channel();
+    harness.controller.begin_shutdown(Some(reply));
+    let result = result.blocking_recv().expect("shutdown reply");
+    assert!(result.is_ok(), "{result:?}");
+    assert!(harness.controller.inferior.is_none());
+    let detached = std::iter::from_fn(|| harness.events.try_recv().ok())
+        .filter(|event| matches!(event, DebuggerEvent::InferiorDetached { .. }))
+        .count();
+    assert_eq!(detached, 1, "clients learn the process is gone");
+}
+
+/// A main thread that reaches its exit event as an attached session ends
+/// finishes exiting. Linux reports its exit only after every other
+/// thread's, so detaching the others never waits for it.
+#[test]
+fn detaching_waits_for_no_main_thread_that_exits_during_the_detach() {
+    let mut harness = watch_harness(2);
+    let [leader, sibling] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.origin = InferiorOrigin::Attached;
+    // The main thread runs alone, as after a client continued it so.
+    inferior.thread_mut(leader).expect("leader").state = NativeThreadState::Running;
+    harness.trace().take_actions();
+
+    let (reply, mut result) = tokio::sync::oneshot::channel();
+    harness.controller.begin_shutdown(Some(reply));
+    assert!(
+        result.try_recv().is_err(),
+        "the detach waits for the main thread"
+    );
+    harness.controller.handle_wait(WaitEvent::PtraceEvent(
+        leader,
+        Signal::SIGTRAP,
+        libc::PTRACE_EVENT_EXIT,
+    ));
+    assert!(
+        matches!(result.try_recv(), Ok(Ok(()))),
+        "the detach completes without the main thread's exit"
+    );
+    let actions = harness.trace().take_actions();
+    assert!(
+        actions.contains(&format!("detach {sibling} None")),
+        "{actions:?}"
+    );
+}
+
+/// A failure that ends an attached session detaches the process and ends
+/// the controller, as a shutdown does, rather than serve requests after.
+#[test]
+fn a_failure_that_detaches_an_attached_process_ends_the_controller() {
+    let mut harness = watch_harness(2);
+    harness
+        .controller
+        .inferior
+        .as_mut()
+        .expect("inferior")
+        .origin = InferiorOrigin::Attached;
+    let unowned = WaitEvent::PtraceEvent(
+        Pid::from_raw(9999),
+        Signal::SIGTRAP,
+        libc::PTRACE_EVENT_CLONE,
+    );
+    let keeps_running = harness
+        .controller
+        .handle_message(ControllerMessage::Wait(unowned));
+    assert!(
+        harness.controller.inferior.is_none(),
+        "the process was detached"
+    );
+    assert!(!keeps_running, "the controller ends");
+}
+
 #[test]
 fn an_attached_stop_collects_traps_queued_behind_its_interrupt() {
     let mut harness = watch_harness(2);
@@ -2929,6 +3081,95 @@ fn a_fork_child_whose_event_was_lost_is_found_as_its_parent_exits() {
     assert!(harness.controller.orphans.is_none());
 }
 
+/// A shutdown that meets a fork event its parent's SIGKILL superseded
+/// continues the parent from its exit stop, and the parent is soon reaped.
+/// The child it forked is found first, and released once it stops rather
+/// than left stopped and traced.
+#[test]
+fn a_shutdown_meeting_a_superseded_fork_event_still_releases_the_child() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    let child = Pid::from_raw(6000);
+    harness.start_continue();
+    harness.trace().traced_children.borrow_mut().push(child);
+    harness.controller.begin_shutdown(None);
+    harness.trace().sigkill(parent);
+    harness
+        .trace()
+        .memory
+        .borrow_mut()
+        .insert(HIT_SITE, u64::from(BREAKPOINT_OPCODE));
+    assert!(harness.controller.handle_wait(WaitEvent::PtraceEvent(
+        parent,
+        Signal::SIGTRAP,
+        libc::PTRACE_EVENT_FORK,
+    )));
+    // Continued from its exit stop, the parent was reaped, and `/proc`
+    // lists its children no more.
+    harness.trace().traced_children.borrow_mut().clear();
+    for status in [
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Signaled(parent, Signal::SIGKILL, false),
+    ] {
+        harness.controller.handle_wait(status);
+    }
+    assert!(
+        harness.controller.orphans.is_some(),
+        "the controller waits to release the child"
+    );
+    harness
+        .controller
+        .handle_wait(WaitEvent::Stopped(child, Signal::SIGSTOP));
+    let actions = harness.trace().take_actions();
+    assert!(
+        actions.contains(&format!("write_word {child} {HIT_SITE:#x} 0x90")),
+        "{actions:?}"
+    );
+    assert!(
+        actions.contains(&format!("detach {child} None")),
+        "{actions:?}"
+    );
+    assert!(harness.controller.orphans.is_none());
+}
+
+/// A launch while the controller still releases children the last program
+/// forked waits for them, rather than failing as if a program still ran.
+#[test]
+fn a_launch_while_fork_children_are_released_waits_for_them() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    let child = Pid::from_raw(6000);
+    harness.trace().clone.replace(Some((child, child)));
+    for status in [
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_FORK),
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Exited(parent, 0),
+    ] {
+        harness.controller.handle_wait(status);
+    }
+    assert!(harness.controller.orphans.is_some());
+    harness.trace().take_actions();
+
+    let (reply, mut launched) = tokio::sync::oneshot::channel();
+    harness.controller.launch(LaunchOptions::default(), reply);
+    assert!(
+        launched.try_recv().is_err(),
+        "the launch waits for the child"
+    );
+    assert!(harness.trace().take_actions().is_empty());
+    harness
+        .controller
+        .handle_wait(WaitEvent::Stopped(child, Signal::SIGSTOP));
+    let actions = harness.trace().take_actions();
+    assert_eq!(
+        actions.iter().position(|action| action == "spawn"),
+        Some(actions.len() - 1),
+        "the child is released, and then the program launched: {actions:?}"
+    );
+    assert!(harness.controller.orphans.is_none());
+    assert!(harness.controller.inferior.is_some());
+}
+
 #[test]
 fn a_fork_child_that_dies_as_it_is_released_is_awaited_until_its_exit() {
     let mut harness = hit_harness(1, ">=1");
@@ -3284,6 +3525,7 @@ fn a_stop_whose_thread_sigkill_ends_while_it_is_handled_waits_for_the_exit() {
         start: Box::new(StepStart {
             stack_pointer: 0,
             returned_to: None,
+            running_on: false,
             source: None,
             code_instance: None,
             physical_instance: None,
@@ -3359,6 +3601,7 @@ fn a_step_whose_threads_sigkill_ends_as_it_begins_runs_into_the_exit() {
             start: Box::new(StepStart {
                 stack_pointer: 0,
                 returned_to: None,
+                running_on: false,
                 source: None,
                 code_instance: None,
                 physical_instance: None,
@@ -3433,6 +3676,7 @@ fn plan_traps_a_dying_process_cannot_take_are_not_restored() {
                 start: Box::new(StepStart {
                     stack_pointer: 0,
                     returned_to: None,
+                    running_on: false,
                     source: None,
                     code_instance: None,
                     physical_instance: None,
@@ -3878,6 +4122,41 @@ fn a_co_hit_meeting_its_condition_turns_an_internal_stop_visible() {
     assert_eq!(harness.thread(second).reason, Some(site_hit(2)));
 }
 
+/// SIGKILL takes a sibling out of a published stop to its exit, so no
+/// site can be edited until it is reaped; a breakpoint removed meanwhile
+/// leaves its owner on the trap, which the stopped thread's frames must
+/// not take for a breakpoint that still exists.
+#[test]
+fn frames_ignore_a_breakpoint_removed_while_a_sibling_exits() {
+    let mut harness = hit_harness(2, "==1");
+    let [first, second] = harness.threads[..] else {
+        panic!("two threads");
+    };
+    harness.hit(first).expect("stopping hit");
+    harness.settle_requested_stops();
+    assert_eq!(harness.public_reason(), Some(site_hit(1)));
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            second,
+            Signal::SIGTRAP,
+            libc::PTRACE_EVENT_EXIT,
+        ))
+        .expect("exit event");
+    assert!(!harness.controller.sites_live());
+
+    harness
+        .controller
+        .remove_breakpoint(BreakpointId::new(1))
+        .expect("remove");
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    let instances = harness
+        .controller
+        .breakpoint_code_instances(inferior, VirtualAddress::new(HIT_SITE))
+        .expect("the site's breakpoints");
+    assert!(instances.is_empty(), "{instances:?}");
+}
+
 #[test]
 fn a_declined_thread_exiting_during_an_internal_stop_publishes_nothing() {
     let mut harness = hit_harness(3, "==5");
@@ -3989,6 +4268,111 @@ fn a_trap_reexecuted_after_a_signal_interrupted_its_repair_is_not_a_new_hit() {
         harness.trace().take_actions().last(),
         Some(&format!("continue {pid} None"))
     );
+}
+
+/// A thread whose step over the breakpoint it hit a pause interrupted
+/// still steps over the trap there once the breakpoint is replaced by
+/// another at the same place: its arrival there was counted.
+#[test]
+fn a_breakpoint_replaced_where_a_paused_repair_stands_is_stepped_over() {
+    let mut harness = hit_harness(1, "==2");
+    let pid = harness.threads[0];
+    harness.hit(pid).expect("declined hit");
+    harness
+        .controller
+        .begin_pause(process_id(pid))
+        .expect("pause");
+    // The pause's SIGSTOP arrives instead of the repair step's trace trap.
+    harness.settle_requested_stops();
+    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
+
+    harness
+        .edit(|reply| Edit::RemoveBreakpoint {
+            id: BreakpointId::new(1),
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("removed");
+    harness
+        .edit(|reply| Edit::AddBreakpoint {
+            spec: address_breakpoint(HIT_SITE),
+            options: Box::default(),
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("added");
+    harness.trace().take_actions();
+
+    harness.resume().expect("resume");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("remove_site {HIT_SITE:#x}"), format!("step {pid}")]
+    );
+}
+
+/// A thread stepping from a breakpoint it had not hit meets a signal
+/// first. Back from the signal it hits the breakpoint, once, at the guard
+/// where its step resumes, and steps over the trap: the step executes the
+/// instruction the trap covers, not the trap again.
+#[test]
+fn a_breakpoint_hit_where_a_signal_interrupted_a_step_is_stepped_over() {
+    let mut harness = hit_harness(1, "==2");
+    let pid = harness.threads[0];
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.active.as_mut().expect("execution").kind = ActiveKind::Step {
+        thread: pid,
+        kind: StepKind::Instruction,
+        start: Box::new(StepStart {
+            stack_pointer: 0,
+            returned_to: None,
+            running_on: false,
+            source: None,
+            code_instance: None,
+            physical_instance: None,
+            activation: None,
+            plan_addresses: BTreeSet::new(),
+            epilogue_traversal: None,
+            return_traversal: None,
+            signal_guard: None,
+            call_return: None,
+        }),
+        progress_owed: false,
+    };
+    inferior.thread_mut(pid).expect("thread").expected = ExpectedStop::UserStep {
+        kind: StepKind::Instruction,
+    };
+    harness
+        .trace()
+        .program_counters
+        .borrow_mut()
+        .insert(pid, HIT_SITE);
+    let child_exited = Signal::new(libc::SIGCHLD).expect("SIGCHLD");
+    deliver(&mut harness, pid, child_exited);
+    assert_eq!(
+        harness.trace().take_actions().last(),
+        Some(&format!("continue {pid} Some({child_exited:?})"))
+    );
+
+    harness.hit(pid).expect("the trap at the guard");
+    assert_eq!(harness.hit_count(), 1);
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            format!("set_registers {pid} rip={HIT_SITE:#x}"),
+            format!("remove_site {HIT_SITE:#x}"),
+            format!("step {pid}"),
+        ]
+    );
+    harness.finish_step(pid).expect("repair step");
+    assert_eq!(
+        harness.public_reason(),
+        Some(StopReason::Step {
+            kind: StepKind::Instruction
+        })
+    );
+    assert_eq!(harness.hit_count(), 1);
 }
 
 fn address_breakpoint(address: u64) -> BreakpointSpec {
@@ -4233,6 +4617,7 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
             start: Box::new(StepStart {
                 stack_pointer: 0,
                 returned_to: None,
+                running_on: false,
                 source: None,
                 code_instance: None,
                 physical_instance: None,
@@ -4495,6 +4880,7 @@ fn a_change_undone_before_every_thread_stopped_lets_a_stepi_finish_once() {
         start: Box::new(StepStart {
             stack_pointer: 0,
             returned_to: None,
+            running_on: false,
             source: None,
             code_instance: None,
             physical_instance: None,
@@ -4850,6 +5236,81 @@ fn repairing_harness_of(repairing: usize) -> WatchHarness {
     harness
 }
 
+/// A main thread stepped across its exit exits alone, and Linux reports
+/// that only after every other thread's. Its siblings run on in the step's
+/// scope, and finishing one's repair resumes them without stepping the
+/// thread that is gone.
+#[test]
+fn a_step_whose_main_thread_exited_alone_runs_its_siblings_on() {
+    let mut harness = repairing_harness_of(1);
+    let (leader, repairing) = (harness.threads[0], harness.threads[1]);
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    let active = inferior.active.as_mut().expect("execution");
+    active.kind = ActiveKind::Step {
+        thread: leader,
+        kind: StepKind::IntoSource,
+        start: Box::new(StepStart {
+            stack_pointer: 0,
+            returned_to: None,
+            running_on: false,
+            source: None,
+            code_instance: None,
+            physical_instance: None,
+            activation: None,
+            plan_addresses: BTreeSet::new(),
+            epilogue_traversal: None,
+            return_traversal: None,
+            signal_guard: None,
+            call_return: None,
+        }),
+        progress_owed: false,
+    };
+    inferior.thread_mut(leader).expect("leader").state = NativeThreadState::Exiting;
+    harness.trace().killed.borrow_mut().insert(leader);
+    harness.trace().take_actions();
+
+    harness
+        .trap(repairing, libc::TRAP_TRACE, debug_registers::STATUS_IDLE)
+        .expect("the repair finishes");
+    let actions = harness.trace().take_actions();
+    assert!(
+        actions.contains(&format!("continue {repairing} None")),
+        "{actions:?}"
+    );
+    assert!(harness.controller.inferior.is_some());
+}
+
+/// A thread waiting to step over its breakpoint that is exiting meanwhile,
+/// as when SIGKILL ends its process, can step over nothing: its repair is
+/// skipped, and the site restored.
+#[test]
+fn an_exiting_thread_is_not_stepped_over_its_breakpoint() {
+    let mut harness = repairing_harness_of(0);
+    let (finished, exiting) = (harness.threads[0], harness.threads[1]);
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    inferior.repairs.front_mut().expect("group").remaining = VecDeque::from([exiting]);
+    let thread = inferior.thread_mut(exiting).expect("thread");
+    thread.stopped_at_breakpoint = Some(VirtualAddress::new(0x40));
+    thread.state = NativeThreadState::Exiting;
+    harness.trace().killed.borrow_mut().insert(exiting);
+    harness.trace().take_actions();
+
+    harness
+        .trap(finished, libc::TRAP_TRACE, debug_registers::STATUS_IDLE)
+        .expect("the first repair finishes");
+    let actions = harness.trace().take_actions();
+    assert!(
+        !actions
+            .iter()
+            .any(|action| action == &format!("step {exiting}")),
+        "{actions:?}"
+    );
+    assert!(
+        actions.contains(&"reinstall_site 0x40".to_owned()),
+        "{actions:?}"
+    );
+}
+
 fn deliver(harness: &mut WatchHarness, pid: Pid, signal: Signal) {
     harness.trace().siginfo.borrow_mut().insert(
         pid,
@@ -5085,6 +5546,7 @@ fn lost_frame_harness() -> WatchHarness {
             start: Box::new(StepStart {
                 stack_pointer: 0,
                 returned_to: None,
+                running_on: false,
                 source: Some(SourceLocation {
                     file: crate::SourceFileId::new(0),
                     line: crate::LineNumber::new(1).expect("nonzero line"),
@@ -5270,6 +5732,7 @@ fn a_step_whose_thread_exits_while_an_edit_drops_the_other_reason_ends_in_its_ex
         start: Box::new(StepStart {
             stack_pointer: 0,
             returned_to: None,
+            running_on: false,
             source: None,
             code_instance: None,
             physical_instance: None,
