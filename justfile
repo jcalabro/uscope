@@ -11,6 +11,9 @@ default: check
 # Checks formatting, runs Clippy, and runs the complete test suite.
 check: lint test
 
+# Runs everything to check before committing.
+all: lint test stress sim
+
 # Enters the Nix development shell.
 dev *ARGS="":
     exec ./scripts/dev.sh "$@"
@@ -79,7 +82,7 @@ golden-record NAME:
 
 # Simulates random sessions on every core for SECONDS, inside a memory cap,
 # and reports each kind of failure with its smallest seed.
-sim SECONDS="60": golden
+sim SECONDS="30": golden
     cargo build --profile sim --features sim --bin uscope-sim
     ./scripts/contained.sh ./target/sim/uscope-sim sweep --seconds "$1"
 

@@ -62,7 +62,7 @@ just test                          # run the tests
 just stress                        # run the tests ten times under CPU load
 cargo nextest run --test debugger  # run real debugger scenarios
 just run build/test-programs/basic
-just sim 60                        # simulate random sessions for 60 seconds
+just sim                           # simulate random sessions for 30 seconds
 just sim-seed SEED                 # replay one simulated session
 just golden-record NAME            # re-record a golden program's manifest
 ```
@@ -74,4 +74,4 @@ build-test-programs` builds them into `build/golden` with the pinned
 toolchain and fails unless every binary matches the hash its manifest
 records. Re-record a manifest only on purpose, in a commit of its own.
 
-Before committing, run formatting, aggressive Clippy, nextest, and doc tests via `just`. Keep comments concise and useful, document public APIs, group related Rust code with sensible whitespace, and avoid unrelated refactors.
+Before committing, run `just all`: formatting, aggressive Clippy, nextest, doc tests, `just stress`, and a simulator sweep. `just` alone runs the faster gate without stress or the sweep. Keep comments concise and useful, document public APIs, group related Rust code with sensible whitespace, and avoid unrelated refactors.
