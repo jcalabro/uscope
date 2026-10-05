@@ -125,6 +125,34 @@ pub enum Observation {
         stop: StopId,
         variables: VariableSnapshot,
         backtrace: Backtrace,
+        /// Expressions evaluated in the same frame at the same stop.
+        evaluations: Vec<Evaluated>,
+    },
+}
+
+/// An expression the client evaluated where it read variables.
+#[derive(Debug)]
+pub struct Evaluated {
+    pub purpose: Purpose,
+    pub text: String,
+    pub result: Result<crate::Evaluation, String>,
+}
+
+/// What an evaluated expression asks, which decides how it is judged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Purpose {
+    /// The condition of the marker on the frame's line, or its negation.
+    Marker { negated: bool },
+    /// A variable shown once among the frame's variables: its name, or
+    /// the name's address dereferenced.
+    Name(String),
+    /// The address of a variable shown once, in memory.
+    Address(String),
+    /// Two integer variables combined: `left operator right`.
+    Arithmetic {
+        left: String,
+        operator: char,
+        right: String,
     },
 }
 

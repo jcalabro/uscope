@@ -11,15 +11,17 @@ use std::collections::BTreeMap;
 
 use iced_x86::{Decoder, DecoderOptions, Mnemonic};
 
+use super::client::{Evaluated, Purpose};
 use super::corpus::Variant;
 use super::facts::{self, Facts, Line};
 use super::kernel::shadow::{Position, Shadow};
 use super::kernel::{Kernel, State, Thread, Tid};
 use super::loader::Image;
 use super::markers::{Marker, Verdict};
+use super::marks::Mark;
 use crate::{
     Backtrace, FrameKind, PresentedFrame, ScalarValue, StepKind, UnwindTermination,
-    VariableSnapshot, VariableState, VariableValue,
+    VariableSnapshot, VariableState, VariableValue, VariableValueSource,
 };
 
 /// What a backtrace showed of its thread's stack.
@@ -512,33 +514,9 @@ pub fn variables(
     source: &str,
     markers: &[Marker],
 ) -> Result<Option<Inspected>, String> {
-    let Some(thread) = stopped(kernel, snapshot.thread) else {
+    let Some(marker) = marker_at(kernel, snapshot, backtrace, variant, source, markers) else {
         return Ok(None);
     };
-    let facts = &variant.facts;
-    let Some(line) = thread
-        .registers
-        .rip
-        .checked_sub(variant.image.bias())
-        .and_then(|image| facts.range(image))
-        .filter(|range| range.start + variant.image.bias() == thread.registers.rip)
-        .and_then(|range| range.line)
-        .filter(|line| facts.file(*line) == source)
-    else {
-        return Ok(None);
-    };
-    let Some(marker) = markers.iter().find(|marker| marker.line == line.line) else {
-        return Ok(None);
-    };
-    let presented = backtrace
-        .frames
-        .iter()
-        .find(|frame| frame.id == snapshot.stack_frame);
-    if !presented.is_some_and(|frame| {
-        frame.level == 0 && frame.source.as_ref().map(|source| source.line.get()) == Some(line.line)
-    }) {
-        return Ok(None);
-    }
     let mut values = BTreeMap::new();
     for name in marker.condition.variables() {
         let state = snapshot
@@ -551,10 +529,10 @@ pub fn variables(
             Some(value) => {
                 values.insert(name.to_owned(), value);
             }
-            None if !facts.optimized => {
+            None if !variant.facts.optimized => {
                 return Err(format!(
                     "at line {} of {source}, unoptimized code, variable {name} is {state:?}",
-                    line.line
+                    marker.line
                 ));
             }
             None => {}
@@ -565,9 +543,188 @@ pub fn variables(
         Verdict::Unknown(_) => Ok(Some(Inspected::Unavailable)),
         Verdict::Fails(comparison) => Err(format!(
             "at line {} of {source}, {}: {comparison}",
-            line.line, marker.text
+            marker.line, marker.text
         )),
     }
+}
+
+/// Expressions, evaluated in the frame whose variables the client read at
+/// the same stop: where the variables oracle applies, a marker's condition
+/// evaluates true and its negation false; a variable's name, or its
+/// address dereferenced, evaluates to what the variables view shows, from
+/// bytes the simulated memory holds where the debugger says it read them;
+/// `&x` is where the view says `x` lives; and sums, differences, and
+/// products of integer variables are exact, never wrapped to a machine
+/// width. Returns the marks the evaluations reached.
+pub fn evaluations(
+    kernel: &Kernel,
+    snapshot: &VariableSnapshot,
+    backtrace: &Backtrace,
+    variant: &Variant,
+    source: &str,
+    markers: &[Marker],
+    evaluations: &[Evaluated],
+) -> Result<Vec<Mark>, String> {
+    let marker = marker_at(kernel, snapshot, backtrace, variant, source, markers);
+    let shown = |name: &str| {
+        snapshot
+            .variables
+            .iter()
+            .find(|variable| &*variable.name == name)
+            .map(|variable| &variable.state)
+    };
+    let mut marks = Vec::new();
+    for evaluated in evaluations {
+        let state = match &evaluated.result {
+            Ok(crate::Evaluation::Value { value, .. }) => Ok(&value.state),
+            Ok(other) => Err(format!("{other:?}")),
+            Err(error) => Err(error.clone()),
+        };
+        let wrong = |expected: &str| {
+            format!(
+                "`{}` evaluated to {state:?}, not {expected}",
+                evaluated.text
+            )
+        };
+        match &evaluated.purpose {
+            Purpose::Marker { negated } => {
+                let Some(marker) = marker else { continue };
+                let expected = !negated;
+                match &state {
+                    Ok(VariableState::Available {
+                        value: VariableValue::Scalar(ScalarValue::Boolean(truth)),
+                        ..
+                    }) if *truth == expected => {
+                        if expected {
+                            marks.push(Mark::MarkerEvaluated);
+                        }
+                    }
+                    Ok(VariableState::Unavailable(_)) | Err(_) if variant.facts.optimized => {}
+                    _ => {
+                        return Err(format!(
+                            "at line {} of {source}, {}",
+                            marker.line,
+                            wrong(&expected.to_string())
+                        ));
+                    }
+                }
+            }
+            Purpose::Name(name) => match (shown(name), &state) {
+                (
+                    Some(VariableState::Available { value: view, .. }),
+                    Ok(state @ VariableState::Available { value, .. }),
+                ) if value == view => {
+                    marks.push(Mark::NameEvaluated);
+                    marks.extend(stored(kernel, snapshot, &evaluated.text, state)?);
+                }
+                (
+                    Some(VariableState::Unavailable(view)),
+                    Ok(VariableState::Unavailable(reason)),
+                ) if reason == view => {}
+                (view, _) => return Err(wrong(&format!("{view:?}, as the variables view shows"))),
+            },
+            Purpose::Address(name) => match (shown(name), &state) {
+                (
+                    Some(VariableState::Available {
+                        source: VariableValueSource::Memory(view),
+                        ..
+                    }),
+                    Ok(VariableState::Available {
+                        value: VariableValue::Address(address),
+                        ..
+                    }),
+                ) if address.address == *view => marks.push(Mark::AddressEvaluated),
+                (view, _) => return Err(wrong(&format!("the address of {view:?}"))),
+            },
+            Purpose::Arithmetic {
+                left,
+                operator,
+                right,
+            } => {
+                let (Some(a), Some(b)) = (
+                    shown(left).and_then(integer),
+                    shown(right).and_then(integer),
+                ) else {
+                    return Err(format!("`{}` combines variables not shown", evaluated.text));
+                };
+                let exact = match operator {
+                    '+' => a.checked_add(b),
+                    '-' => a.checked_sub(b),
+                    _ => a.checked_mul(b),
+                };
+                let Some(exact) = exact else { continue };
+                match &state {
+                    Ok(state) if integer(state) == Some(exact) => {
+                        marks.push(Mark::ArithmeticEvaluated);
+                    }
+                    _ => return Err(wrong(&format!("{exact}, the exact result"))),
+                }
+            }
+        }
+    }
+    Ok(marks)
+}
+
+/// Storage truth: bytes the debugger says it read from memory are what the
+/// simulated memory holds there.
+fn stored(
+    kernel: &Kernel,
+    snapshot: &VariableSnapshot,
+    text: &str,
+    state: &VariableState,
+) -> Result<Option<Mark>, String> {
+    let VariableState::Available {
+        source: VariableValueSource::Memory(address),
+        raw: Some(raw),
+        ..
+    } = state
+    else {
+        return Ok(None);
+    };
+    let held = stopped(kernel, snapshot.thread).and_then(|thread| {
+        kernel.processes[&thread.tgid]
+            .space
+            .read_user(address.get(), raw.len() as u64)
+    });
+    if held.as_deref() != Some(&**raw) {
+        return Err(format!(
+            "`{text}` showed bytes {raw:?} from {address}, which holds {held:?}"
+        ));
+    }
+    Ok(Some(Mark::StorageTrue))
+}
+
+/// The marker whose condition must hold where the variables were read:
+/// the thread stands at the start of a row of the marker's line, and the
+/// debugger presents that line in its innermost frame.
+fn marker_at<'m>(
+    kernel: &Kernel,
+    snapshot: &VariableSnapshot,
+    backtrace: &Backtrace,
+    variant: &Variant,
+    source: &str,
+    markers: &'m [Marker],
+) -> Option<&'m Marker> {
+    let thread = stopped(kernel, snapshot.thread)?;
+    let facts = &variant.facts;
+    let line = thread
+        .registers
+        .rip
+        .checked_sub(variant.image.bias())
+        .and_then(|image| facts.range(image))
+        .filter(|range| range.start + variant.image.bias() == thread.registers.rip)
+        .and_then(|range| range.line)
+        .filter(|line| facts.file(*line) == source)?;
+    let marker = markers.iter().find(|marker| marker.line == line.line)?;
+    backtrace
+        .frames
+        .iter()
+        .find(|frame| frame.id == snapshot.stack_frame)
+        .is_some_and(|frame| {
+            frame.level == 0
+                && frame.source.as_ref().map(|source| source.line.get()) == Some(line.line)
+        })
+        .then_some(marker)
 }
 
 /// An available integer value.
