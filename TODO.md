@@ -11,7 +11,7 @@
 - [x] Add caller-frame selection for variables and source context, especially for core dumps.
 - [x] Add hit-count breakpoints by evaluating hits at an internal stop and resuming transparently.
 - [x] Add value-change-only watchpoints using the same internal evaluate-and-resume stop.
-- [ ] Expand expression evaluation beyond structural value inspection.
+- [x] Expand expression evaluation beyond structural value inspection.
 - [x] Add conditional breakpoints.
 - [ ] Add conditions and hit conditions to watchpoints; DAP refuses them on data breakpoints today.
 - [ ] Improve support for advanced DWARF location expressions and composite locations.
