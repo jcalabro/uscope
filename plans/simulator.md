@@ -701,7 +701,10 @@ afterwards, and must reach the same result.
   breakpoint the client was told exists owns an installed site at each of
   its locations.
 - *Thread exits:* every `ThreadExited` event reports the status the kernel
-  reported for that thread, as `InferiorExited` does for the process.
+  reported for that thread, as `InferiorExited` does for the process. A
+  group leader is the exception, decided after P5: one that exits while
+  the debugger knows other threads live is reported at its exit event,
+  with the code it passed to `exit` (open question 3, section 18).
 
 Once a process is ending as a whole (killed, by the debugger or from
 outside, or exiting its group), its threads leave their stops whatever the
@@ -904,7 +907,7 @@ running on to its own end.
 
 | Command | What it does |
 |---|---|
-| `just` | The gate: the golden build and its checks; the kernel and CPU conformance tests; 1,000 fixed seeds over every program and variant (about 1.6 s); a determinism double-run of the first 32 seeds; the coverage-mark check; and ten sabotage tests showing the oracles catch lost trap writes, a deaf waiter, a thread resumed behind the controller's back, a trap the CPU skips, misreported return addresses, single steps that run on, misreported stack values (twice: variables and breakpoint conditions), debug-register writes that reach only a copy, and watch traps that never come. |
+| `just` | The gate: the golden build and its checks; the kernel and CPU conformance tests; 2,000 fixed seeds over every program and variant (about 3 s, no longer than the lockstep test beside it); a determinism double-run of the first 32 seeds; the coverage-mark check; and ten sabotage tests showing the oracles catch lost trap writes, a deaf waiter, a thread resumed behind the controller's back, a trap the CPU skips, misreported return addresses, single steps that run on, misreported stack values (twice: variables and breakpoint conditions), debug-register writes that reach only a copy, and watch traps that never come. |
 | `just sim [SECONDS]` | A sweep: random seeds on every core for SECONDS (default 30), inside `scripts/contained.sh`. Failures are grouped by their signatures (section 15); each group keeps its shortest run's report. |
 | `just sim-seed SEED` | Replays one seed and prints its whole trace, also written to `target/sim/SEED/trace.log`. `--fingerprint` checks the replay against a report's fingerprint. |
 | `just sim-seed SEED --at STEP` | Replays to STEP and prints the state there: each thread's state, report, pending signals, and `rip`; the waiter; the controller's queue; and the client. |
@@ -1412,21 +1415,33 @@ Decided on 2026-10-04: the simulator is in-crate, behind the `sim` feature
    was rejected for its tooling and quotas, and fewer variants for the
    coverage they give. Binaries already in history stay there; nothing
    new is added.
-2. **Ambiguous stops from nested inline breakpoints.** When breakpoints on
-   two nested inlined functions hit at the same address, as `rt_exit_group`
-   and `rt_syscall3` do in `straight-clang-O2` at `0x401334`, the stop
-   presents its inline frame as ambiguous, so source steps and backtraces
-   there are refused. The hits are consistent: one inline chain holds both.
-   Presenting the innermost hit's frame would keep those requests working.
-   Is the ambiguity intended? The simulator's client accepts the refusals
-   until this is decided.
-3. **An execution whose only thread exited alone as the leader.** When the
-   client resumes the main thread alone and it exits while others live,
-   Linux reports its exit only after theirs, and they are held stopped, so
-   the execution can never end by itself; a pause stops it at once. gdb
-   reports a thread exit and stops instead. Should uscope end such an
-   execution with `ThreadExited` when the leader passes its exit event? Its
-   final status is not known then (K-EXIT-6).
+2. **Ambiguous stops from nested inline breakpoints.** Decided on
+   2026-10-05: when breakpoints on nested inlined functions hit at the same
+   instruction, as `rt_exit_group` and `rt_syscall3` do in
+   `straight-clang-O2` at `0x401334`, the stop presents the innermost
+   function that hit, as gdb does, and the others are its callers. One
+   chain of calls holds every hit, so this guesses nothing; source steps
+   and backtraces there work, where they were refused
+   (`nested_inline_breakpoints_hit_together_present_the_innermost`). A stop
+   whose debug information describes incompatible chains stays ambiguous.
+3. **An execution whose only thread exited alone as the leader.** Decided
+   on 2026-10-05: when the main thread, resumed alone, exits by `exit`
+   while other threads live, its execution ends at its exit event with
+   `ThreadExited` and the code it passed to `exit`, as any other thread's
+   execution ends when its thread exits, and as gdb reports a thread exit.
+   Linux reports the main thread's exit status only once every other
+   thread has exited, which threads held stopped never do, so the
+   execution never ended by itself. The process's own status, which may
+   differ (K-EXIT-6), comes with `InferiorExited`. A main thread that
+   exits this way during any execution is reported by a `ThreadExited`
+   event at its exit event. Nothing is killed: the program goes on, and
+   every way the session ends still reaps the whole process
+   (`a_main_thread_continued_alone_ends_its_execution_when_it_exits`).
+   The simulator's auditor checks the reported code against what the
+   program passed to `exit`, two coverage marks prove the sweep reaches
+   both the event and the stop, and the `threads` program gained a second
+   run in `leader` mode, with the gate's fixed seeds raised to 2,000, so
+   that they do.
 
 ## Glossary
 
