@@ -905,7 +905,7 @@ running on to its own end.
 | Command | What it does |
 |---|---|
 | `just` | The gate: the golden build and its checks; the kernel and CPU conformance tests; 1,000 fixed seeds over every program and variant (about 1.6 s); a determinism double-run of the first 32 seeds; the coverage-mark check; and ten sabotage tests showing the oracles catch lost trap writes, a deaf waiter, a thread resumed behind the controller's back, a trap the CPU skips, misreported return addresses, single steps that run on, misreported stack values (twice: variables and breakpoint conditions), debug-register writes that reach only a copy, and watch traps that never come. |
-| `just sim [SECONDS]` | A sweep: random seeds on every core for SECONDS (default 60), inside `scripts/contained.sh`. Failures are grouped by kind and check; each group keeps its smallest seed's report. |
+| `just sim [SECONDS]` | A sweep: random seeds on every core for SECONDS (default 30), inside `scripts/contained.sh`. Failures are grouped by kind and check; each group keeps its smallest seed's report. |
 | `just sim-seed SEED` | Replays one seed and prints its whole trace, also written to `target/sim/SEED/trace.log`. `--fingerprint` checks the replay against a report's fingerprint. |
 | `just sim-seed SEED --at STEP` | Replays to STEP and prints the state there: each thread's state, report, pending signals, and `rip`; the waiter; the controller's queue; and the client. |
 
