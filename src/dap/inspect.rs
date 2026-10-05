@@ -2,6 +2,7 @@
 //! expressions.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use uscope::{
@@ -9,11 +10,11 @@ use uscope::{
     ValueChildQuery, VariableKind, VariableState,
 };
 
-use super::handles::{Exhausted, Variables};
+use super::handles::{Exhausted, Location, Variables};
 use super::protocol::{
-    CompletionsArguments, ErrorBody, EvaluateArguments, ExceptionInfoArguments, ScopesArguments,
-    SetExpressionArguments, SetVariableArguments, StackFrameFormat, StackTraceArguments,
-    VariablesArguments,
+    CompletionsArguments, ErrorBody, EvaluateArguments, ExceptionInfoArguments, LocationsArguments,
+    ScopesArguments, SetExpressionArguments, SetVariableArguments, StackFrameFormat,
+    StackTraceArguments, VariablesArguments,
 };
 use super::session::{Session, error, parse, signal_text, thread_id};
 use super::values::{self, Item, Options};
@@ -422,6 +423,7 @@ impl Session {
         window: Window,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
         let snapshot = self.frame_variables(context).await?;
+        let module = self.frame_file(context).await.map(|(module, _)| module);
         let unnamed = self.unnamed_variables(context, &snapshot).await;
         let mut rows = Vec::new();
         for (index, variable) in window.slice(
@@ -442,6 +444,7 @@ impl Session {
                     path,
                     type_info: variable.type_info.as_ref(),
                     state: &variable.state,
+                    declaration: module.zip(variable.declaration.clone()),
                 },
                 context,
                 window.options,
@@ -555,16 +558,22 @@ impl Session {
                 )
                 .await
                 .map_err(error)?;
-            rows.push(self.present(
-                Item {
-                    name: &variable.name,
-                    path: global_expression(&image, global),
-                    type_info: variable.type_info.as_ref(),
-                    state: &variable.state,
-                },
-                context,
-                window.options,
-            )?);
+            rows.push(
+                self.present(
+                    Item {
+                        name: &variable.name,
+                        path: global_expression(&image, global),
+                        type_info: variable.type_info.as_ref(),
+                        state: &variable.state,
+                        declaration: global
+                            .declaration
+                            .clone()
+                            .map(|declaration| (module, declaration)),
+                    },
+                    context,
+                    window.options,
+                )?,
+            );
         }
         Ok(rows)
     }
@@ -600,6 +609,7 @@ impl Session {
                 path,
                 type_info: Some(&pointee.type_info),
                 state: &pointee.state,
+                declaration: None,
             },
             context,
             window.options,
@@ -643,6 +653,7 @@ impl Session {
                     path: values::child_path(base.as_ref(), child),
                     type_info: Some(&child.type_info),
                     state: &child.state,
+                    declaration: None,
                 },
                 context,
                 window.options,
@@ -687,6 +698,7 @@ impl Session {
                         path: values::child_path(path, child),
                         type_info: Some(&child.type_info),
                         state: &child.state,
+                        declaration: None,
                     },
                     context,
                     window.options,
@@ -710,7 +722,8 @@ impl Session {
         context: StopContext,
         options: Options,
     ) -> Result<Map<String, Value>, ErrorBody> {
-        values::variable(item, context, options, &mut self.references).map_err(exhausted)
+        let code = self.code();
+        values::variable(item, context, options, &mut self.references, &code).map_err(exhausted)
     }
 
     const fn value_options(&self) -> Options {
@@ -794,6 +807,7 @@ impl Session {
                     path: Some(parsed),
                     type_info: value.type_info.as_ref(),
                     state: &value.state,
+                    declaration: None,
                 },
                 context,
                 options,
@@ -853,6 +867,55 @@ impl Session {
             self.invalidate_values().await;
         }
         Ok(json!({"result": output, "variablesReference": 0}))
+    }
+
+    /// Where a location reference leads: where a variable is declared, or
+    /// where the function a pointer enters is declared, or else the line
+    /// of its first instruction.
+    pub(super) fn locations(&self, arguments: Value) -> Result<Value, ErrorBody> {
+        let arguments = parse::<LocationsArguments>(arguments, "locations arguments")?;
+        let reference = arguments.location_reference;
+        let (image, location) = match self
+            .references
+            .location_of(reference)
+            .ok_or_else(|| stale("location", reference))?
+        {
+            Location::Code(address) => {
+                let code = self.code();
+                let (image, address) = code.function_entry(*address).ok_or_else(|| {
+                    ErrorBody::new(format!("no loaded module has code at {address:#x}"))
+                })?;
+                let located = image.locate(address);
+                let location = located
+                    .function
+                    .and_then(|function| function.declaration)
+                    .or(located.source)
+                    .ok_or_else(|| {
+                        ErrorBody::new(format!(
+                            "the code at {:#x} has no source location",
+                            address.get()
+                        ))
+                    })?;
+                (Arc::clone(image), location)
+            }
+            Location::Declared { module, location } => (
+                self.loaded_image(*module)
+                    .ok_or_else(|| ErrorBody::new("the module is no longer loaded"))?,
+                location.clone(),
+            ),
+        };
+        let file = image
+            .source_file(location.file)
+            .ok_or_else(|| ErrorBody::new("the source file is missing from its module"))?;
+        let path = self.local_path(&file.path);
+        let mut body = json!({
+            "source": super::sources::source_json(&path),
+            "line": self.line_to_client(location.line.get()),
+        });
+        if let Some(column) = location.column {
+            body["column"] = self.column_to_client(column.get()).into();
+        }
+        Ok(body)
     }
 
     pub(super) fn exception_info(&self, arguments: Value) -> Result<Value, ErrorBody> {
@@ -1000,6 +1063,7 @@ impl Session {
                 path: Some(path),
                 type_info: assigned.type_info.as_ref(),
                 state: &assigned.state,
+                declaration: None,
             },
             context,
             options,

@@ -6,14 +6,16 @@
 //! and pointers expand to what they point to.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use uscope::{
-    IntegerValue, RegisterValue, ScalarValue, StopContext, TypeInfo, ValueChild,
-    ValueChildRelationship, ValueChildren, VariableState, VariableValue, VariableValueSource,
+    ImageAddress, IntegerValue, ModuleImage, RegisterValue, ScalarValue, StopContext, SymbolKind,
+    TypeInfo, ValueChild, ValueChildRelationship, ValueChildren, VariableState, VariableValue,
+    VariableValueSource,
 };
 
-use super::handles::{Exhausted, References, Variables};
+use super::handles::{Exhausted, Location, References, Variables};
 use crate::cli::format::register_bytes;
 use crate::cli::value::summary;
 
@@ -42,6 +44,40 @@ pub struct Item<'a> {
     pub path: Option<uscope::Expression>,
     pub type_info: Option<&'a TypeInfo>,
     pub state: &'a VariableState,
+    /// Where the value's variable is declared, in a module's sources.
+    pub declaration: Option<(uscope::ModuleId, uscope::SourceLocation)>,
+}
+
+/// The loaded modules' code, to tell which addresses enter a function.
+#[derive(Debug, Default)]
+pub struct Code {
+    /// Each module's load bias and image.
+    modules: Vec<(u64, Arc<ModuleImage>)>,
+}
+
+impl Code {
+    pub const fn new(modules: Vec<(u64, Arc<ModuleImage>)>) -> Self {
+        Self { modules }
+    }
+
+
+    /// The image and image address of the function an address enters, when
+    /// it is a function's first instruction rather than any other address.
+    pub fn function_entry(&self, address: u64) -> Option<(&Arc<ModuleImage>, ImageAddress)> {
+        self.modules.iter().find_map(|(bias, image)| {
+            let address = ImageAddress::new(address.checked_sub(*bias)?);
+            if !image.contains_address(address) {
+                return None;
+            }
+            let symbol = image.symbolize(address)?;
+            (symbol.offset == 0
+                && matches!(
+                    symbol.kind,
+                    SymbolKind::Function | SymbolKind::IndirectFunction
+                ))
+            .then_some((image, address))
+        })
+    }
 }
 
 /// Presents a value as a `Variable`, with a reference that expands it.
@@ -50,6 +86,7 @@ pub fn variable(
     context: StopContext,
     options: Options,
     references: &mut References,
+    code: &Code,
 ) -> Result<Map<String, Value>, Exhausted> {
     let mut variable = Map::new();
     variable.insert("name".to_owned(), item.name.into());
@@ -62,6 +99,14 @@ pub fn variable(
             "type".to_owned(),
             item.type_info
                 .map_or("<unknown type>", |type_info| &type_info.name)
+                .into(),
+        );
+    }
+    if let Some((module, location)) = item.declaration {
+        variable.insert(
+            "declarationLocationReference".to_owned(),
+            references
+                .location(Location::Declared { module, location })?
                 .into(),
         );
     }
@@ -105,6 +150,17 @@ pub fn variable(
                 name: item.name.into(),
                 path,
             })?;
+        }
+        // A pointer to a function leads to the function's code.
+        if let VariableValue::Address(address) = value
+            && code.function_entry(address.address.get()).is_some()
+        {
+            variable.insert(
+                "valueLocationReference".to_owned(),
+                references
+                    .location(Location::Code(address.address.get()))?
+                    .into(),
+            );
         }
         if options.memory {
             // A pointer's natural memory is what it points to.

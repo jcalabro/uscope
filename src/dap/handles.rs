@@ -89,6 +89,20 @@ pub struct References {
     /// The expression of each named row of a variables list, by the list's
     /// reference and the row's name.
     paths: HashMap<(i64, String), (StopContext, uscope::Expression)>,
+    /// What each location reference names.
+    locations: HashMap<i64, Location>,
+}
+
+/// A place in the program's source a location reference names.
+#[derive(Debug, Clone)]
+pub enum Location {
+    /// The code at an address, such as the function a pointer points to.
+    Code(u64),
+    /// Where a module's debug information says something is declared.
+    Declared {
+        module: uscope::ModuleId,
+        location: uscope::SourceLocation,
+    },
 }
 
 /// The session ran out of references, which ends it rather than reusing one.
@@ -104,6 +118,7 @@ impl Default for References {
             frame_ids: HashMap::new(),
             variables: HashMap::new(),
             paths: HashMap::new(),
+            locations: HashMap::new(),
         }
     }
 }
@@ -141,6 +156,18 @@ impl References {
         let id = self.allocate()?;
         self.variables.insert(id, variables);
         Ok(id)
+    }
+
+    /// Returns a new reference to a place in the program's source.
+    pub fn location(&mut self, location: Location) -> Result<i64, Exhausted> {
+        let id = self.allocate()?;
+        self.locations.insert(id, location);
+        Ok(id)
+    }
+
+    /// The place a location reference names.
+    pub fn location_of(&self, id: i64) -> Option<&Location> {
+        self.locations.get(&id)
     }
 
     pub fn frame_context(&self, id: i64) -> Option<StopContext> {
@@ -216,6 +243,7 @@ impl References {
         self.frame_ids.clear();
         self.variables.clear();
         self.paths.clear();
+        self.locations.clear();
     }
 }
 
