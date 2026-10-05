@@ -521,25 +521,31 @@ impl Session {
                 executable,
             } => {
                 let process = *process;
-                match executable {
-                    Some(executable) => Debugger::attach_with_executable(process, executable).await,
-                    None => Debugger::attach(process).await,
-                }
-                .map_err(|error| {
-                    ErrorBody::shown(format!("failed to attach to process {process}: {error}"))
-                })?
+                let attached = async {
+                    match executable {
+                        Some(executable) => {
+                            Debugger::attach_with_executable(process, executable).await
+                        }
+                        None => Debugger::attach(process).await,
+                    }
+                };
+                self.with_progress(format!("Attaching to process {process}"), attached)
+                    .await
+                    .map_err(|error| {
+                        ErrorBody::shown(format!("failed to attach to process {process}: {error}"))
+                    })?
             }
             Start::Core(options) => {
-                let title = format!("Opening {}", options.core.display());
+                let core = options.core.display().to_string();
                 let options = options.clone();
                 self.with_progress(
-                    title,
+                    format!("Opening {core}"),
                     tokio::task::spawn_blocking(move || Debugger::open_core(&options)),
                 )
                 .await
                 .map_err(|error| ErrorBody::shown(error.to_string()))?
                 .map_err(|error| {
-                    ErrorBody::shown(format!("failed to open the core dump: {error}"))
+                    ErrorBody::shown(format!("failed to open the core dump {core}: {error}"))
                 })?
             }
             Start::Launch(_) => unreachable!("attach configurations attach"),
@@ -625,6 +631,21 @@ impl Session {
             pumps: Vec::new(),
         });
         self.apply_signal_policies().await?;
+        if !matches!(
+            self.target.as_ref().map(|target| &target.start),
+            Some(Start::Launch(_))
+        ) {
+            // Only a launched program runs again. A client restarts a core
+            // dump by opening it again, and an attached process by
+            // detaching and attaching to it again.
+            self.client
+                .event(
+                    "capabilities",
+                    json!({"capabilities": {"supportsRestartRequest": false}}),
+                )
+                .await
+                .map_err(|Closed| closed())?;
+        }
         if let Some(Start::Core(_)) = self.target.as_ref().map(|target| &target.start) {
             self.warn_core_modules().await.map_err(|Closed| closed())?;
         }
@@ -864,9 +885,18 @@ impl Session {
 
     async fn disconnect(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<protocol::DisconnectArguments>(arguments, "disconnect arguments")?;
-        self.end(arguments.terminate_debuggee)
-            .await
-            .map_err(|Closed| closed())?;
+        // A restart attaches to the process again, so it must survive the
+        // disconnect that begins the restart, whatever else that asks.
+        let attached = matches!(
+            self.target.as_ref().map(|target| &target.start),
+            Some(Start::Attach { .. })
+        );
+        let terminate = if attached && arguments.restart == Some(true) {
+            Some(false)
+        } else {
+            arguments.terminate_debuggee
+        };
+        self.end(terminate).await.map_err(|Closed| closed())?;
         self.after = Some(After::End);
         Ok(json!({}))
     }
@@ -2000,6 +2030,15 @@ impl Session {
             line.saturating_sub(1)
         }
     }
+
+    /// Converts a one-based column to the client's numbering.
+    pub(super) const fn column_to_client(&self, column: u64) -> u64 {
+        if self.support().columns_start_at1 {
+            column
+        } else {
+            column.saturating_sub(1)
+        }
+    }
 }
 
 /// The adapter's capabilities, as `initialize` reports them.
@@ -2026,6 +2065,7 @@ fn capabilities() -> Value {
         "supportsDisassembleRequest": true,
         "supportsReadMemoryRequest": true,
         "supportsSteppingGranularity": true,
+        "supportsSingleThreadExecutionRequests": true,
         "supportsDataBreakpoints": true,
         "supportsDataBreakpointBytes": true,
         "supportsModulesRequest": true,

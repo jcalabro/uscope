@@ -192,3 +192,60 @@ fn stack_frames_show_the_parameters_line_and_module_a_client_asks_for() {
     assert_eq!(plain["stackFrames"][0]["name"], "parameter_target");
     dap.finish();
 }
+
+/// What a client numbering from `base` sees of one stop: the breakpoint's
+/// line, the frame's line and column, the disassembly's location of the
+/// stopped instruction, and the lines breakpoints can use there.
+fn positions(base: u64) -> Vec<u64> {
+    let path = source("c/basic.c");
+    let line = line_of(&path, "return uscope_value;") - 1 + base;
+    let mut dap = Dap::start(format!("lines from {base}"));
+    let mark = dap.mark();
+    dap.request(
+        "initialize",
+        json!({"adapterID": "uscope", "linesStartAt1": base == 1, "columnsStartAt1": base == 1}),
+    );
+    dap.event(mark, "initialized", |_| true);
+    let launch = dap.send("launch", json!({"program": fixture("basic")}));
+    let set = dap.request(
+        "setBreakpoints",
+        json!({"source": {"path": path}, "breakpoints": [{"line": line}]}),
+    );
+    dap.request("configurationDone", Value::Null);
+    dap.success(launch);
+    let stop = dap.stopped(launch.mark);
+    let frame =
+        dap.request("stackTrace", json!({"threadId": stop.thread, "levels": 1}))["stackFrames"][0]
+            .clone();
+    let instructions = dap.request(
+        "disassemble",
+        json!({"memoryReference": frame["instructionPointerReference"], "instructionCount": 1}),
+    )["instructions"][0]
+        .clone();
+    let lines = dap.request(
+        "breakpointLocations",
+        json!({"source": {"path": path}, "line": line}),
+    )["breakpoints"][0]["line"]
+        .clone();
+    dap.finish();
+    let number = |value: &Value| value.as_u64().unwrap_or_else(|| panic!("{value}"));
+    vec![
+        number(&set["breakpoints"][0]["line"]),
+        number(&frame["line"]),
+        number(&frame["column"]),
+        number(&instructions["line"]),
+        number(&instructions["column"]),
+        number(&lines),
+    ]
+}
+
+#[test]
+fn clients_counting_lines_and_columns_from_zero_see_every_position_one_less() {
+    let ones = positions(1);
+    assert!(ones.iter().all(|position| *position > 0), "{ones:?}");
+    let zeros = positions(0);
+    assert_eq!(
+        zeros,
+        ones.iter().map(|position| position - 1).collect::<Vec<_>>()
+    );
+}
