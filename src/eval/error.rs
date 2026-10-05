@@ -35,6 +35,7 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     /// The kind's stable name, as the reference's examples write it.
+    #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             Self::Syntax => "syntax",

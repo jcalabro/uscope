@@ -17,5 +17,23 @@ pub mod syntax;
 pub mod target;
 pub mod types;
 
+/// What evaluating an expression at a stop produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Evaluation {
+    /// A value, or the unavailable state that stands for it, with the part
+    /// of the expression whose value the program state could not provide.
+    Value {
+        value: crate::InspectedValue,
+        cause: Option<syntax::Span>,
+    },
+    /// `base[start..end]`: an array or slice and the half-open range of its
+    /// elements to page through.
+    Range {
+        base: crate::InspectedValue,
+        start: i128,
+        end: i128,
+    },
+}
+
 #[cfg(test)]
 mod tests;

@@ -41,6 +41,7 @@ pub struct Span {
 impl Span {
     /// The span of `start..end`. Text is at most a few kilobytes, so its
     /// offsets fit `u32`.
+    #[must_use]
     pub fn new(start: usize, end: usize) -> Self {
         let offset = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
         Self {
@@ -59,6 +60,7 @@ impl Span {
     }
 
     /// The text this span covers.
+    #[must_use]
     pub fn text(self, text: &str) -> &str {
         text.get(self.start as usize..self.end as usize)
             .unwrap_or_default()
@@ -108,10 +110,12 @@ impl Expression {
     }
 
     /// The text as written.
+    #[must_use]
     pub fn text(&self) -> &str {
         &self.parsed.text
     }
 
+    #[must_use]
     pub fn ambiguities(&self) -> &[Ambiguity] {
         &self.parsed.ambiguities
     }
@@ -123,6 +127,7 @@ impl Expression {
     }
 
     /// The only reading, for text without ambiguities.
+    #[must_use]
     pub fn tree(&self) -> Option<&Tree> {
         match self.parsed.readings.as_slice() {
             [Ok(tree)] => Some(tree),
@@ -131,6 +136,7 @@ impl Expression {
     }
 
     /// Whether both parse the same, whatever their spacing.
+    #[must_use]
     pub fn same_shape(&self, other: &Self) -> bool {
         self.parsed.ambiguities.len() == other.parsed.ambiguities.len()
             && self

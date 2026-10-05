@@ -46,6 +46,9 @@ pub enum Error {
     AmbiguousVariable(String),
     #[error("invalid value expression: {0}")]
     InvalidValueExpression(String),
+    /// An expression that has no value, and the part of its text at fault.
+    #[error("{0}")]
+    Expression(crate::ExpressionError),
     #[error("record type '{type_name}' has no member named '{member}'")]
     MemberNotFound { member: String, type_name: Arc<str> },
     #[error("member '{member}' is ambiguous in record type '{type_name}'")]

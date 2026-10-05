@@ -245,6 +245,15 @@ pub trait VariableInfo: Send + Sync {
         budget: &mut InspectionBudget,
     ) -> Result<Accessed>;
 
+    /// Decodes the scalar stored at `at`, without the text it may point to.
+    fn load(
+        &self,
+        at: &Located,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<std::result::Result<crate::VariableValue, VariableState>>;
+
     /// Decodes the value stored at `at`, with its children and dereference
     /// capabilities.
     fn materialize(

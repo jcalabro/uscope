@@ -56,6 +56,10 @@ pub use disassembly::{
     MAX_WINDOW_AFTER, MAX_WINDOW_BEFORE, TargetBoundary,
 };
 pub use error::{Error, Result};
+pub use eval::Evaluation;
+pub use eval::bind::Mode as EvaluationMode;
+pub use eval::error::{ErrorKind as ExpressionErrorKind, ExpressionError};
+pub use eval::syntax::{Expression, Span};
 pub use expression::parse_value_expression;
 pub use model::{
     Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArrayDimension,
@@ -1007,6 +1011,31 @@ impl DebuggerHandle {
             .ok_or(Error::VariableNotFound(name))
     }
 
+    /// Evaluates an expression in the selected frame of the selected
+    /// stopped thread, reading only.
+    pub async fn evaluate(&self, expression: &Expression) -> Result<Evaluation> {
+        self.selected().await?.evaluate(expression).await
+    }
+
+    /// Evaluates an expression in the selected frame, assigning when `mode`
+    /// allows, under explicit resource limits.
+    pub async fn evaluate_with(
+        &self,
+        expression: &Expression,
+        mode: EvaluationMode,
+        limits: InspectionLimits,
+    ) -> Result<Evaluation> {
+        self.selected()
+            .await?
+            .evaluate_with(expression, mode, limits)
+            .await
+    }
+
+    /// The type an expression has in the selected frame, reading no memory.
+    pub async fn expression_type(&self, expression: &Expression) -> Result<TypeInfo> {
+        self.selected().await?.expression_type(expression).await
+    }
+
     /// Atomically inspects one structural value expression in the selected
     /// frame of the selected stopped thread.
     pub async fn inspect(&self, expression: ValueExpression) -> Result<InspectedValue> {
@@ -1415,6 +1444,54 @@ impl StopView<'_> {
             .request(|reply| Request::Variables {
                 query,
                 limits,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Evaluates an expression in the frame, reading only.
+    pub async fn evaluate(&self, expression: &Expression) -> Result<Evaluation> {
+        self.evaluate_with(
+            expression,
+            EvaluationMode::Read,
+            InspectionLimits::default(),
+        )
+        .await
+    }
+
+    /// Evaluates an expression in the frame, assigning when `mode` allows,
+    /// under explicit resource limits.
+    pub async fn evaluate_with(
+        &self,
+        expression: &Expression,
+        mode: EvaluationMode,
+        limits: InspectionLimits,
+    ) -> Result<Evaluation> {
+        let context = self.context;
+        let expression = expression.clone();
+        self.handle
+            .request(|reply| Request::Evaluate {
+                expression,
+                mode,
+                limits,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// The type an expression has in the frame, reading no memory.
+    pub async fn expression_type(&self, expression: &Expression) -> Result<TypeInfo> {
+        let context = self.context;
+        let expression = expression.clone();
+        self.handle
+            .request(|reply| Request::ExpressionType {
+                expression,
                 stop_id: context.stop,
                 thread_id: context.thread,
                 frame: context.frame,

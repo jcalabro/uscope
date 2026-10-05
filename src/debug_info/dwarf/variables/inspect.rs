@@ -1564,6 +1564,28 @@ impl DwarfVariableInfo {
         Ok(inspected_value(Some(type_info), state, budget))
     }
 
+    /// Decodes a value without its text.
+    pub(super) fn decode_state(
+        &self,
+        type_id: TypeId,
+        storage: &LocatedStorage,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<VariableState> {
+        match self.value_shape(type_id) {
+            Ok(shape) => {
+                self.materialize_shape_state(type_id, &shape, storage, context, runtime, budget)
+            }
+            Err(ValueShapeError::Malformed(description)) => Ok(VariableState::Malformed(
+                malformed_reason(VariableMalformedKind::InvalidTypeGraph, description),
+            )),
+            Err(ValueShapeError::Unsupported(_)) => Ok(VariableState::Unavailable(
+                crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+            )),
+        }
+    }
+
     /// Materializes a value, with its text when it is a string.
     pub(super) fn materialize_value_state(
         &self,
