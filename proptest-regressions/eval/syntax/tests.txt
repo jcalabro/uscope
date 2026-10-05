@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b1d67f054e7d9b3759f52b497408529bcb0556d6dfb60c89499881902cb86cd1 # shrinks to text = "(n) - ((a) as int) as int"
+cc 0397bf3c291d3f2f8352285c7e76a33d11432a2a083bcae399d492241c1f12cc # shrinks to text = "sizeof(a ? a = a : a)"

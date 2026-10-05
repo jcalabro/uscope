@@ -93,9 +93,9 @@ sim-seed SEED *ARGS: golden
     cargo build --profile sim --features sim --bin uscope-sim
     ./target/sim/uscope-sim replay "$1" "${@:2}"
 
-# Runs one fuzz target: value-expression, dwarf-expression, core-dump,
-# elf-symbols, disassembly, debug-register-plan, dap-transport, or
-# dap-request. Arguments go to libFuzzer.
+# Runs one fuzz target: expression-parse, value-expression,
+# dwarf-expression, core-dump, elf-symbols, disassembly, debug-register-plan,
+# dap-transport, or dap-request. Arguments go to libFuzzer.
 # iced-x86 builds its formatter tables once and never frees them, which
 # LeakSanitizer would report as a failure when the disassembly target exits.
 fuzz TARGET *ARGS="":

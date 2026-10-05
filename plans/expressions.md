@@ -118,16 +118,21 @@ parentheses; after `as` a trailing `*` would read as multiplication
 (`x as int * 2`), so it is not a type there.
 
 Parsing stays free of the program. A parenthesized text that can only be a
-type (it has a type keyword, several C base words, a pointer star, a
-qualifier, or a non-name built-in spelling such as `*T`) followed by an operand
-is a cast. A parenthesized *name* (`(a)`, `(ns::a)`, `(main.point)`) followed
-by a token that can begin an operand but could also continue a binary
-expression (`-`, `+`, `*`, `&`) is a `CastOrParen` node holding both readings;
-followed by anything that can only begin an operand (a name, a literal, `(`,
-`!`, `~`, `sizeof`) it is a cast. Binding settles `CastOrParen` as C does: a
-value in scope (a variable or an enumerator) wins, so `(n) - 1` subtracts;
-otherwise a type, so `(T)-1` casts; otherwise an unknown-name error listing
-both readings. No reading is ever refused merely for being ambiguous.
+type (several C base words, a single C base word, a tag, a pointer star, or a
+qualifier) followed by an operand is a cast. A parenthesized *name* (`(n)`,
+`(ns::n)`, `(main.point)`) followed by a token that can only begin an
+operand (a name, a literal, `(`, `!`, `~`) is a cast, and followed by
+anything that cannot begin one it only groups. Followed by `-`, `*`, or `&`
+it is an *ambiguity*: the two readings group the rest of the expression
+differently (`(n) - a * b` is `n - (a * b)`; `(T) - a * b` is
+`((T)(-a)) * b`), so no single tree with a "cast or parenthesis" node can
+hold both. Ambiguities are found from the tokens alone, and the text is
+parsed once per combination of their readings (at most four ambiguities,
+so at most sixteen trees). Binding resolves each ambiguity's name and picks
+the tree that matches: a value in scope (a variable or an enumerator) wins,
+as in C; otherwise a type; otherwise an unknown-name error. No reading is
+ever refused merely for being ambiguous. Text with ambiguities prints as
+written, since parentheses one reading does not need may matter to another.
 
 ### Semantics
 
@@ -255,7 +260,7 @@ for P2 through P4. With the simulator as the net, a phase may refactor
 boldly: P2 and P4 replace whole paths rather than keeping old and new side
 by side.
 
-- **P1 Guards, numbers, and syntax** (pure, no wiring). First the resource
+- **P1 Guards, numbers, and syntax** (pure, no wiring; done 2026-10-05). First the resource
   budgets of §5.0; then `number.rs`, lexer, parser, printer, errors; the
   `docs/expressions.md` skeleton with its syntax rows running; the
   `expression_parse` fuzz target. Replaces nothing yet.
@@ -341,8 +346,8 @@ every ordered pair of binary operators against an independently written
 parenthesization; every `(X)` form (type-only, name followed by each
 ambiguous and each operand-only token). Properties: `parse(print(ast)) ==
 ast`, `print` idempotent, spans balanced, nested, and inside the input.
-Fuzzing: `expression_parse` replaces `value_expression` (no panic, limits hold,
-spans valid, successful parses round-trip); `dap_request` gains the
+Fuzzing: `expression_parse` (no panic, limits hold, spans valid, successful
+parses round-trip; `value_expression` stays until P4 deletes its parser); `dap_request` gains the
 expressions in `evaluate`, `setExpression`, and `setVariable`.
 
 ### 5.4 Evaluator (no process)
@@ -433,7 +438,7 @@ assertions, negative waits, mutation testing.
 Decided on 2026-10-05:
 
 - **D1** Casts are both `(T)x` and `x as T` (revised the same day from `as`
-  only). `CastOrParen` is settled at binding, a variable winning (§2).
+  only). Each ambiguity is settled at binding, a value winning (§2).
 - **D2** Exact integer results range over [−2^127, 2^128 − 1], what
   `ScalarValue::Signed(i128)` or `Unsigned(u128)` holds; beyond is an
   out-of-range error.

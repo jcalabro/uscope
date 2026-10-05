@@ -15,6 +15,11 @@ mod debug_info;
 mod demangle;
 mod disassembly;
 mod error;
+#[allow(
+    dead_code,
+    reason = "the evaluator is wired in by a later phase of plans/expressions.md"
+)]
+mod eval;
 mod expression;
 #[cfg(debug_assertions)]
 #[doc(hidden)]
@@ -149,6 +154,16 @@ pub fn fuzz_elf_symbols(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_disassembly(data: &[u8]) {
     disassembly::fuzz(data);
+}
+
+/// Checks the expression parser's invariants on `text` for the fuzz
+/// harness, panicking when one fails.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_expression_parse(text: &str) {
+    if let Err(failure) = eval::syntax::check_invariants(text) {
+        panic!("{failure}");
+    }
 }
 
 /// Exercises bounded DWARF-expression parsing for the fuzz harness.
