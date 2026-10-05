@@ -752,12 +752,12 @@ impl Inferior {
             stop.presentations.remove(&pid);
         }
         // A barrier is presented from its triggering thread, which must live.
-        // An internal stop still has nothing to present.
-        let replacement = self
-            .threads
-            .iter()
+        // An internal stop still has nothing to present. A leader that
+        // exited alone stays listed until its process ends.
+        let others = || self.threads.iter().filter(|&(&other, _)| other != pid);
+        let replacement = others()
             .find(|(_, thread)| matches!(thread.state, NativeThreadState::Stopped))
-            .or_else(|| self.threads.iter().next())
+            .or_else(|| others().next())
             .map(|(&pid, _)| pid);
         if let Some(barrier) = self
             .barrier

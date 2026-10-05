@@ -430,6 +430,9 @@ pub struct Kernel {
     pub outputs: BTreeMap<Tid, Vec<u8>>,
     /// The status each reaped thread reported.
     pub reaped: BTreeMap<Tid, WaitStatus>,
+    /// The code each group leader passed to `exit`: its own status, which
+    /// the process's replaces when it is reaped (K-EXIT-6).
+    pub leader_exits: BTreeMap<Tid, i32>,
     /// The first model gap the run hit.
     pub gap: Option<ModelGap>,
     /// What happened since the world last looked.
@@ -499,6 +502,7 @@ impl Kernel {
             zombies: BTreeMap::new(),
             outputs: BTreeMap::new(),
             reaped: BTreeMap::new(),
+            leader_exits: BTreeMap::new(),
             gap: None,
             happenings: Vec::new(),
             debugged: None,

@@ -47,8 +47,9 @@ impl Auditor {
     /// announces a new revision, which the events it produced share, so
     /// revisions never decrease; stop identifiers only increase; and every
     /// exit the client hears of, of a thread or of the process, is the one
-    /// the kernel reported. It counts the messages hits logged and the
-    /// conditions that failed to evaluate, for the client's checks.
+    /// the kernel reported, or, for a leader, the code it passed to `exit`.
+    /// It counts the messages hits logged and the conditions that failed to
+    /// evaluate, for the client's checks.
     pub fn check(&mut self, kernel: &Kernel, marks: &mut Marks) -> Result<(), Failure> {
         loop {
             let event = match self.events.try_recv() {
@@ -91,6 +92,21 @@ impl Auditor {
                 } => {
                     marks.hit(Mark::ThreadExited);
                     let tid = Tid::try_from(thread_id.get()).expect("a simulated tid fits");
+                    // A leader that exits while the debugger knows other
+                    // threads live is reported at its exit event, with the
+                    // code it passed to `exit`: Linux reports its exit only
+                    // once every other thread has exited, with the process's
+                    // status. Those threads may have begun to exit already.
+                    if let Some(&code) = kernel.leader_exits.get(&tid) {
+                        if !same_exit(ExitStatus::Code(code), status) {
+                            return Err(failure(format!(
+                                "leader {tid} passed {code} to exit, but the client heard \
+                                 {status:?}"
+                            )));
+                        }
+                        marks.hit(Mark::LeaderExitReported);
+                        continue;
+                    }
                     let Some(&reaped) = kernel.reaped.get(&tid) else {
                         return Err(failure(format!(
                             "thread {tid} reported {status:?} before it was reaped"

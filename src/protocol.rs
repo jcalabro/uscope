@@ -900,7 +900,9 @@ pub enum StopReason {
     ThreadExited {
         /// The thread that exited.
         thread_id: ThreadId,
-        /// How that thread exited.
+        /// How that thread exited. For a process's main thread, which exits
+        /// before the process does, the code it passed to `exit`; the
+        /// process's own status comes when it exits.
         status: ExitStatus,
     },
     /// The backend could not safely classify a native stop.
@@ -1034,7 +1036,10 @@ pub enum DebuggerEvent {
         process_id: ProcessId,
         thread_id: ThreadId,
     },
-    /// One thread of a still-running inferior exited.
+    /// One thread of a still-running inferior exited. A main thread that
+    /// exits before the process does is reported when it exits, with the
+    /// code it passed to `exit`, though the platform reports its status only
+    /// with the process's.
     ThreadExited {
         revision: u64,
         process_id: ProcessId,

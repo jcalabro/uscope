@@ -603,8 +603,14 @@ impl<P: LinuxTraceOps> Controller<P> {
             libc::PTRACE_EVENT_EXIT => {
                 let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
                 inferior.thread_mut(pid)?.state = NativeThreadState::Exiting;
+                let alone = self.leader_exiting_alone(pid)?;
                 self.adopt_unannounced_fork_children(pid);
                 self.release_exiting_thread(pid)?;
+                if let Some(status) = alone {
+                    let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+                    let awaited = inferior.thread(pid)?.awaiting_breakpoint.is_some();
+                    return self.thread_exited(pid, status, awaited);
+                }
                 // A leader exiting alone gives a stop in progress nothing
                 // more to wait for.
                 if self.barrier_active() {
@@ -619,6 +625,40 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             ),
         }
+    }
+
+    /// The status of a group leader stopped at its exit event that exits
+    /// alone, by `exit` while other threads live, or `None` for any other
+    /// thread or exit. Linux reports such a leader's exit status only once
+    /// every other thread has exited, and the process's own status then
+    /// replaces it, so this is the code the thread passed to `exit`, which
+    /// its exit event carries.
+    fn leader_exiting_alone(&self, pid: Pid) -> Result<Option<ExitStatus>> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        // With every other thread exiting too, the process is ending.
+        let others_live = inferior.threads.iter().any(|(&other, thread)| {
+            other != pid && !matches!(thread.state, NativeThreadState::Exiting)
+        });
+        if pid != inferior.tgid || !others_live {
+            return Ok(None);
+        }
+        let (registers, message) = match self
+            .ptrace
+            .registers(pid)
+            .and_then(|registers| Ok((registers, self.ptrace.event_message(pid)?)))
+        {
+            Err(error) if is_vanished_tracee(&error) => return Ok(None),
+            result => result?,
+        };
+        // The exit stop is inside the system call that began the exit. A
+        // status in wait's form with a signal in its low bits is SIGKILL's.
+        let Ok(word) = i32::try_from(message) else {
+            return Ok(None);
+        };
+        if registers.orig_rax.cast_signed() != libc::SYS_exit || word & 0x7f != 0 {
+            return Ok(None);
+        }
+        Ok(Some(ExitStatus::Code(i64::from((word >> 8) & 0xff))))
     }
 
     /// Lets a thread stopped at its exit event finish exiting. A sibling's
@@ -1052,13 +1092,29 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         }
 
+        self.thread_exited(pid, status, exited.awaiting_breakpoint.is_some())
+    }
+
+    /// Publishes the exit of a thread whose process lives on, and ends or
+    /// advances the execution it affects: one of the thread alone ends in
+    /// the exit. `awaited_breakpoint` says the thread was resumed alone to
+    /// reach a breakpoint it awaited.
+    fn thread_exited(
+        &mut self,
+        pid: Pid,
+        status: ExitStatus,
+        awaited_breakpoint: bool,
+    ) -> Result<()> {
+        let thread_id = debug_thread_id(pid);
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let process_id = process_id(inferior.tgid);
         let owned_execution = inferior.active.as_ref().is_some_and(|active| {
             matches!(active.scope, ResumeScope::Thread(thread) if thread == thread_id)
                 || matches!(active.kind, ActiveKind::Step { thread, .. } if thread == pid)
         });
         // A thread resumed alone to reach its awaited breakpoint holds its
         // siblings back; they must run once it is gone.
-        let ran_alone = exited.awaiting_breakpoint.is_some() && inferior.active.is_some();
+        let ran_alone = awaited_breakpoint && inferior.active.is_some();
         let repair_interrupted = inferior.forget_thread(pid, &status);
         let barrier_active = inferior.barrier.is_some();
         self.bump_revision();
@@ -1099,7 +1155,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             }) {
                 return self.begin_visible_stop(stopped, reason);
             }
-            let running = *inferior.threads.keys().next().ok_or(Error::NotRunning)?;
+            let running = inferior
+                .threads
+                .iter()
+                .find(|&(&pid, thread)| !inferior.exited_leader(pid, thread))
+                .map(|(&pid, _)| pid)
+                .ok_or(Error::NotRunning)?;
             return self.raise_barrier(running, reason);
         }
         if repair_interrupted || ran_alone {

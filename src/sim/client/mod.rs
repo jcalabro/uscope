@@ -356,6 +356,9 @@ impl Client {
                 }
                 self.mark(Mark::WatchArmFailed);
             }
+            StopReason::ThreadExited { thread_id, .. } if thread_id.get() == process_id.get() => {
+                self.mark(Mark::LeaderExitEndedExecution);
+            }
             _ => {}
         }
         Ok(())
@@ -533,11 +536,24 @@ impl Client {
     /// Resumes one stopped thread alone. Its execution may never end by
     /// itself, so the client does not wait for it.
     async fn continue_thread(&self, snapshot: &StateSnapshot, stop: StopId) -> Result<(), Failure> {
-        let thread = self
-            .choices
-            .borrow_mut()
-            .pick(Stream::Client, &snapshot.threads)
-            .id;
+        // Half the time the main thread, whose exit alone ends its
+        // execution differently from any other thread's.
+        let main = match snapshot.inferior {
+            InferiorState::Stopped { process_id, .. } => snapshot
+                .threads
+                .iter()
+                .find(|thread| thread.id.get() == process_id.get()),
+            _ => None,
+        };
+        let thread = match main {
+            Some(main) if self.draw(2) == 0 => main.id,
+            _ => {
+                self.choices
+                    .borrow_mut()
+                    .pick(Stream::Client, &snapshot.threads)
+                    .id
+            }
+        };
         let execution = match self
             .handle
             .continue_execution(

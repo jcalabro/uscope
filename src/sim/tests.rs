@@ -7,7 +7,7 @@ use super::world::Sabotage;
 use super::{Corpus, Settings, describe_failure, run};
 
 /// How many fixed seeds the gate runs.
-const GATE_SEEDS: u64 = 1000;
+const GATE_SEEDS: u64 = 2000;
 /// How many seeds the determinism check runs twice.
 const DETERMINISM_SEEDS: u64 = 32;
 
