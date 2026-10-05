@@ -1,0 +1,33 @@
+{
+  "program": "fork",
+  "toolchain": {
+    "gcc": "gcc (GCC) 15.2.0",
+    "clang": "clang version 21.1.8"
+  },
+  "sources": [
+    {"path": "fork.c", "sha256": "b980647986c9c0740d6fcc7ba8aae2f484db4809a8c0f3c1b3ccaeb563fb5b6b"},
+    {"path": "../rt/rt.c", "sha256": "858982e67daf319c0435e304d59c6ef63741b72ba7a7c2a04a9c0c5f9b09ae6e"},
+    {"path": "../rt/rt.h", "sha256": "9a13639b8e9c28b2f36f9395371eee48dbc5bbd9796cefe4ab8db2efc3e0d624"},
+    {"path": "../rt/thread.c", "sha256": "18cf71a60bdc2e333156496c6229bc9315f52d14c12cd4440425ca485b347f77"},
+    {"path": "../rt/thread.h", "sha256": "44144ad894188e5dd8e34592aea9c3f3f62389424c18c300f273b57f3fb038d5"},
+    {"path": "../rt/process.c", "sha256": "dd43f1553e9446591eeee9a72bcfd6840be1e5d4fee35ea91a75de4c7808005a"},
+    {"path": "../rt/process.h", "sha256": "9970ee236102792081826b1ff4cd29648cc02b314f211a907217ee56490fa95d"}
+  ],
+  "variants": [
+    {"name": "gcc-O0", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fno-omit-frame-pointer -static -fno-pie", "sha256": "586aa72e876c2060cae4e8f9965de8d3f8ba2607142cf0ca80945e7013d059a3"},
+    {"name": "gcc-O0-nofp", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fomit-frame-pointer -static -fno-pie", "sha256": "14d311ce7b3ef6650314d5041479181cd35933669a4c74b5cc54d429bc772fe1"},
+    {"name": "gcc-O2", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-tree-vectorize -fno-omit-frame-pointer -static -fno-pie", "sha256": "77a7865fafde563aef9e4d63d6f6af1e71d2c3caa2de36139c862a287053caa8"},
+    {"name": "gcc-O2-nofp", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-tree-vectorize -fomit-frame-pointer -static -fno-pie", "sha256": "c14386f6078b894de3974c7a0e1bd7b55c45e43acf1dd1d75ab02b34178e17c2"},
+    {"name": "gcc-O2-pie", "compiler": "gcc", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-tree-vectorize -fomit-frame-pointer -static-pie -fpie", "sha256": "aa220f7e0b42dd0d60ddfa4a93f71d8e86825a6be85cea83e6976645f7378ce1"},
+    {"name": "clang-O0", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fno-omit-frame-pointer -static -fno-pie", "sha256": "48128eda311898f8f730f9a1bbd0c285225943713d1b30ef472087abd8d0a302"},
+    {"name": "clang-O0-nofp", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fomit-frame-pointer -static -fno-pie", "sha256": "6af1c23d19ff398295a4e98a1b54391a153550006a99516d24699d3e10ad12d7"},
+    {"name": "clang-O0-pie", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O0 -fno-omit-frame-pointer -static-pie -fpie", "sha256": "4a5c6606f0be29144ac4f3c42d01203419bbe23fbe351e65049571487ff23d13"},
+    {"name": "clang-O2", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-vectorize -fno-slp-vectorize -fno-omit-frame-pointer -static -fno-pie", "sha256": "91594f5129dfb71bed6140460b8dce663d52988d10e1a1b3f605856be94cfd5c"},
+    {"name": "clang-O2-nofp", "compiler": "clang", "flags": "-std=c11 -g -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -fcf-protection=none -Wall -Wextra -Werror -O2 -fno-vectorize -fno-slp-vectorize -fomit-frame-pointer -static -fno-pie", "sha256": "0a8a9d97a958e4a1cf3036b5f2cc7a4e9e81231dbf831e2d49ad071b40168a53"}
+  ],
+  "runs": [
+    {"arguments": [], "exit_code": 5, "output": "ok 5\n"},
+    {"arguments": ["0", "1"], "exit_code": 1, "output": "ok 1\n"},
+    {"arguments": ["1", "2"], "exit_code": 3, "output": "ok 3\n"}
+  ]
+}
