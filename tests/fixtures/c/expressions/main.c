@@ -65,6 +65,17 @@ struct fixture {
     enum color color;
     enum sign sign;
     counter_t counter;
+    // C11 anonymous members, whose members are named as the record's own.
+    union {
+        int32_t anonymous_int;
+        uint32_t anonymous_bits;
+    };
+    struct {
+        int16_t outer_half;
+        struct {
+            int16_t deep_half;
+        };
+    };
 };
 
 int global_counter = 42;
@@ -130,6 +141,9 @@ int main(void) {
         .color = BLUE,
         .sign = NEGATIVE,
         .counter = 77,
+        .anonymous_int = -42,
+        .outer_half = 300,
+        .deep_half = -301,
     };
     f.nodes[0] = (struct node){.value = 1, .next = &f.nodes[1]};
     f.nodes[1] = (struct node){.value = 2, .next = &f.nodes[2]};
@@ -222,6 +236,10 @@ int main(void) {
     EXPECT_UINT("static_value", static_value);
     EXPECT_INT("f.flag ? f.arr[0] : f.arr[1]", f.flag ? f.arr[0] : f.arr[1]);
     EXPECT_BOOL("f.head != null && f.head->value == 1", f.head != NULL && f.head->value == 1);
+    EXPECT_INT("f.anonymous_int", f.anonymous_int);
+    EXPECT_UINT("f.anonymous_bits", f.anonymous_bits);
+    EXPECT_INT("f.outer_half + f.deep_half", f.outer_half + f.deep_half);
+    EXPECT_ADDRESS("&f.deep_half", &f.deep_half);
     fflush(stdout);
     barrier(&f);
     return f.i32 == 0;

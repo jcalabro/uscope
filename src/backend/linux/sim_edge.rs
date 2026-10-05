@@ -742,13 +742,14 @@ impl SimController {
     /// Whether a message waits in the queue.
     #[must_use]
     pub fn has_message(&self) -> bool {
-        !self.controller.messages.is_empty()
+        !self.controller.pending.borrow().is_empty()
+            || !self.controller.messages.borrow().is_empty()
     }
 
     /// Takes the message at the front of the queue, or `None` when the
     /// queue is empty.
-    pub fn take(&mut self) -> Option<Delivery> {
-        let message = self.controller.messages.try_recv().ok()?;
+    pub fn take(&self) -> Option<Delivery> {
+        let message = self.controller.next_message(false)?;
         let (description, trap) = match &message {
             ControllerMessage::Request(request) => (request.describe(), None),
             ControllerMessage::Wait(event) => (

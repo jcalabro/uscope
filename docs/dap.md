@@ -26,6 +26,10 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
 - **Inspection.**
   - Threads with names, and stack traces through libraries and inlined calls.
   - Arguments, locals, statics, and registers, with the text of strings.
+  - Standard library and user containers presented by views
+    (`docs/views.md`): a vector's elements as indexed variables, paged by
+    the client's `filter`, `start`, and `count`, and its fields and
+    `[raw]`, the value as stored, as named ones.
   - Hover, watch, and clipboard evaluation.
   - Changing values with `setVariable` and `setExpression`.
   - Memory reads and writes, and disassembly.

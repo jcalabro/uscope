@@ -791,7 +791,7 @@ impl Controller<CoreTarget> {
     }
 
     fn run_post_mortem(mut self) {
-        while let Some(message) = self.messages.blocking_recv() {
+        while let Some(message) = self.next_message(true) {
             let ControllerMessage::Request(request) = message else {
                 continue;
             };

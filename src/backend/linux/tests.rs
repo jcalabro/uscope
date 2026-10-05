@@ -6142,3 +6142,127 @@ fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
         })
     );
 }
+
+/// Inspection of a stop waits behind run control queued after it, which it
+/// would only delay; every other message keeps its order, and inspection
+/// that run control interrupted is served again after it (§3.11 of
+/// `plans/views.md`).
+#[test]
+#[expect(clippy::too_many_lines, reason = "one queue, served in two rounds")]
+fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
+    let LaunchHarness {
+        controller, pid, ..
+    } = launch_controller();
+    let sender = controller.message_sender.clone();
+    let stop_id = StopId::new(7);
+    let thread_id = debug_thread_id(pid);
+    let frame = StackFrameId::INNERMOST;
+    let mut replies = Vec::new();
+    let mut evaluate = |text: &str, mode| {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        replies.push(receiver);
+        Request::Evaluate {
+            expression: crate::Expression::parse(text).expect("an expression"),
+            mode,
+            limits: crate::InspectionLimits::default(),
+            stop_id,
+            thread_id,
+            frame,
+            reply,
+        }
+    };
+    let read = evaluate("a", crate::EvaluationMode::Read);
+    let assign = evaluate("b = 1", crate::EvaluationMode::Assign);
+    let (variables_reply, _variables) = tokio::sync::oneshot::channel();
+    let (breakpoint_reply, _breakpoint) = tokio::sync::oneshot::channel();
+    let (continue_reply, _continued) = tokio::sync::oneshot::channel();
+    let (memory_reply, _memory) = tokio::sync::oneshot::channel();
+    for request in [
+        read,
+        Request::AddBreakpoint {
+            spec: BreakpointSpec::Function("f".into()),
+            options: Box::default(),
+            reply: breakpoint_reply,
+        },
+        Request::Variables {
+            query: VariableQuery::All,
+            limits: crate::InspectionLimits::default(),
+            stop_id,
+            thread_id,
+            frame,
+            reply: variables_reply,
+        },
+        assign,
+        Request::Continue {
+            process_id: process_id(pid),
+            stop_id,
+            scope: ResumeScope::Process(process_id(pid)),
+            exception: ExceptionDisposition::Pass,
+            reply: continue_reply,
+        },
+        Request::ReadMemory {
+            process_id: process_id(pid),
+            stop_id,
+            address: VirtualAddress::new(0x1000),
+            byte_count: 8,
+            reply: memory_reply,
+        },
+    ] {
+        sender
+            .try_send(ControllerMessage::Request(request))
+            .unwrap_or_else(|_| panic!("the queue has room"));
+    }
+    let served = std::iter::from_fn(|| controller.next_message(false))
+        .map(|message| match message {
+            ControllerMessage::Request(request) => request.describe(),
+            ControllerMessage::Wait(_) => "wait".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    let served = served.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_eq!(
+        served,
+        [
+            "add breakpoint Function(\"f\")",
+            "evaluate `b = 1`",
+            "continue StopId(7) Process(ProcessId(4242)) Pass",
+            "evaluate `a`",
+            "variables",
+            "read memory",
+        ]
+    );
+
+    // Run control waiting interrupts inspection, which is served again
+    // after it.
+    assert!(!controller.run_control_waiting());
+    let (pause_reply, _paused) = tokio::sync::oneshot::channel();
+    sender
+        .try_send(ControllerMessage::Request(Request::Pause {
+            process_id: process_id(pid),
+            reply: pause_reply,
+        }))
+        .unwrap_or_else(|_| panic!("the queue has room"));
+    assert!(controller.run_control_waiting());
+    let mut evaluate = |text: &str| {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        replies.push(receiver);
+        Request::Evaluate {
+            expression: crate::Expression::parse(text).expect("an expression"),
+            mode: crate::EvaluationMode::Read,
+            limits: crate::InspectionLimits::default(),
+            stop_id,
+            thread_id,
+            frame,
+            reply,
+        }
+    };
+    controller.serve_later(evaluate("interrupted"));
+    let served = std::iter::from_fn(|| controller.next_message(false))
+        .map(|message| match message {
+            ControllerMessage::Request(request) => request.describe(),
+            ControllerMessage::Wait(_) => "wait".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(served, ["pause 4242", "evaluate `interrupted`"]);
+    // Serving decides only the order; nothing was answered.
+    assert!(replies.iter_mut().all(|reply| reply.try_recv().is_err()));
+}

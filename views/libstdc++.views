@@ -1,0 +1,56 @@
+uscope-views 1
+
+# GCC's libstdc++. Verified against gcc 15.2 and clang 21.1.8 with
+# libstdc++ 15, by tests/fixtures/cpp/containers.cpp.
+
+# std::string and its other characters, in the C++11 ABI: a pointer and a
+# length, with short strings in the object's own buffer.
+view c++ std::basic_string<C, _, _> {
+    let local = _M_dataplus._M_p == &_M_local_buf[0]
+    check local ? _M_string_length < len(_M_local_buf) : _M_string_length <= _M_allocated_capacity
+    show text(_M_dataplus._M_p, _M_string_length)
+    field capacity = local ? len(_M_local_buf) - 1 : _M_allocated_capacity
+}
+
+# The old ABI's copy-on-write string (_GLIBCXX_USE_CXX11_ABI=0). Its length
+# and capacity are in a header just before its characters, which its debug
+# information does not describe: _M_length, _M_capacity, and _M_refcount,
+# three words in all since GCC 3.
+view c++ std::basic_string<C, _, _> {
+    let characters = _M_dataplus._M_p
+    let length = ((usize*)characters)[-3]
+    let capacity = ((usize*)characters)[-2]
+    check length <= capacity
+    show text(characters, length)
+    field capacity = capacity
+}
+
+view c++ std::basic_string_view<C, _> {
+    show text(_M_str, _M_len)
+}
+
+# std::vector<bool> holds bits, which this view does not bind to.
+view c++ std::vector<T, _> {
+    let begin = _M_impl._M_start
+    let end = _M_impl._M_finish
+    let storage_end = _M_impl._M_end_of_storage
+    check begin <= end && end <= storage_end
+    show sequence(end - begin) for i in range(end - begin) => begin[i]
+    field capacity = storage_end - begin
+}
+
+# An empty std::array has no element array, in libstdc++ or libc++.
+view c++ std::array<T, 0> {
+    show sequence(0) for i in range(0) => i
+}
+
+view c++ std::array<T, N> {
+    show sequence(N) for i in range(N) => _M_elems[i]
+}
+
+# A span of dynamic extent stores its size; one of fixed extent is its
+# extent.
+view c++ std::span<T, E> {
+    let size = _M_extent._M_extent_value or E
+    show sequence(size) for i in range(size) => _M_ptr[i]
+}

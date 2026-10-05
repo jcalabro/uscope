@@ -798,6 +798,19 @@ require_dwarf_operation "$output_dir/templates-cpp-gcc-dwarf4" 'DW_AT_type.*sign
 build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/templates.cpp" "$output_dir/templates-cpp-libcxx-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 require_dwarf_operation "$output_dir/templates-cpp-libcxx-o0" 'DW_AT_name.*: __1$'
+# The containers the built-in views present, across the libraries' matrix.
+for optimization in o0 o2; do
+    level="-O${optimization#o}"
+    build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" \
+        "$output_dir/containers-cpp-gcc-$optimization" "$level" -g3 -gdwarf-5 -fPIE -pie
+    build_cpp_fixture clang++ "$cpp_fixtures_dir/containers.cpp" \
+        "$output_dir/containers-cpp-clang-$optimization" "$level" -g3 -gdwarf-5 -fPIE -pie
+    build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/containers.cpp" \
+        "$output_dir/containers-cpp-libcxx-$optimization" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
+# libstdc++'s copy-on-write string, from before the C++11 ABI.
+build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-oldabi" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_USE_CXX11_ABI=0
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o2" \
@@ -824,6 +837,11 @@ build_rust_fixture "$rust_fixtures_dir/generics.rs" "$output_dir/generics-rust-o
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/generics.rs" "$output_dir/generics-rust-o2" \
     -C opt-level=2 -C force-frame-pointers=no
+# Unlike the other Rust fixtures, the containers use std.
+build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o0" \
+    --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0
+build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o2" \
+    --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=2
 build_go_fixture "$go_fixtures_dir/expressions" "$output_dir/expressions-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/expressions" "$output_dir/expressions-go-o2" \
@@ -853,6 +871,10 @@ require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
 require_dwarf_operation "$output_dir/enums-go-o0" 'DW_TAG_constant'
 build_zig_fixture "$zig_fixtures_dir/generics.zig" "$output_dir/generics-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig-o2" \
+    -O ReleaseSafe -fPIE -fomit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-zig-o2" \

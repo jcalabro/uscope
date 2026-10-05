@@ -231,6 +231,29 @@ pub enum Field {
     Index(u32),
 }
 
+/// A function only a view's expressions may call (`docs/views.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    /// `inner(x)`: steps through wrapper records, while the value is a
+    /// record with exactly one member of non-zero size.
+    Inner,
+}
+
+impl Builtin {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "inner" => Some(Self::Inner),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Inner => "inner",
+        }
+    }
+}
+
 /// What `sizeof` measures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SizeOf {
@@ -345,6 +368,11 @@ pub enum NodeKind {
     },
     SizeOf(SizeOf),
     Len(NodeId),
+    /// A call of a view's built-in function on one operand.
+    Call {
+        function: Builtin,
+        operand: NodeId,
+    },
 }
 
 impl NodeKind {
@@ -364,6 +392,7 @@ impl NodeKind {
             | Self::Cast { operand, .. }
             | Self::SizeOf(SizeOf::Operand(operand))
             | Self::Len(operand)
+            | Self::Call { operand, .. }
             | Self::Member { base: operand, .. } => vec![*operand],
             Self::Binary { left, right, .. } => vec![*left, *right],
             Self::Assign { target, value, .. } => vec![*target, *value],
@@ -400,6 +429,12 @@ impl NodeKind {
             | (Self::Len(_), Self::Len(_))
             | (Self::SizeOf(SizeOf::Operand(_)), Self::SizeOf(SizeOf::Operand(_))) => true,
             (Self::Unary { op, .. }, Self::Unary { op: other, .. }) => op == other,
+            (
+                Self::Call { function, .. },
+                Self::Call {
+                    function: other, ..
+                },
+            ) => function == other,
             (Self::Binary { op, .. }, Self::Binary { op: other, .. }) => op == other,
             (Self::Assign { op, .. }, Self::Assign { op: other, .. }) => op == other,
             (

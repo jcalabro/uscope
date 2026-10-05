@@ -203,6 +203,12 @@ impl Printer<'_> {
                 self.child(*operand, ASSIGN);
                 self.out.push(')');
             }
+            NodeKind::Call { function, operand } => {
+                self.out.push_str(function.name());
+                self.out.push('(');
+                self.child(*operand, ASSIGN);
+                self.out.push(')');
+            }
             leaf => self.leaf(leaf),
         }
     }

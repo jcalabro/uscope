@@ -1,0 +1,41 @@
+uscope-views 1
+
+# LLVM's libc++. Verified against clang 21.1.8 with libc++ 21, by
+# tests/fixtures/cpp/containers.cpp.
+
+# std::string: a short string's characters are in the object, a long
+# string's in its buffer, and one bit tells them apart. A long string's
+# capacity is stored halved on little-endian targets.
+view c++ std::basic_string<C, _, _> {
+    check __rep_.__s.__is_long_ || __rep_.__s.__size_ < len(__rep_.__s.__data_)
+    check !__rep_.__s.__is_long_ || __rep_.__l.__size_ <= __rep_.__l.__cap_ * 2
+    show if __rep_.__s.__is_long_ {
+        text(__rep_.__l.__data_, __rep_.__l.__size_)
+    } else {
+        text(__rep_.__s.__data_, __rep_.__s.__size_)
+    }
+}
+
+view c++ std::basic_string_view<C, _> {
+    show text(__data_, __size_)
+}
+
+# libc++ 19 and later name the capacity `__cap_`; earlier versions keep it
+# in a compressed pair.
+view c++ std::vector<T, _> {
+    let capacity_end = __cap_ or __end_cap_.__value_
+    check __begin_ <= __end_ && __end_ <= capacity_end
+    show sequence(__end_ - __begin_) for i in range(__end_ - __begin_) => __begin_[i]
+    field capacity = capacity_end - __begin_
+}
+
+# An empty std::array is presented by libstdc++.views's view, which reads
+# nothing.
+view c++ std::array<T, N> {
+    show sequence(N) for i in range(N) => __elems_[i]
+}
+
+view c++ std::span<T, E> {
+    let size = __size_ or E
+    show sequence(size) for i in range(size) => __data_[i]
+}
