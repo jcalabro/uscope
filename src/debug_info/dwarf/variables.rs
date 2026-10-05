@@ -37,7 +37,7 @@ use die::{
 };
 use evaluate::FrameBaseCache;
 use globals::{load_globals, public_global_type};
-pub(in crate::debug_info) use inspect::PathStep;
+pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
 use inspect::{inspected_value, path_error_state, unavailable};
 use location::{
     EvaluationUnit, Expression, LocationDescription, copy_data_object_value,

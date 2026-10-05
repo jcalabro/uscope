@@ -155,6 +155,47 @@ pub(super) fn row_major_array_index(
     Ok(linear)
 }
 
+/// The byte offset an array index step reaches with `indices`, checked
+/// against the array's static bounds; `None` for any other step.
+pub(in crate::debug_info) fn array_byte_offset(
+    step: &PathStep,
+    indices: &[i128],
+) -> Result<Option<i64>> {
+    let PathStep::ArrayIndex {
+        dimensions,
+        element_size,
+    } = step
+    else {
+        return Ok(None);
+    };
+    if indices.len() != dimensions.len() {
+        return Err(Error::InvalidValueExpression(format!(
+            "an array of {} dimensions takes as many indices, not {}",
+            dimensions.len(),
+            indices.len()
+        )));
+    }
+    let linear = row_major_array_index(dimensions, indices).map_err(|error| match error {
+        ArrayIndexCalculationError::OutOfBounds {
+            index,
+            lower_bound,
+            count,
+        } => Error::ValueIndexOutOfBounds {
+            index,
+            lower_bound,
+            count,
+        },
+        ArrayIndexCalculationError::Overflow => {
+            Error::InvalidValueExpression("array row-major index overflows".to_owned())
+        }
+    })?;
+    linear
+        .checked_mul(*element_size)
+        .and_then(|offset| i64::try_from(offset).ok())
+        .map(Some)
+        .ok_or_else(|| Error::InvalidValueExpression("array element offset overflows".to_owned()))
+}
+
 pub(super) fn static_member_layout_is_valid(
     record_size: Option<u64>,
     member_size: Option<u64>,
@@ -1378,43 +1419,8 @@ impl DwarfVariableInfo {
                             LocatedStorage::Memory(pointer)
                         }
                     }
-                    PathStep::ArrayIndex {
-                        dimensions,
-                        element_size,
-                    } => {
-                        if indices.len() != dimensions.len() {
-                            return Err(Error::InvalidValueExpression(format!(
-                                "an array of {} dimensions takes as many indices, not {}",
-                                dimensions.len(),
-                                indices.len()
-                            )));
-                        }
-                        let linear = row_major_array_index(dimensions, indices).map_err(
-                            |error| match error {
-                                ArrayIndexCalculationError::OutOfBounds {
-                                    index,
-                                    lower_bound,
-                                    count,
-                                } => Error::ValueIndexOutOfBounds {
-                                    index,
-                                    lower_bound,
-                                    count,
-                                },
-                                ArrayIndexCalculationError::Overflow => {
-                                    Error::InvalidValueExpression(
-                                        "array row-major index overflows".to_owned(),
-                                    )
-                                }
-                            },
-                        )?;
-                        let byte_offset = linear
-                            .checked_mul(*element_size)
-                            .and_then(|offset| i64::try_from(offset).ok())
-                            .ok_or_else(|| {
-                                Error::InvalidValueExpression(
-                                    "array element offset overflows".to_owned(),
-                                )
-                            })?;
+                    PathStep::ArrayIndex { .. } => {
+                        let byte_offset = array_byte_offset(step, indices)?.unwrap_or_default();
                         attempt!(Self::storage_with_offset(storage, byte_offset))
                     }
                     PathStep::SliceIndex {
