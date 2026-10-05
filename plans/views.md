@@ -8,56 +8,35 @@ A debugger exists to show data. Today uscope shows structure: a Rust `Vec` is
 `{buf: {inner: {ptr: …, cap: …}}, len: 3}`, a Go map is a pointer to
 `internal/runtime/maps.Map`, and a libc++ `std::string` is a union of bit
 fields. This plan adds **views**, which present a value as the thing it
-stands for while keeping the raw structure one step away. They cover C++,
+stands for while keeping the raw structure one step away. They cover the C++,
 Rust, Go, and Zig standard libraries and any type a user describes. Nothing
 in the design depends on one compiler, compiler version, linker, or loader.
 
-Research for this plan ran on 2026-10-05 against the pinned toolchains (gcc
-15.2, clang 21.1.8 with libstdc++ and libc++ 21, rustc nightly 2026-07-10,
-Go 1.26.5, Zig 0.16.0, gdb 17.1, lldb 21.1.8, Delve master). §1 and the
-appendix keep its findings.
+Research ran on 2026-10-05 against the pinned toolchains (gcc 15.2, clang
+21.1.8 with libstdc++ and libc++ 21, rustc nightly 2026-07-10, Go 1.26.5,
+Zig 0.16.0) and the Windows and Linux visualizer ecosystems. §1 and the
+appendices keep what matters. Decisions D1–D10 were made the same day (§6).
 
 ## Goals
 
-Agreed on 2026-10-05:
-
-1. **Flexible for maintainers and users alike.** uscope's built-in views
-   track the newest versions of every supported toolchain. Users can
-   override and extend them trivially. They can write views for their own
-   complex types as easily as uscope's maintainers write them for standard
-   libraries. Upstream contributions to the built-in views are welcome, so
-   contributing must be easy too.
-2. **Fast and robust.** It should be nigh impossible for a view to harm
-   the debugger. That means no crash, no hang, no unbounded memory, no
-   delay to run control, and no convincing wrong answer.
-3. **Sane defaults, easy to extend and maintain.**
-
-Beyond uscope, the aim is to lead on data visualization for Linux debugging
-in public:
-
-- think through the problems and edge cases;
-- publish what we learn;
-- work with compiler, library, and debugger maintainers toward a standard
-  that compilers and debuggers adopt (§7).
-
-Every interface here is designed as if other debuggers will implement it.
+1. **Flexible for maintainers and users alike.** The built-in views track
+   the newest versions of every supported toolchain. Users override and
+   extend them trivially, and write views for their own complex types as
+   easily as uscope writes them for standard libraries. Contributions to
+   the built-in views are welcome, so contributing is easy.
+2. **Fast and robust.** It should be nigh impossible for a view to harm the
+   debugger. That means:
+   - no crash, no hang, no unbounded memory;
+   - no noticeable delay to run control;
+   - no convincing wrong answer.
+3. **Sane defaults, easy to extend and maintain**, inside a clean and
+   simple architecture: views run in the existing inspection paths, not
+   beside them.
 
 ## 0. Summary
 
-- **What the ecosystem provides.** No part of the Linux ecosystem emits a
-  description of container semantics that is independent of the compiler or
-  library version, and that a debugger without Python can consume. What
-  exists falls into two groups:
-  - Python scripts:
-    - libstdc++'s gdb printers, located through the library's auto-load
-      directory;
-    - rustc's providers, named by a `.debug_gdb_scripts` entry;
-    - Go's `runtime-gdb.py`, named by an absolute GOROOT path;
-    - Zig's scripts, which users load by hand.
-  - LLDB's C++ formatters, compiled into LLDB.
-
-  Every one hard-codes private field paths and breaks as the library moves.
-  Several were broken on these toolchains when tested (appendix A).
+- **What the ecosystem offers.** Nothing on Linux describes container
+  semantics in a debugger-neutral form that uscope can consume (§1).
 - **What is reliable.** DWARF's *structure*:
   - template parameters by position;
   - inline namespaces marked `DW_AT_export_symbols`;
@@ -67,178 +46,117 @@ Every interface here is designed as if other debuggers will implement it.
   - Zig's `DW_AT_ZIG_sentinel`;
   - vtable symbols naming concrete types.
 
-  uscope throws most of this away today (§2).
-- **Design.** There are three layers, joined by one small **view
-  contract** (§3.0).
+  uscope throws most of this away today (§2). The first phase makes
+  uscope's DWARF handling compliant and complete, and uses it fully.
+- **Design.** There are three layers, joined by one small **view contract**
+  (§3.0).
   1. The provider normalizes structure and type identity (§3.1–3.2).
-  2. Views map a type pattern to a presentation (§3.3–3.6).
-     - Most are written in a small **declarative view language** built on
-       uscope's expression language.
-     - Algorithms the language cannot say well (B-trees, hash tables caught
-       mid-resize) can use **kernels**: sandboxed WebAssembly functions from
-       memory reads to yielded items, called from inside a declarative view
-       (§3.13).
-     - A view *binds* against the concrete type before it runs.
-       Alternatives that fail to bind fall through to the next, which
-       gives tolerance across versions without sniffing versions.
+  2. **Declarative views** map type patterns to presentations (§3.3–3.6).
+     - A view *binds* against the concrete type before it runs, and an
+       alternative that does not bind falls through to the next.
+     - Algorithms the language cannot say well can later call sandboxed
+       WebAssembly **kernels** (§3.13).
   3. A neutral presentation model, which every client renders (§3.7).
-- **Robustness by construction** (§3.14):
-  - views cannot write, call, or perform I/O;
-  - every step is metered;
-  - views run on a presentation worker, never on the ptrace controller, and
-    a resume cancels them;
-  - a failing view costs only its own value.
-- **Where views come from.** uscope ships the standard-library views as data,
-  tested against the fixture matrix. Users and projects add their own, and
-  binaries can carry them in a `.debug_uscope_views` section. Views are
-  declarative and bounded by the existing budgets, so loading them is safe
-  without a trust prompt.
-- **Maintenance.** The burden that remains is kept small, early, and
-  harmless (§1.2, §3.12):
-  - layout knowledge is confined to short per-library views that name
-    meaning (`inner()` wrappers, template arguments) rather than paths;
-  - old alternatives stay;
-  - upstream printer test suites and canary builds against nightly
-    toolchains find breakage first.
+- **Where views come from.** Built-in view files ship in the repository.
+  Session, user, and project files override and extend them. Binaries can
+  carry views in a `.debug_uscope_views` section. All of them load without a
+  prompt, because views cannot write, call, or perform I/O (§3.8).
+- **Where views run.** On the controller thread, inside the existing
+  inspection paths (§3.11):
+  - every step is charged to the inspection budget, which serves as a
+    deterministic timeout;
+  - run control and process events are scheduled ahead of inspection;
+  - a resume cancels a running presentation.
 - **Explicit results.** A view never guesses:
-  - a value no view binds shows raw;
+  - a value no view binds shows raw, and `info view` says why;
   - a failed invariant shows raw with the reason;
   - a cycle or an exhausted budget is a typed partial result.
 
-  Raw is always one step away: a `[raw]` child, `print/r`, or a per-session
-  switch.
+  Raw is always one step away: a `[raw]` child, `print/r`, or `set views
+  off`.
+- **Clean room.** Views are written from the DWARF of uscope's own compiled
+  fixtures. uscope does not run, read, port, or test against any Python
+  printer, or any GPL code (D2).
 
 ## 1. What exists, and what it teaches
 
-### 1.1 Shipped printers
+### 1.1 The ecosystem
 
-| Ecosystem | Artifact | How it is found | Keyed on | Reads layout by | State on our toolchains |
-|---|---|---|---|---|---|
-| libstdc++ | `printers.py` (3014 lines), `xmethods.py` | `libstdc++.so.6.*-gdb.py` beside the library or under `/usr/share/gdb/auto-load` | exact base name after stripping `std::__8`, `__cxx1998`, `__debug` | private members (`_M_impl._M_start`), constructed type names (`std::_List_node<T>`), constants (deque 512 bytes) | Good with gdb. Belongs to the *runtime library*, not the program: a `-static-libstdc++` build or a core without the `.so` gets nothing. GPLv3. |
-| libc++ | `libcxx/utils/gdb/libcxx/printers.py` (upstream, tested); LLDB's C++ formatters | gdb: not installed by any distro, so it must be sourced by hand; lldb: compiled into liblldb | gdb: base-name dictionary (31 types); lldb: regexes over `std::__[[:alnum:]]+::` | private members, anonymous `_LIBCPP_COMPRESSED_PAIR` structs | gdb printers work for string, vector, map, unordered_map, list, deque, set, unique_ptr, tuple; there is no printer for optional, variant, array, or span. LLDB is good, but its own tests simulate 60 layouts of `std::string` alone. A January 2026 RFC moves the formatters into libc++ because they keep breaking. |
-| Rust | `gdb_providers.py`, `lldb_providers.py`, `rust_types.py` in `lib/rustlib/etc` | `.debug_gdb_scripts` entry `\x01gdb_load_rust_pretty_printers.py`, resolved by `rust-gdb`'s search path | regexes over qualified names (`^(alloc::([a-z_]+::)+)Vec<.+>$`) | `buf.inner.ptr.pointer`, hashbrown control bytes, `RcInner` fields | Seven `BACKCOMPAT` breaks in the providers since 1.32. The most recent layout change landed on 2026-09-15. Under Nix, gdb declines to load them (safe-path), silently. |
-| Rust (crates) | `#[debugger_visualizer(gdb_script_file / natvis_file)]` | inline Python in `.debug_gdb_scripts` (kind `0x04`); natvis reaches only PDBs | — | — | A handful of crates (smol_str, slint, windows-rs, url). Nothing a non-Python debugger can use on Linux. |
-| Go | `runtime-gdb.py` | `.debug_gdb_scripts` `\x01/nix/store/…/go/src/runtime/runtime-gdb.py` (the builder's absolute path) | type-name regexes | swiss-map internals | Maps work. **Interfaces are broken** (looks for `runtime._type`, now `internal/abi.Type`), and `$len(map)` raises. |
-| Go | Delve | — | **`DW_AT_go_kind`**, never names | field-presence checks (`dirPtr` means swiss maps, `buckets` means classic maps), `+rtype` assertions checked in CI | The best existing model (§1.4). |
-| Zig | `lib/lldb/pretty_printers.py` (0.17); the gdb scripts were deleted as "too outdated" | loaded by hand | name regexes, `dbHelper` dummy functions | `payload`/`some` etc. | On 0.16 binaries: `?u32 = 42` shows `null`, error unions show `()`. Stock lldb prints nothing for self-hosted-backend Debug builds. |
-| LLDB | formatter bytecode in `.lldbformatters` | section in the binary | name or `^regex` | a sandboxed stack VM with a fixed selector table | Only Swift's `@DebugDescription` emits it. The v2 ABI is still moving. |
-| Windows | natvis | PDB (`/NATVIS`) or files | `std::vector<*>` wildcards, `$T1` | expressions over private members | The richest declarative vocabulary. VS Code's MIEngine runs a subset over gdb on Linux. There are no maintained libstdc++ or libc++ natvis files. |
-| RAD Debugger | `type_view: {type, expr}` | config, or a `.raddbg` section | patterns with captures (`TArray<?{T}>`) | its own expression language with lenses (`slice`, `array`, `list`, `rows`, `bitmap`, …) | The closest design to this plan. Views are expressions, and indexing goes through them. |
+| Approach | Where | Model | Lesson |
+|---|---|---|---|
+| natvis | Visual Studio, WinDbg, VS Code's MIEngine, CLion/Rider 2026.2 (also on Linux and macOS) | declarative XML; expressions in each host's C++ evaluator; matched by name wildcards with `$T` arguments; embedded per module in PDBs (`/NATVIS`) | The richest declarative vocabulary. Not portable in practice: the hosts' evaluators disagree, and implementers support subsets. |
+| LLDB C++ formatters | compiled into LLDB | C++ code keyed by type-name regex | Owned by LLDB, not by libc++, so they chase libc++ changes months later. LLDB's tests simulate 60 layouts of `std::string` alone. |
+| LLDB formatter bytecode | `.lldbformatters` section in a binary | small sandboxed stack VM with a fixed selector table | The only sandboxed in-binary format. Emitted only by Swift; libc++ intends to use it eventually. |
+| RAD Debugger | config, or a `.raddbg` section | `type_view: {type, expr}` patterns with captures; views are expressions with lenses | The closest design to this plan; indexing goes through views. |
+| Delve | Go | hard-coded, but decides kinds from `DW_AT_go_kind`, never names, and chooses layouts by which fields exist; CI checks its runtime assumptions | The best model for surviving runtime churn. |
 
-### 1.2 Who maintains visualizers, on Windows and on Linux
+### 1.2 Who maintains visualizers
 
-The question that decides uscope's maintenance burden is who keeps a
-visualizer in step with the code it describes. A second round of research
-(2026-10-05; appendix C) looked at the Windows ecosystem and at Linux's
-equivalents. The findings:
-
-- **Windows is cheap mostly because the MSVC STL's ABI has been frozen since
-  2015.**
+- **Windows is cheap mostly because the MSVC STL's ABI has been frozen
+  since 2015.**
   - `STL.natvis` changed in 36 commits over 5.5 years, about 6 a year,
     mostly for new types.
-  - It has no tests. Its maintainer calls testing it "the most significant
-    issue".
-  - It ships with the IDE through a hand-mirrored copy that has lagged by a
-    year.
-  - ABI-compatible member renames still broke it (`atomic`, the
-    `make_shared` control blocks), and one bug showed the wrong year for
-    February dates.
-- **Natvis is not a portable format in practice.** It is XML around each
-  host's C++ expression evaluator.
-  - Microsoft's own two engines (VS and WinDbg) disagree.
-  - JetBrains rewrote an evaluator to support it, and MIEngine and RAD
-    Debugger implement subsets.
+  - It has no tests, and ships with the IDE through a hand-mirrored copy
+    that has lagged by a year.
+  - ABI-compatible member renames still broke it.
+  - One of its bugs showed the wrong year for February dates.
+- **Only one arrangement reliably keeps a visualizer correct.** The owner
+  changes it in the same commit as the layout, and a test fails if they
+  forget.
+  - Rust does this for its natvis: all 13 layout-driven natvis changes in
+    the last three years landed in the std PR that caused them, caught by
+    Windows CI.
   - Library-owned natvis files without tests rot for 10–18 months (LLVM's
     `SmallPtrSet`, nlohmann/json, Qt 6).
-- **Only one arrangement reliably keeps a visualizer correct: the owner
-  changes it in the same commit as the layout, and a test fails if they
-  forget.**
-  - Rust does this for natvis: all 13 layout-driven natvis changes in the
-    last three years landed in the std PR that caused them, caught by cdb
-    tests on CI.
-  - libstdc++ does it for gdb: 306 value checks, with layout fixes in the
-    same commit as the header change.
-  - libc++'s gdb printers do the same, upstream.
-  - LLDB's libc++ formatters, owned by a different team, chased the same
-    libc++ changes in separate PRs months later. This is the clearest
-    evidence that visualizers belong with the code they describe.
-- **On Linux, only libstdc++ is fully owned, tested, and installed.**
-  - Fedora 44's whole repository ships gdb auto-load scripts for libstdc++,
-    glib, GStreamer, CPython, Arrow, LibreOffice, and a few others. It ships
-    none for libc++, Rust, Go, Qt, Boost, or abseil.
-  - libc++'s printers are tested but not installed.
-  - Rust's need the active toolchain to be the one that built the binary.
-  - Go's `runtime-gdb.py` is tested without ever printing an interface,
-    which is why its broken interfaces went unnoticed.
-  - libc++ plans to ship formatters inside `libc++.so`: Python first, LLDB
-    bytecode later.
-- **Upstream-maintained data is usable as a reference, not as a dependency.**
-  - Rust's natvis files carry over to Linux DWARF for 92% of their entries,
-    as-is or after a mechanical rename.
-  - But Linux toolchains do not ship them. They must match the exact rustc
-    commit (today's HEAD is already wrong for a July binary). They omit
-    `BTreeMap`, `PathBuf`, `Box<str>`, and `Mutex`. Two of their entries
-    have been stale since 2022.
+- **Rust's natvis is portable but not usable as a source.** 92% of its
+  entries carry over to Linux DWARF, as-is or after a mechanical rename. But
+  Linux toolchains don't ship the files, each copy matches only one rustc
+  commit, and they omit `BTreeMap`, `PathBuf`, `Box<str>`, and `Mutex`.
 - **How fast layouts change, by library:**
 
   | Library | Change rate |
   |---|---|
-  | libstdc++ | frozen since GCC 5; about 1 printer change a year forced by layout |
-  | libc++ | stable bytes but renamed DWARF members; about 1–2 a year |
-  | Go | rare but large: the map rewrite, `abi.Type` changes |
+  | libstdc++ | effectively frozen since GCC 5 |
+  | libc++ | stable bytes, but renamed DWARF members, about 1–2 a year |
+  | Go | rare but large (the 1.24 map rewrite, `abi.Type` changes) |
   | Rust | about 4 a year |
   | Zig | pre-1.0, and its two backends differ |
 
-Nothing on Linux takes the burden off uscope today. What can be done is to
-make breakage rare, caught before release, cheap to fix, and harmless when
-it happens: §3.12.
+Nothing removes uscope's share of the work. §3.12 keeps it small, visible,
+and harmless.
 
 ### 1.3 What every successful design shares
 
 1. **Matching by type, with captured arguments.** Natvis `$T1`, RAD
-   `?{T}`, LLDB template-argument selectors, gdb's `template_argument(n)`.
-2. **Children are lazy, and random-access where possible.** gdb 14's
-   `num_children`/`child(n)`, LLDB's synthetic `get_child_at_index`, DAP's
-   `start`/`count`. Linked structures scan with checkpoints (LLDB caches
-   iterators by index).
-3. **Fallback across layouts.** Natvis `Priority` and `Optional`: an entry
-   that fails to parse against the type yields to the next one. Delve
+   `?{T}`, LLDB template-argument selectors.
+2. **Children are lazy, and random-access where possible.** LLDB's
+   synthetic `get_child_at_index`, and DAP's `start`/`count`. Linked
+   structures scan with checkpoints; LLDB caches iterators by index.
+3. **Fallback across layouts.** Natvis `Priority` and `Optional`; Delve
    chooses map layouts by which fields exist.
-4. **A raw view everywhere.** `[Raw View]`, `print/r`, `frame variable --raw`.
-5. **Views compose with expressions.** gdb xmethods (`v[1]`, `v.size()`),
-   natvis `[]` on `ArrayItems`, RAD lenses as types.
+4. **A raw view everywhere.** `[Raw View]`, `frame variable --raw`.
+5. **Views compose with expressions.** Natvis `[]` on `ArrayItems`; RAD
+   lenses as types.
 
-### 1.4 Common failures, which this design forbids
+### 1.4 Failures this design forbids
 
 - **A convincing wrong answer.**
-  - lldb's libstdc++ formatters print a two-entry `unordered_map` built by
-    GCC as `size=0 {}`. GCC omits `std::allocator`'s template parameters,
-    and a bare `except` turns the failure into an empty container.
-  - lldb truncates 64-bit Rust discriminants to 32 bits, so `Ok(7)` shows as
-    `Err("")`.
-  - Zig's printers show `?u32 = 42` as `null`.
-- **Unbounded work.**
-  - Uninitialized `std::set`s hung gdb under Eclipse CDT.
-  - A Qt Creator release grew gdb's memory until the machine hung.
-  - gdb prints a cyclic list until `print elements` runs out.
-- **Name regexes that miss real spellings.**
+  - lldb truncates 64-bit Rust discriminants to 32 bits, so `Ok(7)` shows
+    as `Err("")`.
+  - A visualizer that swallows its own error can show a populated container
+    as empty.
+  - `STL.natvis` once showed the wrong year.
+- **Unbounded work.** Debuggers have hung or exhausted memory on
+  uninitialized containers, garbage sizes, and cyclic lists.
+- **Name matching that misses real spellings.**
   - At `-O`, rustc names slices `*const [T]`. uscope's own `&[` prefix test
-    misses them too (§2).
-  - GCC writes `pair<int const, …>` and `array<int, 4>`, while clang writes
+    misses them (§2).
+  - GCC writes `pair<int const, …>` and `array<int, 4>`; clang writes
     `pair<const int, …>` and `array<int, 4UL>`.
   - `-gsimple-template-names` emits bare `vector`.
-- **Version churn.** Every artifact in §1.1 is a list of private paths kept
-  in step with one library version. Delve contains the damage best:
-  - it decides kinds from structural attributes;
-  - it chooses layouts by which fields exist;
-  - it writes each runtime assumption next to the code, where CI checks it
-    against the runtime source.
-
-**Conclusion.** Do not run any of these artifacts. Use them as layout
-references (license note: write views from the DWARF and headers, not by
-translating GPL Python). Build on the DWARF structure that is stable across
-toolchains, and keep the library-specific knowledge small and declarative.
-It should be checked against real binaries and should fail loudly.
+- **Version churn handled by path lists.** Delve contains it best: kinds
+  from structural attributes, layouts chosen by which fields exist, and
+  assumptions checked automatically.
 
 ## 2. Where uscope is today
 
@@ -280,9 +198,10 @@ From a survey of `next` at 89d634cf:
 ### 3.0 The view contract
 
 Everything below implements one small contract between *a view* and *a
-debugger*. It is the part worth standardizing (§7), and it is what LLDB's
-bytecode RFC called the hard part: "all the interesting/difficult work
-here is about how to interface with ValueObject".
+debugger*. LLDB's bytecode RFC called this the hard part: "all the
+interesting/difficult work here is about how to interface with
+ValueObject". Keeping it small and explicit is also what would make it
+proposable later (§7).
 
 **What a view may ask the debugger.** Every request is a pure read,
 answered at one stop, and charged to the budget:
@@ -757,8 +676,7 @@ Every source is safe to load without a prompt:
 - a broken view costs only its own value, which falls back to raw with the
   reason.
 
-This is the property gdb's auto-load safe-path exists to approximate for
-Python. A parse or bind error in a file is reported once per load (in the
+A parse or bind error in a file is reported once per load (in the
 CLI, and as DAP output), and never stops the session.
 
 ### 3.9 Limits
@@ -782,138 +700,88 @@ CLI, and as DAP output), and never stops the session.
 
 ### 3.10 What is out of scope
 
-- **Running Python**, or reading `.debug_gdb_scripts`. At most,
-  `info view` mentions that a binary names gdb scripts uscope does not run.
-- **Structural guessing.** One example is RAD's `slice` guessing "the first
-  pointer and the first integer". Every view is explicit about which
-  members it reads.
-- **Inferior calls**, such as `size()` or the stringstream printers' calls
-  into the program.
-- **Whole views in WebAssembly**, as opposed to kernels (§3.13). A full
-  wasm view would need the whole of §3.0 as a binary ABI, typed handles
-  for types and places, forever. Kernels need only `read` and `yield`.
-  Revisit only if kernels prove too narrow.
-- **Natvis import and LLDB bytecode.** Natvis is deferred to a later phase
-  (§4, P7), and LLDB bytecode is deferred indefinitely. Natvis's
-  vocabulary maps onto §3.3 (DisplayString, ArrayItems, IndexListItems,
-  LinkedListItems, TreeItems, ExpandedItem, Condition, Optional, Priority,
-  `$T`), so an importer is a translator, not a second engine. That is the
-  same conclusion RAD Debugger reached.
-  - Its value on Linux is third-party libraries (imgui, EASTL, Godot, EnTT,
-    Unreal), as CLion 2026.2 found.
-  - It is not a way to get standard-library views. Rust's std natvis is not
-    shipped on Linux and is pinned to a commit (§1.2).
-  - LLDB bytecode is the format to watch, because libc++ intends to ship
-    its formatters that way. Its selectors (child by name, template
-    argument, cast, read memory) map onto uscope's `Machine`, so an
-    interpreter is plausible once libc++ ships one.
-- **A gdb subprocess as a formatter.** uscope would serve the stopped
-  tracee's memory read-only over the remote protocol, and gdb would format
-  with its auto-loaded printers.
-  - It is feasible: Pernosco does exactly this, and a gdbserver stand-in
-    worked here with `set sysroot /` and paged over MI.
-  - But it adds a gdb dependency, values come back as strings, and it
-    inherits upstream's gaps (no libc++ printers installed, broken Go
-    interfaces).
-  - It would be an opt-in provider for the Linux long tail (glib, CPython,
-    Arrow, users' own printers), and only if users ask.
+- **Python and GPL code** (D2). uscope does not run, read, port, or test
+  against any Python printer or GPL source. Views are written from the DWARF
+  of uscope's own fixtures.
+- **Structural guessing.** RAD's `slice` guesses "the first pointer and the
+  first integer". Every view here is explicit about which members it reads.
+- **Inferior calls.** Views never run code in the debuggee.
+- **Whole views in WebAssembly**, as opposed to kernels (§3.13). A full wasm
+  view would need all of §3.0 as a permanent binary ABI. Kernels need only
+  `read` and `yield`.
+- **For later, if users ask:**
+  - a natvis importer for third-party libraries (imgui, EASTL, Godot,
+    Unreal), translating into §3.3 rather than adding an engine;
+  - reading LLDB formatter bytecode, if libc++ ships it.
 
-### 3.11 Purity and threads
+### 3.11 Where views run (D9)
 
-- **`src/view` is pure.** It holds the parser, binder, generator machinery,
-  kernel host, and summary formatter, with no program. It sits under the
-  same boundary test as `src/eval`, and reaches programs only through the
-  contract's traits (§3.0).
-- **Views run on a presentation worker, not on the controller.** The
-  controller serves memory a page at a time from a per-stop page cache
-  (§3.14), and answers type and symbol queries from immutable module data.
-  Everything else (binding, generators, kernels, summaries) happens on the
-  worker.
-- **The worker owns the stop-scoped state.** It holds the bound-view cache
-  (keyed by type and view-set generation) and the scan checkpoints. A
-  resume bumps the `StopId`; in-flight work fails as stale and the
-  checkpoints are dropped.
-- **The simulator drives the engine inline.** The worker is an edge
-  adapter around a pure engine, so a simulated world runs presentations
-  synchronously, with no real thread.
-- **View sources** are parsed and validated off both threads. An immutable
-  `Arc<ViewSet>` with a generation number is handed over whole.
+Views run on the controller thread, inside the existing inspection paths:
+`variables`, `evaluate`, `value_children`, and conditions and log messages
+at internal stops. There is no worker thread and no second execution site.
+
+- **`src/view` is pure.** It holds the parser, binder, generators, kernel
+  host, and summary formatter. It sits under the same boundary test as
+  `src/eval`, and reaches programs only through the contract's traits,
+  which `StopMachine` and the provider implement. The simulator therefore
+  runs views exactly as the debugger does.
+- **Budgets are the timeouts.** Every read, generator step, kernel
+  instruction (fuel), and output node is charged to the request's
+  `InspectionBudget`. A request costs milliseconds at most, and the same
+  inputs always stop at the same point. No wall clock is involved, so runs
+  stay deterministic.
+- **Scheduling.** The controller's single FIFO loop
+  (`backend/linux.rs:1078`) takes run-control requests (continue, step,
+  pause, kill, detach) and waiter events before queued inspection requests.
+  So a burst of hovers, watches, and locals never delays a step or the
+  classification of a process event.
+- **Cancellation.** A presentation checks between reads whether a
+  run-control request is waiting. If one is, it stops with a stale result,
+  as a request for an old `StopId` does today, and the run-control request
+  proceeds.
+- **Caches** live as long as their inputs:
+  - bound views, per type and view-set generation, until the view set
+    changes;
+  - scan checkpoints, until the `StopId` changes.
+
+  A per-stop page cache is added only if measurements show views re-reading
+  the same memory.
+- **View sources** are parsed and validated when loaded, outside the
+  controller. The controller receives an immutable `Arc<ViewSet>`.
 
 ### 3.12 Keeping views working
 
 The goal is that a library change never shows a user a wrong value, rarely
-shows them raw, and reaches uscope's maintainers before it reaches users.
+shows them raw, and is caught by uscope's gate rather than by users.
 
-1. **Most presentation needs no library knowledge at all.** These are all
-   DWARF semantics and change only when DWARF does:
-   - enums and optionals;
-   - slices, `str`, and Go strings and slices;
-   - Zig sums and sentinels;
-   - trait objects and Go interfaces (§3.1, §3.6).
-
-   The views that do need library knowledge are a short list per library.
-2. **Views name meaning, not paths, wherever the DWARF allows it:**
+1. **Most presentation needs no library knowledge at all.** Enums and
+   optionals; slices, `str`, and Go strings and slices; Zig sums and
+   sentinels; and trait objects and Go interfaces (§3.1, §3.6) are DWARF
+   semantics. They change only when DWARF does.
+2. **Views name meaning, not paths, wherever DWARF allows it:**
    - `inner()` steps through wrappers;
    - element and key types come from template arguments, `go_key` and
      `go_elem`, or `typeof`;
-   - patterns anchor on the crate or namespace root and base name.
+   - patterns anchor on the crate or namespace root and base name, with
+     `**` for intermediate modules.
 
    Of the 13 Rust std changes that broke natvis between 2023 and 2026, by
-   our reading of each PR, 11 add, remove, or rename a wrapper or a module:
-   `Cap`, `RawVecInner`, `Unique` removal, `MaybeDangling`, `WrappedIndex`,
-   `ManuallyDrop`, the `NonZero` inner type, two `Pin` field renames,
-   `RcBox`→`RcInner`, `rc`→`rcs`. Views written this way would survive
-   them. The atomics' `Atomic<T>` rename and the `NonZero` alias flip
-   change the type's own name and need a second pattern.
-3. **Old layouts stay.** Alternatives (`or`, a second view) are rarely
-   deleted, so a user on an old toolchain keeps working after uscope
-   learns a new layout. This is the reverse of Rust's providers, which must
-   track only the current std.
-4. **Failure is visible, never wrong.**
-   - When nothing binds, the value is raw and `info view` says why: for
-     example, "alloc::vec::Vec: `inner(buf).ptr`: no member `ptr` in
-     `RawVecInner`".
-   - A failed `check` is shown as the problem it is.
-   - Natvis's silent fallback is safe but leaves users guessing;
-     `time_point`'s wrong February year is the failure to avoid.
-5. **Fixing does not wait for a release.** Views are data:
-   - a user or project file overrides a built-in view on the spot (§3.8);
-   - a fix to a built-in view is a one-file change with a fixture.
-6. **Upstream tests become uscope's tests.**
-   - The library owners have already written expected values for their
-     printers:
-     - libstdc++'s `libstdc++-prettyprinters` (306 value checks);
-     - libc++'s `gdb_pretty_printer_test` (about 126);
-     - Rust's `tests/debuginfo` (139 gdb tests);
-     - Go's `TestGdbPython`.
-   - A `just upstream-views` recipe builds their test programs with the
-     pinned toolchains and compares uscope's presented *values* (not their
-     text format) with the expected ones, under a small translation table
-     per suite.
-   - When a library changes a layout, its own test already says what the
-     value should be.
-7. **Canary builds catch breakage before release.** A scheduled job (once
-   CI exists; TODO.md) builds the fixtures and upstream suites with the
-   newest toolchains:
-   - Rust nightly;
-   - Go tip;
-   - Zig master;
-   - libc++ and libstdc++ trunk.
-
-   It runs "every view binds" and the value checks (§5.2). This is the role
-   Delve's `+rtype` CI check plays. Breakage is found the week the library
-   changes, usually as one `or` alternative to add.
-8. **Ownership can move upstream later.**
-   - `.debug_uscope_views` (§3.8) lets any library ship views in its own
-     binaries, tested in its own CI.
-   - An LLDB bytecode interpreter would let uscope consume what libc++
-     ships, once it does (§3.10).
-   - Either moves a library's views to the people who change its layout.
-
-**Expected burden.** By the churn above, this is a handful of one-line view
-edits a year, mostly for Rust and libc++. Each is found by the canary
-before users see it, and each degrades to a raw value with a reason if it
-ships anyway.
+   our reading of each PR, 11 add, remove, or rename a wrapper or a module,
+   which views written this way survive.
+3. **The built-in views target the pinned toolchains** (D4, D7): the newest
+   version of each supported compiler and library. An alternative for an
+   older layout stays while it is cheap, but older toolchains are not
+   promised. A user on one can override a view.
+4. **The gate catches drift.** "Every built-in view binds" (§5.2) fails when
+   a toolchain bump moves a field, with `info view`'s explanation, so the
+   fix lands with the bump.
+5. **Failure is visible, never wrong.** When nothing binds, the value is
+   raw and `info view` says why, for example "alloc::vec::Vec:
+   `inner(buf).ptr`: no member `ptr` in `RawVecInner`". A failed `check` is
+   shown as the problem it is.
+6. **Fixing does not wait for a release.** A user or project file
+   overrides or extends a built-in view on the spot. A fix to a built-in
+   view is a one-file change with a fixture marker.
 
 ### 3.13 Kernels: WebAssembly for algorithms
 
@@ -959,8 +827,8 @@ are refused by default.
 - Every run is a pure function of its arguments and the bytes `read`
   returned. A recorded run therefore replays offline as a unit test, in
   the simulator, or in a bug report.
-- Any debugger can implement two imports in an afternoon, which makes this
-  a credible cross-debugger proposal (§7).
+- Two imports are trivial to implement and to keep stable, and any
+  debugger could host them (§7).
 - The Component Model is still Phase 1. Only wasmtime implements it.
   Zed's extension API carries ten versioned WIT directories.
 
@@ -1005,24 +873,22 @@ and took Typst down.
 **Sequencing.** Kernels come after the declarative phases, when the first
 built-in view genuinely needs one. The candidates are `BTreeMap` and
 classic Go maps (§4, P7). The contract is designed now so they fit without
-change.
+change (D8).
 
 ### 3.14 Robustness model
 
-The guarantee is that a view can make its own value wrong only by being
-visibly wrong, and can never affect anything else. Each property below has
-a mechanism and a test.
+A view can make its own value wrong only by being visibly wrong, and can
+never affect anything else.
 
 | Property | Mechanism | Test |
 |---|---|---|
-| No side effects | The contract has no writes, calls, or I/O; kernels can import only `read` and `yield` | import validation; boundary test on `src/view` |
-| Bounded work | Every read, generator step, kernel instruction (fuel), and output node is charged to one per-presentation budget; scans may not pass their count | fake-world budget tests; hostile fuzzing (below) |
-| Bounded memory | Budget caps on output and text; kernel linear memory 4 MiB; view files 256 KiB | heap cap in every test process (`memory_cap.rs`) |
-| Run control never waits | Views run on the presentation worker. The controller only serves cached pages; a resume makes in-flight work stale | scenario: `continue` while a large presentation runs; stress |
-| Contained failure | A bind error, failed check, cycle, trap, or exhausted budget makes *that value* raw with a typed problem. Engine panics are caught at the presentation boundary and recorded by the flight recorder | sabotage tests; fault injection in the simulator |
-| Deterministic | No clocks (fuel, never time); the simulator runs the engine inline | `a_seed_always_names_the_same_run` |
-| Never convincingly wrong | Binding is static and total; `check`s guard invariants; a missing type is "unavailable", never zero | the failures of §1.4 as regression tests |
-| Fast | One per-stop page cache shared by all views; bound views cached per type; random-access paging; previews capped | a container-heavy scenario with a read-count budget |
+| No side effects | The contract has no writes, calls, or I/O; kernels can import only `read` and `yield` | import validation; the boundary test on `src/view` |
+| Bounded work | One per-request budget charges reads, generator steps, kernel fuel, and output; scans may not pass their count | fake-world budget tests; hostile fuzzing |
+| Bounded memory | Budget caps on output and text; kernel memory 4 MiB; view files 256 KiB | the heap cap in every test process |
+| Run control comes first | Priority scheduling and cancellation (§3.11) | scenario: `continue` during a large presentation is acknowledged first, and the presentation ends stale; `just stress` |
+| Contained failure | A bind error, failed check, cycle, trap, or exhausted budget makes *that value* raw with a typed problem. Engine panics are caught at the presentation boundary, recorded by the flight recorder, and reported as an internal problem | sabotage tests; simulator fault injection |
+| Deterministic | Budgets and fuel, never clocks | `a_seed_always_names_the_same_run` |
+| Never convincingly wrong | Binding is static and total; `check`s guard invariants; an incomplete type is "unavailable", never zero | the failures of §1.4 as regression tests |
 
 **Hostile fuzzing** is the "nigh impossible" assurance. A contained fuzz
 target runs every built-in view, and random view files, over random
@@ -1033,16 +899,9 @@ memory:
 - huge counts;
 - unmapped pages.
 
-It asserts that every presentation ends with a value or a typed problem
-within its budget, never panics, and never allocates past its cap. It runs
-only through `scripts/contained.sh`, like the existing fuzzers.
-
-**The page cache.** At a stop, the worker requests memory in aligned 4 KiB
-pages through the handle. The controller reads each page once through
-`/proc/<pid>/mem` and hides breakpoint bytes, as reads do today. The cache
-dies with the `StopId`. Hash tables and trees touch the same pages
-repeatedly, so this cuts reads sharply. It also keeps every tracee access
-on the controller, as AGENTS.md requires.
+Every presentation must end in a value or a typed problem within its
+budget, never panic, and never allocate past its cap. Like the existing
+fuzzers, it runs only through `scripts/contained.sh`.
 
 ### 3.15 Authoring, contributing, and the built-in library
 
@@ -1073,8 +932,7 @@ why. It serves:
 
 - contributors before they open a PR;
 - users writing views for their own types;
-- the "every built-in view binds" gate check;
-- the canary job (§3.12).
+- the "every built-in view binds" gate check (§5.2).
 
 `uscope views explain TYPE` and `info view EXPR` give the same answer
 interactively.
@@ -1091,79 +949,91 @@ collection, and a kernel.
 ## 4. Phases
 
 Each phase is test-first, lands on `next` on its own, and is reviewed
-(`/roast`) before landing. While iterating, run targeted tests; at the end
-of each phase, `just` and `just sim 60`. `just all`, `just stress`, and
-`just sim 600` run once, at the end of the project.
+(`/roast`) before landing.
 
-- **P1 Type identity (provider; small visible change).**
-  - §3.1 fat pointers by shape; this fixes `*const [T]` at `-O`.
-  - Zig `[]const u8` text, and text charged to the budget.
-  - §3.2 identity: language, path with `DW_AT_export_symbols` collapsing,
-    template arguments with packs, name parsing for Zig and GCC gaps, Go
-    attributes.
-  - The per-image identity index.
-  - Add libc++ to the dev shell (§6, D4).
-  - `ptype` shows template arguments.
-- **P2 The engine and contiguous shapes.**
-  - `src/view` parser and binder (`or`, types, checks).
-  - Random-access sequences, `text`, `value`, `empty`, `if`, fields.
-  - The `Presentation` model, the view children reference, `[raw]`.
-  - CLI `print`, `print/r`, `info view`; DAP counts, `filter`, hints.
-  - `v[i]` and `len(v)` through views.
-  - Built-in views that replace `string_parts`: C++ strings (libstdc++,
-    old-ABI, and libc++ short and long forms), Rust `String`, `Box<str>`,
-    `PathBuf`, `OsString`, `CString`.
-  - Further built-in views: `std::vector` (not `<bool>`), `std::array`,
-    `std::span`, `std::string_view`, Rust `Vec`, `VecDeque`, Zig
-    `ArrayList`, `ArrayListUnmanaged`.
-  - `docs/views.md` with executable examples.
-- **P3 Scans and maps.**
-  - `list`, `inorder`, filters, nested generators, checkpoints, and cycle
-    detection.
-  - Map presentation.
-  - Built-in views:
-    - C++: `std::map`, `set`, and their multi- forms; `unordered_*`;
-      `std::list`, `forward_list`, `deque`.
-    - Rust: `HashMap`, `HashSet`.
-    - Go: maps.
-    - Zig: `HashMap`, `ArrayHashMap`.
-- **P4 Pointers, sums, and dynamic types.**
-  - Rust `Box`, `Rc`, `Arc`, `Weak`, `Cell`, `RefCell`, `Mutex`.
-  - C++ `unique_ptr`, `shared_ptr`, `weak_ptr`, `optional`, `variant`,
-    `tuple`.
-  - §3.6 vtables (C++ and Rust `dyn`), and Go interfaces and `error`.
-  - Go channels.
-  - Zig LLVM-backend optionals, error unions, and tagged unions.
-- **P5 User and embedded views, and the authoring tools.**
-  - `uscope views check`, `views explain`, `extend`, `hide`, `format`,
-    `match`, `record`, `container_of`, `global`.
-  - `docs/writing-views.md`.
-  - Session, user, and project files.
-  - The DAP `viewFiles` launch argument.
-  - `.debug_uscope_views` and its C header.
-  - Module scoping.
-  - Load diagnostics.
-- **P6 Compatibility.** Widen the fixture matrix (§5.3):
-  - Zig self-hosted backend;
-  - `-gsimple-template-names`;
-  - `_GLIBCXX_DEBUG`;
-  - `_GLIBCXX_USE_CXX11_ABI=0`;
-  - C++ layout simulators for historical libc++ and libstdc++ layouts;
-  - native views for Rust `BTreeMap` and classic Go maps if the language
-    cannot say them.
-- **P7 Kernels**, when the first built-in view needs one (`BTreeMap` or
-  classic Go maps):
-  - the wasmi host;
-  - the `uscope_kernel_v1` ABI;
-  - the SDK crate and C/Zig header;
-  - kernel records in `.debug_uscope_views`;
-  - replayable recorded runs.
-- **P8 (later, optional).** Natvis importer; richer presentation hints
-  (table, bitmap, memory) for a future TUI or web UI.
+- **While iterating:** targeted tests only.
+- **At the end of each phase:** `just` and `just sim 60`.
+- **Once, at the end of the project:** `just all`, `just stress`, and
+  `just sim 600`.
 
-The presentation worker, page cache, and hostile fuzz target land in P2
-with the engine, not later, because robustness is a property of the
-architecture.
+**P1 Compliant DWARF and type identity.** This phase is in the provider and
+changes little that users see.
+
+- §3.1 fat pointers by shape, which fixes `*const [T]` at `-O`.
+- Zig `[]const u8` text, and text charged to the budget.
+- §3.2 identity:
+  - the language;
+  - the path, with `DW_AT_export_symbols` collapsing;
+  - template arguments, including packs;
+  - name parsing where DWARF has no parameters;
+  - Go's attributes.
+- The per-image identity index.
+- libc++ in the dev shell (D4).
+- `ptype` shows template arguments.
+
+**P2 The engine and contiguous shapes.**
+
+- The `src/view` parser and binder (`or`, types, checks).
+- Random-access sequences, `text`, `value`, `empty`, `if`, and fields.
+- The `Presentation` model, the view children reference, and `[raw]`.
+- Scheduling and cancellation (§3.11), and the hostile fuzz target.
+- CLI `print`, `print/r`, `info view`; DAP counts, `filter`, and hints.
+- `v[i]` and `len(v)` through views.
+- Built-in views that replace `string_parts`:
+  - C++ strings: libstdc++, the old ABI, and libc++ in short and long
+    forms;
+  - Rust `String`, `Box<str>`, `PathBuf`, `OsString`, `CString`.
+- Further built-in views:
+  - C++ `std::vector` (not `<bool>`), `std::array`, `std::span`,
+    `std::string_view`;
+  - Rust `Vec`, `VecDeque`;
+  - Zig `ArrayList`, `ArrayListUnmanaged`.
+- `docs/views.md`, with executable examples.
+
+**P3 Scans and maps.**
+
+- `list`, `inorder`, filters, nested generators, checkpoints, and cycle
+  detection.
+- Map presentation.
+- Built-in views:
+  - C++ `std::map`, `set`, and the multi- forms; `unordered_*`;
+    `std::list`, `forward_list`, `deque`;
+  - Rust `HashMap`, `HashSet`;
+  - Go maps;
+  - Zig `HashMap`, `ArrayHashMap`.
+
+**P4 Pointers, sums, and dynamic types.**
+
+- Rust `Box`, `Rc`, `Arc`, `Weak`, `Cell`, `RefCell`, `Mutex`.
+- C++ `unique_ptr`, `shared_ptr`, `weak_ptr`, `optional`, `variant`,
+  `tuple`.
+- §3.6 vtables (C++ and Rust `dyn`); Go interfaces and `error`.
+- Go channels.
+- Zig's LLVM-backend optionals, error unions, and tagged unions.
+
+**P5 User and embedded views, and the authoring tools.**
+
+- Session, user, and project files, and the DAP `viewFiles` launch
+  argument.
+- `.debug_uscope_views`, with its C header and Rust macro, and module
+  scoping.
+- `extend`, `hide`, `format`, `match`, `record`, `container_of`, `global`.
+- `uscope views check` and `views explain`.
+- `docs/writing-views.md`.
+
+**P6 A wider matrix.**
+
+- The Zig self-hosted backend.
+- `-gsimple-template-names`, `-fstandalone-debug`, `_GLIBCXX_DEBUG`,
+  `_GLIBCXX_USE_CXX11_ABI=0`, `-static-libstdc++`.
+
+**P7 Kernels**, when the first built-in view needs one (Rust `BTreeMap` or
+classic Go maps):
+
+- the wasmi host and the `uscope_kernel_v1` ABI;
+- the SDK crate and the C/Zig header;
+- kernel records in `.debug_uscope_views`;
+- replayable recorded runs.
 
 ## 5. Testing
 
@@ -1191,39 +1061,32 @@ architecture.
   - deliberately corrupted instances: a cyclic `std::list` and C list,
     `len > cap`, a garbage data pointer, a variant index out of range.
 
+  Each value's expectation is a `// VIEW:` marker on its line (§3.15).
   Assertions cover summaries, children, DAP counts and pages, and
   `evaluateName`s that evaluate back. Corrupted instances must produce their
   typed problem, raw underneath, and finish within the budget.
-- **"Every built-in view binds" checks.** For each fixture build, a test
-  asserts:
-  - every built-in container type in it is presented by the view meant for
-    it;
-  - no such type falls through to raw.
-
-  Bumping a toolchain that moves a private field therefore fails the gate
-  with `info view`'s explanation, the role Delve's `+rtype` checks play.
+- **"Every built-in view binds."** For each fixture build, every built-in
+  container type is presented by the view meant for it, and none falls
+  through to raw. A toolchain bump that moves a private field fails here,
+  with `info view`'s explanation.
 - **Strings move from `string_parts` to views.** The existing string tests
   (`tests/debugger/values.rs`, `tests/dap/variables.rs`, `tests/cli.rs`)
   stay green unchanged.
-
-- **Upstream suites** (§3.12): `just upstream-views` runs libstdc++'s,
-  libc++'s, Rust's, and Go's printer tests against uscope's presented
-  values. It runs outside the gate, at the end of each phase, and in the
-  canary job.
+- **Run control comes first.** A scenario asserts that a `continue` sent
+  during a large presentation is acknowledged first, and that the
+  presentation ends stale.
 
 ### 5.3 Matrix
 
 | Language | Builds |
 |---|---|
-| C++ | gcc and clang × libstdc++; clang × libc++ (added in P1); -O0 and -O2. P6 adds `-fstandalone-debug` vs default (the libc++ `shared_ptr` control block is declaration-only by default; the view must say "unavailable", not 0), `-gsimple-template-names`, `_GLIBCXX_DEBUG`, `_GLIBCXX_USE_CXX11_ABI=0`, `-static-libstdc++` |
+| C++ | gcc and clang × libstdc++; clang × libc++ (P1); -O0 and -O2. P6 adds `-fstandalone-debug` (the libc++ `shared_ptr` control block is declaration-only by default, so counts must be "unavailable", not 0), `-gsimple-template-names`, `_GLIBCXX_DEBUG`, `_GLIBCXX_USE_CXX11_ABI=0`, and `-static-libstdc++` |
 | Rust | debug and `-O` (fat-pointer names change). `-C debuginfo=limited` has no types at all; a test pins that it shows raw with a clear reason |
 | Go | `-N -l` and default |
-| Zig | `-fllvm` (today) and the self-hosted backend (the default for Debug; different shapes), Debug and ReleaseSafe |
+| Zig | `-fllvm` (today) and, in P6, the self-hosted backend (the default for Debug; different shapes); Debug and ReleaseSafe |
 
-Older layouts are covered without older toolchains where possible. Like
-LLDB's libcxx-simulators, C++ fixtures can declare historical layouts under
-the real namespaces. Rust and Go history waits for a decision on pinning
-extra toolchains (D4).
+The pinned toolchains are the newest of each (D4). Older toolchains are not
+part of the matrix.
 
 ### 5.4 Simulator
 
@@ -1247,186 +1110,68 @@ ground truth:
 As AGENTS.md requires, there is a sabotage test (an engine that drops one
 element must fail) and coverage marks the gate's seeds must reach.
 
-## 6. Decisions to make
+## 6. Decisions (2026-10-05)
 
-- **D1 Declarative views (recommended) or hand-written Rust printers.**
-  - Declarative costs a small interpreter on top of `src/eval`. In return,
-    standard-library fixes are data changes, users can describe their own
-    types, binaries can carry views, and every view gets the same binding,
-    budgets, and diagnostics.
-  - Rust printers alone are faster to start and would be the Delve model.
-    But users could never extend them, and every layout fix would need a
-    uscope release.
-- **D2 No Python, no gdb scripts (recommended).** Use the DWARF
-  structure, ELF symbols, and Go runtime tables. Treat the ecosystem's
-  scripts as layout references only, and do not translate the GPL'd
-  libstdc++ printers.
-- **D3 Load views from binaries and project directories without a prompt
-  (recommended).** They are declarative and bounded.
-- **D4 Toolchains in the dev shell.**
-  - Add libc++ now (recommended).
-  - Decide separately whether to pin older Rust and Go toolchains for
-    layout history (a `just compat` recipe outside the gate), or to rely on
-    simulators and "every view binds" checks against the pinned
-    toolchains only.
-- **D5 First-wave scope.** The earlier decision to keep language support
-  minimal deferred standard-library container views "until there is a
-  need". This plan is that need. P2–P4 cover the types users meet daily;
+- **D1 Declarative views.** A small view language on uscope's expressions.
+  Kernels serve only algorithms, and native Rust views are the exception.
+- **D2 No Python and no GPL code.** uscope does not run, read, port, or
+  test against Python printers or GPL sources, and takes no heavy
+  dependency like an embedded interpreter. Views are written from the DWARF
+  of uscope's own fixtures.
+- **D3 Load without a prompt.** Views from binaries and from project
+  directories load automatically; their inability to act is the safety.
+- **D4 Toolchains.** Add libc++ to the dev shell now, and test against the
+  newest pinned toolchains only.
+- **D5 First wave.** The daily types of P2–P4 across all five languages.
   `BTreeMap`, classic Go maps, `std::any`, iostreams, and channel waiters
-  wait for P6 or later.
-- **D6 Summary style** (§3.7): `len=3 [1, 2, 3]` and `{"k": v}`, the same in
-  every language. The alternatives are gdb's `std::vector of length 3,
-  capacity 3 = {1, 2, 3}`, or per-language spellings like Delve's
-  `[]int len: 3, cap: 3, [1,2,3]`.
-- **D7 Maintenance machinery** (§3.12): `inner()`, upstream test suites
-  as uscope tests, and a canary job against nightly toolchains once CI
-  exists. Recommended: all three. The canary is what turns "things keep
-  breaking for users" into "we fix it the week the library changes".
-- **D8 Kernels** (§3.13). Design the contract for them now, and build them
-  when the first view needs one.
-  - wasmi, a core-wasm `read`/`yield` ABI, no Component Model.
-  - Recommended: yes, with the implementation deferred to P7.
-- **D9 Presentation worker and page cache** (§3.11, §3.14). Views run off
-  the controller thread from P2, so run control never waits on a view.
-  Recommended: yes.
-- **D10 Standards track** (§7). Recommended:
-  - design every public format as if others will implement it;
-  - publish the research report and conformance corpus once P3 works;
-  - open the producer-side proposals (counted_by, GCC template
-    parameters, libc++ `standalone_debug`) early, because they are small
-    and help every debugger today.
+  come later. This lifts, for views, the earlier decision to keep language
+  support minimal.
+- **D6 One neutral summary style**, shown in §3.7, in every language and
+  client.
+- **D7 Maintenance.**
+  - Adopted: `inner()` and `**` patterns, and the "every view binds" gate.
+  - Not adopted: a canary job, a promise to keep old layouts, and reuse of
+    upstream printer suites.
+- **D8 Kernels.** Designed into the contract now, built in P7 when the
+  first view needs one: wasmi, with a core-wasm `read`/`yield` ABI.
+- **D9 Views run on the controller thread**, in the existing inspection
+  paths, with budgets as deterministic timeouts, priority scheduling for
+  run control, and cancellation on resume. Keep the architecture simple.
+- **D10 uscope first, standards later.** Formats stay uscope-specific
+  (`.debug_uscope_views`, `uscope_kernel_v1`). The standards ideas in §7
+  wait until views have shipped.
 
-## 7. Toward a shared standard
+## 7. Later: a shared standard
 
-Data visualization on Linux is fragmented:
+Deferred by D10, and kept here so the ideas are not lost. Each level is
+useful without the others.
 
-- gdb printers are Python against gdb's API;
-- LLDB formatters are C++ or Python against `SBValue`, moving toward a
-  bytecode;
-- natvis is C++ expressions against Microsoft's evaluators;
-- Delve hard-codes Go.
+- **L0. Producers emit more semantics in DWARF.** Every debugger benefits,
+  with no new format.
+  - **`counted_by` in DWARF.** Checked on 2026-10-05: neither gcc 15 nor
+    clang 21 emits C's `counted_by` into DWARF, and gcc 15 rejects it on
+    pointer members. DWARF 5 can already express it, as a `DW_AT_count`
+    expression using `DW_OP_push_object_address`. The Linux kernel
+    annotates hundreds of structures with it.
+  - **GCC template parameters on every instantiation.**
+  - **libc++** making the `shared_ptr` control block's debug info complete
+    by default.
+  - **Zig's LLVM backend** emitting `DW_TAG_variant_part`.
+  - **An explicit marker for transparent wrappers.**
+- **L1.** Libraries ship declarative views in their binaries.
+- **L2.** A tiny executable ABI for algorithms: the kernels.
+- **L3.** A shared conformance corpus: programs built across compilers,
+  with the values a debugger should show.
 
-Each library would have to write its visualizers three times, so most
-write none, and the ones that exist rot when nobody tests them (§1.2). A
-standard has to make the right thing cheap for **producers** (compilers
-and libraries), because they are the only people who change layouts. It
-works at four levels, each useful without the others.
-
-**L0. Producers emit more semantics in DWARF.** These are the cheapest and
-most widely useful changes, since every debugger benefits with no new
-format:
-
-- **`counted_by` into DWARF.** C's `__attribute__((counted_by(n)))` (and
-  `__counted_by` on pointers in clang) says exactly which member counts an
-  array.
-  - Checked on 2026-10-05: neither gcc 15 nor clang 21 emits it. The
-    flexible array's subrange has no count.
-  - gcc 15 also rejects the attribute on pointer members.
-  - DWARF 5 already lets `DW_AT_count` be an expression using
-    `DW_OP_push_object_address`, so this needs no new DWARF.
-  - The Linux kernel annotates hundreds of structures, so this would
-    improve kernel debugging (drgn, crash, gdb) as well as uscope.
-- **Template parameters on every instantiation.** gcc omits them on 39 of
-  309 templates, including `std::allocator<T>`. lldb's libstdc++
-  formatters show a two-entry `unordered_map` as empty because of it.
-- **libc++ marks the types its containers need for complete debug info**
-  (clang's `standalone_debug` attribute). Today the `shared_ptr` control
-  block is declaration-only by default, so no debugger can show use counts.
-- **Zig's LLVM backend emits `DW_TAG_variant_part`**, as its self-hosted
-  backend does, instead of `{payload, some}` records.
-- **Rust and others mark transparent wrappers.** `#[repr(transparent)]` is
-  the very fact `inner()` infers. Saying it explicitly, perhaps as a
-  vendor attribute first, makes it exact.
-
-**L1. Libraries ship declarative views in their binaries.** This is
-`.debug_uscope_views` (§3.8), with a debugger-neutral language: its contract
-is §3.0, and its patterns name types by identity, not by one compiler's
-spelling. The section carries a vendor name until other debuggers want it.
-Then the format, not the name, is what gets proposed. A neutral successor
-name is chosen together, rather than claimed.
-
-**L2. A tiny executable ABI for algorithms.** That is `read` and `yield`
-kernels (§3.13). It is small enough for gdb (C), lldb (C++), and Delve (Go)
-to host. It complements LLDB's bytecode rather than competing with it: a
-kernel is a pure iterator, and LLDB's selectors could call one.
-
-**L3. A shared conformance corpus.** These are the programs, built across
-compilers, with the values a debugger should show:
-
-- uscope's fixtures, including the corrupted containers;
-- the upstream printer suites (§3.12).
-
-It measures every debugger by the same standard. Appendix A's failures
-(lldb's `Ok(7)` as `Err("")`, the empty `unordered_map`) are exactly what
-it would catch. It is the easiest of the four for others to adopt, and the
-clearest way to show where things stand.
-
-**Who to talk to, and where:**
-
-| Party | What to talk about | Venue |
-|---|---|---|
-| LLDB | the formatter bytecode authors and the libc++ "formatters out of LLDB" RFC | LLVM Discourse; LLVM Developers' Meeting |
-| GDB | the Rust and DAP maintainers | gdb mailing list; GNU Tools Cauldron |
-| GCC | DWARF output | GNU Tools Cauldron |
-| Rust | the debuginfo test-suite and visualizer work (the compiler-team MCPs on debuginfo tests), and `#[debugger_visualizer]`, which could gain a declarative kind | t-compiler Zulip |
-| Go | Delve | issue trackers |
-| Zig | DWARF output | issue tracker |
-| The DWARF committee | the L0 items that need the standard | dwarfstd.org issues |
-| RAD Debugger and JetBrains | the same problem from Windows and natvis | — |
-| All of the above | the debugging and toolchain tracks | Linux Plumbers Conference; FOSDEM |
-
-**Sequencing.**
-
-1. Build first, so the conversation starts from working code and
-   measurements rather than a proposal.
-2. Once P3 works, publish a report on the state of data visualization on
-   Linux, drawing on this plan's research and corpus.
-3. Open the L0 proposals early: each is small, independently useful, and
-   helps every debugger today.
-4. Offer L1 and L2 once uscope has shipped them long enough to know they
-   hold up.
-
-## Appendix A. Quality bars observed (2026-10-05)
-
-gdb 17.1 with libstdc++'s printers (gcc and clang, -O0 and -O2 alike):
-
-```text
-std::vector of length 3, capacity 3 = {1, 2, 3}
-std::map with 2 elements = {["one"] = 1, ["two"] = 2}
-std::unordered_map with 2 elements = {[2] = "dos", [1] = "uno"}
-std::shared_ptr<Point> (use count 2, weak count 1) = {get() = 0x55555557e870}
-std::optional = {[contained value] = 42}      std::variant [index 1] = {"alt"}
-```
-
-rust-gdb (debug build):
-
-```text
-v = Vec(size=5) = {1, 2, 3, 4, 5}
-hm = HashMap(size=3) = {["three"] = 3, ["one"] = 1, ["two"] = 2}
-rc = Rc(strong=2, weak=1) = {value = types::Point {x: 3, y: 4}, ...}
-m2 = types::Msg::Move{x: 1, y: -2}
-```
-
-It fails on `Ref` (Python exception). `Mutex`, `Duration`, `CString`, and
-`&Path` print raw, and `Box<dyn>` errors.
-
-Delve (master):
+## Appendix A. Delve's output, the bar for Go
 
 ```text
 map[string]int ["one": 1, "two": 2, ]
 interface {}(main.Point) {X: 1, Y: 2}
 error(*errors.errorString) *{s: "boom"}
 main.main.func1 {s string = "hello, world"}
+[]int len: 3, cap: 3, [1,2,3]
 ```
-
-Failures uscope must not repeat:
-
-- lldb `Ok(7)` shows `Err("")` (64-bit discriminant truncated).
-- lldb + gcc libstdc++ `unordered_map` shows `size=0 {}` (missing allocator
-  template parameters swallowed by `except`).
-- Zig printers show `?u32 = 42` as `null`.
-- Go `runtime-gdb.py` prints interfaces raw (`internal/abi.Type` rename).
-- gdb shows a garbage `std::vector` as `length 35184372071424`.
 
 ## Appendix B. Structural facts the design relies on
 
@@ -1443,30 +1188,3 @@ Failures uscope must not repeat:
 | Go swiss-map layout | `map<K,V>{used, dirPtr, dirLen, globalDepth, …}`, groups `{ctrl u64, slots [8]{key, elem}}`, `0x80` = empty |
 | Zig self-hosted backend: DWARF 5, `DW_LANG_Zig`, variant parts for `?T`/`E!T`/tagged unions, `DW_AT_ZIG_sentinel` | zig 0.16.0 |
 | Zig LLVM backend: DWARF 4, `DW_LANG_C99`, `{payload, some}` optionals, packed struct field names lost | zig 0.16.0 `-fllvm` |
-
-## Appendix C. Maintenance research (2026-10-05)
-
-| Visualizer | Owner | Tested upstream | Reaches users how | Matches the binary |
-|---|---|---|---|---|
-| MSVC `STL.natvis` | Microsoft STL team | no | with the VS IDE | yes; ABI frozen since 2015 |
-| Rust std natvis | rustc | yes (cdb, Windows CI; same-PR fixes) | embedded in PDBs (`/NATVIS`) | yes, on Windows |
-| libstdc++ `printers.py` | GCC | yes (306 value checks, also `-flto`) | auto-load beside the runtime `.so` | runtime `.so`; none for static or cores without the `.so` |
-| libc++ gdb `printers.py` | LLVM libc++ | yes (~126 assertions) | not installed by distros | manual |
-| LLDB libc++ formatters | LLDB (not libc++) | yes (layout simulators) | in liblldb | must handle every layout; chases libc++ months later |
-| Rust gdb/lldb providers | rustc | yes (139 gdb, 109 lldb tests) | sysroot + `.debug_gdb_scripts` name | only with the building toolchain active |
-| Go `runtime-gdb.py` | Go runtime | partly (never prints an interface) | absolute GOROOT path in the binary | only on the build machine; interfaces broken |
-| Zig lldb printers | Zig | 17 lldb cases | `lib/` since 0.17, by hand | manual; wrong on 0.16 |
-
-Commits per year (2019–2026):
-
-- libstdc++ printers: 4–20 (about 4 layout-forced since 2022, each in the
-  header commit).
-- libc++ gdb printers: 2–6 (about 7 of 30 layout-forced, in the same
-  commit).
-- LLDB C++ formatters: 30–90.
-- Rust natvis: 17 in three years, 13 layout-forced, all in the same PR.
-- Go `runtime-gdb.py`: 0–4.
-
-Scratch evidence for these numbers and for appendices A and B (dumps,
-scripts, churn tables) was kept in the 2026-10-05 session's scratchpad. It
-is not in the repository.
