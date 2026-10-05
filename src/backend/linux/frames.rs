@@ -107,21 +107,15 @@ impl<P: InspectionOps> Controller<P> {
             _ => BTreeSet::new(),
         };
         if !breakpoint_targets.is_empty() {
-            let active = location
+            // Every instance a breakpoint hit lies in the one chain, outermost
+            // first. Where several hit together, the stop presents the
+            // innermost, as gdb does; the others are its callers.
+            let innermost = location
                 .physical_instance
                 .into_iter()
                 .chain(chain.instances.iter().copied())
-                .filter(|instance| breakpoint_targets.contains(instance))
-                .collect::<Vec<_>>();
-
-            if active.len() > 1 {
-                return Ok(FramePresentation {
-                    instruction,
-                    frame: PresentedFrame::Ambiguous(active.into()),
-                    hidden_inline_frames: 0,
-                });
-            }
-            if let Some(target) = active.first().copied() {
+                .rfind(|instance| breakpoint_targets.contains(instance));
+            if let Some(target) = innermost {
                 let visible = chain
                     .instances
                     .iter()
