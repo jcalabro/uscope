@@ -86,6 +86,14 @@ pub enum Mark {
     AddressEvaluated,
     /// Arithmetic over variables evaluated exactly.
     ArithmeticEvaluated,
+    /// What a marker expects, in the debugger's own language, was true.
+    ExpectationHeld,
+    /// A variable cast to a narrower integer type kept its low bits.
+    CastEvaluated,
+    /// An ill-typed expression was refused.
+    IllTypedRefused,
+    /// An evaluated value's bytes were in the register the debugger said.
+    RegisterTrue,
     /// The client changed a breakpoint's hit condition or condition.
     BreakpointAmended,
     /// A breakpoint counted a hit that did not stop.
@@ -143,7 +151,7 @@ pub enum Mark {
 }
 
 impl Mark {
-    pub const ALL: [Self; 64] = [
+    pub const ALL: [Self; 68] = [
         Self::EntryStop,
         Self::BreakpointStop,
         Self::StepStop,
@@ -183,6 +191,10 @@ impl Mark {
         Self::StorageTrue,
         Self::AddressEvaluated,
         Self::ArithmeticEvaluated,
+        Self::ExpectationHeld,
+        Self::CastEvaluated,
+        Self::IllTypedRefused,
+        Self::RegisterTrue,
         Self::BreakpointAmended,
         Self::HitDeclined,
         Self::ConditionHeld,

@@ -66,6 +66,8 @@ pub struct Script {
     pub marker_lines: Vec<u64>,
     /// Each marker's condition, by line.
     pub markers: BTreeMap<u64, String>,
+    /// What markers expect in the debugger's own language, by line.
+    pub expectations: BTreeMap<u64, String>,
     /// In unoptimized code, the image addresses where a row of a marker's
     /// line starts, with the line: where its condition holds at every hit.
     pub marker_rows: BTreeMap<u64, u64>,
@@ -143,11 +145,21 @@ pub struct Evaluated {
 pub enum Purpose {
     /// The condition of the marker on the frame's line, or its negation.
     Marker { negated: bool },
+    /// What the marker on the frame's line expects.
+    Expected,
     /// A variable shown once among the frame's variables: its name, or
     /// the name's address dereferenced.
     Name(String),
     /// The address of a variable shown once, in memory.
     Address(String),
+    /// An integer variable cast to an integer type `bits` wide.
+    Cast {
+        name: String,
+        bits: u32,
+        signed: bool,
+    },
+    /// An expression no program's types allow.
+    IllTyped,
     /// Two integer variables combined: `left operator right`.
     Arithmetic {
         left: String,

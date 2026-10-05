@@ -288,7 +288,7 @@ by side.
   `LogMessage`, with the old public path types and requests and their
   superseded tests. Conditions compile at each hit rather than caching a
   program; caching waits until a profile shows the need. The `data` golden
-  program is deferred with P5.
+  program followed (§5.6, as built (data)).
 - **P5 Data shapes**: deferred by decision (2026-10-05): per-language
   support stays minimal, the most common types only (scalars, records,
   arrays, pointers, and the strings and slices the provider already reads).
@@ -454,11 +454,29 @@ the view says `x` lives; and arithmetic is exact. Marks: `MarkerEvaluated`,
 `NameEvaluated`, `StorageTrue`, `AddressEvaluated`, `ArithmeticEvaluated`.
 Sabotage: `SkewSmallStackWords` fails the marker and storage checks, and a
 new `FlickeringStackWords` (every other read of a small stack number is one
-greater) fails agreement with the view and exact arithmetic. Not built yet:
-register-storage truth, member/index agreement (`p->f`/`(*p).f`,
-`a[i]`/`*(a + i)`), drawn casts and ill-typed expressions, narrowing the
-breakpoint-conditions oracle, and the `data` golden program; the golden
-programs hold only integers and pointers to them, so these wait for it.
+greater) fails agreement with the view and exact arithmetic.
+
+**As built (data).** The `data` golden program holds a global table of
+records (`u8`, `u16`, a nested record, `u64`) that it fills, then visits
+through pointers into it. A marker may carry `// EXPECT: <expression>`,
+which only the debugger's evaluator judges, so it can use `->`, `.`, `[]`,
+`&`, `*`, and casts: `data` expects `item == &items[index]`,
+`(*item).count`, `items[index].at.x`, `(*(items + index)).at.y`, and a cast
+of a member, each equal to what the program stored. The client also draws a
+cast of an integer variable to a narrower type, in either form, which must
+keep exactly its low bits, and an ill-typed expression over one
+(`x.no_such_member`, `x[0]`, `*x`), which must be refused. Pointer
+variables join the name checks. Storage truth covers registers: in the
+innermost frame, a value read from a general register has the bytes the
+simulated register holds. Marks: `ExpectationHeld`, `CastEvaluated`,
+`IllTypedRefused`, `RegisterTrue`. Sabotage: `SkewSmallStackWords` fails
+expectations, `FlickeringStackWords` fails casts, and a new
+`SkewSmallRegisters` (reads of small register values one greater, writes of
+what it reported taking it back) fails register truth. No kernel lie makes
+an ill-typed expression evaluate, so that check has only its mark. Floats
+and bit-fields stay out: the simulated CPU has no SSE, and `data` keeps to
+the common shapes. Not built: narrowing the breakpoint-conditions oracle
+with drawn conditions it can compute.
 
 ### 5.7 Boundary and what is not used
 

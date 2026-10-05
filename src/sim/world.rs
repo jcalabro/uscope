@@ -95,6 +95,11 @@ pub enum Sabotage {
     /// Ptrace reads of the same small numbers report every other one one
     /// greater, so two reads of a value that has not changed disagree.
     FlickeringStackWords,
+    /// `PTRACE_GETREGS` reports general registers other than the stack and
+    /// frame pointers one greater when they hold small numbers other than
+    /// zero, and `PTRACE_SETREGS` takes back what it reported, so the
+    /// program runs on unchanged.
+    SkewSmallRegisters,
     /// Ptrace writes to the debug registers of threads other than a
     /// process's first go to a copy that reads them back, leaving the
     /// thread's own slots as they were.
@@ -1011,6 +1016,11 @@ fn script(
             .markers
             .iter()
             .map(|marker| (marker.line, marker.text.clone()))
+            .collect(),
+        expectations: program
+            .markers
+            .iter()
+            .filter_map(|marker| Some((marker.line, marker.expect.clone()?)))
             .collect(),
         marker_rows: marker_rows(program, variant),
         globals: variant.globals.clone(),

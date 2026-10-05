@@ -40,13 +40,49 @@ impl Kernel {
 
     /// `PTRACE_GETREGS`.
     pub fn get_registers(&self, tid: Tid) -> Result<Registers, Errno> {
-        Ok(self.stopped(tid)?.registers)
+        let registers = self.stopped(tid)?.registers;
+        #[cfg(test)]
+        let registers = self.reported(registers);
+        Ok(registers)
     }
 
     /// `PTRACE_SETREGS`.
     pub fn set_registers(&mut self, tid: Tid, registers: Registers) -> Result<(), Errno> {
+        #[cfg(test)]
+        let registers = {
+            // A value the sabotage reported writes back what the register
+            // held, so the program runs on unchanged.
+            let held = self.stopped(tid)?.registers;
+            let reported = self.reported(held);
+            let mut registers = registers;
+            for (index, value) in registers.general.iter_mut().enumerate() {
+                if *value == reported.general[index] {
+                    *value = held.general[index];
+                }
+            }
+            registers
+        };
         self.stopped_mut(tid)?.registers = registers;
         Ok(())
+    }
+
+    /// Registers as the kernel reports them: under
+    /// [`Sabotage::SkewSmallRegisters`](super::super::world::Sabotage),
+    /// general registers other than the stack and frame pointers that hold
+    /// small numbers other than zero read one greater.
+    #[cfg(test)]
+    fn reported(&self, mut registers: Registers) -> Registers {
+        if self.sabotage == Some(super::super::world::Sabotage::SkewSmallRegisters) {
+            for (index, value) in registers.general.iter_mut().enumerate() {
+                if index != crate::sim::cpu::RSP
+                    && index != crate::sim::cpu::RBP
+                    && (1..0x1000).contains(value)
+                {
+                    *value += 1;
+                }
+            }
+        }
+        registers
     }
 
     /// `PTRACE_PEEKUSER` of a debug register (K-DR-3, K-DR-4).
@@ -144,7 +180,10 @@ impl Kernel {
     /// `PTRACE_GETREGS`, with `orig_rax`.
     pub fn get_registers_and_call(&self, tid: Tid) -> Result<(Registers, u64), Errno> {
         let thread = self.stopped(tid)?;
-        Ok((thread.registers, thread.orig_rax))
+        let registers = thread.registers;
+        #[cfg(test)]
+        let registers = self.reported(registers);
+        Ok((registers, thread.orig_rax))
     }
 
     /// `PTRACE_GETEVENTMSG`: the message of the latest event stop, or zero.
