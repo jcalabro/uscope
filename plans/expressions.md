@@ -270,7 +270,10 @@ by side.
   storage (`locate`), follows a planned step with run-time index values
   (`apply`), and materializes (`materialize`); `debug_info::inspect_path`
   folds over them for today's paths. The type-name index moves to P3, where
-  casts first need it). Split the provider into
+  casts first need it). Static array bounds are checked from types before
+  any storage is read. Accepted from review: `apply` starts its own
+  frame-base cache, so resolving an implicit pointer may evaluate a frame
+  base a second time and charge the budget for it. Split the provider into
   `locate`/`step`/`materialize`/`type_named`; today's path inspection folds
   over them. The existing suites are the safety net.
 - **P3 Evaluator at a stop.** Category, binder, IR, interpreter, test world;

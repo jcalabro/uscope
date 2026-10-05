@@ -129,6 +129,14 @@ mod variables;
 
 pub(in crate::debug_info) use variables::PathStep;
 
+/// Checks an array index step's index values against its static bounds.
+pub(in crate::debug_info) fn check_step_indices(
+    step: &PathStep,
+    indices: &[i128],
+) -> crate::Result<()> {
+    variables::array_byte_offset(step, indices).map(drop)
+}
+
 #[cfg(feature = "fuzzing")]
 pub(super) fn fuzz_expression(data: &[u8]) {
     variables::fuzz_expression(data);

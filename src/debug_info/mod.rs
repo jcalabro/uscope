@@ -129,6 +129,15 @@ impl PlannedStep {
     pub const fn transitions(&self) -> usize {
         self.steps.len()
     }
+
+    /// Checks index values against an array's static bounds, which needs no
+    /// program state, so that a bad index is an error before any storage is
+    /// read.
+    pub fn check_indices(&self, indices: &[i128]) -> Result<()> {
+        self.steps
+            .iter()
+            .try_for_each(|step| dwarf::check_step_indices(step, indices))
+    }
 }
 
 pub struct DebugInfo {
@@ -390,6 +399,9 @@ pub fn inspect_path(
             budget,
         ));
     }
+    for (plan, indices) in &planned {
+        plan.check_indices(indices)?;
+    }
     let mut located = match info.locate(object, address, runtime, budget)? {
         Ok(located) => located,
         Err(state) => return Ok(inspected(terminal_info, state, budget)),
@@ -456,4 +468,55 @@ pub(crate) fn load_module_bytes(
     id: crate::ModuleImageId,
 ) -> Result<DebugInfo> {
     dwarf::load_bytes(path, data, id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{PlannedStep, dwarf::PathStep};
+    use crate::model::ArrayDimension;
+    use crate::{Error, TypeId};
+
+    #[test]
+    fn array_indices_are_checked_without_program_state() {
+        let step = PlannedStep {
+            steps: vec![PathStep::ArrayIndex {
+                dimensions: Arc::from([
+                    ArrayDimension {
+                        lower_bound: 0,
+                        count: 3,
+                    },
+                    ArrayDimension {
+                        lower_bound: 1,
+                        count: 2,
+                    },
+                ]),
+                element_size: 4,
+            }],
+            consumed: 2,
+            result: Some(TypeId::new(0)),
+        };
+        assert!(step.check_indices(&[2, 2]).is_ok());
+        assert!(matches!(
+            step.check_indices(&[3, 1]),
+            Err(Error::ValueIndexOutOfBounds {
+                index: 3,
+                lower_bound: 0,
+                count: 3,
+            })
+        ));
+        assert!(matches!(
+            step.check_indices(&[0, 0]),
+            Err(Error::ValueIndexOutOfBounds {
+                index: 0,
+                lower_bound: 1,
+                ..
+            })
+        ));
+        assert!(matches!(
+            step.check_indices(&[0]),
+            Err(Error::InvalidValueExpression(_))
+        ));
+    }
 }
