@@ -202,3 +202,126 @@ fn console_commands_print_what_the_cli_prints_at_the_same_stop() {
         );
     }
 }
+
+/// Stops `command-names` where every local is set, and returns the stop
+/// and its innermost frame.
+fn stopped_in_names(dap: &mut Dap, profile: Profile) -> (crate::dap::Stopped, Value) {
+    let path = source("c/command-names.c");
+    let started = dap.launch(
+        profile,
+        &fixture("command-names"),
+        json!({}),
+        &Configuration {
+            sources: vec![(path.clone(), vec![line_of(&path, "volatile int sink")])],
+            ..Configuration::default()
+        },
+    );
+    let stop = dap.stopped(started.mark);
+    let frame =
+        dap.request("stackTrace", json!({"threadId": stop.thread, "levels": 1}))["stackFrames"][0]
+            .clone();
+    (stop, frame)
+}
+
+#[test]
+fn variables_named_like_commands_evaluate_in_the_console() {
+    let mut dap = Dap::start("console names");
+    let (_, frame) = stopped_in_names(&mut dap, Profile::VsCode);
+    let id = &frame["id"];
+    // A name the frame knows is the variable, even where a command or its
+    // alias has the same name.
+    for (line, value) in [
+        ("x", "20"),
+        ("n", "10"),
+        ("list", "5"),
+        ("p", "4"),
+        ("x + 1", "21"),
+        ("list * p", "20"),
+        ("p/x", "0"),
+        ("where->y", "2"),
+    ] {
+        assert_eq!(repl(&mut dap, id, line), value, "{line}");
+    }
+    let pointer = dap.request(
+        "evaluate",
+        json!({"expression": "where", "frameId": id, "context": "repl"}),
+    );
+    assert_ne!(pointer["variablesReference"], 0, "{pointer}");
+    // A command the frame has no variable for is still the command, and a
+    // line that is no expression is always one.
+    assert!(repl(&mut dap, id, "bt").starts_with("#0 "));
+    assert!(repl(&mut dap, id, "frame").contains("names"));
+    assert_eq!(repl(&mut dap, id, "p/x list"), "(int) list = 0x5");
+    assert_eq!(repl(&mut dap, id, "print/x x"), "(int) x = 0x14");
+    assert_eq!(repl(&mut dap, id, "print x"), "(int) x = 20");
+    assert_eq!(
+        dap.request_error(
+            "evaluate",
+            json!({"expression": "next", "frameId": id, "context": "repl"})
+        ),
+        "`next` is not available in the debug console; use the debugger's controls"
+    );
+    // An expression's mistake points at the text it is about.
+    let message = dap.request_error(
+        "evaluate",
+        json!({"expression": "x + missing", "frameId": id, "context": "repl"}),
+    );
+    assert!(message.contains("missing"), "{message}");
+    assert!(message.contains("^^^^^^^"), "{message}");
+    dap.finish();
+}
+
+#[test]
+fn assignments_in_the_console_change_what_the_variables_view_shows() {
+    let mut dap = Dap::start("console assignments");
+    let (_, frame) = stopped_in_names(&mut dap, Profile::VsCode);
+    let id = frame["id"].clone();
+    let locals = |dap: &mut Dap| {
+        let scopes = dap.request("scopes", json!({"frameId": id}))["scopes"].clone();
+        let reference = scopes
+            .as_array()
+            .expect("scopes")
+            .iter()
+            .find(|scope| scope["name"] == "Locals")
+            .expect("locals")["variablesReference"]
+            .clone();
+        dap.request("variables", json!({"variablesReference": reference}))["variables"]
+            .as_array()
+            .expect("variables")
+            .iter()
+            .map(|variable| {
+                (
+                    variable["name"].as_str().expect("name").to_owned(),
+                    variable["value"].as_str().expect("value").to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    assert_eq!(locals(&mut dap)["x"], "20");
+
+    let mark = dap.mark();
+    assert_eq!(repl(&mut dap, &id, "x = 7"), "7");
+    assert_eq!(
+        dap.event(mark, "invalidated", |_| true),
+        json!({"areas": ["variables"]})
+    );
+    assert_eq!(locals(&mut dap)["x"], "7");
+
+    let mark = dap.mark();
+    assert_eq!(repl(&mut dap, &id, "set var list = 9"), "(int) list = 9");
+    dap.event(mark, "invalidated", |_| true);
+    assert_eq!(locals(&mut dap)["list"], "9");
+    let hover = dap.request(
+        "evaluate",
+        json!({"expression": "list + x", "frameId": id, "context": "hover"}),
+    );
+    assert_eq!(hover["result"], "16");
+
+    // Reading changes nothing, so it invalidates nothing.
+    let mark = dap.mark();
+    assert_eq!(repl(&mut dap, &id, "x"), "7");
+    assert_eq!(repl(&mut dap, &id, "print list"), "(int) list = 9");
+    dap.request("threads", Value::Null);
+    assert!(dap.events(mark, "invalidated").is_empty());
+    dap.finish();
+}

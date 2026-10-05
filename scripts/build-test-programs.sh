@@ -619,6 +619,8 @@ build_fixture clang "$c_fixtures_dir/variables.c" "$output_dir/variables-clang-o
     -O2 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/variables.c" "$output_dir/variables-gcc-nopie" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fno-pie -no-pie
+build_fixture gcc "$c_fixtures_dir/command-names.c" "$output_dir/command-names" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/records.c" "$output_dir/records-c-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/records.c" "$output_dir/records-c-clang-o0" \

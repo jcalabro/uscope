@@ -650,6 +650,10 @@ impl Session {
         }
     }
 
+    /// Evaluates an expression for a watch, a hover, the clipboard, or the
+    /// debug console. A console line is a command when it starts with a
+    /// command's name, unless it is an expression whose first name the frame
+    /// knows, so variables such as `x`, `n`, or `list` read as themselves.
     pub(super) async fn evaluate(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<EvaluateArguments>(arguments, "evaluate arguments")?;
         let context = match arguments.frame_id {
@@ -661,12 +665,21 @@ impl Session {
             }),
         };
         let expression = arguments.expression.trim();
-        if arguments.context.as_deref() == Some("repl")
-            && let Some(output) = self.console_command(expression, context).await?
-        {
-            return Ok(json!({"result": output, "variablesReference": 0}));
-        }
-        let context = context.ok_or_else(ErrorBody::not_stopped)?;
+        let repl = arguments.context.as_deref() == Some("repl");
+        let command = repl
+            .then(|| crate::cli::commands::line_command(expression))
+            .flatten();
+        let parsed = match (uscope::Expression::parse(expression), command) {
+            (Ok(parsed), _) => parsed,
+            (Err(_), Some(_)) => return self.console_line(expression, context).await,
+            (Err(failure), None) => return Err(expression_failure(expression, &failure, repl)),
+        };
+        let Some(context) = context else {
+            if command.is_some() {
+                return self.console_line(expression, None).await;
+            }
+            return Err(ErrorBody::not_stopped());
+        };
         let options = Options {
             hex: arguments
                 .format
@@ -675,24 +688,38 @@ impl Session {
                 .unwrap_or(false),
             ..self.value_options()
         };
-        let computed = uscope::Expression::parse(expression)
-            .map_err(|failure| error(uscope::Error::Expression(failure)))?;
         let handle = self.target_handle()?;
-        let mode = if arguments.context.as_deref() == Some("repl") {
+        let mode = if repl {
             uscope::EvaluationMode::Assign
         } else {
             uscope::EvaluationMode::Read
         };
-        let evaluation = handle
+        let evaluation = match handle
             .at(context)
-            .evaluate_with(&computed, mode, uscope::InspectionLimits::default())
+            .evaluate_with(&parsed, mode, uscope::InspectionLimits::default())
             .await
-            .map_err(error)?;
+        {
+            Ok(evaluation) => evaluation,
+            // The frame does not know the command's name, so it is the command.
+            Err(uscope::Error::Expression(failure))
+                if command.is_some_and(|(_, name)| names_only(&failure, name)) =>
+            {
+                return self.console_line(expression, Some(context)).await;
+            }
+            Err(uscope::Error::Expression(failure)) => {
+                return Err(expression_failure(expression, &failure, repl));
+            }
+            Err(other) => return Err(error(other)),
+        };
+        if parsed.assignment_target().is_some() {
+            self.forget_reads();
+            self.invalidate_values().await;
+        }
         let mut body = match evaluation {
             uscope::Evaluation::Value { value, .. } => self.present(
                 Item {
                     name: expression,
-                    path: Some(computed),
+                    path: Some(parsed),
                     type_info: value.type_info.as_ref(),
                     state: &value.state,
                 },
@@ -705,7 +732,7 @@ impl Session {
                     .references
                     .variables(Variables::Range {
                         context,
-                        expression: computed,
+                        expression: parsed,
                     })
                     .map_err(exhausted)?;
                 let mut body = Map::new();
@@ -728,23 +755,32 @@ impl Session {
         Ok(Value::Object(body))
     }
 
-    /// Runs a console command in the frame the client focuses, or returns
-    /// `None` when the line is no command.
-    async fn console_command(
-        &self,
+    /// Runs a console command in the frame the client focuses, as the
+    /// evaluation of its line.
+    async fn console_line(
+        &mut self,
         line: &str,
         context: Option<StopContext>,
-    ) -> Result<Option<String>, ErrorBody> {
+    ) -> Result<Value, ErrorBody> {
         let console = self.console()?;
         if let Some(context) = context {
             let handle = self.target_handle()?;
             handle.select_thread(context.thread).await.map_err(error)?;
             handle.select_frame(context.frame).await.map_err(error)?;
         }
-        console
+        let output = console
             .console(line)
             .await
-            .map_err(|error| ErrorBody::new(format!("{error:#}")))
+            .map_err(|error| ErrorBody::new(format!("{error:#}")))?
+            .ok_or_else(|| ErrorBody::new(format!("'{line}' is not a command")))?;
+        // `set` changes values the client shows.
+        if crate::cli::commands::line_command(line)
+            .is_some_and(|(spec, _)| spec.command == crate::cli::commands::Command::Set)
+        {
+            self.forget_reads();
+            self.invalidate_values().await;
+        }
+        Ok(json!({"result": output, "variablesReference": 0}))
     }
 
     pub(super) fn exception_info(&self, arguments: Value) -> Result<Value, ErrorBody> {
@@ -970,6 +1006,24 @@ impl Session {
             })
             .collect::<Vec<_>>();
         Ok(json!({"targets": targets}))
+    }
+}
+
+/// Whether an evaluation failed only because the frame does not know the
+/// name that starts the text.
+fn names_only(failure: &uscope::ExpressionError, name: &str) -> bool {
+    failure.kind == uscope::ExpressionErrorKind::UnknownName
+        && failure.span.start == 0
+        && failure.span.end as usize == name.len()
+}
+
+/// An expression's mistake: in the console, pointing at the text it is
+/// about, as the terminal debugger prints it; elsewhere, on one line.
+fn expression_failure(text: &str, failure: &uscope::ExpressionError, console: bool) -> ErrorBody {
+    if console {
+        ErrorBody::new(crate::cli::format::expression_error(text, failure))
+    } else {
+        error(uscope::Error::Expression(failure.clone()))
     }
 }
 

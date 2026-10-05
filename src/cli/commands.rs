@@ -399,6 +399,14 @@ pub fn command_named(name: &str) -> Option<&'static CommandSpec> {
         .find(|command| command.name == name || command.aliases.contains(&name))
 }
 
+/// The command a line starts with, and the name it is written with, which
+/// excludes a format such as the `/x` of `p/x`.
+pub fn line_command(line: &str) -> Option<(&'static CommandSpec, &str)> {
+    let written = line.split_whitespace().next()?;
+    let name = written.split_once('/').map_or(written, |(name, _)| name);
+    command_named(name).map(|spec| (spec, name))
+}
+
 impl Cli {
     /// Parses and executes one non-empty command line.
     pub(super) async fn execute(&self, line: &str) -> Result<Control> {
@@ -501,7 +509,7 @@ impl Cli {
     /// refused, since the client owns those.
     pub async fn console(&self, line: &str) -> Result<Option<String>> {
         let line = line.trim();
-        let Some(spec) = line.split_whitespace().next().and_then(command_named) else {
+        let Some((spec, _)) = line_command(line) else {
             return Ok(None);
         };
         if matches!(
