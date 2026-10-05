@@ -445,6 +445,7 @@ impl Session {
             "completions" => self.completions(arguments).await?,
             "setDataBreakpoints" => self.set_data_breakpoints(arguments).await?,
             "disassemble" => self.disassemble(arguments).await?,
+            "locations" => self.locations(arguments)?,
             "uscope/setValueFormat" => self.set_value_format(arguments).await?,
             "source" => {
                 return Err(ErrorBody::new(
@@ -2017,6 +2018,27 @@ impl Session {
         self.variables
             .insert((context.thread, context.frame), Arc::clone(&snapshot));
         Ok(snapshot)
+    }
+
+    /// The image of a module the client was told is loaded.
+    pub(super) fn loaded_image(&self, module: ModuleId) -> Option<Arc<ModuleImage>> {
+        self.target.as_ref()?.images.get(&module).cloned()
+    }
+
+    /// The code of the modules the client was told are loaded.
+    pub(super) fn code(&self) -> super::values::Code {
+        let Some(target) = &self.target else {
+            return super::values::Code::default();
+        };
+        super::values::Code::new(
+            self.modules
+                .values()
+                .filter_map(|record| {
+                    let image = target.images.get(&record.module.id)?;
+                    Some((record.module.load_bias, Arc::clone(image)))
+                })
+                .collect(),
+        )
     }
 
     /// The assembly syntax the configuration chose.

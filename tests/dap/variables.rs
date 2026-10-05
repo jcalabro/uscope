@@ -636,6 +636,56 @@ fn statics_that_files_share_a_name_with_evaluate_to_their_own_files_value() {
 }
 
 #[test]
+fn function_pointers_link_to_the_function_they_point_to() {
+    let mut dap = Dap::start("value locations");
+    let stop = stopped_at(
+        &mut dap,
+        "variables-gcc-o0",
+        "c/variables.c",
+        "return **pointer_pointer",
+    );
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let scopes = scopes(&mut dap, &frame);
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+    let function = named(&locals, "function_pointer");
+    let reference = function["valueLocationReference"].clone();
+    assert!(reference.as_i64().is_some_and(|id| id > 0), "{function}");
+    let location = dap.request("locations", json!({"locationReference": reference}));
+    let path = source("c/variables.c");
+    assert_eq!(location["source"]["path"], json!(path));
+    assert_eq!(
+        location["line"],
+        line_of(&path, "static int pointer_identity(int value)")
+    );
+    // Evaluating the pointer links it too; data pointers and null link
+    // nowhere.
+    let evaluated = dap.request(
+        "evaluate",
+        json!({"expression": "function_pointer", "frameId": frame["id"], "context": "watch"}),
+    );
+    let again = dap.request(
+        "locations",
+        json!({"locationReference": evaluated["valueLocationReference"]}),
+    );
+    assert_eq!(again, location);
+    for name in ["pointer", "null_pointer", "invalid_pointer", "void_pointer"] {
+        assert!(
+            named(&locals, name).get("valueLocationReference").is_none(),
+            "{name}"
+        );
+    }
+    let message = dap.request_error("locations", json!({"locationReference": 999_999}));
+    assert!(message.contains("stale"), "{message}");
+    // References end with the stop.
+    let resumed = dap.send("next", json!({"threadId": stop.thread}));
+    dap.success(resumed);
+    dap.stopped(resumed.mark);
+    let message = dap.request_error("locations", json!({"locationReference": reference}));
+    assert!(message.contains("stale"), "{message}");
+    dap.finish();
+}
+
+#[test]
 fn hexadecimal_is_a_session_default_each_request_may_override() {
     let mut dap = Dap::start("hexadecimal");
     let stop = stopped_at(
@@ -741,6 +791,46 @@ fn variables_filtered_by_kind_return_only_children_of_that_kind() {
         filtered(&mut dap, &scopes["Locals"]["variablesReference"], "indexed"),
         0
     );
+    dap.finish();
+}
+
+#[test]
+fn variables_lead_to_where_they_are_declared() {
+    let path = source("c/command-names.c");
+    let mut dap = Dap::start("declarations");
+    let stop = stopped_at(
+        &mut dap,
+        "command-names",
+        "c/command-names.c",
+        "volatile int sink",
+    );
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let scopes = scopes(&mut dap, &frame);
+    let mut rows = variables(&mut dap, &scopes["Arguments"]["variablesReference"]);
+    rows.extend(variables(&mut dap, &scopes["Locals"]["variablesReference"]));
+    rows.extend(variables(
+        &mut dap,
+        &scopes["Statics"]["variablesReference"],
+    ));
+    for (name, marker) in [
+        ("n", "static int names(int n)"),
+        ("x", "int x = n * 2"),
+        ("where", "struct point *where"),
+        ("counter", "static int counter"),
+    ] {
+        let row = named(&rows, name);
+        let location = dap.request(
+            "locations",
+            json!({"locationReference": row["declarationLocationReference"]}),
+        );
+        assert_eq!(location["source"]["path"], json!(path), "{name}");
+        assert_eq!(location["line"], line_of(&path, marker), "{name}");
+    }
+    // A member's declaration is its type's, which is not where the value
+    // lives, so it has none.
+    let origin = named(&rows, "origin")["variablesReference"].clone();
+    let members = variables(&mut dap, &origin);
+    assert!(members[0].get("declarationLocationReference").is_none());
     dap.finish();
 }
 

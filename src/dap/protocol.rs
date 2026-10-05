@@ -510,6 +510,12 @@ pub struct SetValueFormatArguments {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+pub struct LocationsArguments {
+    pub location_reference: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct ExceptionInfoArguments {
     pub thread_id: i64,
 }
