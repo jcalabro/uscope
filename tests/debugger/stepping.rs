@@ -746,7 +746,7 @@ async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
 #[tokio::test]
 async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden/threads/threads-clang-O0");
+        .join("build/golden/threads/threads-clang-O0");
     let source = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/golden/threads/threads.c"
@@ -2206,7 +2206,7 @@ async fn step_over_from_the_entry_point(fixture: &str) {
 #[tokio::test]
 async fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden/straight/straight-clang-O2");
+        .join("build/golden/straight/straight-clang-O2");
     let mut scenario = Scenario::new("instruction-step-ambiguous-inline", program);
     scenario.add_breakpoint("rt_exit_group").await;
     scenario.add_breakpoint("rt_syscall3").await;

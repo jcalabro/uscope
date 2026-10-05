@@ -57,19 +57,21 @@ just
 Useful focused commands:
 
 ```sh
-just build-test-programs           # build native fixtures
+just build-test-programs           # build native fixtures and golden programs
 just test                          # run the tests
 just stress                        # run the tests ten times under CPU load
 cargo nextest run --test debugger  # run real debugger scenarios
 just run build/test-programs/basic
 just sim 60                        # simulate random sessions for 60 seconds
 just sim-seed SEED                 # replay one simulated session
-just golden-build NAME             # rebuild a simulator golden program
+just golden-record NAME            # re-record a golden program's manifest
 ```
 
 The deterministic simulator (`src/sim`, `plans/simulator.md`) runs the
 real controller against a simulated kernel and CPU. Its golden programs in
-`tests/golden` are checked in as source and binaries; rebuild them only on
-purpose, in a commit of their own.
+`tests/golden` are checked in as sources and manifests. `just
+build-test-programs` builds them into `build/golden` with the pinned
+toolchain and fails unless every binary matches the hash its manifest
+records. Re-record a manifest only on purpose, in a commit of its own.
 
 Before committing, run formatting, aggressive Clippy, nextest, and doc tests via `just`. Keep comments concise and useful, document public APIs, group related Rust code with sensible whitespace, and avoid unrelated refactors.

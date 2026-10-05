@@ -2,8 +2,9 @@
 //!
 //! Each program in `tests/golden` has a manifest, written by
 //! `scripts/golden.sh`, naming its compiled variants and what each run of
-//! it prints and returns; facts about each variant from GNU binutils; and
-//! markers in its source, conditions its variables satisfy at their lines.
+//! it prints and returns, and markers in its source, conditions its
+//! variables satisfy at their lines. `just build-test-programs` builds the
+//! variants into `build/golden`, with facts about each from GNU binutils.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,10 +17,18 @@ use super::loader::Image;
 use super::markers::{self, Marker};
 use crate::debug_info::{self, DebugInfo};
 
-/// Where the golden programs live, in the source tree this build came from.
+/// Where the golden programs' sources and manifests live, in the source
+/// tree this build came from.
 #[must_use]
 pub fn directory() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
+}
+
+/// Where `just build-test-programs` builds the golden programs' binaries and
+/// their facts.
+#[must_use]
+pub fn built() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("build/golden")
 }
 
 /// Where a golden program's sources and binaries are in simulated paths,
@@ -40,6 +49,8 @@ pub enum CorpusError {
     },
     #[error("{path}: {error}")]
     Load { path: PathBuf, error: String },
+    #[error("{path} is missing; build the golden programs with `just build-test-programs`")]
+    NotBuilt { path: PathBuf },
 }
 
 impl CorpusError {
@@ -75,7 +86,7 @@ pub struct Run {
 pub struct Variant {
     /// The binary's file name, such as `straight-gcc-O0`.
     pub name: String,
-    /// The binary in the source tree, which tests also run natively.
+    /// The binary as built, which tests also run natively.
     pub file: PathBuf,
     /// The binary's path inside the simulation.
     pub path: Arc<str>,
@@ -126,9 +137,18 @@ impl Corpus {
     /// Loads every program under [`directory`], in name order.
     pub fn load() -> Result<Self, CorpusError> {
         let root = directory();
+        let built = built();
         let io = |path: &Path| {
             let path = path.to_owned();
             move |error| CorpusError::Io { path, error }
+        };
+        let read_built = |path: &Path| match std::fs::read(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(CorpusError::NotBuilt {
+                    path: path.to_owned(),
+                })
+            }
+            result => result.map_err(io(path)),
         };
         let mut manifests = std::fs::read_dir(&root)
             .map_err(io(&root))?
@@ -146,19 +166,20 @@ impl Corpus {
                     path: path.clone(),
                     error,
                 })?;
-            let facts_path = path.with_file_name("facts.json");
-            let facts_text = std::fs::read_to_string(&facts_path).map_err(io(&facts_path))?;
+            let facts_path = built.join(&manifest.program).join("facts.json");
             let facts: ProgramFacts =
-                serde_json::from_str(&facts_text).map_err(|error| CorpusError::Manifest {
-                    path: facts_path.clone(),
-                    error,
+                serde_json::from_slice(&read_built(&facts_path)?).map_err(|error| {
+                    CorpusError::Manifest {
+                        path: facts_path.clone(),
+                        error,
+                    }
                 })?;
             let mut facts = facts.variants.into_iter();
             let mut variants = Vec::new();
             for entry in &manifest.variants {
                 let name = format!("{}-{}", manifest.program, entry.name);
-                let file = root.join(&manifest.program).join(&name);
-                let data: Arc<[u8]> = std::fs::read(&file).map_err(io(&file))?.into();
+                let file = built.join(&manifest.program).join(&name);
+                let data: Arc<[u8]> = read_built(&file)?.into();
                 let simulated = format!("{SIMULATED_ROOT}/{}/{name}", manifest.program);
                 let load = |error: String| CorpusError::Load {
                     path: file.clone(),

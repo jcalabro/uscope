@@ -8,9 +8,8 @@ max_test_threads := "16"
 # Lints the Rust code and runs the complete test suite.
 default: check
 
-# Checks formatting, runs Clippy, checks the golden programs, and runs the
-# complete test suite.
-check: lint golden-check test
+# Checks formatting, runs Clippy, and runs the complete test suite.
+check: lint test
 
 # Enters the Nix development shell.
 dev *ARGS="":
@@ -20,9 +19,15 @@ dev *ARGS="":
 install-vscode-symlink:
     ln -s "$PWD/editors/vscode" ~/.vscode/extensions/uscope.uscope-0.1.0
 
-# Builds the native test fixtures without running Rust tests.
-build-test-programs:
+# Builds the native test fixtures and the simulator's golden programs
+# without running Rust tests.
+build-test-programs: golden
     ./scripts/build-test-programs.sh
+
+# Builds the simulator's golden programs into build/golden, failing unless
+# they match the hashes and behavior their manifests record.
+golden:
+    ./scripts/golden.sh build
 
 # Builds the native test fixtures and uscope.
 build: build-test-programs
@@ -67,26 +72,20 @@ stress COUNT="10" *ARGS: build-test-programs
     for (( i = 0; i < cpus / 2; i++ )); do (while :; do :; done) & burners+=($!); done
     setarch "$(uname -m)" cargo nextest run --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
 
-# Compiles one golden program's variants, used by the simulator, and
-# rewrites its manifest and the facts binutils give about each binary.
-# Commit rebuilt binaries on their own.
-golden-build NAME:
-    ./scripts/golden.sh build "$1"
-
-# Fails unless every golden program's manifest matches its sources,
-# binaries, and output, and its facts match its binaries.
-golden-check:
-    ./scripts/golden.sh check
+# Rebuilds one golden program and rewrites its manifest, after a deliberate
+# change to its sources or the toolchain. Commit a new manifest on its own.
+golden-record NAME:
+    ./scripts/golden.sh record "$1"
 
 # Simulates random sessions on every core for SECONDS, inside a memory cap,
 # and reports each kind of failure with its smallest seed.
-sim SECONDS="60":
+sim SECONDS="60": golden
     cargo build --profile sim --features sim --bin uscope-sim
     ./scripts/contained.sh ./target/sim/uscope-sim sweep --seconds "$1"
 
 # Replays one simulated session and prints its trace. Pass `--at STEP` to
 # stop there and print the state, or the `--fingerprint` a report gave.
-sim-seed SEED *ARGS:
+sim-seed SEED *ARGS: golden
     cargo build --profile sim --features sim --bin uscope-sim
     ./target/sim/uscope-sim replay "$1" "${@:2}"
 
