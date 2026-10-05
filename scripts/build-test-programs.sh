@@ -118,6 +118,24 @@ build_c_fixture_directory() {
         "${command[@]}"
 }
 
+build_cpp_fixture_directory() {
+    local compiler="$1"
+    local source_dir="$2"
+    local output="$3"
+    shift 3
+    local -a sources=()
+    mapfile -d '' sources < <(
+        find "$source_dir" -maxdepth 1 -type f -name '*.cpp' -print0 | sort -z
+    )
+    local -a command=(
+        "$compiler" -std=c++20 -Wall -Wextra -Werror "$@" "${sources[@]}" -o "$output"
+    )
+    read_dash_version "$compiler"
+    run_cached_build "$source_dir" "$output" \
+        "compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=${compiler}" \
+        "${command[@]}"
+}
+
 build_cpp_fixture() {
     local compiler="$1"
     local source="$2"
@@ -730,6 +748,10 @@ build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-c
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_cpp_fixture clang++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_cpp_fixture_directory g++ "$cpp_fixtures_dir/expressions" \
+    "$output_dir/expressions-cpp-gcc-o0" -O0 -g3 -gdwarf-5 -fPIE -pie
+build_cpp_fixture_directory clang++ "$cpp_fixtures_dir/expressions" \
+    "$output_dir/expressions-cpp-clang-o2" -O2 -g3 -gdwarf-5 -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/records.cpp" "$output_dir/records-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture clang++ "$cpp_fixtures_dir/records.cpp" "$output_dir/records-cpp-clang-o0" \
@@ -782,6 +804,14 @@ build_rust_fixture "$rust_fixtures_dir/globals.rs" "$output_dir/globals-rust-o0"
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/globals.rs" "$output_dir/globals-rust-o2" \
     -C opt-level=2 -C force-frame-pointers=no
+build_rust_fixture "$rust_fixtures_dir/expressions.rs" "$output_dir/expressions-rust-o0" \
+    -C opt-level=0 -C force-frame-pointers=yes
+build_rust_fixture "$rust_fixtures_dir/expressions.rs" "$output_dir/expressions-rust-o2" \
+    -C opt-level=2 -C force-frame-pointers=no
+build_go_fixture "$go_fixtures_dir/expressions" "$output_dir/expressions-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/expressions" "$output_dir/expressions-go-o2" \
+    -buildmode=pie
 build_go_fixture "$go_fixtures_dir/variables" "$output_dir/variables-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/records" "$output_dir/records-go-o0" \
@@ -801,6 +831,10 @@ build_go_fixture "$go_fixtures_dir/enums" "$output_dir/enums-go-o2" \
 require_dwarf_operation "$output_dir/variables-go-o0" 'DW_AT_language.*Go'
 require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
 require_dwarf_operation "$output_dir/enums-go-o0" 'DW_TAG_constant'
+build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-zig-o2" \
+    -O ReleaseFast -fPIE -fomit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o2" \
