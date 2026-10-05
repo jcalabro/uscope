@@ -606,13 +606,32 @@ pub(super) fn materialize_constant(
         // A fixed data form supplies zero high bits; the target type then
         // interprets the materialized byte pattern.
         ConstantValue::Unsigned(value) | ConstantValue::Fixed(value) => {
-            integer_bytes(*value, size, target)
+            integer_bytes(narrowed_constant(*value, size), size, target)
         }
         ConstantValue::Signed(value) => signed_integer_bytes(*value, size, target),
         ConstantValue::Bytes(bytes) if bytes.len() == size => Ok(Arc::clone(bytes)),
         ConstantValue::Bytes(_) => Err(EvaluateError::Malformed(
             "constant value size does not match its scalar type".into(),
         )),
+    }
+}
+
+/// The pattern a wider constant stands for: Clang writes a narrow type's
+/// constant with its sign bit set as the 64-bit sign extension of its
+/// pattern, in an unsigned form. Any other value is kept, to be refused if it
+/// does not fit.
+fn narrowed_constant(value: u128, size: usize) -> u128 {
+    let bits = size * 8;
+    if size == 0 || bits >= 64 {
+        return value;
+    }
+    let pattern = value & ((1_u128 << bits) - 1);
+    let negative = pattern >> (bits - 1) == 1;
+    let extended = pattern | (u128::from(u64::MAX) & !((1_u128 << bits) - 1));
+    if negative && value == extended {
+        pattern
+    } else {
+        value
     }
 }
 
