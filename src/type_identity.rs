@@ -15,17 +15,8 @@ use crate::{
     TypeNode, TypeReference,
 };
 
-/// Inline namespaces that producers older than DWARF 5's
-/// `DW_AT_export_symbols` cannot mark, and that names still spell.
-pub const INLINE_NAMESPACES: [&str; 7] = [
-    "__1",
-    "__Cr",
-    "__ndk1",
-    "__cxx11",
-    "__8",
-    "__debug",
-    "__cxx1998",
-];
+/// How a path spells a namespace without a name. Each unit's is its own.
+pub const ANONYMOUS_NAMESPACE: &str = "(anonymous namespace)";
 
 /// How deeply argument matching may nest before it gives up.
 const MAX_ARGUMENT_DEPTH: usize = 16;
@@ -79,14 +70,6 @@ impl<'a> TypeName<'a> {
             base: name,
             arguments: None,
         })
-    }
-
-    /// The path without the inline namespaces a name may spell.
-    fn significant_path(&self) -> impl Iterator<Item = &'a str> + '_ {
-        self.path
-            .iter()
-            .copied()
-            .filter(|segment| !INLINE_NAMESPACES.contains(segment))
     }
 }
 
@@ -173,7 +156,7 @@ fn is_identifier(text: &str) -> bool {
 /// A path segment: an identifier with any arguments, an anonymous
 /// namespace, or one of Rust's braced scopes such as `{impl#0}`.
 fn is_angle_segment(segment: &str) -> bool {
-    segment == "(anonymous namespace)"
+    segment == ANONYMOUS_NAMESPACE
         || segment.starts_with('{') && segment.ends_with('}')
         || split_arguments(segment, '<', '>', NameSyntax::Angle)
             .is_some_and(|(base, _)| is_identifier(base.trim_end()))
@@ -349,8 +332,10 @@ pub trait TypeLookup {
 }
 
 /// Whether `info` is a type `pattern` names. A pattern's path may omit
-/// outer segments, and with `exact` false its arguments may omit trailing
-/// ones, as C++ omits defaulted template arguments.
+/// outer segments and spell or omit the type's inline namespaces, and with
+/// `exact` false its arguments may omit trailing ones, as C++ omits
+/// defaulted template arguments. Identities keep inline namespaces' names
+/// but not their places, so a pattern may spell one anywhere in its path.
 pub fn names_type(
     pattern: &TypeName<'_>,
     syntax: NameSyntax,
@@ -372,7 +357,9 @@ pub fn names_type(
         return false;
     }
     let path = pattern
-        .significant_path()
+        .path
+        .iter()
+        .copied()
         .filter(|segment| {
             !identity
                 .inline_namespaces
@@ -581,7 +568,8 @@ impl TypeIndex {
 }
 
 /// A type's identity as one string: its identity when it has one, and
-/// otherwise its shape over its targets' keys.
+/// otherwise its shape over its targets' keys. A type in an anonymous
+/// namespace is its unit's own, so its key is its own too.
 fn canonical_key<'a>(
     index: usize,
     info: &impl Fn(usize) -> Option<&'a TypeInfo>,
@@ -601,6 +589,13 @@ fn canonical_key<'a>(
         |reference: TypeReference| canonical_key(reference.id.index(), info, memo, visiting);
     let key = if let Some(identity) = &type_info.identity {
         let mut key = format!("{:?}|", identity.language);
+        if identity
+            .path
+            .iter()
+            .any(|segment| segment.as_ref() == ANONYMOUS_NAMESPACE)
+        {
+            let _ = write!(key, "#{index}|");
+        }
         for segment in identity.path.iter() {
             let _ = write!(key, "{segment}::");
         }
@@ -748,6 +743,50 @@ mod tests {
         ] {
             assert_eq!(parts(name, syntax), (vec![], name, None), "{name}");
         }
+    }
+
+    /// One type defined in several units is one type, but each unit's
+    /// anonymous namespace is its own, so types in them are distinct
+    /// however alike they are spelled, and so are instances over them.
+    #[test]
+    fn types_in_anonymous_namespaces_are_distinct_in_each_unit() {
+        use crate::{ArgumentOrigin, TypeIdentity};
+
+        let image = ModuleImageId::new(0);
+        let reference = |index| TypeReference {
+            image,
+            id: TypeId::new(index),
+        };
+        let named = |index, scope: &str, base: &str, argument: Option<u32>| TypeInfo {
+            reference: reference(index),
+            name: base.into(),
+            byte_size: Some(4),
+            kind: TypeKind::Unspecified,
+            identity: Some(Arc::new(TypeIdentity {
+                language: SourceLanguage::Cpp,
+                path: [Arc::from(scope)].into(),
+                inline_namespaces: Arc::default(),
+                base: base.into(),
+                arguments: argument
+                    .map(|argument| TypeArgument::Type(reference(argument)))
+                    .into_iter()
+                    .collect(),
+                origin: ArgumentOrigin::Dwarf,
+                go: None,
+            })),
+        };
+        let types = [
+            named(0, "(anonymous namespace)", "Entry", None),
+            named(1, "(anonymous namespace)", "Entry", None),
+            named(2, "app", "Entry", None),
+            named(3, "app", "Entry", None),
+            named(4, "std", "vector", Some(0)),
+            named(5, "std", "vector", Some(1)),
+        ];
+        let index = TypeIndex::build(Some(image), types.len(), |index| types.get(index));
+        assert!(!index.same_type(reference(0), reference(1)));
+        assert!(index.same_type(reference(2), reference(3)));
+        assert!(!index.same_type(reference(4), reference(5)));
     }
 
     #[test]
