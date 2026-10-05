@@ -23,6 +23,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "expression-parse"
+path = "fuzz_targets/expression_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dwarf-expression"
 path = "fuzz_targets/dwarf_expression.rs"
 test = false

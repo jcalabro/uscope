@@ -1,0 +1,1 @@
+sizeof(int*) + len(s.items[1..4])

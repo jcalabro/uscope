@@ -68,6 +68,7 @@ rustc-demangle = "0.1"
 [dev-dependencies]
 expectrl = "0.9"
 jsonschema = { version = "0.58", default-features = false }
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 object = { version = "0.39", features = ["read", "write"] }
