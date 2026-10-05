@@ -31,7 +31,7 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
   - Memory reads and writes, and disassembly.
   - Modules and loaded sources.
 - **Signals.** Exception filters choose which signals stop the program (`fatal`, `interrupt`, `routine`, `other`), and `exceptionInfo` explains a stop. The `signals` setting overrides the policy of individual signals.
-- **Debug console.** Lines that are not expressions run as uscope commands, such as `info breakpoints`, `disassemble`, `x 0x7ffd1000 16`, or `handle SIGUSR1 nostop`. Commands that run the program are refused; use the client's controls.
+- **Debug console.** A line is an [expression](expressions.md) evaluated in the focused frame: `count * 2`, `p->items[i]`, `(u8)flags`, `$rip`, or an assignment such as `x = 5` or `total += 1`, after which the client reads its variables again. A line that starts with the name of a uscope command runs the command instead, such as `info breakpoints`, `print/x mask`, `whatis p`, `ptype struct node`, `disassemble`, `x 0x7ffd1000 16`, or `handle SIGUSR1 nostop`, unless the frame has a variable of that name: in a frame with a local `list`, the lines `list` and `list + 1` read the variable, while `print list` always evaluates and `list` alone lists source only where no variable is named `list`. A mistake in an expression is shown pointing at the text it is about. Commands that run the program are refused; use the client's controls.
 - **Session control.** `restart` relaunches the program and keeps breakpoints, `terminate` asks the program to exit, and `cancel` cancels slow requests.
 
 ## Configuration
