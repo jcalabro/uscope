@@ -71,14 +71,56 @@ impl Data {
 
 /// The protocol's name for an access kind. A `write` data breakpoint stops
 /// when the value changes, as clients present it ("Break on Value Change")
-/// and as gdb's and lldb's adapters arm it, so stores of an identical value
-/// have no name.
+/// and as gdb's and lldb's adapters arm it; its `store` mode stops at every
+/// store instead, even of the value already held.
 const fn access_name(access: WatchAccess) -> Option<&'static str> {
     match access {
         WatchAccess::Change => Some("write"),
         WatchAccess::Write => None,
         WatchAccess::Read => Some("read"),
         WatchAccess::ReadWrite => Some("readWrite"),
+    }
+}
+
+/// The modes a data breakpoint may have, as `initialize` reports them.
+pub fn modes() -> Value {
+    json!([
+        {
+            "mode": "change",
+            "label": "On Change",
+            "description": "Stop when a store changes the value",
+            "appliesTo": ["data"],
+        },
+        {
+            "mode": "store",
+            "label": "On Every Store",
+            "description": "Stop at every store, even of the value already held",
+            "appliesTo": ["data"],
+        },
+    ])
+}
+
+/// The accesses a client's data breakpoint watches, from its access type
+/// and mode.
+fn access_of(access_type: Option<&str>, mode: Option<&str>) -> Result<WatchAccess, String> {
+    let change = match mode {
+        None | Some("change") => true,
+        Some("store") => false,
+        Some(other) => return Err(format!("unknown data breakpoint mode '{other}'")),
+    };
+    match (access_type, change) {
+        (None | Some("write"), true) => Ok(WatchAccess::Change),
+        (None | Some("write"), false) => Ok(WatchAccess::Write),
+        // Every access includes every store.
+        (Some("readWrite"), _) if mode != Some("change") => Ok(WatchAccess::ReadWrite),
+        (Some("read"), true) if mode.is_none() => Ok(WatchAccess::Read),
+        (Some("read" | "readWrite"), true) => {
+            Err("the change mode applies only to write data breakpoints".to_owned())
+        }
+        (Some("read"), false) => {
+            Err("the store mode does not apply to read data breakpoints".to_owned())
+        }
+        (Some(other), _) => Err(format!("unknown access type '{other}'")),
     }
 }
 
@@ -174,17 +216,17 @@ impl Session {
     ) -> Result<Value, ErrorBody> {
         let arguments =
             parse::<SetDataBreakpointsArguments>(arguments, "setDataBreakpoints arguments")?;
-        let handle = self.target_handle()?;
+        // Before a program is loaded, nothing is watched, and each data
+        // breakpoint says why.
+        let handle = self.target_handle().ok();
         let wanted = arguments
             .breakpoints
             .iter()
             .map(|breakpoint| {
-                let access = match breakpoint.access_type.as_deref() {
-                    None | Some("write") => Ok(WatchAccess::Change),
-                    Some("read") => Ok(WatchAccess::Read),
-                    Some("readWrite") => Ok(WatchAccess::ReadWrite),
-                    Some(other) => Err(format!("unknown access type '{other}'")),
-                };
+                let access = access_of(
+                    breakpoint.access_type.as_deref(),
+                    breakpoint.mode.as_deref(),
+                );
                 (breakpoint, access)
             })
             .collect::<Vec<_>>();
@@ -196,7 +238,7 @@ impl Session {
             });
             if still_wanted && entry.watchpoint.is_ok() {
                 kept.insert((entry.data_id.clone(), entry.access), entry);
-            } else if let Ok(watchpoint) = entry.watchpoint {
+            } else if let (Ok(watchpoint), Some(handle)) = (entry.watchpoint, &handle) {
                 match handle.remove_watchpoint(watchpoint).await {
                     Ok(_) | Err(uscope::Error::WatchpointNotFound(_)) => {}
                     Err(error) => return Err(self::error(error)),
@@ -264,6 +306,38 @@ impl Session {
             .await
             .map(|watchpoint| watchpoint.id)
             .map_err(|error| error.to_string())
+    }
+
+    /// Removes the client's data breakpoints whose watchpoints are gone,
+    /// such as those the console deleted.
+    pub(super) async fn sync_data(&mut self) -> Result<(), Closed> {
+        let Ok(handle) = self.target_handle() else {
+            return Ok(());
+        };
+        let Ok(snapshot) = handle.snapshot().await else {
+            return Ok(());
+        };
+        let gone = self
+            .data
+            .entries
+            .iter()
+            .filter_map(|entry| entry.watchpoint.as_ref().ok().copied())
+            .filter(|id| {
+                !snapshot
+                    .watchpoints
+                    .iter()
+                    .any(|watchpoint| watchpoint.id == *id)
+            })
+            .collect::<Vec<_>>();
+        for id in self.data.forget(&gone) {
+            self.client
+                .event(
+                    "breakpoint",
+                    json!({"reason": "removed", "breakpoint": {"id": id, "verified": false}}),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     /// Reports data breakpoints whose watched storage ended.
@@ -359,6 +433,13 @@ impl Session {
                     format!(
                         "{subject} changed from {} to {}",
                         value(hit.previous.as_deref()),
+                        value(hit.current.as_deref())
+                    )
+                } else if watchpoint
+                    .is_some_and(|watchpoint| watchpoint.access == WatchAccess::Write)
+                {
+                    format!(
+                        "{subject} was written; it is still {}",
                         value(hit.current.as_deref())
                     )
                 } else {

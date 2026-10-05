@@ -1201,7 +1201,8 @@ impl Session {
             DebuggerEvent::WatchpointsInvalidated { invalidated, .. } => {
                 self.data_invalidated(&invalidated).await?;
             }
-            DebuggerEvent::StateChanged { .. } | DebuggerEvent::WatchpointsChanged { .. } => {}
+            DebuggerEvent::WatchpointsChanged { .. } => self.sync_data().await?,
+            DebuggerEvent::StateChanged { .. } => {}
         }
         Ok(())
     }
@@ -2068,6 +2069,7 @@ fn capabilities() -> Value {
         "supportsSingleThreadExecutionRequests": true,
         "supportsDataBreakpoints": true,
         "supportsDataBreakpointBytes": true,
+        "breakpointModes": super::watch::modes(),
         "supportsModulesRequest": true,
         "supportsLoadedSourcesRequest": true,
         "supportsBreakpointLocationsRequest": true,
