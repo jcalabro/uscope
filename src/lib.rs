@@ -8,7 +8,6 @@ macro_rules! record {
     }};
 }
 
-mod assign;
 mod backend;
 mod condition;
 mod debug_info;
@@ -46,7 +45,7 @@ use tokio::time::timeout;
 use backend::ControllerMessage;
 use protocol::Request;
 
-pub use condition::{Condition, LogMessage, LogSegment, Operand};
+pub use condition::{Condition, LogMessage, LogSegment};
 pub use disassembly::{
     AssemblySyntax, BlockCompletion, BoundaryConflict, BoundaryEvidence, ContextShortfall,
     ControlFlow, DecodedInstruction, DisassembledFunction, DisassembledInstruction, Disassembly,
@@ -1066,12 +1065,6 @@ impl DebuggerHandle {
             .await
     }
 
-    /// Assigns a new value in the selected frame of the selected thread;
-    /// see [`StopView::assign`].
-    pub async fn assign(&self, expression: ValueExpression, value: &str) -> Result<InspectedValue> {
-        self.selected().await?.assign(expression, value).await
-    }
-
     /// Inspects one bounded range under explicit resource limits.
     pub async fn inspect_range_with_limits(
         &self,
@@ -1542,29 +1535,6 @@ impl StopView<'_> {
                 stop_id: context.stop,
                 thread_id: context.thread,
                 frame: context.frame,
-                reply,
-            })
-            .await
-    }
-
-    /// Assigns a new value to the number, boolean, enumeration, or pointer
-    /// `expression` names, and returns its new value. `value` is an
-    /// expression evaluated in the same frame, such as `42`, `x + 1`, or an
-    /// enumerator's name.
-    ///
-    /// The value must have storage: memory, or for a whole variable of the
-    /// innermost frame, a general register. A caller's register copies,
-    /// part of a value in a register, bit-fields, and values the debug
-    /// information computes are refused.
-    pub async fn assign(&self, expression: ValueExpression, value: &str) -> Result<InspectedValue> {
-        let context = self.context;
-        self.handle
-            .request(|reply| Request::Assign {
-                stop_id: context.stop,
-                thread_id: context.thread,
-                frame: context.frame,
-                expression,
-                value: value.to_owned(),
                 reply,
             })
             .await

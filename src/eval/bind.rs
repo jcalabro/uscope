@@ -39,6 +39,23 @@ pub fn bind<S: Scope>(
     scope: &S,
     mode: Mode,
 ) -> Result<Program<S::Object, S::Step>, ExpressionError> {
+    bind_as(expression, scope, mode, false)
+}
+
+/// Binds a breakpoint's condition, whose value is its truth.
+pub fn bind_condition<S: Scope>(
+    expression: &Expression,
+    scope: &S,
+) -> Result<Program<S::Object, S::Step>, ExpressionError> {
+    bind_as(expression, scope, Mode::Read, true)
+}
+
+fn bind_as<S: Scope>(
+    expression: &Expression,
+    scope: &S,
+    mode: Mode,
+    truth: bool,
+) -> Result<Program<S::Object, S::Step>, ExpressionError> {
     let mut casts = 0;
     for (index, ambiguity) in expression.ambiguities().iter().enumerate() {
         let binder = Binder::new(scope, expression.text(), mode, None);
@@ -65,12 +82,18 @@ pub fn bind<S: Scope>(
     }
     let tree = expression.reading(casts).map_err(Clone::clone)?;
     let mut binder = Binder::new(scope, expression.text(), mode, Some(tree));
-    let root = binder.bind(tree.root())?;
-    let root = if matches!(root.op, Op::Range { .. }) {
+    let root = match tree.kind(tree.root()) {
+        NodeKind::Assign { op, target, value } if mode == Mode::Assign => {
+            binder.assignment(*op, *target, *value, tree.span(tree.root()))?
+        }
+        _ => binder.bind(tree.root())?,
+    };
+    let root = if matches!(root.op, Op::Range { .. } | Op::Assign { .. }) {
         root
     } else {
         binder.settle(root)?
     };
+    let root = if truth { binder.truth(root)? } else { root };
     if matches!(root.ty, Ty::Text) {
         return Err(ExpressionError::new(
             ErrorKind::Type,
@@ -192,8 +215,8 @@ impl<'a, S: Scope> Binder<'a, S> {
                 )),
                 Mode::Assign => Err(Self::error(
                     span,
-                    ErrorKind::Unsupported,
-                    "assignment is not evaluated yet",
+                    ErrorKind::Mode,
+                    "an assignment must be the whole expression",
                 )),
             },
             NodeKind::Cast { ty, operand, .. } => {
@@ -207,6 +230,11 @@ impl<'a, S: Scope> Binder<'a, S> {
                 field_span,
                 arrow,
             } => {
+                // `a.b.c` may name a global, as Go's `main.counter` does: the
+                // longest name the scope knows is taken first.
+                if let Some(path) = self.dotted(id) {
+                    return self.name(&path, span);
+                }
                 let base = self.bind(base)?;
                 self.member(base, &field, field_span, arrow, span)
             }
@@ -269,6 +297,28 @@ impl<'a, S: Scope> Binder<'a, S> {
     }
 
     // ---- Names ----
+
+    /// A chain of `.name` selections from a name, as one dotted path.
+    fn dotted(&self, id: NodeId) -> Option<Path> {
+        match self.tree().kind(id) {
+            NodeKind::Name(path) => Some(path.clone()),
+            NodeKind::Member {
+                base,
+                field: Field::Named(name),
+                field_span,
+                arrow: false,
+            } => {
+                let mut path = self.dotted(*base)?;
+                path.segments.push(super::syntax::ast::Segment {
+                    separator: Separator::Dot,
+                    name: name.clone(),
+                    span: *field_span,
+                });
+                Some(path)
+            }
+            _ => None,
+        }
+    }
 
     /// The text of a path's first `count` segments.
     fn prefix_text(path: &Path, count: usize) -> String {
@@ -840,6 +890,17 @@ impl<'a, S: Scope> Binder<'a, S> {
             );
         }
         let (left, right) = self.operands(left, right)?;
+        self.binary_bound(op, left, right, span)
+    }
+
+    /// A binary operator other than `&&` and `||` on bound operands.
+    fn binary_bound(
+        &mut self,
+        op: BinaryOp,
+        left: Bound<S>,
+        right: Bound<S>,
+        span: Span,
+    ) -> BindResult<S> {
         match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
                 self.arithmetic(op, left, right, span)
@@ -1281,6 +1342,84 @@ impl<'a, S: Scope> Binder<'a, S> {
                 then: Box::new(then),
                 otherwise: Box::new(otherwise),
                 places: false,
+            },
+            ty,
+            span,
+        )
+    }
+
+    // ---- Assignment ----
+
+    /// `target = value`, or `target op= value`, which must be the whole
+    /// expression.
+    fn assignment(
+        &mut self,
+        op: Option<BinaryOp>,
+        target: NodeId,
+        value: NodeId,
+        span: Span,
+    ) -> BindResult<S> {
+        let target = self.bind(target)?;
+        let target = self.settle(target)?;
+        if !target.is_place() || !matches!(target.ty, Ty::Program(_)) {
+            return Err(Self::error(
+                target.span,
+                ErrorKind::NotAnLvalue,
+                format!(
+                    "`{}` is a computed value, which cannot be assigned",
+                    self.quote(target.span)
+                ),
+            ));
+        }
+        let category = self.category(&target.ty);
+        if !matches!(
+            category,
+            Category::Integer { .. } | Category::Float(_) | Category::Bool | Category::Pointer(_)
+        ) {
+            return Err(self.type_error(
+                &target,
+                &category,
+                "cannot be assigned; only numbers, truth values, and pointers can",
+            ));
+        }
+        let value = self.bind_beside(value, Some(&target))?;
+        let value = match op {
+            None => value,
+            Some(op) => self.binary_bound(op, target.clone(), value, span)?,
+        };
+        let value = self.operand(value)?;
+        let source = self.category(&value.ty);
+        let compatible = match category {
+            Category::Integer { .. } => {
+                matches!(
+                    source,
+                    Category::Integer { .. } | Category::Float(_) | Category::Bool
+                )
+            }
+            Category::Float(_) => matches!(source, Category::Integer { .. } | Category::Float(_)),
+            Category::Bool => matches!(source, Category::Bool | Category::Integer { .. }),
+            _ => matches!(
+                source,
+                Category::Pointer(_) | Category::Null | Category::Integer { .. }
+            ),
+        };
+        if !compatible {
+            return Err(Self::error(
+                value.span,
+                ErrorKind::Type,
+                format!(
+                    "`{}` cannot be assigned to `{}`",
+                    type_name(self.scope, &value.ty),
+                    type_name(self.scope, &target.ty)
+                ),
+            ));
+        }
+        let (ty, value_span) = (target.ty.clone(), value.span);
+        let fitted = self.node(Op::Fit(Box::new(value)), ty.clone(), value_span)?;
+        self.node(
+            Op::Assign {
+                target: Box::new(target),
+                value: Box::new(fitted),
             },
             ty,
             span,

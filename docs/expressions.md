@@ -26,8 +26,8 @@ including one with `/`, `-`, spaces, or angle brackets, and one that is
 otherwise a keyword.
 
 A dotted name such as Go's `main.counter` names a global when one has that
-whole name; otherwise the dots select members. Parentheses make the choice
-explicit: `(a).b` always selects the member `b` of `a`.
+whole name; otherwise the dots select members. The longest name the frame
+knows is taken first.
 
 `$name` reads a register of the selected frame, such as `$rax` or `$rip`, and
 `$pc`, `$sp`, and `$fp` name the program counter, stack pointer, and frame
@@ -40,7 +40,6 @@ ns::counter               => reads as `ns::counter`
 `Vec<i32>`::len           => reads as `` `Vec<i32>`::len ``
 `as` + 1                  => reads as `` `as` + 1 ``
 main.counter              => reads as `main.counter`
-(main).counter            => reads as `(main).counter`
 $rip                      => reads as `$rip`
 naïve                     => error syntax at `ï`
 $                         => error syntax at `$`
@@ -468,6 +467,45 @@ sizeof(1)              => error type at `sizeof(1)`
 len(name)              => 5 : integer
 len(buf)               => 8 : integer
 len(s)                 => error type at `s`
+```
+
+## Assignment
+
+In the console and with `set var`, `=` and the compound operators (`+=`,
+`<<=`, …) assign, and an assignment must be the whole expression. The value
+must fit the target's type exactly; to store a wrapped or rounded value, cast
+it first. Only numbers, truth values, enumerations, and pointers are
+assigned. The result is the target read again. Hovering, watching, and
+breakpoint conditions cannot assign.
+
+```uscope-example
+world: scalars
+assign: uc = 7         => 7 : unsigned char
+assign: uc -= 10       => 240 : unsigned char
+assign: uc += 10       => error assignment at `uc += 10`
+assign: uc = 256       => error assignment at `256`
+assign: uc = (u8)256   => 0 : unsigned char
+assign: uc = -6        => error assignment at `-6`
+assign: flag = 1       => true : _Bool
+assign: flag = 2       => error assignment at `2`
+assign: d = 3          => 3.0 : double
+assign: f = 0.1        => error assignment at `0.1`
+assign: f = 0.5        => 0.5 : float
+assign: f = 0.1f32     => 0.1 : float
+assign: i32v = 2.0     => 2 : int
+assign: i32v = 2.5     => error assignment at `2.5`
+uc = 7                 => error mode at `uc = 7`
+assign: uc + 1 = 2     => error not-an-lvalue at `uc + 1`
+assign: uc = sc = 1    => error mode at `sc = 1`
+```
+
+```uscope-example
+world: memory
+assign: color = GREEN  => GREEN : Color
+assign: ptr = 0        => 0x0 : S*
+assign: ptr = 1.5      => error type at `1.5`
+assign: s = s          => error type at `s`
+assign: r = 3          => 3 : int
 ```
 
 ## Limits

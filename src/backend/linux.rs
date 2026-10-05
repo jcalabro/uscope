@@ -1229,16 +1229,18 @@ impl<P: LinuxTraceOps> Controller<P> {
             } => {
                 let _ = reply.send(self.write_memory(process_id, stop_id, address, &bytes));
             }
-            Request::Assign {
+            Request::Evaluate {
+                expression,
+                mode: crate::EvaluationMode::Assign,
+                limits,
                 stop_id,
                 thread_id,
                 frame,
-                expression,
-                value,
                 reply,
             } => {
-                let result = debug_pid(thread_id)
-                    .and_then(|pid| self.assign(stop_id, pid, frame, &expression, &value));
+                let result = debug_pid(thread_id).and_then(|pid| {
+                    self.evaluate_assigning(stop_id, pid, frame, &expression, limits)
+                });
                 let _ = reply.send(result);
             }
             Request::Shutdown { reply } => {
@@ -1495,7 +1497,6 @@ impl<P: InspectionOps> Controller<P> {
             | Request::Pause { .. }
             | Request::WriteWord { .. }
             | Request::WriteMemory { .. }
-            | Request::Assign { .. }
             | Request::Kill { .. }
             | Request::Terminate { .. }
             | Request::Shutdown { .. } => {

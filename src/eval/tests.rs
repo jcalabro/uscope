@@ -93,6 +93,9 @@ fn render(value: &VariableValue) -> String {
 /// What evaluating a row's expression in its world gives, as the reference
 /// writes it.
 fn evaluate(world_name: &str, text: &str) -> String {
+    let (mode, text) = text
+        .strip_prefix("assign:")
+        .map_or((Mode::Read, text), |rest| (Mode::Assign, rest.trim()));
     let mut world = world(world_name);
     let failure = |error: &ExpressionError| {
         format!("error {} at `{}`", error.kind.name(), error.span.text(text))
@@ -101,11 +104,24 @@ fn evaluate(world_name: &str, text: &str) -> String {
         Ok(expression) => expression,
         Err(error) => return failure(&error),
     };
-    let program = match bind(&expression, &world, Mode::Read) {
+    let program = match bind(&expression, &world, mode) {
         Ok(program) => program,
         Err(error) => return failure(&error),
     };
-    match run(&program, &mut world) {
+    let outcome = match run(&program, &mut world) {
+        Ok(Outcome::Assign { target, bytes, .. }) => {
+            // The value is the target read again.
+            world.write(&target, &bytes);
+            let target = text.split_once('=').map_or(text, |(target, _)| {
+                target.trim_end_matches(['+', '-', '*', '/', '%', '&', '|', '^', '<', '>'])
+            });
+            let expression = Expression::parse(target.trim()).expect("the target parses");
+            let program = bind(&expression, &world, Mode::Read).expect("the target binds");
+            run(&program, &mut world)
+        }
+        outcome => outcome,
+    };
+    match outcome {
         Ok(Outcome::Value { value, cause }) => {
             let name = value
                 .type_info
@@ -121,6 +137,7 @@ fn evaluate(world_name: &str, text: &str) -> String {
             }
         }
         Ok(Outcome::Range { start, end, .. }) => format!("range {start}..{end}"),
+        Ok(Outcome::Assign { .. }) => "an assignment the world did not make".to_owned(),
         Err(Failure::Expression(error)) => failure(&error),
         Err(Failure::Debugger(error)) => format!("debugger failure {error}"),
     }
@@ -191,6 +208,7 @@ fn outcome(world: &mut super::fake::World, text: &str) -> String {
             (state, cause) => format!("{state:?} at {cause:?}"),
         },
         Ok(Outcome::Range { start, end, .. }) => format!("range {start}..{end}"),
+        Ok(Outcome::Assign { .. }) => "an assignment".to_owned(),
         Err(Failure::Expression(error)) => format!("error {error}"),
         Err(Failure::Debugger(error)) => format!("failure {error}"),
     }

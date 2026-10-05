@@ -359,6 +359,33 @@ impl World {
         region[..bytes.len()].copy_from_slice(bytes);
     }
 
+    /// Stores bytes at a place, as the debugger would.
+    pub fn write(&mut self, at: &Place, bytes: &[u8]) {
+        match at {
+            Place::Memory { address, .. } => {
+                let (start, region) = self
+                    .memory
+                    .range_mut(..=*address)
+                    .next_back()
+                    .expect("a mapped place");
+                let offset = usize::try_from(address - start).expect("small offsets");
+                region[offset..offset + bytes.len()].copy_from_slice(bytes);
+            }
+            Place::Register { name, .. } => {
+                for object in &mut self.objects {
+                    if let Storage::Register {
+                        name: register,
+                        bytes: stored,
+                    } = &mut object.storage
+                        && register == name
+                    {
+                        stored[..bytes.len()].copy_from_slice(bytes);
+                    }
+                }
+            }
+        }
+    }
+
     /// Makes reading `[address, address + size)` fail the test.
     pub fn poison(&mut self, address: u64, size: u64) {
         self.poisoned.push((address, address + size));

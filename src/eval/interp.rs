@@ -21,12 +21,21 @@ use crate::{
 
 /// What running a program produced.
 #[derive(Debug)]
-pub enum Outcome {
+pub enum Outcome<P> {
     /// A value, or the state that stood in for one, with the operand whose
     /// state the program could not provide.
     Value {
         value: InspectedValue,
         cause: Option<Span>,
+    },
+    /// A value to store: the target's place, the bytes of the value in the
+    /// target's type, and whether the place is a whole variable rather
+    /// than part of one.
+    Assign {
+        target: P,
+        bytes: Vec<u8>,
+        whole: bool,
+        span: Span,
     },
     /// `base[start..end]`: the array or slice, and the range to page through.
     Range {
@@ -67,11 +76,13 @@ enum Halt {
 pub fn run<M: Machine>(
     program: &Program<M::Object, M::Step>,
     machine: &mut M,
-) -> Result<Outcome, Failure> {
+) -> Result<Outcome<M::Place>, Failure> {
     let mut interpreter = Interpreter { machine };
     let root = &program.root;
     let result = if let Op::Range { base, start, end } = &root.op {
         interpreter.range(base, start, end)
+    } else if let Op::Assign { target, value } = &root.op {
+        interpreter.assign(target, value, root.span)
     } else {
         interpreter
             .eval(root)
@@ -381,7 +392,10 @@ impl<M: Machine> Interpreter<'_, M> {
                 };
                 Value::Int(Integer::Exact(Exact::from(u128::from(length))))
             }
-            Op::Range { .. } => unreachable!("a range is only ever the whole expression"),
+            Op::Fit(operand) => self.fit(&node.ty, operand)?,
+            Op::Range { .. } | Op::Assign { .. } => {
+                unreachable!("ranges and assignments are only ever the whole expression")
+            }
         })
     }
 
@@ -676,12 +690,104 @@ impl<M: Machine> Interpreter<'_, M> {
         }
     }
 
+    fn assign(
+        &mut self,
+        target: &Node<M::Object, M::Step>,
+        value: &Node<M::Object, M::Step>,
+        span: Span,
+    ) -> Result<Outcome<M::Place>, Halt> {
+        let fitted = self.eval(value)?;
+        let place = self.place(target)?;
+        let size = size_of(self.machine, &target.ty)
+            .and_then(|size| usize::try_from(size).ok())
+            .ok_or_else(|| Self::error(target.span, ErrorKind::Type, "the target has no size"))?;
+        Ok(Outcome::Assign {
+            target: place,
+            bytes: self.encode(&fitted, size),
+            whole: matches!(target.op, Op::Object(_)),
+            span,
+        })
+    }
+
+    /// A value converted to `ty` only if `ty` holds it exactly.
+    fn fit(&mut self, ty: &Ty, operand: &Node<M::Object, M::Step>) -> Evaluated<M::Place> {
+        let span = operand.span;
+        let value = self.eval(operand)?;
+        let shown = match &value {
+            Value::Int(integer) => integer.value().to_string(),
+            Value::Float(float) => float.to_string(),
+            Value::Bool(value) => value.to_string(),
+            Value::Pointer(address) => format!("{address:#x}"),
+            _ => "the value".to_owned(),
+        };
+        let refuse = |interpreter: &Self| {
+            Self::error(
+                span,
+                ErrorKind::Assignment,
+                format!(
+                    "{shown} does not fit `{}` exactly",
+                    super::types::type_name(interpreter.machine, ty)
+                ),
+            )
+        };
+        let exact_integer = |value: &Value<M::Place>| match value {
+            Value::Int(integer) => Some(integer.value()),
+            Value::Bool(value) => Some(Exact::from(u128::from(*value))),
+            Value::Pointer(address) => Some(Exact::from(u128::from(*address))),
+            Value::Float(float) => float
+                .to_int(IntType::new(128, true).expect("valid"))
+                .ok()
+                .and_then(|bits| {
+                    (float.compare_exact(bits.value()) == Some(std::cmp::Ordering::Equal))
+                        .then(|| bits.value())
+                }),
+            _ => None,
+        };
+        Ok(match category(self.machine, ty) {
+            Category::Integer { int: Some(int), .. } => {
+                let bits = exact_integer(&value)
+                    .and_then(|exact| Bits::exactly(int, exact).ok())
+                    .ok_or_else(|| refuse(self))?;
+                Value::Int(Integer::Typed(bits))
+            }
+            Category::Float(format) => {
+                let fitted = match value {
+                    Value::Float(float) => {
+                        let converted = float.convert(format);
+                        let round_trip = converted.convert(float.format());
+                        let same = float.is_nan()
+                            || round_trip.compare(float) == Some(std::cmp::Ordering::Equal);
+                        same.then_some(converted)
+                    }
+                    Value::Int(integer) => {
+                        let converted = Float::from_exact(integer.value(), format);
+                        (converted.compare_exact(integer.value())
+                            == Some(std::cmp::Ordering::Equal))
+                        .then_some(converted)
+                    }
+                    _ => None,
+                };
+                Value::Float(fitted.ok_or_else(|| refuse(self))?)
+            }
+            Category::Bool => match exact_integer(&value) {
+                Some(exact) if exact.is_zero() => Value::Bool(false),
+                Some(exact) if exact == Exact::from(1_u128) => Value::Bool(true),
+                _ => return Err(refuse(self)),
+            },
+            Category::Pointer(_) => {
+                let exact = exact_integer(&value).ok_or_else(|| refuse(self))?;
+                Value::Pointer(self.address_value(exact, span)?)
+            }
+            _ => return Err(refuse(self)),
+        })
+    }
+
     fn range(
         &mut self,
         base: &Node<M::Object, M::Step>,
         start: &Node<M::Object, M::Step>,
         end: &Node<M::Object, M::Step>,
-    ) -> Result<Outcome, Halt> {
+    ) -> Result<Outcome<M::Place>, Halt> {
         let start = self.index(start)?;
         let end = self.index(end)?;
         let place = self.place(base)?;

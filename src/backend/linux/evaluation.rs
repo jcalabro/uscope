@@ -14,8 +14,8 @@ use crate::eval::bind::{Mode, bind};
 use crate::eval::error::ErrorKind;
 use crate::eval::interp::{Failure, Outcome, run};
 use crate::eval::number::Exact;
-use crate::eval::syntax::Expression;
 use crate::eval::syntax::ast::Tag;
+use crate::eval::syntax::{Expression, Span};
 use crate::eval::target::{
     Lookup, Machine, Planned, Refusal, Register, Scope, StepKind, Stop, TypeLookup, TypeQuery,
 };
@@ -33,7 +33,7 @@ use crate::{
 
 use super::frames::{FrameRegisters, ResolvedFrame};
 use super::inspection::{global_context_address, validate_inspection_limits, variable_context};
-use super::native::InspectionOps;
+use super::native::{InspectionOps, LinuxTraceOps};
 use super::registers::x86_64_register_snapshot;
 use super::{
     Controller, Inferior, RuntimeModule, validate_image_current, validate_public_stop,
@@ -803,6 +803,109 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     }
 }
 
+/// What evaluating an expression asks of the controller.
+pub(super) enum Evaluated {
+    Done(Box<Evaluation>),
+    /// Store `bytes` in `target`, then read it again.
+    Write {
+        target: StopPlace,
+        bytes: Vec<u8>,
+        whole: bool,
+        span: Span,
+    },
+}
+
+impl<P: LinuxTraceOps> Controller<P> {
+    /// Evaluates an expression that may assign, in one frame of a validated
+    /// stop, and makes its assignment.
+    pub(super) fn evaluate_assigning(
+        &mut self,
+        stop_id: StopId,
+        pid: Pid,
+        frame: StackFrameId,
+        expression: &Expression,
+        limits: crate::InspectionLimits,
+    ) -> Result<Evaluation> {
+        validate_inspection_limits(limits)?;
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_stopped_thread(inferior, pid)?;
+        validate_image_current(inferior)?;
+        let resolved = self.resolve_frame(inferior, pid, frame)?;
+        let mut budget = InspectionBudget::new(limits);
+        let evaluated = self.evaluate_in_frame(
+            inferior,
+            stop_id,
+            pid,
+            &resolved,
+            expression,
+            Mode::Assign,
+            &mut budget,
+        )?;
+        let (target, bytes, whole, span) = match evaluated {
+            Evaluated::Done(evaluation) => return Ok(*evaluation),
+            Evaluated::Write {
+                target,
+                bytes,
+                whole,
+                span,
+            } => (target, bytes, whole, span),
+        };
+        let refused = |reason: String| {
+            Error::Expression(crate::ExpressionError::new(
+                ErrorKind::Assignment,
+                span,
+                reason,
+            ))
+        };
+        match &target.located.storage {
+            ValueStorage::Memory(address)
+            | ValueStorage::Bytes {
+                address: Some(address),
+                ..
+            } => {
+                let written = self.write_memory_as(pid, *address, &bytes)?;
+                if written != bytes.len() as u64 {
+                    return Err(Error::MemoryNotWritable(*address));
+                }
+            }
+            ValueStorage::Bytes {
+                source: VariableValueSource::Register(register),
+                ..
+            } => {
+                // A register belongs to the innermost frame; a caller's copy
+                // lives in memory its callees saved, and part of a register
+                // cannot be told from the whole.
+                if frame != StackFrameId::INNERMOST {
+                    return Err(refused(
+                        "it is held in a register of a caller's frame".into(),
+                    ));
+                }
+                if !whole {
+                    return Err(refused("it is part of a value held in a register".into()));
+                }
+                self.write_register(pid, register.id, &bytes).map_err(|_| {
+                    refused(format!("register {} cannot be changed", register.name))
+                })?;
+            }
+            _ => {
+                return Err(refused(
+                    "the debug information computes it; it has no storage".into(),
+                ));
+            }
+        }
+        // The value is the target read again, so what the target's own type
+        // makes of the stored bytes shows.
+        let target = Expression::parse(
+            expression
+                .assignment_target()
+                .unwrap_or_else(|| expression.text()),
+        )
+        .map_err(Error::Expression)?;
+        self.evaluate(stop_id, pid, frame, &target, Mode::Read, limits)
+    }
+}
+
 impl<P: InspectionOps> Controller<P> {
     /// Evaluates an expression in one frame of a validated stop.
     pub(super) fn evaluate(
@@ -821,7 +924,7 @@ impl<P: InspectionOps> Controller<P> {
         validate_image_current(inferior)?;
         let resolved = self.resolve_frame(inferior, pid, frame)?;
         let mut budget = InspectionBudget::new(limits);
-        self.evaluate_in_frame(
+        let evaluated = self.evaluate_in_frame(
             inferior,
             stop_id,
             pid,
@@ -829,7 +932,66 @@ impl<P: InspectionOps> Controller<P> {
             expression,
             mode,
             &mut budget,
-        )
+        )?;
+        match evaluated {
+            Evaluated::Done(evaluation) => Ok(*evaluation),
+            Evaluated::Write { span, .. } => Err(Error::Expression(crate::ExpressionError::new(
+                ErrorKind::Mode,
+                span,
+                "this process's state cannot be changed",
+            ))),
+        }
+    }
+
+    /// Evaluates an expression where a breakpoint hit stopped one thread
+    /// while others may run, as a condition or log message does: in the
+    /// hit's innermost frame, with capabilities that belong to no stop. A
+    /// condition's value is its truth.
+    pub(super) fn evaluate_at_hit(
+        &self,
+        pid: Pid,
+        expression: &Expression,
+        condition: bool,
+    ) -> Result<Evaluation> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        // The thread is in the ptrace-stop that reported the hit, which its
+        // recorded state does not reflect until the hit is resolved.
+        validate_image_current(inferior)?;
+        let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
+        let address = VirtualAddress::new(self.ptrace.registers(pid)?.rip);
+        let presentation = self.presentation_for_thread(
+            pid,
+            Some(&crate::StopReason::Breakpoint {
+                address,
+                hits: Arc::from([]),
+            }),
+        )?;
+        let resolved =
+            self.resolve_presented_frame(inferior, pid, StackFrameId::INNERMOST, presentation)?;
+        let stop_id = StopId::new(0);
+        let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+        let program = if condition {
+            crate::eval::bind::bind_condition(expression, &scope)
+        } else {
+            bind(expression, &scope, Mode::Read)
+        }
+        .map_err(Error::Expression)?;
+        let mut machine = StopMachine {
+            frame: &scope,
+            budget: &mut budget,
+        };
+        let outcome = run(&program, &mut machine);
+        record!("evaluate `{}` at a hit: {outcome:?}", expression.text());
+        match outcome {
+            Ok(Outcome::Value { value, cause }) => Ok(Evaluation::Value { value, cause }),
+            Ok(_) => Err(Error::Expression(crate::ExpressionError::new(
+                ErrorKind::Type,
+                Span::new(0, expression.text().len()),
+                "a breakpoint's expression must have a value",
+            ))),
+            Err(Failure::Expression(error)) => Err(Error::Expression(error)),
+            Err(Failure::Debugger(error)) => Err(error),
+        }
     }
 
     /// The type an expression has in one frame, reading no memory.
@@ -881,7 +1043,7 @@ impl<P: InspectionOps> Controller<P> {
         expression: &Expression,
         mode: Mode,
         budget: &mut InspectionBudget,
-    ) -> Result<Evaluation> {
+    ) -> Result<Evaluated> {
         let scope = self.frame_for(inferior, stop_id, pid, resolved);
         let program = bind(expression, &scope, mode).map_err(Error::Expression)?;
         let mut machine = StopMachine {
@@ -891,10 +1053,26 @@ impl<P: InspectionOps> Controller<P> {
         let outcome = run(&program, &mut machine);
         record!("evaluate `{}`: {outcome:?}", expression.text());
         match outcome {
-            Ok(Outcome::Value { value, cause }) => Ok(Evaluation::Value { value, cause }),
+            Ok(Outcome::Value { value, cause }) => {
+                Ok(Evaluated::Done(Box::new(Evaluation::Value {
+                    value,
+                    cause,
+                })))
+            }
             Ok(Outcome::Range { base, start, end }) => self
                 .range_page(stop_id, &base, start, end, budget)
-                .map(Evaluation::Range),
+                .map(|page| Evaluated::Done(Box::new(Evaluation::Range(page)))),
+            Ok(Outcome::Assign {
+                target,
+                bytes,
+                whole,
+                span,
+            }) => Ok(Evaluated::Write {
+                target,
+                bytes,
+                whole,
+                span,
+            }),
             Err(Failure::Expression(error)) => Err(Error::Expression(error)),
             Err(Failure::Debugger(error)) => Err(error),
         }

@@ -444,15 +444,15 @@ fn set_changes_values_the_program_then_uses() {
     for (commands, message) in [
         (
             &["break pointer_target", "run", "set parameter 3"][..],
-            "usage: set <value-path> = [expression...]",
+            "expected an operator or the end of the expression, found `3`",
         ),
         (
             &["break pointer_target", "run", "set parameter ="],
-            "usage: set <value-path> = [expression...]",
+            "expected an operand, found the end of the expression",
         ),
         (
             &["break pointer_target", "run", "set pair = 1"],
-            "cannot assign to pair: only numbers, booleans, enumerations, and pointers can be assigned",
+            "`pair` cannot be assigned; only numbers, truth values, and pointers can",
         ),
     ] {
         assert_failure(&batch_output("variables-gcc-o0", commands), message);
@@ -487,7 +487,7 @@ fn hit_condition_commands_explain_rejected_input() {
         ),
         (
             &["break counted", "condition 1 call = 3"],
-            "invalid condition: '=' assigns; compare with '=='",
+            "invalid condition: a breakpoint's expressions cannot assign; compare with `==`",
         ),
         (&["condition 4 x > 1"], "breakpoint 4 was not found"),
         (&["condition"], "usage: condition <id> [expression...]"),
