@@ -365,6 +365,10 @@ fn single_thread_requests_run_only_the_thread_they_name() {
             ..Configuration::default()
         },
     );
+    assert_eq!(
+        started.capabilities["supportsSingleThreadExecutionRequests"],
+        true
+    );
     let first = dap.stopped(started.mark);
     // Only the named thread runs, so only it can stop again, though every
     // thread calls the function.

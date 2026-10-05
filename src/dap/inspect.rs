@@ -164,7 +164,10 @@ impl Session {
                     "path": path.display().to_string(),
                 });
                 body["line"] = self.line_to_client(location.line.get()).into();
-                body["column"] = location.column.map_or(0, uscope::ColumnNumber::get).into();
+                body["column"] = location
+                    .column
+                    .map_or(0, |column| self.column_to_client(column.get()))
+                    .into();
             }
             None => body["presentationHint"] = "subtle".into(),
         }

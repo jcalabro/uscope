@@ -177,6 +177,16 @@ fn invalid_configurations_are_shown_to_the_user_and_the_session_survives() {
             json!({"pid": "not a number"}),
             "invalid attach configuration at pid: expected a positive process id".to_owned(),
         ),
+        (
+            "attach",
+            json!({"pid": 999_999_999}),
+            "failed to attach to process 999999999: ".to_owned(),
+        ),
+        (
+            "attach",
+            json!({"coreFile": missing}),
+            format!("failed to open the core dump {}: ", missing.display()),
+        ),
     ] {
         let mut dap = Dap::start(format!("{command} {arguments}"));
         dap.initialize(Profile::VsCode);
@@ -313,6 +323,10 @@ fn attaching_continues_the_process_and_detaching_leaves_it_running() {
         let event = dap.event(started.mark, "process", |_| true);
         assert_eq!(event["startMethod"], "attach");
         assert_eq!(event["systemProcessId"], pid);
+        // Reading the process's debug information shows progress.
+        let progress = dap.event(started.mark, "progressStart", |_| true);
+        assert_eq!(progress["title"], format!("Attaching to process {pid}"));
+        dap.event(started.mark, "progressEnd", |_| true);
         if stop_on_entry {
             let stop = dap.stopped(started.mark);
             assert_eq!(stop.reason, "entry");
@@ -368,6 +382,11 @@ fn core_dumps_open_stopped_at_their_signal_and_refuse_to_run() {
     let stop = dap.stopped(started.mark);
     assert_eq!(stop.reason, "exception");
     assert_eq!(stop.body["text"], "SIGSEGV");
+    // A core dump has no program to restart, so a client opens it again.
+    assert_eq!(
+        dap.event(started.mark, "capabilities", |_| true),
+        json!({"capabilities": {"supportsRestartRequest": false}})
+    );
     let info = dap.request("exceptionInfo", json!({"threadId": stop.thread}));
     assert_eq!(info["exceptionId"], "SIGSEGV");
     assert_eq!(info["breakMode"], "always");
@@ -429,7 +448,7 @@ fn restarting_relaunches_the_program_with_new_arguments_in_the_same_session() {
 }
 
 #[test]
-fn restarts_cannot_change_the_program_or_restart_attached_processes() {
+fn restarts_keep_the_program_and_attached_processes_are_attached_again() {
     let mut dap = Dap::start("restart refused");
     let started = dap.launch(
         Profile::Neovim,
@@ -447,19 +466,41 @@ fn restarts_cannot_change_the_program_or_restart_attached_processes() {
     );
     dap.finish();
 
-    let process = ExternalProcess::spawn(&fixture("attach"));
+    // An attached process is restarted by attaching to it again, which a
+    // client does itself; the disconnect that begins it detaches, even
+    // when it asks to terminate, so the process is there to attach to.
+    let mut process = ExternalProcess::spawn(&fixture("attach"));
     let mut dap = Dap::start("restart attached");
     let started = dap.begin(
-        Profile::Neovim,
+        Profile::VsCode,
         ("attach", json!({"pid": process.process_id().get()})),
         &Configuration::default(),
     );
     dap.event(started.mark, "process", |_| true);
     assert_eq!(
+        dap.event(started.mark, "capabilities", |_| true),
+        json!({"capabilities": {"supportsRestartRequest": false}})
+    );
+    assert_eq!(
         dap.request_error("restart", Value::Null),
         "only a launched program can be restarted; start a new session instead"
     );
+    dap.finish_with(json!({"restart": true, "terminateDebuggee": true}));
+    let mut dap = Dap::start("attach again");
+    let started = dap.begin(
+        Profile::VsCode,
+        ("attach", json!({"pid": process.process_id().get()})),
+        &Configuration {
+            functions: vec!["attach_breakpoint".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    dap.event(started.mark, "process", |_| true);
+    let mark = dap.mark();
+    process.release();
+    assert_eq!(dap.stopped(mark).reason, "function breakpoint");
     dap.finish();
+    assert_eq!(process.wait().code(), Some(23));
 }
 
 #[test]

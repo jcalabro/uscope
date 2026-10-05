@@ -206,7 +206,10 @@ impl Session {
                 self.line_to_client(source.line.get()).into(),
             );
             if let Some(column) = source.column {
-                body.insert("column".to_owned(), column.get().into());
+                body.insert(
+                    "column".to_owned(),
+                    self.column_to_client(column.get()).into(),
+                );
             }
         } else {
             *previous_file = None;
