@@ -252,6 +252,10 @@ struct TraceThread {
     pending_signal: Option<PendingSignal>,
     reason: Option<StopReason>,
     stopped_at_breakpoint: Option<VirtualAddress>,
+    /// The site whose trap the thread reported, until it steps over the
+    /// site or runs on otherwise. It outlives the site's removal, so that a
+    /// breakpoint added there before the thread moves is stepped over too.
+    trapped_at: Option<VirtualAddress>,
     awaiting_breakpoint: Option<VirtualAddress>,
     debugger_stop_pending: bool,
     /// The watch-plan generation programmed into this thread's debug
@@ -271,6 +275,7 @@ impl TraceThread {
             pending_signal: None,
             reason: None,
             stopped_at_breakpoint: None,
+            trapped_at: None,
             awaiting_breakpoint: None,
             debugger_stop_pending: false,
             armed: None,
@@ -381,11 +386,15 @@ struct StepStart {
     /// known, a frame below it was entered by a call, and code above it was
     /// returned to.
     stack_pointer: u64,
-    /// For a step over, the activation its frame returned to, once the
-    /// frame it began in returned short of a source statement. The step
-    /// then goes on by single steps and judges frames by this: a later call
-    /// can make a new activation at the returned one's CFA.
+    /// For a step over or out, the activation its frame returned to, once
+    /// the frame it began in returned short of where the step ends, and
+    /// the one that returned to in turn. The step then goes on by single
+    /// steps and judges frames by this: a later call can make a new
+    /// activation at the returned one's CFA.
     returned_to: Option<VirtualAddress>,
+    /// Whether the step returned into code without source and runs on, to
+    /// be ended only by a stop the user sees.
+    running_on: bool,
     plan_addresses: BTreeSet<VirtualAddress>,
     epilogue_traversal: Option<EpilogueTraversal>,
     return_traversal: Option<ReturnTraversal>,
@@ -793,7 +802,9 @@ impl Inferior {
 
     /// Ends `pid`'s step over the front repair group's breakpoint at `address`.
     fn finish_current_repair(&mut self, pid: Pid, address: VirtualAddress) -> Result<()> {
-        self.thread_mut(pid)?.stopped_at_breakpoint = None;
+        let thread = self.thread_mut(pid)?;
+        thread.stopped_at_breakpoint = None;
+        thread.trapped_at = None;
         let group = self
             .repairs
             .front_mut()
@@ -978,6 +989,8 @@ struct Controller<P: InspectionOps> {
     kill_reply: Option<Reply<()>>,
     /// Fork children still traced after the inferior ended.
     orphans: Option<Orphans>,
+    /// A launch or attach waiting for those children to be released.
+    deferred_start: Option<DeferredStart>,
     signals: SignalPolicies,
     revision: u64,
 }
@@ -992,6 +1005,20 @@ struct Orphans {
     /// Children that could not be scrubbed, killed and awaiting their exit.
     killed: BTreeSet<Pid>,
     waiter: Option<Waiter>,
+}
+
+/// A launch or attach requested while the controller still releases the
+/// children the last program forked. It starts once they are released,
+/// since their waiter must finish before another waits.
+enum DeferredStart {
+    Launch(crate::LaunchOptions, Reply<ExecutionId>),
+    Attach(ProcessId, Reply<StopId>),
+    LaunchByExec {
+        requested: ProcessId,
+        stop_at_entry: bool,
+        release: Box<dyn FnOnce() + Send>,
+        reply: Reply<ExecutionId>,
+    },
 }
 
 pub fn spawn_controller(
@@ -1061,6 +1088,7 @@ impl<P: InspectionOps> Controller<P> {
             shutdown_reply: None,
             kill_reply: None,
             orphans: None,
+            deferred_start: None,
             signals: SignalPolicies::default(),
             revision: 0,
         }
@@ -1082,13 +1110,16 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// controller keeps running. A driver that owns the queue, such as the
     /// simulator, delivers messages one at a time through this.
     fn handle_message(&mut self, message: ControllerMessage) -> bool {
-        match message {
+        let keeps_running = match message {
             ControllerMessage::Request(request) => {
                 record!("request {}", request.describe());
                 self.handle_request(request)
             }
             ControllerMessage::Wait(status) => self.handle_wait(status),
-        }
+        };
+        // A shutdown, whether requested or begun when an attached process
+        // failed, ends the controller once nothing is left to release.
+        keeps_running && !(self.shutting_down && self.inferior.is_none() && self.orphans.is_none())
     }
 
     #[expect(

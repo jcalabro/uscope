@@ -909,6 +909,8 @@ build_fixture gcc "$c_fixtures_dir/orphan-frames.c" "$output_dir/orphan-frames" 
 # Keeps the assembly after the function before it, as the source places it.
 build_fixture gcc "$c_fixtures_dir/assembly-after-code.c" "$output_dir/assembly-after-code" \
     -O0 -g3 -fno-toplevel-reorder -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/undescribed-caller.c" "$output_dir/undescribed-caller" \
+    -O0 -g3 -fno-toplevel-reorder -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/repeated-calls.c" "$output_dir/repeated-calls-gcc-o0" \
     -O0 -g3 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/repeated-calls.c" "$output_dir/repeated-calls-clang-o0" \

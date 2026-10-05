@@ -127,6 +127,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if self.sites_live() {
             let inferior = self.inferior.as_mut().expect("live sites have an inferior");
             install_logical_breakpoint(&self.ptrace, inferior, &breakpoint)?;
+            self.step_over_where_threads_trapped(&breakpoint)?;
         }
 
         self.next_breakpoint_id = next_id;
@@ -230,6 +231,29 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Err(failure.expect("the program itself was searched"));
         }
         Ok(locations.into())
+    }
+
+    /// A thread that reported a trap at a site steps over the trap there
+    /// when it moves on, whichever breakpoint owns the site by then: its
+    /// arrival there was counted. Removing the breakpoint it hit forgets the
+    /// step, so one added there again before the thread moves restores it.
+    /// Any other thread standing at the new breakpoint arrives there when it
+    /// resumes, as one does after a step that ends at a breakpoint.
+    fn step_over_where_threads_trapped(&mut self, breakpoint: &Breakpoint) -> Result<()> {
+        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+        let sites = breakpoint
+            .locations
+            .iter()
+            .map(|resolved| runtime_breakpoint_address(inferior, resolved.location))
+            .collect::<Result<BTreeSet<_>>>()?;
+        for thread in inferior.threads.values_mut() {
+            if thread.stopped_at_breakpoint.is_none()
+                && let Some(address) = thread.trapped_at.filter(|address| sites.contains(address))
+            {
+                thread.stopped_at_breakpoint = Some(address);
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn remove_breakpoint(&mut self, id: BreakpointId) -> Result<Breakpoint> {

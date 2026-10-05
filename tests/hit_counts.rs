@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use support::Scenario;
 use uscope::{
-    Breakpoint, BreakpointHit, BreakpointId, BreakpointLocation, BreakpointSpec,
-    ExceptionDisposition, ExitStatus, HitCondition, StepKind, StopReason, ThreadState,
-    VirtualAddress,
+    Breakpoint, BreakpointHit, BreakpointId, BreakpointLocation, BreakpointSpec, DebuggerEvent,
+    ExceptionDisposition, ExitStatus, HitCondition, InferiorState, ResumeScope, StepKind,
+    StopReason, ThreadId, ThreadState, VirtualAddress,
 };
 
 /// The compiler and linker variants of `hit-counts.c`.
@@ -185,6 +185,182 @@ async fn colocated_hit_conditions_each_count_every_hit() {
     }
 }
 
+/// A thread that hit a breakpoint steps over the trap there when it next
+/// runs, whichever breakpoint is there by then: its arrival was counted.
+/// Here the breakpoint it hit is replaced by another at the same place. A
+/// thread a step left somewhere arrives there as it resumes, for every
+/// breakpoint there by then, one added meanwhile too.
+#[tokio::test]
+async fn only_a_thread_that_hit_a_breakpoint_steps_over_one_added_where_it_stands() {
+    for fixture in MATRIX {
+        let mut scenario = Scenario::launch(fixture);
+        let first = scenario.add_breakpoint("counted").await;
+        scenario.run_to_stop().await;
+        assert_eq!(global(&scenario, "last_call").await, 0, "{fixture}");
+        scenario.remove_breakpoint(first.id).await;
+        let second = scenario.add_breakpoint("counted").await;
+        assert_ne!(second.id, first.id);
+        assert_eq!(
+            hits(&scenario.resume_to_stop().await),
+            [BreakpointHit {
+                breakpoint: second.id,
+                hit_count: 1,
+            }],
+            "{fixture}"
+        );
+        assert_eq!(
+            global(&scenario, "last_call").await,
+            1,
+            "{fixture}: the stop is the next call's"
+        );
+
+        scenario.remove_breakpoint(second.id).await;
+        scenario.step_to_stop(StepKind::Instruction).await;
+        let stepped = global(&scenario, "last_call").await;
+        let here = program_counter(&scenario).await;
+        let third = scenario
+            .add_breakpoint_spec(BreakpointSpec::Address(here))
+            .await;
+        assert_eq!(
+            hits(&scenario.resume_to_stop().await),
+            [BreakpointHit {
+                breakpoint: third.id,
+                hit_count: 1,
+            }],
+            "{fixture}"
+        );
+        assert_eq!(
+            global(&scenario, "last_call").await,
+            stepped,
+            "{fixture}: the stop is the same call's"
+        );
+
+        let fourth = scenario.add_breakpoint("counted").await;
+        assert_eq!(
+            hits(&scenario.resume_to_stop().await),
+            [BreakpointHit {
+                breakpoint: fourth.id,
+                hit_count: 1,
+            }],
+            "{fixture}"
+        );
+        scenario.step_to_stop(StepKind::Instruction).await;
+        assert_eq!(program_counter(&scenario).await, here, "{fixture}");
+        let handle = scenario.handle().clone();
+        let fifth = scenario
+            .operation(
+                "add conditioned breakpoint",
+                handle.add_breakpoint_with_hit_condition(
+                    BreakpointSpec::Address(here),
+                    condition(">=1"),
+                ),
+            )
+            .await;
+        let call = global(&scenario, "last_call").await;
+        assert_eq!(
+            hits(&scenario.resume_to_stop().await),
+            [
+                BreakpointHit {
+                    breakpoint: third.id,
+                    hit_count: 2,
+                },
+                BreakpointHit {
+                    breakpoint: fifth.id,
+                    hit_count: 1,
+                },
+            ],
+            "{fixture}"
+        );
+        assert_eq!(
+            global(&scenario, "last_call").await,
+            call,
+            "{fixture}: the stop is the same call's"
+        );
+        scenario.shutdown().await;
+    }
+}
+
+/// Continues one thread alone and waits for the stop its execution ends in.
+async fn continue_alone(scenario: &mut Scenario, thread: ThreadId) -> StopReason {
+    let handle = scenario.handle().clone();
+    let stop = scenario.snapshot().await.stop_id.expect("stopped");
+    let mut events = handle.subscribe();
+    let execution = scenario
+        .operation(
+            "continue alone",
+            handle.continue_execution(
+                stop,
+                ResumeScope::Thread(thread),
+                ExceptionDisposition::Pass,
+            ),
+        )
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, events.recv()).await {
+            Ok(Ok(DebuggerEvent::InferiorStopped {
+                execution_id: Some(id),
+                reason,
+                ..
+            })) if id == execution => return reason,
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => panic!("event stream failed: {error}"),
+            Err(elapsed) => panic!("thread {thread} did not stop: {elapsed}"),
+        }
+    }
+}
+
+/// A thread that hit a breakpoint and has not run since steps over the
+/// trap there, whichever breakpoint it is by then, though another thread
+/// ran while the breakpoint was replaced.
+#[tokio::test]
+async fn a_thread_kept_stopped_steps_over_a_breakpoint_replaced_where_it_hit_one() {
+    let mut scenario = Scenario::launch("hit-count-threads");
+    let first = scenario.add_breakpoint("contended").await;
+    scenario.run_to_stop().await;
+    let snapshot = scenario.snapshot().await;
+    let InferiorState::Stopped {
+        process_id,
+        thread_id: worker,
+        ..
+    } = snapshot.inferior
+    else {
+        panic!("expected a stop, got {:?}", snapshot.inferior);
+    };
+    scenario.remove_breakpoint(first.id).await;
+
+    // The main thread waits to join the workers, so it runs until paused.
+    let main = ThreadId::new(process_id.get());
+    let handle = scenario.handle().clone();
+    let stop = snapshot.stop_id.expect("stopped");
+    scenario
+        .operation(
+            "continue main alone",
+            handle.continue_execution(stop, ResumeScope::Thread(main), ExceptionDisposition::Pass),
+        )
+        .await;
+    let second = scenario.add_breakpoint("contended").await;
+    assert_eq!(
+        scenario.operation("pause", handle.pause()).await,
+        StopReason::Pause
+    );
+
+    let total = global(&scenario, "total").await;
+    assert_eq!(
+        hits(&continue_alone(&mut scenario, worker).await),
+        [BreakpointHit {
+            breakpoint: second.id,
+            hit_count: 1,
+        }]
+    );
+    assert!(
+        global(&scenario, "total").await > total,
+        "the worker finished the call it stood in before the next one stopped"
+    );
+    scenario.shutdown().await;
+}
+
 #[tokio::test]
 async fn one_breakpoints_hits_are_numbered_across_all_its_locations() {
     for fixture in MATRIX {
@@ -301,6 +477,77 @@ async fn skipped_hits_are_transparent_to_next_and_finish() {
         );
         scenario.shutdown().await;
     }
+}
+
+/// A hit skipped two calls below the line a next steps over leaves the
+/// step running to the line after, not to the line after the hit's caller.
+#[tokio::test]
+async fn skipped_hits_deep_inside_a_call_are_transparent_to_next() {
+    for fixture in UNOPTIMIZED {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_breakpoint("main").await;
+        scenario.run_to_stop().await;
+        while line(&scenario).await != source_line("caller(call);") {
+            scenario.step_to_stop(StepKind::OverSource).await;
+        }
+        let counted = add(&scenario, "counted", "==2").await;
+
+        assert_eq!(
+            scenario.step_to_stop(StepKind::OverSource).await,
+            StopReason::Step {
+                kind: StepKind::OverSource
+            },
+            "{fixture}"
+        );
+        let after = line(&scenario).await;
+        assert!(
+            after < source_line("caller(call);"),
+            "{fixture}: the next ended on line {after}, not back at the loop"
+        );
+        assert_eq!(breakpoint(&mut scenario, counted.id).await.hit_count, 1);
+        assert_eq!(global(&scenario, "last_call").await, 1);
+        scenario.shutdown().await;
+    }
+}
+
+/// A hit skipped just before a callee's marked epilogue, two calls below
+/// the line a next steps over, is no epilogue of the stepping frame: the
+/// step runs on, here to the program's exit. The simulator found nexts
+/// over `main`'s call that ended inside `main`.
+#[tokio::test]
+async fn a_skipped_hit_before_a_deep_callees_epilogue_is_transparent_to_next() {
+    let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("build/golden/stores/stores-clang-O2");
+    let mut scenario = Scenario::new("skipped hit before an epilogue", program);
+    scenario.add_breakpoint("rt_start").await;
+    let options = uscope::LaunchOptions {
+        arguments: vec!["1".into(), "0".into()],
+        ..uscope::LaunchOptions::default()
+    };
+    assert!(matches!(
+        scenario.run_with_to_stop(options).await,
+        StopReason::Breakpoint { .. }
+    ));
+    scenario.remove_all_breakpoints().await;
+    let source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/rt/rt.c"))
+            .expect("read rt.c");
+    let calls_main = 1 + source
+        .lines()
+        .position(|line| line.contains("rt_exit_group(main("))
+        .expect("rt_start calls main") as u64;
+    while line(&scenario).await != calls_main {
+        scenario.step_to_stop(StepKind::OverSource).await;
+    }
+    // `bump` traps on the instruction its epilogue follows.
+    let bump = add(&scenario, "bump", "==1000").await;
+
+    assert_eq!(
+        scenario.step_to_stop(StepKind::OverSource).await,
+        StopReason::Exited(ExitStatus::Code(11))
+    );
+    assert_eq!(breakpoint(&mut scenario, bump.id).await.hit_count, 1);
+    scenario.shutdown().await;
 }
 
 #[tokio::test]

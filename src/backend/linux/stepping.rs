@@ -11,7 +11,8 @@ use crate::protocol::{
 };
 use crate::unwind::{CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext};
 use crate::{
-    CodeInstanceKind, Error, ImageLocation, InlineFrameLookup, Result, StackFrameId, VirtualAddress,
+    CodeInstanceKind, Error, ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, Result,
+    SourceLocation, StackFrameId, VirtualAddress,
 };
 
 use super::breakpoints::install_plan_breakpoint;
@@ -242,13 +243,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return self.start_user_step(pid, kind);
         }
         if self.source_step_returned_to_undescribed_code(pid, kind)? {
-            let execution = self
-                .inferior
-                .as_ref()
-                .and_then(|inferior| inferior.active.as_ref())
-                .map(|active| active.id)
-                .ok_or(Error::NotRunning)?;
-            self.cleanup_plan_breakpoints(execution)?;
+            self.let_step_run_on()?;
             return self.continue_thread(pid);
         }
         if matches!(kind, StepKind::OverSource | StepKind::Out) && !self.step_frame_returned() {
@@ -271,11 +266,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.start_user_step(pid, kind)
     }
 
-    /// When a step over whose frame returned enters a call its caller
-    /// makes, it runs the call to its return instead of stepping through
-    /// it: it guards the return address, which call-frame information and
-    /// the stack's return slot must agree on, as a return traversal's does.
-    /// Without that evidence it goes on by single steps.
+    /// When a step over or out whose frame returned enters a call its
+    /// caller makes, it runs the call to its return instead of stepping
+    /// through it: it guards the return address, which call-frame
+    /// information and the stack's return slot must agree on, as a return
+    /// traversal's does. Without that evidence it goes on by single steps.
     fn guard_returned_callee(&mut self, pid: Pid) -> Result<()> {
         let plan = self
             .inferior
@@ -284,7 +279,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|active| match &active.kind {
                 ActiveKind::Step {
                     thread,
-                    kind: StepKind::OverSource,
+                    kind: StepKind::OverSource | StepKind::Out,
                     start,
                     ..
                 } if *thread == pid && start.plan_addresses.is_empty() => {
@@ -338,15 +333,17 @@ impl<P: LinuxTraceOps> Controller<P> {
             })
     }
 
-    /// Notes that the frame a step over began in has returned short of a
-    /// source statement, with no traversal guarding the return. Its plan
-    /// then guards a frame that no longer exists, and a later call can
-    /// create a new activation at the same CFA, which the plan cannot tell
-    /// from the one that returned. The step instead records the activation
-    /// it returned to and goes on by single steps. When that activation
-    /// returns too, the step records the one it returned to in turn.
+    /// Notes that the frame a step over or out began in has returned short
+    /// of where the step ends, with no traversal guarding the return: short
+    /// of a source statement for a step over, of code a line describes for
+    /// a step out. Its plan then guards a frame that no longer exists, and
+    /// a later call can create a new activation at the same CFA, which the
+    /// plan cannot tell from the one that returned. The step instead
+    /// records the activation it returned to and goes on by single steps.
+    /// When that activation returns too, the step records the one it
+    /// returned to in turn.
     pub(super) fn note_returned_activation(&mut self, pid: Pid, kind: StepKind) -> Result<()> {
-        if kind != StepKind::OverSource {
+        if !matches!(kind, StepKind::OverSource | StepKind::Out) {
             return Ok(());
         }
         let activation = self
@@ -354,9 +351,12 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
+                // A step over begun in code no debug information describes
+                // steps as stepping in does, which follows no frame.
                 ActiveKind::Step { thread, start, .. }
                     if *thread == pid
-                        && start.code_instance.is_some()
+                        && (kind == StepKind::Out || start.code_instance.is_some())
+                        && !start.running_on
                         && start.epilogue_traversal.is_none()
                         && start.return_traversal.is_none() =>
                 {
@@ -425,6 +425,29 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(())
     }
 
+    /// Lets a source step that returned into code without source run on:
+    /// its plan is removed, and no stop of its thread completes it, so only
+    /// a stop the user sees, such as a breakpoint's, ends it.
+    pub(super) fn let_step_run_on(&mut self) -> Result<()> {
+        let execution = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .map(|active| active.id)
+            .ok_or(Error::NotRunning)?;
+        self.cleanup_plan_breakpoints(execution)?;
+        if let Some(ActiveKind::Step { start, .. }) = self
+            .inferior
+            .as_mut()
+            .and_then(|inferior| inferior.active.as_mut())
+            .map(|active| &mut active.kind)
+        {
+            start.running_on = true;
+            start.plan_addresses.clear();
+        }
+        Ok(())
+    }
+
     /// Source stepping has no truthful stop to publish after its starting
     /// activation returns into code for which the debugger has no source.
     /// Keep the operation active so an exit, signal, or user breakpoint is
@@ -448,7 +471,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .ok_or(Error::LocationUnavailable)?;
         // A step over begun where no frame could be found steps as stepping
         // in does, and has no activation to return from.
-        let Some(activation) = start.activation else {
+        let Some(activation) = start.activation.filter(|_| !start.running_on) else {
             return Ok(false);
         };
         let registers = self.ptrace.registers(pid)?;
@@ -469,8 +492,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     ///
     /// Only source steps cross an epilogue to the caller's next statement. A
     /// step out ends where its frame returns, which its plan already guards.
+    /// So does only the stepping frame's epilogue, or a caller's it returned
+    /// to: a callee's, which a step over reaches by skipping a hit inside the
+    /// call, returns to a frame the step has not finished.
     pub(super) fn begin_epilogue_traversal(&mut self, pid: Pid) -> Result<bool> {
-        let (execution, already_traversing, start_source, kind) = self
+        let (execution, already_traversing, start_source, kind, activation) = self
             .inferior
             .as_ref()
             .and_then(|inferior| inferior.active.as_ref())
@@ -485,6 +511,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     start.epilogue_traversal.is_some() || start.return_traversal.is_some(),
                     start.source.clone(),
                     *kind,
+                    start.activation,
                 )),
                 _ => None,
             })
@@ -494,6 +521,14 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         let registers = self.ptrace.registers(pid)?;
+        if let Some(activation) = activation
+            && kind == StepKind::OverSource
+            && self
+                .top_activation(pid, &registers)
+                .is_ok_and(|current| current < activation)
+        {
+            return Ok(false);
+        }
         let instruction = VirtualAddress::new(registers.rip);
         let (loaded_module, image_address) = {
             let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
@@ -523,35 +558,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Ok(caller_image) = loaded_module.image_address(return_address) else {
             return Ok(false);
         };
-        let caller_location = self.module_image.locate(caller_image);
-        let mut completion_addresses = BTreeSet::new();
-        if let Some(caller_instance_id) = caller_location.physical_instance
-            && let Some(caller_instance) = self.module_image.code_instance(caller_instance_id)
-        {
-            for line in self.module_image.line_entries() {
-                if !line.statement || !caller_instance.contains(line.range.start) {
-                    continue;
-                }
-                if self
-                    .module_image
-                    .control_boundaries_at(line.range.start)
-                    .any(|row| row.flags.epilogue_begin())
-                {
-                    continue;
-                }
-                let candidate_location = self.module_image.locate(line.range.start);
-                if source_for_code_instance(
-                    &self.module_image,
-                    &candidate_location,
-                    caller_instance_id,
-                )
-                .is_some_and(|candidate| {
-                    source_line_changed(start_source.as_ref(), Some(&candidate))
-                }) {
-                    completion_addresses.insert(loaded_module.virtual_address(line.range.start)?);
-                }
-            }
-        }
+        let completion_addresses =
+            self.caller_statements(loaded_module, caller_image, start_source.as_ref())?;
 
         let mut plan_addresses = completion_addresses.clone();
         plan_addresses.insert(return_address);
@@ -573,6 +581,44 @@ impl<P: LinuxTraceOps> Controller<P> {
             retire_return_after_repair: false,
         });
         Ok(true)
+    }
+
+    /// The statements of the function containing `caller_image` where a
+    /// source step from `start_source` that returned there may end: those
+    /// on other lines, outside epilogues.
+    fn caller_statements(
+        &self,
+        loaded_module: LoadedModule,
+        caller_image: ImageAddress,
+        start_source: Option<&SourceLocation>,
+    ) -> Result<BTreeSet<VirtualAddress>> {
+        let mut statements = BTreeSet::new();
+        let caller_location = self.module_image.locate(caller_image);
+        let Some(caller_instance_id) = caller_location.physical_instance else {
+            return Ok(statements);
+        };
+        let Some(caller_instance) = self.module_image.code_instance(caller_instance_id) else {
+            return Ok(statements);
+        };
+        for line in self.module_image.line_entries() {
+            if !line.statement || !caller_instance.contains(line.range.start) {
+                continue;
+            }
+            if self
+                .module_image
+                .control_boundaries_at(line.range.start)
+                .any(|row| row.flags.epilogue_begin())
+            {
+                continue;
+            }
+            let candidate_location = self.module_image.locate(line.range.start);
+            if source_for_code_instance(&self.module_image, &candidate_location, caller_instance_id)
+                .is_some_and(|candidate| source_line_changed(start_source, Some(&candidate)))
+            {
+                statements.insert(loaded_module.virtual_address(line.range.start)?);
+            }
+        }
+        Ok(statements)
     }
 
     /// Runs through a frame that should not become a source-step destination.
@@ -819,6 +865,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 _ => None,
             })
             .expect("source step has a starting state");
+        if start.running_on {
+            return Ok(false);
+        }
         if kind == StepKind::OverInstruction {
             // A stepped-over call completes when it returns to its caller's
             // stack, not when recursion reaches the same return address.
@@ -858,8 +907,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             StepKind::OverSource if start.code_instance.is_none() => {
                 self.step_into_source_is_complete(pid, &registers, start)
             }
-            StepKind::OverSource if let Some(caller) = start.returned_to => {
-                Ok(self.returned_step_over_is_complete(pid, &registers, caller))
+            StepKind::OverSource | StepKind::Out if let Some(caller) = start.returned_to => {
+                Ok(self.returned_step_is_complete(pid, &registers, caller, kind))
             }
             StepKind::OverSource | StepKind::Out => {
                 let Some(activation) = start.activation else {
@@ -934,21 +983,23 @@ impl<P: LinuxTraceOps> Controller<P> {
         })
     }
 
-    /// Whether a step over whose frame returned is complete: at the first
-    /// source statement of the frame it returned to, or of one further
-    /// out, never in a callee of theirs.
-    fn returned_step_over_is_complete(
+    /// Whether a step over or out whose frame returned is complete: in the
+    /// frame it returned to, or one further out, never in a callee of
+    /// theirs, at a source statement for a step over and at code a line
+    /// describes for a step out.
+    fn returned_step_is_complete(
         &self,
         pid: Pid,
         registers: &libc::user_regs_struct,
         caller: VirtualAddress,
+        kind: StepKind,
     ) -> bool {
         let current = self.top_activation(pid, registers).ok();
         current.is_some_and(|current| current >= caller)
             && self
                 .image_location(VirtualAddress::new(registers.rip))
                 .is_some_and(|location| {
-                    source_step_destination(&self.module_image, &location, StepKind::OverSource)
+                    source_step_destination(&self.module_image, &location, kind)
                 })
     }
 
@@ -1153,6 +1204,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             activation,
             stack_pointer: registers.rsp,
             returned_to: None,
+            running_on: false,
             plan_addresses,
             epilogue_traversal: None,
             return_traversal: None,
@@ -1264,6 +1316,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             activation: Some(activation),
             stack_pointer: registers.rsp,
             returned_to: None,
+            running_on: false,
             plan_addresses,
             epilogue_traversal: None,
             return_traversal: None,
