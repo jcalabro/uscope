@@ -247,6 +247,18 @@ fn caller_frames_registers_and_hexadecimal_values() {
         .to_owned();
     let number = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("hex");
     assert_eq!(number(&rip), number(&pointer));
+    // A register's row names it as an expression, and cannot be changed.
+    let row = named(&registers, "rip");
+    assert_eq!(row["evaluateName"], "$rip");
+    assert_eq!(row["presentationHint"]["attributes"], json!(["readOnly"]));
+    let watched = dap.request(
+        "evaluate",
+        json!({"expression": "$rip", "frameId": frames[0]["id"], "context": "watch", "format": {"hex": true}}),
+    );
+    assert_eq!(
+        number(watched["result"].as_str().expect("result")),
+        number(&rip)
+    );
     // A caller's registers that its callees may change are unknown.
     let caller_registers = variables(&mut dap, &caller["Registers"]["variablesReference"]);
     assert_eq!(named(&caller_registers, "rax")["value"], "<not saved>");
@@ -620,6 +632,115 @@ fn statics_that_files_share_a_name_with_evaluate_to_their_own_files_value() {
         mark = resumed.mark;
     }
     dap.event(mark, "exited", |_| true);
+    dap.finish();
+}
+
+#[test]
+fn hexadecimal_is_a_session_default_each_request_may_override() {
+    let mut dap = Dap::start("hexadecimal");
+    let stop = stopped_at(
+        &mut dap,
+        "variables-gcc-o0",
+        "c/variables.c",
+        "return **pointer_pointer",
+    );
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let parameters = |dap: &mut Dap, hex: bool| {
+        dap.request(
+            "stackTrace",
+            json!({"threadId": stop.thread, "levels": 1, "format": {"parameters": true, "hex": hex}}),
+        )["stackFrames"][0]["name"]
+            .clone()
+    };
+    let starts = |name: Value, prefix: &str| {
+        assert!(
+            name.as_str().is_some_and(|name| name.starts_with(prefix)),
+            "{name} does not start with {prefix}"
+        );
+    };
+    starts(
+        parameters(&mut dap, true),
+        "pointer_target(parameter = 0x28, pointer_parameter = 0x",
+    );
+    let scopes = scopes(&mut dap, &frame);
+    let arguments = scopes["Arguments"]["variablesReference"].clone();
+    let parameter = |dap: &mut Dap, format: Value| {
+        let mut arguments = json!({"variablesReference": arguments});
+        if !format.is_null() {
+            arguments["format"] = format;
+        }
+        dap.request("variables", arguments)["variables"][0]["value"].clone()
+    };
+    let watched = |dap: &mut Dap| {
+        dap.request(
+            "evaluate",
+            json!({"expression": "parameter + 1", "frameId": frame["id"], "context": "watch"}),
+        )["result"]
+            .clone()
+    };
+    assert_eq!(parameter(&mut dap, Value::Null), "40");
+
+    let mark = dap.mark();
+    assert_eq!(
+        dap.request("uscope/setValueFormat", json!({"hex": true})),
+        json!({})
+    );
+    assert_eq!(
+        dap.event(mark, "invalidated", |_| true),
+        json!({"areas": ["variables"]})
+    );
+    assert_eq!(parameter(&mut dap, Value::Null), "0x28");
+    assert_eq!(watched(&mut dap), "0x29");
+    assert_eq!(parameter(&mut dap, json!({"hex": false})), "40");
+    starts(
+        parameters(&mut dap, false),
+        "pointer_target(parameter = 40, pointer_parameter = 0x",
+    );
+    // Setting what is already set changes nothing.
+    let mark = dap.mark();
+    dap.request("uscope/setValueFormat", json!({"hex": true}));
+    dap.request("threads", Value::Null);
+    assert!(dap.events(mark, "invalidated").is_empty());
+    dap.request("uscope/setValueFormat", json!({"hex": false}));
+    assert_eq!(parameter(&mut dap, Value::Null), "40");
+    assert!(
+        dap.request_error("uscope/setValueFormat", json!({"hex": "yes"}))
+            .contains("hex")
+    );
+    dap.finish();
+}
+
+#[test]
+fn variables_filtered_by_kind_return_only_children_of_that_kind() {
+    let mut dap = Dap::start("filters");
+    let stop = stopped_at(
+        &mut dap,
+        "variables-gcc-o0",
+        "c/variables.c",
+        "return **pointer_pointer",
+    );
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let scopes = scopes(&mut dap, &frame);
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+    let filtered = |dap: &mut Dap, reference: &Value, filter: &str| {
+        dap.request(
+            "variables",
+            json!({"variablesReference": reference, "filter": filter}),
+        )["variables"]
+            .as_array()
+            .expect("variables")
+            .len()
+    };
+    let array = named(&locals, "array")["variablesReference"].clone();
+    let pair = named(&locals, "pair")["variablesReference"].clone();
+    assert_eq!(filtered(&mut dap, &array, "indexed"), 2);
+    assert_eq!(filtered(&mut dap, &array, "named"), 0);
+    assert_eq!(filtered(&mut dap, &pair, "named"), 2);
+    assert_eq!(filtered(&mut dap, &pair, "indexed"), 0);
+    assert_eq!(
+        filtered(&mut dap, &scopes["Locals"]["variablesReference"], "indexed"),
+        0
+    );
     dap.finish();
 }
 

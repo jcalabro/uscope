@@ -28,6 +28,13 @@ pub struct Options {
     pub hex: bool,
 }
 
+/// How values show when a request does not say.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Display {
+    /// Whether integers show in hexadecimal.
+    pub hex: bool,
+}
+
 /// One value to present.
 pub struct Item<'a> {
     pub name: &'a str,
@@ -46,17 +53,10 @@ pub fn variable(
 ) -> Result<Map<String, Value>, Exhausted> {
     let mut variable = Map::new();
     variable.insert("name".to_owned(), item.name.into());
-    let text = options
-        .hex
-        .then(|| {
-            hex(
-                item.type_info.and_then(|type_info| type_info.byte_size),
-                item.state,
-            )
-        })
-        .flatten()
-        .unwrap_or_else(|| summary(item.type_info, item.state));
-    variable.insert("value".to_owned(), text.into());
+    variable.insert(
+        "value".to_owned(),
+        text(item.type_info, item.state, options.hex).into(),
+    );
     if options.types {
         variable.insert(
             "type".to_owned(),
@@ -82,18 +82,21 @@ pub fn variable(
     {
         if let ValueChildren::Available(children) = children {
             let total = children.total();
-            match value {
-                VariableValue::Array { .. } | VariableValue::Slice { .. } => {
-                    variable.insert("indexedVariables".to_owned(), total.into());
-                }
-                _ => {
-                    variable.insert("namedVariables".to_owned(), total.into());
-                }
-            }
+            let indexed = matches!(
+                value,
+                VariableValue::Array { .. } | VariableValue::Slice { .. }
+            );
+            let count = if indexed {
+                "indexedVariables"
+            } else {
+                "namedVariables"
+            };
+            variable.insert(count.to_owned(), total.into());
             reference = references.variables(Variables::Children {
                 context,
                 reference: children.clone(),
                 path,
+                indexed,
             })?;
         } else if let uscope::DereferenceState::Available(dereference) = dereference {
             reference = references.variables(Variables::Pointee {
@@ -162,10 +165,22 @@ fn attributes(
     attributes
 }
 
-/// Presents a register, which never expands.
+/// Presents a register, which never expands and which expressions read but
+/// cannot assign.
 pub fn register(value: &RegisterValue, byte_order: uscope::ByteOrder) -> Map<String, Value> {
     let mut variable = Map::new();
-    variable.insert("name".to_owned(), value.register.name.as_ref().into());
+    let name = value.register.name.as_ref();
+    variable.insert("name".to_owned(), name.into());
+    if name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        variable.insert("evaluateName".to_owned(), format!("${name}").into());
+    }
+    variable.insert(
+        "presentationHint".to_owned(),
+        json!({"kind": "data", "attributes": ["readOnly"]}),
+    );
     variable.insert(
         "value".to_owned(),
         value
@@ -232,6 +247,14 @@ pub fn child_path(
         ValueChildRelationship::Member(member) => parent.member(member.name.as_deref()?),
         _ => None,
     }
+}
+
+/// A value's text: its summary, with integers in hexadecimal when asked.
+pub fn text(type_info: Option<&TypeInfo>, state: &VariableState, hexadecimal: bool) -> String {
+    hexadecimal
+        .then(|| hex(type_info.and_then(|type_info| type_info.byte_size), state))
+        .flatten()
+        .unwrap_or_else(|| summary(type_info, state))
 }
 
 /// An integer value in hexadecimal, in the width of its type's size.

@@ -188,6 +188,7 @@ impl Session {
             let names = format.parameter_names.unwrap_or(true);
             let types = format.parameter_types.unwrap_or(false);
             let values = format.parameter_values.unwrap_or(true);
+            let hex = format.hex.unwrap_or(self.display.hex);
             let parameters = self.frame_variables(context).await.map_or_else(
                 |_| Vec::new(),
                 |snapshot| {
@@ -210,9 +211,10 @@ impl Session {
                                 if names {
                                     text.push_str(" = ");
                                 }
-                                text.push_str(&crate::cli::value::summary(
+                                text.push_str(&values::text(
                                     variable.type_info.as_ref(),
                                     &variable.state,
+                                    hex,
                                 ));
                             }
                             text.trim().to_owned()
@@ -334,7 +336,7 @@ impl Session {
                 .format
                 .as_ref()
                 .and_then(|format| format.hex)
-                .unwrap_or(false),
+                .unwrap_or(self.display.hex),
             ..self.value_options()
         };
         let window = Window {
@@ -347,6 +349,16 @@ impl Session {
                 .min(MAX_CHILDREN),
             options,
         };
+        // A client pages by the count the list was given, so the other
+        // kind of row has none to show.
+        let wanted = match arguments.filter.as_deref() {
+            Some("indexed") => Some(true),
+            Some("named") => Some(false),
+            _ => None,
+        };
+        if wanted.is_some_and(|wanted| variables.indexed() == Some(!wanted)) {
+            return Ok(json!({"variables": []}));
+        }
         let list = arguments.variables_reference;
         let context = variables.context();
         let rows = match variables {
@@ -368,6 +380,7 @@ impl Session {
                 context,
                 reference,
                 path,
+                ..
             } => {
                 self.children(context, reference, path.as_ref(), window)
                     .await?
@@ -705,7 +718,7 @@ impl Session {
         Options {
             types: support.variable_type,
             memory: support.memory_references,
-            hex: false,
+            hex: self.display.hex,
         }
     }
 
@@ -744,7 +757,7 @@ impl Session {
                 .format
                 .as_ref()
                 .and_then(|format| format.hex)
-                .unwrap_or(false),
+                .unwrap_or(self.display.hex),
             ..self.value_options()
         };
         let handle = self.target_handle()?;
@@ -917,7 +930,7 @@ impl Session {
         let hex = arguments
             .format
             .and_then(|format| format.hex)
-            .unwrap_or(false);
+            .unwrap_or(self.display.hex);
         self.assign(context, &arguments.name, path, &arguments.value, hex)
             .await
     }
@@ -938,7 +951,7 @@ impl Session {
         let hex = arguments
             .format
             .and_then(|format| format.hex)
-            .unwrap_or(false);
+            .unwrap_or(self.display.hex);
         self.assign(
             context,
             arguments.expression.trim(),

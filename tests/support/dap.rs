@@ -1214,8 +1214,15 @@ fn validate_schema(message: &Value) -> Result<(), String> {
         serde_json::from_str(include_str!("../dap/schema/debugAdapterProtocol.json"))
             .expect("schema")
     });
+    let custom = message["command"]
+        .as_str()
+        .is_some_and(|command| command.starts_with("uscope/"));
     let definition = match message["type"].as_str() {
         Some("response") if message["success"] == false => "ErrorResponse".to_owned(),
+        // The adapter's own requests, which the protocol allows any adapter
+        // to add, have only the protocol's general shape.
+        Some("response") if custom => "Response".to_owned(),
+        Some("request") if custom => "Request".to_owned(),
         Some("response") => format!(
             "{}Response",
             capitalized(message["command"].as_str().unwrap_or_default())
