@@ -1011,15 +1011,26 @@ fn inline_range_start_presentation_obeys_the_step_kind() {
 }
 
 fn virtual_step_image() -> Arc<ModuleImage> {
-    let source = |line| SourceLocation {
+    let range = (0x10, 0x20);
+    inline_test_image(&[
+        (0, None, None, (0, 0x100)),
+        (1, Some(0), Some(10), range),
+        (2, Some(1), Some(20), range),
+    ])
+}
+
+/// A code instance of a test image: its index, its parent's, its call
+/// site's line if it is inlined, and its address range.
+type TestInstance = (u32, Option<u32>, Option<u32>, (u64, u64));
+
+/// An image whose functions `physical`, `middle`, and `leaf` have one code
+/// instance each.
+fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
+    let source = |line: u32| SourceLocation {
         file: crate::SourceFileId::new(0),
-        line: crate::LineNumber::new(line).expect("nonzero line"),
+        line: crate::LineNumber::new(u64::from(line)).expect("nonzero line"),
         column: None,
     };
-    let range = Arc::from([AddressRange {
-        start: ImageAddress::new(0x10),
-        end: ImageAddress::new(0x20),
-    }]);
     Arc::new(ModuleImage::new(
         PathBuf::from("/test/inline"),
         crate::TargetDescription {
@@ -1042,39 +1053,26 @@ fn virtual_step_image() -> Arc<ModuleImage> {
                     declaration: None,
                 })
                 .collect(),
-            code_instances: vec![
-                crate::CodeInstanceInfo {
-                    id: CodeInstanceId::new(0),
-                    function: crate::FunctionId::new(0),
-                    parent: None,
-                    kind: CodeInstanceKind::OutOfLine,
-                    ranges: Arc::from([AddressRange {
-                        start: ImageAddress::new(0),
-                        end: ImageAddress::new(0x100),
-                    }]),
-                    breakpoint_entry: None,
-                },
-                crate::CodeInstanceInfo {
-                    id: CodeInstanceId::new(1),
-                    function: crate::FunctionId::new(1),
-                    parent: Some(CodeInstanceId::new(0)),
-                    kind: CodeInstanceKind::Inline {
-                        call_site: Some(source(10)),
+            code_instances: instances
+                .iter()
+                .map(
+                    |&(id, parent, call_line, (start, end))| crate::CodeInstanceInfo {
+                        id: CodeInstanceId::new(id),
+                        function: crate::FunctionId::new(id),
+                        parent: parent.map(CodeInstanceId::new),
+                        kind: call_line.map_or(CodeInstanceKind::OutOfLine, |line| {
+                            CodeInstanceKind::Inline {
+                                call_site: Some(source(line)),
+                            }
+                        }),
+                        ranges: Arc::from([AddressRange {
+                            start: ImageAddress::new(start),
+                            end: ImageAddress::new(end),
+                        }]),
+                        breakpoint_entry: None,
                     },
-                    ranges: Arc::clone(&range),
-                    breakpoint_entry: None,
-                },
-                crate::CodeInstanceInfo {
-                    id: CodeInstanceId::new(2),
-                    function: crate::FunctionId::new(2),
-                    parent: Some(CodeInstanceId::new(1)),
-                    kind: CodeInstanceKind::Inline {
-                        call_site: Some(source(20)),
-                    },
-                    ranges: range,
-                    breakpoint_entry: None,
-                },
-            ],
+                )
+                .collect(),
             symbols: Vec::new(),
             symbol_sources: crate::model::SymbolTableSources::default(),
             globals: Vec::new(),
@@ -1869,19 +1867,23 @@ impl WatchHarness {
 }
 
 fn watch_harness(thread_count: i32) -> WatchHarness {
+    watch_harness_of(thread_count, &virtual_step_image())
+}
+
+/// A harness of `thread_count` stopped threads in a process of `image`.
+fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness {
     let threads = (0..thread_count)
         .map(|offset| Pid::from_raw(5000 + offset))
         .collect::<Vec<_>>();
-    let image = virtual_step_image();
     let (mut controller, event_receiver) = test_controller(
         SessionLease::detached(),
         "/test/watch",
         sectionless_elf(),
-        Arc::clone(&image),
+        Arc::clone(image),
         DebugRegisterTrace::default(),
         256,
     );
-    let mut inferior = virtual_step_inferior(threads[0], &image, StopId::new(1));
+    let mut inferior = virtual_step_inferior(threads[0], image, StopId::new(1));
     for &pid in &threads[1..] {
         inferior
             .threads
@@ -6082,4 +6084,78 @@ fn a_pause_waits_for_an_exiting_thread() {
             _ => None,
         });
     assert_eq!(stopped, Some((debug_thread_id(leader), StopReason::Pause)));
+}
+
+/// Where the debug information describes two inlined calls that overlap
+/// without nesting, no frame can be presented, so source steps are refused
+/// rather than guessed. An instruction step needs no frame: it executes one
+/// instruction whatever is presented.
+#[test]
+fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
+    let mut harness = watch_harness_of(
+        1,
+        &inline_test_image(&[
+            (0, None, None, (0, 0x100)),
+            (1, Some(0), Some(10), (0x10, 0x20)),
+            (2, Some(0), Some(11), (0x18, 0x28)),
+        ]),
+    );
+    let pid = harness.threads[0];
+    harness
+        .trace()
+        .program_counters
+        .borrow_mut()
+        .insert(pid, 0x1a);
+    let inferior = harness.controller.inferior.as_mut().expect("inferior");
+    let stop = inferior.public_stop.as_mut().expect("public stop");
+    stop.presentations.insert(
+        pid,
+        FramePresentation {
+            instruction: VirtualAddress::new(0x1a),
+            frame: PresentedFrame::Ambiguous(Arc::from([
+                CodeInstanceId::new(1),
+                CodeInstanceId::new(2),
+            ])),
+            hidden_inline_frames: 0,
+        },
+    );
+    let stop = stop.id;
+    let process = process_id(inferior.tgid);
+    let request_step = |harness: &mut WatchHarness, kind| {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        harness
+            .controller
+            .handle_message(ControllerMessage::Request(Request::Step {
+                process_id: process,
+                stop_id: stop,
+                thread_id: debug_thread_id(pid),
+                frame: StackFrameId::INNERMOST,
+                kind,
+                scope: ResumeScope::Process(process),
+                exception: ExceptionDisposition::Pass,
+                reply,
+            }));
+        result.blocking_recv().expect("a reply")
+    };
+
+    assert!(matches!(
+        request_step(&mut harness, StepKind::OverSource),
+        Err(Error::AmbiguousInlineFrame)
+    ));
+    harness.trace().take_actions();
+    request_step(&mut harness, StepKind::Instruction).expect("an instruction step");
+    assert!(
+        harness
+            .trace()
+            .take_actions()
+            .contains(&format!("step {pid}")),
+        "the thread single-steps"
+    );
+    harness.finish_step(pid).expect("the step completes");
+    assert_eq!(
+        harness.public_reason(),
+        Some(StopReason::Step {
+            kind: StepKind::Instruction
+        })
+    );
 }
