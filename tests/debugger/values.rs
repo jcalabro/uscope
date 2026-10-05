@@ -2698,7 +2698,7 @@ async fn text_running_into_an_unmapped_page_stops_at_the_page() {
 #[tokio::test]
 async fn a_variable_whose_location_wraps_the_address_space_is_unavailable() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden/straight/straight-clang-O0");
+        .join("build/golden/straight/straight-clang-O0");
     let mut scenario = Scenario::new("variables before a prologue", program);
     let entry = scenario
         .run_with_to_stop(LaunchOptions {

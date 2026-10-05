@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
-# Builds and checks the simulator's golden programs, which are checked in as
-# source and as compiled binaries so that compiler upgrades never change what
-# a simulation means.
+# Builds the simulator's golden programs. Their sources and manifests are
+# checked in; the binaries are built with the pinned Nix toolchain, which
+# reproduces them byte for byte, and must match the hashes the manifests
+# record, so a compiler change can never silently change what a simulation
+# means.
 #
-#   golden.sh build NAME   compiles NAME's variants, runs each with every
-#                          argument list in NAME/arguments, and rewrites
-#                          NAME/manifest.json and NAME/facts.json
-#   golden.sh check        fails unless every manifest matches its sources,
-#                          binaries, and the output the binaries produce, and
-#                          every facts file matches its binaries
+#   golden.sh build         compiles every program into build/golden, unless
+#                           its inputs are unchanged since the last build;
+#                           fails unless its binaries, and what they print and
+#                           return, match its manifest; and writes the facts
+#                           GNU binutils give about each binary
+#   golden.sh record NAME   compiles NAME's variants, runs each with every
+#                           argument list in NAME/arguments, and rewrites
+#                           NAME/manifest.json, after a deliberate change to
+#                           its sources or the toolchain
 
 set -euo pipefail
 
 readonly golden_dir="tests/golden"
+readonly build_dir="build/golden"
 # Debug information places the repository here wherever it is checked out.
 readonly source_root="/uscope"
 # How many more times a build runs each binary to check that it behaves the
@@ -58,13 +64,26 @@ hash_of() {
     sha256sum "$1" | cut -d' ' -f1
 }
 
+# The binary of program NAME's variant VARIANT.
+binary_of() {
+    printf '%s/%s/%s-%s' "$build_dir" "$1" "$1" "$2"
+}
+
+toolchain() {
+    gcc --version | head -n1
+    clang --version | head -n1
+}
+
 # The sources a program's binaries are built from, relative to its directory.
-# Programs that include the thread runtime link it too.
+# Programs that include the thread or process runtime link it too.
 sources_of() {
     local name="$1"
     printf '%s\n' "${name}.c" ../rt/rt.c ../rt/rt.h
     if grep -q '^#include "../rt/thread.h"$' "${golden_dir}/${name}/${name}.c"; then
         printf '%s\n' ../rt/thread.c ../rt/thread.h
+    fi
+    if grep -q '^#include "../rt/process.h"$' "${golden_dir}/${name}/${name}.c"; then
+        printf '%s\n' ../rt/process.c ../rt/process.h
     fi
 }
 
@@ -93,8 +112,8 @@ manifest() {
     local variant
     for variant in "${variants[@]}"; do
         read -r variant_name compiler flags <<<"$variant"
-        local binary="${directory}/${name}-${variant_name}"
-        [[ -f "$binary" ]] || die "${binary} is missing; run: just golden-build ${name}"
+        local binary
+        binary=$(binary_of "$name" "$variant_name")
         printf '%s    {"name": %s, "compiler": %s, "flags": %s, "sha256": "%s"}' "$separator" \
             "$(json_string "$variant_name")" "$(json_string "$compiler")" \
             "$(json_string "${common_flags} ${flags}")" "$(hash_of "$binary")"
@@ -111,7 +130,8 @@ manifest() {
         local expected_output="" expected_status=""
         for variant in "${variants[@]}"; do
             read -r variant_name _ <<<"$variant"
-            local binary="${directory}/${name}-${variant_name}" output status=0
+            local binary output status=0
+            binary=$(binary_of "$name" "$variant_name")
             output=$("./${binary}" "${argv[@]}"; printf x) || status=$?
             if [[ $status -eq 0 ]]; then
                 # The command substitution's status is the program's.
@@ -146,13 +166,12 @@ manifest() {
 # sequence.
 facts() {
     local name="$1"
-    local directory="${golden_dir}/${name}"
     local separator="" variant
     printf '{\n  "program": %s,\n  "variants": [\n' "$(json_string "$name")"
     for variant in "${variants[@]}"; do
         read -r variant_name _ flags <<<"$variant"
-        local binary="${directory}/${name}-${variant_name}"
-        [[ -f "$binary" ]] || die "${binary} is missing; run: just golden-build ${name}"
+        local binary
+        binary=$(binary_of "$name" "$variant_name")
         local optimized=false
         [[ " ${flags} " == *" -O0 "* ]] || optimized=true
         local inlined
@@ -196,72 +215,106 @@ facts() {
     printf '\n  ]\n}\n'
 }
 
-build() {
+# Compiles program NAME's variants into build/golden/NAME, with the facts
+# about each.
+compile() {
     local name="$1"
     local directory="${golden_dir}/${name}"
     [[ -f "${directory}/${name}.c" ]] || die "no program ${directory}/${name}.c"
+    mkdir -p "${build_dir}/${name}"
+    local -a sources=()
+    mapfile -t sources < <(sources_of "$name" | grep '\.c$' | sed "s|^|${directory}/|")
+    printf '[golden] building %s\n' "$name"
     local variant
     for variant in "${variants[@]}"; do
         read -r variant_name compiler flags <<<"$variant"
-        local binary="${directory}/${name}-${variant_name}"
-        local -a sources=()
-        mapfile -t sources < <(sources_of "$name" | grep '\.c$' | sed "s|^|${directory}/|")
-        printf '[build] %s\n' "$binary"
         # shellcheck disable=SC2086
         NIX_HARDENING_ENABLE= "$compiler" $common_flags $flags \
             "-ffile-prefix-map=${PWD}=${source_root}" \
-            -o "$binary" "${sources[@]}"
+            -o "$(binary_of "$name" "$variant_name")" "${sources[@]}"
     done
-    manifest "$name" "$(gcc --version | head -n1)" "$(clang --version | head -n1)" \
-        >"${directory}/manifest.json.tmp"
+    facts "$name" >"${build_dir}/${name}/facts.json.tmp"
+    mv "${build_dir}/${name}/facts.json.tmp" "${build_dir}/${name}/facts.json"
+}
+
+# What a build of program NAME depends on: this script, the toolchain, and
+# the program's manifest, arguments, and sources.
+inputs_of() {
+    local name="$1"
+    local directory="${golden_dir}/${name}"
+    {
+        cat "${BASH_SOURCE[0]}" "${directory}/manifest.json" "${directory}/arguments"
+        toolchain
+        local source
+        while read -r source; do
+            cat "${directory}/${source}"
+        done < <(sources_of "$name")
+    } | sha256sum | cut -d' ' -f1
+}
+
+# Builds program NAME unless its inputs are as they were at its last build,
+# and fails unless the binaries match its manifest.
+build_one() {
+    local name="$1"
+    local manifest_path="${golden_dir}/${name}/manifest.json"
+    local stamp="${build_dir}/${name}/inputs" inputs
+    inputs=$(inputs_of "$name")
+    if [[ -f "$stamp" && "$(<"$stamp")" == "$inputs" ]]; then
+        return
+    fi
+    rm -f "$stamp"
+    compile "$name"
+    local gcc_version clang_version
+    gcc_version=$(sed -n 's/^    "gcc": "\(.*\)",$/\1/p' "$manifest_path")
+    clang_version=$(sed -n 's/^    "clang": "\(.*\)"$/\1/p' "$manifest_path")
+    if ! diff -u "$manifest_path" <(manifest "$name" "$gcc_version" "$clang_version"); then
+        printf 'golden: %s does not match what %s builds and does.\n' "$manifest_path" "$name" >&2
+        printf 'golden: recorded with %s and %s; built with %s and %s.\n' \
+            "$gcc_version" "$clang_version" "$(gcc --version | head -n1)" "$(clang --version | head -n1)" >&2
+        die "if its sources or the toolchain changed on purpose, run: just golden-record ${name}"
+    fi
+    printf '%s\n' "$inputs" >"$stamp"
+}
+
+build() {
+    local manifest_path
+    for manifest_path in "${golden_dir}"/*/manifest.json; do
+        build_one "$(basename "$(dirname "$manifest_path")")"
+    done
+}
+
+record() {
+    local name="$1"
+    local directory="${golden_dir}/${name}"
+    rm -f "${build_dir}/${name}/inputs"
+    compile "$name"
+    local gcc_version clang_version
+    gcc_version=$(gcc --version | head -n1)
+    clang_version=$(clang --version | head -n1)
+    manifest "$name" "$gcc_version" "$clang_version" >"${directory}/manifest.json.tmp"
     mv "${directory}/manifest.json.tmp" "${directory}/manifest.json"
-    printf '[wrote] %s/manifest.json\n' "$directory"
-    facts "$name" >"${directory}/facts.json.tmp"
-    mv "${directory}/facts.json.tmp" "${directory}/facts.json"
-    printf '[wrote] %s/facts.json\n' "$directory"
+    printf '[golden] wrote %s/manifest.json\n' "$directory"
     # Threads interleave differently on every run; what a program prints and
     # returns must not depend on how.
     local run
     for run in $(seq "$determinism_runs"); do
-        manifest "$name" "$(gcc --version | head -n1)" "$(clang --version | head -n1)" |
-            cmp -s - "${directory}/manifest.json" ||
+        manifest "$name" "$gcc_version" "$clang_version" | cmp -s - "${directory}/manifest.json" ||
             die "${name} behaved differently on run ${run}: its output depends on scheduling"
     done
-    printf '[checked] %s behaves the same in %s more runs\n' "$name" "$determinism_runs"
-}
-
-check() {
-    local manifest_path failed=0
-    for manifest_path in "${golden_dir}"/*/manifest.json; do
-        local name gcc_version clang_version
-        name=$(basename "$(dirname "$manifest_path")")
-        gcc_version=$(sed -n 's/^    "gcc": "\(.*\)",$/\1/p' "$manifest_path")
-        clang_version=$(sed -n 's/^    "clang": "\(.*\)"$/\1/p' "$manifest_path")
-        if ! diff -u "$manifest_path" <(manifest "$name" "$gcc_version" "$clang_version"); then
-            printf 'golden: %s does not match its files; rebuild with: just golden-build %s\n' \
-                "$manifest_path" "$name" >&2
-            failed=1
-        fi
-        local facts_path="${golden_dir}/${name}/facts.json"
-        if ! diff -u "$facts_path" <(facts "$name"); then
-            printf 'golden: %s does not match its binaries; rebuild with: just golden-build %s\n' \
-                "$facts_path" "$name" >&2
-            failed=1
-        fi
-    done
-    return "$failed"
+    printf '[golden] %s behaves the same in %s more runs\n' "$name" "$determinism_runs"
+    inputs_of "$name" >"${build_dir}/${name}/inputs"
 }
 
 case "${1:-}" in
 build)
-    [[ $# -eq 2 ]] || die "usage: golden.sh build NAME"
-    build "$2"
+    [[ $# -eq 1 ]] || die "usage: golden.sh build"
+    build
     ;;
-check)
-    [[ $# -eq 1 ]] || die "usage: golden.sh check"
-    check
+record)
+    [[ $# -eq 2 ]] || die "usage: golden.sh record NAME"
+    record "$2"
     ;;
 *)
-    die "usage: golden.sh build NAME | golden.sh check"
+    die "usage: golden.sh build | golden.sh record NAME"
     ;;
 esac
