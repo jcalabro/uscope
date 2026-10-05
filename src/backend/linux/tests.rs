@@ -552,17 +552,79 @@ impl VariableInfo for UnusedVariableInfo {
         panic!("unexpected variable lookup")
     }
 
-    fn inspect_path(
+    fn visible_object(
         &self,
         _address: ImageAddress,
         _selected: Option<crate::CodeInstanceId>,
-        _root: &str,
-        _selectors: &[crate::ValuePathStep],
+        _name: &str,
+    ) -> Result<crate::debug_info::ObjectKey> {
+        panic!("unexpected variable lookup")
+    }
+
+    fn global_object(&self, _id: crate::GlobalVariableId) -> Result<crate::debug_info::ObjectKey> {
+        panic!("unexpected global variable lookup")
+    }
+
+    fn object_type(
+        &self,
+        _object: crate::debug_info::ObjectKey,
+    ) -> std::result::Result<crate::TypeId, Arc<str>> {
+        panic!("unexpected object type lookup")
+    }
+
+    fn type_info(&self, _id: crate::TypeId) -> std::result::Result<crate::TypeInfo, Arc<str>> {
+        panic!("unexpected type lookup")
+    }
+
+    fn plan_step(
+        &self,
+        _from: crate::TypeId,
+        _step: crate::debug_info::Step<'_>,
+    ) -> Result<crate::debug_info::PlannedStep> {
+        panic!("unexpected step planning")
+    }
+
+    fn inspect_object(
+        &self,
+        _object: crate::debug_info::ObjectKey,
+        _address: Option<ImageAddress>,
+        _context: VariableContext,
+        _runtime: &mut dyn VariableRuntime,
+        _budget: &mut InspectionBudget,
+    ) -> Result<crate::Variable> {
+        panic!("unexpected object inspection")
+    }
+
+    fn locate(
+        &self,
+        _object: crate::debug_info::ObjectKey,
+        _address: Option<ImageAddress>,
+        _runtime: &mut dyn VariableRuntime,
+        _budget: &mut InspectionBudget,
+    ) -> Result<crate::debug_info::Accessed> {
+        panic!("unexpected location")
+    }
+
+    fn apply(
+        &self,
+        _from: &crate::debug_info::Located,
+        _step: &crate::debug_info::PlannedStep,
+        _indices: &[i128],
+        _address: Option<ImageAddress>,
+        _runtime: &mut dyn VariableRuntime,
+        _budget: &mut InspectionBudget,
+    ) -> Result<crate::debug_info::Accessed> {
+        panic!("unexpected step")
+    }
+
+    fn materialize(
+        &self,
+        _at: &crate::debug_info::Located,
         _context: VariableContext,
         _runtime: &mut dyn VariableRuntime,
         _budget: &mut InspectionBudget,
     ) -> Result<crate::InspectedValue> {
-        panic!("unexpected variable path lookup")
+        panic!("unexpected materialization")
     }
 
     fn local_storage(
@@ -590,18 +652,6 @@ impl VariableInfo for UnusedVariableInfo {
         _budget: &mut InspectionBudget,
     ) -> Result<crate::Variable> {
         panic!("unexpected global variable lookup")
-    }
-
-    fn inspect_global_path(
-        &self,
-        _id: crate::GlobalVariableId,
-        _address: Option<ImageAddress>,
-        _selectors: &[crate::ValuePathStep],
-        _context: VariableContext,
-        _runtime: &mut dyn VariableRuntime,
-        _budget: &mut InspectionBudget,
-    ) -> Result<crate::InspectedValue> {
-        panic!("unexpected global variable path lookup")
     }
 
     fn dereference(

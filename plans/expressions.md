@@ -255,8 +255,9 @@ allocates.
 
 Each phase is test-first, lands on `next` when its checks pass, and is
 reviewed (`/roast`) before landing. Fast, targeted checks while iterating;
-the full gate at the end of each phase; `just stress` and `just sim 600`
-for P2 through P4. With the simulator as the net, a phase may refactor
+the fast gate (`just`) and a one-minute sweep (`just sim 60`) at the end of
+each phase. `just all`, `just stress`, `just sim 600`, and ten-minute fuzz
+runs happen once, at the end of the whole project. With the simulator as the net, a phase may refactor
 boldly: P2 and P4 replace whole paths rather than keeping old and new side
 by side.
 
@@ -264,7 +265,12 @@ by side.
   budgets of §5.0; then `number.rs`, lexer, parser, printer, errors; the
   `docs/expressions.md` skeleton with its syntax rows running; the
   `expression_parse` fuzz target. Replaces nothing yet.
-- **P2 Provider primitives** (no behavior change). Split the provider into
+- **P2 Provider primitives** (no behavior change; done 2026-10-05: the
+  provider plans one step from types (`plan_step`), finds an object's
+  storage (`locate`), follows a planned step with run-time index values
+  (`apply`), and materializes (`materialize`); `debug_info::inspect_path`
+  folds over them for today's paths. The type-name index moves to P3, where
+  casts first need it). Split the provider into
   `locate`/`step`/`materialize`/`type_named`; today's path inspection folds
   over them. The existing suites are the safety net.
 - **P3 Evaluator at a stop.** Category, binder, IR, interpreter, test world;

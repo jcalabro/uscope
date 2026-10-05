@@ -22,12 +22,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::inspection::InspectionBudget;
+use crate::model::ValueStorage;
 use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
     InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StackFrameId,
-    StopId, ThreadId, UnwindTermination, ValueChildPage, ValueChildrenReference, ValuePathStep,
-    Variable, VariableQuery, VariableUnavailableReason, VirtualAddress,
+    StopId, ThreadId, TypeId, TypeInfo, UnwindTermination, ValueChildPage, ValueChildrenReference,
+    ValuePathStep, Variable, VariableMalformedKind, VariableMalformedReason, VariableQuery,
+    VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -75,6 +77,58 @@ pub enum StorageClass {
 pub struct ObjectStorage {
     pub class: StorageClass,
     pub ranges: Arc<[crate::AddressRange<ImageAddress>]>,
+}
+
+/// One data object an image catalogs: a local, a parameter, or a global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ObjectKey(usize);
+
+/// A typed value's storage in one image, found at one stop.
+#[derive(Debug, Clone)]
+pub struct Located {
+    pub ty: TypeId,
+    pub storage: ValueStorage,
+}
+
+/// Storage reached, or the unavailable or malformed state that stopped it.
+pub type Accessed = std::result::Result<Located, VariableState>;
+
+/// One structural step from a value to another.
+#[derive(Debug, Clone, Copy)]
+pub enum Step<'a> {
+    /// Through a pointer or reference.
+    Deref,
+    /// To a member, through any pointers to the record holding it.
+    Member(&'a str),
+    /// To an element of an array or slice, holding `available` index values,
+    /// of which an array takes one per dimension and a slice one.
+    Index { available: usize },
+}
+
+/// A step planned from types alone, which [`VariableInfo::apply`] follows at
+/// a stop.
+#[derive(Clone)]
+pub struct PlannedStep {
+    steps: Vec<dwarf::PathStep>,
+    /// How many index values the step takes.
+    consumed: usize,
+    /// The type the step reaches, unless planning found it unavailable.
+    result: Option<TypeId>,
+}
+
+impl PlannedStep {
+    pub const fn consumed(&self) -> usize {
+        self.consumed
+    }
+
+    pub const fn result(&self) -> Option<TypeId> {
+        self.result
+    }
+
+    /// How many storage transitions the step makes.
+    pub const fn transitions(&self) -> usize {
+        self.steps.len()
+    }
 }
 
 pub struct DebugInfo {
@@ -129,18 +183,64 @@ pub trait VariableInfo: Send + Sync {
         budget: &mut InspectionBudget,
     ) -> Result<Vec<Variable>>;
 
-    /// Inspects one visible local or parameter and follows a structural member
-    /// path atomically within one stopped-state validation.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the provider boundary keeps frame identity, path, runtime, and budget explicit"
-    )]
-    fn inspect_path(
+    /// The local or parameter `name` names in the selected logical frame,
+    /// whose innermost declaration hides the others.
+    fn visible_object(
         &self,
         address: ImageAddress,
         selected: Option<CodeInstanceId>,
-        root: &str,
-        selectors: &[ValuePathStep],
+        name: &str,
+    ) -> Result<ObjectKey>;
+
+    /// The data object of one cataloged global.
+    fn global_object(&self, id: GlobalVariableId) -> Result<ObjectKey>;
+
+    /// The object's type, or why its type is malformed.
+    fn object_type(&self, object: ObjectKey) -> std::result::Result<TypeId, Arc<str>>;
+
+    /// One type's metadata, or why it is malformed.
+    fn type_info(&self, id: TypeId) -> std::result::Result<TypeInfo, Arc<str>>;
+
+    /// Plans one step from a value of type `from`, reading no program state.
+    fn plan_step(&self, from: TypeId, step: Step<'_>) -> Result<PlannedStep>;
+
+    /// Inspects one data object whole, as the variables view shows it.
+    fn inspect_object(
+        &self,
+        object: ObjectKey,
+        address: Option<ImageAddress>,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Variable>;
+
+    /// Finds one data object's storage at `address`, the frame's
+    /// module-relative instruction, if any.
+    fn locate(
+        &self,
+        object: ObjectKey,
+        address: Option<ImageAddress>,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Accessed>;
+
+    /// Follows a planned step from `from`, with `indices` as its index
+    /// values. An index outside an array's static bounds is an error.
+    fn apply(
+        &self,
+        from: &Located,
+        step: &PlannedStep,
+        indices: &[i128],
+        address: Option<ImageAddress>,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<Accessed>;
+
+    /// Decodes the value stored at `at`, with its children and dereference
+    /// capabilities.
+    fn materialize(
+        &self,
+        at: &Located,
         context: VariableContext,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
@@ -174,18 +274,6 @@ pub trait VariableInfo: Send + Sync {
         budget: &mut InspectionBudget,
     ) -> Result<Variable>;
 
-    /// Evaluates one cataloged global and follows a structural member path
-    /// atomically within one stopped-state validation.
-    fn inspect_global_path(
-        &self,
-        id: GlobalVariableId,
-        address: Option<ImageAddress>,
-        selectors: &[ValuePathStep],
-        context: VariableContext,
-        runtime: &mut dyn VariableRuntime,
-        budget: &mut InspectionBudget,
-    ) -> Result<InspectedValue>;
-
     /// Dereferences one stop-scoped capability produced by this image.
     fn dereference(
         &self,
@@ -204,6 +292,126 @@ pub trait VariableInfo: Send + Sync {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<ValueChildPage>;
+}
+
+const fn inspected(
+    type_info: Option<TypeInfo>,
+    state: VariableState,
+    budget: &InspectionBudget,
+) -> InspectedValue {
+    InspectedValue {
+        type_info,
+        state,
+        completion: budget.completion(),
+        usage: budget.usage(),
+    }
+}
+
+/// Inspects one data object and follows a structural path from it,
+/// atomically within one stopped-state validation. Every step is planned
+/// from types before any is followed, so a path the types refuse is an
+/// error whatever the program state.
+pub fn inspect_path(
+    info: &dyn VariableInfo,
+    object: ObjectKey,
+    selectors: &[ValuePathStep],
+    address: Option<ImageAddress>,
+    context: VariableContext,
+    runtime: &mut dyn VariableRuntime,
+    budget: &mut InspectionBudget,
+) -> Result<InspectedValue> {
+    if let Err(exhaustion) = budget.consume_variable_value() {
+        return Ok(inspected(
+            None,
+            VariableState::Unavailable(exhaustion.into()),
+            budget,
+        ));
+    }
+    if selectors.is_empty() {
+        let variable = info.inspect_object(object, address, context, runtime, budget)?;
+        return Ok(inspected(variable.type_info, variable.state, budget));
+    }
+    let malformed_type = |description| {
+        VariableState::Malformed(VariableMalformedReason {
+            kind: VariableMalformedKind::InvalidTypeGraph,
+            description,
+        })
+    };
+    let mut current = match info.object_type(object) {
+        Ok(ty) => Some(ty),
+        Err(description) => return Ok(inspected(None, malformed_type(description), budget)),
+    };
+
+    let mut planned = Vec::new();
+    let mut remaining = selectors;
+    while let (Some(from), [selector, ..]) = (current, remaining) {
+        let step = match selector {
+            ValuePathStep::Dereference => Step::Deref,
+            ValuePathStep::Named(name) => Step::Member(name),
+            ValuePathStep::Index(_) => Step::Index {
+                available: remaining
+                    .iter()
+                    .take_while(|selector| matches!(selector, ValuePathStep::Index(_)))
+                    .count(),
+            },
+        };
+        let plan = info.plan_step(from, step)?;
+        let consumed = plan.consumed().max(1);
+        let indices: Vec<i128> = remaining
+            .iter()
+            .take(plan.consumed())
+            .filter_map(|selector| match selector {
+                ValuePathStep::Index(index) => Some(*index),
+                _ => None,
+            })
+            .collect();
+        current = plan.result();
+        planned.push((plan, indices));
+        remaining = remaining.get(consumed..).unwrap_or_default();
+    }
+
+    let terminal = match current {
+        Some(terminal) => match info.type_info(terminal) {
+            Ok(type_info) => Some((terminal, type_info)),
+            Err(description) => return Ok(inspected(None, malformed_type(description), budget)),
+        },
+        None => None,
+    };
+    let terminal_info = terminal.as_ref().map(|(_, info)| info.clone());
+    let transitions: usize = planned.iter().map(|(plan, _)| plan.transitions()).sum();
+    let depth = u64::try_from(transitions).unwrap_or(u64::MAX);
+    if let Err(exhaustion) = budget
+        .observe_aggregate_depth(depth)
+        .and_then(|()| budget.consume_expression_work(depth))
+    {
+        return Ok(inspected(
+            terminal_info,
+            VariableState::Unavailable(exhaustion.into()),
+            budget,
+        ));
+    }
+    let mut located = match info.locate(object, address, runtime, budget)? {
+        Ok(located) => located,
+        Err(state) => return Ok(inspected(terminal_info, state, budget)),
+    };
+    for (plan, indices) in &planned {
+        located = match info.apply(&located, plan, indices, address, runtime, budget)? {
+            Ok(located) => located,
+            Err(state) => return Ok(inspected(terminal_info, state, budget)),
+        };
+    }
+    let Some((terminal, _)) = terminal else {
+        return Ok(inspected(
+            None,
+            VariableState::Malformed(VariableMalformedReason {
+                kind: VariableMalformedKind::InvalidExpression,
+                description: "an untyped expression unexpectedly reached materialization".into(),
+            }),
+            budget,
+        ));
+    };
+    located.ty = terminal;
+    info.materialize(&located, context, runtime, budget)
 }
 
 /// Call-frame information for one module image. Instruction addresses are
