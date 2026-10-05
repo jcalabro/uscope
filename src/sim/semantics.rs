@@ -566,6 +566,13 @@ pub fn evaluations(
     evaluations: &[Evaluated],
 ) -> Result<Vec<Mark>, String> {
     let marker = marker_at(kernel, snapshot, backtrace, variant, source, markers);
+    // Registers hold the values of the innermost frame only; a caller's
+    // were saved somewhere or lost.
+    let innermost = backtrace
+        .frames
+        .iter()
+        .find(|frame| frame.id == snapshot.stack_frame)
+        .is_some_and(|frame| frame.level == 0);
     let shown = |name: &str| {
         snapshot
             .variables
@@ -587,22 +594,27 @@ pub fn evaluations(
             )
         };
         match &evaluated.purpose {
-            Purpose::Marker { negated } => {
+            Purpose::Marker { .. } | Purpose::Expected => {
                 let Some(marker) = marker else { continue };
-                let expected = !negated;
+                let expected = evaluated.purpose != Purpose::Marker { negated: true };
                 match &state {
                     Ok(VariableState::Available {
                         value: VariableValue::Scalar(ScalarValue::Boolean(truth)),
                         ..
-                    }) if *truth == expected => {
-                        if expected {
-                            marks.push(Mark::MarkerEvaluated);
-                        }
-                    }
+                    }) if *truth == expected => match evaluated.purpose {
+                        Purpose::Expected => marks.push(Mark::ExpectationHeld),
+                        Purpose::Marker { negated: false } => marks.push(Mark::MarkerEvaluated),
+                        _ => {}
+                    },
                     Ok(VariableState::Unavailable(_)) | Err(_) if variant.facts.optimized => {}
                     _ => {
+                        let what = if evaluated.purpose == Purpose::Expected {
+                            "what it expected, "
+                        } else {
+                            ""
+                        };
                         return Err(format!(
-                            "at line {} of {source}, {}",
+                            "at line {} of {source}, {what}{}",
                             marker.line,
                             wrong(&expected.to_string())
                         ));
@@ -615,7 +627,7 @@ pub fn evaluations(
                     Ok(state @ VariableState::Available { value, .. }),
                 ) if value == view => {
                     marks.push(Mark::NameEvaluated);
-                    marks.extend(stored(kernel, snapshot, &evaluated.text, state)?);
+                    marks.extend(stored(kernel, snapshot, innermost, &evaluated.text, state)?);
                 }
                 (
                     Some(VariableState::Unavailable(view)),
@@ -636,63 +648,136 @@ pub fn evaluations(
                 ) if address.address == *view => marks.push(Mark::AddressEvaluated),
                 (view, _) => return Err(wrong(&format!("the address of {view:?}"))),
             },
-            Purpose::Arithmetic {
-                left,
-                operator,
-                right,
-            } => {
-                let (Some(a), Some(b)) = (
-                    shown(left).and_then(integer),
-                    shown(right).and_then(integer),
-                ) else {
-                    return Err(format!("`{}` combines variables not shown", evaluated.text));
-                };
-                let exact = match operator {
-                    '+' => a.checked_add(b),
-                    '-' => a.checked_sub(b),
-                    _ => a.checked_mul(b),
-                };
-                let Some(exact) = exact else { continue };
-                match &state {
-                    Ok(state) if integer(state) == Some(exact) => {
-                        marks.push(Mark::ArithmeticEvaluated);
-                    }
-                    _ => return Err(wrong(&format!("{exact}, the exact result"))),
-                }
+            Purpose::Cast { .. } | Purpose::IllTyped | Purpose::Arithmetic { .. } => {
+                marks.extend(computed(evaluated, &state, shown)?);
             }
         }
     }
     Ok(marks)
 }
 
-/// Storage truth: bytes the debugger says it read from memory are what the
-/// simulated memory holds there.
+/// Judges an expression computed from integer variables against the
+/// values the variables view shows them holding.
+fn computed<'v>(
+    evaluated: &Evaluated,
+    state: &Result<&VariableState, String>,
+    shown: impl Fn(&str) -> Option<&'v VariableState>,
+) -> Result<Option<Mark>, String> {
+    let wrong = |expected: &str| {
+        format!(
+            "`{}` evaluated to {state:?}, not {expected}",
+            evaluated.text
+        )
+    };
+    match &evaluated.purpose {
+        Purpose::Cast { name, bits, signed } => {
+            let Some(value) = shown(name).and_then(integer) else {
+                return Err(format!("`{}` casts a variable not shown", evaluated.text));
+            };
+            let low = value.cast_unsigned() & ((1 << bits) - 1);
+            let truncated = if *signed && low >> (bits - 1) == 1 {
+                low.cast_signed() - (1 << bits)
+            } else {
+                low.cast_signed()
+            };
+            match state {
+                Ok(state) if integer(state) == Some(truncated) => Ok(Some(Mark::CastEvaluated)),
+                _ => Err(wrong(&format!(
+                    "{truncated}, {value} truncated to {bits} bits"
+                ))),
+            }
+        }
+        Purpose::IllTyped => match state {
+            Err(_) => Ok(Some(Mark::IllTypedRefused)),
+            Ok(_) => Err(format!(
+                "`{}` is ill-typed, but evaluated to {state:?}",
+                evaluated.text
+            )),
+        },
+        Purpose::Arithmetic {
+            left,
+            operator,
+            right,
+        } => {
+            let (Some(a), Some(b)) = (
+                shown(left).and_then(integer),
+                shown(right).and_then(integer),
+            ) else {
+                return Err(format!("`{}` combines variables not shown", evaluated.text));
+            };
+            let exact = match operator {
+                '+' => a.checked_add(b),
+                '-' => a.checked_sub(b),
+                _ => a.checked_mul(b),
+            };
+            let Some(exact) = exact else { return Ok(None) };
+            match state {
+                Ok(state) if integer(state) == Some(exact) => Ok(Some(Mark::ArithmeticEvaluated)),
+                _ => Err(wrong(&format!("{exact}, the exact result"))),
+            }
+        }
+        _ => unreachable!("only computed expressions are judged here"),
+    }
+}
+
+/// Storage truth: bytes the debugger says it read from memory, or from a
+/// register of the innermost frame, are what the simulated machine holds
+/// there.
 fn stored(
     kernel: &Kernel,
     snapshot: &VariableSnapshot,
+    innermost: bool,
     text: &str,
     state: &VariableState,
 ) -> Result<Option<Mark>, String> {
-    let VariableState::Available {
-        source: VariableValueSource::Memory(address),
-        raw: Some(raw),
-        ..
-    } = state
+    let (
+        VariableState::Available {
+            source,
+            raw: Some(raw),
+            ..
+        },
+        Some(thread),
+    ) = (state, stopped(kernel, snapshot.thread))
     else {
         return Ok(None);
     };
-    let held = stopped(kernel, snapshot.thread).and_then(|thread| {
-        kernel.processes[&thread.tgid]
-            .space
-            .read_user(address.get(), raw.len() as u64)
-    });
+    let (place, held, mark) = match source {
+        VariableValueSource::Memory(address) => (
+            address.to_string(),
+            kernel.processes[&thread.tgid]
+                .space
+                .read_user(address.get(), raw.len() as u64),
+            Mark::StorageTrue,
+        ),
+        VariableValueSource::Register(register) if innermost && raw.len() <= 8 => {
+            let Some(index) = GENERAL_REGISTERS
+                .iter()
+                .position(|name| *name == &*register.name)
+            else {
+                return Ok(None);
+            };
+            let bytes = thread.registers.general[index].to_le_bytes();
+            (
+                register.name.to_string(),
+                Some(bytes[..raw.len()].to_vec()),
+                Mark::RegisterTrue,
+            )
+        }
+        _ => return Ok(None),
+    };
     if held.as_deref() != Some(&**raw) {
         return Err(format!(
-            "`{text}` showed bytes {raw:?} from {address}, which holds {held:?}"
+            "`{text}` showed bytes {raw:?} from {place}, which holds {held:?}"
         ));
     }
-    Ok(Some(Mark::StorageTrue))
+    Ok(Some(mark))
 }
+
+/// The simulated CPU's general registers, in its order.
+const GENERAL_REGISTERS: [&str; 16] = [
+    "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15",
+];
 
 /// The marker whose condition must hold where the variables were read:
 /// the thread stands at the start of a row of the marker's line, and the

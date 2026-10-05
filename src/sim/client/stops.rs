@@ -232,24 +232,28 @@ impl Client {
 
 impl Client {
     /// Evaluates, in the selected frame, the condition of the marker on its
-    /// line and the negation; a few of its variables by name, and those in
-    /// memory by address; and a few sums, differences, and products of its
-    /// integer variables.
+    /// line, the negation, and what it expects; a few of its variables by
+    /// name, and those in memory by address; and a few sums, differences,
+    /// products, and casts of its integer variables, and an ill-typed
+    /// expression over one.
     async fn evaluations(
         &self,
         variables: &VariableSnapshot,
         backtrace: &Backtrace,
     ) -> Vec<Evaluated> {
         let mut asked = Vec::new();
-        let marker = backtrace
+        let line = backtrace
             .frames
             .iter()
             .find(|frame| frame.id == variables.stack_frame)
             .and_then(|frame| frame.source.as_ref())
-            .and_then(|source| self.script.markers.get(&source.line.get()));
-        if let Some(condition) = marker {
+            .map(|source| source.line.get());
+        if let Some(condition) = line.and_then(|line| self.script.markers.get(&line)) {
             asked.push((Purpose::Marker { negated: false }, condition.clone()));
             asked.push((Purpose::Marker { negated: true }, format!("!({condition})")));
+        }
+        if let Some(expected) = line.and_then(|line| self.script.expectations.get(&line)) {
+            asked.push((Purpose::Expected, expected.clone()));
         }
         // Only names shown once, which name one variable unambiguously.
         let unique = variables.variables.iter().filter(|variable| {
@@ -267,7 +271,14 @@ impl Client {
             .collect::<Vec<_>>();
         let named = unique.filter(|variable| {
             integer(&variable.state).is_some()
-                || matches!(variable.state, VariableState::Unavailable(_))
+                || matches!(
+                    variable.state,
+                    VariableState::Unavailable(_)
+                        | VariableState::Available {
+                            value: VariableValue::Address(_),
+                            ..
+                        }
+                )
         });
         let mut by_name = Vec::new();
         for variable in named.take(4) {
@@ -283,29 +294,17 @@ impl Client {
             }
         }
         let pick = |count: usize| usize::try_from(self.draw(count as u64)).expect("small");
-        let mut arithmetic = Vec::new();
-        if !integers.is_empty() {
-            for _ in 0..2 {
-                let left = integers[pick(integers.len())].clone();
-                let right = integers[pick(integers.len())].clone();
-                let operator = ['+', '-', '*'][pick(3)];
-                let text = format!("{left} {operator} {right}");
-                arithmetic.push((
-                    Purpose::Arithmetic {
-                        left,
-                        operator,
-                        right,
-                    },
-                    text,
-                ));
-            }
-        }
+        let computed = if integers.is_empty() {
+            Vec::new()
+        } else {
+            self.computed(&integers)
+        };
         // Either kind may come first, so that either may be the first to
         // notice a value that changed between reads.
         if pick(2) == 0 {
-            asked.extend(by_name.into_iter().chain(arithmetic));
+            asked.extend(by_name.into_iter().chain(computed));
         } else {
-            asked.extend(arithmetic.into_iter().chain(by_name));
+            asked.extend(computed.into_iter().chain(by_name));
         }
         let mut evaluations = Vec::new();
         for (purpose, text) in asked {
@@ -325,6 +324,46 @@ impl Client {
             });
         }
         evaluations
+    }
+
+    /// Draws expressions computed from `integers`, the names of integer
+    /// variables: two sums, differences, or products, a cast to a narrower
+    /// type, and an ill-typed expression.
+    fn computed(&self, integers: &[String]) -> Vec<(Purpose, String)> {
+        let pick = |count: usize| usize::try_from(self.draw(count as u64)).expect("small");
+        let mut computed = Vec::new();
+        for _ in 0..2 {
+            let left = integers[pick(integers.len())].clone();
+            let right = integers[pick(integers.len())].clone();
+            let operator = ['+', '-', '*'][pick(3)];
+            let text = format!("{left} {operator} {right}");
+            computed.push((
+                Purpose::Arithmetic {
+                    left,
+                    operator,
+                    right,
+                },
+                text,
+            ));
+        }
+        let name = integers[pick(integers.len())].clone();
+        let bits = [8, 16, 32][pick(3)];
+        let signed = pick(2) == 0;
+        let target = format!("{}{bits}", if signed { 'i' } else { 'u' });
+        let text = if pick(2) == 0 {
+            format!("({target}){name}")
+        } else {
+            format!("{name} as {target}")
+        };
+        computed.push((Purpose::Cast { name, bits, signed }, text));
+        let name = &integers[pick(integers.len())];
+        let text = match pick(3) {
+            0 => format!("{name}.no_such_member"),
+            1 => format!("{name}[0]"),
+            _ => format!("*{name}"),
+        };
+        computed.push((Purpose::IllTyped, text));
+        computed
     }
 }
 

@@ -165,12 +165,13 @@ fn skewed_stack_words_fail_the_variables_oracle() {
     );
 }
 
-/// The same misreported values make a marker's condition, evaluated as an
-/// expression, false where it must hold, and show bytes that memory does
-/// not hold, which the expressions oracle catches both ways.
+/// The same misreported values make a marker's condition, or what it
+/// expects, evaluated as an expression, false where it must hold, and show
+/// bytes that memory does not hold, which the expressions oracle catches
+/// every way.
 #[test]
 fn skewed_stack_words_fail_the_expressions_oracle() {
-    for saying in ["not true", "which holds"] {
+    for saying in ["not true", "which holds", "expected"] {
         some_failure_saying(
             Sabotage::SkewSmallStackWords,
             "expressions",
@@ -192,11 +193,15 @@ fn skewed_stack_words_fail_breakpoint_conditions() {
 }
 
 /// A kernel whose reads of an unchanged stack value disagree shows a
-/// variable with one value and evaluates its name, and arithmetic over it,
-/// with another, which the expressions oracle catches both ways.
+/// variable with one value and evaluates its name, arithmetic over it, and
+/// casts of it with another, which the expressions oracle catches each way.
 #[test]
 fn flickering_stack_words_fail_the_expressions_oracle() {
-    for saying in ["as the variables view shows", "the exact result"] {
+    for saying in [
+        "as the variables view shows",
+        "the exact result",
+        "truncated",
+    ] {
         some_failure_saying(
             Sabotage::FlickeringStackWords,
             "expressions",
@@ -204,6 +209,25 @@ fn flickering_stack_words_fail_the_expressions_oracle() {
             &["variables", "expressions", "breakpoint conditions"],
         );
     }
+}
+
+/// A kernel that misreports small numbers in registers shows values held
+/// there that the registers do not hold, which the expressions oracle
+/// catches.
+#[test]
+fn skewed_registers_fail_the_expressions_oracle() {
+    some_failure_saying(
+        Sabotage::SkewSmallRegisters,
+        "expressions",
+        "which holds",
+        &[
+            "variables",
+            "expressions",
+            "breakpoint conditions",
+            "backtrace",
+            "stepping",
+        ],
+    );
 }
 
 /// A kernel that keeps a thread's debug-register writes in a copy that
