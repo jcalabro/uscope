@@ -129,6 +129,12 @@ fn late_single_steps_fail_the_stepping_oracle() {
 /// Runs fixed seeds with `sabotage` until one fails `check`, requiring
 /// every failure on the way to be one of `allowed`.
 fn some_failure_with(sabotage: Sabotage, check: &str, allowed: &[&str]) {
+    some_failure_saying(sabotage, check, "", allowed);
+}
+
+/// Like [`some_failure_with`], for a failure of `check` whose message
+/// contains `saying`.
+fn some_failure_saying(sabotage: Sabotage, check: &str, saying: &str, allowed: &[&str]) {
     let corpus = Corpus::load().expect("load the golden corpus");
     let settings = Settings {
         sabotage: Some(sabotage),
@@ -140,23 +146,38 @@ fn some_failure_with(sabotage: Sabotage, check: &str, allowed: &[&str]) {
         };
         assert_eq!(failure.kind, FailureKind::Debugger, "{failure}");
         assert!(allowed.contains(&failure.check), "{failure}");
-        if failure.check == check {
+        if failure.check == check && failure.message.contains(saying) {
             return;
         }
     }
-    panic!("no sabotaged run failed {check}");
+    panic!("no sabotaged run failed {check} saying {saying:?}");
 }
 
 /// A kernel that misreports small numbers on the stack shows variables
-/// with wrong values, which the variables oracle catches. Breakpoint
-/// conditions read the same values, and may catch it first.
+/// with wrong values, which the variables oracle catches. Expressions and
+/// breakpoint conditions read the same values, and may catch it first.
 #[test]
 fn skewed_stack_words_fail_the_variables_oracle() {
     some_failure_with(
         Sabotage::SkewSmallStackWords,
         "variables",
-        &["variables", "breakpoint conditions"],
+        &["variables", "expressions", "breakpoint conditions"],
     );
+}
+
+/// The same misreported values make a marker's condition, evaluated as an
+/// expression, false where it must hold, and show bytes that memory does
+/// not hold, which the expressions oracle catches both ways.
+#[test]
+fn skewed_stack_words_fail_the_expressions_oracle() {
+    for saying in ["not true", "which holds"] {
+        some_failure_saying(
+            Sabotage::SkewSmallStackWords,
+            "expressions",
+            saying,
+            &["variables", "expressions", "breakpoint conditions"],
+        );
+    }
 }
 
 /// The same misreported values make conditions the client knows hold or
@@ -166,8 +187,23 @@ fn skewed_stack_words_fail_breakpoint_conditions() {
     some_failure_with(
         Sabotage::SkewSmallStackWords,
         "breakpoint conditions",
-        &["variables", "breakpoint conditions"],
+        &["variables", "expressions", "breakpoint conditions"],
     );
+}
+
+/// A kernel whose reads of an unchanged stack value disagree shows a
+/// variable with one value and evaluates its name, and arithmetic over it,
+/// with another, which the expressions oracle catches both ways.
+#[test]
+fn flickering_stack_words_fail_the_expressions_oracle() {
+    for saying in ["as the variables view shows", "the exact result"] {
+        some_failure_saying(
+            Sabotage::FlickeringStackWords,
+            "expressions",
+            saying,
+            &["variables", "expressions", "breakpoint conditions"],
+        );
+    }
 }
 
 /// A kernel that keeps a thread's debug-register writes in a copy that

@@ -280,12 +280,15 @@ by side.
   `FrameScope`, `StopMachine`, `DerivedTypes`, `Request::Evaluate`;
   CLI `print`/`whatis`/`ptype` and DAP `evaluate`/`completions`. The full
   executable reference. Native fixtures across the matrix.
-- **P4 One evaluator everywhere.** Conditions and log messages with cached
-  programs; `set var`, `setExpression`, `setVariable`; `watch expr` resolving
-  its root storage and extent. The simulator's evaluating client, its
-  oracles, and the `data` golden program.
-  Delete `condition.rs`, `expression.rs`, `assign.rs`, and the old public path
-  types and requests, with their superseded tests.
+- **P4 One evaluator everywhere** (done 2026-10-05). Conditions and log
+  messages; `set var`, `setExpression`, `setVariable`; `watch expr` resolving
+  its root storage and extent. The simulator's evaluating client and its
+  expressions oracle (§5.6, as built). `expression.rs` and `assign.rs` are
+  deleted and `condition.rs` holds only the parsed `Condition` and
+  `LogMessage`, with the old public path types and requests and their
+  superseded tests. Conditions compile at each hit rather than caching a
+  program; caching waits until a profile shows the need. The `data` golden
+  program is deferred with P5.
 - **P5 Data shapes**: deferred by decision (2026-10-05): per-language
   support stays minimal, the most common types only (scalars, records,
   arrays, pointers, and the strings and slices the provider already reads).
@@ -437,6 +440,25 @@ independently of DWARF-reading code paths the debugger shares with itself.
 - **Golden programs.** The existing ones hold only integers. A new `data`
   golden program adds records, arrays, pointers, enums, a bit-field, and
   floats with markers over them; recording its manifest is its own commit.
+
+**As built (P4).** At half the stops where it reads variables, the client
+evaluates, in the same frame, the marker condition on the frame's line and
+its negation; up to four variables shown once, by name, and those in memory
+also as `&x` and `*&x`; and two drawn sums, differences, or products of
+integer variables, in a drawn order. The expressions oracle
+(`semantics::evaluations`) requires: where the variables oracle applies, the
+condition is `true` and its negation `false` (optimized code may leave
+either unavailable); `x` and `*&x` equal the variables view, and their bytes
+read from memory are what the simulated memory holds there; `&x` is where
+the view says `x` lives; and arithmetic is exact. Marks: `MarkerEvaluated`,
+`NameEvaluated`, `StorageTrue`, `AddressEvaluated`, `ArithmeticEvaluated`.
+Sabotage: `SkewSmallStackWords` fails the marker and storage checks, and a
+new `FlickeringStackWords` (every other read of a small stack number is one
+greater) fails agreement with the view and exact arithmetic. Not built yet:
+register-storage truth, member/index agreement (`p->f`/`(*p).f`,
+`a[i]`/`*(a + i)`), drawn casts and ill-typed expressions, narrowing the
+breakpoint-conditions oracle, and the `data` golden program; the golden
+programs hold only integers and pointers to them, so these wait for it.
 
 ### 5.7 Boundary and what is not used
 

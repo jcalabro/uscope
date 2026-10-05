@@ -1,13 +1,14 @@
 //! What the client inspects at a stop for the semantic oracles: backtraces,
 //! steps, and the selected frame's variables.
 
-use super::{Client, Observation, protocol};
+use super::{Client, Evaluated, Observation, Purpose, protocol};
 use crate::sim::choices::Stream;
 use crate::sim::marks::Mark;
 use crate::sim::report::Failure;
 use crate::{
-    Backtrace, Error, FrameKind, PresentedFrame, StackFrameId, StateSnapshot, StepKind,
-    StopContext, StopId, ThreadState, UnwindTermination, VirtualAddress,
+    Backtrace, Error, Expression, FrameKind, PresentedFrame, ScalarValue, StackFrameId,
+    StateSnapshot, StepKind, StopContext, StopId, ThreadState, UnwindTermination, VariableSnapshot,
+    VariableState, VariableValue, VariableValueSource, VirtualAddress,
 };
 
 impl Client {
@@ -184,10 +185,18 @@ impl Client {
             stop,
             backtrace: backtrace.clone(),
         });
+        // Half the inspections also evaluate expressions, so that the
+        // variables oracle alone judges the rest.
+        let evaluations = if self.draw(2) == 0 {
+            self.evaluations(&variables, &backtrace).await
+        } else {
+            Vec::new()
+        };
         self.observe(Observation::Variables {
             stop,
             variables,
             backtrace,
+            evaluations,
         });
         // Every other stopped thread's stack, without changing which is
         // selected.
@@ -218,6 +227,119 @@ impl Client {
             }
         }
         Ok(())
+    }
+}
+
+impl Client {
+    /// Evaluates, in the selected frame, the condition of the marker on its
+    /// line and the negation; a few of its variables by name, and those in
+    /// memory by address; and a few sums, differences, and products of its
+    /// integer variables.
+    async fn evaluations(
+        &self,
+        variables: &VariableSnapshot,
+        backtrace: &Backtrace,
+    ) -> Vec<Evaluated> {
+        let mut asked = Vec::new();
+        let marker = backtrace
+            .frames
+            .iter()
+            .find(|frame| frame.id == variables.stack_frame)
+            .and_then(|frame| frame.source.as_ref())
+            .and_then(|source| self.script.markers.get(&source.line.get()));
+        if let Some(condition) = marker {
+            asked.push((Purpose::Marker { negated: false }, condition.clone()));
+            asked.push((Purpose::Marker { negated: true }, format!("!({condition})")));
+        }
+        // Only names shown once, which name one variable unambiguously.
+        let unique = variables.variables.iter().filter(|variable| {
+            variables
+                .variables
+                .iter()
+                .filter(|other| other.name == variable.name)
+                .count()
+                == 1
+        });
+        let integers = unique
+            .clone()
+            .filter(|variable| integer(&variable.state).is_some())
+            .map(|variable| variable.name.to_string())
+            .collect::<Vec<_>>();
+        let named = unique.filter(|variable| {
+            integer(&variable.state).is_some()
+                || matches!(variable.state, VariableState::Unavailable(_))
+        });
+        let mut by_name = Vec::new();
+        for variable in named.take(4) {
+            let name = variable.name.to_string();
+            by_name.push((Purpose::Name(name.clone()), name.clone()));
+            if let VariableState::Available {
+                source: VariableValueSource::Memory(_),
+                ..
+            } = variable.state
+            {
+                by_name.push((Purpose::Address(name.clone()), format!("&{name}")));
+                by_name.push((Purpose::Name(name.clone()), format!("*&{name}")));
+            }
+        }
+        let pick = |count: usize| usize::try_from(self.draw(count as u64)).expect("small");
+        let mut arithmetic = Vec::new();
+        if !integers.is_empty() {
+            for _ in 0..2 {
+                let left = integers[pick(integers.len())].clone();
+                let right = integers[pick(integers.len())].clone();
+                let operator = ['+', '-', '*'][pick(3)];
+                let text = format!("{left} {operator} {right}");
+                arithmetic.push((
+                    Purpose::Arithmetic {
+                        left,
+                        operator,
+                        right,
+                    },
+                    text,
+                ));
+            }
+        }
+        // Either kind may come first, so that either may be the first to
+        // notice a value that changed between reads.
+        if pick(2) == 0 {
+            asked.extend(by_name.into_iter().chain(arithmetic));
+        } else {
+            asked.extend(arithmetic.into_iter().chain(by_name));
+        }
+        let mut evaluations = Vec::new();
+        for (purpose, text) in asked {
+            let result = match Expression::parse(&text) {
+                Ok(expression) => self
+                    .handle
+                    .evaluate(&expression)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(format!("parsing failed: {error}")),
+            };
+            self.note(format!("evaluated `{text}`"));
+            evaluations.push(Evaluated {
+                purpose,
+                text,
+                result,
+            });
+        }
+        evaluations
+    }
+}
+
+/// An integer variable's value.
+fn integer(state: &VariableState) -> Option<i128> {
+    match state {
+        VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Signed(value)),
+            ..
+        } => Some(*value),
+        VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Unsigned(value)),
+            ..
+        } => i128::try_from(*value).ok(),
+        _ => None,
     }
 }
 

@@ -461,6 +461,10 @@ pub struct Kernel {
     /// [`Sabotage::LateSingleSteps`].
     #[cfg(test)]
     late_step: Option<Tid>,
+    /// How many small stack words ptrace has read, under
+    /// [`Sabotage::FlickeringStackWords`].
+    #[cfg(test)]
+    flickers: std::cell::Cell<u64>,
     /// The debug registers the tracer believes it wrote, under
     /// [`Sabotage::PhantomArming`].
     #[cfg(test)]
@@ -518,6 +522,8 @@ impl Kernel {
             phantom_debug: BTreeMap::new(),
             #[cfg(test)]
             late_step: None,
+            #[cfg(test)]
+            flickers: std::cell::Cell::new(0),
         }
     }
 
@@ -966,22 +972,26 @@ impl Kernel {
                     .any(|call| call.slot == address && (!exact || call.return_address == word))
             })
         };
+        let small_on_stack = || {
+            (1..0x1000).contains(&word)
+                && !return_slot(false)
+                && self.processes[&tgid].space.maps().lines().any(|line| {
+                    line.ends_with("[stack]") && {
+                        let range = line.split_whitespace().next().unwrap_or_default();
+                        let (start, end) = range.split_once('-').unwrap_or_default();
+                        (u64::from_str_radix(start, 16).unwrap_or(0)
+                            ..u64::from_str_radix(end, 16).unwrap_or(0))
+                            .contains(&address)
+                    }
+                })
+        };
         match self.sabotage {
             Some(Sabotage::SkewReturnAddresses) if return_slot(true) => word + 1,
-            Some(Sabotage::SkewSmallStackWords)
-                if (1..0x1000).contains(&word)
-                    && !return_slot(false)
-                    && self.processes[&tgid].space.maps().lines().any(|line| {
-                        line.ends_with("[stack]") && {
-                            let range = line.split_whitespace().next().unwrap_or_default();
-                            let (start, end) = range.split_once('-').unwrap_or_default();
-                            (u64::from_str_radix(start, 16).unwrap_or(0)
-                                ..u64::from_str_radix(end, 16).unwrap_or(0))
-                                .contains(&address)
-                        }
-                    }) =>
-            {
-                word + 1
+            Some(Sabotage::SkewSmallStackWords) if small_on_stack() => word + 1,
+            Some(Sabotage::FlickeringStackWords) if small_on_stack() => {
+                let reads = self.flickers.get();
+                self.flickers.set(reads + 1);
+                word + reads % 2
             }
             _ => word,
         }

@@ -92,6 +92,9 @@ pub enum Sabotage {
     /// stack report them one greater. Zeros, which end chains of frames,
     /// and slots where calls pushed return addresses stay as they are.
     SkewSmallStackWords,
+    /// Ptrace reads of the same small numbers report every other one one
+    /// greater, so two reads of a value that has not changed disagree.
+    FlickeringStackWords,
     /// Ptrace writes to the debug registers of threads other than a
     /// process's first go to a copy that reads them back, leaving the
     /// thread's own slots as they were.
@@ -607,6 +610,7 @@ impl<'a> World<'a> {
                     stop,
                     variables,
                     backtrace,
+                    evaluations,
                 } if self.still_at(stop) => {
                     let source = self
                         .program
@@ -614,6 +618,21 @@ impl<'a> World<'a> {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or_default();
+                    let reached = semantics::evaluations(
+                        &self.machine.kernel.borrow(),
+                        &variables,
+                        &backtrace,
+                        self.variant,
+                        source,
+                        &self.program.markers,
+                        &evaluations,
+                    )
+                    .map_err(|message| Failure::debugger("expressions", message))?;
+                    let mut marks = self.machine.marks.borrow_mut();
+                    for mark in reached {
+                        marks.hit(mark);
+                    }
+                    drop(marks);
                     let inspected = semantics::variables(
                         &self.machine.kernel.borrow(),
                         &variables,

@@ -75,6 +75,17 @@ pub enum Mark {
     SourceStepExact,
     /// A marker's condition held with the values the debugger read.
     MarkerHeld,
+    /// A marker's condition, evaluated as an expression, was true.
+    MarkerEvaluated,
+    /// A variable's name evaluated to the value the variables view shows.
+    NameEvaluated,
+    /// An evaluated value's bytes were in memory where the debugger said.
+    StorageTrue,
+    /// A variable's address evaluated to where the variables view says it
+    /// lives.
+    AddressEvaluated,
+    /// Arithmetic over variables evaluated exactly.
+    ArithmeticEvaluated,
     /// The client changed a breakpoint's hit condition or condition.
     BreakpointAmended,
     /// A breakpoint counted a hit that did not stop.
@@ -132,7 +143,7 @@ pub enum Mark {
 }
 
 impl Mark {
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 64] = [
         Self::EntryStop,
         Self::BreakpointStop,
         Self::StepStop,
@@ -167,6 +178,11 @@ impl Mark {
         Self::StepJudged,
         Self::SourceStepExact,
         Self::MarkerHeld,
+        Self::MarkerEvaluated,
+        Self::NameEvaluated,
+        Self::StorageTrue,
+        Self::AddressEvaluated,
+        Self::ArithmeticEvaluated,
         Self::BreakpointAmended,
         Self::HitDeclined,
         Self::ConditionHeld,
