@@ -646,6 +646,127 @@ fn watched_scalar(type_info: &TypeInfo, image: Option<&ModuleImage>) -> Option<W
     None
 }
 
+/// Renders an integer in hexadecimal within its type's width, as `print/x`
+/// does; other values render as `print` shows them.
+pub fn hexadecimal(
+    type_info: &TypeInfo,
+    name: &str,
+    state: &VariableState,
+    renderer: Renderer,
+) -> String {
+    let integer = match state {
+        VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Signed(value)),
+            ..
+        } => Some(IntegerValue::Signed(*value)),
+        VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Unsigned(value)),
+            ..
+        } => Some(IntegerValue::Unsigned(*value)),
+        VariableState::Available {
+            value: VariableValue::Enumeration { value, .. },
+            ..
+        } => Some(*value),
+        _ => None,
+    };
+    let Some(integer) = integer else {
+        return assignment(
+            &type_info.name,
+            name,
+            &state_summary(type_info, state),
+            renderer,
+        );
+    };
+    // An exact integer has no width: a negative one keeps its sign.
+    let width = type_info
+        .byte_size
+        .map(|size| size.saturating_mul(8).min(128));
+    let text = match (integer, width) {
+        (IntegerValue::Signed(value), None) if value < 0 => format!("-{:#x}", value.unsigned_abs()),
+        (IntegerValue::Signed(value), Some(width)) => {
+            let mask = if width >= 128 {
+                u128::MAX
+            } else {
+                (1_u128 << width) - 1
+            };
+            format!("{:#x}", value.cast_unsigned() & mask)
+        }
+        (IntegerValue::Signed(value), None) => format!("{value:#x}"),
+        (IntegerValue::Unsigned(value), _) => format!("{value:#x}"),
+        _ => {
+            return assignment(
+                &type_info.name,
+                name,
+                &state_summary(type_info, state),
+                renderer,
+            );
+        }
+    };
+    assignment(
+        &type_info.name,
+        name,
+        &renderer.paint(Role::Value, text).to_string(),
+        renderer,
+    )
+}
+
+/// Renders a type's definition, as `ptype` does: a record's or union's
+/// members, an enumeration's enumerators, or the name of any other type.
+pub fn type_definition(
+    type_info: &TypeInfo,
+    images: &[std::sync::Arc<ModuleImage>],
+    renderer: Renderer,
+) -> String {
+    let name_of = |reference: uscope::TypeReference| {
+        images
+            .iter()
+            .find_map(|image| image.type_info(reference))
+            .map_or_else(|| "<unknown>".to_owned(), |info| info.name.to_string())
+    };
+    let members = |keyword: &str, members: &[uscope::RecordMember]| {
+        let mut output = format!("type = {keyword} {} {{\n", type_info.name);
+        for member in members {
+            let bits = match member.layout {
+                uscope::RecordMemberLayout::BitRange { bit_size, .. } => format!(" : {bit_size}"),
+                _ => String::new(),
+            };
+            let _ = writeln!(
+                output,
+                "    {} {}{bits};",
+                renderer.paint(Role::Type, name_of(member.type_ref)),
+                member.name.as_deref().unwrap_or("<anonymous>"),
+            );
+        }
+        output.push('}');
+        output
+    };
+    match &type_info.kind {
+        TypeKind::Record {
+            members: fields, ..
+        } => members("struct", fields),
+        TypeKind::Union {
+            members: fields, ..
+        } => members("union", fields),
+        TypeKind::Enumeration { enumerators, .. } => format!(
+            "type = enum {} {{{}}}",
+            type_info.name,
+            enumerators
+                .iter()
+                .map(|enumerator| {
+                    let value = match enumerator.value {
+                        IntegerValue::Signed(value) => value.to_string(),
+                        IntegerValue::Unsigned(value) => value.to_string(),
+                        _ => "?".to_owned(),
+                    };
+                    format!("{} = {value}", enumerator.name)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => format!("type = {}", renderer.paint(Role::Type, &type_info.name)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

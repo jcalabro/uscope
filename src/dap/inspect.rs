@@ -678,9 +678,17 @@ impl Session {
                 .unwrap_or(false),
             ..self.value_options()
         };
-        let parsed = uscope::parse_value_expression(expression).map_err(error)?;
+        let computed = uscope::Expression::parse(expression)
+            .map_err(|failure| error(uscope::Error::Expression(failure)))?;
+        // A structural path also names the result's children for later
+        // requests; any other expression is computed.
+        let structural = uscope::parse_value_expression(expression).ok();
         let handle = self.target_handle()?;
-        let mut body = if let Some(range) = parsed.range {
+        let mut body = if let Some(parsed) =
+            structural.as_ref().filter(|parsed| parsed.range.is_some())
+            && let Some(range) = parsed.range
+        {
+            let parsed = parsed.clone();
             let length = range.end.saturating_sub(range.start).max(0);
             let reference = self
                 .references
@@ -699,21 +707,42 @@ impl Session {
             );
             body
         } else {
-            let inspected = handle
+            let mode = if arguments.context.as_deref() == Some("repl") {
+                uscope::EvaluationMode::Assign
+            } else {
+                uscope::EvaluationMode::Read
+            };
+            let evaluation = handle
                 .at(context)
-                .inspect(parsed.expression.clone())
+                .evaluate_with(&computed, mode, uscope::InspectionLimits::default())
                 .await
                 .map_err(error)?;
-            self.present(
-                Item {
-                    name: expression,
-                    path: Some(parsed.expression),
-                    type_info: inspected.type_info.as_ref(),
-                    state: &inspected.state,
-                },
-                context,
-                options,
-            )?
+            match evaluation {
+                uscope::Evaluation::Value { value, .. } => self.present(
+                    Item {
+                        name: expression,
+                        path: structural.map(|parsed| parsed.expression),
+                        type_info: value.type_info.as_ref(),
+                        state: &value.state,
+                    },
+                    context,
+                    options,
+                )?,
+                uscope::Evaluation::Range(page) => {
+                    let mut body = Map::new();
+                    body.insert(
+                        "value".to_owned(),
+                        format!("[<{} elements>]", page.children.len()).into(),
+                    );
+                    body.insert("variablesReference".to_owned(), 0.into());
+                    body
+                }
+                _ => {
+                    return Err(ErrorBody::new(
+                        "the evaluation produced an unknown kind of result",
+                    ));
+                }
+            }
         };
         // An evaluation result names its value `result`.
         body.remove("name");

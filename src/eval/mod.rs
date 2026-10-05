@@ -19,6 +19,11 @@ pub mod types;
 
 /// What evaluating an expression at a stop produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one evaluation is returned per request and moved, not stored"
+)]
 pub enum Evaluation {
     /// A value, or the unavailable state that stands for it, with the part
     /// of the expression whose value the program state could not provide.
@@ -26,13 +31,9 @@ pub enum Evaluation {
         value: crate::InspectedValue,
         cause: Option<syntax::Span>,
     },
-    /// `base[start..end]`: an array or slice and the half-open range of its
-    /// elements to page through.
-    Range {
-        base: crate::InspectedValue,
-        start: i128,
-        end: i128,
-    },
+    /// `base[start..end]`: the elements of an array or slice in a
+    /// half-open range of source indices.
+    Range(crate::ValueChildPage),
 }
 
 #[cfg(test)]

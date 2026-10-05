@@ -892,7 +892,9 @@ impl<P: InspectionOps> Controller<P> {
         record!("evaluate `{}`: {outcome:?}", expression.text());
         match outcome {
             Ok(Outcome::Value { value, cause }) => Ok(Evaluation::Value { value, cause }),
-            Ok(Outcome::Range { base, start, end }) => Ok(Evaluation::Range { base, start, end }),
+            Ok(Outcome::Range { base, start, end }) => self
+                .range_page(stop_id, &base, start, end, budget)
+                .map(Evaluation::Range),
             Err(Failure::Expression(error)) => Err(Error::Expression(error)),
             Err(Failure::Debugger(error)) => Err(error),
         }
