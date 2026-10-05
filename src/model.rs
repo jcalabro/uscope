@@ -554,6 +554,9 @@ pub enum TypeKind {
         element: TypeReference,
         /// Whether the descriptor includes a capacity field.
         has_capacity: bool,
+        /// Whether the elements are the language's text, as in Rust's `str`
+        /// and Zig's `[]const u8`.
+        text: bool,
     },
     /// A structure or class with ordered instance members and base subobjects.
     Record {
@@ -631,6 +634,164 @@ pub struct TypeInfo {
     pub byte_size: Option<u64>,
     /// The node's normalized shape.
     pub kind: TypeKind,
+    /// What the type is, independent of how a producer spells its name:
+    /// present for every type the producer names.
+    pub identity: Option<Arc<TypeIdentity>>,
+}
+
+/// The source language of the unit that defines a type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum SourceLanguage {
+    /// Any version of C.
+    C,
+    /// Any version of C++.
+    Cpp,
+    /// Rust.
+    Rust,
+    /// Go.
+    Go,
+    /// Zig, whichever backend produced it.
+    Zig,
+    /// Another language, by its DWARF language code.
+    Other(u16),
+    /// The unit does not say.
+    Unknown,
+}
+
+/// What a named type is: its language, where it is declared, its base name,
+/// and its arguments.
+///
+/// Two instances of one template have the same path and base and differ in
+/// their arguments. Identities never depend on how a producer spells a name:
+/// inline namespaces are removed from paths, and arguments refer to types
+/// rather than to their spellings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeIdentity {
+    /// The language of the unit that defines the type.
+    pub language: SourceLanguage,
+    /// The enclosing namespaces, modules, packages, types, and functions,
+    /// outermost first, with inline namespaces removed.
+    pub path: Arc<[Arc<str>]>,
+    /// The inline namespaces among the enclosing scopes, such as libc++'s
+    /// `__1`, which a name may spell or omit.
+    pub inline_namespaces: Arc<[Arc<str>]>,
+    /// The name without its path or arguments: `vector`, `Vec`, `Aligned`.
+    pub base: Arc<str>,
+    /// Template or generic arguments by position, with packs flattened.
+    pub arguments: Arc<[TypeArgument]>,
+    /// Where the arguments came from.
+    pub origin: ArgumentOrigin,
+    /// What Go's runtime records about the type, for Go types.
+    pub go: Option<GoTypeAttributes>,
+}
+
+/// One template or generic argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TypeArgument {
+    /// A type.
+    Type(TypeReference),
+    /// An integral value, such as an array length.
+    Value(IntegerValue),
+    /// An argument the debugger cannot resolve, as the name spells it. It
+    /// matches only a wildcard.
+    Unknown(Arc<str>),
+}
+
+/// Where a type identity's arguments came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArgumentOrigin {
+    /// Template parameter entries, or Go's key and element attributes.
+    /// Values the entries omit, such as Rust's const generic arguments,
+    /// come from the name.
+    Dwarf,
+    /// The producer described no parameters, so the name was parsed and its
+    /// arguments resolved through the image's types.
+    ParsedName,
+    /// The type has no arguments.
+    None,
+}
+
+/// What Go records about a type for its runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoTypeAttributes {
+    /// The type's kind, which says what it is whatever it is named.
+    pub kind: GoKind,
+    /// The offset of the type's runtime descriptor from `runtime.types`.
+    pub runtime_type: Option<u64>,
+}
+
+/// A Go type's kind, as `internal/abi.Kind` numbers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum GoKind {
+    Bool,
+    Int,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Uint,
+    Uint8,
+    Uint16,
+    Uint32,
+    Uint64,
+    Uintptr,
+    Float32,
+    Float64,
+    Complex64,
+    Complex128,
+    Array,
+    Chan,
+    Func,
+    Interface,
+    Map,
+    Pointer,
+    Slice,
+    String,
+    Struct,
+    UnsafePointer,
+    /// A number this version does not know, or zero, which Go gives the
+    /// types it synthesizes for its own runtime.
+    Other(u8),
+}
+
+impl GoKind {
+    /// The kind `internal/abi.Kind` numbers `value`.
+    #[must_use]
+    pub const fn from_abi(value: u8) -> Self {
+        match value {
+            1 => Self::Bool,
+            2 => Self::Int,
+            3 => Self::Int8,
+            4 => Self::Int16,
+            5 => Self::Int32,
+            6 => Self::Int64,
+            7 => Self::Uint,
+            8 => Self::Uint8,
+            9 => Self::Uint16,
+            10 => Self::Uint32,
+            11 => Self::Uint64,
+            12 => Self::Uintptr,
+            13 => Self::Float32,
+            14 => Self::Float64,
+            15 => Self::Complex64,
+            16 => Self::Complex128,
+            17 => Self::Array,
+            18 => Self::Chan,
+            19 => Self::Func,
+            20 => Self::Interface,
+            21 => Self::Map,
+            22 => Self::Pointer,
+            23 => Self::Slice,
+            24 => Self::String,
+            25 => Self::Struct,
+            26 => Self::UnsafePointer,
+            other => Self::Other(other),
+        }
+    }
 }
 
 /// One finalized node in an image's immutable normalized type graph.
@@ -797,13 +958,15 @@ pub struct InspectionLimits {
 }
 
 impl Default for InspectionLimits {
+    /// Enough for a frame's values and the text they hold: text is charged
+    /// to the same budget, up to [`TextSummary::MAX_BYTES`] per value.
     fn default() -> Self {
         Self {
             variables: 256,
             value_nodes: 512,
             aggregate_depth: 64,
-            memory_reads: 64,
-            memory_bytes: 1_024,
+            memory_reads: 256,
+            memory_bytes: 64 * 1_024,
             expression_work: 5_120_000,
         }
     }
@@ -1459,6 +1622,12 @@ pub enum TextCompletion {
     Truncated { length: Option<u64> },
     /// The text continues into memory that could not be read.
     Unreadable { address: VirtualAddress },
+    /// The inspection's budget could not afford reading more of the text:
+    /// `length` bytes in all, when the string records its length.
+    Limited {
+        length: Option<u64>,
+        exhaustion: InspectionExhaustion,
+    },
 }
 
 /// The inspection state of one visible variable.
@@ -2805,6 +2974,7 @@ pub struct ModuleImage {
     section_range_index: RangeIndex<SectionId>,
     /// Known instruction starts in address order, one per address.
     instruction_starts: Arc<[(ImageAddress, crate::BoundaryEvidence)]>,
+    type_index: crate::type_identity::TypeIndex,
 }
 
 impl ModuleImage {
@@ -2862,6 +3032,19 @@ impl ModuleImage {
                 .map(|section| (section.range, section.id)),
         );
 
+        let type_index = crate::type_identity::TypeIndex::build(
+            metadata
+                .types
+                .first()
+                .map(TypeNode::reference)
+                .map(|reference| reference.image),
+            metadata.types.len(),
+            |index| match &metadata.types[index] {
+                TypeNode::Resolved(info) => Some(info),
+                TypeNode::Malformed { .. } => None,
+            },
+        );
+
         Self {
             id: ModuleImageId::new(0),
             path: Arc::new(path),
@@ -2892,6 +3075,7 @@ impl ModuleImage {
             unsized_data_index,
             section_range_index,
             instruction_starts,
+            type_index,
         }
     }
 
@@ -3139,6 +3323,35 @@ impl ModuleImage {
             TypeNode::Resolved(info) => Some(info),
             TypeNode::Malformed { .. } => None,
         }
+    }
+
+    /// The types with exactly this language, path, and base, whatever their
+    /// arguments, in identifier order: every instance of a template.
+    #[must_use]
+    pub fn type_instances(
+        &self,
+        language: SourceLanguage,
+        path: &[&str],
+        base: &str,
+    ) -> Vec<TypeReference> {
+        self.type_index
+            .instances(language, path, base, &self.types.as_ref())
+    }
+
+    /// The types a name could mean, in identifier order: those named
+    /// exactly so, and those whose identity it spells. The name may omit
+    /// outer path segments and trailing arguments, as in `vector<int>` for
+    /// `std::vector<int, std::allocator<int> >`.
+    #[must_use]
+    pub fn types_named(&self, name: &str) -> Vec<TypeReference> {
+        self.type_index.named(name, false, &self.types.as_ref())
+    }
+
+    /// Whether two of this image's types have the same identity, as one
+    /// type defined in several units does.
+    #[must_use]
+    pub fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        self.type_index.same_type(left, right)
     }
 
     /// Resolves a basename, canonical qualification, source qualification, or
@@ -3676,6 +3889,7 @@ mod tests {
                 name: "int".into(),
                 byte_size: Some(4),
                 kind: TypeKind::Base(base),
+                identity: None,
             })
         };
         let globals = [
@@ -3818,6 +4032,7 @@ mod tests {
                         kind: TypeKind::Opaque {
                             description: "test type".into(),
                         },
+                        identity: None,
                     }),
                     TypeNode::Malformed {
                         reference: malformed_reference,

@@ -36,6 +36,7 @@ pub(super) enum ValueShapeKind {
         element: TypeId,
         byte_size: u64,
         has_capacity: bool,
+        text: bool,
     },
     Record {
         /// The canonical record DIE after aliases and qualifiers are removed.
@@ -268,6 +269,7 @@ pub(super) fn nested_value_shape<T: TypeMetadataEntry>(
             TypeKind::Slice {
                 element,
                 has_capacity,
+                text,
             } => {
                 let byte_size = info.byte_size.ok_or_else(|| {
                     ValueShapeError::Malformed("slice descriptor has no byte size".into())
@@ -277,6 +279,7 @@ pub(super) fn nested_value_shape<T: TypeMetadataEntry>(
                         element: element.id,
                         byte_size,
                         has_capacity: *has_capacity,
+                        text: *text,
                     },
                 });
             }

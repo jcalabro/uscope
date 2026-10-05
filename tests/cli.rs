@@ -418,6 +418,43 @@ fn strings_print_as_quoted_escaped_text() {
     );
 }
 
+/// `ptype` names a type with its path and lists its arguments, whatever
+/// the producer called it.
+#[test]
+fn ptype_shows_qualified_names_and_template_arguments() {
+    for (fixture, commands, expected) in [
+        (
+            "templates-cpp-clang-o0",
+            &[
+                "break templates_target",
+                "run",
+                "ptype std::`vector<int>`",
+                "ptype `Fixed<3, short>`",
+            ][..],
+            &[
+                "type = class std::vector<int, std::allocator<int> > {",
+                "arguments: int, std::allocator<int>\n",
+                "type = struct Fixed<3, short> {\n    short[3] items;\n}\narguments: 3, short\n",
+            ][..],
+        ),
+        (
+            "generics-rust-o0",
+            &[
+                "break generics_target",
+                "run",
+                "ptype alloc::vec::`Vec<i32>`",
+            ][..],
+            &[
+                "type = struct alloc::vec::Vec<i32, alloc::alloc::Global> {",
+                "arguments: i32, alloc::alloc::Global\n",
+            ][..],
+        ),
+    ] {
+        let stdout = batch(fixture, &[], commands);
+        assert_in_order(&stdout, expected);
+    }
+}
+
 #[test]
 fn set_changes_values_the_program_then_uses() {
     let stdout = batch(

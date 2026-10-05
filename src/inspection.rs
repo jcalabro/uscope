@@ -98,6 +98,46 @@ impl InspectionBudget {
         ])
     }
 
+    /// The exhaustion one read of `bytes` would cause, if any, without
+    /// recording it.
+    pub fn memory_shortfall(&self, bytes: u64) -> Option<InspectionExhaustion> {
+        if let Some(exhaustion) = self.exhaustion {
+            return Some(exhaustion);
+        }
+        [
+            (InspectionLimit::MemoryReads, 1),
+            (InspectionLimit::MemoryBytes, bytes),
+        ]
+        .into_iter()
+        .find_map(|(resource, requested)| {
+            let (limit, used) = self.resource(resource);
+            used.checked_add(requested)
+                .is_none_or(|next| next > limit)
+                .then_some(InspectionExhaustion {
+                    resource,
+                    limit,
+                    used,
+                    requested,
+                })
+        })
+    }
+
+    /// Reserves one read of at most `bytes`, or of as many as remain. A read
+    /// the budget cannot afford is described without exhausting the budget,
+    /// so a caller can cut its own work short without failing the rest of
+    /// the inspection.
+    pub fn consume_memory_up_to(&mut self, bytes: usize) -> Result<usize, InspectionExhaustion> {
+        let wanted = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let granted = self.remaining_memory_bytes().min(wanted);
+        if let Some(exhaustion) = self.memory_shortfall(if granted == 0 { wanted } else { granted })
+        {
+            return Err(exhaustion);
+        }
+        self.usage.memory_reads += 1;
+        self.usage.memory_bytes += granted;
+        Ok(usize::try_from(granted).expect("granted bytes never exceed the request"))
+    }
+
     pub fn consume_expression_work(&mut self, amount: u64) -> Result<(), InspectionExhaustion> {
         self.reserve(&[(InspectionLimit::ExpressionWork, amount)])
     }

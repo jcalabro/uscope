@@ -111,6 +111,7 @@ impl World {
             name: name.into(),
             byte_size,
             kind,
+            identity: None,
         });
         reference
     }
@@ -233,6 +234,7 @@ impl World {
             TypeKind::Slice {
                 element,
                 has_capacity: false,
+                text: false,
             },
         )
     }

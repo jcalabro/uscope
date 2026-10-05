@@ -1600,7 +1600,7 @@ impl DwarfVariableInfo {
             self.materialize_shape_state(type_id, shape, storage, context, runtime, budget)?;
         if let VariableState::Available { value, text, .. } = &mut state {
             *text = self
-                .text_summary(shape, value, storage, runtime)
+                .text_summary(type_id, shape, value, storage, runtime, budget)
                 .map(Arc::new);
         }
         Ok(state)
@@ -1826,6 +1826,7 @@ impl DwarfVariableInfo {
                 element: _,
                 byte_size,
                 has_capacity,
+                ..
             } => {
                 let decoded =
                     match self.decode_slice(storage, *byte_size, *has_capacity, runtime, budget) {

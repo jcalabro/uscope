@@ -9,6 +9,7 @@ mod expressions;
 #[cfg(debug_assertions)]
 mod flight_recorder;
 mod globals;
+mod identities;
 mod libraries;
 mod metadata;
 mod signals;

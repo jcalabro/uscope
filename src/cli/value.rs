@@ -339,6 +339,18 @@ pub fn quoted(text: &uscope::TextSummary) -> String {
         uscope::TextCompletion::Unreadable { address } => {
             let _ = write!(output, "... <unreadable at {address}>");
         }
+        uscope::TextCompletion::Limited { length, exhaustion } => {
+            if let Some(length) = length {
+                let _ = write!(output, "... ({length} bytes)");
+            } else {
+                output.push_str("...");
+            }
+            let _ = write!(
+                output,
+                " <{}>",
+                uscope::VariableUnavailableReason::InspectionLimit(exhaustion)
+            );
+        }
     }
     output
 }
@@ -710,21 +722,52 @@ pub fn hexadecimal(
     )
 }
 
+/// A type's name with the path its producer's name leaves out, as in
+/// `std::vector<int, std::allocator<int> >`. Go and Zig names already
+/// carry their packages and modules.
+fn qualified_name(type_info: &TypeInfo) -> String {
+    let Some(identity) = type_info.identity.as_deref() else {
+        return type_info.name.to_string();
+    };
+    let spells_path = identity.path.first().is_none_or(|first| {
+        type_info
+            .name
+            .strip_prefix(first.as_ref())
+            .is_some_and(|rest| rest.starts_with("::"))
+    });
+    if spells_path
+        || !matches!(
+            identity.language,
+            uscope::SourceLanguage::C | uscope::SourceLanguage::Cpp | uscope::SourceLanguage::Rust
+        )
+    {
+        return type_info.name.to_string();
+    }
+    let mut name = String::new();
+    for segment in identity.path.iter() {
+        let _ = write!(name, "{segment}::");
+    }
+    name.push_str(&type_info.name);
+    name
+}
+
 /// Renders a type's definition, as `ptype` does: a record's or union's
-/// members, an enumeration's enumerators, or the name of any other type.
+/// members, an enumeration's enumerators, or the name of any other type,
+/// then the type's template or generic arguments.
 pub fn type_definition(
     type_info: &TypeInfo,
     images: &[std::sync::Arc<ModuleImage>],
     renderer: Renderer,
 ) -> String {
-    let name_of = |reference: uscope::TypeReference| {
-        images
-            .iter()
-            .find_map(|image| image.type_info(reference))
-            .map_or_else(|| "<unknown>".to_owned(), |info| info.name.to_string())
+    let info_of = |reference: uscope::TypeReference| {
+        images.iter().find_map(|image| image.type_info(reference))
     };
+    let name_of = |reference: uscope::TypeReference| {
+        info_of(reference).map_or_else(|| "<unknown>".to_owned(), |info| info.name.to_string())
+    };
+    let name = qualified_name(type_info);
     let members = |keyword: &str, members: &[uscope::RecordMember]| {
-        let mut output = format!("type = {keyword} {} {{\n", type_info.name);
+        let mut output = format!("type = {keyword} {name} {{\n");
         for member in members {
             let bits = match member.layout {
                 uscope::RecordMemberLayout::BitRange { bit_size, .. } => format!(" : {bit_size}"),
@@ -740,16 +783,24 @@ pub fn type_definition(
         output.push('}');
         output
     };
-    match &type_info.kind {
+    let mut output = match &type_info.kind {
         TypeKind::Record {
-            members: fields, ..
-        } => members("struct", fields),
+            kind,
+            members: fields,
+            ..
+        } => members(
+            if *kind == uscope::RecordKind::Class {
+                "class"
+            } else {
+                "struct"
+            },
+            fields,
+        ),
         TypeKind::Union {
             members: fields, ..
         } => members("union", fields),
         TypeKind::Enumeration { enumerators, .. } => format!(
-            "type = enum {} {{{}}}",
-            type_info.name,
+            "type = enum {name} {{{}}}",
             enumerators
                 .iter()
                 .map(|enumerator| {
@@ -764,7 +815,27 @@ pub fn type_definition(
                 .join(", ")
         ),
         _ => format!("type = {}", renderer.paint(Role::Type, &type_info.name)),
+    };
+    if let Some(identity) = type_info.identity.as_deref()
+        && !identity.arguments.is_empty()
+    {
+        let arguments = identity
+            .arguments
+            .iter()
+            .map(|argument| match argument {
+                uscope::TypeArgument::Type(reference) => {
+                    info_of(*reference).map_or_else(|| "<unknown>".to_owned(), qualified_name)
+                }
+                uscope::TypeArgument::Value(IntegerValue::Signed(value)) => value.to_string(),
+                uscope::TypeArgument::Value(IntegerValue::Unsigned(value)) => value.to_string(),
+                uscope::TypeArgument::Unknown(text) => text.to_string(),
+                _ => "?".to_owned(),
+            })
+            .map(|argument| renderer.paint(Role::Type, argument).to_string())
+            .collect::<Vec<_>>();
+        let _ = write!(output, "\narguments: {}", arguments.join(", "));
     }
+    output
 }
 
 #[cfg(test)]

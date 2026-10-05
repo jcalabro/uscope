@@ -348,6 +348,7 @@ pub fn type_info(types: &dyn TypeSource, ty: &Ty) -> TypeInfo {
         name,
         byte_size: size_of(types, ty),
         kind,
+        identity: None,
     }
 }
 

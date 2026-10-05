@@ -51,6 +51,7 @@ mod codec;
 mod die;
 mod evaluate;
 mod globals;
+mod identity;
 mod inspect;
 mod location;
 mod shape;

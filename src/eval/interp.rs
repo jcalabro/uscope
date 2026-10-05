@@ -669,6 +669,10 @@ impl<M: Machine> Interpreter<'_, M> {
             TextCompletion::Complete => Ok(u64::try_from(text.bytes.len()).unwrap_or(u64::MAX)),
             TextCompletion::Truncated {
                 length: Some(length),
+            }
+            | TextCompletion::Limited {
+                length: Some(length),
+                ..
             } => Ok(length),
             completion => Err(Halt::Missing {
                 state: Box::new(unavailable(Self::incomplete(completion))),
@@ -686,6 +690,9 @@ impl<M: Machine> Interpreter<'_, M> {
                     completed: 0,
                     next_address: address,
                 }
+            }
+            TextCompletion::Limited { exhaustion, .. } => {
+                VariableUnavailableReason::InspectionLimit(exhaustion)
             }
             _ => VariableUnavailableReason::EvaluationLimit,
         }

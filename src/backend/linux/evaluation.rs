@@ -19,7 +19,7 @@ use crate::eval::syntax::{Expression, Span};
 use crate::eval::target::{
     Lookup, Machine, Planned, Refusal, Register, Scope, StepKind, Stop, TypeLookup, TypeQuery,
 };
-use crate::eval::types::{TypeSource, c_type_key_of_name, type_info};
+use crate::eval::types::{TypeSource, type_info};
 use crate::inspection::InspectionBudget;
 use crate::model::{DereferenceTarget, ValueStorage};
 use crate::protocol::StopId;
@@ -362,20 +362,33 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
         Ok(Lookup::NotFound)
     }
 
+    /// The types a name means, through each image's identity index: a name
+    /// may omit outer path segments and trailing arguments. One type
+    /// defined alike in several units is one type, and so is a synonym
+    /// that only renames another candidate, as Go's typedefs of its named
+    /// types do.
     fn lookup_type(&self, query: &TypeQuery) -> TypeLookup {
         for module in self.modules() {
-            let mut found: Vec<(String, TypeReference)> = Vec::new();
-            for node in module.image.types() {
-                let TypeNode::Resolved(info) = node else {
-                    continue;
-                };
-                let named = info.name.as_ref() == query.name
-                    || (matches!(info.kind, TypeKind::Base(_))
-                        && c_type_key_of_name(&info.name).is_some_and(|key| key == query.name));
-                if named && tag_matches(query.tag, &info.kind) {
-                    found.push((definition(&module.image, info), info.reference));
-                }
-            }
+            let candidates = module
+                .image
+                .types_named(&query.name)
+                .into_iter()
+                .filter_map(|reference| module.image.type_info(reference))
+                .filter(|info| tag_matches(query.tag, &info.kind))
+                .collect::<Vec<_>>();
+            let mut found: Vec<(String, TypeReference)> = candidates
+                .iter()
+                .filter(|info| {
+                    !matches!(
+                        info.kind,
+                        TypeKind::Named { target: Some(target), .. }
+                            if candidates.iter().any(|other| {
+                                other.reference == target && other.name == info.name
+                            })
+                    )
+                })
+                .map(|info| (definition(&module.image, info), info.reference))
+                .collect();
             found.sort_by(|left, right| left.0.cmp(&right.0));
             found.dedup_by(|left, right| left.0 == right.0);
             match found.as_slice() {
