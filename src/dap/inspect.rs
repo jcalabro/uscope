@@ -406,17 +406,24 @@ impl Session {
         window: Window,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
         let snapshot = self.frame_variables(context).await?;
+        let unnamed = self.unnamed_variables(context, &snapshot).await;
         let mut rows = Vec::new();
-        for variable in window.slice(
+        for (index, variable) in window.slice(
             snapshot
                 .variables
                 .iter()
-                .filter(|variable| variable.kind == kind),
+                .enumerate()
+                .filter(|(_, variable)| variable.kind == kind),
         ) {
+            let path = if unnamed.contains(&index) {
+                None
+            } else {
+                uscope::Expression::name(&variable.name)
+            };
             rows.push(self.present(
                 Item {
                     name: &variable.name,
-                    path: uscope::Expression::name(&variable.name),
+                    path,
                     type_info: variable.type_info.as_ref(),
                     state: &variable.state,
                 },
@@ -433,6 +440,55 @@ impl Session {
             )));
         }
         Ok(rows)
+    }
+
+    /// The frame's variables their names do not reach, because another of
+    /// the frame's variables has the same name, such as one an inner block
+    /// hides: all but the one the name binds, told apart by their storage,
+    /// or all of them when their storage cannot tell.
+    async fn unnamed_variables(
+        &self,
+        context: StopContext,
+        snapshot: &uscope::VariableSnapshot,
+    ) -> std::collections::BTreeSet<usize> {
+        let storage = |state: &VariableState| match state {
+            VariableState::Available {
+                source:
+                    source @ (uscope::VariableValueSource::Memory(_)
+                    | uscope::VariableValueSource::Register(_)),
+                ..
+            } => Some(source.clone()),
+            _ => None,
+        };
+        let mut by_name = std::collections::BTreeMap::<&str, Vec<usize>>::new();
+        for (index, variable) in snapshot.variables.iter().enumerate() {
+            by_name.entry(&variable.name).or_default().push(index);
+        }
+        let mut unnamed = std::collections::BTreeSet::new();
+        for (name, indices) in by_name.into_iter().filter(|(_, indices)| indices.len() > 1) {
+            let bound = if let (Ok(handle), Some(expression)) =
+                (self.target_handle(), uscope::Expression::name(name))
+                && let Ok(uscope::Evaluation::Value { value, .. }) =
+                    handle.at(context).evaluate(&expression).await
+            {
+                storage(&value.state)
+            } else {
+                None
+            };
+            let matching = indices
+                .iter()
+                .copied()
+                .filter(|index| {
+                    bound.is_some() && storage(&snapshot.variables[*index].state) == bound
+                })
+                .collect::<Vec<_>>();
+            for index in indices {
+                if matching != [index] {
+                    unnamed.insert(index);
+                }
+            }
+        }
+        unnamed
     }
 
     /// The module and source file of a frame's location, when it has one.
@@ -486,7 +542,7 @@ impl Session {
             rows.push(self.present(
                 Item {
                     name: &variable.name,
-                    path: uscope::Expression::name(&variable.name),
+                    path: global_expression(&image, global),
                     type_info: variable.type_info.as_ref(),
                     state: &variable.state,
                 },
@@ -1007,6 +1063,42 @@ impl Session {
             .collect::<Vec<_>>();
         Ok(json!({"targets": targets}))
     }
+}
+
+/// A name that reaches a global from any frame, which the frame's own
+/// locals cannot shadow: its qualified name, or, when other files declare
+/// the same, that name qualified by its file's name or path.
+fn global_expression(
+    image: &uscope::ModuleImage,
+    global: &uscope::GlobalVariableInfo,
+) -> Option<uscope::Expression> {
+    let mut selectors = vec![global.qualified_name.to_string()];
+    if let Some(file) = global
+        .declaration
+        .as_ref()
+        .and_then(|declaration| image.source_file(declaration.file))
+    {
+        if let Some(name) = file.path.file_name() {
+            selectors.push(format!(
+                "{}::{}",
+                name.to_string_lossy(),
+                global.qualified_name
+            ));
+        }
+        selectors.push(format!(
+            "{}::{}",
+            file.path.display(),
+            global.qualified_name
+        ));
+    }
+    selectors
+        .into_iter()
+        .find(|selector| {
+            image
+                .global_named(selector)
+                .is_ok_and(|found| found.id == global.id)
+        })
+        .and_then(|selector| uscope::Expression::outermost(&selector))
 }
 
 /// Whether an evaluation failed only because the frame does not know the

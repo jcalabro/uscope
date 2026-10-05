@@ -142,6 +142,14 @@ impl Expression {
         Self::parse(&print::name_text(name)).ok()
     }
 
+    /// A name in the outermost scope, which no local can shadow, quoted
+    /// when it holds other characters, as a qualified name such as
+    /// `ns::value` does.
+    #[must_use]
+    pub fn outermost(name: &str) -> Option<Self> {
+        Self::parse(&format!("::{}", print::name_text(name))).ok()
+    }
+
     /// The member `name` of this expression's value.
     #[must_use]
     pub fn member(&self, name: &str) -> Option<Self> {
