@@ -27,6 +27,7 @@
     {"arguments": ["1", "main"], "exit_code": 60, "output": "total 60\n"},
     {"arguments": ["3", "main"], "exit_code": 30, "output": "total 330\n"},
     {"arguments": ["2", "worker"], "exit_code": 70, "output": "total 170\n"},
-    {"arguments": ["3", "leader"], "exit_code": 3, "output": "total 330\n"}
+    {"arguments": ["3", "leader"], "exit_code": 3, "output": "total 330\n"},
+    {"arguments": ["1", "leader"], "exit_code": 3, "output": "total 60\n"}
   ]
 }
