@@ -2274,16 +2274,18 @@ async fn step_over_from_the_entry_point(fixture: &str) {
     scenario.shutdown().await;
 }
 
-/// An instruction step needs no inline frame, so it works where the stop
-/// leaves the presented inline frame ambiguous: at the loop clang builds
-/// for the inlined `exit_group` that follows `main` in the simulator's
-/// golden runtime, where breakpoints on two nested inlined functions both
-/// hit. The simulator found such steps refused.
+/// Breakpoints on two nested inlined functions that begin at one
+/// instruction hit there together: `rt_exit_group` and the `rt_syscall3`
+/// inlined into it, at the loop clang builds for the inlined `exit_group`
+/// that follows `main` in the simulator's golden runtime. One chain of calls
+/// holds both, so the stop presents the innermost, as gdb does, and
+/// backtraces and source steps work there. The stop was presented as
+/// ambiguous, which refused them.
 #[tokio::test]
-async fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
+async fn nested_inline_breakpoints_hit_together_present_the_innermost() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("build/golden/straight/straight-clang-O2");
-    let mut scenario = Scenario::new("instruction-step-ambiguous-inline", program);
+    let mut scenario = Scenario::new("nested-inline-breakpoints", program);
     scenario.add_breakpoint("rt_exit_group").await;
     scenario.add_breakpoint("rt_syscall3").await;
     let loop_head = VirtualAddress::new(0x40_1334);
@@ -2296,7 +2298,7 @@ async fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
         reason = scenario.resume_to_stop().await;
     }
     assert!(
-        matches!(&reason, StopReason::Breakpoint { address, .. } if *address == loop_head),
+        matches!(&reason, StopReason::Breakpoint { address, hits } if *address == loop_head && hits.len() == 2),
         "the golden binary changed: {reason:?}"
     );
     let presentation = scenario
@@ -2305,14 +2307,28 @@ async fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
         .presentation
         .expect("a presentation");
     assert!(
-        matches!(presentation.frame, uscope::PresentedFrame::Ambiguous(_)),
-        "the golden binary changed: {presentation:?}"
+        matches!(presentation.frame, uscope::PresentedFrame::Inline(_)),
+        "{presentation:?}"
     );
-
+    let backtrace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let functions = backtrace
+        .frames
+        .iter()
+        .take(2)
+        .map(|frame| {
+            frame
+                .function
+                .as_ref()
+                .map(|function| function.name.as_ref())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(functions, [Some("rt_syscall3"), Some("rt_exit_group")]);
     assert_eq!(
-        scenario.step_to_stop(StepKind::Instruction).await,
+        scenario.step_to_stop(StepKind::OverSource).await,
         StopReason::Step {
-            kind: StepKind::Instruction
+            kind: StepKind::OverSource
         }
     );
     scenario.shutdown().await;
