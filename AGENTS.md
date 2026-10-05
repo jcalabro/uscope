@@ -41,6 +41,17 @@ Development builds (`debug_assertions`) record every client request, ptrace cont
 - Each `uscope` run streams to `runs/`, keeping the latest 20, and `latest.log` links to the newest. `USCOPE_FLIGHT_RECORDING=PATH` streams to PATH instead, and an empty value turns recording off.
 - Record new native control paths through `record!` or the `Recorded` ptrace wrapper. Recording must never change what the inferior sees.
 
+## Simulator
+
+The deterministic simulator (`src/sim`, `plans/simulator.md`) runs the real controller and `DebuggerHandle` against a simulated kernel and CPU, so one seed names one complete, reproducible session, and oracles check the debugger against the simulation's ground truth after every action.
+
+- Keep runs deterministic. All randomness comes from the seed's `Choices` streams; nothing reads the clock, iterates a hash container, or runs a real thread inside a world. `a_seed_always_names_the_same_run` checks this.
+- Model a kernel behavior only once a dual-run test in `src/sim/conformance/kernel.rs` pins it on the real kernel, and number it as a rule in the plan. Whatever is not modeled fails the run as a model gap; never guess.
+- Never loosen an oracle to make a run pass. When an oracle is wrong, correct it in a change of its own that says why, with a unit test. A new oracle gets a sabotage test showing it catches the lie it exists for, and a new feature gets coverage marks that the gate's fixed seeds must reach.
+- A failure's kind decides the response. A debugger failure gets a test outside the simulator, written to fail first, before the fix; a model gap gets a probe and a rule; a simulator failure is fixed in the simulator. Seeds name runs only for the commit they ran on, so they are never kept as tests.
+- `just all` sweeps for 30 seconds before every commit. Before merging a lifecycle, run-control, attach, or concurrency change, or a change to the model, sweep longer: `just sim 600`. A sweep groups failures by what their messages share and reports each group's shortest run; replay it with `just sim-seed SEED`, and see the state at an action with `--at STEP`. The trace includes the controller's flight recording.
+- The golden programs in `tests/golden` are checked in as sources and manifests. `just build-test-programs` builds them into `build/golden` with the pinned toolchain and fails unless every binary matches the hash its manifest records. Re-record a manifest with `just golden-record NAME` only on purpose, in a commit of its own.
+
 ## Local Development
 
 Run all project commands inside the pinned Nix environment. Do not run `cargo`,
@@ -66,12 +77,5 @@ just sim                           # simulate random sessions for 30 seconds
 just sim-seed SEED                 # replay one simulated session
 just golden-record NAME            # re-record a golden program's manifest
 ```
-
-The deterministic simulator (`src/sim`, `plans/simulator.md`) runs the
-real controller against a simulated kernel and CPU. Its golden programs in
-`tests/golden` are checked in as sources and manifests. `just
-build-test-programs` builds them into `build/golden` with the pinned
-toolchain and fails unless every binary matches the hash its manifest
-records. Re-record a manifest only on purpose, in a commit of its own.
 
 Before committing, run `just all`: formatting, aggressive Clippy, nextest, doc tests, `just stress`, and a simulator sweep. `just` alone runs the faster gate without stress or the sweep. Keep comments concise and useful, document public APIs, group related Rust code with sensible whitespace, and avoid unrelated refactors.
