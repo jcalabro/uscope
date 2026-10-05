@@ -9,6 +9,13 @@
 //! of integers, the variables in scope, `+`, `-`, `*`, `/`, `%`, and
 //! parentheses. The variables oracle reads the variables from the debugger
 //! at a stop there and requires the condition to hold.
+//!
+//! A marker may also expect something only the debugger's own expressions
+//! can say, which the expressions oracle requires to evaluate true there:
+//!
+//! ```c
+//! visit(item); // MARK: index < 4 // EXPECT: item == &items[index]
+//! ```
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -20,6 +27,8 @@ pub struct Marker {
     pub condition: Condition,
     /// The condition as written.
     pub text: String,
+    /// An expression in the debugger's language that is true there too.
+    pub expect: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,14 +159,19 @@ pub fn parse(source: &str) -> Result<Vec<Marker>, String> {
     source
         .lines()
         .zip(1..)
-        .filter_map(|(text, line)| Some((text.split_once("// MARK:")?.1.trim(), line)))
+        .filter_map(|(text, line)| Some((text.split_once("// MARK:")?.1, line)))
         .map(|(text, line)| {
+            let (text, expect) = match text.split_once("// EXPECT:") {
+                Some((text, expect)) => (text.trim(), Some(expect.trim().to_owned())),
+                None => (text.trim(), None),
+            };
             Ok(Marker {
                 line,
                 condition: Parser::new(text)
                     .condition()
                     .map_err(|error| format!("line {line}: {error} in {text:?}"))?,
                 text: text.to_owned(),
+                expect,
             })
         })
         .collect()
@@ -310,6 +324,11 @@ mod tests {
                 .evaluate(&BTreeMap::from([("total".into(), 0)])),
             Verdict::Unknown("index".into())
         );
+        let expecting = parse("f(p); // MARK: index < 4 // EXPECT: p->n == (*p).n\n")
+            .expect("a marker with an expectation");
+        assert_eq!(expecting[0].text, "index < 4");
+        assert_eq!(expecting[0].expect.as_deref(), Some("p->n == (*p).n"));
+        assert_eq!(marker.expect, None);
         assert!(parse("// MARK: total ==").is_err());
         assert!(parse("// MARK: total").is_err());
         assert!(parse("// MARK: (a == 1").is_err());
