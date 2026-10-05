@@ -344,6 +344,8 @@ pub struct DataBreakpointInfoArguments {
 pub struct DataBreakpoint {
     pub data_id: String,
     pub access_type: Option<String>,
+    /// One of the adapter's `breakpointModes`.
+    pub mode: Option<String>,
     pub condition: Option<String>,
     pub hit_condition: Option<String>,
 }

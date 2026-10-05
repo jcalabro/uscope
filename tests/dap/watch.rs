@@ -250,3 +250,107 @@ fn addresses_are_watched_as_memory_a_client_names_by_address() {
     assert_eq!(refused["description"], "'watch_i32' is not an address");
     dap.finish();
 }
+
+#[test]
+fn the_store_mode_stops_at_every_store_even_of_the_value_held() {
+    let mut dap = Dap::start("store mode");
+    let (stop, frame) = stopped_in(&mut dap, "watch-gcc-o0", "scalar_stores");
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    let info = dap.request(
+        "dataBreakpointInfo",
+        json!({"name": "watch_i32", "frameId": frame["id"]}),
+    );
+    let set = dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [
+            {"dataId": info["dataId"], "accessType": "write", "mode": "store"},
+            {"dataId": info["dataId"], "accessType": "readWrite", "mode": "change"},
+            {"dataId": info["dataId"], "accessType": "write", "mode": "sometimes"},
+        ]}),
+    );
+    let rows = breakpoints(&set);
+    assert_eq!(rows[0]["verified"], true);
+    for (row, message) in [
+        (
+            &rows[1],
+            "the change mode applies only to write data breakpoints",
+        ),
+        (&rows[2], "unknown data breakpoint mode 'sometimes'"),
+    ] {
+        assert_eq!(
+            (&row["verified"], &row["message"]),
+            (&json!(false), &json!(message))
+        );
+    }
+    let id = rows[0]["id"].clone();
+    for description in [
+        "watch_i32 changed from 0 to 1",
+        "watch_i32 changed from 1 to 2",
+        "watch_i32 was written; it is still 2",
+        "watch_i32 changed from 2 to 42",
+    ] {
+        assert_eq!(next_change(&mut dap, stop.thread, &id), description);
+    }
+    dap.finish();
+}
+
+#[test]
+fn data_breakpoints_the_console_removes_are_removed_from_the_client() {
+    let mut dap = Dap::start("console unwatch");
+    let (stop, frame) = stopped_in(&mut dap, "watch-gcc-o0", "scalar_stores");
+    dap.request("setFunctionBreakpoints", json!({"breakpoints": []}));
+    let info = dap.request(
+        "dataBreakpointInfo",
+        json!({"name": "watch_i32", "frameId": frame["id"]}),
+    );
+    let set = dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [{"dataId": info["dataId"], "accessType": "write"}]}),
+    );
+    let id = breakpoints(&set)[0]["id"].clone();
+    let mark = dap.mark();
+    let output = dap.request(
+        "evaluate",
+        json!({"expression": "unwatch all", "frameId": frame["id"], "context": "repl"}),
+    );
+    assert!(
+        output["result"]
+            .as_str()
+            .is_some_and(|text| text.contains("1 watchpoint")),
+        "{output}"
+    );
+    let removed = dap.event(mark, "breakpoint", |body| body["reason"] == "removed");
+    assert_eq!(removed["breakpoint"]["id"], id);
+    // The client's next update has nothing left to release.
+    let cleared = dap.request("setDataBreakpoints", json!({"breakpoints": []}));
+    assert_eq!(cleared, json!({"breakpoints": []}));
+    // The program's later phases raise signals of their own.
+    dap.request("setExceptionBreakpoints", json!({"filters": []}));
+    let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+    dap.success(resumed);
+    let (kind, _) = dap.next_event(resumed.mark, &["stopped", "exited"]);
+    assert_eq!(kind, "exited");
+    dap.finish();
+}
+
+#[test]
+fn data_breakpoints_before_a_program_is_loaded_wait_unverified() {
+    let mut dap = Dap::start("data breakpoints before launch");
+    dap.initialize(Profile::DeferredLaunch);
+    assert_eq!(
+        dap.request("setDataBreakpoints", json!({"breakpoints": []})),
+        json!({"breakpoints": []})
+    );
+    let set = dap.request(
+        "setDataBreakpoints",
+        json!({"breakpoints": [{"dataId": "data-1", "accessType": "write"}]}),
+    );
+    assert_eq!(
+        (
+            &breakpoints(&set)[0]["verified"],
+            &breakpoints(&set)[0]["reason"]
+        ),
+        (&json!(false), &json!("failed"))
+    );
+    dap.finish();
+}
