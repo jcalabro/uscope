@@ -26,6 +26,8 @@ mod protocol;
 #[doc(hidden)]
 pub mod sim;
 mod source_map;
+#[cfg(test)]
+mod test_memory;
 mod unwind;
 
 use std::path::{Path, PathBuf};

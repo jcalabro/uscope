@@ -1,3 +1,6 @@
+#[path = "support/memory_cap.rs"]
+mod memory_cap;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};

@@ -50,12 +50,13 @@ lint:
     cargo check --quiet --manifest-path fuzz/Cargo.toml
 
 # Arguments go to nextest, e.g. `just test print_` or `just test --test cli`.
-# Doc tests only run with the full suite. `nix develop` turns address
+# Doc tests only run with the full suite. Tests run inside a memory cap, and
+# each test process also caps its own heap (tests/support/memory_cap.rs). `nix develop` turns address
 # randomization off, which setarch turns back on, so tests see what they would
 # in any shell.
 [doc("Builds the native test fixtures and runs the Rust test suite.")]
 test *ARGS: build-test-programs
-    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" "$@"
+    test_threads="$(nproc)"; if (( test_threads > {{max_test_threads}} )); then test_threads={{max_test_threads}}; fi; ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$test_threads" "$@"
     if (( $# == 0 )); then cargo test --doc; fi
 
 # Races in process control fail far more often when the debugger competes for
@@ -73,7 +74,7 @@ stress COUNT="10" *ARGS: build-test-programs
     burners=()
     trap 'kill "${burners[@]}" 2>/dev/null || true' EXIT
     for (( i = 0; i < cpus / 2; i++ )); do (while :; do :; done) & burners+=($!); done
-    setarch "$(uname -m)" cargo nextest run --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
+    ./scripts/contained.sh setarch "$(uname -m)" cargo nextest run --test-threads "$(( cpus * 2 ))" --stress-count "$1" "${@:2}"
 
 # Rebuilds one golden program and rewrites its manifest, after a deliberate
 # change to its sources or the toolchain. Commit a new manifest on its own.

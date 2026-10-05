@@ -9,6 +9,7 @@
 #![allow(dead_code, reason = "each test crate uses a subset of the harness")]
 
 pub mod flight_recordings;
+mod memory_cap;
 
 use std::future::Future;
 use std::io::{BufRead as _, BufReader, Write as _};
