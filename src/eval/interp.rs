@@ -1,0 +1,822 @@
+//! Running a bound program at one stop.
+//!
+//! Places stay unread until a value is needed, `&&`, `||`, and `?:` run only
+//! the side they need, and a value the program state cannot provide
+//! poisons what depends on it, remembering the operand that caused it.
+
+use std::cmp::Ordering;
+
+use super::error::{ErrorKind, ExpressionError};
+use super::ir::{Comparison, Constant, Conversion, Length, Node, Op, Program};
+use super::number::{Bits, Exact, Float, FloatFormat, IntType, Integer, NumberError};
+use super::syntax::Span;
+use super::syntax::ast::BinaryOp;
+use super::target::{Machine, Refusal, Stop};
+use super::types::{Category, Ty, category, size_of, type_info};
+use crate::{
+    ByteOrder, DereferenceState, InspectedValue, IntegerValue, ScalarValue, TextCompletion,
+    ValueAccessUnavailableReason, ValueChildren, VariableMalformedKind, VariableMalformedReason,
+    VariableState, VariableUnavailableReason, VariableValue, VariableValueSource, VirtualAddress,
+};
+
+/// What running a program produced.
+#[derive(Debug)]
+pub enum Outcome {
+    /// A value, or the state that stood in for one, with the operand whose
+    /// state the program could not provide.
+    Value {
+        value: InspectedValue,
+        cause: Option<Span>,
+    },
+    /// `base[start..end]`: the array or slice, and the range to page through.
+    Range {
+        base: InspectedValue,
+        start: i128,
+        end: i128,
+    },
+}
+
+/// Why running produced nothing.
+#[derive(Debug)]
+pub enum Failure {
+    Expression(ExpressionError),
+    Debugger(crate::Error),
+}
+
+enum Value<P> {
+    Place(P),
+    /// A language-typed value in memory.
+    Raw(u64),
+    Int(Integer),
+    Float(Float),
+    Bool(bool),
+    Pointer(u64),
+    Text(Vec<u8>),
+}
+
+enum Halt {
+    Missing {
+        state: Box<VariableState>,
+        cause: Span,
+    },
+    Error(ExpressionError),
+    Failed(crate::Error),
+}
+
+/// Runs `program` on `machine`.
+pub fn run<M: Machine>(
+    program: &Program<M::Object, M::Step>,
+    machine: &mut M,
+) -> Result<Outcome, Failure> {
+    let mut interpreter = Interpreter { machine };
+    let root = &program.root;
+    let result = if let Op::Range { base, start, end } = &root.op {
+        interpreter.range(base, start, end)
+    } else {
+        interpreter
+            .eval(root)
+            .and_then(|value| interpreter.present(root, value))
+            .map(|value| Outcome::Value { value, cause: None })
+    };
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(Halt::Missing { state, cause }) => Ok(Outcome::Value {
+            value: interpreter
+                .machine
+                .finish(Some(type_info(interpreter.machine, &root.ty)), *state),
+            cause: Some(cause),
+        }),
+        Err(Halt::Error(error)) => Err(Failure::Expression(error)),
+        Err(Halt::Failed(error)) => Err(Failure::Debugger(error)),
+    }
+}
+
+struct Interpreter<'m, M: Machine> {
+    machine: &'m mut M,
+}
+
+type Evaluated<P> = Result<Value<P>, Halt>;
+
+const fn unavailable(reason: VariableUnavailableReason) -> VariableState {
+    VariableState::Unavailable(reason)
+}
+
+fn malformed(description: &str) -> VariableState {
+    VariableState::Malformed(VariableMalformedReason {
+        kind: VariableMalformedKind::InvalidExpression,
+        description: description.into(),
+    })
+}
+
+impl<M: Machine> Interpreter<'_, M> {
+    /// Attributes a machine's stop to the node that asked for it.
+    fn at<T>(span: Span, result: Result<T, Stop>) -> Result<T, Halt> {
+        result.map_err(|stop| match stop {
+            Stop::Missing(state) => Halt::Missing { state, cause: span },
+            Stop::Refused(Refusal { kind, message }) => {
+                Halt::Error(ExpressionError::new(kind, span, message))
+            }
+            Stop::Failed(error) => Halt::Failed(error),
+        })
+    }
+
+    fn error(span: Span, kind: ErrorKind, message: impl Into<String>) -> Halt {
+        Halt::Error(ExpressionError::new(kind, span, message))
+    }
+
+    fn arithmetic(span: Span, error: NumberError) -> Halt {
+        Self::error(span, ErrorKind::Arithmetic, error.to_string())
+    }
+
+    fn integer(&mut self, node: &Node<M::Object, M::Step>) -> Result<Integer, Halt> {
+        match self.eval(node)? {
+            Value::Int(integer) => Ok(integer),
+            _ => unreachable!("the binder made this operand an integer"),
+        }
+    }
+
+    fn truth(&mut self, node: &Node<M::Object, M::Step>) -> Result<bool, Halt> {
+        match self.eval(node)? {
+            Value::Bool(value) => Ok(value),
+            _ => unreachable!("the binder made this operand a truth value"),
+        }
+    }
+
+    fn pointer(&mut self, node: &Node<M::Object, M::Step>) -> Result<u64, Halt> {
+        match self.eval(node)? {
+            Value::Pointer(address) => Ok(address),
+            _ => unreachable!("the binder made this operand a pointer"),
+        }
+    }
+
+    fn float(&mut self, node: &Node<M::Object, M::Step>) -> Result<Float, Halt> {
+        match self.eval(node)? {
+            Value::Float(value) => Ok(value),
+            _ => unreachable!("the binder made this operand a float"),
+        }
+    }
+
+    fn place(&mut self, node: &Node<M::Object, M::Step>) -> Result<M::Place, Halt> {
+        match self.eval(node)? {
+            Value::Place(place) => Ok(place),
+            _ => unreachable!("the binder made this operand a program place"),
+        }
+    }
+
+    /// An index value as `i128`, which every index the debugger can reach
+    /// fits.
+    fn index(&mut self, node: &Node<M::Object, M::Step>) -> Result<i128, Halt> {
+        let value = self.integer(node)?.value();
+        value.to_i128().ok_or_else(|| {
+            Self::error(
+                node.span,
+                ErrorKind::Bounds,
+                format!("the index {value} is out of bounds"),
+            )
+        })
+    }
+
+    fn address_width(&self) -> u32 {
+        u32::from(self.machine.pointer_size()) * 8
+    }
+
+    #[expect(clippy::too_many_lines, reason = "one arm per operation")]
+    fn eval(&mut self, node: &Node<M::Object, M::Step>) -> Evaluated<M::Place> {
+        let span = node.span;
+        Self::at(span, self.machine.charge())?;
+        Ok(match &node.op {
+            Op::Object(object) => Value::Place(Self::at(span, self.machine.locate(object))?),
+            Op::Step {
+                base,
+                step,
+                indices,
+            } => {
+                let mut values = Vec::with_capacity(indices.len());
+                for index in indices {
+                    values.push(self.index(index)?);
+                }
+                Self::at(span, self.machine.check_indices(step, &values))?;
+                let base = self.place(base)?;
+                Value::Place(Self::at(span, self.machine.step(&base, step, &values))?)
+            }
+            Op::At { address, pointee } => {
+                let address = self.pointer(address)?;
+                if address == 0 {
+                    return Err(Halt::Missing {
+                        state: Box::new(unavailable(VariableUnavailableReason::ValueAccess(
+                            ValueAccessUnavailableReason::NullPointer,
+                        ))),
+                        cause: span,
+                    });
+                }
+                Value::Place(Self::at(span, self.machine.place_at(address, *pointee))?)
+            }
+            Op::Raw { address } => {
+                let address = self.pointer(address)?;
+                if address == 0 {
+                    return Err(Halt::Missing {
+                        state: Box::new(unavailable(VariableUnavailableReason::ValueAccess(
+                            ValueAccessUnavailableReason::NullPointer,
+                        ))),
+                        cause: span,
+                    });
+                }
+                Value::Raw(address)
+            }
+            Op::Load(place) => match self.eval(place)? {
+                Value::Place(at) => {
+                    let loaded = Self::at(span, self.machine.load(&at))?;
+                    Self::at(span, self.loaded(&node.ty, loaded))?
+                }
+                Value::Raw(address) => self.read_raw(&node.ty, address, span)?,
+                other => other,
+            },
+            Op::Register(register) => {
+                let raw = Self::at(span, self.machine.register(register))?;
+                let Ty::Int(int) = node.ty else {
+                    unreachable!("registers are unsigned integers")
+                };
+                Value::Int(Integer::Typed(Bits::from_raw(int, raw)))
+            }
+            Op::Constant(constant) => match constant {
+                Constant::Integer(integer) => Value::Int(*integer),
+                Constant::Float(value) => Value::Float(*value),
+                Constant::Bool(value) => Value::Bool(*value),
+                Constant::Pointer(address) => Value::Pointer(*address),
+                Constant::Text(bytes) => Value::Text(bytes.clone()),
+            },
+            Op::AddressOf(place) | Op::Decay(place) => match self.eval(place)? {
+                Value::Place(at) => {
+                    Value::Pointer(Self::at(place.span, self.machine.address(&at))?)
+                }
+                Value::Raw(address) => Value::Pointer(address),
+                _ => unreachable!("the binder takes addresses of places only"),
+            },
+            Op::Negate(operand) => {
+                let value = self.integer(operand)?.value();
+                Value::Int(Integer::Exact(
+                    value.neg().map_err(|error| Self::arithmetic(span, error))?,
+                ))
+            }
+            Op::FloatNegate(operand) => Value::Float(self.float(operand)?.neg()),
+            Op::Not(operand) => Value::Bool(!self.truth(operand)?),
+            Op::BitNot(operand) => Value::Int(
+                self.integer(operand)?
+                    .not()
+                    .map_err(|error| Self::arithmetic(span, error))?,
+            ),
+            Op::Arithmetic { op, left, right } => {
+                let left = self.integer(left)?.value();
+                let right = self.integer(right)?.value();
+                let result = match op {
+                    BinaryOp::Add => left.add(right),
+                    BinaryOp::Sub => left.sub(right),
+                    BinaryOp::Mul => left.mul(right),
+                    BinaryOp::Div => left.div(right),
+                    _ => left.rem(right),
+                };
+                Value::Int(Integer::Exact(
+                    result.map_err(|error| Self::arithmetic(span, error))?,
+                ))
+            }
+            Op::FloatArithmetic { op, left, right } => {
+                let left = self.float(left)?;
+                let right = self.float(right)?;
+                Value::Float(Float::binary(*op, left, right))
+            }
+            Op::Bitwise { op, left, right } => {
+                let left_value = self.integer(left)?;
+                let right_value = self.integer(right)?;
+                let combined = left_value.bitwise(*op, right_value).map_err(|error| {
+                    // Point at the exact operand that does not fit.
+                    let culprit = if matches!(left_value, Integer::Exact(_)) {
+                        left.span
+                    } else {
+                        right.span
+                    };
+                    Self::arithmetic(culprit, error)
+                })?;
+                Value::Int(self.retype(&node.ty, combined))
+            }
+            Op::Shift {
+                left,
+                value,
+                amount,
+            } => {
+                let shifted = self.integer(value)?;
+                let amount = self.integer(amount)?.value();
+                let result = if *left {
+                    shifted.shl(amount)
+                } else {
+                    shifted.shr(amount)
+                };
+                Value::Int(result.map_err(|error| Self::arithmetic(span, error))?)
+            }
+            Op::Compare {
+                op,
+                how,
+                left,
+                right,
+            } => Value::Bool(self.compare(*op, *how, left, right)?),
+            Op::Logical { and, left, right } => {
+                let left = self.truth(left)?;
+                if left == *and {
+                    Value::Bool(self.truth(right)?)
+                } else {
+                    Value::Bool(left)
+                }
+            }
+            Op::Choose {
+                condition,
+                then,
+                otherwise,
+                ..
+            } => {
+                if self.truth(condition)? {
+                    self.eval(then)?
+                } else {
+                    self.eval(otherwise)?
+                }
+            }
+            Op::Convert {
+                operand,
+                conversion,
+            } => self.convert(&node.ty, operand, *conversion, span)?,
+            Op::Offset {
+                pointer,
+                count,
+                scale,
+                backward,
+            } => {
+                let address = Exact::from(u128::from(self.pointer(pointer)?));
+                let count = self.integer(count)?.value();
+                let bytes = count
+                    .mul(Exact::from(u128::from(*scale)))
+                    .map_err(|error| Self::arithmetic(span, error))?;
+                let moved = if *backward {
+                    address.sub(bytes)
+                } else {
+                    address.add(bytes)
+                }
+                .map_err(|error| Self::arithmetic(span, error))?;
+                Value::Pointer(self.address_value(moved, span)?)
+            }
+            Op::Difference { left, right, scale } => {
+                let left = Exact::from(u128::from(self.pointer(left)?));
+                let right = Exact::from(u128::from(self.pointer(right)?));
+                let bytes = left
+                    .sub(right)
+                    .map_err(|error| Self::arithmetic(span, error))?;
+                Value::Int(Integer::Exact(
+                    bytes
+                        .div(Exact::from(u128::from(*scale)))
+                        .map_err(|error| Self::arithmetic(span, error))?,
+                ))
+            }
+            Op::Length { operand, how } => {
+                let place = self.place(operand)?;
+                let length = match how {
+                    Length::Slice => Self::at(span, self.machine.length(&place))?,
+                    Length::Text => self.text_length(&place, operand.span)?,
+                };
+                Value::Int(Integer::Exact(Exact::from(u128::from(length))))
+            }
+            Op::Range { .. } => unreachable!("a range is only ever the whole expression"),
+        })
+    }
+
+    /// An integer result of a bit operation, in the node's type.
+    fn retype(&self, ty: &Ty, integer: Integer) -> Integer {
+        match (category(self.machine, ty), integer) {
+            (Category::Integer { int: Some(int), .. }, Integer::Typed(bits))
+                if bits.ty() != int =>
+            {
+                Integer::Typed(bits.cast(int))
+            }
+            (_, integer) => integer,
+        }
+    }
+
+    /// An address as a pointer value, which must fit the target's width.
+    fn address_value(&self, address: Exact, span: Span) -> Result<u64, Halt> {
+        let width = self.address_width();
+        address
+            .to_u128()
+            .filter(|&address| width >= 128 || address >> width == 0)
+            .and_then(|address| u64::try_from(address).ok())
+            .ok_or_else(|| {
+                Self::error(
+                    span,
+                    ErrorKind::Arithmetic,
+                    format!("the address {address} is outside the address space"),
+                )
+            })
+    }
+
+    /// A value decoded from a place of type `ty`.
+    fn loaded(&self, ty: &Ty, value: VariableValue) -> Result<Value<M::Place>, Stop> {
+        let integer = |value: IntegerValue| match value {
+            IntegerValue::Signed(value) => Exact::from(value),
+            IntegerValue::Unsigned(value) => Exact::from(value),
+        };
+        Ok(match (category(self.machine, ty), value) {
+            (
+                Category::Integer { int: Some(int), .. },
+                VariableValue::Scalar(ScalarValue::Signed(value)),
+            ) => Value::Int(Integer::Typed(Bits::truncate(int, Exact::from(value)))),
+            (
+                Category::Integer { int: Some(int), .. },
+                VariableValue::Scalar(ScalarValue::Unsigned(value)),
+            ) => Value::Int(Integer::Typed(Bits::truncate(int, Exact::from(value)))),
+            (
+                Category::Integer { int: Some(int), .. },
+                VariableValue::Enumeration { value, .. },
+            ) => Value::Int(Integer::Typed(Bits::truncate(int, integer(value)))),
+            (Category::Float(format), VariableValue::Scalar(ScalarValue::Floating(value))) => {
+                Value::Float(Float::from_value(value).convert(format))
+            }
+            (Category::Bool, VariableValue::Scalar(ScalarValue::Boolean(value))) => {
+                Value::Bool(value)
+            }
+            (Category::Pointer(_), VariableValue::Address(address)) => {
+                Value::Pointer(address.address.get())
+            }
+            (Category::Pointer(_), VariableValue::ImplicitPointer) => {
+                return Err(Stop::missing(unavailable(
+                    crate::UnsupportedVariableFeature::ImplicitPointer.into(),
+                )));
+            }
+            _ => {
+                return Err(Stop::missing(malformed(
+                    "the value's representation does not match its type",
+                )));
+            }
+        })
+    }
+
+    fn read_raw(&mut self, ty: &Ty, address: u64, span: Span) -> Evaluated<M::Place> {
+        let size = size_of(self.machine, ty).and_then(|size| usize::try_from(size).ok());
+        let Some(size) = size else {
+            return Err(Self::error(span, ErrorKind::Type, "the value has no size"));
+        };
+        let bytes = Self::at(span, self.machine.read(address, size))?;
+        Self::at(span, self.decode(ty, &bytes))
+    }
+
+    /// Decodes a language type's bytes.
+    fn decode(&self, ty: &Ty, bytes: &[u8]) -> Result<Value<M::Place>, Stop> {
+        let mut ordered = bytes.to_vec();
+        if self.machine.byte_order() == ByteOrder::Big {
+            ordered.reverse();
+        }
+        let mut wide = [0_u8; 16];
+        let length = ordered.len().min(16);
+        wide[..length].copy_from_slice(&ordered[..length]);
+        let raw = u128::from_le_bytes(wide);
+        Ok(match category(self.machine, ty) {
+            Category::Integer { int: Some(int), .. } => {
+                Value::Int(Integer::Typed(Bits::from_raw(int, raw)))
+            }
+            Category::Bool => Value::Bool(raw != 0),
+            Category::Pointer(_) => Value::Pointer(u64::try_from(raw).unwrap_or(u64::MAX)),
+            Category::Float(format) => {
+                let value = match format {
+                    FloatFormat::Binary32 => {
+                        crate::FloatValue::Binary32(u32::try_from(raw).unwrap_or_default())
+                    }
+                    FloatFormat::Binary64 => {
+                        crate::FloatValue::Binary64(u64::try_from(raw).unwrap_or_default())
+                    }
+                    FloatFormat::X87Extended => crate::FloatValue::X87Extended {
+                        significand: u64::try_from(raw & u128::from(u64::MAX)).unwrap_or_default(),
+                        sign_exponent: u16::try_from((raw >> 64) & 0xffff).unwrap_or_default(),
+                    },
+                };
+                Value::Float(Float::from_value(value))
+            }
+            _ => return Err(Stop::missing(malformed("the value is not a scalar"))),
+        })
+    }
+
+    fn convert(
+        &mut self,
+        ty: &Ty,
+        operand: &Node<M::Object, M::Step>,
+        conversion: Conversion,
+        span: Span,
+    ) -> Evaluated<M::Place> {
+        Ok(match conversion {
+            Conversion::Truncate(int) => Value::Int(Integer::Typed(Bits::truncate(
+                int,
+                self.integer(operand)?.value(),
+            ))),
+            Conversion::IntegerToFloat(format) => {
+                Value::Float(Float::from_exact(self.integer(operand)?.value(), format))
+            }
+            Conversion::FloatToInteger(int) => Value::Int(Integer::Typed(
+                self.float(operand)?
+                    .to_int(int)
+                    .map_err(|error| Self::arithmetic(span, error))?,
+            )),
+            Conversion::FloatToFloat(format) => Value::Float(self.float(operand)?.convert(format)),
+            Conversion::Truth => Value::Bool(match self.eval(operand)? {
+                Value::Int(integer) => !integer.value().is_zero(),
+                Value::Float(value) => !value.is_zero(),
+                Value::Pointer(address) => address != 0,
+                Value::Bool(value) => value,
+                _ => unreachable!("the binder converts only scalars to truth values"),
+            }),
+            Conversion::BoolToInteger(int) => {
+                let value = u128::from(self.truth(operand)?);
+                Value::Int(Integer::Typed(Bits::from_raw(int, value)))
+            }
+            Conversion::PointerToInteger(int) => {
+                let address = u128::from(self.pointer(operand)?);
+                Value::Int(Integer::Typed(Bits::truncate(int, Exact::from(address))))
+            }
+            Conversion::IntegerToPointer => {
+                let value = self.integer(operand)?.value();
+                let width = u8::try_from(self.address_width()).unwrap_or(64);
+                let int = IntType::new(width, false).expect("address widths are valid");
+                let bits = Bits::truncate(int, value);
+                Value::Pointer(u64::try_from(bits.raw()).unwrap_or(u64::MAX))
+            }
+            Conversion::PointerToPointer => Value::Pointer(self.pointer(operand)?),
+        })
+        .map(|value| {
+            // A cast to an enumeration or typedef keeps its own type.
+            if let Value::Int(integer) = value {
+                Value::Int(self.retype(ty, integer))
+            } else {
+                value
+            }
+        })
+    }
+
+    fn compare(
+        &mut self,
+        op: BinaryOp,
+        how: Comparison,
+        left: &Node<M::Object, M::Step>,
+        right: &Node<M::Object, M::Step>,
+    ) -> Result<bool, Halt> {
+        let ordering = match how {
+            Comparison::Integers => {
+                let left = self.integer(left)?.value();
+                Some(left.cmp(&self.integer(right)?.value()))
+            }
+            Comparison::Floats => {
+                let left = self.float(left)?;
+                left.compare(self.float(right)?)
+            }
+            Comparison::FloatInteger => {
+                let left = self.float(left)?;
+                left.compare_exact(self.integer(right)?.value())
+            }
+            Comparison::IntegerFloat => {
+                let left = self.integer(left)?.value();
+                self.float(right)?
+                    .compare_exact(left)
+                    .map(Ordering::reverse)
+            }
+            Comparison::Addresses => {
+                let left = self.pointer_or_zero(left)?;
+                Some(left.cmp(&self.pointer_or_zero(right)?))
+            }
+            Comparison::Bools => {
+                let left = self.truth(left)?;
+                Some(left.cmp(&self.truth(right)?))
+            }
+            Comparison::Text => {
+                let place = self.place(left)?;
+                let Value::Text(literal) = self.eval(right)? else {
+                    unreachable!("the binder compares text with a string")
+                };
+                let equal = self.text_equals(&place, &literal, left.span)?;
+                Some(if equal {
+                    Ordering::Equal
+                } else {
+                    Ordering::Less
+                })
+            }
+        };
+        Ok(match (op, ordering) {
+            (BinaryOp::Ne, None) => true,
+            (_, None) => false,
+            (BinaryOp::Eq, Some(order)) => order == Ordering::Equal,
+            (BinaryOp::Ne, Some(order)) => order != Ordering::Equal,
+            (BinaryOp::Lt, Some(order)) => order == Ordering::Less,
+            (BinaryOp::Le, Some(order)) => order != Ordering::Greater,
+            (BinaryOp::Gt, Some(order)) => order == Ordering::Greater,
+            (BinaryOp::Ge, Some(order)) => order != Ordering::Less,
+            _ => unreachable!("only comparisons compare"),
+        })
+    }
+
+    /// A pointer, or an integer the binder allowed only as zero.
+    fn pointer_or_zero(&mut self, node: &Node<M::Object, M::Step>) -> Result<u64, Halt> {
+        match self.eval(node)? {
+            Value::Pointer(address) => Ok(address),
+            Value::Int(_) => Ok(0),
+            _ => unreachable!("the binder compares pointers with pointers and zero"),
+        }
+    }
+
+    fn text_equals(&mut self, place: &M::Place, literal: &[u8], span: Span) -> Result<bool, Halt> {
+        let Some(text) = Self::at(span, self.machine.text(place))? else {
+            return Err(Self::error(
+                span,
+                ErrorKind::Type,
+                "the value holds no text",
+            ));
+        };
+        let read = text.bytes.as_ref();
+        match text.completion {
+            TextCompletion::Complete => Ok(read == literal),
+            // Text known to differ before what could not be read differs.
+            _ if !literal.starts_with(read) => Ok(false),
+            completion => Err(Halt::Missing {
+                state: Box::new(unavailable(Self::incomplete(completion))),
+                cause: span,
+            }),
+        }
+    }
+
+    fn text_length(&mut self, place: &M::Place, span: Span) -> Result<u64, Halt> {
+        let Some(text) = Self::at(span, self.machine.text(place))? else {
+            return Err(Self::error(
+                span,
+                ErrorKind::Type,
+                "the value holds no text",
+            ));
+        };
+        match text.completion {
+            TextCompletion::Complete => Ok(u64::try_from(text.bytes.len()).unwrap_or(u64::MAX)),
+            TextCompletion::Truncated {
+                length: Some(length),
+            } => Ok(length),
+            completion => Err(Halt::Missing {
+                state: Box::new(unavailable(Self::incomplete(completion))),
+                cause: span,
+            }),
+        }
+    }
+
+    const fn incomplete(completion: TextCompletion) -> VariableUnavailableReason {
+        match completion {
+            TextCompletion::Unreadable { address } => {
+                VariableUnavailableReason::MemoryInaccessible {
+                    address,
+                    requested: 1,
+                    completed: 0,
+                    next_address: address,
+                }
+            }
+            _ => VariableUnavailableReason::EvaluationLimit,
+        }
+    }
+
+    fn range(
+        &mut self,
+        base: &Node<M::Object, M::Step>,
+        start: &Node<M::Object, M::Step>,
+        end: &Node<M::Object, M::Step>,
+    ) -> Result<Outcome, Halt> {
+        let start = self.index(start)?;
+        let end = self.index(end)?;
+        let place = self.place(base)?;
+        let base = Self::at(base.span, self.machine.present(&place))?;
+        Ok(Outcome::Range { base, start, end })
+    }
+
+    /// Presents a result as inspection presents values.
+    fn present(
+        &mut self,
+        node: &Node<M::Object, M::Step>,
+        value: Value<M::Place>,
+    ) -> Result<InspectedValue, Halt> {
+        let span = node.span;
+        let ty = &node.ty;
+        let value = match value {
+            Value::Place(place) => return Self::at(span, self.machine.present(&place)),
+            Value::Raw(address) => {
+                let loaded = self.read_raw(ty, address, span)?;
+                return self.present_computed(ty, &loaded, Some(address), span);
+            }
+            value => value,
+        };
+        self.present_computed(ty, &value, None, span)
+    }
+
+    fn present_computed(
+        &mut self,
+        ty: &Ty,
+        value: &Value<M::Place>,
+        address: Option<u64>,
+        span: Span,
+    ) -> Result<InspectedValue, Halt> {
+        let size = size_of(self.machine, ty).and_then(|size| usize::try_from(size).ok());
+        if let (Ty::Program(reference), Some(size)) = (ty, size) {
+            let bytes = self.encode(value, size);
+            return Self::at(span, self.machine.present_bytes(*reference, &bytes));
+        }
+        if let (Ty::Pointer(pointee), Value::Pointer(address)) = (ty, value) {
+            let pointee = match pointee.as_ref() {
+                Ty::Program(reference) => Some(*reference),
+                _ => None,
+            };
+            let info = type_info(self.machine, ty);
+            return Self::at(span, self.machine.present_pointer(*address, pointee, info));
+        }
+        let scalar = match value {
+            Value::Int(integer) => {
+                let integer = *integer;
+                let value = integer.value();
+                let signed = matches!(integer, Integer::Typed(bits) if bits.ty().is_signed());
+                match (signed, value.to_u128(), value.to_i128()) {
+                    (false, Some(unsigned), _) => {
+                        VariableValue::Scalar(ScalarValue::Unsigned(unsigned))
+                    }
+                    (_, _, Some(signed)) => VariableValue::Scalar(ScalarValue::Signed(signed)),
+                    _ => unreachable!("exact integers fit i128 or u128"),
+                }
+            }
+            Value::Float(value) => VariableValue::Scalar(ScalarValue::Floating(value.to_value())),
+            Value::Bool(value) => VariableValue::Scalar(ScalarValue::Boolean(*value)),
+            Value::Pointer(address) => VariableValue::Address(crate::AddressValue {
+                address: VirtualAddress::new(*address),
+            }),
+            Value::Place(_) | Value::Raw(_) | Value::Text(_) => {
+                unreachable!("places and strings are presented elsewhere")
+            }
+        };
+        let raw = size.map(|size| std::sync::Arc::from(self.encode_scalar(&scalar, size)));
+        let state = VariableState::Available {
+            source: address.map_or(VariableValueSource::Computed, |address| {
+                VariableValueSource::Memory(VirtualAddress::new(address))
+            }),
+            raw,
+            value: scalar,
+            dereference: DereferenceState::NotApplicable,
+            children: ValueChildren::NotApplicable,
+            text: None,
+        };
+        Ok(self
+            .machine
+            .finish(Some(type_info(self.machine, ty)), state))
+    }
+
+    /// A value's bytes in target order, `size` long.
+    fn encode(&self, value: &Value<M::Place>, size: usize) -> Vec<u8> {
+        let raw = match value {
+            Value::Int(integer) => match integer {
+                Integer::Typed(bits) => bits.raw(),
+                Integer::Exact(value) => {
+                    let width = u8::try_from(size.saturating_mul(8).min(128)).unwrap_or(128);
+                    IntType::new(width.max(1), false)
+                        .map_or(0, |int| Bits::truncate(int, *value).raw())
+                }
+            },
+            Value::Bool(value) => u128::from(*value),
+            Value::Pointer(address) => u128::from(*address),
+            Value::Float(value) => match value.to_value() {
+                crate::FloatValue::Binary32(bits) => u128::from(bits),
+                crate::FloatValue::Binary64(bits) => u128::from(bits),
+                crate::FloatValue::X87Extended {
+                    significand,
+                    sign_exponent,
+                } => u128::from(sign_exponent) << 64 | u128::from(significand),
+            },
+            Value::Place(_) | Value::Raw(_) | Value::Text(_) => 0,
+        };
+        self.ordered(raw, size)
+    }
+
+    fn encode_scalar(&self, scalar: &VariableValue, size: usize) -> Vec<u8> {
+        let raw = match scalar {
+            VariableValue::Scalar(ScalarValue::Signed(value)) => value.cast_unsigned(),
+            VariableValue::Scalar(ScalarValue::Unsigned(value)) => *value,
+            VariableValue::Scalar(ScalarValue::Boolean(value)) => u128::from(*value),
+            VariableValue::Address(address) => u128::from(address.address.get()),
+            VariableValue::Scalar(ScalarValue::Floating(value)) => match value {
+                crate::FloatValue::Binary32(bits) => u128::from(*bits),
+                crate::FloatValue::Binary64(bits) => u128::from(*bits),
+                crate::FloatValue::X87Extended {
+                    significand,
+                    sign_exponent,
+                } => u128::from(*sign_exponent) << 64 | u128::from(*significand),
+            },
+            _ => 0,
+        };
+        self.ordered(raw, size)
+    }
+
+    fn ordered(&self, raw: u128, size: usize) -> Vec<u8> {
+        let mut bytes = raw.to_le_bytes().to_vec();
+        bytes.resize(size, 0);
+        if self.machine.byte_order() == ByteOrder::Big {
+            bytes.reverse();
+        }
+        bytes
+    }
+}

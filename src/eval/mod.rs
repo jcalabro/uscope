@@ -6,9 +6,16 @@
 //! debugger implements for it, and never performs I/O, reads clocks, or
 //! starts threads.
 
+pub mod bind;
 pub mod error;
+#[cfg(test)]
+mod fake;
+pub mod interp;
+pub mod ir;
 pub mod number;
 pub mod syntax;
+pub mod target;
+pub mod types;
 
 #[cfg(test)]
 mod tests;

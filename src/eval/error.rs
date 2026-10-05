@@ -12,6 +12,25 @@ pub enum ErrorKind {
     Syntax,
     /// The expression exceeds a size, depth, or ambiguity limit.
     Limit,
+    /// A name means nothing in the scope.
+    UnknownName,
+    /// A name means several things; the message says how to choose.
+    AmbiguousName,
+    /// An operator does not apply to its operand's type.
+    Type,
+    /// An index is outside an array's bounds.
+    Bounds,
+    /// Arithmetic has no result: a division by zero, a result beyond 128
+    /// bits, a shift out of range, or a value that does not fit.
+    Arithmetic,
+    /// An operand that must be in memory is not.
+    NotAnLvalue,
+    /// The expression assigns where assigning is not allowed.
+    Mode,
+    /// An assignment's value does not fit its target.
+    Assignment,
+    /// An operand has a type the debugger cannot compute with.
+    Unsupported,
 }
 
 impl ErrorKind {
@@ -20,6 +39,15 @@ impl ErrorKind {
         match self {
             Self::Syntax => "syntax",
             Self::Limit => "limit",
+            Self::UnknownName => "unknown-name",
+            Self::AmbiguousName => "ambiguous-name",
+            Self::Type => "type",
+            Self::Bounds => "bounds",
+            Self::Arithmetic => "arithmetic",
+            Self::NotAnLvalue => "not-an-lvalue",
+            Self::Mode => "mode",
+            Self::Assignment => "assignment",
+            Self::Unsupported => "unsupported",
         }
     }
 }

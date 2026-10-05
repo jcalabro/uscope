@@ -1,0 +1,417 @@
+//! The types expressions compute with: the program's, seen through to their
+//! representation, and the few the language names itself.
+
+use std::sync::Arc;
+
+use super::number::{FloatFormat, IntType};
+use super::syntax::ast::CWord;
+use crate::{
+    ArrayDimension, BaseType, BaseTypeEncoding, Enumerator, ModuleImageId, NamedTypeRelationship,
+    TypeId, TypeInfo, TypeKind, TypeReference,
+};
+
+/// A type an expression's value has.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Ty {
+    /// A type the program's debug information describes.
+    Program(TypeReference),
+    /// An exact integer: unsuffixed literals and arithmetic results.
+    Exact,
+    /// A built-in integer type, `iN` or `uN`.
+    Int(IntType),
+    /// A built-in float type.
+    Float(FloatFormat),
+    Bool,
+    /// A pointer the expression derived, by `&` or a cast.
+    Pointer(Arc<Self>),
+    /// What `void*` points to.
+    Void,
+    /// The type of `null`.
+    Null,
+    /// The type of a string literal.
+    Text,
+}
+
+/// What can be done with a value of a type.
+#[derive(Debug, Clone)]
+pub enum Category {
+    /// An integer: exact when `int` is `None`. Enumerations keep their
+    /// enumerators.
+    Integer {
+        int: Option<IntType>,
+        enumerators: Option<Arc<[Enumerator]>>,
+    },
+    Float(FloatFormat),
+    Bool,
+    /// A pointer, to `void` when the pointee is `None`.
+    Pointer(Option<Ty>),
+    /// A language reference, which stands for what it refers to.
+    Reference(TypeReference),
+    Array {
+        element: TypeReference,
+        dimensions: Arc<[ArrayDimension]>,
+    },
+    Slice(TypeReference),
+    /// A record, union, or variant, whose members are reached with `.`.
+    Record,
+    Void,
+    Null,
+    Text,
+    /// A type the debugger cannot compute with, and why.
+    Opaque(Arc<str>),
+}
+
+/// The types a scope describes, by reference.
+pub trait TypeSource {
+    /// One program type, or `None` when its metadata is malformed.
+    fn type_info(&self, ty: TypeReference) -> Option<TypeInfo>;
+
+    /// The size of the target's addresses, in bytes.
+    fn pointer_size(&self) -> u8;
+
+    /// The target's byte order.
+    fn byte_order(&self) -> crate::ByteOrder;
+}
+
+/// How deep a chain of typedefs and qualifiers may go.
+const MAX_WRAPPERS: usize = 64;
+
+/// The type a chain of typedefs and qualifiers stands for, and its
+/// metadata.
+pub fn representation(
+    types: &dyn TypeSource,
+    mut ty: TypeReference,
+) -> Result<(TypeReference, TypeInfo), Arc<str>> {
+    for _ in 0..MAX_WRAPPERS {
+        let info = types
+            .type_info(ty)
+            .ok_or_else(|| Arc::<str>::from("the type's debug information is malformed"))?;
+        match &info.kind {
+            TypeKind::Modified { target, .. }
+            | TypeKind::Named {
+                target: Some(target),
+                relationship:
+                    NamedTypeRelationship::Synonym
+                    | NamedTypeRelationship::Distinct
+                    | NamedTypeRelationship::Encoding,
+            } => ty = *target,
+            TypeKind::Named { target: None, .. } => {
+                return Err(format!("`{}` is declared but not defined", info.name).into());
+            }
+            _ => return Ok((ty, info)),
+        }
+    }
+    Err("the type's typedefs nest too deeply".into())
+}
+
+/// Classifies a type by what can be done with its values.
+pub fn category(types: &dyn TypeSource, ty: &Ty) -> Category {
+    match ty {
+        Ty::Program(reference) => program_category(types, *reference),
+        Ty::Exact => Category::Integer {
+            int: None,
+            enumerators: None,
+        },
+        Ty::Int(int) => Category::Integer {
+            int: Some(*int),
+            enumerators: None,
+        },
+        Ty::Float(format) => Category::Float(*format),
+        Ty::Bool => Category::Bool,
+        Ty::Pointer(pointee) => Category::Pointer(match pointee.as_ref() {
+            Ty::Void => None,
+            pointee => Some(pointee.clone()),
+        }),
+        Ty::Void => Category::Void,
+        Ty::Null => Category::Null,
+        Ty::Text => Category::Text,
+    }
+}
+
+fn program_category(types: &dyn TypeSource, ty: TypeReference) -> Category {
+    let (_, info) = match representation(types, ty) {
+        Ok(found) => found,
+        Err(reason) => return Category::Opaque(reason),
+    };
+    match &info.kind {
+        TypeKind::Base(base) => base_category(base),
+        TypeKind::Enumeration {
+            representation,
+            enumerators,
+            ..
+        } => match base_category(representation) {
+            Category::Integer { int, .. } => Category::Integer {
+                int,
+                enumerators: Some(Arc::clone(enumerators)),
+            },
+            _ => Category::Opaque("the enumeration is not an integer".into()),
+        },
+        TypeKind::Pointer { address_class, .. } | TypeKind::Reference { address_class, .. }
+            if *address_class != 0 =>
+        {
+            Category::Opaque(
+                format!("the pointer is into another address space ({address_class})").into(),
+            )
+        }
+        TypeKind::Pointer { target: None, .. } => Category::Pointer(None),
+        TypeKind::Pointer {
+            target: Some(target),
+            ..
+        } => match program_category(types, *target) {
+            Category::Void => Category::Pointer(None),
+            _ => Category::Pointer(Some(Ty::Program(*target))),
+        },
+        TypeKind::Reference { target, .. } => Category::Reference(*target),
+        TypeKind::Array {
+            element,
+            dimensions,
+        } => Category::Array {
+            element: *element,
+            dimensions: Arc::clone(dimensions),
+        },
+        TypeKind::Slice { element, .. } => Category::Slice(*element),
+        TypeKind::Record { .. } | TypeKind::Union { .. } | TypeKind::Variant { .. } => {
+            Category::Record
+        }
+        TypeKind::Unspecified => Category::Void,
+        TypeKind::Opaque { description } => Category::Opaque(Arc::clone(description)),
+        _ => Category::Opaque(format!("`{}` is not a type values have", info.name).into()),
+    }
+}
+
+fn base_category(base: &BaseType) -> Category {
+    let bits = base
+        .bit_size
+        .unwrap_or_else(|| base.byte_size.saturating_mul(8));
+    let int = |signed| {
+        u8::try_from(bits)
+            .ok()
+            .and_then(|width| IntType::new(width, signed))
+            .map_or_else(
+                || Category::Opaque(format!("`{}` has {bits} bits", base.name).into()),
+                |int| Category::Integer {
+                    int: Some(int),
+                    enumerators: None,
+                },
+            )
+    };
+    match base.encoding {
+        BaseTypeEncoding::Boolean => Category::Bool,
+        BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => int(true),
+        BaseTypeEncoding::Unsigned | BaseTypeEncoding::UnsignedCharacter => int(false),
+        BaseTypeEncoding::Floating => match (base.byte_size, base.base_name.as_ref()) {
+            (4, _) => Category::Float(FloatFormat::Binary32),
+            (8, _) => Category::Float(FloatFormat::Binary64),
+            (10 | 12 | 16, "long double" | "__float80" | "_Float64x" | "f80" | "c_longdouble") => {
+                Category::Float(FloatFormat::X87Extended)
+            }
+            _ => Category::Opaque(
+                format!("`{}` is not a float format uscope computes with", base.name).into(),
+            ),
+        },
+    }
+}
+
+/// Whether values of a type are characters, whose pointers point at text.
+pub fn is_character(types: &dyn TypeSource, ty: &Ty) -> bool {
+    let Ty::Program(reference) = ty else {
+        return false;
+    };
+    matches!(
+        representation(types, *reference),
+        Ok((
+            _,
+            TypeInfo {
+                kind: TypeKind::Base(BaseType {
+                    encoding: BaseTypeEncoding::SignedCharacter
+                        | BaseTypeEncoding::UnsignedCharacter,
+                    byte_size: 1,
+                    ..
+                }),
+                ..
+            }
+        ))
+    )
+}
+
+/// A type's size in bytes, which exact integers, `null`, and strings lack.
+pub fn size_of(types: &dyn TypeSource, ty: &Ty) -> Option<u64> {
+    match ty {
+        Ty::Program(reference) => types.type_info(*reference)?.byte_size,
+        Ty::Int(int) => Some(u64::from(int.width()).div_ceil(8)),
+        Ty::Float(FloatFormat::Binary32) => Some(4),
+        Ty::Float(FloatFormat::Binary64) => Some(8),
+        Ty::Float(FloatFormat::X87Extended) => Some(16),
+        Ty::Bool => Some(1),
+        Ty::Pointer(_) => Some(u64::from(types.pointer_size())),
+        Ty::Exact | Ty::Void | Ty::Null | Ty::Text => None,
+    }
+}
+
+/// The name a type is shown by.
+pub fn type_name(types: &dyn TypeSource, ty: &Ty) -> String {
+    match ty {
+        Ty::Program(reference) => types
+            .type_info(*reference)
+            .map_or_else(|| "<malformed>".to_owned(), |info| info.name.to_string()),
+        Ty::Exact => "integer".to_owned(),
+        Ty::Int(int) => int_name(*int),
+        Ty::Float(FloatFormat::Binary32) => "f32".to_owned(),
+        Ty::Float(FloatFormat::Binary64) => "f64".to_owned(),
+        Ty::Float(FloatFormat::X87Extended) => "f80".to_owned(),
+        Ty::Bool => "bool".to_owned(),
+        Ty::Pointer(pointee) => format!("{}*", type_name(types, pointee)),
+        Ty::Void => "void".to_owned(),
+        Ty::Null => "null".to_owned(),
+        Ty::Text => "string".to_owned(),
+    }
+}
+
+fn int_name(int: IntType) -> String {
+    format!("{}{}", if int.is_signed() { 'i' } else { 'u' }, int.width())
+}
+
+/// The image that types the language itself defines claim.
+pub const LANGUAGE_IMAGE: ModuleImageId = ModuleImageId::new(u32::MAX);
+
+/// A stable identity for a language type within [`LANGUAGE_IMAGE`].
+fn language_type_id(ty: &Ty) -> u32 {
+    match ty {
+        Ty::Program(reference) => reference.id.get(),
+        Ty::Exact => 0,
+        Ty::Bool => 1,
+        Ty::Null => 2,
+        Ty::Text => 3,
+        Ty::Void => 4,
+        Ty::Float(FloatFormat::Binary32) => 5,
+        Ty::Float(FloatFormat::Binary64) => 6,
+        Ty::Float(FloatFormat::X87Extended) => 7,
+        Ty::Int(int) => 16 + u32::from(int.width()) * 2 + u32::from(int.is_signed()),
+        Ty::Pointer(pointee) => (1_u32 << 20).wrapping_add(language_type_id(pointee)),
+    }
+}
+
+/// The reference a type is identified by: its own for a program type.
+pub fn type_reference(ty: &Ty) -> TypeReference {
+    match ty {
+        Ty::Program(reference) => *reference,
+        other => TypeReference {
+            image: LANGUAGE_IMAGE,
+            id: TypeId::new(language_type_id(other)),
+        },
+    }
+}
+
+/// Metadata describing a type, as results carry it.
+pub fn type_info(types: &dyn TypeSource, ty: &Ty) -> TypeInfo {
+    if let Ty::Program(reference) = ty
+        && let Some(info) = types.type_info(*reference)
+    {
+        return info;
+    }
+    let name: Arc<str> = type_name(types, ty).into();
+    let base = |encoding, byte_size| {
+        TypeKind::Base(BaseType {
+            name: Arc::clone(&name),
+            base_name: Arc::clone(&name),
+            encoding,
+            byte_size,
+            bit_size: None,
+        })
+    };
+    let kind = match ty {
+        Ty::Int(int) => base(
+            if int.is_signed() {
+                BaseTypeEncoding::Signed
+            } else {
+                BaseTypeEncoding::Unsigned
+            },
+            size_of(types, ty).unwrap_or_default(),
+        ),
+        Ty::Exact => base(BaseTypeEncoding::Signed, 16),
+        Ty::Float(_) => base(
+            BaseTypeEncoding::Floating,
+            size_of(types, ty).unwrap_or_default(),
+        ),
+        Ty::Bool => base(BaseTypeEncoding::Boolean, 1),
+        Ty::Pointer(pointee) => TypeKind::Pointer {
+            target: match pointee.as_ref() {
+                Ty::Void => None,
+                pointee => Some(type_reference(pointee)),
+            },
+            address_class: 0,
+        },
+        Ty::Program(_) | Ty::Void | Ty::Null | Ty::Text => TypeKind::Unspecified,
+    };
+    TypeInfo {
+        reference: type_reference(ty),
+        name,
+        byte_size: size_of(types, ty),
+        kind,
+    }
+}
+
+/// The canonical spelling of a C base type from its words in any order,
+/// such as `unsigned long` for `long unsigned int`, or `None` when the words
+/// spell no C type.
+pub fn c_type_key(words: &[CWord]) -> Option<String> {
+    let count = |word| words.iter().filter(|&&found| found == word).count();
+    let (signed, unsigned) = (count(CWord::Signed), count(CWord::Unsigned));
+    let (short, long, char) = (count(CWord::Short), count(CWord::Long), count(CWord::Char));
+    let (int, float, double) = (count(CWord::Int), count(CWord::Float), count(CWord::Double));
+    if words.is_empty() || signed + unsigned > 1 || int > 1 || char > 1 || short > 1 {
+        return None;
+    }
+    let sign = if unsigned == 1 { "unsigned " } else { "" };
+    let key = match (short, long, char, float, double) {
+        (0, 0, 0, 1, 0) if signed + unsigned + int == 0 => "float".to_owned(),
+        (0, 0, 0, 0, 1) if signed + unsigned + int == 0 => "double".to_owned(),
+        (0, 1, 0, 0, 1) if signed + unsigned + int == 0 => "long double".to_owned(),
+        (0, 0, 1, 0, 0) if int == 0 => match (signed, unsigned) {
+            (1, _) => "signed char".to_owned(),
+            (_, 1) => "unsigned char".to_owned(),
+            _ => "char".to_owned(),
+        },
+        (1, 0, 0, 0, 0) => format!("{sign}short"),
+        (0, 1, 0, 0, 0) => format!("{sign}long"),
+        (0, 2, 0, 0, 0) => format!("{sign}long long"),
+        (0, 0, 0, 0, 0) => format!("{sign}int"),
+        _ => return None,
+    };
+    Some(key)
+}
+
+/// The canonical spelling of a type name written as C base-type words, as
+/// producers name base types, or `None` when it is not one.
+pub fn c_type_key_of_name(name: &str) -> Option<String> {
+    let words: Option<Vec<CWord>> = name.split_whitespace().map(CWord::parse).collect();
+    c_type_key(&words?)
+}
+
+/// The built-in type a name spells, given the target's address size.
+pub fn builtin(name: &str, pointer_size: u8) -> Option<Ty> {
+    match name {
+        "bool" => return Some(Ty::Bool),
+        "f32" => return Some(Ty::Float(FloatFormat::Binary32)),
+        "f64" => return Some(Ty::Float(FloatFormat::Binary64)),
+        "void" => return Some(Ty::Void),
+        "isize" | "usize" => {
+            return IntType::new(pointer_size.saturating_mul(8), name == "isize").map(Ty::Int);
+        }
+        _ => {}
+    }
+    let signed = match name.as_bytes().first()? {
+        b'i' => true,
+        b'u' => false,
+        _ => return None,
+    };
+    let digits = &name[1..];
+    if digits.starts_with('0') {
+        return None;
+    }
+    digits
+        .parse::<u8>()
+        .ok()
+        .and_then(|width| IntType::new(width, signed))
+        .map(Ty::Int)
+}

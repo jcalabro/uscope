@@ -16,8 +16,18 @@ mod print;
 use std::fmt;
 use std::sync::Arc;
 
-use ast::Path;
 pub use ast::Tree;
+use ast::{BinaryOp, Path};
+
+/// A path as it is written.
+pub fn print_path(path: &Path) -> String {
+    print::path_text(path)
+}
+
+/// A binary operator as it is written.
+pub const fn binary_operator_text(op: BinaryOp) -> &'static str {
+    parser::binary_text(op)
+}
 
 use super::error::ExpressionError;
 

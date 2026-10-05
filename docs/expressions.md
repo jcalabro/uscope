@@ -5,10 +5,18 @@ whether it is written in C, C++, Rust, Go, or Zig. The language is small and
 exact, and the same everywhere: it has no per-language parsers, type checkers,
 or compilers behind it.
 
-Every example on this page runs as one of uscope's tests. Each row reads
-`expression => outcome`: `reads as` gives the expression's normal form, the
-spelling uscope prints it in, and `error` names the kind of error the
-expression produces and the text it points at.
+Arithmetic gives the mathematically true answer, never a wrapped or
+promoted one, and bit operations keep their operand's width. Nothing converts
+implicitly except where this page says so, and a value the program cannot
+provide, such as an optimized-out variable, is reported as unavailable rather
+than guessed.
+
+Every example on this page runs as one of uscope's tests, against small worlds
+of variables. Each row reads `expression => outcome`. An outcome is a value
+and its type, `value : type`; `reads as` and the expression's normal form, the
+spelling uscope prints it in; `error` and the kind of error with the text it
+points at; or `unavailable` and the operand whose value the program could not
+provide.
 
 ## Names
 
@@ -36,6 +44,31 @@ main.counter              => reads as `main.counter`
 $rip                      => reads as `$rip`
 naïve                     => error syntax at `ï`
 $                         => error syntax at `$`
+```
+
+A name that several variables share is ambiguous, and the error lists how to
+qualify each. Typedefs and qualifiers such as `const` keep their names but
+behave as the types they stand for, and a C++ reference stands for what it
+refers to. In a caller's frame, registers hold what unwinding recovered, and
+one it could not recover is unavailable.
+
+```uscope-example
+world: memory
+s.a                    => 5 : int
+ptr->b                 => 7 : long int
+$rip                   => 4198400 : u64
+$pc                    => 4198400 : u64
+missing                => error unknown-name at `missing`
+`s`.a                  => 5 : int
+count + 1              => 13 : integer
+count << 1             => 24 : counter_t
+limit * 2              => 200 : integer
+first                  => 11 : int
+&first == &arr[0]      => true : bool
+$rbp                   => unavailable at `$rbp`
+$rbp + 1               => unavailable at `$rbp`
+$nope                  => error unknown-name at `$nope`
+twice                  => error ambiguous-name at `twice`
 ```
 
 ## Literals
@@ -71,6 +104,19 @@ in every language.
 340282366920938463463374607431768211456 => error syntax at `340282366920938463463374607431768211456`
 'ab'                      => error syntax at `'a`
 nullptr                   => error syntax at `nullptr`
+```
+
+```uscope-example
+world: scalars
+0x2a                   => 42 : integer
+255u8                  => 255 : u8
+256u8                  => error arithmetic at `256u8`
+-128i8                 => -128 : i8
+-129i8                 => error arithmetic at `-129i8`
+'a' + 1                => 98 : integer
+2.5f32                 => 2.5 : f32
+1e3                    => 1000.0 : f64
+3usize                 => 3 : u64
 ```
 
 ## Operators
@@ -120,6 +166,164 @@ f(x)                      => error syntax at `f(`
 a +                       => error syntax at ``
 ```
 
+
+## Arithmetic is exact
+
+`+ - * / %` compute the true result. No operand's type limits it: two `u8`
+values add to a number above 255, and subtracting from an unsigned value can
+go below zero. Results range over every value a 128-bit integer of either
+signedness holds, from −2^127 to 2^128 − 1; beyond that, and dividing by
+zero, are errors. Division truncates toward zero and the remainder takes the
+dividend's sign, as C, Rust, and Go agree.
+
+To get a program's wrapping arithmetic, cast the result: `(u8)(uc + 10)`.
+
+```uscope-example
+world: scalars
+uc + 10                => 260 : integer
+(u8)(uc + 10)          => 4 : u8
+u32v + u32v            => 8000000000 : integer
+0 - u32v               => -4000000000 : integer
+i32v * 1000000         => -123456000000 : integer
+-7 / 2                 => -3 : integer
+-7 % 2                 => -1 : integer
+7 % -2                 => 1 : integer
+u64v * u64v            => 340282366920938463426481119284349108225 : integer
+u64v * u64v * 2        => error arithmetic at `u64v * u64v * 2`
+0 - u64v * u64v        => error arithmetic at `0 - u64v * u64v`
+1 / 0                  => error arithmetic at `1 / 0`
+-u32v                  => -4000000000 : integer
+flag + 1               => error type at `flag`
+```
+
+Comparisons are exact too, so signed and unsigned values compare as numbers.
+
+```uscope-example
+world: scalars
+-1 < 1u32              => true : bool
+i32v < u32v            => true : bool
+u32v - 1 > 0           => true : bool
+sc == -7               => true : bool
+```
+
+## Bit operations keep their width
+
+`~ & | ^ << >>` work on a value's bits at the width of its type, and the
+result keeps that type. When two typed operands meet, the wider one's type
+wins, and between equal widths, the unsigned one's. An exact integer meeting
+a typed one must fit its width, as either a signed or an unsigned value.
+Exact integers alone behave as infinite two's complement.
+
+`>>` is arithmetic for a signed value and logical for an unsigned one, and
+`<<` drops the bits it shifts past the width. A shift's result has the type
+of the value shifted. A shift by a negative amount, or by the width or more,
+is an error.
+
+```uscope-example
+world: scalars
+~uc                    => 5 : unsigned char
+uc << 1                => 244 : unsigned char
+uc >> 4                => 15 : unsigned char
+sc >> 1                => -4 : signed char
+uc & 0x0f              => 10 : unsigned char
+uc | 0x100             => error arithmetic at `0x100`
+i32v & 0xffff_ffff     => -123456 : int
+uc << 8                => error arithmetic at `uc << 8`
+1 << 70 >> 68          => 4 : integer
+-1 << 1u32             => -2 : integer
+~0                     => -1 : integer
+-4 >> 1                => -2 : integer
+uc << -1               => error arithmetic at `uc << -1`
+sc >> 8                => error arithmetic at `sc >> 8`
+u16v >> 15             => 1 : short unsigned int
+uc & u16v              => 250 : short unsigned int
+```
+
+## Floating point
+
+Floats compute in the widest format among their operands, and an integer
+operand converts to the nearest value. x87 `long double` values compute
+exactly in their own format, never rounded through a double. Floats compare
+with integers exactly.
+
+```uscope-example
+world: scalars
+f * 2                  => 3.0 : f32
+f + d                  => 11.5 : f64
+d / 4                  => 2.5 : f64
+ld * 2                 => 2.5 : f80
+ld + 1                 => 2.25 : f80
+1.0 / 0.0              => inf : f64
+f == 1.5               => true : bool
+9007199254740993 == 9007199254740993.0 => false : bool
+0.0 / 0.0              => NaN : f64
+0.0 / 0.0 == 0.0 / 0.0 => false : bool
+0.0 / 0.0 != 0.0 / 0.0 => true : bool
+-d                     => -10.0 : f64
+f & 1                  => error type at `f`
+```
+
+## Truth values
+
+`!`, `&&`, `||`, and `?:` take truth values: booleans, or numbers and pointers,
+which are true when nonzero. `&&`, `||`, and `?:` evaluate only what they
+need, so `ptr != null && ptr->a > 3` never follows a null pointer. Booleans
+are not numbers; convert one with `flag as u8`.
+
+```uscope-example
+world: memory
+null_ptr != null && null_ptr->a > 3 => false : bool
+ptr != null && ptr->a > 3          => true : bool
+!ptr                               => false : bool
+s.a > 3 ? 1 : 2                    => 1 : integer
+false && gone > 0                  => false : bool
+0 ? gone : 1                       => 1 : integer
+ptr == null || gone > 0            => unavailable at `gone`
+s && true                          => error type at `s`
+```
+
+## Pointers, arrays, and members
+
+`*p` dereferences, `&x` takes an address, `p[i]` is `*(p + i)`, and `p + n`
+moves by `n` elements. `p - q` counts the elements between two pointers.
+Pointers compare with pointers, `null`, and `0`; to compare an address with
+another number, cast the pointer. Arrays index by each of their dimensions,
+and decay to a pointer to their first element in arithmetic. A slice's index
+is checked against its length when the expression runs.
+
+```uscope-example
+world: memory
+*ip                    => 22 : int
+ip[1]                  => 33 : int
+*(ip + 2)              => 44 : int
+&arr[3] - &arr[0]      => 3 : integer
+ptr.a                  => 5 : int
+(*ptr).b               => 7 : long int
+arr[2]                 => 33 : int
+*arr                   => 11 : int
+*(arr + 1)             => 22 : int
+m[1][2]                => 6 : int
+m[1]                   => error type at `m[1]`
+arr[4]                 => error bounds at `arr[4]`
+items[1]               => 20 : int
+items[5]               => unavailable at `items[5]`
+len(items)             => 3 : integer
+len(arr)               => 4 : integer
+*null_ptr              => unavailable at `*null_ptr`
+ptr != 0               => true : bool
+ptr == 3               => error type at `ptr == 3`
+(u64)ip - (u64)&arr[0] => 4 : integer
+ip - arr               => 1 : integer
+arr + 1 == ip          => true : bool
+vp + 1                 => error type at `vp`
+*vp                    => error type at `vp`
+*s                     => error type at `s`
+s.missing              => error type at `missing`
+s->a                   => error type at `s`
+&r                     => error not-an-lvalue at `r`
+gone + 1               => unavailable at `gone`
+```
+
 ## Casts
 
 `(T)x` and `x as T` convert a value. `T` may be a built-in type (`iN` and
@@ -153,6 +357,117 @@ x as T * 2                => reads as `x as T * 2`
 sizeof(int*)              => reads as `sizeof(int*)`
 (int)                     => error syntax at ``
 (a)-(b)-(c)-(d)-(e)-f     => error limit at `(`
+```
+
+Casting an integer truncates its two's complement. Casting a float to an
+integer rounds toward zero and saturates at the type's bounds; a NaN cannot be
+cast. Integers and pointers convert into each other as addresses, and anything
+with a truth value casts to `bool`. A cast cannot reinterpret a whole record;
+reinterpret its storage through a pointer instead. Casting a value to the type
+it already has changes nothing.
+
+```uscope-example
+world: scalars
+(short)-70000          => -4464 : short int
+(u8)-1                 => 255 : u8
+-70000 as i16          => -4464 : i16
+(int)-123456000000     => 1098051584 : int
+2.9 as i32             => 2 : i32
+-2.9 as u8             => 0 : u8
+1e10 as i32            => 2147483647 : i32
+(f32)i32v              => -123456.0 : f32
+(unsigned long)sc      => 18446744073709551609 : long unsigned int
+(long unsigned int)sc  => 18446744073709551609 : long unsigned int
+d as bool              => true : bool
+(bool)0.1              => true : bool
+flag as u8 + 1         => 2 : integer
+(u1)3                  => 1 : u1
+(i1)1                  => -1 : i1
+(u128)-1               => 340282366920938463463374607431768211455 : u128
+-1e40 as i128          => -170141183460469231731687303715884105728 : i128
+(0.0 / 0.0) as i32     => error arithmetic at `(0.0 / 0.0) as i32`
+(nothing)1             => error unknown-name at `nothing`
+```
+
+```uscope-example
+world: memory
+*(long*)&s.b           => 7 : long int
+*(&s.b as *long)       => 7 : long int
+(u8*)vp + 1 - (u8*)vp  => 1 : integer
+*(int*)ptr             => 5 : int
+(S*)ip == (S*)&arr[1]  => true : bool
+(S)s                   => {…} : S
+(S)ptr                 => error type at `(S)ptr`
+(long)s                => error type at `(long)s`
+(count) - 1            => 11 : integer
+(counter_t) - 1        => -1 : counter_t
+(counter_t) - 1 * 2    => -2 : integer
+(count) - 1 * 2        => 10 : integer
+(Color)1               => GREEN : Color
+(Color)7               => 7 : Color
+```
+
+## Enumerations
+
+An enumerator's name means its value. Next to a value of an enumeration, a
+bare enumerator name is found among that enumeration's enumerators, so
+`color == RED` works even where `RED` alone is ambiguous. An integer casts to
+an enumeration, whether or not an enumerator has its value.
+
+```uscope-example
+world: memory
+color                  => BLUE : Color
+color == BLUE          => true : bool
+color == Color::GREEN  => false : bool
+color + 1              => 3 : integer
+(f64)BLUE              => 2.0 : f64
+sign < POSITIVE        => true : bool
+NEGATIVE < POSITIVE    => true : bool
+-(Small::TWO << 1)     => -4 : integer
+Small::HIGH << 1       => 0 : Small
+RED                    => error ambiguous-name at `RED`
+color == RED           => false : bool
+light == RED           => false : bool
+light == Light::AMBER  => true : bool
+```
+
+## Text
+
+A string literal compares with the program's text: a `char*`, a character
+array, or a language's string type. Text that could not be read to its end
+does not compare at all, unless what was read already differs.
+
+```uscope-example
+world: memory
+name == "hello"        => true : bool
+name != "help"         => true : bool
+buf == "abc"           => true : bool
+name < "hello"         => error type at `name < "hello"`
+partial == "hello"     => unavailable at `partial`
+partial == "xyz"       => false : bool
+"hello"                => error type at `"hello"`
+```
+
+## Sizes and lengths
+
+`sizeof(x)` and `sizeof(T)` give a size in bytes without reading anything.
+`len(x)` gives an array's or slice's element count, or the length in bytes of
+text: a language's string, or what a character pointer points to. An array of
+characters is an array, so its length is its element count.
+
+```uscope-example
+world: memory
+sizeof(s)              => 16 : integer
+sizeof(S)              => 16 : integer
+sizeof(struct S)       => 16 : integer
+sizeof(int)            => 4 : integer
+sizeof(arr)            => 16 : integer
+sizeof(u128)           => 16 : integer
+sizeof(ptr)            => 8 : integer
+sizeof(1)              => error type at `sizeof(1)`
+len(name)              => 5 : integer
+len(buf)               => 8 : integer
+len(s)                 => error type at `s`
 ```
 
 ## Limits
