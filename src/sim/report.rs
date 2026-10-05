@@ -115,6 +115,40 @@ impl Failure {
             step: 0,
         }
     }
+
+    /// What failures with one cause share, to group a sweep's failures by:
+    /// the kind, the check, and the message with its numbers, and any dump
+    /// of a value from the first one on, left out. Thread ids, addresses,
+    /// and counts differ between runs that meet one bug; the words around
+    /// them rarely do.
+    #[must_use]
+    pub fn signature(&self) -> String {
+        let words = self.message.split(['{', '[']).next().unwrap_or_default();
+        format!(
+            "{} {}: {}",
+            self.kind,
+            self.check,
+            without_numbers(words).trim_end()
+        )
+    }
+}
+
+/// `text` with each number, decimal or hexadecimal, written as `#`.
+fn without_numbers(text: &str) -> String {
+    let mut shape = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(next) = chars.next() {
+        if next.is_ascii_digit() {
+            while chars
+                .next_if(|next| next.is_ascii_hexdigit() || *next == 'x')
+                .is_some()
+            {}
+            shape.push('#');
+        } else {
+            shape.push(next);
+        }
+    }
+    shape
 }
 
 impl fmt::Display for Failure {
@@ -124,5 +158,54 @@ impl fmt::Display for Failure {
             "{} failure at #{}, {}: {}",
             self.kind, self.step, self.check, self.message
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs that meet one bug share a signature whatever threads, addresses,
+    /// and values they met it with; another message of the same check does
+    /// not.
+    #[test]
+    fn signatures_leave_out_what_differs_between_runs_of_one_bug() {
+        let hit = |tid: u64, address: u64, count: u64| {
+            Failure::debugger(
+                "breakpoint accounting",
+                format!(
+                    "breakpoint 1's hit count went from {count} to {count}; thread {tid} \
+                     trapped at {address:#x}, and the breakpoint owned that site"
+                ),
+            )
+        };
+        assert_eq!(
+            hit(1004, 0x7fff_f7ff_7620, 0).signature(),
+            hit(2013, 0x40_1334, 17).signature()
+        );
+        assert_eq!(
+            hit(1004, 0x40_1334, 0).signature(),
+            "debugger breakpoint accounting: breakpoint #'s hit count went from # to #; \
+             thread # trapped at #, and the breakpoint owned that site"
+        );
+        let stop = |reason: &str| {
+            Failure::debugger("protocol", format!("stop 7 reports {reason}")).signature()
+        };
+        assert_eq!(
+            stop("Exception(ExceptionInfo { signal: 11 })"),
+            stop("Exception(ExceptionInfo { signal: 5 })")
+        );
+        assert_ne!(
+            stop("Exception(ExceptionInfo { signal: 11 })"),
+            stop("Unclassifiable { address: 0x1000 }")
+        );
+        assert_ne!(
+            hit(1004, 0x40_1334, 0).signature(),
+            Failure::debugger(
+                "breakpoint accounting",
+                "breakpoint 1 owns no site at 0x401334"
+            )
+            .signature()
+        );
     }
 }

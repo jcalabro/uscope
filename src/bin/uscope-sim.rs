@@ -1,7 +1,7 @@
 //! Sweeps and replays deterministic simulations of debugging sessions.
 //!
 //! `uscope-sim sweep` runs random seeds on every core for a while and
-//! reports each kind of failure once, with its smallest seed. `uscope-sim
+//! reports each kind of failure once, with its shortest run. `uscope-sim
 //! replay SEED` reruns one seed and prints its whole trace.
 
 use std::collections::BTreeMap;
@@ -28,7 +28,7 @@ enum Command {
     /// Runs random seeds on every core and reports each kind of failure.
     Sweep {
         /// How long to sweep.
-        #[arg(long, default_value_t = 60)]
+        #[arg(long, default_value_t = 30)]
         seconds: u64,
         /// How many worker threads; every core by default.
         #[arg(long)]
@@ -79,26 +79,33 @@ fn main() -> Result<ExitCode> {
     }
 }
 
-/// One kind of failure: how often it happened and its smallest seed's
-/// report.
+/// One kind of failure: how often it happened, and the report of its
+/// shortest run, the easiest to read.
 struct Group {
     count: u64,
-    seed: u64,
+    /// The shortest run's length in actions, then its seed, which breaks
+    /// ties so that a sweep's choice does not depend on its threads.
+    shortest: (u64, u64),
     report: String,
 }
 
-/// Counts a failure in its group, which keeps the smallest seed's report.
-fn record_failure(groups: &Mutex<BTreeMap<String, Group>>, key: String, seed: u64, report: String) {
+/// Counts a failed run in its failure's group, which keeps the shortest
+/// run's report.
+fn record_failure(groups: &Mutex<BTreeMap<String, Group>>, outcome: &Outcome) {
+    let Some(failure) = &outcome.failure else {
+        return;
+    };
+    let run = (outcome.steps, outcome.seed);
     let mut groups = groups.lock().unwrap_or_else(PoisonError::into_inner);
-    let group = groups.entry(key).or_insert_with(|| Group {
+    let group = groups.entry(failure.signature()).or_insert_with(|| Group {
         count: 0,
-        seed,
-        report: report.clone(),
+        shortest: run,
+        report: describe_failure(outcome),
     });
     group.count += 1;
-    if seed < group.seed {
-        group.seed = seed;
-        group.report = report;
+    if run < group.shortest {
+        group.shortest = run;
+        group.report = describe_failure(outcome);
     }
     drop(groups);
 }
@@ -146,10 +153,7 @@ fn sweep(
                         counts.1 += u64::from(outcome.unfired.is_none());
                         drop(faults);
                     }
-                    if let Some(failure) = &outcome.failure {
-                        let key = format!("{} {}", failure.kind, failure.check);
-                        record_failure(&groups, key, seed, describe_failure(&outcome));
-                    }
+                    record_failure(&groups, &outcome);
                 }
             });
         }
@@ -178,10 +182,11 @@ fn sweep(
         println!("no failures");
         return ExitCode::SUCCESS;
     }
-    for (key, group) in &groups {
+    for (signature, group) in &groups {
+        let (steps, seed) = group.shortest;
         println!(
-            "\n{key}: {} sessions; smallest seed {:#x}\n{}",
-            group.count, group.seed, group.report
+            "\n{signature}\n{} sessions; the shortest, seed {seed:#x}, failed at action #{steps}\n{}",
+            group.count, group.report
         );
     }
     ExitCode::FAILURE
