@@ -24,10 +24,19 @@ pub struct Condition {
 /// Parses an expression a breakpoint reads, which may not assign.
 fn read_only(text: &str, invalid: fn(String) -> Error) -> Result<Expression> {
     let expression = Expression::parse(text).map_err(|error| invalid(error.to_string()))?;
+    // An assignment anywhere in any reading, not only at its root.
     let assigns = (0..1 << expression.ambiguities().len()).any(|casts| {
-        expression
-            .reading(casts)
-            .is_ok_and(|tree| matches!(tree.kind(tree.root()), NodeKind::Assign { .. }))
+        expression.reading(casts).is_ok_and(|tree| {
+            let mut pending = vec![tree.root()];
+            while let Some(node) = pending.pop() {
+                let kind = tree.kind(node);
+                if matches!(kind, NodeKind::Assign { .. }) {
+                    return true;
+                }
+                pending.extend(kind.children());
+            }
+            false
+        })
     });
     if assigns {
         return Err(invalid(
@@ -155,7 +164,7 @@ mod tests {
                 .to_string(),
             "a + 1 > b"
         );
-        for text in ["", "a = 1", "a += 1", "a +"] {
+        for text in ["", "a = 1", "a += 1", "a +", "a == (b = 1)", "(a = 1) && b"] {
             assert!(Condition::parse(text).is_err(), "`{text}`");
         }
         let message = LogMessage::parse("sum {a + b}, {{literal}} {p->x}").expect("a message");
@@ -176,7 +185,7 @@ mod tests {
                 "value p->x"
             ]
         );
-        for text in ["{a = 1}", "{", "}", "{a +}"] {
+        for text in ["{a = 1}", "{", "}", "{a +}", "{a + (b -= 1)}"] {
             assert!(LogMessage::parse(text).is_err(), "`{text}`");
         }
     }
