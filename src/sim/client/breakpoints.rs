@@ -3,7 +3,6 @@
 //! the hits counted at each stop.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use super::{Client, protocol};
 use crate::sim::choices::Stream;
@@ -14,8 +13,8 @@ use crate::sim::report::Failure;
 use crate::sim::watches::Intent;
 use crate::{
     BreakpointId, BreakpointLocation, BreakpointOptions, BreakpointSpec, Condition, Error,
-    HitComparison, HitCondition, LineNumber, LogMessage, ProcessId, StateSnapshot, ValueExpression,
-    ValuePathStep, VirtualAddress, WatchAccess, WatchpointSpec,
+    HitComparison, HitCondition, LineNumber, LogMessage, ProcessId, StateSnapshot, VirtualAddress,
+    WatchAccess, WatchpointSpec,
 };
 
 /// A breakpoint the client added, with the image addresses of its traps.
@@ -63,10 +62,15 @@ impl Client {
             (format!("{name}+{offset}"), image_address + offset, width)
         };
         let result = if whole && self.draw(2) == 0 {
-            let expression = ValueExpression {
-                steps: Arc::from([ValuePathStep::Named(name.clone())]),
-            };
-            self.handle.watch(expression, access).await
+            match crate::Expression::name(&name) {
+                Some(expression) => self.handle.watch(&expression, access).await,
+                None => {
+                    return Err(Failure::simulator(
+                        "client",
+                        format!("`{name}` has no expression"),
+                    ));
+                }
+            }
         } else {
             let address = VirtualAddress::new(image_address + self.main_bias().await?);
             self.handle

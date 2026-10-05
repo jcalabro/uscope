@@ -635,3 +635,32 @@ proptest! {
         check_invariants(&text).map_err(TestCaseError::fail)?;
     }
 }
+
+#[test]
+fn children_are_named_by_expressions_that_parse_back() {
+    let pair = Expression::name("pair").expect("a name");
+    assert_eq!(
+        pair.member("first").expect("a member").to_string(),
+        "pair.first"
+    );
+    assert_eq!(
+        pair.member("a.b").expect("a member").to_string(),
+        "pair.`a.b`"
+    );
+    let target = Expression::name("p")
+        .and_then(|name| name.dereferenced())
+        .expect("a pointee");
+    assert_eq!(target.to_string(), "*p");
+    assert_eq!(target.member("x").expect("a member").to_string(), "(*p).x");
+    assert_eq!(
+        pair.indexed(&[-2, 3]).expect("an element").to_string(),
+        "pair[-2][3]"
+    );
+    assert_eq!(pair.range(1, 4).expect("a range").to_string(), "pair[1..4]");
+    assert_eq!(
+        Expression::name("has space").expect("a name").to_string(),
+        "`has space`"
+    );
+    let sum = Expression::parse("a + b").expect("a sum");
+    assert_eq!(sum.member("c").expect("a member").to_string(), "(a + b).c");
+}

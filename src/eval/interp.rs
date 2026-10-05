@@ -201,6 +201,7 @@ impl<M: Machine> Interpreter<'_, M> {
                 base,
                 step,
                 indices,
+                ..
             } => {
                 let mut values = Vec::with_capacity(indices.len());
                 for index in indices {

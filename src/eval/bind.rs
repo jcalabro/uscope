@@ -596,6 +596,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 base: Box::new(node),
                 step: planned.step,
                 indices: Vec::new(),
+                follows: true,
             },
             ty,
             span,
@@ -1580,6 +1581,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 base: Box::new(base),
                 step: planned.step,
                 indices: Vec::new(),
+                follows: false,
             },
             ty,
             span,
@@ -1602,7 +1604,7 @@ impl<'a, S: Scope> Binder<'a, S> {
             node = self.settle(node)?;
             let category = self.category(&node.ty);
             match category {
-                Category::Array { .. } | Category::Slice(_) if node.is_place() => {
+                ref category @ (Category::Array { .. } | Category::Slice(_)) if node.is_place() => {
                     let Ty::Program(from) = node.ty else {
                         unreachable!("arrays are program types")
                     };
@@ -1638,6 +1640,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                             base: Box::new(node),
                             step: planned.step,
                             indices,
+                            follows: matches!(category, Category::Slice(_)),
                         },
                         ty,
                         span,

@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use uscope::{
-    StackFrameId, StopContext, ValueExpression, VirtualAddress, WatchAccess, WatchScope,
-    WatchpointHit, WatchpointId, WatchpointSpec,
+    StackFrameId, StopContext, VirtualAddress, WatchAccess, WatchScope, WatchpointHit,
+    WatchpointId, WatchpointSpec,
 };
 
 use super::protocol::{self, DataBreakpointInfoArguments, ErrorBody, SetDataBreakpointsArguments};
@@ -130,13 +130,12 @@ impl Session {
                         frame: StackFrameId::INNERMOST,
                     },
                 };
-                match uscope::parse_value_expression(arguments.name.trim()) {
-                    Ok(parsed) if parsed.range.is_none() => (context, parsed.expression),
-                    Ok(_) => return Ok(unwatchable("a range cannot be watched")),
+                match uscope::Expression::parse(arguments.name.trim()) {
+                    Ok(expression) => (context, expression),
                     Err(error) => return Ok(unwatchable(&error.to_string())),
                 }
             };
-            match handle.at(context).resolve_watch_target(expression).await {
+            match handle.at(context).resolve_watch_target(&expression).await {
                 Ok(target) => {
                     let description = format!(
                         "{} ({} bytes at {}{})",
@@ -327,11 +326,8 @@ fn data_json(entry: &DataEntry) -> Value {
 }
 
 /// The expression a child shown in a variables list evaluates as.
-pub fn child_expression(path: &str) -> Option<ValueExpression> {
-    uscope::parse_value_expression(path)
-        .ok()
-        .filter(|parsed| parsed.range.is_none())
-        .map(|parsed| parsed.expression)
+pub fn child_expression(path: &str) -> Option<uscope::Expression> {
+    uscope::Expression::parse(path).ok()
 }
 
 impl Session {

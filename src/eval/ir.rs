@@ -19,6 +19,24 @@ impl<O, S> Program<O, S> {
     pub const fn result(&self) -> &Ty {
         &self.root.ty
     }
+
+    /// The data object whose storage holds the result, when the result is
+    /// part of one: reached from it through members and array elements
+    /// only, never through a pointer.
+    pub fn root_object(&self) -> Option<&O> {
+        let mut node = &self.root;
+        loop {
+            match &node.op {
+                Op::Object(object) => return Some(object),
+                Op::Step {
+                    base,
+                    follows: false,
+                    ..
+                } => node = base,
+                _ => return None,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -99,11 +117,14 @@ pub enum Length {
 pub enum Op<O, S> {
     /// A data object's storage.
     Object(O),
-    /// A structural step from a place, with its index values.
+    /// A structural step from a place, with its index values. A step that
+    /// `follows` a pointer, as a dereference or a slice's element does,
+    /// leaves the storage of the place it starts from.
     Step {
         base: Box<Node<O, S>>,
         step: S,
         indices: Vec<Node<O, S>>,
+        follows: bool,
     },
     /// The place a computed pointer to a program type points at.
     At {

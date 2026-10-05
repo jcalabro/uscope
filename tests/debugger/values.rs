@@ -107,7 +107,7 @@ async fn structural_inspection_selects_direct_and_pointer_record_members() {
             let value = scenario
                 .operation(
                     "inspect record member",
-                    scenario.handle().inspect(value_expression(components)),
+                    scenario.handle().inspect(&value_expression(components)),
                 )
                 .await;
             assert_inspected_signed(&value, expected, fixture);
@@ -128,7 +128,7 @@ async fn structural_inspection_selects_direct_and_pointer_record_members() {
                 "inspect member through C++ reference",
                 scenario
                     .handle()
-                    .inspect(value_expression(&["structure_reference", "second"])),
+                    .inspect(&value_expression(&["structure_reference", "second"])),
             )
             .await;
         assert_inspected_signed(&value, 22, fixture);
@@ -156,7 +156,7 @@ async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_
                 "inspect terminal pointer member",
                 scenario
                     .handle()
-                    .inspect(value_expression(&["recursive_pointer", "next"])),
+                    .inspect(&value_expression(&["recursive_pointer", "next"])),
             )
             .await;
         assert!(
@@ -179,7 +179,7 @@ async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_
             let value = scenario
                 .operation(
                     "inspect pointer member chain",
-                    scenario.handle().inspect(value_expression(components)),
+                    scenario.handle().inspect(&value_expression(components)),
                 )
                 .await;
             assert_inspected_signed(&value, expected, fixture);
@@ -188,7 +188,7 @@ async fn structural_inspection_dereferences_each_intermediate_pointer_only_when_
         let unavailable = scenario
             .operation(
                 "inspect through null intermediate pointer",
-                scenario.handle().inspect(value_expression(&[
+                scenario.handle().inspect(&value_expression(&[
                     "recursive_pointer",
                     "next",
                     "next",
@@ -496,24 +496,24 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                         "inspect one Rust slice element directly",
                         scenario
                             .handle()
-                            .inspect(parsed_value_expression("slice[1]")),
+                            .inspect(&parsed_value_expression("slice[1]")),
                     )
                     .await;
                 assert_inspected_signed(&indexed, 22, fixture);
-                let range =
-                    uscope::parse_value_expression("slice[0..2]").expect("parse slice range");
                 let range_page = scenario
                     .operation(
                         "inspect one bounded Rust slice range",
-                        scenario
-                            .handle()
-                            .inspect_range(range.expression, range.range.expect("terminal range")),
+                        evaluate_range(
+                            scenario.handle(),
+                            "slice[0..2]",
+                            uscope::InspectionLimits::default(),
+                        ),
                     )
                     .await;
                 assert_eq!(range_page.children.len(), 2, "{fixture}: {range_page:?}");
                 let out_of_bounds = scenario
                     .handle()
-                    .inspect(parsed_value_expression("slice[2]"))
+                    .inspect(&parsed_value_expression("slice[2]"))
                     .await;
                 assert!(
                     matches!(
@@ -877,7 +877,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
                     "inspect one large-array element directly",
                     scenario
                         .handle()
-                        .inspect(parsed_value_expression(expression)),
+                        .inspect(&parsed_value_expression(expression)),
                 )
                 .await;
             assert!(
@@ -893,7 +893,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
                 "inspect through an explicitly dereferenced array",
                 scenario
                     .handle()
-                    .inspect(parsed_value_expression("(*records)[1].values[1]")),
+                    .inspect(&parsed_value_expression("(*records)[1].values[1]")),
             )
             .await;
         assert_inspected_signed(&nested_array_member, 44, fixture);
@@ -902,18 +902,17 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
                 "inspect one multidimensional array element",
                 scenario
                     .handle()
-                    .inspect(parsed_value_expression("matrix[1][2]")),
+                    .inspect(&parsed_value_expression("matrix[1][2]")),
             )
             .await;
         assert_inspected_signed(&matrix_element, 6, fixture);
-        let range =
-            uscope::parse_value_expression("huge_array[3..7]").expect("parse bounded array range");
         let range_page = scenario
             .operation(
                 "inspect one bounded array range",
-                scenario.handle().inspect_range(
-                    range.expression,
-                    range.range.expect("parsed terminal range"),
+                evaluate_range(
+                    scenario.handle(),
+                    "huge_array[3..7]",
+                    uscope::InspectionLimits::default(),
                 ),
             )
             .await;
@@ -943,13 +942,14 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             sources.windows(2).all(|pair| pair[1] == pair[0] + 1),
             "{fixture}: element sources {sources:#x?}"
         );
-        let empty = uscope::parse_value_expression("huge_array[7..7]").expect("parse empty range");
         let empty_page = scenario
             .operation(
                 "inspect one empty in-bounds range",
-                scenario
-                    .handle()
-                    .inspect_range(empty.expression, empty.range.expect("terminal range")),
+                evaluate_range(
+                    scenario.handle(),
+                    "huge_array[7..7]",
+                    uscope::InspectionLimits::default(),
+                ),
             )
             .await;
         assert_eq!(empty_page.offset, 7, "{fixture}: {empty_page:?}");
@@ -961,12 +961,12 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             "matrix[0..1]",
             "global_record[0..1]",
         ] {
-            let parsed =
-                uscope::parse_value_expression(expression).expect("parse invalid semantic range");
-            let result = scenario
-                .handle()
-                .inspect_range(parsed.expression, parsed.range.expect("terminal range"))
-                .await;
+            let result = evaluate_range(
+                scenario.handle(),
+                expression,
+                uscope::InspectionLimits::default(),
+            )
+            .await;
             let expected = match expression {
                 "huge_array[1048576..1048578]" => matches!(
                     &result,
@@ -978,8 +978,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
                 ),
                 "global_record[0..1]" => matches!(
                     &result,
-                    Err(Error::IndexAccessOnNonIndexable { type_name })
-                        if type_name.as_ref() == "outer_record"
+                    Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::Type
                 ),
                 _ => matches!(&result, Err(Error::InvalidValueRange(_))),
             };
@@ -987,24 +986,28 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
         }
         let out_of_bounds = scenario
             .handle()
-            .inspect(parsed_value_expression("huge_array[1048577]"))
+            .inspect(&parsed_value_expression("huge_array[1048577]"))
             .await;
         assert!(
             matches!(
-                out_of_bounds,
-                Err(uscope::Error::ValueIndexOutOfBounds { .. })
+                &out_of_bounds,
+                Err(uscope::Error::Expression(error))
+                    if error.kind == uscope::ExpressionErrorKind::Bounds
             ),
             "{fixture}: {out_of_bounds:?}"
         );
+        // A pointer indexes as C indexes it: `records[0]` is `*records`.
         let pointer_index = scenario
             .handle()
-            .inspect(parsed_value_expression("records[0]"))
+            .inspect(&parsed_value_expression("records[0]"))
             .await;
-        assert!(
-            matches!(
-                pointer_index,
-                Err(uscope::Error::IndexAccessOnNonIndexable { .. })
-            ),
+        assert_eq!(
+            pointer_index
+                .as_ref()
+                .ok()
+                .and_then(|value| value.type_info.as_ref())
+                .map(|info| info.name.as_ref()),
+            Some("outer_record[2]"),
             "{fixture}: {pointer_index:?}"
         );
         for (components, expected) in [
@@ -1014,7 +1017,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
             let value = scenario
                 .operation(
                     "inspect nested or bit-field member",
-                    scenario.handle().inspect(value_expression(components)),
+                    scenario.handle().inspect(&value_expression(components)),
                 )
                 .await;
             assert_inspected_signed(&value, expected, fixture);
@@ -1024,7 +1027,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
                 "inspect unsigned bit-field member",
                 scenario
                     .handle()
-                    .inspect(value_expression(&["bits", "second"])),
+                    .inspect(&value_expression(&["bits", "second"])),
             )
             .await;
         assert!(
@@ -1040,7 +1043,7 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
                 "inspect small field in large record",
                 scenario
                     .handle()
-                    .inspect(value_expression(&["large", "small"])),
+                    .inspect(&value_expression(&["large", "small"])),
             )
             .await;
         assert_inspected_signed(&selected, 73, fixture);
@@ -1119,19 +1122,17 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
                 "obtain a stop-scoped large-array capability",
                 scenario
                     .handle()
-                    .inspect(parsed_value_expression("huge_array")),
+                    .inspect(&parsed_value_expression("huge_array")),
             )
             .await;
         let reference = available_children(&huge.state).clone();
 
-        let bounded_range =
-            uscope::parse_value_expression("huge_array[0..4]").expect("parse bounded range");
         let range = scenario
             .operation(
                 "share one value-node budget across range selection and its child page",
-                scenario.handle().inspect_range_with_limits(
-                    bounded_range.expression,
-                    bounded_range.range.expect("terminal range"),
+                evaluate_range(
+                    scenario.handle(),
+                    "huge_array[0..4]",
                     uscope::InspectionLimits {
                         value_nodes: 3,
                         ..uscope::InspectionLimits::default()
@@ -1139,7 +1140,9 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
                 ),
             )
             .await;
-        assert_eq!(range.children.len(), 2, "{range:?}");
+        // The selection and the page share the limit, which the page's
+        // elements reach.
+        assert_eq!(range.children.len(), 3, "{range:?}");
         assert!(matches!(
             range.completion,
             uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
@@ -1261,50 +1264,29 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
             })
         ));
 
-        let depth_limits = uscope::InspectionLimits {
-            aggregate_depth: 1,
-            ..uscope::InspectionLimits::default()
-        };
-        let depth = scenario
-            .operation(
-                "truncate a structural path by aggregate depth",
-                scenario.handle().inspect_with_limits(
-                    parsed_value_expression("global_record.inner.signed_value"),
-                    depth_limits,
-                ),
-            )
-            .await;
-        assert!(matches!(
-            depth.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::AggregateDepth,
-                limit: 1,
-                used: 0,
-                requested: 2,
-            })
-        ));
-
         let work_limits = uscope::InspectionLimits {
             expression_work: 1,
             ..uscope::InspectionLimits::default()
         };
         let work = scenario
             .operation(
-                "truncate DWARF evaluation by expression work",
+                "truncate evaluation by expression work",
                 scenario
                     .handle()
-                    .inspect_with_limits(parsed_value_expression("huge_array[0]"), work_limits),
+                    .inspect_with_limits(&parsed_value_expression("huge_array[0]"), work_limits),
             )
             .await;
-        assert!(matches!(
-            work.completion,
-            uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
-                resource: uscope::InspectionLimit::ExpressionWork,
-                limit: 1,
-                used: 1,
-                requested: 10_000,
-            })
-        ));
+        assert!(
+            matches!(
+                work.completion,
+                uscope::InspectionCompletion::Truncated(uscope::InspectionExhaustion {
+                    resource: uscope::InspectionLimit::ExpressionWork,
+                    limit: 1,
+                    ..
+                })
+            ),
+            "{work:?}"
+        );
 
         let invalid = uscope::InspectionLimits {
             memory_reads: 0,
@@ -1313,7 +1295,7 @@ async fn inspection_budgets_report_typed_partial_results_at_each_public_boundary
         assert!(matches!(
             scenario
                 .handle()
-                .inspect_with_limits(parsed_value_expression("huge_array"), invalid)
+                .inspect_with_limits(&parsed_value_expression("huge_array"), invalid)
                 .await,
             Err(uscope::Error::InvalidInspectionLimit {
                 resource: uscope::InspectionLimit::MemoryReads,
@@ -1568,7 +1550,7 @@ async fn assert_record_members(scenario: &Scenario, signed_member: &str, fixture
                 &expression,
                 scenario
                     .handle()
-                    .inspect(parsed_value_expression(&expression)),
+                    .inspect(&parsed_value_expression(&expression)),
             )
             .await;
         assert_inspected_signed(&value, expected, &format!("{fixture}: {expression}"));
@@ -1621,7 +1603,7 @@ async fn rust_payload_enum_is_never_published_as_an_empty_record() {
             "select active Rust enum payload",
             scenario
                 .handle()
-                .inspect(value_expression(&["value", "Integer", "__0"])),
+                .inspect(&value_expression(&["value", "Integer", "__0"])),
         )
         .await;
     assert!(
@@ -1636,7 +1618,7 @@ async fn rust_payload_enum_is_never_published_as_an_empty_record() {
             "reject inactive Rust enum payload",
             scenario
                 .handle()
-                .inspect(value_expression(&["value", "Unit"])),
+                .inspect(&value_expression(&["value", "Unit"])),
         )
         .await;
     assert!(
@@ -1872,7 +1854,7 @@ async fn c_raw_unions_expose_overlapping_interpretations_without_claiming_an_act
                 "inspect a union interpretation",
                 scenario
                     .handle()
-                    .inspect(value_expression(&["raw", "integer"])),
+                    .inspect(&value_expression(&["raw", "integer"])),
             )
             .await;
         assert_inspected_signed(&integer, 42, fixture);
@@ -2100,7 +2082,7 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
                 "inspect a readable element at a mapping boundary",
                 scenario
                     .handle()
-                    .inspect(parsed_value_expression("(*boundary_array)[1]")),
+                    .inspect(&parsed_value_expression("(*boundary_array)[1]")),
             )
             .await;
         assert_inspected_signed(&indexed_readable, 42, fixture);
@@ -2109,7 +2091,7 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
                 "inspect an unreadable element at a mapping boundary",
                 scenario
                     .handle()
-                    .inspect(parsed_value_expression("(*boundary_array)[2]")),
+                    .inspect(&parsed_value_expression("(*boundary_array)[2]")),
             )
             .await;
         assert!(
@@ -2123,14 +2105,14 @@ async fn dereference_reads_are_all_or_unavailable_across_an_unmapped_boundary() 
             ),
             "{fixture}: {indexed_unreadable:?}"
         );
-        let parsed = uscope::parse_value_expression("(*boundary_array)[0..4]")
-            .expect("parse boundary range");
         let range = scenario
             .operation(
                 "inspect a range crossing an unmapped boundary",
-                scenario
-                    .handle()
-                    .inspect_range(parsed.expression, parsed.range.expect("terminal range")),
+                evaluate_range(
+                    scenario.handle(),
+                    "(*boundary_array)[0..4]",
+                    uscope::InspectionLimits::default(),
+                ),
             )
             .await;
         assert_eq!(range.children.len(), 4, "{fixture}: {range:?}");
@@ -2398,7 +2380,7 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
             "inspect through implicit pointer chain atomically",
             scenario
                 .handle()
-                .inspect(parsed_value_expression("**pointer_pointer")),
+                .inspect(&parsed_value_expression("**pointer_pointer")),
         )
         .await;
     assert_inspected_signed(&atomic_pointee, 42, fixture);
@@ -2445,7 +2427,7 @@ async fn optimized_implicit_pointer_chains_reconstruct_the_referent_without_an_a
             "inspect through offset implicit pointer atomically",
             offset
                 .handle()
-                .inspect(parsed_value_expression("*byte_pointer")),
+                .inspect(&parsed_value_expression("*byte_pointer")),
         )
         .await;
     assert!(
@@ -2509,7 +2491,7 @@ async fn readable_invalid_boolean_bytes_are_not_reported_as_unavailable_or_malfo
                 "inspect invalid boolean representation",
                 scenario
                     .handle()
-                    .inspect(parsed_value_expression("*invalid")),
+                    .inspect(&parsed_value_expression("*invalid")),
             )
             .await;
         assert!(

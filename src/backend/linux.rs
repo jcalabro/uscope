@@ -43,9 +43,8 @@ use crate::protocol::{
     WatchpointId,
 };
 use crate::{
-    CodeInstanceId, Error, GlobalVariableReference, ImageAddress, LoadedModule, ModuleImage,
-    Result, SourceLocation, StackFrameId, ThreadId as DebugThreadId, UnwindTermination,
-    VirtualAddress,
+    CodeInstanceId, Error, LoadedModule, ModuleImage, Result, SourceLocation, StackFrameId,
+    ThreadId as DebugThreadId, UnwindTermination, VirtualAddress,
 };
 
 use super::{ControllerChannels, ControllerMessage, EventSender, ExecutableSource, FileIdentity};
@@ -125,8 +124,6 @@ const TRAP_UNKNOWN: i32 = 5;
 const TRAP_HARDWARE_BREAKPOINT: i32 = 4;
 const MAX_LOGICAL_MEMORY_READ: usize = 1024 * 1024;
 const MAX_PUBLIC_MEMORY_READ: u64 = 64 * 1024;
-const MAX_VALUE_EXPRESSION_STEPS: usize = 64;
-const MAX_VALUE_EXPRESSION_DEREFERENCES: usize = 63;
 const MAX_VALUE_CHILD_PAGE_LIMIT: u32 = 256;
 
 static LINUX_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -537,26 +534,6 @@ enum Edit {
     /// Bring modules and breakpoints up to date after the loader changed
     /// the loaded libraries.
     RefreshModules,
-}
-
-/// The data object an expression's longest matching name prefix selected.
-struct ExpressionRoot {
-    /// How many leading named steps form the root's name.
-    components: usize,
-    kind: ExpressionRootKind,
-}
-
-enum ExpressionRootKind {
-    /// A local or parameter of the inspected logical frame.
-    Local {
-        name: String,
-        /// The module describing the frame's function.
-        module: crate::ModuleId,
-        /// The frame's address in the module's image.
-        address: ImageAddress,
-        selected: Option<CodeInstanceId>,
-    },
-    Global(GlobalVariableReference),
 }
 
 struct PublicStop {
@@ -1387,33 +1364,6 @@ impl<P: InspectionOps> Controller<P> {
                         .send(debug_pid(thread_id).and_then(|pid| {
                             self.expression_type(stop_id, pid, frame, &expression)
                         }));
-            }
-            Request::Inspect {
-                expression,
-                limits,
-                stop_id,
-                thread_id,
-                frame,
-                reply,
-            } => {
-                let _ =
-                    reply
-                        .send(debug_pid(thread_id).and_then(|pid| {
-                            self.inspect(stop_id, pid, frame, &expression, limits)
-                        }));
-            }
-            Request::InspectRange {
-                expression,
-                range,
-                limits,
-                stop_id,
-                thread_id,
-                frame,
-                reply,
-            } => {
-                let _ = reply.send(debug_pid(thread_id).and_then(|pid| {
-                    self.inspect_range(stop_id, pid, frame, &expression, range, limits)
-                }));
             }
             Request::Dereference {
                 reference,

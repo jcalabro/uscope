@@ -12,8 +12,7 @@ use crate::{
     CallFrameUnavailableReason, CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference,
     ImageAddress, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion,
     RegisterSnapshot, Result, StackFrameId, TlsUnavailableReason, UnwindTermination,
-    ValueExpression, ValueIndexRange, ValuePathStep, VariableSnapshot, VariableUnavailableReason,
-    VirtualAddress,
+    VariableSnapshot, VariableUnavailableReason, VirtualAddress,
 };
 
 use super::frames::{FrameRegisters, FrameScope, ResolvedFrame};
@@ -24,10 +23,8 @@ use super::registers::{
     x86_64_register_snapshot, x86_64_xmm_variable_register,
 };
 use super::{
-    BreakpointSite, Controller, ExpressionRoot, ExpressionRootKind, Inferior,
-    MAX_VALUE_CHILD_PAGE_LIMIT, MAX_VALUE_EXPRESSION_DEREFERENCES, MAX_VALUE_EXPRESSION_STEPS,
-    RuntimeModule, debug_pid, debug_thread_id, validate_image_current, validate_public_stop,
-    validate_stopped_thread,
+    BreakpointSite, Controller, Inferior, MAX_VALUE_CHILD_PAGE_LIMIT, RuntimeModule, debug_pid,
+    debug_thread_id, validate_image_current, validate_public_stop, validate_stopped_thread,
 };
 
 impl<P: InspectionOps> Controller<P> {
@@ -226,195 +223,6 @@ impl<P: InspectionOps> Controller<P> {
         Ok(variable)
     }
 
-    pub(super) fn inspect(
-        &self,
-        stop_id: StopId,
-        pid: Pid,
-        frame: StackFrameId,
-        expression: &ValueExpression,
-        limits: crate::InspectionLimits,
-    ) -> Result<InspectedValue> {
-        validate_inspection_limits(limits)?;
-        let mut budget = InspectionBudget::new(limits);
-        self.inspect_with_budget(stop_id, pid, frame, expression, &mut budget)
-    }
-
-    pub(super) fn inspect_with_budget(
-        &self,
-        stop_id: StopId,
-        pid: Pid,
-        frame: StackFrameId,
-        expression: &ValueExpression,
-        budget: &mut InspectionBudget,
-    ) -> Result<InspectedValue> {
-        self.inspect_with_root(stop_id, pid, frame, expression, budget)
-            .map(|(value, _)| value)
-    }
-
-    /// Inspects an expression and reports which data object its longest
-    /// matching name prefix resolved to.
-    pub(super) fn inspect_with_root(
-        &self,
-        stop_id: StopId,
-        pid: Pid,
-        frame: StackFrameId,
-        expression: &ValueExpression,
-        budget: &mut InspectionBudget,
-    ) -> Result<(InspectedValue, ExpressionRoot)> {
-        validate_value_expression(expression)?;
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
-        let resolved = self.resolve_frame(inferior, pid, frame)?;
-        self.inspect_in_frame(inferior, stop_id, pid, &resolved, expression, budget)
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "longest-prefix local/global lookup shares one validated stopped runtime"
-    )]
-    fn inspect_in_frame(
-        &self,
-        inferior: &Inferior,
-        stop_id: StopId,
-        pid: Pid,
-        resolved: &ResolvedFrame,
-        expression: &ValueExpression,
-        budget: &mut InspectionBudget,
-    ) -> Result<(InspectedValue, ExpressionRoot)> {
-        let frame = resolved.id;
-        let scope = self.frame_scope(resolved);
-        let mut runtime =
-            scope.map(|(module, ..)| self.frame_runtime(inferior, pid, resolved, module));
-
-        let named_prefix = expression
-            .steps
-            .iter()
-            .take_while(|step| matches!(step, ValuePathStep::Named(_)))
-            .count();
-        for root_components in (1..=named_prefix).rev() {
-            let root = expression.steps[..root_components]
-                .iter()
-                .map(|step| match step {
-                    ValuePathStep::Named(name) => name.as_str(),
-                    _ => unreachable!("root prefix contains only names"),
-                })
-                .collect::<Vec<_>>()
-                .join(".");
-            let selectors = &expression.steps[root_components..];
-            let local = match (scope, runtime.as_mut()) {
-                (Some((module, address, selected)), Some(runtime)) => module
-                    .variables
-                    .visible_object(address, selected, &root)
-                    .and_then(|object| {
-                        crate::debug_info::inspect_path(
-                            module.variables.as_ref(),
-                            object,
-                            selectors,
-                            Some(address),
-                            variable_context(stop_id, pid, frame, module, Some(address)),
-                            runtime,
-                            budget,
-                        )
-                    })
-                    .map(|value| {
-                        (
-                            value,
-                            ExpressionRootKind::Local {
-                                name: root.clone(),
-                                module: module.loaded.id,
-                                address,
-                                selected,
-                            },
-                        )
-                    }),
-                _ => Err(Error::VariableNotFound(root.clone())),
-            };
-            match local {
-                Ok((value, kind)) => {
-                    return Ok((
-                        value,
-                        ExpressionRoot {
-                            components: root_components,
-                            kind,
-                        },
-                    ));
-                }
-                Err(Error::VariableNotFound(_)) => {}
-                Err(error) => return Err(error),
-            }
-
-            let mut matches = Vec::new();
-            for module in self.modules.values() {
-                match module.image.global_named(&root) {
-                    Ok(global) => matches.push(GlobalVariableReference {
-                        module: module.loaded.id,
-                        image: module.loaded.image,
-                        variable: global.id,
-                    }),
-                    Err(Error::VariableNotFound(_)) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            match matches.as_slice() {
-                [] => {}
-                [global] => {
-                    return self
-                        .inspect_loaded_global_path(
-                            inferior, pid, resolved, *global, selectors, budget,
-                        )
-                        .map(|value| {
-                            (
-                                value,
-                                ExpressionRoot {
-                                    components: root_components,
-                                    kind: ExpressionRootKind::Global(*global),
-                                },
-                            )
-                        });
-                }
-                _ => {
-                    return Err(Error::AmbiguousLoadedGlobalVariable {
-                        selector: root,
-                        candidates: matches,
-                    });
-                }
-            }
-        }
-
-        Err(Error::VariableNotFound(
-            expression
-                .steps
-                .iter()
-                .filter_map(|step| match step {
-                    ValuePathStep::Named(name) => Some(name.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("."),
-        ))
-    }
-
-    pub(super) fn inspect_range(
-        &self,
-        stop_id: StopId,
-        pid: Pid,
-        frame: StackFrameId,
-        expression: &ValueExpression,
-        range: ValueIndexRange,
-        limits: crate::InspectionLimits,
-    ) -> Result<crate::ValueChildPage> {
-        validate_inspection_limits(limits)?;
-        let mut budget = InspectionBudget::new(limits);
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_range_length(range.start, range.end)?;
-        let inspected = self.inspect_with_budget(stop_id, pid, frame, expression, &mut budget)?;
-        self.range_page(stop_id, &inspected, range.start, range.end, &mut budget)
-    }
-
     /// The elements `start..end` of an inspected array or slice, by source
     /// index.
     #[expect(
@@ -430,7 +238,6 @@ impl<P: InspectionOps> Controller<P> {
         budget: &mut InspectionBudget,
     ) -> Result<crate::ValueChildPage> {
         let length = validate_range_length(start, end)?;
-        let range = ValueIndexRange { start, end };
         let type_name = inspected
             .type_info
             .as_ref()
@@ -490,27 +297,25 @@ impl<P: InspectionOps> Controller<P> {
                 ));
             }
         };
-        let relative_start = range
-            .start
+        let relative_start = start
             .checked_sub(lower_bound)
             .and_then(|index| u64::try_from(index).ok());
-        let relative_end = range
-            .end
+        let relative_end = end
             .checked_sub(lower_bound)
             .and_then(|index| u64::try_from(index).ok());
-        let (Some(offset), Some(end)) = (relative_start, relative_end) else {
+        let (Some(offset), Some(relative_end)) = (relative_start, relative_end) else {
             return Err(Error::ValueIndexOutOfBounds {
-                index: range.start,
+                index: start,
                 lower_bound,
                 count,
             });
         };
-        if offset > count || end > count {
+        if offset > count || relative_end > count {
             return Err(Error::ValueIndexOutOfBounds {
                 index: if offset > count {
-                    range.start
+                    start
                 } else {
-                    range.end.checked_sub(1).unwrap_or(range.end)
+                    end.checked_sub(1).unwrap_or(end)
                 },
                 lower_bound,
                 count,
@@ -532,42 +337,6 @@ impl<P: InspectionOps> Controller<P> {
                 offset,
                 limit: u32::try_from(length).expect("validated range length fits u32"),
             },
-            budget,
-        )
-    }
-
-    pub(super) fn inspect_loaded_global_path(
-        &self,
-        inferior: &Inferior,
-        pid: Pid,
-        frame: &ResolvedFrame,
-        global: GlobalVariableReference,
-        selectors: &[ValuePathStep],
-        budget: &mut InspectionBudget,
-    ) -> Result<InspectedValue> {
-        let module = self
-            .modules
-            .get(&global.module)
-            .ok_or(Error::ModuleNotLoaded(global.module))?;
-        if module.loaded.image != global.image {
-            return Err(Error::StaleModuleImage);
-        }
-        let context_address = global_context_address(frame, module);
-        let mut runtime = self.frame_runtime(inferior, pid, frame, module);
-        let object = module.variables.global_object(global.variable)?;
-        crate::debug_info::inspect_path(
-            module.variables.as_ref(),
-            object,
-            selectors,
-            context_address,
-            variable_context(
-                public_stop_id(inferior),
-                pid,
-                frame.id,
-                module,
-                context_address,
-            ),
-            &mut runtime,
             budget,
         )
     }
@@ -855,42 +624,6 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
             ),
         }
     }
-}
-
-pub(super) fn validate_value_expression(expression: &ValueExpression) -> Result<()> {
-    if expression.steps.is_empty()
-        || !matches!(expression.steps.first(), Some(ValuePathStep::Named(_)))
-    {
-        return Err(Error::InvalidValueExpression(
-            "an expression must name a data object".to_owned(),
-        ));
-    }
-    if expression.steps.len() > MAX_VALUE_EXPRESSION_STEPS {
-        return Err(Error::InvalidValueExpression(format!(
-            "an expression may contain at most {MAX_VALUE_EXPRESSION_STEPS} operations"
-        )));
-    }
-    if expression
-        .steps
-        .iter()
-        .any(|step| matches!(step, ValuePathStep::Named(name) if name.is_empty()))
-    {
-        return Err(Error::InvalidValueExpression(
-            "expression names must not be empty".to_owned(),
-        ));
-    }
-    if expression
-        .steps
-        .iter()
-        .filter(|step| matches!(step, ValuePathStep::Dereference))
-        .count()
-        > MAX_VALUE_EXPRESSION_DEREFERENCES
-    {
-        return Err(Error::InvalidValueExpression(format!(
-            "an expression may contain at most {MAX_VALUE_EXPRESSION_DEREFERENCES} explicit dereferences"
-        )));
-    }
-    Ok(())
 }
 
 /// The number of elements `start..end` holds, at most a page.

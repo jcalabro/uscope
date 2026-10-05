@@ -135,6 +135,62 @@ impl Expression {
         }
     }
 
+    /// A data object's name as an expression, quoted when it holds other
+    /// characters. `None` only past the language's limits.
+    #[must_use]
+    pub fn name(name: &str) -> Option<Self> {
+        Self::parse(&print::name_text(name)).ok()
+    }
+
+    /// The member `name` of this expression's value.
+    #[must_use]
+    pub fn member(&self, name: &str) -> Option<Self> {
+        Self::parse(&format!("({self}).{}", print::name_text(name))).ok()
+    }
+
+    /// The element at `indices`, one per dimension, of this expression's
+    /// array, slice, or pointer.
+    #[must_use]
+    pub fn indexed(&self, indices: &[i128]) -> Option<Self> {
+        let indices = indices.iter().fold(String::new(), |mut text, index| {
+            use std::fmt::Write as _;
+            let _ = write!(text, "[{index}]");
+            text
+        });
+        Self::parse(&format!("({self}){indices}")).ok()
+    }
+
+    /// What this expression's pointer or reference points at.
+    #[must_use]
+    pub fn dereferenced(&self) -> Option<Self> {
+        Self::parse(&format!("*({self})")).ok()
+    }
+
+    /// The elements `start..end` of this expression's array or slice.
+    #[must_use]
+    pub fn range(&self, start: i128, end: i128) -> Option<Self> {
+        Self::parse(&format!("({self})[{start}..{end}]")).ok()
+    }
+
+    /// Whether the expression is one name, such as a variable's.
+    #[must_use]
+    pub fn is_name(&self) -> bool {
+        self.tree()
+            .is_some_and(|tree| matches!(tree.kind(tree.root()), ast::NodeKind::Name(_)))
+    }
+
+    /// The array or slice a range expression ranges over.
+    #[must_use]
+    pub fn range_base(&self) -> Option<Self> {
+        let tree = self.tree()?;
+        match tree.kind(tree.root()) {
+            ast::NodeKind::Range { base, .. } => {
+                Self::parse(tree.span(*base).text(self.text())).ok()
+            }
+            _ => None,
+        }
+    }
+
     /// The text of an assignment's target, when the expression assigns.
     #[must_use]
     pub fn assignment_target(&self) -> Option<&str> {

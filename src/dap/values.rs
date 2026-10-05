@@ -10,8 +10,7 @@ use std::fmt::Write as _;
 use serde_json::{Map, Value, json};
 use uscope::{
     IntegerValue, RegisterValue, ScalarValue, StopContext, TypeInfo, ValueChild,
-    ValueChildRelationship, ValueChildren, ValueExpression, ValuePathStep, VariableState,
-    VariableValue, VariableValueSource,
+    ValueChildRelationship, ValueChildren, VariableState, VariableValue, VariableValueSource,
 };
 
 use super::handles::{Exhausted, References, Variables};
@@ -33,7 +32,7 @@ pub struct Options {
 pub struct Item<'a> {
     pub name: &'a str,
     /// How to evaluate the value again, when it can be.
-    pub path: Option<ValueExpression>,
+    pub path: Option<uscope::Expression>,
     pub type_info: Option<&'a TypeInfo>,
     pub state: &'a VariableState,
 }
@@ -66,9 +65,9 @@ pub fn variable(
                 .into(),
         );
     }
-    let path = item.path.filter(nameable);
+    let path = item.path;
     let named = path.is_some();
-    let whole = path.as_ref().is_some_and(|path| path.steps.len() == 1);
+    let whole = path.as_ref().is_some_and(uscope::Expression::is_name);
     if let Some(path) = &path {
         variable.insert("evaluateName".to_owned(), path.to_string().into());
     }
@@ -222,37 +221,17 @@ pub const fn shown(child: &ValueChild) -> bool {
 
 /// How to evaluate a child again, when its parent can be and the child has
 /// a name.
-pub fn child_path(parent: Option<&ValueExpression>, child: &ValueChild) -> Option<ValueExpression> {
+pub fn child_path(
+    parent: Option<&uscope::Expression>,
+    child: &ValueChild,
+) -> Option<uscope::Expression> {
     let parent = parent?;
-    let steps = match &child.relationship {
-        ValueChildRelationship::ArrayElement { indices, .. } => indices
-            .iter()
-            .map(|index| ValuePathStep::Index(*index))
-            .collect(),
-        ValueChildRelationship::SliceElement { index } => {
-            vec![ValuePathStep::Index(i128::from(*index))]
-        }
-        ValueChildRelationship::Member(member) => {
-            vec![ValuePathStep::Named(member.name.as_deref()?.to_owned())]
-        }
-        _ => return None,
-    };
-    Some(extended(parent, steps))
-}
-
-/// Appends steps to an expression.
-pub fn extended(parent: &ValueExpression, steps: Vec<ValuePathStep>) -> ValueExpression {
-    ValueExpression {
-        steps: parent.steps.iter().cloned().chain(steps).collect(),
+    match &child.relationship {
+        ValueChildRelationship::ArrayElement { indices, .. } => parent.indexed(indices),
+        ValueChildRelationship::SliceElement { index } => parent.indexed(&[i128::from(*index)]),
+        ValueChildRelationship::Member(member) => parent.member(member.name.as_deref()?),
+        _ => None,
     }
-}
-
-/// Whether an expression's text parses back to the same expression; names
-/// that the expression syntax cannot spell, such as a member name holding
-/// a dot or a space, have no evaluable text.
-fn nameable(path: &ValueExpression) -> bool {
-    uscope::parse_value_expression(&path.to_string())
-        .is_ok_and(|parsed| parsed.range.is_none() && parsed.expression == *path)
 }
 
 /// An integer value in hexadecimal, in the width of its type's size.
@@ -287,30 +266,6 @@ fn hex(byte_size: Option<u64>, state: &VariableState) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn path(text: &str) -> ValueExpression {
-        uscope::parse_value_expression(text)
-            .expect("valid expression")
-            .expression
-    }
-
-    #[test]
-    fn only_expressions_that_parse_back_are_evaluable() {
-        assert!(nameable(&path("a.b[3]")));
-        assert!(nameable(&path("(*p).x")));
-        assert!(nameable(&extended(
-            &path("v"),
-            vec![ValuePathStep::Index(-2)]
-        )));
-        assert!(!nameable(&extended(
-            &path("v"),
-            vec![ValuePathStep::Named("a.b".to_owned())]
-        )));
-        assert!(!nameable(&extended(
-            &path("v"),
-            vec![ValuePathStep::Named("has space".to_owned())]
-        )));
-    }
 
     #[test]
     fn hexadecimal_integers_use_their_types_width() {

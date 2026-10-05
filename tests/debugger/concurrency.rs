@@ -516,11 +516,7 @@ async fn watchpoints_are_armed_and_disarmed_while_running() {
     let stale = scenario
         .operation(
             "resolve the flag",
-            handle.resolve_watch_target(
-                uscope::parse_value_expression("hot_stop")
-                    .expect("path")
-                    .expression,
-            ),
+            handle.resolve_watch_target(&uscope::Expression::parse("hot_stop").expect("path")),
         )
         .await;
 

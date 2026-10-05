@@ -45,6 +45,8 @@ use super::{
 pub(super) struct StopObject {
     module: ModuleId,
     key: ObjectKey,
+    /// Whether it is a local or parameter of the frame.
+    local: bool,
 }
 
 /// A structural step planned in one module's image.
@@ -247,6 +249,7 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
                         object: StopObject {
                             module: module.loaded.id,
                             key,
+                            local: true,
                         },
                         ty: module
                             .variables
@@ -296,6 +299,7 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
                     object: StopObject {
                         module: module.loaded.id,
                         key,
+                        local: false,
                     },
                     ty: module
                         .variables
@@ -992,6 +996,65 @@ impl<P: InspectionOps> Controller<P> {
             Err(Failure::Expression(error)) => Err(Error::Expression(error)),
             Err(Failure::Debugger(error)) => Err(error),
         }
+    }
+
+    /// Resolves an expression at a stop to the memory it occupies and the
+    /// lifetime of that storage: the lifetime of the object it is part of,
+    /// or none when it was reached through a pointer.
+    pub(super) fn resolve_watch_target(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        frame: StackFrameId,
+        expression: &Expression,
+    ) -> Result<crate::WatchTarget> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_stopped_thread(inferior, pid)?;
+        validate_image_current(inferior)?;
+        let resolved = self.resolve_frame(inferior, pid, frame)?;
+        let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+        let program = bind(expression, &scope, Mode::Read).map_err(Error::Expression)?;
+        let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
+        let mut machine = StopMachine {
+            frame: &scope,
+            budget: &mut budget,
+        };
+        let value = match run(&program, &mut machine) {
+            Ok(Outcome::Value { value, .. }) => value,
+            Ok(_) => {
+                return Err(Error::WatchTargetUnsupported(
+                    "a range cannot be watched; watch one element".into(),
+                ));
+            }
+            Err(Failure::Expression(error)) => return Err(Error::Expression(error)),
+            Err(Failure::Debugger(error)) => return Err(error),
+        };
+        let (address, byte_size) = super::watchpoints::watchable_storage(&value)?;
+        let (watch_scope, evidence) = match program.root_object() {
+            Some(object) => {
+                let module = self
+                    .modules
+                    .get(&object.module)
+                    .ok_or(Error::ModuleNotLoaded(object.module))?;
+                let storage = module.variables.object_storage(object.key);
+                let local = object
+                    .local
+                    .then(|| scope.code.map(|(_, address, _)| address))
+                    .flatten();
+                self.root_watch_scope(inferior, pid, frame, object.module, storage, local)?
+            }
+            None => (crate::WatchScope::Location, None),
+        };
+        Ok(crate::WatchTarget {
+            stop_id,
+            expression: expression.clone(),
+            address,
+            byte_size,
+            type_info: value.type_info,
+            scope: watch_scope,
+            frame: evidence,
+        })
     }
 
     /// The type an expression has in one frame, reading no memory.

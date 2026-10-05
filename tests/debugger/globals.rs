@@ -14,7 +14,7 @@ async fn structural_inspection_preserves_dots_in_global_roots_before_selecting_m
             "inspect dotted global root",
             scenario
                 .handle()
-                .inspect(value_expression(&["main", "globalRecord"])),
+                .inspect(&value_expression(&["main", "globalRecord"])),
         )
         .await;
     record_page(&scenario, &root.state, 2, fixture).await;
@@ -22,7 +22,7 @@ async fn structural_inspection_preserves_dots_in_global_roots_before_selecting_m
     let member = scenario
         .operation(
             "inspect member below dotted global root",
-            scenario.handle().inspect(value_expression(&[
+            scenario.handle().inspect(&value_expression(&[
                 "main",
                 "globalRecord",
                 "inner",

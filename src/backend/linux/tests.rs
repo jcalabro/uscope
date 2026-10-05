@@ -6,8 +6,6 @@ use crate::MemoryReadCompletion;
 use crate::MemoryReadUnavailableReason;
 use crate::Path;
 use crate::PresentedFrame;
-use crate::ValueExpression;
-use crate::ValuePathStep;
 use crate::VariableQuery;
 use crate::WatchpointHit;
 use crate::WatchpointSpec;
@@ -26,62 +24,11 @@ use tokio::sync::broadcast;
 
 use super::classify::{WatchStatus, classify_stop_evidence};
 use super::frames::{default_inline_visible_count, frame_lookup_address};
-use super::inspection::validate_value_expression;
 use super::memory::{MemoryAccessError, read_logical_memory_with};
 use super::modules::{ModuleMapping, parse_maps};
 use super::native::{InspectionOps, LinuxTraceOps, interrupt_outcome, queued_trap_in_status};
 use super::*;
 use crate::{AddressRange, ImageAddress};
-
-#[test]
-fn value_expression_validation_bounds_untrusted_request_structure() {
-    let valid = ValueExpression {
-        steps: std::iter::once(ValuePathStep::Named("root".to_owned()))
-            .chain(std::iter::repeat_n(
-                ValuePathStep::Dereference,
-                MAX_VALUE_EXPRESSION_DEREFERENCES,
-            ))
-            .collect::<Vec<_>>()
-            .into(),
-    };
-    validate_value_expression(&valid).expect("bounded dereferences");
-    let valid = ValueExpression {
-        steps: vec![
-            ValuePathStep::Named("root".to_owned()),
-            ValuePathStep::Named("member".to_owned()),
-            ValuePathStep::Index(1),
-        ]
-        .into(),
-    };
-    validate_value_expression(&valid).expect("bounded expression");
-
-    for expression in [
-        ValueExpression {
-            steps: Arc::new([]),
-        },
-        ValueExpression {
-            steps: vec![
-                ValuePathStep::Named("root".to_owned()),
-                ValuePathStep::Named(String::new()),
-            ]
-            .into(),
-        },
-        ValueExpression {
-            steps: (0..=MAX_VALUE_EXPRESSION_STEPS)
-                .map(|index| ValuePathStep::Named(format!("member{index}")))
-                .collect::<Vec<_>>()
-                .into(),
-        },
-        ValueExpression {
-            steps: vec![ValuePathStep::Index(0)].into(),
-        },
-    ] {
-        assert!(matches!(
-            validate_value_expression(&expression),
-            Err(Error::InvalidValueExpression(_))
-        ));
-    }
-}
 
 #[test]
 fn maps_parser_preserves_distinct_loads_and_rejects_corruption() {
@@ -572,27 +519,12 @@ impl VariableInfo for UnusedVariableInfo {
         panic!("unexpected object type lookup")
     }
 
-    fn type_info(&self, _id: crate::TypeId) -> std::result::Result<crate::TypeInfo, Arc<str>> {
-        panic!("unexpected type lookup")
-    }
-
     fn plan_step(
         &self,
         _from: crate::TypeId,
         _step: crate::debug_info::Step<'_>,
     ) -> Result<crate::debug_info::PlannedStep> {
         panic!("unexpected step planning")
-    }
-
-    fn inspect_object(
-        &self,
-        _object: crate::debug_info::ObjectKey,
-        _address: Option<ImageAddress>,
-        _context: VariableContext,
-        _runtime: &mut dyn VariableRuntime,
-        _budget: &mut InspectionBudget,
-    ) -> Result<crate::Variable> {
-        panic!("unexpected object inspection")
     }
 
     fn locate(
@@ -637,20 +569,11 @@ impl VariableInfo for UnusedVariableInfo {
         panic!("unexpected materialization")
     }
 
-    fn local_storage(
+    fn object_storage(
         &self,
-        _address: ImageAddress,
-        _selected: Option<crate::CodeInstanceId>,
-        _root: &str,
-    ) -> Result<crate::debug_info::ObjectStorage> {
-        panic!("unexpected local storage lookup")
-    }
-
-    fn global_storage(
-        &self,
-        _id: crate::GlobalVariableId,
-    ) -> Result<crate::debug_info::ObjectStorage> {
-        panic!("unexpected global storage lookup")
+        _object: crate::debug_info::ObjectKey,
+    ) -> crate::debug_info::ObjectStorage {
+        panic!("unexpected storage lookup")
     }
 
     fn inspect_global(

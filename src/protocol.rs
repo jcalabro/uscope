@@ -444,7 +444,7 @@ pub struct FrameScopeEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchTarget {
     pub(crate) stop_id: StopId,
-    pub(crate) expression: crate::ValueExpression,
+    pub(crate) expression: crate::Expression,
     pub(crate) address: VirtualAddress,
     pub(crate) byte_size: u64,
     pub(crate) type_info: Option<crate::TypeInfo>,
@@ -461,7 +461,7 @@ impl WatchTarget {
 
     /// Returns the expression that named the object.
     #[must_use]
-    pub const fn expression(&self) -> &crate::ValueExpression {
+    pub const fn expression(&self) -> &crate::Expression {
         &self.expression
     }
 
@@ -512,7 +512,7 @@ pub struct Watchpoint {
     /// The accesses it reports.
     pub access: WatchAccess,
     /// The expression that named the object, absent for explicit locations.
-    pub expression: Option<crate::ValueExpression>,
+    pub expression: Option<crate::Expression>,
     /// The first watched byte.
     pub address: VirtualAddress,
     /// The number of watched bytes.
@@ -1160,7 +1160,7 @@ pub enum Request {
         reply: Reply<Arc<[Breakpoint]>>,
     },
     ResolveWatchTarget {
-        expression: crate::ValueExpression,
+        expression: crate::Expression,
         stop_id: StopId,
         thread_id: ThreadId,
         frame: StackFrameId,
@@ -1314,23 +1314,6 @@ pub enum Request {
         frame: StackFrameId,
         reply: Reply<crate::TypeInfo>,
     },
-    Inspect {
-        expression: crate::ValueExpression,
-        limits: crate::InspectionLimits,
-        stop_id: StopId,
-        thread_id: ThreadId,
-        frame: StackFrameId,
-        reply: Reply<crate::InspectedValue>,
-    },
-    InspectRange {
-        expression: crate::ValueExpression,
-        range: crate::ValueIndexRange,
-        limits: crate::InspectionLimits,
-        stop_id: StopId,
-        thread_id: ThreadId,
-        frame: StackFrameId,
-        reply: Reply<ValueChildPage>,
-    },
     Dereference {
         reference: DereferenceReference,
         limits: crate::InspectionLimits,
@@ -1449,8 +1432,6 @@ impl Request {
             Self::Variables { .. } => "variables".to_owned(),
             Self::Evaluate { expression, .. } => format!("evaluate `{}`", expression.text()),
             Self::ExpressionType { expression, .. } => format!("type of `{}`", expression.text()),
-            Self::Inspect { .. } => "inspect".to_owned(),
-            Self::InspectRange { .. } => "inspect range".to_owned(),
             Self::Dereference { .. } => "dereference".to_owned(),
             Self::ValueChildren { .. } => "value children".to_owned(),
             Self::Globals { .. } => "globals".to_owned(),

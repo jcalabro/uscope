@@ -587,31 +587,8 @@ impl VariableInfo for DwarfVariableInfo {
         }
     }
 
-    fn type_info(&self, id: TypeId) -> std::result::Result<TypeInfo, Arc<str>> {
-        Self::type_info(self, id).cloned()
-    }
-
     fn plan_step(&self, from: TypeId, step: Step<'_>) -> Result<PlannedStep> {
         Self::plan_step(self, from, step)
-    }
-
-    fn inspect_object(
-        &self,
-        object: ObjectKey,
-        address: Option<ImageAddress>,
-        context: VariableContext,
-        runtime: &mut dyn VariableRuntime,
-        budget: &mut InspectionBudget,
-    ) -> Result<Variable> {
-        let mut frame_base = FrameBaseCache::Empty;
-        self.inspect_data_object(
-            &self.objects[object.0],
-            address,
-            context,
-            runtime,
-            &mut frame_base,
-            budget,
-        )
     }
 
     fn locate(
@@ -726,22 +703,8 @@ impl VariableInfo for DwarfVariableInfo {
         )
     }
 
-    fn local_storage(
-        &self,
-        address: ImageAddress,
-        selected: Option<CodeInstanceId>,
-        root: &str,
-    ) -> Result<ObjectStorage> {
-        Ok(self.object_storage(&self.objects[self.visible_object(address, selected, root)?]))
-    }
-
-    fn global_storage(&self, id: GlobalVariableId) -> Result<ObjectStorage> {
-        let global_index = id.index();
-        let object_index = *self
-            .globals
-            .get(global_index)
-            .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
-        Ok(self.object_storage(&self.objects[object_index]))
+    fn object_storage(&self, object: ObjectKey) -> ObjectStorage {
+        self.object_storage(&self.objects[object.0])
     }
 
     fn inspect_global(

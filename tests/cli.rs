@@ -2414,7 +2414,7 @@ fn watch_command_failures_explain_themselves() {
         ),
         (
             &["break scalar_stores", "run", "watch watch_array[0..2]"][..],
-            "cannot watch a range",
+            "a range cannot be watched; watch one element",
         ),
         (
             &["break scalar_stores", "run", "watch 0x1000:many"][..],

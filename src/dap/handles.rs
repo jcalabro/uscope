@@ -9,8 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use uscope::{
-    DereferenceReference, StackFrameId, StopContext, ThreadId, ValueChildrenReference,
-    ValueExpression, ValueIndexRange, ValuePathStep, VariableKind,
+    DereferenceReference, StackFrameId, StopContext, ThreadId, ValueChildrenReference, VariableKind,
 };
 
 /// The largest reference DAP clients accept: references are 32-bit signed.
@@ -36,20 +35,19 @@ pub enum Variables {
     Children {
         context: StopContext,
         reference: Arc<ValueChildrenReference>,
-        path: Option<ValueExpression>,
+        path: Option<uscope::Expression>,
     },
     /// What a pointer or reference refers to.
     Pointee {
         context: StopContext,
         reference: DereferenceReference,
         name: Arc<str>,
-        path: Option<ValueExpression>,
+        path: Option<uscope::Expression>,
     },
     /// The elements of an evaluated range, such as `values[2..6]`.
     Range {
         context: StopContext,
-        expression: ValueExpression,
-        range: ValueIndexRange,
+        expression: uscope::Expression,
     },
 }
 
@@ -76,7 +74,7 @@ pub struct References {
     variables: HashMap<i64, Variables>,
     /// The expression of each named row of a variables list, by the list's
     /// reference and the row's name.
-    paths: HashMap<(i64, String), (StopContext, ValueExpression)>,
+    paths: HashMap<(i64, String), (StopContext, uscope::Expression)>,
 }
 
 /// The session ran out of references, which ends it rather than reusing one.
@@ -145,61 +143,55 @@ impl References {
         list: i64,
         name: String,
         context: StopContext,
-        path: ValueExpression,
+        path: uscope::Expression,
     ) {
         self.paths.insert((list, name), (context, path));
     }
 
     /// The expression of a row of a variables list, with its frame: as it
     /// was listed, or else as the list's kind names its rows.
-    pub fn child_path(&self, list: i64, name: &str) -> Option<(StopContext, ValueExpression)> {
+    pub fn child_path(&self, list: i64, name: &str) -> Option<(StopContext, uscope::Expression)> {
         if let Some(recorded) = self.paths.get(&(list, name.to_owned())) {
             return Some(recorded.clone());
         }
-        let extended = |parent: &ValueExpression, steps: Vec<ValuePathStep>| ValueExpression {
-            steps: parent.steps.iter().cloned().chain(steps).collect(),
-        };
-        let row = |name: &str| -> Option<Vec<ValuePathStep>> {
+        // A row is named `[i]`, `[i][j]`, or by its member's name.
+        let row = |parent: &uscope::Expression, name: &str| {
             if name.starts_with('[') {
-                name.strip_prefix('[')?
+                let indices: Option<Vec<i128>> = name
+                    .strip_prefix('[')?
                     .strip_suffix(']')?
                     .split("][")
-                    .map(|index| index.parse().ok().map(ValuePathStep::Index))
-                    .collect()
+                    .map(|index| index.parse().ok())
+                    .collect();
+                parent.indexed(&indices?)
             } else {
-                Some(vec![ValuePathStep::Named(name.to_owned())])
+                parent.member(name)
             }
         };
         match self.variables.get(&list)? {
-            Variables::Scope { context, .. } => Some((
-                *context,
-                ValueExpression {
-                    steps: [ValuePathStep::Named(name.to_owned())].into(),
-                },
-            )),
+            Variables::Scope { context, .. } => Some((*context, uscope::Expression::name(name)?)),
             Variables::Children {
                 context,
                 path: Some(path),
                 ..
-            } => Some((*context, extended(path, row(name)?))),
+            } => Some((*context, row(path, name)?)),
             Variables::Pointee {
                 context,
                 name: owner,
                 path: Some(path),
                 ..
             } => {
-                let pointee = extended(path, vec![ValuePathStep::Dereference]);
+                let pointee = path.dereferenced()?;
                 if name == format!("*{owner}") {
                     Some((*context, pointee))
                 } else {
-                    Some((*context, extended(&pointee, row(name)?)))
+                    Some((*context, row(&pointee, name)?))
                 }
             }
             Variables::Range {
                 context,
                 expression,
-                ..
-            } => Some((*context, extended(expression, row(name)?))),
+            } => Some((*context, row(&expression.range_base()?, name)?)),
             _ => None,
         }
     }
