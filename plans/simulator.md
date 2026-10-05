@@ -1,6 +1,6 @@
 # Deterministic Simulation
 
-Status: P0 through P4 done, 2026-10-05 (section 17). P5 is design.
+Status: P0 through P5 done, 2026-10-05 (section 17).
 
 uscope's hardest bugs come from orderings: a thread leaves its stop between
 two ptrace requests, a fork event races a pause, SIGKILL lands while a step
@@ -245,8 +245,8 @@ unreproducible sweep failure.
 - **One API.** `Choices::below(stream, n)`, `chance(stream, per_mille)`, and
   `pick(stream, &[T])`. Draws are integers only: no floats and no hashing.
 - **Recorded draws.** In a replay, every draw can be logged with its stream
-  and the value chosen. A later phase stores draws as a tape, which makes
-  shrinking possible (section 15).
+  and the value chosen. Draws are not stored as a tape for shrinking; P5
+  decided against it (section 15).
 
 **Swarm configuration.** Before the session starts, the `Swarm` stream
 picks the run's shape. Swarm testing (Groce et al.) finds more bugs than
@@ -905,7 +905,7 @@ running on to its own end.
 | Command | What it does |
 |---|---|
 | `just` | The gate: the golden build and its checks; the kernel and CPU conformance tests; 1,000 fixed seeds over every program and variant (about 1.6 s); a determinism double-run of the first 32 seeds; the coverage-mark check; and ten sabotage tests showing the oracles catch lost trap writes, a deaf waiter, a thread resumed behind the controller's back, a trap the CPU skips, misreported return addresses, single steps that run on, misreported stack values (twice: variables and breakpoint conditions), debug-register writes that reach only a copy, and watch traps that never come. |
-| `just sim [SECONDS]` | A sweep: random seeds on every core for SECONDS (default 30), inside `scripts/contained.sh`. Failures are grouped by kind and check; each group keeps its smallest seed's report. |
+| `just sim [SECONDS]` | A sweep: random seeds on every core for SECONDS (default 30), inside `scripts/contained.sh`. Failures are grouped by their signatures (section 15); each group keeps its shortest run's report. |
 | `just sim-seed SEED` | Replays one seed and prints its whole trace, also written to `target/sim/SEED/trace.log`. `--fingerprint` checks the replay against a report's fingerprint. |
 | `just sim-seed SEED --at STEP` | Replays to STEP and prints the state there: each thread's state, report, pending signals, and `rip`; the waiter; the controller's queue; and the client. |
 
@@ -926,11 +926,30 @@ running on to its own end.
   on 24. A one-minute sweep runs half a million sessions. In P4, with six
   programs, attach, watches, and conditions, a sweep on 24 threads runs
   about 6,300 sessions per second: 380,000 a minute.
-- **Where sweeps run.** There is no CI today. Sweeps run locally, before
-  merging any lifecycle, run-control, or concurrency change, alongside
-  `just stress`.
+- **Where sweeps run.** There is no CI today. Sweeps run locally, in the
+  routine below.
 
-## 15. Failures: reports, replay, and shrinking
+**The routine**, as built in P5:
+
+1. Before every commit, `just all` lints, runs the suite and `just
+   stress`, and sweeps for 30 seconds, about 180,000 sessions.
+2. Before merging a lifecycle, run-control, attach, or concurrency change,
+   or a change to the model or the oracles, sweep for ten minutes: `just
+   sim 600`, about 3.5 million sessions.
+3. A failure's kind decides the response (section 15). Replay the shortest
+   run of its group with `just sim-seed SEED --fingerprint F`, which
+   checks that the run is the one the sweep saw, and print the state at an
+   action with `--at STEP`. The trace includes the controller's flight
+   recording.
+4. A debugger failure gets a test outside the simulator, written to fail
+   first, before the fix. Afterwards the seed replays cleanly, and a sweep
+   of the same length finds nothing more.
+5. An oracle found wrong is corrected in a change of its own that says
+   why, with a unit test; it is never loosened to make a run pass.
+
+The rules for working on the simulator itself are in AGENTS.md.
+
+## 15. Failures: reports, replay, and grouping
 
 **Three kinds of failure**, reported differently because they mean
 different things:
@@ -972,12 +991,35 @@ bug a seed finds becomes a red-first test in the ordinary suites before it
 is fixed, as AGENTS.md requires. Seeds themselves are never kept as
 regression tests.
 
-**Shrinking (P5).** In tape mode, a run's draws are stored as a sequence
-of integers, and an exhausted tape draws zero. Zero always means the
-simplest option: the fewest threads, no faults, the first enabled action.
-A shrinker deletes and zeroes stretches of the tape. It keeps each change
-that still fails the same oracle at the same site. The result is a short
-trace a person can read in one sitting.
+**Grouping.** A sweep groups failures by their signatures: the kind, the
+check, and the message with its numbers, and any dump of a value from the
+first one on, left out (`Failure::signature`). Runs that meet one bug
+differ in thread ids, addresses, and counts, not in the words around them,
+so they share a group; two bugs that trip one oracle usually differ in
+those words, and get a group each. Each group reports its count and its
+shortest run, the fewest actions, with the smallest seed breaking ties.
+
+**No shrinking.** The design once planned a tape mode, storing a run's
+draws so that a shrinker could delete and zero stretches of them while the
+run still failed. P5 decided against it, on the evidence of P1 to P4:
+
+- None of the 27 debugger bugs and one oracle error those phases found
+  needed it. Each report names the oracle, the action, and both sides of
+  the disagreement; the cause was always within a few dozen lines of the
+  trace's end; and `--at STEP` shows the whole state anywhere. The work
+  was deciding whether the debugger, the oracle, or the model was wrong,
+  which a shorter trace does not help with.
+- It costs a rule every later change must keep: each random choice must
+  make zero its simplest option. Breaking that rule fails silently, the
+  shrinker merely shrinking worse. It adds a second way to replay a run,
+  which needs its own determinism checks, and a definition of "the same
+  failure" more exact than a signature.
+- Most of its benefit comes free: a sweep meets a common failure many
+  times, and keeps the shortest. To shorten one further, sweep again
+  pinned to its program, variant, and faults.
+
+Should failures someday become hard to read, there will be real examples
+to design a shrinker around.
 
 ## 16. Production changes (P0)
 
@@ -1342,16 +1384,20 @@ the fixed seeds, the gate and `just stress` pass, and of 10.9 million
 swept sessions the first 7.5 million found the one oracle error above and
 the 3.4 million after its correction found nothing.
 
-**P5: Shrinking and routine.**
+**P5: Grouping and routine.** Done on 2026-10-05.
 
-- Tape mode and the shrinker.
-- Grouping of failures in sweep summaries.
-- A documented routine for pre-merge sweeps.
-- AGENTS.md rules for working on the simulator, in a section of its own:
-  - the determinism contract;
-  - rules need probes;
-  - never loosen an oracle;
-  - model gaps are not debugger bugs.
+- A sweep groups failures by their signatures rather than by oracle
+  alone, so two bugs that trip one oracle are not merged, and each group
+  keeps its shortest run rather than its smallest seed (section 15).
+- `just all` runs lint, the suite, `just stress`, and a 30-second sweep
+  before every commit, and the routine for longer sweeps is written down
+  (section 14).
+- AGENTS.md has a section of its own for the simulator: the determinism
+  contract, rules need probes, never loosen an oracle, what each kind of
+  failure calls for, the routine, and the golden programs.
+
+Departure from the design: tape mode and the shrinker were dropped, for
+the reasons section 15 records.
 
 ## 18. Open questions
 
@@ -1396,7 +1442,7 @@ Decided on 2026-10-04: the simulator is in-crate, behind the `sim` feature
   finds ordering bugs of small depth with known probability.
 - **Preemption point:** a `SimTrace` call at which running threads may
   advance before the call takes effect.
+- **Signature:** what failures with one cause share, by which a sweep
+  groups them (section 15).
 - **Swarm configuration:** the per-seed choice of which features and faults
   are active, and how intensely.
-- **Tape:** the recorded sequence of a run's random draws, which can be
-  replayed or shrunk.
