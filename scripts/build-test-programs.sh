@@ -637,6 +637,16 @@ require_dwarf_operation "$output_dir/variables-static-clang-o2" DW_OP_addrx
 build_fixture gcc "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-gcc-nopie" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie
 require_dwarf_operation "$output_dir/variables-static-gcc-nopie" 'DW_OP_addr:'
+for compiler in gcc clang; do
+    for optimization in o0 o2; do
+        build_c_fixture_directory "$compiler" "$c_fixtures_dir/expressions" \
+            "$output_dir/expressions-c-$compiler-$optimization-pie" \
+            "-${optimization^^}" -g3 -gdwarf-5 -fPIE -pie
+        build_c_fixture_directory "$compiler" "$c_fixtures_dir/expressions" \
+            "$output_dir/expressions-c-$compiler-$optimization-nopie" \
+            "-${optimization^^}" -g3 -gdwarf-5 -fno-pie -no-pie
+    done
+done
 build_c_fixture_directory gcc "$c_fixtures_dir/same-names" "$output_dir/same-names" \
     -O0 -g3 -gdwarf-5 -fPIE -pie
 build_c_fixture_directory gcc "$c_fixtures_dir/globals" "$output_dir/globals-c-gcc-o0" \

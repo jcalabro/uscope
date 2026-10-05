@@ -617,6 +617,16 @@ impl VariableInfo for UnusedVariableInfo {
         panic!("unexpected step")
     }
 
+    fn load(
+        &self,
+        _at: &crate::debug_info::Located,
+        _context: VariableContext,
+        _runtime: &mut dyn VariableRuntime,
+        _budget: &mut InspectionBudget,
+    ) -> Result<std::result::Result<crate::VariableValue, crate::VariableState>> {
+        panic!("unexpected load")
+    }
+
     fn materialize(
         &self,
         _at: &crate::debug_info::Located,

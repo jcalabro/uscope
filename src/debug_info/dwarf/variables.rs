@@ -677,6 +677,25 @@ impl VariableInfo for DwarfVariableInfo {
         }
     }
 
+    fn load(
+        &self,
+        at: &Located,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<std::result::Result<crate::VariableValue, VariableState>> {
+        match self.decode_state(
+            at.ty,
+            &Self::restored_storage(&at.storage),
+            context,
+            runtime,
+            budget,
+        )? {
+            VariableState::Available { value, .. } => Ok(Ok(value)),
+            state => Ok(Err(state)),
+        }
+    }
+
     fn materialize(
         &self,
         at: &Located,

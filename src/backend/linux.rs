@@ -62,6 +62,7 @@ mod core_dump;
 mod core_files;
 mod debug_registers;
 mod disassembly;
+mod evaluation;
 mod frames;
 mod glibc_tls;
 mod inspection;
@@ -1357,6 +1358,33 @@ impl<P: InspectionOps> Controller<P> {
                     debug_pid(thread_id)
                         .and_then(|pid| self.variables(stop_id, pid, frame, &query, limits)),
                 );
+            }
+            Request::Evaluate {
+                expression,
+                mode,
+                limits,
+                stop_id,
+                thread_id,
+                frame,
+                reply,
+            } => {
+                let _ =
+                    reply.send(debug_pid(thread_id).and_then(|pid| {
+                        self.evaluate(stop_id, pid, frame, &expression, mode, limits)
+                    }));
+            }
+            Request::ExpressionType {
+                expression,
+                stop_id,
+                thread_id,
+                frame,
+                reply,
+            } => {
+                let _ =
+                    reply
+                        .send(debug_pid(thread_id).and_then(|pid| {
+                            self.expression_type(stop_id, pid, frame, &expression)
+                        }));
             }
             Request::Inspect {
                 expression,

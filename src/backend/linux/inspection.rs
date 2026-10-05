@@ -725,7 +725,7 @@ impl<P: InspectionOps> Controller<P> {
     }
 }
 
-fn variable_context(
+pub(super) fn variable_context(
     stop_id: StopId,
     pid: Pid,
     frame: StackFrameId,
@@ -754,7 +754,10 @@ fn public_stop_id(inferior: &Inferior) -> StopId {
 /// The instruction context that selects a global's range-gated location
 /// entries. A frame executing another module gives none, so the provider
 /// refuses to guess rather than resolving against an unrelated address.
-fn global_context_address(frame: &ResolvedFrame, module: &RuntimeModule) -> Option<ImageAddress> {
+pub(super) fn global_context_address(
+    frame: &ResolvedFrame,
+    module: &RuntimeModule,
+) -> Option<ImageAddress> {
     frame
         .code
         .filter(|(code_module, _)| *code_module == module.loaded.id)
