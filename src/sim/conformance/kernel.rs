@@ -5,7 +5,9 @@
 //! observations (see `tracee`). A rule the simulation models without such a
 //! test is a guess.
 
-use super::tracee::dual_run;
+use nix::libc;
+
+use super::tracee::{dual_run, dual_run_then_exit};
 use crate::sim::cpu::{RAX, RDI, RSP};
 
 /// K-EXEC-1: a launched program first stops at its entry point for a
@@ -462,6 +464,35 @@ fn k_exit_5_a_leader_exiting_alone_waits_for_its_threads() {
     });
 }
 
+/// K-EXIT-5: an untraced leader that exited alone cannot be seized while it
+/// is a zombie, any more than a thread the tracer already traces.
+#[test]
+fn k_exit_5_a_zombie_cannot_be_seized() {
+    dual_run("threads", &["1", "leader"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let worker = record.cloned(leader);
+        record.wait(worker);
+        record.detach(leader, None);
+        let started = std::time::Instant::now();
+        while !record.tracee.is_zombie(leader) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the leader never finished exiting"
+            );
+            record.tracee.pass_time();
+        }
+        record.seize(leader);
+        record.seize(worker);
+        record.resume(worker, None);
+        record.wait(worker);
+        record.event_message(worker);
+        record.resume(worker, None);
+        record.wait(worker);
+    });
+}
+
 /// K-EXIT-6: the thread that begins to exit last, before its exit event,
 /// starts a group exit with its status, which every thread reaped later
 /// reports. Holding the leader at its exit event changes nothing; holding it
@@ -552,5 +583,460 @@ fn k_exit_6_a_group_exit_decides_the_status_of_unreaped_threads() {
         record.wait(workers[1]);
         record.resume(leader, None);
         record.wait(leader);
+    });
+}
+
+/// DR7 for slot 0 watching eight bytes for stores.
+const WRITE_8: u64 = 1 | 1 << 16 | 2 << 18;
+/// DR6 with no condition recorded.
+const DR6_IDLE: u64 = 0xffff_0ff0;
+
+/// Whether a DR6 value records a slot's hit.
+const fn records_hit(dr6: u64) -> bool {
+    dr6 & 0xf != 0
+}
+
+/// K-DR-1: a store a slot watches raises SIGTRAP with `TRAP_HWBKPT` and
+/// `rip` after the instruction, and DR6 holds the slot's bit. DR6 does not
+/// change at a stop that is no debug exception, such as a breakpoint's.
+#[test]
+fn k_dr_1_a_watched_store_traps_after_the_instruction() {
+    dual_run("stores", &["2", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        let counter = record.landmarks.symbol("counter");
+        let _ = record.debug(leader, 6);
+        record.watch(leader, counter, WRITE_8);
+        let _ = record.debug(leader, 0);
+        let _ = record.debug(leader, 7);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.stop(leader);
+        record.rip(leader);
+        let _ = record.debug(leader, 6);
+        let bump = record.landmarks.symbol("bump");
+        record.plant(bump);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.stop(leader);
+        let _ = record.debug(leader, 6);
+    });
+}
+
+/// K-DR-2: single-stepping over a watched store gives one stop,
+/// `TRAP_TRACE`, with DR6 holding both the step's bit and the slot's.
+#[test]
+fn k_dr_2_a_step_over_a_watched_store_reports_both() {
+    dual_run("stores", &["2", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        let counter = record.landmarks.symbol("counter");
+        record.watch(leader, counter, WRITE_8);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.set_debug(leader, 6, DR6_IDLE);
+        // Step to the next round's store of the counter.
+        let mut steps = 0;
+        loop {
+            record.tracee.resume(leader, None, true).expect("step");
+            let status = record.tracee.wait(leader);
+            steps += 1;
+            let dr6 = record.tracee.read_debug(leader, 6).expect("read DR6");
+            if records_hit(dr6) || steps == 10_000 {
+                let status = status
+                    .to_string()
+                    .replacen(&leader.to_string(), "leader", 1);
+                record.note(format!("steps to the store: {steps}, last {status}"));
+                break;
+            }
+        }
+        record.stop(leader);
+        record.rip(leader);
+        let _ = record.debug(leader, 6);
+    });
+}
+
+/// K-DR-3: a new thread starts with no slot armed, so it stores to the
+/// watched counter without trapping, though its DR7 reads as its
+/// creator's.
+#[test]
+fn k_dr_3_a_new_thread_starts_unarmed() {
+    dual_run("stores", &["1", "1"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        let shared = record.landmarks.symbol("shared");
+        record.watch(leader, shared, WRITE_8);
+        record.resume(leader, None);
+        let worker = record.cloned(leader);
+        record.wait(worker);
+        record.stop(worker);
+        for index in [0, 6, 7] {
+            let _ = record.debug(worker, index);
+        }
+        // The worker adds to the counter and exits, without a trap.
+        record.resume(worker, None);
+        record.wait(worker);
+        record.event_message(worker);
+    });
+}
+
+/// K-DR-4: writing an address reserves a hardware breakpoint even while
+/// disabled, which fails with `ENOSPC` once others hold every slot. A DR7
+/// write a slot refuses, as for an address its length misaligns, changes
+/// nothing. No slot may watch the top page of user memory.
+#[test]
+fn k_dr_4_slots_are_reserved_and_dr7_is_transactional() {
+    dual_run("stores", &["1", "0"], |record| {
+        let leader = record.leader();
+        let counter = record.landmarks.symbol("counter");
+        let steady = record.landmarks.symbol("steady");
+        record.tracee.hold_debug_slots(leader, 3, counter);
+        record.set_debug(leader, 0, counter);
+        record.set_debug(leader, 1, steady);
+        record.set_debug(leader, 0, counter + 4);
+        record.set_debug(leader, 7, WRITE_8);
+        let _ = record.debug(leader, 7);
+        let _ = record.debug(leader, 0);
+        record.set_debug(leader, 0, 0x7fff_ffff_f000);
+        record.set_debug(leader, 5, 0);
+    });
+}
+
+/// K-DR-5: a store of the value already there traps, a ptrace write does
+/// not, and `rep stos` traps once per iteration that touches the watched
+/// bytes, with `rip` still at the instruction.
+#[test]
+fn k_dr_5_every_store_traps_but_ptrace_writes() {
+    dual_run("stores", &["1", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        let steady = record.landmarks.symbol("steady");
+        record.watch(leader, steady, WRITE_8);
+        let value = record.tracee.peek(leader, steady).expect("read steady");
+        let result = record.tracee.poke(leader, steady, value);
+        record.result("poke steady", result);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.stop(leader);
+        record.rip(leader);
+        let pattern = record.landmarks.symbol("pattern");
+        record.watch(leader, pattern, WRITE_8);
+        for _ in 0..3 {
+            record.resume(leader, None);
+            record.wait(leader);
+            record.stop(leader);
+            record.rip(leader);
+        }
+    });
+}
+
+/// K-FORK-1: a fork stops the parent at `PTRACE_EVENT_FORK` inside the
+/// call, naming the child, which leads its own group and is listed as the
+/// forking thread's child. The child starts stopped, traced with the
+/// parent's options, in a copy of its memory, traps included, with no
+/// debug register armed though DR7 reads as the parent's (K-DR-3).
+#[test]
+fn k_fork_1_a_fork_child_starts_stopped_in_a_copy_of_its_parent() {
+    dual_run("fork", &["1", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        let child_code = record.landmarks.symbol("child");
+        let original = record.plant(child_code);
+        let unmapped = record.landmarks.unmapped;
+        record.watch(leader, unmapped, WRITE_8);
+        record.resume(leader, None);
+        let child = record.forked(leader);
+        record.wait(child);
+        record.stop(child);
+        record.system_call(child);
+        let _ = record.debug(child, 0);
+        let _ = record.debug(child, 7);
+        let byte = record
+            .tracee
+            .peek(child, child_code)
+            .map(|word| word & 0xff);
+        record.note(format!("the child's byte at child: {byte:x?}"));
+
+        // The child traps where its parent's memory did, and reports its
+        // own exit, as its parent's options say.
+        record.resume(child, None);
+        record.wait(child);
+        record.stop(child);
+        record.restore(child, child_code, original);
+        record.rewind(child);
+        let byte = record
+            .tracee
+            .peek(leader, child_code)
+            .map(|word| word & 0xff);
+        record.note(format!("the parent's byte at child: {byte:x?}"));
+        record.resume(child, None);
+        record.wait(child);
+        record.event_message(child);
+        record.resume(child, None);
+        record.wait(child);
+
+        // Once the tracer reaped it, the child is its parent's to reap,
+        // with SIGCHLD.
+        record.restore(leader, child_code, original);
+        record.set_debug(leader, 7, 0);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+        record.wait(leader);
+        record.event_message(leader);
+        record.children_of(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
+}
+
+/// K-FORK-2: a detached child runs untraced. Its requests fail with ESRCH,
+/// its parent reaps it after SIGCHLD, and a trap it executes kills it with
+/// SIGTRAP, which its parent sees. Whether it dumps core depends on the
+/// machine, so only the signal is recorded.
+#[test]
+fn k_fork_2_a_detached_child_runs_untraced() {
+    dual_run("fork", &["2", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        let child_code = record.landmarks.symbol("child");
+        let original = record.plant(child_code);
+        record.resume(leader, None);
+        let first = record.forked(leader);
+        record.wait(first);
+        record.restore(first, child_code, original);
+        record.detach(first, None);
+        let result = record.tracee.registers(first).map(drop);
+        record.result("registers of a detached child", result);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+
+        // This one keeps the trap it inherited, and dies of it.
+        let second = record.forked(leader);
+        record.wait(second);
+        record.detach(second, None);
+        record.restore(leader, child_code, original);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+        record.wait(leader);
+        record.event_message(leader);
+        record.children_of(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+    });
+}
+
+/// K-FORK-3: a child whose parent exits sees its parent change, and its
+/// exit is the tracer's to reap.
+#[test]
+fn k_fork_3_an_orphan_sees_its_parent_change() {
+    dual_run("fork", &["1", "1"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let waited = record.forked(leader);
+        record.wait(waited);
+        record.detach(waited, None);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+        let orphan = record.forked(leader);
+        record.wait(orphan);
+        record.resume(orphan, None);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.event_message(leader);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.wait(orphan);
+        record.stop(orphan);
+        record.event_message(orphan);
+        record.resume(orphan, None);
+        record.wait(orphan);
+    });
+}
+
+/// K-SEIZE-1: a seized thread runs on until an interrupt stops it with
+/// `PTRACE_EVENT_STOP`. The threads and processes it creates then are
+/// traced with its options, each first stopping in a `PTRACE_EVENT_STOP`
+/// of its own rather than for SIGSTOP.
+#[test]
+fn k_seize_1_a_seized_thread_runs_on_and_its_children_start_in_an_event_stop() {
+    dual_run("fork", &["1", "2"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        // The first child stays at its first stop, so its parent waits for
+        // it, running untraced once detached.
+        let first = record.forked(leader);
+        record.wait(first);
+        record.detach(leader, None);
+        record.seize(leader);
+        record.interrupt(leader);
+        record.wait(leader);
+        record.signal(leader);
+        record.event_message(leader);
+        record.detach(first, None);
+        record.resume(leader, None);
+        record.wait(leader);
+        record.signal(leader);
+        record.resume(leader, Some(libc::SIGCHLD));
+        let worker = record.cloned(leader);
+        record.wait(worker);
+        record.signal(worker);
+        record.event_message(worker);
+        record.resume(worker, None);
+        let second = record.forked(worker);
+        record.wait(second);
+        record.signal(second);
+        record.event_message(second);
+    });
+}
+
+/// K-INT-1: an interrupt stops a running seized thread with
+/// `PTRACE_EVENT_STOP`. One sent while the thread is stopped waits until
+/// it resumes, ahead of a pending signal. Where a running thread stops
+/// depends on timing, so only signals are compared.
+#[test]
+fn k_int_1_an_interrupt_stops_a_seized_thread() {
+    dual_run("racing-exit", &["2", "4"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        // Worker 0 stays at its first stop, so nothing exits the group.
+        let first = record.cloned(leader);
+        record.resume(leader, None);
+        let second = record.cloned(leader);
+        record.resume(leader, None);
+        record.wait(first);
+        record.wait(second);
+        record.detach(second, None);
+        record.seize(second);
+        record.interrupt(second);
+        record.wait(second);
+        record.signal(second);
+
+        record.interrupt(second);
+        record.resume(second, None);
+        let result = record.tracee.request_stop(second);
+        record.result("tgkill SIGSTOP", result);
+        record.wait(second);
+        record.signal(second);
+        record.resume(second, None);
+        record.wait(second);
+        record.signal(second);
+    });
+}
+
+/// K-INT-2: an interrupt and a stop request succeed for a seized thread at
+/// its exit event and for one that is an unreaped zombie, and fail with
+/// ESRCH once it is reaped.
+#[test]
+fn k_int_2_an_interrupt_reaches_an_exiting_thread_until_it_is_reaped() {
+    dual_run("racing-exit", &["2", "4"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let first = record.cloned(leader);
+        record.resume(leader, None);
+        let second = record.cloned(leader);
+        record.wait(first);
+        record.wait(second);
+        record.detach(second, None);
+        record.seize(second);
+        // Worker 0 exits the group, which stops every thread at its exit.
+        record.resume(first, None);
+        record.wait(second);
+        record.event_message(second);
+        record.interrupt(second);
+        let result = record.tracee.request_stop(second);
+        record.result("tgkill SIGSTOP at the exit event", result);
+        record.resume(second, None);
+        while !record.tracee.has_report(second) {
+            std::thread::yield_now();
+        }
+        record.interrupt(second);
+        let result = record.tracee.request_stop(second);
+        record.result("tgkill SIGSTOP to a zombie", result);
+        record.wait(second);
+        record.interrupt(second);
+        let result = record.tracee.request_stop(second);
+        record.result("tgkill SIGSTOP once reaped", result);
+    });
+}
+
+/// K-WAIT-3: a tracer that exits releases the threads it still traces. A
+/// traced leader that exited alone, a zombie no request reaches, joins its
+/// process's end as if never traced, and the process's parent reaps the
+/// process once its last thread exits. Its tracer traces no clones, so the
+/// worker it creates runs untraced, ending whenever it does.
+#[test]
+fn k_wait_3_a_tracers_exit_releases_a_traced_zombie() {
+    dual_run_then_exit("threads", &["1", "leader"], |record| {
+        let leader = record.leader();
+        record.resume(leader, None);
+        let started = std::time::Instant::now();
+        while !record.tracee.is_zombie(leader) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the leader never finished exiting"
+            );
+            record.tracee.pass_time();
+        }
+        record.detach(leader, None);
+    });
+}
+
+/// K-EXIT-5: an untraced leader that exited alone is a zombie the tracer
+/// cannot reach. Once the tracer reaps the last thread, the process ends,
+/// and its parent reaps it.
+#[test]
+fn k_exit_5_reaping_the_last_thread_ends_an_untraced_leaders_process() {
+    dual_run_then_exit("threads", &["1", "leader"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let worker = record.cloned(leader);
+        record.wait(worker);
+        record.detach(leader, None);
+        let started = std::time::Instant::now();
+        while !record.tracee.is_zombie(leader) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "the leader never finished exiting"
+            );
+            record.tracee.pass_time();
+        }
+        record.resume(worker, None);
+        record.wait(worker);
+        record.event_message(worker);
+        record.resume(worker, None);
+        record.wait(worker);
+    });
+}
+
+/// K-WAIT-3: a tracer that exits releases a thread on its way out too: a
+/// seized one SIGKILL took out of its stop ends untraced, and its parent
+/// reaps its process.
+#[test]
+fn k_wait_3_a_tracers_exit_releases_an_exiting_thread() {
+    dual_run_then_exit("fork", &["1", "0"], |record| {
+        let leader = record.leader();
+        record.set_options(leader);
+        record.resume(leader, None);
+        let first = record.forked(leader);
+        record.wait(first);
+        record.detach(leader, None);
+        record.seize(leader);
+        record.interrupt(leader);
+        record.wait(leader);
+        record.detach(first, None);
+        let result = record.tracee.kill();
+        record.result("SIGKILL", result);
     });
 }

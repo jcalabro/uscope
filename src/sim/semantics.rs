@@ -192,9 +192,10 @@ pub enum Judged {
 /// - Stepping over an instruction steps one, or runs a call until it
 ///   returns to the same frame.
 /// - Stepping out of a physical frame returns to its caller's return
-///   address, or, where no line describes that, goes on to the caller's
-///   first instruction one does; out of an inline frame, it stays in the
-///   physical frame or returns from it.
+///   address, or, where no line describes that, goes on to the first
+///   instruction one does, in the caller or, if the caller returns first,
+///   further out; out of an inline frame, it stays in the physical frame
+///   or returns from it.
 /// - A source step stops in a statement row of another line, or in a
 ///   caller's statement row, or, stepping in, wherever a new function
 ///   begins its source. Stepping over never stops in a callee. In
@@ -259,16 +260,21 @@ pub fn step(
             // A source step stops only where a line describes the code, so
             // a return to undescribed code goes on to the first instruction
             // of the caller that a line describes.
+            // A caller that returns before reaching described code takes the
+            // step on to its own caller.
             let returned = before.split_last().is_some_and(|(call, callers)| {
-                let caller = activation_at(&begun.shadow, callers.len());
-                after.as_slice() == callers
-                    && (end == call.return_address
-                        || !described(call.return_address)
-                            && described(end)
-                            && positions
-                                .iter()
-                                .filter(|position| Some(position.activation) == caller)
-                                .all(|position| !described(position.rip)))
+                (end == call.return_address && after.as_slice() == callers)
+                    || callers.starts_with(after)
+                        && !described(call.return_address)
+                        && described(end)
+                        && positions
+                            .iter()
+                            .filter(|position| {
+                                position.depth < before.len()
+                                    && activation_at(&begun.shadow, position.depth)
+                                        == Some(position.activation)
+                            })
+                            .all(|position| !described(position.rip))
             });
             let inline = matches!(begun.frame, Some(PresentedFrame::Inline(_)));
             if returned || inline && after == before {

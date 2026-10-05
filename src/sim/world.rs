@@ -19,7 +19,7 @@
 //! client still waits is stuck, which is a failure.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::pin::Pin;
@@ -36,18 +36,20 @@ use super::client::{Client, Observation, Script, Shared};
 use super::corpus::{Corpus, Program, Run, Variant};
 use super::faults::{Faults, Plan};
 use super::kernel::shadow::Tracking;
-use super::kernel::{Kernel, State, StopKind, Tid};
+use super::kernel::watching::UserWatch;
+use super::kernel::{Kernel, Parent, State, StopKind, Tid};
 use super::machine::Machine;
 use super::marks::{Mark, Marks};
-use super::oracles;
+use super::oracles::{self, HeardTrap};
 use super::report::{Failure, Trace};
 use super::schedule::{Action, Scheduler};
 use super::semantics::{self, Begun, Inspected, Judged, Unwound};
 use super::swarm::Swarm;
-use crate::DebuggerHandle;
+use super::watches::{self, Intent};
 use crate::backend::sim_edge::{
     Preemption, SimController, SimExecutable, SimLaunch, SimParts, SimWaiter,
 };
+use crate::{DebuggerHandle, ProcessId};
 
 /// The simulated debugger's process identifier.
 const TRACER: i32 = 100;
@@ -90,6 +92,13 @@ pub enum Sabotage {
     /// stack report them one greater. Zeros, which end chains of frames,
     /// and slots where calls pushed return addresses stay as they are.
     SkewSmallStackWords,
+    /// Ptrace writes to the debug registers of threads other than a
+    /// process's first go to a copy that reads them back, leaving the
+    /// thread's own slots as they were.
+    PhantomArming,
+    /// Threads other than a process's first take no debug exception for
+    /// an access their slots cover.
+    MissWatchTraps,
 }
 
 impl Default for Settings {
@@ -219,10 +228,18 @@ struct World<'a> {
     woken: Arc<Woken>,
     waker: Waker,
     auditor: Auditor,
-    /// The traps whose stops the controller heard of, by thread and count.
-    counted: BTreeSet<(Tid, u64)>,
+    /// Each thread's latest arrival at a trap the controller heard of.
+    arrivals: BTreeMap<Tid, Arrival>,
+    /// Whether the controller was asked to shut down.
+    shutting_down: bool,
     /// The step the client requested, until it ends.
     stepping: Option<Begun>,
+    /// The watchpoints the client knows of, with the bytes each watched at
+    /// the last stop.
+    watches: Vec<Intent>,
+    baselines: BTreeMap<u64, Vec<u8>>,
+    /// The last stop watch accounting judged.
+    judged_stop: Option<u64>,
     trace: Trace,
     #[cfg(debug_assertions)]
     capture: crate::flight_recorder::Capture,
@@ -244,6 +261,7 @@ impl<'a> World<'a> {
         let scheduler = Scheduler::new(swarm.policy, &mut choices);
         let choices = Rc::new(RefCell::new(choices));
         let kernel = Rc::new(RefCell::new(Kernel::new(TRACER)));
+        kernel.borrow_mut().debug_behavior = swarm.debug;
         #[cfg(test)]
         {
             let mut kernel = kernel.borrow_mut();
@@ -251,6 +269,9 @@ impl<'a> World<'a> {
         }
         let marks = Rc::new(RefCell::new(Marks::default()));
         let shared = Shared::default();
+        let attach = swarm
+            .attach
+            .map(|_| start_untraced(&mut kernel.borrow_mut(), variant, run, random));
         let machine = Rc::new(Machine {
             kernel: Rc::clone(&kernel),
             waiter: Rc::new(RefCell::new(SimWaiter::default())),
@@ -260,7 +281,9 @@ impl<'a> World<'a> {
             marks: Rc::clone(&marks),
             killed: Rc::clone(&shared.killed),
             ending: Rc::clone(&shared.ending),
+            unclean: RefCell::new(Vec::new()),
             step: Cell::new(0),
+            ran: Cell::new(0),
             preempt: swarm.preempt,
             #[cfg(test)]
             sabotage: settings.sabotage,
@@ -292,14 +315,15 @@ impl<'a> World<'a> {
             requests: channels.requests,
             events: channels.events,
         };
-        let auditor = Auditor::new(handle.subscribe());
+        let auditor = Auditor::new(handle.subscribe(), Rc::clone(&shared.published));
         let client = Client {
             handle,
             choices,
             marks,
             shared: shared.clone(),
-            script: script(&swarm, program, variant, run),
+            script: script(&swarm, program, variant, run, attach),
             alone: Cell::new(None),
+            baseline: RefCell::new(None),
         };
         let woken = Arc::new(Woken(AtomicBool::new(true)));
         let waker = Waker::from(Arc::clone(&woken));
@@ -320,8 +344,12 @@ impl<'a> World<'a> {
             woken,
             waker,
             auditor,
-            counted: BTreeSet::new(),
+            arrivals: BTreeMap::new(),
+            shutting_down: false,
             stepping: None,
+            watches: Vec::new(),
+            baselines: BTreeMap::new(),
+            judged_stop: None,
             trace,
             #[cfg(debug_assertions)]
             capture,
@@ -330,6 +358,22 @@ impl<'a> World<'a> {
 
     fn step(&self) -> u64 {
         self.machine.step.get()
+    }
+
+    /// Whether the client may act: a program started untraced first runs
+    /// as many instructions as the swarm says, unless it ends sooner.
+    fn client_may_act(&self) -> bool {
+        let Some(after) = self.swarm.attach else {
+            return true;
+        };
+        self.machine.ran.get() >= after
+            || self
+                .machine
+                .kernel
+                .borrow()
+                .processes
+                .values()
+                .all(|process| process.parent != Parent::Launcher)
     }
 
     fn actions(&self) -> Vec<Action> {
@@ -348,7 +392,7 @@ impl<'a> World<'a> {
                 actions.push(Action::Deliver);
             }
         }
-        if self.client.is_some() && self.woken.0.load(Ordering::Relaxed) {
+        if self.client.is_some() && self.woken.0.load(Ordering::Relaxed) && self.client_may_act() {
             actions.push(Action::Poll);
         }
         actions
@@ -389,6 +433,7 @@ impl<'a> World<'a> {
             // the kernel watches for unseen hits.
             self.machine.kernel.borrow_mut().user_breakpoints =
                 self.shared.addresses(self.variant.image.bias());
+            self.follow_watches();
             self.judge()?;
         }
         #[cfg(test)]
@@ -463,31 +508,74 @@ impl<'a> World<'a> {
         let delivery = controller.take().expect("deliver needs a message");
         let description = delivery.description.clone();
         let before = controller.truth();
-        // A trap whose stop the controller now hears of, once: each trap the
-        // CPU executed is one hit.
-        let trap = delivery
+        // A trap whose stop the controller now hears of: each arrival at a
+        // trap is one hit.
+        let trapped = delivery
             .trap
-            .and_then(|tid| trap_address(&self.machine.kernel.borrow(), tid))
-            .filter(|&(tid, _, traps)| self.counted.insert((tid, traps)))
-            .map(|(tid, address, _)| (tid, address));
-        let launch = delivery.launch;
+            .and_then(|tid| trap_of(&self.machine.kernel.borrow(), tid));
+        let trap = trapped.map(|(tid, address, retired)| HeardTrap {
+            tid,
+            address,
+            again: self
+                .arrivals
+                .get(&tid)
+                .filter(|arrival| arrival.address == address && arrival.retired == retired)
+                .map(|arrival| arrival.counted.clone()),
+            in_shutdown: self.shutting_down,
+        });
+        self.shutting_down |= delivery.shutdown;
         let running = controller.handle(delivery);
         if !running {
             self.controller = None;
+            let mut kernel = self.machine.kernel.borrow_mut();
+            if let Some(thread) = kernel
+                .threads
+                .values()
+                .find(|thread| thread.traced() && thread.held())
+            {
+                return Err(Failure::debugger(
+                    "clean exit",
+                    format!(
+                        "the controller exited holding thread {} in a stop",
+                        thread.tid
+                    ),
+                ));
+            }
+            // The tracer thread exits with the controller, which releases
+            // what it could not detach (K-WAIT-3).
+            kernel.forget_tracer();
             return Ok(format!("deliver {description} -> controller exited"));
         }
         let after = controller.truth();
         // A group exit or SIGKILL meanwhile takes the trap's thread out of
         // its stop, and the controller may never count the hit.
-        let disturbed = trap.is_some_and(|(tid, _)| {
+        let disturbed = trap.as_ref().is_some_and(|trap| {
             self.machine
                 .kernel
                 .borrow()
-                .process_of(tid)
+                .process_of(trap.tid)
                 .is_none_or(|process| process.group_exit.is_some())
         });
-        oracles::hit_counts(&before, &after, trap, launch, disturbed)
+        oracles::hit_counts(&before, &after, trap.as_ref(), disturbed)
             .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
+        if let Some((tid, address, retired)) = trapped {
+            let counted = after.breakpoints.iter().filter_map(|(&id, breakpoint)| {
+                let previous = before
+                    .breakpoints
+                    .get(&id)
+                    .map_or(0, |earlier| earlier.hit_count);
+                (breakpoint.hit_count > previous).then_some(id)
+            });
+            let arrival = self.arrivals.entry(tid).or_default();
+            if (arrival.address, arrival.retired) != (address, retired) {
+                *arrival = Arrival {
+                    address,
+                    retired,
+                    counted: BTreeSet::new(),
+                };
+            }
+            arrival.counted.extend(counted);
+        }
         Ok(format!("deliver {description}"))
     }
 
@@ -540,6 +628,95 @@ impl<'a> World<'a> {
                     }
                 }
                 Observation::Backtrace { .. } | Observation::Variables { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Follows the watchpoints the client now knows of: the kernel watches
+    /// their accesses, and a new one's bytes, the program stopped, are its
+    /// baseline.
+    fn follow_watches(&mut self) {
+        let watches = self
+            .shared
+            .watches
+            .borrow()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if watches == self.watches {
+            return;
+        }
+        let mut kernel = self.machine.kernel.borrow_mut();
+        let tgid = self
+            .controller
+            .as_ref()
+            .and_then(|controller| controller.truth().inferior);
+        self.baselines
+            .retain(|id, _| watches.iter().any(|watch| watch.id == *id));
+        for watch in &watches {
+            if !self.baselines.contains_key(&watch.id)
+                && let Some(bytes) = tgid.and_then(|tgid| watches::bytes(&kernel, tgid, watch))
+            {
+                self.baselines.insert(watch.id, bytes);
+            }
+        }
+        kernel.watching.watches = watches
+            .iter()
+            .map(|watch| UserWatch {
+                id: watch.id,
+                spans: watch.spans.clone(),
+                loads: matches!(
+                    watch.access,
+                    crate::WatchAccess::ReadWrite | crate::WatchAccess::Read
+                ),
+                every: watch.access != crate::WatchAccess::Change,
+            })
+            .collect();
+        drop(kernel);
+        self.watches = watches;
+    }
+
+    /// Watch accounting, at each new stop: the hits reported against the
+    /// accesses made since the last. Every stop starts the accesses and
+    /// baselines again.
+    fn account_watches(&mut self, truth: &crate::backend::sim_edge::Truth) -> Result<(), Failure> {
+        let (Some(stop), Some(tgid)) = (truth.public_stop, truth.inferior) else {
+            return Ok(());
+        };
+        if self.judged_stop == Some(stop) {
+            return Ok(());
+        }
+        self.judged_stop = Some(stop);
+        let mut kernel = self.machine.kernel.borrow_mut();
+        let ending = kernel
+            .processes
+            .get(&tgid)
+            .is_none_or(|process| process.group_exit.is_some());
+        if !ending {
+            let found = watches::judge(
+                &kernel,
+                tgid,
+                &truth.reasons,
+                &self.watches,
+                &self.baselines,
+            )
+            .map_err(|message| Failure::debugger("watch accounting", message))?;
+            let mut marks = self.machine.marks.borrow_mut();
+            if found.hit {
+                marks.hit(Mark::WatchHit);
+            }
+            if found.other_thread {
+                marks.hit(Mark::WatchHitOnAnotherThread);
+            }
+            if found.unchanged {
+                marks.hit(Mark::UnchangedStore);
+            }
+        }
+        kernel.watching.restart();
+        for watch in &self.watches {
+            if let Some(bytes) = watches::bytes(&kernel, tgid, watch) {
+                self.baselines.insert(watch.id, bytes);
             }
         }
         Ok(())
@@ -636,6 +813,52 @@ impl<'a> World<'a> {
             &self.machine.kernel.borrow(),
             &mut self.machine.marks.borrow_mut(),
         )?;
+        if let Some(unseen) = self.machine.kernel.borrow().watching.unseen.first() {
+            return Err(Failure::debugger(
+                "watch accounting",
+                format!(
+                    "thread {} accessed {:#x}, which watchpoint {} watches, with no slot armed for it",
+                    unseen.tid, unseen.address, unseen.watch
+                ),
+            ));
+        }
+        if let Some(&(tid, (address, now, was))) = self.machine.unclean.borrow().first() {
+            return Err(Failure::debugger(
+                "clean release",
+                format!(
+                    "thread {tid} was released with {now:#04x} at {address:#x}, where the \
+                     program has {was:#04x}"
+                ),
+            ));
+        }
+        if let Some(lost) = self.machine.kernel.borrow().watching.lost.first() {
+            return Err(Failure::debugger(
+                "watch accounting",
+                format!(
+                    "thread {} ran on from an access to watchpoint {} that no stop reported",
+                    lost.tid, lost.watch
+                ),
+            ));
+        }
+        // Only a process the controller debugs has the user's breakpoints
+        // and watches, once it finished launching or attaching: none once it
+        // detached, or once it exited itself.
+        let truth = self.controller.as_ref().map(SimController::truth);
+        let debugged = truth
+            .as_ref()
+            .filter(|truth| truth.established)
+            .and_then(|truth| truth.inferior);
+        let mut kernel = self.machine.kernel.borrow_mut();
+        if kernel.debugged != debugged {
+            // What a process's threads accessed is the debugger's to report
+            // only while it debugs the process.
+            kernel.watching.restart();
+            kernel.debugged = debugged;
+        }
+        drop(kernel);
+        if let Some(truth) = truth {
+            self.account_watches(&truth)?;
+        }
         let kernel = self.machine.kernel.borrow();
         oracles::unseen_hits(&kernel)
             .map_err(|message| Failure::debugger("breakpoint accounting", message))?;
@@ -677,6 +900,14 @@ impl<'a> World<'a> {
         oracles::clean_exit(&kernel).map_err(|message| Failure::debugger("clean exit", message))?;
         oracles::transparency(&kernel, self.run)
             .map_err(|message| Failure::debugger("transparency", message))?;
+        let mut marks = self.machine.marks.borrow_mut();
+        let ran_on = kernel
+            .ended
+            .values()
+            .any(|ended| ended.reaper == Parent::Launcher && !ended.killed_externally);
+        if marks.count(Mark::Detached) > 0 && ran_on {
+            marks.hit(Mark::FinishedAfterDetach);
+        }
         Ok(Progress::Finished)
     }
 
@@ -722,33 +953,97 @@ impl<'a> World<'a> {
 }
 
 /// What the client knows of the program it debugs.
-fn script(swarm: &Swarm, program: &Program, variant: &Variant, run: &Run) -> Script {
+/// Starts the program untraced, for the client to attach to.
+fn start_untraced(
+    kernel: &mut Kernel,
+    variant: &Variant,
+    run: &Run,
+    random: [u8; 16],
+) -> ProcessId {
+    let tgid = kernel.spawn_untraced(
+        Arc::clone(&variant.image),
+        &variant.path,
+        &run.arguments,
+        random,
+    );
+    ProcessId::new(u64::try_from(tgid).expect("process ids are positive"))
+}
+
+fn script(
+    swarm: &Swarm,
+    program: &Program,
+    variant: &Variant,
+    run: &Run,
+    attach: Option<ProcessId>,
+) -> Script {
     Script {
         arguments: run.arguments.clone(),
         stop_at_entry: swarm.stop_at_entry,
         requests: swarm.requests,
         launches: swarm.launches,
         early_breakpoints: swarm.early_breakpoints,
+        watching: swarm.watching,
         functions: program.functions.clone(),
         defined: variant.functions.clone(),
         source: program.source.clone(),
         source_lines: program.source_lines,
         marker_lines: program.markers.iter().map(|marker| marker.line).collect(),
+        markers: program
+            .markers
+            .iter()
+            .map(|marker| (marker.line, marker.text.clone()))
+            .collect(),
+        marker_rows: marker_rows(program, variant),
+        globals: variant.globals.clone(),
+        debug: swarm.debug,
         image: Arc::clone(&variant.image),
+        attach,
     }
 }
 
-/// The address of the trap whose stop `tid` is in, if its stop is one, and
-/// how many traps the thread executed so far.
-fn trap_address(kernel: &Kernel, tid: Tid) -> Option<(Tid, u64, u64)> {
+/// Where, in unoptimized code, a row of a marker's line starts, with the
+/// line, by image address.
+fn marker_rows(program: &Program, variant: &Variant) -> std::collections::BTreeMap<u64, u64> {
+    let facts = &variant.facts;
+    let source = program
+        .source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if facts.optimized {
+        return std::collections::BTreeMap::new();
+    }
+    program
+        .markers
+        .iter()
+        .flat_map(|marker| {
+            facts
+                .line_starts(source, marker.line)
+                .map(move |address| (address, marker.line))
+        })
+        .collect()
+}
+
+/// A thread's arrival at a trap: where, how many instructions it had
+/// completed, and the breakpoints that counted it.
+#[derive(Default)]
+struct Arrival {
+    address: u64,
+    retired: u64,
+    counted: BTreeSet<u64>,
+}
+
+/// The trap whose stop `tid` is in, if its stop is one: the thread, where,
+/// and how many instructions it had completed then.
+fn trap_of(kernel: &Kernel, tid: Tid) -> Option<(Tid, u64, u64)> {
     let thread = kernel.threads.get(&tid)?;
     match thread.state {
         State::Stopped {
             kind: StopKind::Signal(libc::SIGTRAP),
             info,
-        } if info.code == super::cpu::SI_KERNEL => thread
-            .trapped_at
-            .map(|address| (tid, address, thread.traps)),
+        } if info.code == super::cpu::SI_KERNEL && thread.trapped_at.is_some() => thread
+            .last_trap
+            .map(|(address, retired)| (tid, address, retired)),
         _ => None,
     }
 }

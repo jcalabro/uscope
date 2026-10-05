@@ -717,7 +717,7 @@ pub(super) fn trace_child(command: &mut ProcessCommand) {
 /// Runs the program this process executes next without address space
 /// randomization, as gdb does, so a rerun shows the same addresses, pointers,
 /// and stack contents. A sandbox may forbid it, which costs only that.
-fn disable_address_randomization() {
+pub(super) fn disable_address_randomization() {
     if let Ok(persona) = personality::get() {
         let _ = personality::set(persona | Persona::ADDR_NO_RANDOMIZE);
     }

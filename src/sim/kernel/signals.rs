@@ -18,6 +18,8 @@ pub const SI_TKILL: i32 = libc::SI_TKILL;
 pub const TRAP_BRKPT: i32 = 1;
 /// `si_code` of a single-step trap.
 pub const TRAP_TRACE: i32 = 2;
+/// `si_code` of a hardware breakpoint's trap.
+pub const TRAP_HWBKPT: i32 = 4;
 
 /// Signals the kernel delivers before any other pending signal, because an
 /// instruction raised them.
@@ -202,19 +204,25 @@ impl Kernel {
         );
     }
 
-    /// Delivers a running thread's next pending signal, which stops it for
-    /// the tracer. Returns whether it stopped.
+    /// Delivers a running thread's next pending signal, its own before its
+    /// process's. A traced thread stops for the tracer; an untraced one
+    /// takes the signal's default action. Returns whether it stopped.
     pub(super) fn deliver_pending(&mut self, tid: Tid) -> bool {
         let thread = self.threads.get_mut(&tid).expect("running thread exists");
-        let Some(info) = thread.pending.take_next() else {
+        let group = thread.tgid;
+        let Some(info) = thread.pending.take_next().or_else(|| {
+            self.processes
+                .get_mut(&group)
+                .and_then(|process| process.shared.take_next())
+        }) else {
             return false;
         };
-        if info.signal != SIGSTOP {
+        if info.signal != SIGSTOP && info.signal != libc::SIGCHLD {
             self.gap(format!("delivering pending {}", name(info.signal)));
             return true;
         }
         self.signal_stop(tid, info);
-        true
+        !matches!(self.threads[&tid].state, State::Running)
     }
 
     /// Resumes a thread from a signal-delivery-stop with `signal` delivered
@@ -242,16 +250,32 @@ impl Kernel {
         }
     }
 
+    /// Takes an untraced thread through `info`'s default action, as if no
+    /// debugger were there: SIGCHLD is ignored, and a trap or fault ends
+    /// its process (K-FORK-2).
+    pub(super) fn act_by_default(&mut self, tid: Tid, info: SigInfo) {
+        match default_action(info.signal) {
+            DefaultAction::Ignore => {}
+            DefaultAction::Terminate | DefaultAction::CoreDump => {
+                let group = self.threads[&tid].tgid;
+                // Core dumps are off for simulated processes, as with a zero
+                // core size limit.
+                self.kill_process(group, ExitStatus::Signal(info.signal, false));
+            }
+            DefaultAction::Stop => self.gap(format!("group-stop by {}", name(info.signal))),
+        }
+    }
+
     /// Takes an exiting thread to its exit: the exit event stop when exits
     /// are traced (K-EXIT-1, K-EXIT-3), otherwise straight to a zombie.
     pub(super) fn reach_exit(&mut self, tid: Tid, exit: ExitStatus) {
         let thread = self.threads.get_mut(&tid).expect("exiting thread exists");
-        if thread.options.trace_exit {
-            thread.state = State::Stopped {
-                kind: StopKind::Exit(exit),
-                info: SigInfo::event(tid, libc::PTRACE_EVENT_EXIT),
-            };
-            thread.report = Some(WaitStatus::Event(tid, libc::PTRACE_EVENT_EXIT));
+        if thread.traced() && thread.options.trace_exit {
+            thread.enter_stop(
+                StopKind::Exit(exit),
+                SigInfo::event(tid, libc::PTRACE_EVENT_EXIT),
+                WaitStatus::Event(tid, libc::PTRACE_EVENT_EXIT),
+            );
         } else {
             self.become_zombie(tid, exit);
         }
@@ -262,9 +286,13 @@ impl Kernel {
     pub(super) fn become_zombie(&mut self, tid: Tid, exit: ExitStatus) {
         let thread = self.threads.get_mut(&tid).expect("exiting thread exists");
         let group = thread.tgid;
+        let traced = thread.traced();
         thread.state = State::Zombie(exit);
-        thread.report = Some(exit.wait_status(tid));
+        // The tracer reaps a traced thread; nobody waits for an untraced one
+        // but its process's parent.
+        thread.report = traced.then(|| exit.wait_status(tid));
         thread.pending = Pending::default();
+        self.forget_children(tid);
         let Some(process) = self.processes.get(&group) else {
             return;
         };
@@ -276,6 +304,9 @@ impl Kernel {
             });
         if tid == group && alone {
             self.happenings.push(Happening::LeaderExitedAlone { tid });
+        }
+        if !traced {
+            self.reap_untraced(tid);
         }
     }
 }

@@ -34,6 +34,11 @@ pub(super) trait Tracee {
     fn wait(&mut self, thread: Tid) -> WaitStatus;
     /// Whether `thread` has a status to report, without reaping it.
     fn has_report(&mut self, thread: Tid) -> bool;
+    /// Lets running threads run a little while a script polls for what
+    /// they do: real ones run by themselves.
+    fn pass_time(&mut self);
+    /// Whether `thread` finished exiting and awaits reaping.
+    fn is_zombie(&self, thread: Tid) -> bool;
     /// The registers, and `orig_rax`.
     fn registers(&self, thread: Tid) -> Result<(Registers, u64), Errno>;
     fn set_registers(&mut self, thread: Tid, registers: &Registers) -> Result<(), Errno>;
@@ -52,6 +57,20 @@ pub(super) trait Tracee {
     fn thread_group(&self, thread: Tid) -> Option<Tid>;
     /// `/proc/<thread>/maps`.
     fn maps(&self, thread: Tid) -> Option<String>;
+    fn read_debug(&self, thread: Tid, index: usize) -> Result<u64, Errno>;
+    fn write_debug(&mut self, thread: Tid, index: usize, value: u64) -> Result<(), Errno>;
+    /// Lets something other than the tracer hold `count` of `thread`'s
+    /// hardware breakpoints, watching `address`.
+    fn hold_debug_slots(&mut self, thread: Tid, count: usize, address: u64);
+    /// Takes on `child`, which the process forked, to end it with the
+    /// process.
+    fn adopt(&mut self, child: Tid);
+    fn detach(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno>;
+    /// `PTRACE_SEIZE` of an untraced thread, with the controller's options.
+    fn seize(&mut self, thread: Tid) -> Result<(), Errno>;
+    fn interrupt(&mut self, thread: Tid) -> Result<(), Errno>;
+    /// The children `thread` forked that are not reaped.
+    fn children(&self, thread: Tid) -> Vec<Tid>;
 }
 
 impl Tracee for NativeTracee {
@@ -66,6 +85,18 @@ impl Tracee for NativeTracee {
     }
     fn has_report(&mut self, thread: Tid) -> bool {
         Self::has_report(self, thread)
+    }
+    fn pass_time(&mut self) {
+        std::thread::yield_now();
+    }
+    fn is_zombie(&self, thread: Tid) -> bool {
+        std::fs::read_to_string(format!("/proc/{}/task/{thread}/stat", self.pid()))
+            .ok()
+            .and_then(|stat| {
+                let (_, fields) = stat.rsplit_once(')')?;
+                fields.split_whitespace().next().map(|state| state == "Z")
+            })
+            .unwrap_or(false)
     }
     fn registers(&self, thread: Tid) -> Result<(Registers, u64), Errno> {
         Ok((
@@ -112,6 +143,30 @@ impl Tracee for NativeTracee {
     fn maps(&self, thread: Tid) -> Option<String> {
         Self::maps(self, thread)
     }
+    fn read_debug(&self, thread: Tid, index: usize) -> Result<u64, Errno> {
+        self.read_debug_register(thread, index)
+    }
+    fn write_debug(&mut self, thread: Tid, index: usize, value: u64) -> Result<(), Errno> {
+        self.write_debug_register(thread, index, value)
+    }
+    fn hold_debug_slots(&mut self, thread: Tid, count: usize, address: u64) {
+        Self::hold_debug_slots(self, thread, count, address);
+    }
+    fn adopt(&mut self, child: Tid) {
+        Self::adopt(self, child);
+    }
+    fn detach(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno> {
+        Self::detach(self, thread, signal)
+    }
+    fn seize(&mut self, thread: Tid) -> Result<(), Errno> {
+        Self::seize(self, thread)
+    }
+    fn interrupt(&mut self, thread: Tid) -> Result<(), Errno> {
+        Self::interrupt(self, thread)
+    }
+    fn children(&self, thread: Tid) -> Vec<Tid> {
+        Self::children(self, thread)
+    }
 }
 
 /// The simulated kernel running one golden program.
@@ -137,6 +192,30 @@ impl SimTracee {
     fn check_gap(&self) {
         if let Some(gap) = &self.kernel.gap {
             panic!("model gap: {}", gap.0);
+        }
+    }
+
+    /// The tracer exits; runs every thread until the program ends, and
+    /// returns how it ended.
+    fn end(&mut self) -> String {
+        self.kernel.forget_tracer();
+        let mut steps = 0;
+        loop {
+            if let Some(ended) = self.kernel.ended.get(&self.pid) {
+                return match ended.status {
+                    crate::sim::kernel::ExitStatus::Code(code) => format!("exited {code}"),
+                    crate::sim::kernel::ExitStatus::Signal(signal, _) => {
+                        format!("killed by {signal}")
+                    }
+                };
+            }
+            let runnable = self.kernel.runnable().collect::<Vec<_>>();
+            assert!(!runnable.is_empty(), "the program can never end");
+            for tid in runnable {
+                steps += self.kernel.run(tid, 16).executed.max(1);
+                self.check_gap();
+            }
+            assert!(steps < MAX_WAIT_STEPS, "the program never ended");
         }
     }
 }
@@ -171,6 +250,19 @@ impl Tracee for SimTracee {
     fn has_report(&mut self, thread: Tid) -> bool {
         self.kernel.reportable().any(|tid| tid == thread)
     }
+    fn pass_time(&mut self) {
+        let runnable = self.kernel.runnable().collect::<Vec<_>>();
+        for tid in runnable {
+            self.kernel.run(tid, 16);
+            self.check_gap();
+        }
+    }
+    fn is_zombie(&self, thread: Tid) -> bool {
+        self.kernel
+            .threads
+            .get(&thread)
+            .is_some_and(|thread| matches!(thread.state, crate::sim::kernel::State::Zombie(_)))
+    }
     fn registers(&self, thread: Tid) -> Result<(Registers, u64), Errno> {
         self.kernel.get_registers_and_call(thread)
     }
@@ -188,6 +280,7 @@ impl Tracee for SimTracee {
             thread,
             Options {
                 trace_clone: true,
+                trace_fork: true,
                 trace_exit: true,
                 exit_kill: true,
             },
@@ -221,11 +314,43 @@ impl Tracee for SimTracee {
     fn maps(&self, thread: Tid) -> Option<String> {
         self.kernel.maps(thread)
     }
+    fn read_debug(&self, thread: Tid, index: usize) -> Result<u64, Errno> {
+        self.kernel.peek_debug(thread, index)
+    }
+    fn write_debug(&mut self, thread: Tid, index: usize, value: u64) -> Result<(), Errno> {
+        self.kernel.poke_debug(thread, index, value)
+    }
+    fn hold_debug_slots(&mut self, thread: Tid, count: usize, _address: u64) {
+        self.kernel.hold_debug_slots(thread, count);
+    }
+    fn adopt(&mut self, _child: Tid) {}
+    fn detach(&mut self, thread: Tid, signal: Option<i32>) -> Result<(), Errno> {
+        self.kernel.detach(thread, signal)
+    }
+    fn seize(&mut self, thread: Tid) -> Result<(), Errno> {
+        self.kernel.seize(
+            thread,
+            Options {
+                trace_clone: true,
+                trace_fork: true,
+                trace_exit: true,
+                exit_kill: false,
+            },
+        )
+    }
+    fn interrupt(&mut self, thread: Tid) -> Result<(), Errno> {
+        self.kernel.interrupt(thread)
+    }
+    fn children(&self, thread: Tid) -> Vec<Tid> {
+        self.kernel.children(thread)
+    }
 }
 
 /// Addresses a script needs in one variant, where it loaded, and symbols
 /// that describe others.
 pub(super) struct Landmarks {
+    /// Where the image loaded, above its own addresses.
+    pub(super) bias: u64,
     pub(super) entry: u64,
     /// The first `syscall` instruction.
     pub(super) syscall: u64,
@@ -235,7 +360,7 @@ pub(super) struct Landmarks {
 }
 
 /// Symbols whose addresses describe others, where a program defines them.
-const SYMBOLS: [&str; 7] = [
+const SYMBOLS: [&str; 15] = [
     "fib",
     "share",
     "tick",
@@ -243,6 +368,14 @@ const SYMBOLS: [&str; 7] = [
     "rt_thread_start",
     "stacks",
     "rt_exit",
+    "counter",
+    "steady",
+    "pattern",
+    "shared",
+    "fill",
+    "bump",
+    "child",
+    "work",
 ];
 
 impl Landmarks {
@@ -270,6 +403,7 @@ impl Landmarks {
             .ip()
             + bias;
         Self {
+            bias,
             entry: file.entry() + bias,
             syscall,
             unmapped: 0x1000,
@@ -302,7 +436,9 @@ pub(super) struct Record<'a> {
     pub(super) landmarks: &'a Landmarks,
     /// Threads by creation order, the leader first.
     threads: Vec<Tid>,
-    lines: Vec<String>,
+    /// Forked processes by creation order.
+    children: Vec<Tid>,
+    pub(super) lines: Vec<String>,
 }
 
 impl Record<'_> {
@@ -319,6 +455,14 @@ impl Record<'_> {
         match self.threads.iter().position(|&known| known == tid) {
             Some(0) => "leader".to_owned(),
             Some(index) => format!("thread {index}"),
+            None if self.children.contains(&tid) => format!(
+                "child {}",
+                1 + self
+                    .children
+                    .iter()
+                    .position(|&child| child == tid)
+                    .expect("a known child")
+            ),
             None if tid == self.tracee.tracer() => "tracer".to_owned(),
             None => format!("unknown {}", if tid == 0 { "0" } else { "thread" }),
         }
@@ -331,6 +475,16 @@ impl Record<'_> {
             .replacen(&thread.to_string(), &self.name_of(thread), 1);
         self.note(format!("wait {}: {text}", self.name_of(thread)));
         status
+    }
+
+    /// The stopped thread's signal information, without its location, for
+    /// a signal that arrives wherever the thread happens to be.
+    pub(super) fn signal(&mut self, thread: Tid) {
+        let signal = self.tracee.signal(thread).map(|(signal, code, sender, _)| {
+            (signal, code, sender.map(|sender| self.name_of(sender)))
+        });
+        let name = self.name_of(thread);
+        self.note(format!("siginfo of {name}: {signal:?}"));
     }
 
     /// The stopped thread's signal information and location.
@@ -386,6 +540,59 @@ impl Record<'_> {
         child
     }
 
+    /// Handles a parent's fork event: records it and names the child,
+    /// which is returned.
+    pub(super) fn forked(&mut self, parent: Tid) -> Tid {
+        self.wait(parent);
+        self.stop(parent);
+        self.system_call(parent);
+        let child = self
+            .tracee
+            .event_message(parent)
+            .map(|message| Tid::try_from(message).expect("a process id"))
+            .expect("the fork event names the child");
+        self.children.push(child);
+        self.tracee.adopt(child);
+        let group = self.tracee.thread_group(child);
+        let name = self.name_of(child);
+        self.note(format!(
+            "{name} leads its own group: {}",
+            group == Some(child)
+        ));
+        self.children_of(parent);
+        child
+    }
+
+    /// The unreaped children `thread` forked, by name.
+    pub(super) fn children_of(&mut self, thread: Tid) {
+        let children = self
+            .tracee
+            .children(thread)
+            .into_iter()
+            .map(|child| self.name_of(child))
+            .collect::<Vec<_>>();
+        let name = self.name_of(thread);
+        self.note(format!("children of {name}: {children:?}"));
+    }
+
+    pub(super) fn detach(&mut self, thread: Tid, signal: Option<i32>) {
+        let result = self.tracee.detach(thread, signal);
+        let name = self.name_of(thread);
+        self.result(&format!("detach {name} with {signal:?}"), result);
+    }
+
+    pub(super) fn seize(&mut self, thread: Tid) {
+        let result = self.tracee.seize(thread);
+        let name = self.name_of(thread);
+        self.result(&format!("seize {name}"), result);
+    }
+
+    pub(super) fn interrupt(&mut self, thread: Tid) {
+        let result = self.tracee.interrupt(thread);
+        let name = self.name_of(thread);
+        self.result(&format!("interrupt {name}"), result);
+    }
+
     pub(super) fn result(&mut self, operation: &str, result: Result<(), Errno>) {
         self.note(format!("{operation}: {result:?}"));
     }
@@ -429,6 +636,53 @@ impl Record<'_> {
         self.result("restore", result);
     }
 
+    /// Where an address is in the image, whichever address it loaded at.
+    pub(super) fn place(&self, address: u64) -> String {
+        format!("{:#x}", address.wrapping_sub(self.landmarks.bias))
+    }
+
+    /// A stopped thread's exact place, and its `rcx`.
+    pub(super) fn rip(&mut self, thread: Tid) {
+        let place = self.tracee.registers(thread).map(|(registers, _)| {
+            (
+                self.place(registers.rip),
+                registers.general[crate::sim::cpu::RCX],
+            )
+        });
+        let name = self.name_of(thread);
+        self.note(format!("rip and rcx of {name}: {place:x?}"));
+    }
+
+    /// Reads a debug register, recording what it holds.
+    pub(super) fn debug(&mut self, thread: Tid, index: usize) -> Result<u64, Errno> {
+        let value = self.tracee.read_debug(thread, index);
+        let name = self.name_of(thread);
+        let shown = value.map(|value| {
+            if index < 4 {
+                self.place(value)
+            } else {
+                format!("{value:#x}")
+            }
+        });
+        self.note(format!("DR{index} of {name}: {shown:?}"));
+        value
+    }
+
+    /// Writes a debug register, recording the result.
+    pub(super) fn set_debug(&mut self, thread: Tid, index: usize, value: u64) {
+        let result = self.tracee.write_debug(thread, index, value);
+        let name = self.name_of(thread);
+        self.result(&format!("write DR{index} of {name}"), result);
+    }
+
+    /// Watches `address` with slot 0 for `control`'s accesses, as uscope
+    /// programs the registers: DR7 cleared, the address, then DR7.
+    pub(super) fn watch(&mut self, thread: Tid, address: u64, control: u64) {
+        self.set_debug(thread, 7, 0);
+        self.set_debug(thread, 0, address);
+        self.set_debug(thread, 7, control);
+    }
+
     /// Rewinds a thread's `rip` over the trap it executed.
     pub(super) fn rewind(&mut self, thread: Tid) {
         let (mut registers, _) = self.tracee.registers(thread).expect("registers at a trap");
@@ -441,7 +695,27 @@ impl Record<'_> {
 
 /// Runs `script` natively and simulated on every variant of `program`
 /// with `arguments`, and requires the same observations.
-pub(super) fn dual_run(program: &str, arguments: &[&str], script: impl Fn(&mut Record<'_>)) {
+pub(super) fn dual_run(program: &str, arguments: &[&str], script: impl Fn(&mut Record<'_>) + Sync) {
+    run_both(program, arguments, false, script);
+}
+
+/// Runs `script` as [`dual_run`] does, then the tracer exits: on Linux,
+/// the thread that traced the program ends, and the test, the program's
+/// parent, waits for it. The record ends with how the program ended.
+pub(super) fn dual_run_then_exit(
+    program: &str,
+    arguments: &[&str],
+    script: impl Fn(&mut Record<'_>) + Sync,
+) {
+    run_both(program, arguments, true, script);
+}
+
+fn run_both(
+    program: &str,
+    arguments: &[&str],
+    tracer_exits: bool,
+    script: impl Fn(&mut Record<'_>) + Sync,
+) {
     let corpus = Corpus::load().expect("load the golden corpus");
     let program = corpus
         .programs
@@ -467,21 +741,62 @@ pub(super) fn dual_run(program: &str, arguments: &[&str], script: impl Fn(&mut R
                 tracee,
                 landmarks: &landmarks,
                 threads: vec![leader],
+                children: Vec::new(),
                 lines: Vec::new(),
             };
             record.note(format!("first: {first:?}").replace(&leader.to_string(), "leader"));
             script(&mut record);
             record.lines
         };
-        let (mut native, first) = NativeTracee::spawn(&variant.file, &arguments);
-        let native_lines = observe(&mut native, first);
-        drop(native);
+        let native_lines = if tracer_exits {
+            let (mut lines, process) = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let (mut native, first) =
+                            NativeTracee::spawn_outliving_tracer(&variant.file, &arguments);
+                        let lines = observe(&mut native, first);
+                        (lines, native.abandon())
+                    })
+                    .join()
+                    .expect("the tracing thread")
+            });
+            lines.push(format!("the parent reaps: {}", reap_native(process)));
+            lines
+        } else {
+            let (mut native, first) = NativeTracee::spawn(&variant.file, &arguments);
+            observe(&mut native, first)
+        };
         let (mut simulated, first) = SimTracee::spawn(variant, &arguments);
-        let simulated_lines = observe(&mut simulated, first);
+        let mut simulated_lines = observe(&mut simulated, first);
+        if tracer_exits {
+            simulated_lines.push(format!("the parent reaps: {}", simulated.end()));
+        }
         assert_eq!(
             simulated_lines, native_lines,
             "{} behaves differently simulated (left) and on Linux (right)",
             variant.name
         );
+    }
+}
+
+/// Waits, as its parent, for a process its tracer left, killing it if it
+/// does not end within ten seconds. Returns how it ended.
+fn reap_native(process: Tid) -> String {
+    use nix::sys::wait::{WaitPidFlag, WaitStatus as Status, waitpid};
+    let pid = nix::unistd::Pid::from_raw(process);
+    let started = std::time::Instant::now();
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(Status::Exited(_, code)) => return format!("exited {code}"),
+            Ok(Status::Signaled(_, signal, _)) => return format!("killed by {}", signal as i32),
+            Ok(_) => {}
+            Err(errno) => panic!("waiting for {process} failed: {errno}"),
+        }
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+            let _ = waitpid(pid, None);
+            panic!("{process} did not end once its tracer exited");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }

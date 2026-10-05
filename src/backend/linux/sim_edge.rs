@@ -28,9 +28,9 @@ use super::signals::{Signal, WaitEvent};
 use super::{Controller, LinuxError, SessionLease, SignalMetadata, Waiter, backend_error};
 use crate::backend::{ControllerChannels, ControllerMessage, ExecutableSource, FileIdentity};
 use crate::debug_info::DebugInfo;
-use crate::protocol::{DebuggerEvent, LaunchOptions, StopId};
+use crate::protocol::{DebuggerEvent, LaunchOptions, Request, StopId};
 use crate::sim::cpu::Registers;
-use crate::sim::kernel::{Kernel, Options, SigInfo, Tid, WaitStatus};
+use crate::sim::kernel::{Kernel, Options, SigInfo, Thread, Tid, WaitStatus};
 use crate::sim::loader::Image;
 use crate::{Error, Result, VirtualAddress};
 
@@ -174,6 +174,16 @@ const fn tid(pid: Pid) -> Tid {
     pid.as_raw()
 }
 
+/// The options the controller traces every thread with.
+const fn trace_options(exit_kill: bool) -> Options {
+    Options {
+        trace_clone: true,
+        trace_fork: true,
+        trace_exit: true,
+        exit_kill,
+    }
+}
+
 impl SimTrace {
     /// Records that the controller asked for something the simulation does
     /// not model, and fails the request.
@@ -195,11 +205,24 @@ impl SimTrace {
         self.kernel.borrow_mut()
     }
 
+    /// The memory map of `pid`'s process, as production's `read_maps`
+    /// reads it: a leader that exited before the rest of its process has an
+    /// empty map, and a live thread's describes the process instead.
     fn maps(&self, pid: Pid) -> Result<String> {
-        self.kernel().maps(tid(pid)).ok_or_else(|| {
+        let kernel = self.kernel();
+        let Some(maps) = kernel.maps(tid(pid)) else {
             record!("read /proc/{pid}/maps -> not found");
-            std::io::Error::from(std::io::ErrorKind::NotFound).into()
-        })
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
+        };
+        if !maps.is_empty() {
+            return Ok(maps);
+        }
+        let group = kernel.thread_group(tid(pid)).unwrap_or_else(|| tid(pid));
+        Ok(kernel
+            .threads_of(group)
+            .filter_map(|thread| kernel.maps(thread.tid))
+            .find(|maps| !maps.is_empty())
+            .unwrap_or(maps))
     }
 }
 
@@ -383,13 +406,27 @@ impl LinuxTraceOps for SimTrace {
         Ok(Waiter::external())
     }
 
-    fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
-        self.gap("listing threads")
+    fn process_threads(&self, process: Pid) -> Result<Vec<Pid>> {
+        let kernel = self.kernel();
+        if !kernel.processes.contains_key(&tid(process)) {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
+        }
+        let mut threads = kernel
+            .threads_of(tid(process))
+            .map(|thread| Pid::from_raw(thread.tid))
+            .collect::<Vec<_>>();
+        threads.sort_unstable();
+        Ok(threads)
     }
 
-    fn traced_children(&self, _process: Pid, _thread: Pid) -> Vec<Pid> {
-        // No simulated program forks: `fork` is a model gap.
-        Vec::new()
+    fn traced_children(&self, _process: Pid, thread: Pid) -> Vec<Pid> {
+        let kernel = self.kernel();
+        kernel
+            .children(tid(thread))
+            .into_iter()
+            .filter(|child| kernel.threads.get(child).is_some_and(Thread::traced))
+            .map(Pid::from_raw)
+            .collect()
     }
 
     fn thread_name(&self, process: Pid, thread: Pid) -> Option<Arc<str>> {
@@ -398,16 +435,33 @@ impl LinuxTraceOps for SimTrace {
         (owner.tgid == tid(process)).then(|| Arc::clone(&owner.name))
     }
 
-    fn seize(&self, _pid: Pid, _exit_kill: bool) -> Result<bool> {
-        self.gap("seize")
+    fn seize(&self, pid: Pid, exit_kill: bool) -> Result<bool> {
+        let mut kernel = self.kernel_mut();
+        match kernel.seize(tid(pid), trace_options(exit_kill)) {
+            Ok(()) => Ok(true),
+            Err(Errno::ESRCH) => Ok(false),
+            Err(Errno::EPERM) if kernel.finished_exiting(tid(pid)) => Ok(false),
+            Err(errno) => Err(system(errno)),
+        }
     }
 
-    fn interrupt(&self, _pid: Pid) -> Result<bool> {
-        self.gap("interrupt")
+    fn interrupt(&self, pid: Pid) -> Result<bool> {
+        match self.kernel_mut().interrupt(tid(pid)) {
+            Ok(()) => Ok(true),
+            Err(Errno::ESRCH) => Ok(false),
+            Err(errno) => Err(system(errno)),
+        }
     }
 
-    fn detach(&self, _pid: Pid, _signal: Option<Signal>) -> Result<bool> {
-        self.gap("detach")
+    fn detach(&self, pid: Pid, signal: Option<Signal>) -> Result<bool> {
+        match self
+            .kernel_mut()
+            .detach(tid(pid), signal.map(Signal::number))
+        {
+            Ok(()) => Ok(true),
+            Err(Errno::ESRCH) => Ok(false),
+            Err(errno) => Err(system(errno)),
+        }
     }
 
     fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {
@@ -511,14 +565,7 @@ impl LinuxTraceOps for SimTrace {
 
     fn set_options(&self, pid: Pid, exit_kill: bool) -> Result<()> {
         self.kernel_mut()
-            .set_options(
-                tid(pid),
-                Options {
-                    trace_clone: true,
-                    trace_exit: true,
-                    exit_kill,
-                },
-            )
+            .set_options(tid(pid), trace_options(exit_kill))
             .map_err(system)
     }
 
@@ -547,19 +594,21 @@ impl LinuxTraceOps for SimTrace {
         Ok(maps_executable(&self.maps(pid)?, address))
     }
 
-    fn read_debug_register(&self, _pid: Pid, _index: usize) -> std::result::Result<u64, Errno> {
-        let _ = self.gap::<()>("reading a debug register");
-        Err(Errno::ENOSYS)
+    fn read_debug_register(&self, pid: Pid, index: usize) -> std::result::Result<u64, Errno> {
+        self.kernel()
+            .peek_debug(tid(pid), index)
+            .inspect_err(|&errno| {
+                let _ = failed_read("PTRACE_PEEKUSER", pid, errno);
+            })
     }
 
     fn write_debug_register(
         &self,
-        _pid: Pid,
-        _index: usize,
-        _value: u64,
+        pid: Pid,
+        index: usize,
+        value: u64,
     ) -> std::result::Result<(), Errno> {
-        let _ = self.gap::<()>("writing a debug register");
-        Err(Errno::ENOSYS)
+        self.kernel_mut().poke_debug(tid(pid), index, value)
     }
 }
 
@@ -598,10 +647,15 @@ pub struct Truth {
     pub public_stop: Option<u64>,
     /// The process the controller debugs.
     pub inferior: Option<Tid>,
+    /// Whether the inferior finished launching or attaching, which put its
+    /// breakpoints and watchpoints in place.
+    pub established: bool,
     /// The inferior's threads the controller knows.
     pub threads: BTreeSet<Tid>,
     /// The user's breakpoints, by identifier.
     pub breakpoints: BTreeMap<u64, UserBreakpoint>,
+    /// Each stopped thread's own reason, as the controller holds it.
+    pub reasons: BTreeMap<Tid, crate::StopReason>,
 }
 
 /// A real controller over the simulated kernel, with the queue it serves.
@@ -622,8 +676,8 @@ pub struct Delivery {
     pub description: String,
     /// The thread a `SIGTRAP` signal-delivery-stop status is about.
     pub trap: Option<Tid>,
-    /// Whether the message asks for a launch.
-    pub launch: bool,
+    /// Whether the message asks the controller to shut down.
+    pub shutdown: bool,
 }
 
 /// Everything a simulated controller is built from.
@@ -695,26 +749,25 @@ impl SimController {
     /// queue is empty.
     pub fn take(&mut self) -> Option<Delivery> {
         let message = self.controller.messages.try_recv().ok()?;
-        let (description, trap, launch) = match &message {
-            ControllerMessage::Request(request) => (
-                request.describe(),
-                None,
-                matches!(request, crate::protocol::Request::Launch { .. }),
-            ),
+        let (description, trap) = match &message {
+            ControllerMessage::Request(request) => (request.describe(), None),
             ControllerMessage::Wait(event) => (
                 format!("wait {}", wait_status(event)),
                 match *event {
                     WaitEvent::Stopped(pid, Signal::SIGTRAP) => Some(pid.as_raw()),
                     _ => None,
                 },
-                false,
             ),
         };
+        let shutdown = matches!(
+            message,
+            ControllerMessage::Request(Request::Shutdown { .. })
+        );
         Some(Delivery {
             message,
             description,
             trap,
-            launch,
+            shutdown,
         })
     }
 
@@ -787,7 +840,14 @@ impl SimController {
             active_execution: inferior.active.as_ref().map(|active| active.id.get()),
             public_stop: inferior.public_stop.as_ref().map(|stop| stop.id.get()),
             inferior: Some(inferior.tgid.as_raw()),
+            established: self.controller.launch_reply.is_none()
+                && self.controller.attach_reply.is_none(),
             threads: inferior.threads.keys().map(|pid| pid.as_raw()).collect(),
+            reasons: inferior
+                .threads
+                .iter()
+                .filter_map(|(pid, thread)| Some((pid.as_raw(), thread.reason.clone()?)))
+                .collect(),
             breakpoints: self
                 .controller
                 .breakpoints
