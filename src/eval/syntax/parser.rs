@@ -178,7 +178,7 @@ pub fn parse(text: &str) -> Result<(Vec<Ambiguity>, Readings), ExpressionError> 
     for &start in &starts {
         let mut parser = Parser::new(text, &tokens, &starts, 0);
         parser.position = start + 1;
-        let name = parser.path()?;
+        let name = parser.path(true)?;
         let close = parser.peek_span();
         ambiguity_list.push(Ambiguity {
             name,
@@ -612,10 +612,10 @@ impl<'tokens> Parser<'tokens> {
                     return self.push(NodeKind::Len(operand), span.to(close));
                 }
                 "as" | "sizeof" => return Err(self.unexpected("an operand")),
-                _ => NodeKind::Name(self.path()?),
+                _ => NodeKind::Name(self.path(false)?),
             },
             TokenKind::Quoted(_) | TokenKind::Punct(Punct::ColonColon) => {
-                NodeKind::Name(self.path()?)
+                NodeKind::Name(self.path(false)?)
             }
             TokenKind::Register(name) => {
                 self.advance();
@@ -652,19 +652,38 @@ impl<'tokens> Parser<'tokens> {
     }
 
     /// A name and the names `::` or `.` join to it.
-    fn path(&mut self) -> Result<Path, ExpressionError> {
+    /// A name and the names `::` joins to it, and in a type name `.` too,
+    /// as in Go's `main.point`. In an expression a `.` selects a member,
+    /// which binding may find is part of a global's dotted name.
+    fn path(&mut self, dots: bool) -> Result<Path, ExpressionError> {
         let global = self.eat(Punct::ColonColon);
         let mut segments = vec![self.segment(Separator::Colons)?];
         loop {
             let separator = match self.peek_punct() {
                 Some(Punct::ColonColon) => Separator::Colons,
-                Some(Punct::Dot) if is_segment(self.peek_at(1)) => Separator::Dot,
+                Some(Punct::Dot)
+                    if is_segment(self.peek_at(1)) && (dots || self.dots_then_colons()) =>
+                {
+                    Separator::Dot
+                }
                 _ => break,
             };
             self.advance();
             segments.push(self.segment(separator)?);
         }
         Ok(Path { global, segments })
+    }
+
+    /// Whether the `.`-joined names ahead continue into `::`, as a
+    /// file-qualified name such as `one.c::duplicate` does.
+    fn dots_then_colons(&self) -> bool {
+        let mut offset = 0;
+        while self.peek_at(offset) == &TokenKind::Punct(Punct::Dot)
+            && is_segment(self.peek_at(offset + 1))
+        {
+            offset += 2;
+        }
+        offset > 0 && self.peek_at(offset) == &TokenKind::Punct(Punct::ColonColon)
     }
 
     fn segment(&mut self, separator: Separator) -> Result<Segment, ExpressionError> {
@@ -758,7 +777,7 @@ impl<'tokens> Parser<'tokens> {
         }
         let base = if let Some(tag) = self.peek_word().and_then(Tag::parse) {
             self.advance();
-            TypeBase::Tagged(tag, self.path()?)
+            TypeBase::Tagged(tag, self.path(true)?)
         } else if self.peek_word().and_then(CWord::parse).is_some() {
             let mut words = Vec::new();
             loop {
@@ -777,7 +796,7 @@ impl<'tokens> Parser<'tokens> {
             words.sort_unstable();
             TypeBase::CWords(words)
         } else {
-            TypeBase::Named(self.path()?)
+            TypeBase::Named(self.path(true)?)
         };
         let mut end = self.previous_span();
         loop {

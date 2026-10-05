@@ -250,8 +250,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Set,
         "set",
         [],
-        "set <value-path> = [expression...]",
-        "Change a number, boolean, enumeration, or pointer, such as set x = y + 1"
+        "set [var] <assignment...>",
+        "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1"
     ),
     command!(
         Globals,
@@ -457,7 +457,7 @@ impl Cli {
             Command::Whatis => self.whatis(rest).await?,
             Command::Ptype => self.ptype(rest).await?,
             Command::Globals => self.globals(first).await?,
-            Command::Set => self.set(arguments[0], &arguments[1..], spec).await?,
+            Command::Set => self.set(rest, spec).await?,
             Command::Stepi => self.step(StepKind::Instruction).await?,
             Command::Nexti => self.step(StepKind::OverInstruction).await?,
             Command::Step => self.step(StepKind::IntoSource).await?,
@@ -845,21 +845,27 @@ impl Cli {
     }
 
     /// Assigns a value in the selected frame, as gdb's `set var` does.
-    async fn set(&self, target: &str, words: &[&str], spec: &CommandSpec) -> Result<String> {
-        let ["=", value @ ..] = words else {
+    async fn set(&self, text: &str, spec: &CommandSpec) -> Result<String> {
+        let text = text.strip_prefix("var ").map_or(text, str::trim);
+        let expression = parse_expression(text)?;
+        let Some(target) = expression.assignment_target() else {
             return Err(spec.usage_error());
         };
-        if value.is_empty() {
-            return Err(spec.usage_error());
-        }
-        let parsed = uscope::parse_value_expression(target)?;
-        if parsed.range.is_some() {
-            bail!("a range cannot be assigned");
-        }
-        let assigned = self
+        let evaluation = self
             .debugger
-            .assign(parsed.expression, &value.join(" "))
-            .await?;
+            .evaluate_with(
+                &expression,
+                uscope::EvaluationMode::Assign,
+                uscope::InspectionLimits::default(),
+            )
+            .await
+            .map_err(|error| expression_error(text, error))?;
+        let uscope::Evaluation::Value {
+            value: assigned, ..
+        } = evaluation
+        else {
+            bail!("the assignment produced no value");
+        };
         let renderer = self.renderers.stdout;
         Ok(match &assigned.type_info {
             Some(type_info) => format!(

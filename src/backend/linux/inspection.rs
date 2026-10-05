@@ -270,41 +270,6 @@ impl<P: InspectionOps> Controller<P> {
         self.inspect_in_frame(inferior, stop_id, pid, &resolved, expression, budget)
     }
 
-    /// Inspects an expression where a breakpoint hit stopped one thread
-    /// while others may run, as a condition or log message does. Its
-    /// capabilities belong to no stop.
-    pub(super) fn inspect_at_hit(
-        &self,
-        pid: Pid,
-        expression: &ValueExpression,
-    ) -> Result<InspectedValue> {
-        validate_value_expression(expression)?;
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        // The thread is in the ptrace-stop that reported the hit, which its
-        // recorded state does not reflect until the hit is resolved.
-        validate_image_current(inferior)?;
-        let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
-        let address = crate::VirtualAddress::new(self.ptrace.registers(pid)?.rip);
-        let presentation = self.presentation_for_thread(
-            pid,
-            Some(&crate::StopReason::Breakpoint {
-                address,
-                hits: Arc::from([]),
-            }),
-        )?;
-        let resolved =
-            self.resolve_presented_frame(inferior, pid, StackFrameId::INNERMOST, presentation)?;
-        self.inspect_in_frame(
-            inferior,
-            StopId::new(0),
-            pid,
-            &resolved,
-            expression,
-            &mut budget,
-        )
-        .map(|(value, _)| value)
-    }
-
     #[expect(
         clippy::too_many_lines,
         reason = "longest-prefix local/global lookup shares one validated stopped runtime"

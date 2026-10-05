@@ -437,12 +437,27 @@ impl<P: LinuxTraceOps> Controller<P> {
         pid: Pid,
         condition: &crate::Condition,
     ) -> std::result::Result<bool, String> {
-        condition.evaluate(&mut |path| {
-            let value = self
-                .inspect_at_hit(pid, path)
-                .map_err(|error| error.to_string())?;
-            crate::Operand::of(path, value.type_info.as_ref(), &value.state)
-        })
+        let expression = condition.expression();
+        match self.evaluate_at_hit(pid, expression, true) {
+            Ok(crate::Evaluation::Value { value, cause }) => match value.state {
+                crate::VariableState::Available {
+                    value: crate::VariableValue::Scalar(crate::ScalarValue::Boolean(holds)),
+                    ..
+                } => Ok(holds),
+                crate::VariableState::Unavailable(reason) => Err(cause.map_or_else(
+                    || format!("the condition is unavailable: {reason}"),
+                    |cause| {
+                        format!(
+                            "`{}` is unavailable: {reason}",
+                            cause.text(expression.text())
+                        )
+                    },
+                )),
+                state => Err(format!("the condition has no truth value: {state:?}")),
+            },
+            Ok(_) => Err("the condition has no truth value".to_owned()),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     /// Reads the values a log message shows, as the hitting thread sees them.
@@ -453,11 +468,15 @@ impl<P: LinuxTraceOps> Controller<P> {
             .map(|segment| match segment {
                 crate::LogSegment::Text(text) => crate::LogPart::Text(Arc::clone(text)),
                 crate::LogSegment::Value(expression) => {
-                    match self.inspect_at_hit(pid, expression) {
-                        Ok(value) => crate::LogPart::Value {
+                    match self.evaluate_at_hit(pid, expression, false) {
+                        Ok(crate::Evaluation::Value { value, .. }) => crate::LogPart::Value {
                             expression: expression.clone(),
                             type_info: value.type_info,
                             state: value.state,
+                        },
+                        Ok(_) => crate::LogPart::Error {
+                            expression: expression.clone(),
+                            error: "a range cannot be logged".into(),
                         },
                         Err(error) => crate::LogPart::Error {
                             expression: expression.clone(),

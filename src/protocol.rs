@@ -320,8 +320,8 @@ pub enum LogPart {
     Text(Arc<str>),
     /// A value the message shows, as the hitting thread saw it.
     Value {
-        /// The value's path.
-        expression: crate::ValueExpression,
+        /// The value's expression.
+        expression: crate::Expression,
         /// Its type, when it resolved.
         type_info: Option<crate::TypeInfo>,
         /// Its state; its capabilities belong to no stop.
@@ -329,8 +329,8 @@ pub enum LogPart {
     },
     /// A value the message names that could not be read.
     Error {
-        /// The value's path.
-        expression: crate::ValueExpression,
+        /// The value's expression.
+        expression: crate::Expression,
         /// Why it could not be read.
         error: Arc<str>,
     },
@@ -1231,14 +1231,6 @@ pub enum Request {
         bytes: Arc<[u8]>,
         reply: Reply<u64>,
     },
-    Assign {
-        stop_id: StopId,
-        thread_id: ThreadId,
-        frame: StackFrameId,
-        expression: crate::ValueExpression,
-        value: String,
-        reply: Reply<crate::InspectedValue>,
-    },
     ReadWord {
         process_id: ProcessId,
         stop_id: StopId,
@@ -1443,7 +1435,6 @@ impl Request {
             Self::ResolveWatchTarget { .. } => "resolve watch target".to_owned(),
             Self::RemoveAllWatchpoints { .. } => "remove all watchpoints".to_owned(),
             Self::ReadMemory { .. } => "read memory".to_owned(),
-            Self::Assign { .. } => "assign".to_owned(),
             Self::ReadWord { .. } => "read word".to_owned(),
             Self::LoadedModule { .. } => "loaded module".to_owned(),
             Self::LoadedModules { .. } => "loaded modules".to_owned(),

@@ -312,7 +312,7 @@ fn conditions_stop_only_where_they_hold() {
     assert_eq!(invalid["verified"], false);
     assert_eq!(
         invalid["message"],
-        "invalid condition: '=' assigns; compare with '=='"
+        "invalid condition: a breakpoint's expressions cannot assign; compare with `==`"
     );
     let mut mark = dap.send("continue", json!({"threadId": entry.thread})).mark;
     for expected in ["10", "20", "30", "38", "39", "40"] {
@@ -338,7 +338,7 @@ fn logpoints_log_values_instead_of_stopping() {
         json!({"source": {"path": path}, "breakpoints": [
             {"line": line, "logMessage": "call {call} after {last_call}, {{braces}}"},
             {"line": line, "logMessage": "seven", "condition": "call == 7"},
-            {"line": line, "logMessage": "bad {call + 1}"},
+            {"line": line, "logMessage": "bad {call +}"},
         ]}),
     );
     let set = breakpoints(&set);
@@ -348,7 +348,7 @@ fn logpoints_log_values_instead_of_stopping() {
     );
     assert_eq!(
         set[2]["message"],
-        "invalid log message: '{call + 1}' is not a value path such as name, a.b, p->next, or items[2]"
+        "invalid log message: expected an operand, found the end of the expression"
     );
     let resumed = dap.send("continue", json!({"threadId": entry.thread}));
     dap.success(resumed);
@@ -391,7 +391,7 @@ fn a_condition_that_cannot_be_evaluated_stops_and_says_why() {
         important,
         format!(
             "breakpoint {id} stopped because its condition could not be evaluated: \
-             no visible variable or parameter named 'no_such_value' was found\n"
+             no variable is named `no_such_value` here\n"
         )
     );
     dap.finish();

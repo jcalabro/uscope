@@ -890,11 +890,23 @@ impl Session {
         hex: bool,
     ) -> Result<Value, ErrorBody> {
         let handle = self.target_handle()?;
-        let assigned = handle
+        let assignment = uscope::Expression::parse(&format!("{path} = {value}"))
+            .map_err(|failure| error(uscope::Error::Expression(failure)))?;
+        let evaluation = handle
             .at(context)
-            .assign(path.clone(), value)
+            .evaluate_with(
+                &assignment,
+                uscope::EvaluationMode::Assign,
+                uscope::InspectionLimits::default(),
+            )
             .await
             .map_err(error)?;
+        let uscope::Evaluation::Value {
+            value: assigned, ..
+        } = evaluation
+        else {
+            return Err(ErrorBody::new("the assignment produced no value"));
+        };
         self.forget_reads();
         let options = Options {
             hex,

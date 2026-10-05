@@ -189,6 +189,14 @@ pub enum Op<O, S> {
         operand: Box<Node<O, S>>,
         how: Length,
     },
+    /// A value converted to the node's type, refused unless the type holds
+    /// it exactly.
+    Fit(Box<Node<O, S>>),
+    /// Stores a fitted value in a place: only ever the whole expression.
+    Assign {
+        target: Box<Node<O, S>>,
+        value: Box<Node<O, S>>,
+    },
     /// `base[start..end]`.
     Range {
         base: Box<Node<O, S>>,

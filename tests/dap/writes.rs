@@ -89,17 +89,14 @@ fn set_variable_changes_values_the_program_then_uses() {
         "setVariable",
         json!({"variablesReference": main_locals, "name": "unsigned_character", "value": "300"}),
     );
-    assert_eq!(
-        narrow,
-        "cannot assign to unsigned_character: 300 does not fit a unsigned 8-bit value"
-    );
+    assert_eq!(narrow, "300 does not fit `unsigned char` exactly");
     let record = dap.request_error(
         "setVariable",
         json!({"variablesReference": locals, "name": "pair", "value": "1"}),
     );
     assert_eq!(
         record,
-        "cannot assign to pair: only numbers, booleans, enumerations, and pointers can be assigned"
+        "`pair` cannot be assigned; only numbers, truth values, and pointers can; its type is `pointer_pair`"
     );
     // main checks the values it set, and now finds them changed.
     let resumed = dap.send("continue", json!({"threadId": thread}));

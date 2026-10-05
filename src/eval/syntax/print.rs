@@ -283,13 +283,8 @@ impl Printer<'_> {
     }
 
     fn member(&mut self, base: NodeId, field: &Field, arrow: bool) {
-        // `(a).b` selects a member where `a.b` could name a global, and
-        // `(1).5` a field where `1.5` would be a float.
-        let force = match self.tree.kind(base) {
-            NodeKind::Name(_) => !arrow && matches!(field, Field::Named(_)),
-            NodeKind::Integer { suffix: None, .. } => true,
-            _ => false,
-        };
+        // `(1).5` selects a field where `1.5` would be a float.
+        let force = matches!(self.tree.kind(base), NodeKind::Integer { suffix: None, .. });
         if force {
             self.out.push('(');
             self.node(base);

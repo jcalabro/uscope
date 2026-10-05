@@ -135,6 +135,16 @@ impl Expression {
         }
     }
 
+    /// The text of an assignment's target, when the expression assigns.
+    #[must_use]
+    pub fn assignment_target(&self) -> Option<&str> {
+        let tree = self.tree()?;
+        match tree.kind(tree.root()) {
+            ast::NodeKind::Assign { target, .. } => Some(tree.span(*target).text(self.text())),
+            _ => None,
+        }
+    }
+
     /// Whether both parse the same, whatever their spacing.
     #[must_use]
     pub fn same_shape(&self, other: &Self) -> bool {
@@ -157,6 +167,16 @@ impl Expression {
                 })
     }
 }
+
+/// Two expressions are equal when their text is: one text has one set of
+/// readings.
+impl PartialEq for Expression {
+    fn eq(&self, other: &Self) -> bool {
+        self.parsed.text == other.parsed.text
+    }
+}
+
+impl Eq for Expression {}
 
 /// The expression in normal form: one space around binary operators and
 /// only the parentheses its meaning needs, which parses back to the same
