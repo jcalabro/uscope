@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use crate::eval::interp::{self, Outcome, Value};
-use crate::eval::number::Exact;
 use crate::eval::target::{Machine, Refusal, Register, Stop};
 use crate::eval::types::{Category, TypeSource, category};
 use crate::{
@@ -306,23 +305,16 @@ pub(super) fn truth<M: Machine>(
     }
 }
 
-fn exact<M: Machine>(
-    program: &ViewProgram<M::Step>,
-    machine: &mut ViewMachine<'_, M>,
-) -> Result<Exact, Failure> {
-    match interp::value(program, machine)? {
-        Value::Int(integer) => Ok(integer.value()),
-        _ => Err(internal("a count is not an integer")),
-    }
-}
-
 /// A count: a non-negative integer.
 pub(super) fn count<M: Machine>(
     program: &ViewProgram<M::Step>,
     machine: &mut ViewMachine<'_, M>,
     what: &str,
 ) -> Result<u64, Failure> {
-    let value = exact(program, machine)?;
+    let Value::Int(integer) = interp::value(program, machine)? else {
+        return Err(internal("a count is not an integer"));
+    };
+    let value = integer.value();
     value
         .to_u128()
         .and_then(|value| u64::try_from(value).ok())
@@ -365,12 +357,13 @@ fn checks<M: Machine>(
     Ok(())
 }
 
-/// The shape a value has, choosing `if` branches.
+/// The shape a value has, once its checks hold, choosing `if` branches.
 fn resolve<'b, M: Machine>(
-    shape: &'b BoundShape<M::Step>,
+    bound: &'b BoundView<M::Step>,
     machine: &mut ViewMachine<'_, M>,
 ) -> Result<&'b BoundShape<M::Step>, Failure> {
-    let mut shape = shape;
+    checks(bound, machine)?;
+    let mut shape = &bound.shape;
     while let BoundShape::If {
         condition,
         then,
@@ -681,8 +674,7 @@ pub fn present<M: Machine>(
     checkpoints: &mut Checkpoints,
 ) -> Result<Presented, Failure> {
     let mut machine = ViewMachine::new(machine, bound, this);
-    checks(bound, &mut machine)?;
-    let shape = resolve(&bound.shape, &mut machine)?;
+    let shape = resolve(bound, &mut machine)?;
     let mut presented = match shape {
         BoundShape::Text { source, length } => {
             let text = read_text(source, length.as_ref(), &mut machine)?;
@@ -874,8 +866,7 @@ pub fn children<M: Machine>(
     checkpoints: &mut Checkpoints,
 ) -> Result<Vec<Child>, Failure> {
     let mut machine = ViewMachine::new(machine, bound, this);
-    checks(bound, &mut machine)?;
-    let shape = resolve(&bound.shape, &mut machine)?;
+    let shape = resolve(bound, &mut machine)?;
     // A record's members come before the view's fields.
     let named = named(bound, shape);
     let end = offset.saturating_add(limit).min(
@@ -974,8 +965,7 @@ pub fn length<M: Machine>(
     checkpoints: &mut Checkpoints,
 ) -> Result<u64, Failure> {
     let mut machine = ViewMachine::new(machine, bound, this);
-    checks(bound, &mut machine)?;
-    match resolve(&bound.shape, &mut machine)? {
+    match resolve(bound, &mut machine)? {
         BoundShape::Sequence { scan, .. } | BoundShape::Map { scan, .. } => {
             if let Some(length) = declared_length(scan, &mut machine)? {
                 return Ok(length);
@@ -1031,8 +1021,7 @@ pub fn element_place<M: Machine>(
     checkpoints: &mut Checkpoints,
 ) -> Result<M::Place, Failure> {
     let mut machine = ViewMachine::new(machine, bound, this);
-    checks(bound, &mut machine)?;
-    let shape = resolve(&bound.shape, &mut machine)?;
+    let shape = resolve(bound, &mut machine)?;
     let BoundShape::Sequence { scan, element } = shape else {
         return Err(refused(if matches!(shape, BoundShape::Map { .. }) {
             "a map's entries are not indexed by position"
