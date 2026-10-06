@@ -203,6 +203,42 @@ func constants() {
 // Point is passed in two registers.
 type Point struct{ X, Y int }
 
+// Celsius shares its shape, go.shape.float64, with float64.
+type Celsius float64
+
+type Other struct{ Name string }
+
+type number interface{ ~int | ~float64 }
+
+// scale is compiled once per shape: Go describes value and product by
+// the shape, and the dictionary says what type each really has.
+//
+//go:noinline
+func scale[T number](checkpoint string, value T, factor T) T {
+	product := value * factor
+	truth(checkpoint, "value", "type", fmt.Sprintf("%T", value))
+	truth(checkpoint, "product", "type", fmt.Sprintf("%T", product))
+	switch typed := any(product).(type) {
+	case int:
+		truth(checkpoint, "product", "int", typed)
+	case float64:
+		truth(checkpoint, "product", "f64", bits64(typed))
+	case Celsius:
+		truth(checkpoint, "product", "f64", bits64(float64(typed)))
+	}
+	reached(checkpoint)
+	return product
+}
+
+// identity's pointers share one shape whatever they point to.
+//
+//go:noinline
+func identity[T any](checkpoint string, value T) T {
+	truth(checkpoint, "value", "type", fmt.Sprintf("%T", value))
+	reached(checkpoint)
+	return value
+}
+
 // pieces takes values Go passes in registers, which its code describes in
 // pieces; the tests stop at its entry rather than in reached's caller.
 //
@@ -228,6 +264,11 @@ func main() {
 		os.Exit(1)
 	}
 	constants()
+	scale("shape-int", 3, 4)
+	scale("shape-float", 2.5, 4.0)
+	scale("shape-celsius", Celsius(1.5), 2)
+	identity("shape-point", &Point{X: 1, Y: 2})
+	identity("shape-other", &Other{Name: "other"})
 	text := "pieces"
 	numbers := []int{4, 5, 6}
 	truth("pieces", "text", "string", fmt.Sprintf("%q", text))

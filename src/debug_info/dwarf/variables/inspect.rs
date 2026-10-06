@@ -29,6 +29,7 @@ use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, evaluate,
     evaluate_dynamic_aggregate_address, materialize_constant, materialize_piece,
 };
+use super::generic::Generic;
 use super::location::{Expression, ExpressionUse, LocationSelectionError};
 use super::pieces;
 use super::shape::{
@@ -632,6 +633,14 @@ impl DwarfVariableInfo {
             || PathStep::Unavailable(crate::UnsupportedVariableFeature::TypeRepresentation.into());
         let mut steps = Vec::new();
         match step {
+            // A generic pointer's shape, Go's `go.shape.*uint8`, points to
+            // whatever its type argument does, which only running finds.
+            Step::Deref if self.go_dict_indices.contains_key(&from) => {
+                let reason = VariableUnavailableReason::ValueAccess(
+                    crate::ValueAccessUnavailableReason::UnspecifiedPointee,
+                );
+                Ok(planned(vec![PathStep::Unavailable(reason)], 0, None))
+            }
             Step::Deref => {
                 let Some((_canonical, info)) = supported_shape(self.transparent_type(from))? else {
                     return Ok(planned(vec![unsupported()], 0, None));
@@ -1100,7 +1109,7 @@ impl DwarfVariableInfo {
         }
     }
 
-    fn storage_with_offset(
+    pub(super) fn storage_with_offset(
         storage: ValueStorage,
         offset: i64,
     ) -> std::result::Result<ValueStorage, EvaluateError> {
@@ -1164,7 +1173,7 @@ impl DwarfVariableInfo {
         }
     }
 
-    fn read_storage(
+    pub(super) fn read_storage(
         storage: &ValueStorage,
         size: usize,
         runtime: &mut dyn VariableRuntime,
@@ -2725,6 +2734,13 @@ impl DwarfVariableInfo {
             }
             (None, TypeResolution::Resolved(id)) => *id,
         };
+        // A generic value has its type argument, or else its shape.
+        let (type_id, unresolved_shape) =
+            match self.generic_type(type_id, variable.instance, address, runtime, budget)? {
+                Generic::Plain => (type_id, None),
+                Generic::Resolved(argument) => (argument, None),
+                Generic::Unresolved(shape, reason) => (shape, Some(reason)),
+            };
         let type_info = match self.type_info(type_id) {
             Ok(info) => info.clone(),
             Err(description) => return Ok(data_object(variable, None, invalid(description))),
@@ -2743,7 +2759,21 @@ impl DwarfVariableInfo {
             }
             Err(error) => shape_error_state(error),
         };
-        Ok(data_object(variable, Some(type_info), state))
+        let mut state = state;
+        // A shape's pointer points to whatever its unknown type argument
+        // does, not to the shape's pointee.
+        if unresolved_shape.is_some()
+            && let VariableState::Available { dereference, .. } = &mut state
+            && matches!(dereference, DereferenceState::Available(_))
+        {
+            *dereference = DereferenceState::Unavailable {
+                pointee: None,
+                reason: DereferenceUnavailableReason::UnspecifiedPointee,
+            };
+        }
+        let mut variable = data_object(variable, Some(type_info), state);
+        variable.unresolved_shape = unresolved_shape;
+        Ok(variable)
     }
 
     fn constrain_dereference(&self, state: &mut VariableState, shape: &ValueShape) {
@@ -2919,6 +2949,7 @@ pub(super) fn data_object(
         name: Arc::clone(&variable.name),
         declaration: variable.declaration.clone(),
         type_info,
+        unresolved_shape: None,
         state,
     }
 }

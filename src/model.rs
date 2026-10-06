@@ -2042,8 +2042,70 @@ pub struct Variable {
     pub declaration: Option<SourceLocation>,
     /// Its resolved type, when valid and supported.
     pub type_info: Option<TypeInfo>,
+    /// Why a generic value has the type of the shape its code was compiled
+    /// for, such as Go's `go.shape.int`, rather than its own type.
+    pub unresolved_shape: Option<ShapeUnresolvedReason>,
     /// Its current availability and value.
     pub state: VariableState,
+}
+
+/// Why the type argument a generic value has could not be found, so the
+/// value shows the shape its code was compiled for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ShapeUnresolvedReason {
+    /// The function has no dictionary of type arguments here.
+    NoDictionary,
+    /// The dictionary, or its entry for the type, cannot be read.
+    DictionaryUnavailable(VariableUnavailableReason),
+    /// Optimized code describes its dictionary in the slot where the
+    /// function may spill it, which holds a stale value until it does.
+    UnreliableDictionary,
+    /// The table of the runtime's type descriptors, Go's
+    /// `runtime.firstmoduledata`, is not described or cannot be read.
+    ModuleDataUnavailable(VariableUnavailableReason),
+    /// The dictionary names a type descriptor outside this module's.
+    ForeignType,
+    /// No type in the debug information has the dictionary's descriptor.
+    UndescribedType,
+    /// The type the dictionary names is laid out unlike the shape.
+    MismatchedShape,
+    /// The debug information describing the dictionary or the table is
+    /// malformed.
+    Malformed(Arc<str>),
+}
+
+impl fmt::Display for ShapeUnresolvedReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoDictionary => formatter.write_str("the function has no type dictionary here"),
+            Self::DictionaryUnavailable(reason) => {
+                write!(formatter, "the type dictionary is unavailable: {reason}")
+            }
+            Self::UnreliableDictionary => formatter.write_str(
+                "optimized code may not have stored its type dictionary where described",
+            ),
+            Self::ModuleDataUnavailable(reason) => {
+                write!(
+                    formatter,
+                    "the runtime's type table is unavailable: {reason}"
+                )
+            }
+            Self::ForeignType => {
+                formatter.write_str("the type argument is described by another module")
+            }
+            Self::UndescribedType => {
+                formatter.write_str("no debug information describes the type argument")
+            }
+            Self::MismatchedShape => {
+                formatter.write_str("the type argument is laid out unlike its shape")
+            }
+            Self::Malformed(description) => write!(
+                formatter,
+                "the type dictionary's debug information is malformed: {description}"
+            ),
+        }
+    }
 }
 
 /// One value produced by explicitly dereferencing a pointer or reference.

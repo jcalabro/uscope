@@ -142,6 +142,64 @@ async fn check_gallery(gallery: &Gallery<'_>) {
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }
 
+/// Checks that a variable the compiler made for itself, named by the
+/// whole path, which may begin with a dot, is not listed but its name
+/// reaches it.
+async fn check_hidden(
+    scenario: &Scenario,
+    variables: &[Variable],
+    name: &str,
+    may_be_unavailable: bool,
+) -> Result<(), String> {
+    if let Some(variable) = variables
+        .iter()
+        .find(|variable| variable.name.as_ref() == name)
+    {
+        return Err(format!("is listed: {variable:?}"));
+    }
+    match scenario.handle().variable(name).await {
+        Ok(_) => Ok(()),
+        Err(_) if may_be_unavailable => Ok(()),
+        Err(error) => Err(format!("is not reachable by name: {error:?}")),
+    }
+}
+
+/// Checks what a truth says of the variable rather than of its value: that
+/// it is a result, or, for its type, that a generic value whose type
+/// argument is unknown keeps its shape for a typed reason.
+fn check_variable(
+    variable: &Variable,
+    truth: &Truth,
+    may_be_unavailable: bool,
+) -> Option<Result<(), String>> {
+    if truth.kind == "result" {
+        return Some(if variable.kind == VariableKind::Result {
+            Ok(())
+        } else {
+            Err(format!("is listed as a {:?}", variable.kind))
+        });
+    }
+    // A generic value whose type argument is unknown keeps its shape, for
+    // a typed reason.
+    if truth.kind == "type"
+        && let Some(reason) = &variable.unresolved_shape
+    {
+        let shape = variable.type_info.as_ref().map(|info| info.name.as_ref());
+        return Some(
+            if !shape.is_some_and(|shape| shape.starts_with("go.shape.")) {
+                Err(format!(
+                    "is unresolved ({reason}) without its shape: {shape:?}"
+                ))
+            } else if may_be_unavailable {
+                Ok(())
+            } else {
+                Err(format!("has its shape's type: {reason}"))
+            },
+        );
+    }
+    None
+}
+
 /// Checks one truth, accepting a typed unavailable or malformed state
 /// when `may_be_unavailable`.
 async fn check_truth(
@@ -150,21 +208,8 @@ async fn check_truth(
     truth: &Truth,
     may_be_unavailable: bool,
 ) -> Result<(), String> {
-    // A variable the compiler made for itself is named by the whole path,
-    // which may begin with a dot.
     if truth.kind == "hidden" {
-        let name = truth.path.as_str();
-        if let Some(variable) = variables
-            .iter()
-            .find(|variable| variable.name.as_ref() == name)
-        {
-            return Err(format!("is listed: {variable:?}"));
-        }
-        return match scenario.handle().variable(name).await {
-            Ok(_) => Ok(()),
-            Err(_) if may_be_unavailable => Ok(()),
-            Err(error) => Err(format!("is not reachable by name: {error:?}")),
-        };
+        return check_hidden(scenario, variables, &truth.path, may_be_unavailable).await;
     }
     let mut segments = truth.path.split('.');
     let name = segments.next().expect("a path names a variable");
@@ -184,12 +229,8 @@ async fn check_truth(
             Err("is not listed".to_owned())
         };
     };
-    if truth.kind == "result" {
-        return if variable.kind == VariableKind::Result {
-            Ok(())
-        } else {
-            Err(format!("is listed as a {:?}", variable.kind))
-        };
+    if let Some(checked) = check_variable(variable, truth, may_be_unavailable) {
+        return checked;
     }
     let mut type_info = variable.type_info.clone();
     let mut type_name = variable.type_info.as_ref().map(|info| info.name.clone());
@@ -392,6 +433,11 @@ async fn go_values_agree_with_their_program() {
                 "visibility-after",
                 "temporaries",
                 "constants",
+                "shape-int",
+                "shape-float",
+                "shape-celsius",
+                "shape-point",
+                "shape-other",
                 "pieces",
             ],
             optimized,
