@@ -26,8 +26,8 @@ use super::evaluate::{
 };
 use super::globals::{DefinitionIndex, DefinitionResolution};
 use super::inspect::{
-    ArrayIndexCalculationError, ScalarDecodeError, evaluate_error_state, implicit_pointer_range,
-    row_major_array_index, static_member_layout_is_valid,
+    PathStep, ScalarDecodeError, array_byte_offset, evaluate_error_state, implicit_pointer_range,
+    static_member_layout_is_valid,
 };
 use super::location::{EvaluationUnit, Expression, LocationDescription, LocationEntry};
 use super::shape::{ValueShape, ValueShapeError, value_shape_from};
@@ -42,49 +42,35 @@ use super::variant::{
 use super::*;
 
 #[test]
-fn row_major_array_indices_honor_lower_bounds_and_reject_overflow() {
-    let dimensions = [
-        ArrayDimension {
-            lower_bound: -2,
-            count: 3,
-        },
-        ArrayDimension {
-            lower_bound: 10,
-            count: 2,
-        },
-    ];
-    assert_eq!(row_major_array_index(&dimensions, &[0, 11]), Ok(5));
+fn array_indices_honor_lower_bounds_and_reject_overflow() {
+    let step = |dimensions: &[(i128, u64)], element_size| PathStep::ArrayIndex {
+        dimensions: dimensions
+            .iter()
+            .map(|&(lower_bound, count)| ArrayDimension { lower_bound, count })
+            .collect(),
+        element_size,
+    };
+    let bounded = step(&[(-2, 3), (10, 2)], 4);
+    assert_eq!(array_byte_offset(&bounded, &[0, 11]).ok(), Some(Some(20)));
+    for (indices, bad_index, bad_lower_bound, bad_count) in
+        [([-3, 10], -3, -2, 3), ([0, 12], 12, 10, 2)]
+    {
+        assert!(matches!(
+            array_byte_offset(&bounded, &indices),
+            Err(Error::ValueIndexOutOfBounds { index, lower_bound, count })
+                if (index, lower_bound, count) == (bad_index, bad_lower_bound, bad_count)
+        ));
+    }
     assert!(matches!(
-        row_major_array_index(&dimensions, &[-3, 10]),
-        Err(ArrayIndexCalculationError::OutOfBounds {
-            index: -3,
-            lower_bound: -2,
-            count: 3,
-        })
-    ));
-    assert!(matches!(
-        row_major_array_index(&dimensions, &[0, 12]),
-        Err(ArrayIndexCalculationError::OutOfBounds {
-            index: 12,
-            lower_bound: 10,
-            count: 2,
-        })
+        array_byte_offset(&bounded, &[0]),
+        Err(Error::InvalidValueExpression(_))
     ));
 
-    let overflowing = [
-        ArrayDimension {
-            lower_bound: 0,
-            count: u64::MAX,
-        },
-        ArrayDimension {
-            lower_bound: 0,
-            count: 2,
-        },
-    ];
-    assert_eq!(
-        row_major_array_index(&overflowing, &[i128::from(u64::MAX - 1), 1]),
-        Err(ArrayIndexCalculationError::Overflow)
-    );
+    let overflowing = step(&[(0, u64::MAX), (0, 2)], 1);
+    assert!(matches!(
+        array_byte_offset(&overflowing, &[i128::from(u64::MAX - 1), 1]),
+        Err(Error::InvalidValueExpression(message)) if message.contains("row-major")
+    ));
 }
 
 #[test]

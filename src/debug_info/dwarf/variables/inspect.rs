@@ -121,16 +121,6 @@ pub(super) struct DecodedSlice {
     pub(super) capacity: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ArrayIndexCalculationError {
-    OutOfBounds {
-        index: i128,
-        lower_bound: i128,
-        count: u64,
-    },
-    Overflow,
-}
-
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum ScalarDecodeError {
     Unavailable(VariableUnavailableReason),
@@ -222,35 +212,6 @@ const fn dereference_reference(
     }
 }
 
-pub(super) fn row_major_array_index(
-    dimensions: &[ArrayDimension],
-    indices: &[i128],
-) -> std::result::Result<u64, ArrayIndexCalculationError> {
-    assert_eq!(
-        dimensions.len(),
-        indices.len(),
-        "array index planning must supply one source index per dimension"
-    );
-    let mut linear = 0_u64;
-    for (index, dimension) in indices.iter().copied().zip(dimensions) {
-        let relative = index
-            .checked_sub(dimension.lower_bound)
-            .and_then(|relative| u64::try_from(relative).ok());
-        let Some(relative) = relative.filter(|relative| *relative < dimension.count) else {
-            return Err(ArrayIndexCalculationError::OutOfBounds {
-                index,
-                lower_bound: dimension.lower_bound,
-                count: dimension.count,
-            });
-        };
-        linear = linear
-            .checked_mul(dimension.count)
-            .and_then(|value| value.checked_add(relative))
-            .ok_or(ArrayIndexCalculationError::Overflow)?;
-    }
-    Ok(linear)
-}
-
 /// The byte offset an array index step reaches with `indices`, checked
 /// against the array's static bounds; `None` for any other step.
 pub(in crate::debug_info) fn array_byte_offset(
@@ -271,20 +232,24 @@ pub(in crate::debug_info) fn array_byte_offset(
             indices.len()
         )));
     }
-    let linear = row_major_array_index(dimensions, indices).map_err(|error| match error {
-        ArrayIndexCalculationError::OutOfBounds {
-            index,
-            lower_bound,
-            count,
-        } => Error::ValueIndexOutOfBounds {
-            index,
-            lower_bound,
-            count,
-        },
-        ArrayIndexCalculationError::Overflow => {
-            Error::InvalidValueExpression("array row-major index overflows".to_owned())
-        }
-    })?;
+    let mut linear = 0_u64;
+    for (index, dimension) in indices.iter().copied().zip(dimensions.iter()) {
+        let relative = index
+            .checked_sub(dimension.lower_bound)
+            .and_then(|relative| u64::try_from(relative).ok())
+            .filter(|relative| *relative < dimension.count)
+            .ok_or(Error::ValueIndexOutOfBounds {
+                index,
+                lower_bound: dimension.lower_bound,
+                count: dimension.count,
+            })?;
+        linear = linear
+            .checked_mul(dimension.count)
+            .and_then(|value| value.checked_add(relative))
+            .ok_or_else(|| {
+                Error::InvalidValueExpression("array row-major index overflows".to_owned())
+            })?;
+    }
     linear
         .checked_mul(*element_size)
         .and_then(|offset| i64::try_from(offset).ok())
