@@ -8,13 +8,13 @@ use object::read::elf::{FileHeader as _, ProgramHeader as _};
 use object::{Endianness, Object as _, elf};
 use uscope::{
     Backtrace, CoreDumpInfo, CoreDumpOptions, CoreModuleState, Debugger, Error,
-    ExceptionDisposition, InferiorState, LoadedModuleSnapshot, MemoryReadCompletion,
-    ModuleIdentity, ProcessId, RegisterRole, ResumeScope, ScalarValue, StepKind, StopId,
-    StopReason, ThreadState, UnwindTermination, Variable, VariableState, VariableUnavailableReason,
-    VariableValue, VariableValueSource, VirtualAddress,
+    ExceptionDisposition, InferiorState, MemoryReadCompletion, ModuleIdentity, ProcessId,
+    RegisterRole, ResumeScope, ScalarValue, StepKind, StopId, StopReason, ThreadState,
+    UnwindTermination, Variable, VariableState, VariableUnavailableReason, VariableValue,
+    VariableValueSource, VirtualAddress,
 };
 
-use support::{Scenario, ScratchDir};
+use support::{Scenario, ScratchDir, frame_modules, position_of, register_u64};
 
 const MATRIX: [&str; 3] = ["gcc-o0", "clang-o2", "gcc-o2-nopie"];
 const WORKERS: u64 = 3;
@@ -76,51 +76,6 @@ async fn variable(scenario: &Scenario, name: &str) -> Variable {
         .await
 }
 
-fn register(registers: &uscope::RegisterSnapshot, role: RegisterRole) -> u64 {
-    let value = registers
-        .registers
-        .iter()
-        .find(|value| value.register.role == Some(role))
-        .unwrap_or_else(|| panic!("missing {role:?} register"));
-    u64::from_le_bytes(
-        value
-            .bytes
-            .as_deref()
-            .expect("innermost registers are saved")
-            .try_into()
-            .expect("64-bit register"),
-    )
-}
-
-/// Names each frame by its owning module's file name and its function.
-fn frames(trace: &Backtrace, modules: &LoadedModuleSnapshot) -> Vec<(String, Option<String>)> {
-    trace
-        .frames
-        .iter()
-        .map(|frame| {
-            let module = frame.module.map_or_else(
-                || "?".to_owned(),
-                |id| {
-                    modules
-                        .modules
-                        .iter()
-                        .find(|record| record.module.id == id)
-                        .and_then(|record| record.path.file_name())
-                        .map_or_else(
-                            || panic!("frame names unknown module {id:?}"),
-                            |name| name.to_string_lossy().into_owned(),
-                        )
-                },
-            );
-            let function = frame
-                .function
-                .as_ref()
-                .map(|function| function.name.to_string());
-            (module, function)
-        })
-        .collect()
-}
-
 async fn named_frames(scenario: &Scenario) -> (Backtrace, Vec<(String, Option<String>)>) {
     let modules = scenario
         .operation("modules", scenario.handle().loaded_modules())
@@ -128,17 +83,8 @@ async fn named_frames(scenario: &Scenario) -> (Backtrace, Vec<(String, Option<St
     let trace = scenario
         .operation("backtrace", scenario.handle().backtrace())
         .await;
-    let names = frames(&trace, &modules);
+    let names = frame_modules(&trace, &modules);
     (trace, names)
-}
-
-fn position(frames: &[(String, Option<String>)], module: &str, function: &str) -> usize {
-    frames
-        .iter()
-        .position(|(frame_module, name)| {
-            frame_module == module && name.as_deref() == Some(function)
-        })
-        .unwrap_or_else(|| panic!("no {module}:{function} frame in {frames:#?}"))
 }
 
 fn core_info(scenario: &Scenario) -> CoreDumpInfo {
@@ -302,7 +248,7 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
             .operation("registers", scenario.handle().registers())
             .await;
         assert_eq!(
-            register(&registers, RegisterRole::ProgramCounter),
+            register_u64(&registers, RegisterRole::ProgramCounter),
             location.address.get()
         );
 
@@ -410,7 +356,7 @@ async fn abort_cores_unwind_from_libc_into_the_aborting_caller() {
         );
 
         let (trace, names) = named_frames(&scenario).await;
-        let caller = position(&names, &fixture, "crash_abort");
+        let caller = position_of(&names, &fixture, "crash_abort");
         assert!(caller > 0, "{variant}: {names:#?}");
         assert!(
             names[..caller]
@@ -438,7 +384,7 @@ async fn every_dumped_thread_keeps_its_own_registers_stack_and_tls() {
     let mut scenario = open_core("crash-gcc-o0-segv.core");
     let (stop, snapshot) = stopped(&mut scenario).await;
     let spin_line = crash_source_line("while (atomic_load(&release) == 0) {");
-    let mut stack_pointers = vec![register(
+    let mut stack_pointers = vec![register_u64(
         &scenario
             .operation("registers", scenario.handle().registers())
             .await,
@@ -494,7 +440,7 @@ async fn every_dumped_thread_keeps_its_own_registers_stack_and_tls() {
             654 + worker
         );
         workers.push(worker);
-        stack_pointers.push(register(
+        stack_pointers.push(register_u64(
             &scenario
                 .operation("registers", scenario.handle().registers())
                 .await,
@@ -911,7 +857,7 @@ type SegmentEdit = fn(&mut Vec<u8>, usize);
 async fn unsaved_and_truncated_memory_stays_unavailable_rather_than_guessed() {
     // Locate the faulting thread's stack segment in an intact dump.
     let reference = open_core("crash-gcc-o0-segv.core");
-    let stack = register(
+    let stack = register_u64(
         &reference
             .operation("registers", reference.handle().registers())
             .await,
@@ -944,7 +890,7 @@ async fn unsaved_and_truncated_memory_stays_unavailable_rather_than_guessed() {
         let registers = scenario
             .operation("registers", scenario.handle().registers())
             .await;
-        assert_eq!(register(&registers, RegisterRole::StackPointer), stack);
+        assert_eq!(register_u64(&registers, RegisterRole::StackPointer), stack);
         let (trace, _) = named_frames(&scenario).await;
         assert_eq!(trace.frames.len(), 1, "{name}: {trace:?}");
         assert!(

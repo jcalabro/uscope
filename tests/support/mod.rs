@@ -23,10 +23,10 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uscope::{
-    Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
+    Backtrace, Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
     DebuggerHandle, ExceptionDisposition, ExecutionId, ExitStatus, LaunchOptions, LineNumber,
-    ProcessId, Result, ResumeScope, StackFrameId, StateSnapshot, StepKind, StopReason, ThreadId,
-    VirtualAddress,
+    LoadedModuleSnapshot, ProcessId, RegisterRole, RegisterSnapshot, Result, ResumeScope,
+    StackFrameId, StateSnapshot, StepKind, StopReason, ThreadId, VirtualAddress,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -683,6 +683,66 @@ pub fn breakpoint_address(reason: &StopReason) -> VirtualAddress {
         StopReason::Breakpoint { address, .. } => *address,
         other => panic!("expected a breakpoint stop, got {other:?}"),
     }
+}
+
+/// The 64-bit register with `role` in a snapshot of saved registers.
+pub fn register_u64(registers: &RegisterSnapshot, role: RegisterRole) -> u64 {
+    let value = registers
+        .registers
+        .iter()
+        .find(|value| value.register.role == Some(role))
+        .unwrap_or_else(|| panic!("missing {role:?} register"));
+    let bytes = value
+        .bytes
+        .as_deref()
+        .unwrap_or_else(|| panic!("{} was not saved", value.register.name));
+    u64::from_le_bytes(
+        bytes
+            .try_into()
+            .unwrap_or_else(|_| panic!("{} was not 64 bits", value.register.name)),
+    )
+}
+
+/// Names each frame by its owning module's file name and its function.
+pub fn frame_modules(
+    trace: &Backtrace,
+    modules: &LoadedModuleSnapshot,
+) -> Vec<(String, Option<String>)> {
+    trace
+        .frames
+        .iter()
+        .map(|frame| {
+            let module = frame.module.map_or_else(
+                || "?".to_owned(),
+                |id| {
+                    modules
+                        .modules
+                        .iter()
+                        .find(|record| record.module.id == id)
+                        .and_then(|record| record.path.file_name())
+                        .map_or_else(
+                            || panic!("frame names unknown module {id:?}"),
+                            |name| name.to_string_lossy().into_owned(),
+                        )
+                },
+            );
+            let function = frame
+                .function
+                .as_ref()
+                .map(|function| function.name.to_string());
+            (module, function)
+        })
+        .collect()
+}
+
+/// Where `module`'s `function` is among named frames.
+pub fn position_of(frames: &[(String, Option<String>)], module: &str, function: &str) -> usize {
+    frames
+        .iter()
+        .position(|(frame_module, name)| {
+            frame_module == module && name.as_deref() == Some(function)
+        })
+        .unwrap_or_else(|| panic!("no {module}:{function} frame in {frames:#?}"))
 }
 
 /// Randomizes the address space of every process this thread starts from

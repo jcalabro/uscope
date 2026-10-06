@@ -34,7 +34,7 @@ use uscope::{
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use support::Scenario;
+use support::{Scenario, frame_modules, position_of, register_u64};
 use tokio::time::{Duration, timeout};
 
 fn available_value(state: &VariableState) -> &uscope::VariableValue {
@@ -1126,22 +1126,6 @@ fn assert_language_scalar_catalog(snapshot: &uscope::VariableSnapshot, fixture: 
     );
 }
 
-fn register_u64(registers: &uscope::RegisterSnapshot, role: RegisterRole) -> u64 {
-    let value = registers
-        .registers
-        .iter()
-        .find(|value| value.register.role == Some(role))
-        .unwrap_or_else(|| panic!("missing {role:?} register"));
-    let bytes: [u8; 8] = value
-        .bytes
-        .as_deref()
-        .unwrap_or_else(|| panic!("{} was not saved", value.register.name))
-        .try_into()
-        .unwrap_or_else(|_| panic!("{} was not 64 bits", value.register.name));
-
-    u64::from_le_bytes(bytes)
-}
-
 fn assert_basic_source_context(
     context: &SourceContext,
     source_file: &SourceFile,
@@ -1199,52 +1183,6 @@ fn assert_register_snapshot(
             && value.register.bits == 64
             && value.bytes.as_ref().is_some_and(|bytes| bytes.len() == 8)
     }));
-}
-
-/// Summarizes one backtrace frame as its owning module's file name and its
-/// function name, so cross-module assertions name both identities.
-fn frame_modules(
-    trace: &uscope::Backtrace,
-    modules: &uscope::LoadedModuleSnapshot,
-) -> Vec<(String, Option<String>)> {
-    trace
-        .frames
-        .iter()
-        .map(|frame| {
-            let module = frame.module.map_or_else(
-                || "?".to_owned(),
-                |id| {
-                    let record = modules
-                        .modules
-                        .iter()
-                        .find(|record| record.module.id == id)
-                        .unwrap_or_else(|| panic!("frame references unknown module {id:?}"));
-                    record
-                        .path
-                        .file_name()
-                        .expect("module path names a file")
-                        .to_string_lossy()
-                        .into_owned()
-                },
-            );
-            (
-                module,
-                frame
-                    .function
-                    .as_ref()
-                    .map(|function| function.name.to_string()),
-            )
-        })
-        .collect()
-}
-
-fn position_of(frames: &[(String, Option<String>)], module: &str, function: &str) -> usize {
-    frames
-        .iter()
-        .position(|(frame_module, name)| {
-            frame_module == module && name.as_deref() == Some(function)
-        })
-        .unwrap_or_else(|| panic!("no {module}:{function} frame in {frames:#?}"))
 }
 
 fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
