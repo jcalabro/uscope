@@ -1223,3 +1223,100 @@ fn bit_field_extraction_is_endian_aware_and_bounded() {
     assert!(extract_bit_field(&[0], 7, 2, ByteOrder::Little).is_err());
     assert!(extract_bit_field(&[0], 0, 0, ByteOrder::Little).is_err());
 }
+
+/// A global whose type has no usable shape is a malformed type graph, as a
+/// local, a member, or a pointee of that type is.
+#[test]
+fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
+    use object::write::Object;
+
+    let encoding = Encoding {
+        format: Format::Dwarf32,
+        version: 5,
+        address_size: 8,
+    };
+    let mut written = WriteDwarf::new();
+    let unit_id = written.units.add(Unit::new(encoding, LineProgram::none()));
+    let unit = written.units.get_mut(unit_id);
+    let root = unit.root();
+    unit.get_mut(root).set(
+        gimli::DW_AT_language,
+        WriteAttributeValue::Language(gimli::DW_LANG_C11),
+    );
+    let empty = unit.add(root, gimli::DW_TAG_pointer_type);
+    unit.get_mut(empty)
+        .set(gimli::DW_AT_byte_size, WriteAttributeValue::Udata(0));
+    let global = unit.add(root, gimli::DW_TAG_variable);
+    unit.get_mut(global).set(
+        gimli::DW_AT_name,
+        WriteAttributeValue::String(b"nothing".to_vec()),
+    );
+    unit.get_mut(global)
+        .set(gimli::DW_AT_type, WriteAttributeValue::UnitRef(empty));
+    unit.get_mut(global)
+        .set(gimli::DW_AT_external, WriteAttributeValue::Flag(true));
+    let mut location = gimli::write::Expression::new();
+    location.op_addr(gimli::write::Address::Constant(0x10));
+    unit.get_mut(global).set(
+        gimli::DW_AT_location,
+        WriteAttributeValue::Exprloc(location),
+    );
+    let mut sections = Sections::new(EndianVec::new(LittleEndian));
+    written.write(&mut sections).expect("write test DWARF");
+
+    let mut elf = Object::new(
+        object::BinaryFormat::Elf,
+        object::Architecture::X86_64,
+        object::Endianness::Little,
+    );
+    let data = elf.add_section(Vec::new(), b".data".to_vec(), object::SectionKind::Data);
+    elf.append_section_data(data, &[0; 0x20], 8);
+    sections
+        .for_each(|id, section| -> std::result::Result<(), ()> {
+            if !section.slice().is_empty() {
+                let debug = elf.add_section(
+                    Vec::new(),
+                    id.name().as_bytes().to_vec(),
+                    object::SectionKind::Debug,
+                );
+                elf.append_section_data(debug, section.slice(), 1);
+            }
+            Ok(())
+        })
+        .expect("add the DWARF sections");
+    let bytes = elf.write().expect("write the test object");
+    let debug_info = crate::debug_info::load_bytes(std::path::Path::new("malformed.o"), &bytes)
+        .expect("load the test object");
+    assert_eq!(debug_info.image.globals().len(), 1);
+
+    let mut runtime = Runtime::new([]);
+    runtime.memory = Some(Arc::from([0_u8; 0x20]));
+    let context = crate::debug_info::VariableContext {
+        stop_id: crate::StopId::new(1),
+        thread: crate::ThreadId::new(1),
+        frame: crate::StackFrameId::new(0),
+        module: crate::ModuleId::new(0),
+        image: ModuleImageId::new(0),
+        address: None,
+    };
+    let variable = debug_info
+        .variables
+        .inspect_global(
+            GlobalVariableId::new(0),
+            None,
+            context,
+            &mut runtime,
+            &mut InspectionBudget::default(),
+        )
+        .expect("inspect the global");
+    let VariableState::Malformed(reason) = &variable.state else {
+        panic!("{variable:?}");
+    };
+    assert_eq!(
+        (reason.kind, reason.description.as_ref()),
+        (
+            VariableMalformedKind::InvalidTypeGraph,
+            "pointer type has a zero byte size"
+        )
+    );
+}
