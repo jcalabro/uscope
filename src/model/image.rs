@@ -32,6 +32,9 @@ pub struct ModuleMetadata {
     /// Rust trait objects' vtables, by address, with the concrete type each
     /// is for.
     pub vtables: Vec<(ImageAddress, TypeReference)>,
+    /// Whether each thread gets its own copy of a block of the module's
+    /// storage.
+    pub thread_local_storage: bool,
 }
 
 #[derive(Debug)]
@@ -279,6 +282,7 @@ pub struct ModuleImage {
     symbols: Arc<[SymbolInfo]>,
     symbol_sources: SymbolTableSources,
     sections: Arc<[SectionInfo]>,
+    thread_local_storage: bool,
     globals: Arc<[GlobalVariableInfo]>,
     types: Arc<[TypeNode]>,
     source_files: Arc<[SourceFile]>,
@@ -425,6 +429,7 @@ impl ModuleImage {
             symbols: metadata.symbols.into(),
             symbol_sources: metadata.symbol_sources,
             sections: metadata.sections.into(),
+            thread_local_storage: metadata.thread_local_storage,
             globals: metadata.globals.into(),
             types: metadata.types,
             source_files: metadata.source_files.into(),
@@ -552,6 +557,13 @@ impl ModuleImage {
     #[must_use]
     pub fn section(&self, id: SectionId) -> Option<&SectionInfo> {
         self.sections.get(id.index())
+    }
+
+    /// Whether each thread gets its own copy of a block of the module's
+    /// storage, such as an ELF `PT_TLS` segment describes.
+    #[must_use]
+    pub const fn has_thread_local_storage(&self) -> bool {
+        self.thread_local_storage
     }
 
     /// Finds the allocated section containing an image address. Should

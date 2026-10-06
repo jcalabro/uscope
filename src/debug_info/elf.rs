@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 
+use object::read::elf::{ElfFile, FileHeader, ProgramHeader as _};
 use object::{
     Object, ObjectSection, ObjectSegment, ObjectSymbol, SectionFlags, SegmentFlags, SymbolFlags,
     SymbolSection, elf,
@@ -108,6 +109,22 @@ fn collect_embedded(
 fn unusable(reason: &str) -> EmbeddedSymbolTable {
     EmbeddedSymbolTable::Unusable {
         reason: reason.into(),
+    }
+}
+
+/// Whether the image has a `PT_TLS` segment. An empty one gives threads no
+/// storage, and loaders assign it no TLS module.
+pub fn has_thread_local_storage(object: &object::File<'_>) -> bool {
+    fn any_tls<Elf: FileHeader>(file: &ElfFile<'_, Elf>) -> bool {
+        let endian = file.endian();
+        file.elf_program_headers().iter().any(|segment| {
+            segment.p_type(endian) == elf::PT_TLS && segment.p_memsz(endian).into() != 0
+        })
+    }
+    match object {
+        object::File::Elf32(file) => any_tls(file),
+        object::File::Elf64(file) => any_tls(file),
+        _ => false,
     }
 }
 
@@ -523,6 +540,7 @@ pub(super) fn fuzz(data: &[u8]) {
             lines: Vec::new(),
             sections: load_sections(&object),
             vtables: Vec::new(),
+            thread_local_storage: has_thread_local_storage(&object),
         },
     );
     fuzz_lookups(&image, &symbols, data);

@@ -60,6 +60,29 @@ impl<P: InspectionOps> Controller<P> {
         })
     }
 
+    /// Records how the C library identifies each module's TLS block, from
+    /// the loader's link maps in list order, once the registry holds every
+    /// module the loader lists.
+    pub(super) fn locate_tls_modules(&mut self, link_maps: &[(u64, VirtualAddress)]) {
+        let has_tls = self
+            .modules
+            .values()
+            .map(|module| {
+                (
+                    module.loaded.load_bias,
+                    module.image.has_thread_local_storage(),
+                )
+            })
+            .collect();
+        let main_load_bias = self.modules[&crate::ModuleId::new(0)].loaded.load_bias;
+        let tls_modules = self
+            .c_library
+            .tls_modules(link_maps, main_load_bias, &has_tls);
+        for module in self.modules.values_mut() {
+            module.tls = tls_modules.get(&module.loaded.load_bias).copied();
+        }
+    }
+
     pub(super) fn unregister_module(&mut self, id: crate::ModuleId) {
         let module = self.modules.remove(&id).expect("registered module exists");
         self.bump_revision();
@@ -87,7 +110,7 @@ impl<P: InspectionOps> Controller<P> {
             .get_mut(&crate::ModuleId::new(0))
             .expect("main module is registered");
         main.loaded = LoadedModule::main(main.image.id(), 0);
-        main.link_map = None;
+        main.tls = None;
         if self.drop_library_locations() {
             self.bump_revision();
             let _ = self.events.send(DebuggerEvent::BreakpointsChanged {
@@ -155,14 +178,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
 
         for (path, load_bias) in observed {
-            let existing = self.modules.iter().find_map(|(id, module)| {
-                (module.image.path() == path && module.loaded.load_bias == load_bias).then_some(*id)
-            });
-            if let Some(id) = existing {
-                self.modules
-                    .get_mut(&id)
-                    .expect("observed module exists")
-                    .link_map = link_maps.get(&load_bias).copied();
+            let known = self
+                .modules
+                .values()
+                .any(|module| module.image.path() == path && module.loaded.load_bias == load_bias);
+            if known {
                 continue;
             }
             let module_id = crate::ModuleId::new(self.next_module_id);
@@ -191,7 +211,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                     image: debug.image,
                     unwind: debug.unwind,
                     variables: debug.variables,
-                    link_map: link_maps.get(&load_bias).copied(),
+                    tls: None,
                 },
             );
             self.bump_revision();
@@ -208,7 +228,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .get_mut(&main_loaded.id)
             .expect("main module is registered");
         main.loaded = main_loaded;
-        main.link_map = link_maps.get(&main_loaded.load_bias).copied();
+        self.locate_tls_modules(&link_maps);
         Ok(lost_locations)
     }
 }
@@ -377,14 +397,15 @@ pub(super) fn identify_mapped_module(mapping: &ModuleMapping) -> Option<(PathBuf
     Some((path, bias))
 }
 
-/// Each module's loader `link_map`, by load bias, found through the
-/// executable's `DT_DEBUG` rendezvous. A program without one has none.
+/// Each module's load bias and loader `link_map`, in the loader's list
+/// order, found through the executable's `DT_DEBUG` rendezvous. A program
+/// without one has none.
 pub(super) fn loader_link_maps(
     ptrace: &impl InspectionOps,
     pid: Pid,
     executable_data: &[u8],
     main: LoadedModule,
-) -> Result<BTreeMap<u64, VirtualAddress>> {
+) -> Result<Vec<(u64, VirtualAddress)>> {
     const DYNAMIC_ENTRY_SIZE: u64 = 16;
     const DT_NULL: u64 = 0;
     const DT_DEBUG: u64 = 21;
@@ -393,7 +414,7 @@ pub(super) fn loader_link_maps(
     let object = object::File::parse(executable_data)
         .map_err(|error| Error::backend(LinuxError::Object(error)))?;
     let Some(dynamic) = object.section_by_name(".dynamic") else {
-        return Ok(BTreeMap::new());
+        return Ok(Vec::new());
     };
     let dynamic_start = main.virtual_address(ImageAddress::new(dynamic.address()))?;
     let entries = dynamic.size() / DYNAMIC_ENTRY_SIZE;
@@ -415,14 +436,14 @@ pub(super) fn loader_link_maps(
         }
     }
     let Some(rendezvous) = rendezvous.filter(|address| address.get() != 0) else {
-        return Ok(BTreeMap::new());
+        return Ok(Vec::new());
     };
     // The public ELF loader rendezvous begins with r_version followed by the
     // aligned r_map pointer. Each public link_map begins with l_addr and ends
     // its debugger-visible prefix with l_next/l_prev.
     let mut current = VirtualAddress::new(read_word_offset(ptrace, pid, rendezvous.get(), 8)?);
     let mut visited = BTreeSet::new();
-    let mut result = BTreeMap::new();
+    let mut result = Vec::new();
     while current.get() != 0 {
         if result.len() == MAX_LINK_MAPS || !visited.insert(current) {
             return Err(backend_error(LinuxError::LoaderRendezvous(
@@ -430,7 +451,7 @@ pub(super) fn loader_link_maps(
             )));
         }
         let load_bias = ptrace.read_word(pid, current.get())?;
-        result.insert(load_bias, current);
+        result.push((load_bias, current));
         current = VirtualAddress::new(read_word_offset(ptrace, pid, current.get(), 24)?);
     }
     Ok(result)

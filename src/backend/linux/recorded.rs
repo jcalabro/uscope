@@ -27,6 +27,7 @@ use super::modules::{ModuleMapping, ProcessMappings};
 use super::native::{InspectionOps, LinuxTraceOps};
 use super::registers::Fxsave;
 use super::signals::{Signal, WaitEvent};
+use super::tls::TlsModule;
 use super::{BreakpointOwner, BreakpointSite, SignalMetadata, Waiter};
 
 pub(super) struct Recorded<P>(pub(super) P);
@@ -119,10 +120,10 @@ impl<P: InspectionOps> InspectionOps for Recorded<P> {
     fn tls_address(
         &self,
         thread: Pid,
-        link_map: VirtualAddress,
+        module: TlsModule,
         offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
-        self.0.tls_address(thread, link_map, offset)
+        self.0.tls_address(thread, module, offset)
     }
 }
 

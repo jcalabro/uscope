@@ -12,22 +12,19 @@
 //! run on separate controller threads and may look up TLS concurrently.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
-use std::io::IoSliceMut;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use nix::libc;
-use nix::sys::ptrace;
-use nix::sys::uio::{RemoteIoVec, process_vm_readv};
 use nix::unistd::Pid;
-use object::{Object, ObjectSymbol, SymbolKind};
 
-use super::{glibc_tls, mapped_module_load_bias, module_mappings};
+use super::{ProcessServices, glibc};
 use crate::VirtualAddress;
 
 const TD_OK: c_int = 0;
 const TD_ERR: c_int = 1;
+const TD_NOLIBTHREAD: c_int = 12;
 const TD_TLSDEFER: c_int = 21;
 const TD_VERSION: c_int = 22;
 /// `td_err_e` names, indexed by value.
@@ -67,32 +64,6 @@ const X86_64_FS_INDEX: c_int = 25;
 
 /// Serializes all use of `libthread_db`; see the module documentation.
 static THREAD_DB: Mutex<()> = Mutex::new(());
-
-/// Read-only process state that `libthread_db` queries through callbacks.
-pub(super) trait ProcessServices {
-    fn read(&self, address: u64, output: &mut [u8]) -> bool;
-    fn registers(&self, lwp: Pid) -> Option<libc::user_regs_struct>;
-    fn lookup_symbol(&self, object: &str, symbol: &str) -> Option<u64>;
-}
-
-/// A live process read through `process_vm_readv`, ptrace, and `/proc`.
-pub(super) struct LiveProcess {
-    pub(super) pid: Pid,
-}
-
-impl ProcessServices for LiveProcess {
-    fn read(&self, address: u64, output: &mut [u8]) -> bool {
-        usize::try_from(address).is_ok_and(|address| read_process(self.pid, address, output))
-    }
-
-    fn registers(&self, lwp: Pid) -> Option<libc::user_regs_struct> {
-        ptrace::getregs(lwp).ok()
-    }
-
-    fn lookup_symbol(&self, object: &str, symbol: &str) -> Option<u64> {
-        lookup_symbol(self.pid, object, symbol)
-    }
-}
 
 /// The opaque `ps_prochandle` passed back to every callback.
 struct ProcessHandle<'a> {
@@ -199,10 +170,9 @@ pub(super) fn tls_address(
     link_map: VirtualAddress,
     offset: u64,
 ) -> Result<VirtualAddress, Arc<str>> {
-    let described = || {
-        glibc_tls::tls_address(services, thread, link_map.get(), offset).map(VirtualAddress::new)
-    };
-    if glibc_tls::forced() {
+    let described =
+        || glibc::tls_address(services, thread, link_map.get(), offset).map(VirtualAddress::new);
+    if glibc::forced() {
         return described().map_err(|error| error.to_string().into());
     }
     let offset = usize::try_from(offset).map_err(|_| Arc::from("TLS offset exceeds usize"))?;
@@ -258,6 +228,10 @@ fn td_error(code: c_int) -> String {
         // dump from another machine usually has none.
         TD_VERSION => "the inferior's C library is not the version of the debugger's libthread_db",
         TD_TLSDEFER => "the thread has not allocated the module's TLS block",
+        TD_NOLIBTHREAD => {
+            "no module defines glibc's thread library version, and the C library was not \
+             recognized as musl"
+        }
         _ => return name,
     };
     format!("{name}: {explanation}")
@@ -275,16 +249,6 @@ fn with_process<T>(
     }))
     .ok()
     .flatten()
-}
-
-fn read_process(pid: Pid, address: usize, output: &mut [u8]) -> bool {
-    let size = output.len();
-    let mut local = [IoSliceMut::new(output)];
-    let remote = [RemoteIoVec {
-        base: address,
-        len: size,
-    }];
-    process_vm_readv(pid, &mut local, &remote).is_ok_and(|read| read == size)
 }
 
 #[unsafe(no_mangle)]
@@ -320,48 +284,6 @@ unsafe extern "C" fn ps_ptread(
 ) -> c_int {
     // SAFETY: this callback has the identical read contract as ps_pdread.
     unsafe { ps_pdread(process, address, output, size) }
-}
-
-fn lookup_symbol(pid: Pid, requested_object: &str, requested_symbol: &str) -> Option<u64> {
-    let mappings = module_mappings(pid).ok()?;
-    let mut fallback = None;
-    for mapping in mappings {
-        let Some(file_name) = mapping.path.file_name() else {
-            continue;
-        };
-        let file_name = file_name.to_string_lossy();
-        let preferred = file_name.starts_with(requested_object);
-        let Ok(bias) = mapped_module_load_bias(&mapping) else {
-            continue;
-        };
-        let Ok(data) = std::fs::read(&mapping.path) else {
-            continue;
-        };
-        let Ok(object) = object::File::parse(data.as_slice()) else {
-            continue;
-        };
-        // Undefined symbols have no address here, and a TLS symbol's value
-        // is an offset rather than an address.
-        let Some(symbol) = object
-            .dynamic_symbols()
-            .chain(object.symbols())
-            .find(|symbol| {
-                symbol.is_definition()
-                    && symbol.kind() != SymbolKind::Tls
-                    && symbol.name().ok() == Some(requested_symbol)
-            })
-        else {
-            continue;
-        };
-        let Some(address) = bias.checked_add(symbol.address()) else {
-            continue;
-        };
-        if preferred {
-            return Some(address);
-        }
-        fallback.get_or_insert(address);
-    }
-    fallback
 }
 
 #[unsafe(no_mangle)]

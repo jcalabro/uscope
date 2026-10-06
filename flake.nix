@@ -31,6 +31,16 @@
           -isystem ${libcxx.dev}/include/c++/v1 \
           -L${libcxx}/lib -Wl,-rpath,${libcxx}/lib "$@"
       '';
+      # GCC and Clang targeting musl instead of glibc, so fixtures cover both
+      # C libraries' thread layouts. Wrapping them keeps the cross toolchain's
+      # environment out of the shell's native one.
+      musl64 = pkgs.pkgsCross.musl64;
+      muslGcc = pkgs.writeShellScriptBin "musl-gcc" ''
+        exec ${musl64.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc "$@"
+      '';
+      muslClang = pkgs.writeShellScriptBin "musl-clang" ''
+        exec ${musl64.buildPackages.clang}/bin/x86_64-unknown-linux-musl-clang "$@"
+      '';
     in {
       devShells.${system}.default = pkgs.mkShell {
         NIX_HARDENING_ENABLE = "";
@@ -44,6 +54,8 @@
           mold
           clang
           clangLibcxx
+          muslGcc
+          muslClang
           gdb
           lldb
           goStable

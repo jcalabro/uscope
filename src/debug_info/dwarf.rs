@@ -252,6 +252,7 @@ fn load_debug_info(
                 statements,
                 lines,
                 sections: super::elf::load_sections(&object),
+                thread_local_storage: super::elf::has_thread_local_storage(&object),
             },
         )
         .with_id(image_id)

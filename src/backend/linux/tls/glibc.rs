@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use nix::unistd::Pid;
 
-use super::thread_db::ProcessServices;
+use super::{ProcessServices, TlsError, failed};
 
 /// The C library the descriptors are looked up in. Lookups fall back to any
 /// module that defines them, as statically linked programs require.
@@ -30,7 +30,7 @@ const FORCED_DYNAMIC_TLS_OFFSET: u64 = u64::MAX;
 
 static FORCED: AtomicBool = AtomicBool::new(false);
 
-/// Makes every TLS lookup in this process use this module rather than
+/// Makes every glibc TLS lookup in this process use this module rather than
 /// `libthread_db`, so tests can check that the two agree.
 pub(super) fn force(forced: bool) {
     FORCED.store(forced, Ordering::Relaxed);
@@ -38,33 +38,6 @@ pub(super) fn force(forced: bool) {
 
 pub(super) fn forced() -> bool {
     FORCED.load(Ordering::Relaxed)
-}
-
-/// Why a TLS address could not be computed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum TlsError {
-    /// The thread has not allocated the module's block, so it cannot have
-    /// observed any value in it.
-    Deferred,
-    /// The module has no TLS block.
-    NoTls,
-    Failed(String),
-}
-
-impl std::fmt::Display for TlsError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Deferred => {
-                formatter.write_str("the thread has not allocated the module's TLS block")
-            }
-            Self::NoTls => formatter.write_str("the module has no TLS block"),
-            Self::Failed(message) => formatter.write_str(message),
-        }
-    }
-}
-
-fn failed(message: impl Into<String>) -> TlsError {
-    TlsError::Failed(message.into())
 }
 
 /// One `_thread_db_*` field descriptor.
