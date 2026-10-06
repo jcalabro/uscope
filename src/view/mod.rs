@@ -168,11 +168,6 @@ impl ViewSet {
         Arc::clone(EMPTY.get_or_init(|| Arc::new(Self::new([]))))
     }
 
-    /// Replaces what kept parts of the files out.
-    pub(crate) fn set_errors(&mut self, errors: Vec<syntax::Error>) {
-        self.errors = errors;
-    }
-
     /// The views, in the order they are tried.
     #[must_use]
     pub fn views(&self) -> &[Arc<View>] {

@@ -65,8 +65,19 @@ impl From<interp::Failure> for Failure {
     }
 }
 
-fn internal(message: &str) -> Failure {
+pub(super) fn internal(message: &str) -> Failure {
     Failure::Problem(ViewProblem::Internal(message.into()))
+}
+
+fn refused(message: impl Into<Arc<str>>) -> Failure {
+    Failure::Problem(ViewProblem::Refused(message.into()))
+}
+
+fn unsupported(message: &str) -> Stop {
+    Stop::Refused(Refusal::new(
+        crate::ExpressionErrorKind::Unsupported,
+        message,
+    ))
 }
 
 /// What running a view presented.
@@ -86,6 +97,29 @@ pub struct Presented {
     pub named: u64,
 }
 
+impl Presented {
+    const fn new(shape: PresentedShape, summary: String) -> Self {
+        Self {
+            shape,
+            count: None,
+            text: None,
+            summary,
+            inner: None,
+            partial: None,
+            named: 0,
+        }
+    }
+
+    /// A value presented as `inner`.
+    fn value(inner: InspectedValue) -> Self {
+        Self {
+            summary: summary::value(inner.type_info.as_ref(), &inner.state),
+            inner: Some(inner),
+            ..Self::new(PresentedShape::Value, String::new())
+        }
+    }
+}
+
 /// One child of a presented value.
 #[derive(Debug)]
 pub enum Child {
@@ -102,7 +136,7 @@ pub enum Child {
 pub struct ViewMachine<'m, M: Machine> {
     base: &'m mut M,
     this: M::Place,
-    lets: &'m [super::bind::BoundLet<M::Step>],
+    lets: &'m [ViewProgram<M::Step>],
     values: Vec<Option<Value<M::Place>>>,
     /// The generators' variables and clauses' `let`s, by position.
     variables: Vec<Value<M::Place>>,
@@ -130,15 +164,9 @@ impl<'m, M: Machine> ViewMachine<'m, M> {
             return Ok(value.clone());
         }
         let lets = self.lets;
-        let program = &lets
+        let program = lets
             .get(index)
-            .ok_or_else(|| {
-                Stop::Refused(Refusal::new(
-                    crate::ExpressionErrorKind::Unsupported,
-                    "no such `let`",
-                ))
-            })?
-            .program;
+            .ok_or_else(|| unsupported("no such `let`"))?;
         let value = interp::value(program, self)?;
         self.values[index] = Some(value.clone());
         Ok(value)
@@ -178,17 +206,11 @@ impl<M: Machine> Machine for ViewMachine<'_, M> {
             }
             ViewObject::Let(index) => match self.let_value(*index)? {
                 Value::Place(place) => Ok(place),
-                _ => Err(Stop::Refused(Refusal::new(
-                    crate::ExpressionErrorKind::Unsupported,
-                    "the `let` is not a place",
-                ))),
+                _ => Err(unsupported("the `let` is not a place")),
             },
             ViewObject::Variable(depth) => match self.variables.get(*depth) {
                 Some(Value::Place(place)) => Ok(place.clone()),
-                _ => Err(Stop::Refused(Refusal::new(
-                    crate::ExpressionErrorKind::Unsupported,
-                    "a generator's variable is not a place",
-                ))),
+                _ => Err(unsupported("a generator's variable is not a place")),
             },
         }
     }
@@ -235,10 +257,7 @@ impl<M: Machine> Machine for ViewMachine<'_, M> {
     }
 
     fn register(&mut self, _register: &Register) -> Result<u128, Stop> {
-        Err(Stop::Refused(Refusal::new(
-            crate::ExpressionErrorKind::Unsupported,
-            "views read no registers",
-        )))
+        Err(unsupported("views read no registers"))
     }
 
     fn present(&mut self, at: &Self::Place) -> Result<InspectedValue, Stop> {
@@ -265,17 +284,13 @@ impl<M: Machine> Machine for ViewMachine<'_, M> {
     fn bound(&mut self, object: &Self::Object) -> Result<Value<Self::Place>, Stop> {
         match object {
             ViewObject::Let(index) => self.let_value(*index),
-            ViewObject::Variable(depth) => self.variables.get(*depth).cloned().ok_or_else(|| {
-                Stop::Refused(Refusal::new(
-                    crate::ExpressionErrorKind::Unsupported,
-                    "the generator's variable is out of scope",
-                ))
-            }),
+            ViewObject::Variable(depth) => self
+                .variables
+                .get(*depth)
+                .cloned()
+                .ok_or_else(|| unsupported("the generator's variable is out of scope")),
             ViewObject::This | ViewObject::Member(_) | ViewObject::Global(_) => {
-                Err(Stop::Refused(Refusal::new(
-                    crate::ExpressionErrorKind::Unsupported,
-                    "a place is not a bound value",
-                )))
+                Err(unsupported("a place is not a bound value"))
             }
         }
     }
@@ -311,11 +326,7 @@ pub(super) fn count<M: Machine>(
     value
         .to_u128()
         .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| {
-            Failure::Problem(ViewProblem::Refused(
-                format!("the {what} is {value}").into(),
-            ))
-        })
+        .ok_or_else(|| refused(format!("the {what} is {value}")))
 }
 
 /// A value of a check's side, for saying why it failed.
@@ -375,12 +386,9 @@ fn resolve<'b, M: Machine>(
     // A `match` that names no value it has is that value's problem.
     if let BoundShape::Unmatched { text, program } = shape {
         let value = interp::value(program, machine)?;
-        return Err(Failure::Problem(ViewProblem::Refused(
-            format!(
-                "`{text}` is {}, which no arm of the match names",
-                side_text(&value)
-            )
-            .into(),
+        return Err(refused(format!(
+            "`{text}` is {}, which no arm of the match names",
+            side_text(&value)
         )));
     }
     Ok(shape)
@@ -536,9 +544,7 @@ fn run_value<M: Machine>(
 ) -> Result<InspectedValue, Failure> {
     match interp::run(program, machine)? {
         Outcome::Value { value, .. } => Ok(value),
-        _ => Err(Failure::Problem(ViewProblem::Refused(
-            "a view's value is one value".into(),
-        ))),
+        _ => Err(refused("a view's value is one value")),
     }
 }
 
@@ -559,11 +565,7 @@ fn dynamic_place<M: Machine>(
             usize::try_from(index)
                 .ok()
                 .and_then(|index| types.get(index).copied().flatten())
-                .ok_or_else(|| {
-                    Failure::Problem(ViewProblem::Refused(
-                        format!("the type has no type argument {index}").into(),
-                    ))
-                })?
+                .ok_or_else(|| refused(format!("the type has no type argument {index}")))?
         }
     };
     if address == 0 {
@@ -693,37 +695,16 @@ pub fn present<M: Machine>(
         BoundShape::Text { source, length } => {
             let text = read_text(source, length.as_ref(), &mut machine)?;
             Presented {
-                shape: PresentedShape::Text,
-                count: None,
                 summary: summary::quoted(&text),
                 text: Some(text),
-                inner: None,
-                partial: None,
-                named: 0,
+                ..Presented::new(PresentedShape::Text, String::new())
             }
         }
         BoundShape::Value(program) => {
             let inner = run_value(program, &mut machine)?;
-            let inner = formatted(bound, "self", inner, &mut machine)?;
-            Presented {
-                shape: PresentedShape::Value,
-                count: None,
-                text: None,
-                summary: summary::value(inner.type_info.as_ref(), &inner.state),
-                inner: Some(inner),
-                partial: None,
-                named: 0,
-            }
+            Presented::value(formatted(bound, "self", inner, &mut machine)?)
         }
-        BoundShape::Empty(text) => Presented {
-            shape: PresentedShape::Empty,
-            count: None,
-            text: None,
-            summary: text.to_string(),
-            inner: None,
-            partial: None,
-            named: 0,
-        },
+        BoundShape::Empty(text) => Presented::new(PresentedShape::Empty, text.to_string()),
         BoundShape::Sequence { scan, .. } | BoundShape::Map { scan, .. } => {
             preview(shape, scan, &mut machine, checkpoints)?
         }
@@ -746,28 +727,14 @@ pub fn present<M: Machine>(
                     summary::value(value.type_info.as_ref(), &value.state),
                 ));
             }
-            Presented {
-                shape: PresentedShape::Record,
-                count: None,
-                text: None,
-                summary: summary::record(&parts, parts.len() == shown.len()),
-                inner: None,
-                partial: None,
-                named: 0,
-            }
+            Presented::new(
+                PresentedShape::Record,
+                summary::record(&parts, parts.len() == shown.len()),
+            )
         }
         BoundShape::Dynamic { pointer, ty } => {
             let place = dynamic_place(pointer, ty, &mut machine)?;
-            let inner = machine.present(&place)?;
-            Presented {
-                shape: PresentedShape::Value,
-                count: None,
-                text: None,
-                summary: summary::value(inner.type_info.as_ref(), &inner.state),
-                inner: Some(inner),
-                partial: None,
-                named: 0,
-            }
+            Presented::value(machine.present(&place)?)
         }
         BoundShape::If { .. } | BoundShape::Unmatched { .. } => {
             unreachable!("`if` and `match` are resolved")
@@ -887,22 +854,18 @@ fn preview<M: Machine>(
     };
     let complete =
         items.len() as u64 == count.known() && matches!(count, crate::PresentedCount::Exact(_));
+    let presented = if is_map {
+        Presented::new(PresentedShape::Map, summary::map(count, &items, complete))
+    } else {
+        Presented::new(
+            PresentedShape::Sequence,
+            summary::sequence(count, &items, complete),
+        )
+    };
     Ok(Presented {
-        shape: if is_map {
-            PresentedShape::Map
-        } else {
-            PresentedShape::Sequence
-        },
         count: Some(count),
-        text: None,
-        summary: if is_map {
-            summary::map(count, &items, complete)
-        } else {
-            summary::sequence(count, &items, complete)
-        },
-        inner: None,
         partial,
-        named: 0,
+        ..presented
     })
 }
 
@@ -1008,6 +971,8 @@ fn out_of_budget(child: &Child) -> bool {
     }
 }
 
+const NO_LENGTH: &str = "the value it presents has no length";
+
 /// How many elements or entries `this` holds as the view presents it, or
 /// the length of its text, for `len(v)`.
 pub fn length<M: Machine>(
@@ -1038,35 +1003,27 @@ pub fn length<M: Machine>(
                     length: Some(length),
                     ..
                 } => Ok(length),
-                _ => Err(Failure::Problem(ViewProblem::Refused(
-                    "the text's length could not be read".into(),
-                ))),
+                _ => Err(refused("the text's length could not be read")),
             }
         }
         // A value that holds nothing, such as Go's nil map, has nothing.
         BoundShape::Empty(_) => Ok(0),
         // A value presented as another has that one's length.
-        BoundShape::Value(program) => match interp::value(program, &mut machine)? {
-            Value::Place(place) => machine.presented_length(&place)?.ok_or_else(|| {
-                Failure::Problem(ViewProblem::Refused(
-                    "the value it presents has no length".into(),
-                ))
-            }),
-            _ => Err(Failure::Problem(ViewProblem::Refused(
-                "the value it presents has no length".into(),
-            ))),
-        },
+        BoundShape::Value(program) => {
+            let Value::Place(place) = interp::value(program, &mut machine)? else {
+                return Err(refused(NO_LENGTH));
+            };
+            machine
+                .presented_length(&place)?
+                .ok_or_else(|| refused(NO_LENGTH))
+        }
         BoundShape::Dynamic { pointer, ty } => {
             let place = dynamic_place(pointer, ty, &mut machine)?;
-            machine.presented_length(&place)?.ok_or_else(|| {
-                Failure::Problem(ViewProblem::Refused(
-                    "the value it presents has no length".into(),
-                ))
-            })
+            machine
+                .presented_length(&place)?
+                .ok_or_else(|| refused(NO_LENGTH))
         }
-        BoundShape::Record(_) => Err(Failure::Problem(ViewProblem::Refused(
-            "a record has no length".into(),
-        ))),
+        BoundShape::Record(_) => Err(refused("a record has no length")),
         BoundShape::If { .. } | BoundShape::Unmatched { .. } => {
             unreachable!("`if` and `match` are resolved")
         }
@@ -1085,14 +1042,11 @@ pub fn element_place<M: Machine>(
     checks(bound, &mut machine)?;
     let shape = resolve(&bound.shape, &mut machine)?;
     let BoundShape::Sequence { scan, element } = shape else {
-        return Err(Failure::Problem(ViewProblem::Refused(
-            if matches!(shape, BoundShape::Map { .. }) {
-                "a map's entries are not indexed by position"
-            } else {
-                "the view presents no elements"
-            }
-            .into(),
-        )));
+        return Err(refused(if matches!(shape, BoundShape::Map { .. }) {
+            "a map's entries are not indexed by position"
+        } else {
+            "the view presents no elements"
+        }));
     };
     let declared = declared_length(scan, &mut machine)?;
     let out_of_bounds = |count: u64| {
@@ -1118,9 +1072,9 @@ pub fn element_place<M: Machine>(
     }
     match interp::value(element, &mut machine)? {
         Value::Place(place) => Ok(place),
-        _ => Err(Failure::Problem(ViewProblem::Refused(
-            "the view computes its elements, which have no place".into(),
-        ))),
+        _ => Err(refused(
+            "the view computes its elements, which have no place",
+        )),
     }
 }
 
@@ -1150,8 +1104,8 @@ fn read_text<M: Machine>(
             };
             let length = declared.unwrap_or(available);
             if length > available {
-                return Err(Failure::Problem(ViewProblem::Refused(
-                    format!("the text's length {length} exceeds its {available} elements").into(),
+                return Err(refused(format!(
+                    "the text's length {length} exceeds its {available} elements"
                 )));
             }
             if length == 0 {
