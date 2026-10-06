@@ -275,161 +275,127 @@ impl TaintedRegisters {
 mod tests {
     use super::*;
 
-    #[test]
-    fn accepts_gcc_o0_parameter_homing_prefix() {
-        let bytes = [
-            0x55, 0x48, 0x89, 0xe5, 0x89, 0xc8, 0x45, 0x89, 0xc2, 0x45, 0x89, 0xc8, 0xf3, 0x0f,
-            0x11, 0x45, 0xd4, 0xf2, 0x0f, 0x11, 0x4d, 0xc8, 0x89, 0xf9, 0x88, 0x4d, 0xec, 0x89,
-            0xf1, 0x88, 0x4d, 0xe8, 0x88, 0x55, 0xe4, 0x88, 0x45, 0xe0, 0x44, 0x89, 0xd0, 0x66,
-            0x89, 0x45, 0xdc, 0x44, 0x89, 0xc0, 0x66, 0x89, 0x45, 0xd8,
-        ];
+    use PrologueAnalysisError::{
+        InvalidInstruction, MissingFramePointerSave, MissingFramePointerSetup,
+        UnsupportedInstruction,
+    };
 
-        assert_eq!(prove_prologue_prefix(&bytes, 0x1129), Ok(()));
-    }
+    type Case = (&'static [u8], u64, Result<(), PrologueAnalysisError>);
 
-    #[test]
-    fn accepts_stack_argument_copy_and_callee_save_bookkeeping() {
-        let bytes = [
-            0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0x45, 0x10, 0x48,
-            0x89, 0x45, 0xf8,
-        ];
-
-        assert_eq!(prove_prologue_prefix(&bytes, 0x1000), Ok(()));
-    }
-
-    #[test]
-    fn accepts_control_flow_enforcement_before_the_canonical_prologue() {
-        let bytes = [
-            0xf3, 0x0f, 0x1e, 0xfa, 0x55, 0x48, 0x89, 0xe5, 0x89, 0x7d, 0xfc,
-        ];
-
-        assert_eq!(prove_prologue_prefix(&bytes, 0x1000), Ok(()));
-    }
-
-    #[test]
-    fn rejects_gcc_o2_real_work_at_entry() {
-        let bytes = [
-            0x48, 0xc7, 0x05, 0x7d, 0x2e, 0x00, 0x00, 0x63, 0x00, 0x00, 0x00,
-        ];
-
-        assert_eq!(
-            prove_prologue_prefix(&bytes, 0x11e0),
-            Err(PrologueAnalysisError::MissingFramePointerSave)
-        );
-    }
-
-    #[test]
-    fn rejects_real_work_between_frame_setup_and_candidate() {
-        let bytes = [
-            0x55, 0x48, 0x89, 0xe5, 0xc7, 0x45, 0xfc, 0x63, 0x00, 0x00, 0x00,
-        ];
-
-        assert_eq!(
-            prove_prologue_prefix(&bytes, 0x1000),
-            Err(PrologueAnalysisError::UnsupportedInstruction)
-        );
-    }
-
-    #[test]
-    fn rejects_control_flow_between_frame_setup_and_candidate() {
-        let bytes = [0x55, 0x48, 0x89, 0xe5, 0xeb, 0x00];
-
-        assert_eq!(
-            prove_prologue_prefix(&bytes, 0x1000),
-            Err(PrologueAnalysisError::UnsupportedInstruction)
-        );
-    }
-
-    #[test]
-    fn rejects_stack_probe_side_effects() {
-        let bytes = [
-            0x55, 0x48, 0x89, 0xe5, 0x48, 0x81, 0xec, 0x00, 0x10, 0x00, 0x00, 0x48, 0x83, 0x0c,
-            0x24, 0x00,
-        ];
-
-        assert_eq!(
-            prove_prologue_prefix(&bytes, 0x1000),
-            Err(PrologueAnalysisError::UnsupportedInstruction)
-        );
-    }
-
-    #[test]
-    fn rejects_unproved_rsp_relative_argument_stores() {
-        let bytes = [
-            0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x20, 0x48, 0x89, 0x3c, 0x24,
-        ];
-
-        assert_eq!(
-            prove_prologue_prefix(&bytes, 0x1000),
-            Err(PrologueAnalysisError::UnsupportedInstruction)
-        );
-    }
-
-    #[test]
-    fn rejects_tainted_copies_into_the_stack_and_frame_pointers() {
-        // push rbp; mov rbp, rsp; mov rsp, rdi
-        let stack = [0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0xfc];
-        assert_eq!(
-            prove_prologue_prefix(&stack, 0x1000),
-            Err(PrologueAnalysisError::UnsupportedInstruction)
-        );
-
-        // push rbp; mov rbp, rsp; mov rbp, rdi
-        let frame = [0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0xfd];
-        assert_eq!(
-            prove_prologue_prefix(&frame, 0x1000),
-            Err(PrologueAnalysisError::UnsupportedInstruction)
-        );
-
-        // push rbp; mov rbp, rsp; mov rbp, [rbp+0x10]
-        let load = [0x55, 0x48, 0x89, 0xe5, 0x48, 0x8b, 0x6d, 0x10];
-        assert_eq!(
-            prove_prologue_prefix(&load, 0x1000),
-            Err(PrologueAnalysisError::UnsupportedInstruction)
-        );
-    }
-
-    #[test]
-    fn rejects_operand_size_overridden_frame_setup() {
-        // push bp; mov rbp, rsp
-        let narrow_save = [0x66, 0x55, 0x48, 0x89, 0xe5];
-        assert_eq!(
-            prove_prologue_prefix(&narrow_save, 0x1000),
-            Err(PrologueAnalysisError::MissingFramePointerSave)
-        );
-
-        // push rbp; mov ebp, esp
-        let narrow_setup = [0x55, 0x89, 0xe5];
-        assert_eq!(
-            prove_prologue_prefix(&narrow_setup, 0x1000),
-            Err(PrologueAnalysisError::MissingFramePointerSetup)
-        );
-    }
+    const PROLOGUES: [Case; 16] = [
+        // gcc -O0 parameter homing
+        (
+            &[
+                0x55, 0x48, 0x89, 0xe5, 0x89, 0xc8, 0x45, 0x89, 0xc2, 0x45, 0x89, 0xc8, 0xf3, 0x0f,
+                0x11, 0x45, 0xd4, 0xf2, 0x0f, 0x11, 0x4d, 0xc8, 0x89, 0xf9, 0x88, 0x4d, 0xec, 0x89,
+                0xf1, 0x88, 0x4d, 0xe8, 0x88, 0x55, 0xe4, 0x88, 0x45, 0xe0, 0x44, 0x89, 0xd0, 0x66,
+                0x89, 0x45, 0xdc, 0x44, 0x89, 0xc0, 0x66, 0x89, 0x45, 0xd8,
+            ],
+            0x1129,
+            Ok(()),
+        ),
+        // A stack argument copy and callee-save bookkeeping
+        (
+            &[
+                0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0x45, 0x10, 0x48,
+                0x89, 0x45, 0xf8,
+            ],
+            0x1000,
+            Ok(()),
+        ),
+        // endbr64 before the prologue
+        (
+            &[
+                0xf3, 0x0f, 0x1e, 0xfa, 0x55, 0x48, 0x89, 0xe5, 0x89, 0x7d, 0xfc,
+            ],
+            0x1000,
+            Ok(()),
+        ),
+        // gcc -O2 real work at entry
+        (
+            &[
+                0x48, 0xc7, 0x05, 0x7d, 0x2e, 0x00, 0x00, 0x63, 0x00, 0x00, 0x00,
+            ],
+            0x11e0,
+            Err(MissingFramePointerSave),
+        ),
+        // Real work after frame setup
+        (
+            &[
+                0x55, 0x48, 0x89, 0xe5, 0xc7, 0x45, 0xfc, 0x63, 0x00, 0x00, 0x00,
+            ],
+            0x1000,
+            Err(UnsupportedInstruction),
+        ),
+        // Control flow after frame setup
+        (
+            &[0x55, 0x48, 0x89, 0xe5, 0xeb, 0x00],
+            0x1000,
+            Err(UnsupportedInstruction),
+        ),
+        // A stack probe
+        (
+            &[
+                0x55, 0x48, 0x89, 0xe5, 0x48, 0x81, 0xec, 0x00, 0x10, 0x00, 0x00, 0x48, 0x83, 0x0c,
+                0x24, 0x00,
+            ],
+            0x1000,
+            Err(UnsupportedInstruction),
+        ),
+        // An rsp-relative argument store
+        (
+            &[
+                0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x20, 0x48, 0x89, 0x3c, 0x24,
+            ],
+            0x1000,
+            Err(UnsupportedInstruction),
+        ),
+        // mov rsp, rdi; mov rbp, rdi; mov rbp, [rbp+0x10]
+        (
+            &[0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0xfc],
+            0x1000,
+            Err(UnsupportedInstruction),
+        ),
+        (
+            &[0x55, 0x48, 0x89, 0xe5, 0x48, 0x89, 0xfd],
+            0x1000,
+            Err(UnsupportedInstruction),
+        ),
+        (
+            &[0x55, 0x48, 0x89, 0xe5, 0x48, 0x8b, 0x6d, 0x10],
+            0x1000,
+            Err(UnsupportedInstruction),
+        ),
+        // push bp; mov ebp, esp
+        (
+            &[0x66, 0x55, 0x48, 0x89, 0xe5],
+            0x1000,
+            Err(MissingFramePointerSave),
+        ),
+        (&[0x55, 0x89, 0xe5], 0x1000, Err(MissingFramePointerSetup)),
+        // mov fs:[rbp-8], rdi; mov [ebp-8], rdi
+        (
+            &[0x55, 0x48, 0x89, 0xe5, 0x64, 0x48, 0x89, 0x7d, 0xf8],
+            0x1000,
+            Err(UnsupportedInstruction),
+        ),
+        (
+            &[0x55, 0x48, 0x89, 0xe5, 0x67, 0x48, 0x89, 0x7d, 0xf8],
+            0x1000,
+            Err(UnsupportedInstruction),
+        ),
+        // A candidate inside an instruction
+        (&[0x55, 0x48, 0x89], 0x1000, Err(InvalidInstruction)),
+    ];
 
     #[test]
-    fn rejects_segment_and_address_size_overridden_frame_stores() {
-        // push rbp; mov rbp, rsp; mov fs:[rbp-8], rdi
-        let segment = [0x55, 0x48, 0x89, 0xe5, 0x64, 0x48, 0x89, 0x7d, 0xf8];
-        assert_eq!(
-            prove_prologue_prefix(&segment, 0x1000),
-            Err(PrologueAnalysisError::UnsupportedInstruction)
-        );
-
-        // push rbp; mov rbp, rsp; mov [ebp-8], rdi
-        let truncated = [0x55, 0x48, 0x89, 0xe5, 0x67, 0x48, 0x89, 0x7d, 0xf8];
-        assert_eq!(
-            prove_prologue_prefix(&truncated, 0x1000),
-            Err(PrologueAnalysisError::UnsupportedInstruction)
-        );
-    }
-
-    #[test]
-    fn rejects_a_candidate_in_the_middle_of_an_instruction() {
-        let bytes = [0x55, 0x48, 0x89];
-
-        assert_eq!(
-            prove_prologue_prefix(&bytes, 0x1000),
-            Err(PrologueAnalysisError::InvalidInstruction)
-        );
+    fn only_frame_setup_and_argument_homing_prove_a_prologue() {
+        for (index, (bytes, address, expected)) in PROLOGUES.into_iter().enumerate() {
+            assert_eq!(
+                prove_prologue_prefix(bytes, address),
+                expected,
+                "case {index}"
+            );
+        }
     }
 }

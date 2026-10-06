@@ -33,7 +33,7 @@ pub enum NameSyntax {
 }
 
 impl NameSyntax {
-    pub const ALL: [Self; 3] = [Self::Angle, Self::Go, Self::Zig];
+    const ALL: [Self; 3] = [Self::Angle, Self::Go, Self::Zig];
 
     pub const fn of(language: SourceLanguage) -> Self {
         match language {
@@ -342,7 +342,7 @@ pub trait TypeLookup {
 /// `exact` false its arguments may omit trailing ones, as C++ omits
 /// defaulted template arguments. Identities keep inline namespaces' names
 /// but not their places, so a pattern may spell one anywhere in its path.
-pub fn names_type(
+fn names_type(
     pattern: &TypeName<'_>,
     syntax: NameSyntax,
     info: &TypeInfo,
