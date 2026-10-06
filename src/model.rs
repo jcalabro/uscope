@@ -1928,6 +1928,11 @@ pub struct InspectedValue {
 pub enum VariableKind {
     /// A formal parameter of the selected function or inline instance.
     Parameter,
+    /// A result of the selected function or inline instance that the
+    /// debug information names as a variable, such as Go's named results
+    /// and its unnamed `~r0`. It holds the value returned once the
+    /// function sets it, at the latest as it returns.
+    Result,
     /// A local variable declared within the selected function.
     Local,
     /// A data object with static storage described by a module image.

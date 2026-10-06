@@ -244,7 +244,7 @@ impl Session {
                     snapshot
                         .variables
                         .iter()
-                        .filter(|variable| variable.kind == kind)
+                        .filter(|variable| in_scope(kind, variable.kind))
                         .count()
                 };
                 let parameters = count(VariableKind::Parameter);
@@ -411,7 +411,7 @@ impl Session {
                 .variables
                 .iter()
                 .enumerate()
-                .filter(|(_, variable)| variable.kind == kind),
+                .filter(|(_, variable)| in_scope(kind, variable.kind)),
         ) {
             let path = if unnamed.contains(&index) {
                 None
@@ -1306,4 +1306,10 @@ fn limit_text(exhaustion: uscope::InspectionExhaustion) -> String {
         "inspection stopped at its {:?} limit of {}",
         exhaustion.resource, exhaustion.limit
     )
+}
+
+/// Whether a scope of variables of one kind lists a variable: the
+/// arguments scope lists results too, as part of the signature.
+fn in_scope(scope: VariableKind, kind: VariableKind) -> bool {
+    kind == scope || (scope == VariableKind::Parameter && kind == VariableKind::Result)
 }
