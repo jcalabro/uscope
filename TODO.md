@@ -25,6 +25,9 @@
 ## Client interfaces
 
 - [x] Add a debugger protocol server, starting with DAP support.
+- [ ] Write registers, for assigning `$rax` and for DAP's `goto` (VS Code's Jump to Cursor).
+- [ ] Step into a chosen call on a line (DAP `stepInTargets`), and show a function's return value after stepping out of it.
+- [ ] Model function types, so function pointers show their signature instead of `DwTag(21) *`.
 - [ ] Add a richer interactive or TUI client.
 - [ ] Keep the public request/event model suitable for multiple clients.
 

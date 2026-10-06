@@ -2,6 +2,10 @@
 
 `uscope` is a Linux x86-64 native debugger written in Rust.
 
+`uscope dap` serves the Debug Adapter Protocol, so VS Code, Neovim, Zed, Helix,
+and Emacs can debug with it; `editors/vscode` is its VS Code extension. See
+[docs/dap.md](docs/dap.md).
+
 ## Development
 
 Enter the pinned development environment and run the checks:
