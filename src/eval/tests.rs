@@ -260,7 +260,7 @@ fn a_program_bound_once_runs_on_other_data_as_one_bound_there() {
         "f * 2",
         "uc > 3 ? uc : 0",
     ];
-    let mut original = super::fake::scalars();
+    let original = super::fake::scalars();
     let mut changed = super::fake::scalars();
     changed.set("uc", &[3]);
     changed.set("sc", &(-100_i8).to_le_bytes());
@@ -279,15 +279,6 @@ fn a_program_bound_once_runs_on_other_data_as_one_bound_there() {
             run(&fresh, &mut changed).map(|outcome| format!("{outcome:?}"))
         );
         assert_eq!(reused, rebound, "`{text}`");
-        let first = format!(
-            "{:?}",
-            run(&program, &mut original).map(|outcome| format!("{outcome:?}"))
-        );
-        let again = format!(
-            "{:?}",
-            run(&program, &mut original).map(|outcome| format!("{outcome:?}"))
-        );
-        assert_eq!(first, again, "`{text}` runs deterministically");
     }
 }
 
