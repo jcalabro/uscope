@@ -401,10 +401,7 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
         }
         match self.captures.iter().find(|(captured, _)| captured == name) {
             Some((_, Captured::Value(value))) => {
-                return Ok(Lookup::Constant(match value {
-                    crate::IntegerValue::Signed(value) => Exact::from(*value),
-                    crate::IntegerValue::Unsigned(value) => Exact::from(*value),
-                }));
+                return Ok(Lookup::Constant(Exact::from(*value)));
             }
             Some((_, Captured::Type(_))) => return Ok(Lookup::NotFound),
             None => {}

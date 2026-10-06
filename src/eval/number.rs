@@ -235,6 +235,15 @@ fn shift_amount(amount: Exact) -> Result<u32, NumberError> {
     Ok(u32::try_from(amount.magnitude).unwrap_or(u32::MAX))
 }
 
+impl From<crate::IntegerValue> for Exact {
+    fn from(value: crate::IntegerValue) -> Self {
+        match value {
+            crate::IntegerValue::Signed(value) => Self::from(value),
+            crate::IntegerValue::Unsigned(value) => Self::from(value),
+        }
+    }
+}
+
 impl From<i128> for Exact {
     fn from(value: i128) -> Self {
         Self {

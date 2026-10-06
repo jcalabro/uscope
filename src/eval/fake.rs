@@ -790,11 +790,7 @@ impl Scope for World {
                 for enumerator in enumerators.iter() {
                     let qualified = format!("{}::{}", info.name, enumerator.name);
                     if enumerator.name.as_ref() == name || qualified == name {
-                        let value = match enumerator.value {
-                            IntegerValue::Signed(value) => Exact::from(value),
-                            IntegerValue::Unsigned(value) => Exact::from(value),
-                        };
-                        found.push((qualified, value, info.reference));
+                        found.push((qualified, Exact::from(enumerator.value), info.reference));
                     }
                 }
             }

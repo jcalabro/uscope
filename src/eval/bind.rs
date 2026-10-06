@@ -1080,11 +1080,7 @@ impl<'a, S: Scope> Binder<'a, S> {
         else {
             return bound;
         };
-        let value = match found.value {
-            crate::IntegerValue::Signed(value) => Exact::from(value),
-            crate::IntegerValue::Unsigned(value) => Exact::from(value),
-        };
-        self.enumerator(value, enumeration, self.tree().span(id))
+        self.enumerator(Exact::from(found.value), enumeration, self.tree().span(id))
     }
 
     /// Binds both operands of a binary operator, letting either name an

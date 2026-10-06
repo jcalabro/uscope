@@ -14,7 +14,7 @@ use super::syntax::ast::BinaryOp;
 use super::target::{Machine, Refusal, Stop};
 use super::types::{Category, Ty, category, size_of, type_info};
 use crate::{
-    ByteOrder, DereferenceState, InspectedValue, IntegerValue, ScalarValue, TextCompletion,
+    ByteOrder, DereferenceState, InspectedValue, ScalarValue, TextCompletion,
     ValueAccessUnavailableReason, ValueChildren, VariableMalformedKind, VariableMalformedReason,
     VariableState, VariableUnavailableReason, VariableValue, VariableValueSource, VirtualAddress,
 };
@@ -458,10 +458,7 @@ impl<M: Machine> Interpreter<'_, M> {
 
     /// A value decoded from a place of type `ty`.
     fn loaded(&self, ty: &Ty, value: VariableValue) -> Result<Value<M::Place>, Stop> {
-        let integer = |value: IntegerValue| match value {
-            IntegerValue::Signed(value) => Exact::from(value),
-            IntegerValue::Unsigned(value) => Exact::from(value),
-        };
+        let integer = Exact::from;
         Ok(match (category(self.machine, ty), value) {
             (
                 Category::Integer { int: Some(int), .. },

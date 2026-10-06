@@ -25,10 +25,10 @@ use crate::model::{DereferenceTarget, ValueStorage};
 use crate::protocol::StopId;
 use crate::{
     AddressValue, ByteOrder, CodeInstanceId, DereferenceReference, DereferenceState,
-    DereferenceUnavailableReason, Error, ImageAddress, InspectedValue, IntegerValue, ModuleId,
-    PointerWidth, RecordKind, RegisterSnapshot, Result, StackFrameId, TextSummary, TypeInfo,
-    TypeKind, TypeNode, TypeReference, ValueChildren, VariableState, VariableUnavailableReason,
-    VariableValue, VariableValueSource, VirtualAddress,
+    DereferenceUnavailableReason, Error, ImageAddress, InspectedValue, ModuleId, PointerWidth,
+    RecordKind, RegisterSnapshot, Result, StackFrameId, TextSummary, TypeInfo, TypeKind, TypeNode,
+    TypeReference, ValueChildren, VariableState, VariableUnavailableReason, VariableValue,
+    VariableValueSource, VirtualAddress,
 };
 
 use super::frames::{FrameRegisters, ResolvedFrame};
@@ -236,7 +236,7 @@ impl<P: InspectionOps> Frame<'_, P> {
                 for enumerator in enumerators.iter() {
                     let qualified = format!("{}::{}", info.name, enumerator.name);
                     if enumerator.name.as_ref() == name || qualified == name {
-                        found.push((qualified, integer(enumerator.value), info.reference));
+                        found.push((qualified, Exact::from(enumerator.value), info.reference));
                     }
                 }
             }
@@ -344,13 +344,6 @@ const fn tag_matches(tag: Option<Tag>, kind: &TypeKind) -> bool {
         }
         Some(Tag::Union) => matches!(kind, TypeKind::Union { .. }),
         Some(Tag::Enum) => matches!(kind, TypeKind::Enumeration { .. }),
-    }
-}
-
-fn integer(value: IntegerValue) -> Exact {
-    match value {
-        IntegerValue::Signed(value) => Exact::from(value),
-        IntegerValue::Unsigned(value) => Exact::from(value),
     }
 }
 

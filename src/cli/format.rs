@@ -277,15 +277,20 @@ fn watchpoint_invalidations(invalidated: &[InvalidatedWatchpoint], renderer: Ren
                     format!("watchpoint {}", entry.watchpoint.id)
                 ),
                 renderer.paint(Role::Name, watch_subject(&entry.watchpoint)),
-                match entry.reason {
-                    WatchpointInvalidation::ScopeExited => "its frame or block is no longer active",
-                    WatchpointInvalidation::OwnerThreadExited => "the thread owning it exited",
-                    WatchpointInvalidation::ModuleUnloaded => "the module owning it was unloaded",
-                }
+                invalidation_text(entry.reason)
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Why a watchpoint was deleted when its storage ended.
+pub const fn invalidation_text(reason: WatchpointInvalidation) -> &'static str {
+    match reason {
+        WatchpointInvalidation::ScopeExited => "its frame or block is no longer active",
+        WatchpointInvalidation::OwnerThreadExited => "the thread owning it exited",
+        WatchpointInvalidation::ModuleUnloaded => "the module owning it was unloaded",
+    }
 }
 
 /// Describes each hit with the watched value before and after the access.
