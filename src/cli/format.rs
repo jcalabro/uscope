@@ -1492,6 +1492,20 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
     if lines.is_empty() {
         lines.push("no view's pattern names any type".to_owned());
     }
+    // A kernel is shown as what it is built from, to be reviewed as that.
+    if !check.kernels.is_empty() {
+        lines.push("kernels, and what they are built from:".to_owned());
+        for kernel in check.kernels.iter() {
+            lines.push(format!("  {} ({}):", kernel.name, kernel.origin));
+            lines.extend(kernel.source.lines().map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("    {line}")
+                }
+            }));
+        }
+    }
     (lines.join("\n"), failed)
 }
 

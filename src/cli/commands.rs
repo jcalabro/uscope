@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use uscope::{
     BreakpointId, BreakpointSpec, ByteOrder, Disassembly, DisassemblyQuery, DisassemblyRange,
     HitComparison, HitCondition, LineNumber, MAX_WINDOW_AFTER, RegisterRole, SignalPolicy,
@@ -258,8 +258,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Views,
         "views",
         [],
-        "views [load|clear|check|explain] [argument...]",
-        "List the view files values are presented with, load more, clear those loaded, check how the program's types are presented, or explain which view presents a type"
+        "views [load|clear|check|explain|record] [argument...]",
+        "List the view files values are presented with, load more, clear those loaded, check how the program's types are presented, explain which view presents a type, or record the kernel runs presenting a value to a file"
     ),
     command!(
         Globals,
@@ -987,7 +987,28 @@ impl Cli {
                 let types = self.debugger.explain_type(&name).await?;
                 Ok(format::type_views(&name, &types, self.renderers.stdout))
             }
-            _ => bail!("usage: views [load <file...>|clear|check|explain <type...>]"),
+            ["record", path, words @ ..] if !words.is_empty() => {
+                let text = words.join(" ");
+                let expression = parse_expression(&text)?;
+                let recordings = self
+                    .debugger
+                    .record_kernels(&expression)
+                    .await
+                    .map_err(|error| expression_error(&text, error))?;
+                if recordings.is_empty() {
+                    return Ok(format!("no kernel ran presenting `{text}`"));
+                }
+                std::fs::write(path, recordings.concat())
+                    .with_context(|| format!("failed to write {path}"))?;
+                Ok(format!(
+                    "recorded {} kernel run{} to {path}",
+                    recordings.len(),
+                    if recordings.len() == 1 { "" } else { "s" }
+                ))
+            }
+            _ => bail!(
+                "usage: views [load <file...>|clear|check|explain <type...>|record <file> <expression>]"
+            ),
         }
     }
 

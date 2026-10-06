@@ -7,6 +7,10 @@
 
 USCOPE_VIEWS_FILE("tests/fixtures/c/tutorial/tutorial.views");
 
+// The kernel its tree's view calls, built from tree.c into a directory the
+// assembler is given with -Wa,-I.
+USCOPE_KERNEL("tree", "tests/fixtures/c/tutorial/tree.c", "tutorial-tree.wasm");
+
 // A vector of integers: `n` of them at `data`, with room for `cap`.
 typedef struct {
     int *data;
@@ -43,6 +47,18 @@ struct run_queue {
     size_t nr;
 };
 
+// A tree whose nodes keep their children in a list.
+typedef struct node {
+    int value;
+    struct node *child;
+    struct node *sibling;
+} node;
+
+struct tree {
+    node *root;
+    size_t count;
+};
+
 __attribute__((noinline)) void barrier(void *fixture) {
     __asm__ volatile("" : : "r"(fixture) : "memory");
 }
@@ -68,11 +84,16 @@ int main(void) {
     struct task second = {8, {0, 0}};
     enqueue(&queue, &first);
     enqueue(&queue, &second);
+    node leaves[] = {{3, 0, &leaves[1]}, {4, 0, 0}};
+    node branches[] = {{2, &leaves[0], &branches[1]}, {5, 0, 0}};
+    node top = {1, &branches[0], 0};
+    struct tree family = {&top, 5}; // VIEW: family => len=5 [1, 2, 3, 4, 5]
     barrier(&numbers);
     barrier(&broken);
     barrier(&count);
     barrier(&name);
     barrier(&nothing);
     barrier(&queue);
+    barrier(&family);
     return 0;
 }

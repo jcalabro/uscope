@@ -748,7 +748,9 @@ view rust alloc::vec::Vec<T, _> {{
     let errors = scenario
         .operation(
             "load views",
-            scenario.handle().load_views(&[("costly.views", &views)]),
+            scenario
+                .handle()
+                .load_views(&[("costly.views", &views)], &[]),
         )
         .await;
     assert!(errors.is_empty(), "{errors:?}");
@@ -819,9 +821,10 @@ async fn session_views_come_first_and_present_values_as_others() {
     let errors = scenario
         .operation(
             "load views",
-            scenario.handle().load_views(&[(
-                "session.views",
-                "uscope-views 1
+            scenario.handle().load_views(
+                &[(
+                    "session.views",
+                    "uscope-views 1
 view rust std::**::PathBuf {
     show value(inner(self))
     field length = inner(self).len
@@ -833,7 +836,9 @@ view rust nowhere {
     show nothing
 }
 ",
-            )]),
+                )],
+                &[],
+            ),
         )
         .await;
     assert_eq!(
@@ -892,7 +897,7 @@ view rust nowhere {
     );
     // Restoring the built-in views presents the vector again.
     scenario
-        .operation("unload views", scenario.handle().load_views(&[]))
+        .operation("unload views", scenario.handle().load_views(&[], &[]))
         .await;
     assert_eq!(
         summary(&evaluate(&scenario, "ints").await),
@@ -936,9 +941,10 @@ async fn embedded_views_present_only_their_own_modules_types() {
     scenario.shutdown().await;
 }
 
-/// The Rust SDK's macro embeds a program's views as the C header does.
+/// The Rust SDK's macros embed a program's views, and a kernel one calls,
+/// as the C header does; the kernel is written with the SDK.
 #[tokio::test]
-async fn the_rust_sdk_embeds_a_programs_views() {
+async fn the_rust_sdk_embeds_a_programs_views_and_kernels() {
     let mut scenario = Scenario::launch("embedded-views-rust");
     scenario.add_breakpoint("barrier").await;
     scenario.run_to_stop().await;
@@ -954,6 +960,8 @@ async fn the_rust_sdk_embeds_a_programs_views() {
     for (expression, expected) in [
         ("tags", r#"len=2 ["red", "green"]"#),
         ("temperature", "21.5°C"),
+        ("family", "len=5 [1, 2, 3, 4, 5]"),
+        ("nobody", "len=0 []"),
     ] {
         let value = evaluate(&scenario, expression).await;
         let presented = presentation(&value).expect("the program's views present it");

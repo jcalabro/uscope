@@ -258,13 +258,72 @@ enum ViewsCommand {
         #[arg(long = "views", value_name = "FILE")]
         views: Vec<PathBuf>,
     },
+    /// Replay kernel runs that `views record` recorded, with no program.
+    /// Fails unless every run does again what it did.
+    Replay {
+        /// The recorded runs.
+        recording: PathBuf,
+        /// Replay with the kernel module in FILE, rather than the built-in
+        /// kernel each run names.
+        #[arg(long = "kernel", value_name = "FILE")]
+        kernel: Option<PathBuf>,
+    },
 }
 
-/// Runs `uscope views check` or `uscope views explain`.
+/// The largest recording `uscope views replay` reads: far more than the
+/// largest inspection's runs record.
+const MAX_RECORDING_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Replays recorded kernel runs, saying for each whether it reproduced.
+fn replay_views(recording: &std::path::Path, kernel: Option<&std::path::Path>) -> Result<bool> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::fs::File::open(recording)
+        .and_then(|file| file.take(MAX_RECORDING_BYTES + 1).read_to_string(&mut text))
+        .with_context(|| format!("failed to read {}", recording.display()))?;
+    if text.len() as u64 > MAX_RECORDING_BYTES {
+        anyhow::bail!(
+            "{} is larger than a recording may be, {MAX_RECORDING_BYTES} bytes",
+            recording.display()
+        );
+    }
+    let wasm = kernel
+        .map(|path| {
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+        })
+        .transpose()?;
+    let runs = uscope::replay_kernel_runs(&text, wasm.as_deref())
+        .map_err(|error| anyhow::anyhow!("{}: {error}", recording.display()))?;
+    let mut reproduced = true;
+    for (index, run) in runs.iter().enumerate() {
+        match &run.outcome {
+            Ok(events) => println!(
+                "run {}: kernel `{}` reproduced {events} of {} events",
+                index + 1,
+                run.kernel,
+                run.events
+            ),
+            Err(difference) => {
+                reproduced = false;
+                println!(
+                    "run {}: kernel `{}` differs: {difference}",
+                    index + 1,
+                    run.kernel
+                );
+            }
+        }
+    }
+    Ok(reproduced && !runs.is_empty())
+}
+
+/// Runs `uscope views check`, `explain`, or `replay`.
 async fn run_views(args: ViewsArgs) -> Result<bool> {
     let (program, views) = match &args.command {
         ViewsCommand::Check { program, views } | ViewsCommand::Explain { program, views, .. } => {
             (program, views)
+        }
+        ViewsCommand::Replay { recording, kernel } => {
+            return replay_views(recording, kernel.as_deref());
         }
     };
     let debugger = Debugger::new(program)
@@ -303,6 +362,7 @@ async fn run_views(args: ViewsArgs) -> Result<bool> {
                 println!("{report}");
                 !failed
             }
+            ViewsCommand::Replay { .. } => unreachable!("a replay needs no program"),
             ViewsCommand::Explain { name, .. } => {
                 let types = handle.explain_type(name).await?;
                 println!(

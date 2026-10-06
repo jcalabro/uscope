@@ -1476,13 +1476,83 @@ What P6 found:
   marker checked in each; `uscope views check` (P5) found each gap in a
   third of a second before any process ran.
 
-**P7 Kernels**, when the first built-in view needs one (Rust `BTreeMap` or
-classic Go maps):
+**P7 Kernels.** *Done 2026-10-06*, for Rust's `BTreeMap`.
 
-- the wasmi host and the `uscope_kernel_v1` ABI;
-- the SDK crate and the C/Zig header;
-- kernel records in `.debug_uscope_views`;
-- replayable recorded runs.
+- [x] The wasmi host and the `uscope_kernel_v1` ABI.
+- [x] `kernel("NAME", ARG, …)` generators, and the built-in `rust-btree`
+  kernel with the `BTreeMap` and `BTreeSet` views.
+- [x] The SDK crate and the C/Zig header.
+- [x] Kernel records in `.debug_uscope_views`, and kernels beside view
+  files.
+- [x] Replayable recorded runs.
+- [x] End of phase: `/roast` (one finding, fixed: a recording could hold
+  arguments, reads, and items no host gives or takes, and replay read a
+  file of any size), `just` (926 tests), and `just sim 60` (313,759
+  sessions).
+
+What P7 built, and what it learned:
+
+- **The host.** A kernel is loaded once, eagerly compiled by wasmi with
+  floats, SIMD, multiple memories, and start functions refused, wasmi's
+  strict parsing limits, and 1024 frames of recursion; its imports must be
+  exactly `read` and `yield` with their types, and it must export `run`
+  and a memory that starts within 4 MiB. Each run is a new store, limited
+  to 4 MiB, with the arguments in a page grown after the kernel's own
+  memory. `read` and `yield` stop the kernel as resumable host traps, so
+  the store never holds the program: the scan answers each call, charging
+  reads to the inspection's budget, and the kernel runs out of fuel every
+  4096 instructions, which the scan pays for as 512 units of work, so a
+  spinning kernel ends with its budget, deterministically, and run
+  control interrupts it as it does any view. wasmi's calls are wrapped in
+  `catch_unwind`, and a run that traps or panics is ended.
+- **The language.** `for key, value in kernel(…)` names a variable for each
+  word of an item, so an item's width is checked against the view's and
+  a mismatch is a problem. A kernel is found in the view's own source
+  first, then among the built-in ones; a missing one keeps the view from
+  binding. Arguments bind as integers, pointers, or truth values. A scan
+  with a kernel keeps no checkpoints: a kernel's state is its memory and
+  its stack, which wasmi cannot copy, so a later page runs the kernel
+  again, and skips. Within one scan the run is kept live.
+- **`rust-btree`.** Rust's leaf node is reordered by rustc (values before
+  keys), and its length is a `u16`; the view passes every offset and size
+  from the debug information, the root through `root.Some.0`, and 0 for an
+  empty map, whose root may be `None` or an emptied leaf. The kernel, in
+  Zig, walks with an explicit stack of 64 frames, refuses an overfull node
+  or a null edge, and is checked in as `views/kernels/rust-btree.wasm`
+  (871 bytes) beside its source; `just build-test-programs` rebuilds it
+  and fails unless the module is identical.
+- **SDKs.** `sdk/c/uscope_kernel.h`, `sdk/zig/uscope_kernel.zig`, and the
+  `uscope-views` crate's `kernel` module, for `wasm32-unknown-unknown`, write
+  kernels; `USCOPE_KERNEL` and `uscope_kernel!` embed them with their
+  source. The dev shell's nightly Rust builds a `no_std` wasm kernel with
+  `-Zbuild-std=core,panic_abort` and no other toolchain, once the host's
+  linker flags are cleared.
+- **Sources.** A kernel record is kind 2, format 1: the name, the source,
+  and the module, each length-prefixed. A view file's kernels are the
+  `NAME.wasm` files beside it that its views call. `views check` lists
+  every kernel with its source.
+- **Recordings.** A run is its arguments, each read's address and bytes,
+  each item, and how it ended. `views record FILE EXPR` presents a value
+  and its first page of children with every kernel run recorded, and
+  `uscope views replay FILE [--kernel K.wasm]` replays them, reporting the
+  first event that differs. A run its host stopped, because the view had
+  its count or the budget ran out, replays as far as it went.
+- **A bug it exposed.** A budget that ran out while presenting a Rust
+  enum, past a view's share, failed a whole listing of locals; such a
+  value is now missing for that reason, as any value is.
+- **Tests.** Hand-assembled modules check what loads, deterministic fuel,
+  traps, recursion, bad items, and recording; a model check walks fake
+  B-trees of heights 0 to 3; the Rust containers fixture's markers cover
+  empty, emptied, small, three-level, `String`-keyed, set, and overcounted
+  maps in both builds, paged in sizes 7 and 256; the tutorial's C tree
+  and the Rust embedded program's tree are walked by kernels written with
+  each SDK; `tests/cli.rs` covers kernels beside view files, recording,
+  replay, and `views check`; and the hostile harness has a `BTreeMap`, so
+  proptest and the fuzz target run the kernel over arbitrary memory.
+- **Left for later.** Classic Go maps are gone from the pinned Go 1.26,
+  which has only swiss tables, so no kernel walks them. The simulator runs
+  no kernels: its golden programs have no type that needs one. Paging deep
+  into a large `BTreeMap` costs the reads of every page before it.
 
 ## 5. Testing
 

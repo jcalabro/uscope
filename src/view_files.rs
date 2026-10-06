@@ -12,11 +12,21 @@ use std::path::{Path, PathBuf};
 
 use crate::view::syntax::MAX_FILE_BYTES;
 
-/// One view file's name, as errors and `info view` give it, and text.
+/// One view file's name, as errors and `info view` give it, and text, with
+/// the kernels beside it that its views call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewFile {
     pub name: String,
     pub text: String,
+    pub kernels: Vec<KernelFile>,
+}
+
+/// A kernel beside a view file, `NAME.wasm` for the kernel `NAME`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelFile {
+    pub name: String,
+    pub path: String,
+    pub module: Vec<u8>,
 }
 
 /// The project's and then the user's view files, and why any could not be
@@ -47,17 +57,57 @@ pub fn user_directory() -> Option<PathBuf> {
     Some(config.join("uscope/views"))
 }
 
-/// Reads one view file, at most one byte more than a view file may hold,
-/// so that the parser refuses one too long without reading all of it.
+/// Reads one view file and the kernels beside it that its views call.
+///
+/// It reads at most one byte more than a view file may hold, so that the
+/// parser refuses one too long without reading all of it. A kernel with no
+/// file beside it may be a built-in one.
 pub fn read(path: &Path) -> Result<ViewFile, String> {
     let name = path.display().to_string();
+    let bytes = read_at_most(path, MAX_FILE_BYTES)?;
+    let text = String::from_utf8(bytes).map_err(|_| format!("{name}: the file is not UTF-8"))?;
+    let mut called = crate::view::syntax::parse(&name, &text)
+        .views
+        .iter()
+        .flat_map(|view| {
+            view.kernel_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    called.sort();
+    called.dedup();
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut kernels = Vec::new();
+    for kernel in called {
+        let path = directory.join(format!("{kernel}.wasm"));
+        if !path.exists() {
+            continue;
+        }
+        kernels.push(KernelFile {
+            name: kernel,
+            path: path.display().to_string(),
+            module: read_at_most(&path, crate::view::kernel::MAX_MODULE_BYTES)?,
+        });
+    }
+    Ok(ViewFile {
+        name,
+        text,
+        kernels,
+    })
+}
+
+/// A file's bytes, up to one more than `limit`, so that what reads them
+/// can refuse one too long without reading all of it.
+fn read_at_most(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+    let name = path.display();
     let file = fs::File::open(path).map_err(|error| format!("{name}: {error}"))?;
     let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES as u64 + 1)
+    file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("{name}: {error}"))?;
-    let text = String::from_utf8(bytes).map_err(|_| format!("{name}: the file is not UTF-8"))?;
-    Ok(ViewFile { name, text })
+    Ok(bytes)
 }
 
 /// Every `*.views` file in a directory, in name order.

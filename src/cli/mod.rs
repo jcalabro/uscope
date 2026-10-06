@@ -183,23 +183,30 @@ impl Cli {
         warnings
     }
 
-    /// Presents values with the session's view files, and returns what kept
-    /// parts of them out.
+    /// Presents values with the session's view files and the kernels beside
+    /// them, and returns what kept parts of them out.
     async fn reload_views(&self) -> Vec<String> {
-        let files = {
+        let sources = {
             let views = self.views.lock().expect("the view sources are whole");
             views
                 .session
                 .iter()
                 .chain(&views.discovered)
-                .map(|file| (file.name.clone(), file.text.clone()))
+                .cloned()
                 .collect::<Vec<_>>()
         };
-        let files = files
+        let mut kernels = Vec::<uscope::view_files::KernelFile>::new();
+        // Files in one directory share the kernels beside them.
+        for kernel in sources.iter().flat_map(|file| &file.kernels) {
+            if !kernels.iter().any(|loaded| loaded.path == kernel.path) {
+                kernels.push(kernel.clone());
+            }
+        }
+        let files = sources
             .iter()
-            .map(|(name, text)| (name.as_str(), text.as_str()))
+            .map(|file| (file.name.as_str(), file.text.as_str()))
             .collect::<Vec<_>>();
-        match self.debugger.load_views(&files).await {
+        match self.debugger.load_views(&files, &kernels).await {
             Ok(errors) => errors.iter().map(ToString::to_string).collect(),
             Err(error) => vec![error.to_string()],
         }

@@ -20,6 +20,7 @@ use crate::model::ValueStorage;
 use crate::model::ViewChildren;
 use crate::protocol::StopId;
 use crate::view::bind::BoundShape;
+use crate::view::kernel::Recordings;
 use crate::view::run::{Child, Failure};
 use crate::view::scan::Checkpoints;
 use crate::view::{Choice, ViewSet};
@@ -43,6 +44,9 @@ const MAX_DEPTH: u8 = 4;
 /// stop; the oldest is forgotten first.
 const MAX_SCANS: usize = 64;
 
+/// How many children a recording of kernel runs presents after a value.
+const RECORDED_CHILDREN: u32 = 256;
+
 /// The views a controller presents values with, the view each type has,
 /// and where the scans of values presented at this stop have been.
 pub(super) struct Views {
@@ -53,6 +57,9 @@ pub(super) struct Views {
     /// The view each type has under this set, bound when first needed.
     choices: RefCell<BTreeMap<TypeReference, Arc<Choice<StopStep>>>>,
     scans: RefCell<Scans>,
+    /// Where kernel runs are recorded while a request records them; scans
+    /// then neither use nor keep checkpoints.
+    recording: RefCell<Option<Recordings>>,
 }
 
 /// Which value a scan presents: its type, its view, and its storage.
@@ -78,6 +85,7 @@ impl Default for Views {
             enabled: true,
             choices: RefCell::default(),
             scans: RefCell::default(),
+            recording: RefCell::default(),
         }
     }
 }
@@ -97,6 +105,9 @@ impl Views {
 
     /// The checkpoints of a value's scan at `stop`.
     fn checkpoints(&self, stop: StopId, key: &ScanKey) -> Checkpoints {
+        if let Some(recordings) = &*self.recording.borrow() {
+            return Checkpoints::recording(recordings.clone());
+        }
         let mut scans = self.scans.borrow_mut();
         if scans.stop != Some(stop) {
             scans.stop = Some(stop);
@@ -113,7 +124,7 @@ impl Views {
     /// Keeps a value's checkpoints at `stop`.
     fn keep(&self, stop: StopId, key: ScanKey, checkpoints: Checkpoints) {
         let mut scans = self.scans.borrow_mut();
-        if scans.stop != Some(stop) {
+        if scans.stop != Some(stop) || self.recording.borrow().is_some() {
             return;
         }
         scans.entries.retain(|(existing, _)| *existing != key);
@@ -375,9 +386,20 @@ impl<P: InspectionOps> Controller<P> {
             .filter(|view| !used.contains(&(Arc::clone(&view.source), view.line)))
             .map(|view| crate::view::name_of(view))
             .collect();
+        let kernels = self
+            .views
+            .set
+            .kernels()
+            .chain(
+                self.modules
+                    .values()
+                    .flat_map(|module| module.image.views().kernels()),
+            )
+            .collect();
         crate::ViewCheck {
             types: types.into(),
             unused,
+            kernels,
         }
     }
 
@@ -450,6 +472,53 @@ impl<P: InspectionOps> Controller<P> {
             candidates: candidates.into(),
             presentation,
         })
+    }
+
+    /// Presents an expression's value and its first page of children, and
+    /// returns a recording of each kernel run that took, as text.
+    pub(super) fn record_kernels(
+        &self,
+        stop_id: crate::StopId,
+        pid: nix::unistd::Pid,
+        frame: crate::StackFrameId,
+        expression: &crate::Expression,
+    ) -> Result<Vec<String>> {
+        let recordings = Recordings::default();
+        *self.views.recording.borrow_mut() = Some(recordings.clone());
+        let presented = (|| {
+            let evaluation = self.evaluate(
+                stop_id,
+                pid,
+                frame,
+                expression,
+                crate::EvaluationMode::Read,
+                crate::InspectionLimits::default(),
+            )?;
+            let crate::Evaluation::Value { value, .. } = evaluation else {
+                return Err(Error::InvalidValueExpression(
+                    "a range of elements has no view; record one element".into(),
+                ));
+            };
+            if let VariableState::Available {
+                presentation: Some(presentation),
+                ..
+            } = &value.state
+                && let ValueChildren::Available(reference) = &presentation.children
+            {
+                self.value_children(
+                    reference,
+                    &crate::ValueChildQuery {
+                        offset: 0,
+                        limit: RECORDED_CHILDREN,
+                    },
+                    crate::InspectionLimits::default(),
+                )?;
+            }
+            Ok(())
+        })();
+        *self.views.recording.borrow_mut() = None;
+        presented?;
+        Ok(recordings.take().iter().map(ToString::to_string).collect())
     }
 
     /// The step from a value of `from` to an element its view presents,
@@ -1824,16 +1893,21 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         }
     }
 
-    /// A value the provider read, with its presentation.
+    /// A value the provider read, with its presentation. A value whose
+    /// presentation needed what the budget or the program could not provide
+    /// is missing for that reason, as any value is, rather than failing the
+    /// inspection it is part of.
     pub(super) fn present_state(
         &mut self,
         type_info: Option<TypeInfo>,
         state: VariableState,
     ) -> Result<VariableState> {
         let value = self.finish(type_info, state);
-        self.presented(value)
-            .map(|value| value.state)
-            .map_err(stopped)
+        match self.presented(value) {
+            Ok(value) => Ok(value.state),
+            Err(Stop::Missing(state)) => Ok(*state),
+            Err(stop) => Err(stopped(stop)),
+        }
     }
 }
 

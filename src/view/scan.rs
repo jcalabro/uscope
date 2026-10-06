@@ -19,9 +19,10 @@ use std::collections::BTreeSet;
 
 use crate::ViewProblem;
 use crate::eval::interp::{self, Value};
-use crate::eval::target::Machine;
+use crate::eval::target::{Machine, Stop};
 
 use super::bind::{BoundClause, BoundGenerator, BoundItem, BoundScan, ViewProgram};
+use super::kernel::{self, Recordings, RunError};
 use super::run::{Failure, ViewMachine};
 
 /// How many elements apart the controller keeps cursors.
@@ -34,23 +35,41 @@ pub const MAX_DEPTH: u32 = 128;
 /// The most elements a scan without a declared count generates.
 pub const MAX_UNCOUNTED: u64 = 1 << 24;
 
-/// The value a clause's variable holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The value a clause's variable holds, or its variables.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Var {
     /// A range's position, or an index a client asked for.
     Integer(i128),
     /// A linked structure's node: a pointer's address.
     Node(u64),
+    /// A kernel's item: a word for each variable.
+    Words(Box<[u64]>),
 }
 
 impl Var {
-    /// The variable as the evaluator sees it.
-    pub fn value<P>(self) -> Value<P> {
-        match self {
-            Self::Integer(value) => Value::Int(crate::eval::number::Integer::Exact(
+    /// A single variable as the evaluator sees it.
+    pub fn value<P>(&self) -> Value<P> {
+        let exact = |value: i128| {
+            Value::Int(crate::eval::number::Integer::Exact(
                 crate::eval::number::Exact::from(value),
-            )),
-            Self::Node(address) => Value::Pointer(address),
+            ))
+        };
+        match self {
+            Self::Integer(value) => exact(*value),
+            Self::Node(address) => Value::Pointer(*address),
+            Self::Words(words) => exact(words.first().copied().map_or(0, i128::from)),
+        }
+    }
+
+    /// The variables as the evaluator sees them, appended to `values`.
+    fn push<P>(&self, values: &mut Vec<Value<P>>) {
+        match self {
+            Self::Words(words) => values.extend(words.iter().map(|word| {
+                Value::Int(crate::eval::number::Integer::Exact(
+                    crate::eval::number::Exact::from(*word),
+                ))
+            })),
+            _ => values.push(self.value()),
         }
     }
 }
@@ -110,6 +129,8 @@ enum Level {
         /// A subtree still to enter, or 0.
         pending: u64,
     },
+    /// A kernel's run, which the scanner holds.
+    Kernel,
 }
 
 /// Where a scan is: each started clause's generator and variable, and how
@@ -136,13 +157,24 @@ impl Cursor {
 }
 
 /// The cursors one value's scan has passed at this stop, every
-/// [`CHECKPOINT_INTERVAL`] elements, in order.
+/// [`CHECKPOINT_INTERVAL`] elements, in order, and where its kernels' runs
+/// are recorded, if they are. A scan with a kernel keeps no cursors, since
+/// a kernel's run cannot be resumed but only run again.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Checkpoints {
     cursors: Vec<Cursor>,
+    recordings: Option<Recordings>,
 }
 
 impl Checkpoints {
+    /// No checkpoints, with every kernel run recorded into `recordings`.
+    pub const fn recording(recordings: Recordings) -> Self {
+        Self {
+            cursors: Vec::new(),
+            recordings: Some(recordings),
+        }
+    }
+
     /// The latest cursor at or before element `index`.
     fn before(&self, index: u64) -> Cursor {
         self.cursors
@@ -170,11 +202,16 @@ pub struct Scanner<'b, St, P> {
     /// The variables and `let`s of the started clauses, by position.
     values: Vec<Value<P>>,
     visited: Vec<BTreeSet<u64>>,
+    /// The kernel clauses' runs, by depth.
+    runs: Vec<Option<kernel::Run>>,
     /// The count the view declares, which the scan never passes.
     declared: Option<u64>,
     /// Whether `values` holds the cursor's clauses' values yet; a cursor
     /// resumed from a checkpoint computes them again.
     restored: bool,
+    /// Whether a clause is a kernel's, so the scan keeps no checkpoints.
+    kernels: bool,
+    recordings: Option<Recordings>,
 }
 
 impl<'b, St, P: Clone> Scanner<'b, St, P> {
@@ -190,10 +227,16 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
         Self {
             scan,
             visited: vec![BTreeSet::new(); cursor.levels.len()],
+            runs: (0..cursor.levels.len()).map(|_| None).collect(),
             restored: cursor.levels.is_empty(),
             values: Vec::new(),
             cursor,
             declared,
+            kernels: scan
+                .clauses
+                .iter()
+                .any(|clause| matches!(clause.generator, BoundGenerator::Kernel { .. })),
+            recordings: checkpoints.recordings.clone(),
         }
     }
 
@@ -255,7 +298,9 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 limit: MAX_UNCOUNTED,
             }));
         }
-        checkpoints.keep(&self.cursor);
+        if !self.kernels {
+            checkpoints.keep(&self.cursor);
+        }
         Ok(Some(index))
     }
 
@@ -267,7 +312,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
     ) -> Result<(), Failure> {
         self.values.clear();
         for depth in 0..self.cursor.levels.len() {
-            self.values.push(self.cursor.variables[depth].value());
+            self.cursor.variables[depth].push(&mut self.values);
             if !self.items(depth, machine)? {
                 return Err(Failure::Problem(ViewProblem::Internal(
                     "a checkpoint's values no longer pass their filters".into(),
@@ -327,6 +372,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 self.cursor.levels.pop();
                 self.cursor.variables.truncate(depth);
                 self.visited.truncate(depth);
+                self.runs.truncate(depth);
                 if depth == 0 {
                     self.cursor.done = true;
                     return Ok(false);
@@ -334,8 +380,8 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 continue;
             };
             self.cursor.variables.truncate(depth);
+            value.push(&mut self.values);
             self.cursor.variables.push(value);
-            self.values.push(value.value());
             if !self.items(depth, machine)? {
                 continue;
             }
@@ -356,6 +402,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
         let base = self.base(depth);
         self.values.truncate(base);
         machine.set_variables(&self.values);
+        let mut run = None;
         let level = match &self.scan.clauses[depth].generator {
             BoundGenerator::Range(length) => Level::Range {
                 next: 0,
@@ -374,9 +421,25 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 stack: Vec::new(),
                 pending: node(root, machine)?,
             },
+            BoundGenerator::Kernel {
+                kernel, arguments, ..
+            } => {
+                let words = arguments
+                    .iter()
+                    .map(|argument| word(argument, machine))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let started = kernel
+                    .start(&words, self.recordings.as_ref())
+                    .map_err(|reason| kernel_problem(kernel, reason))?;
+                run = Some(started);
+                Level::Kernel
+            }
         };
         self.cursor.levels.push(level);
         self.visited.push(BTreeSet::new());
+        self.runs.truncate(depth);
+        self.runs.resize_with(depth, || None);
+        self.runs.push(run);
         Ok(())
     }
 
@@ -447,10 +510,92 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                 *pending = follow(right, outer, current, machine)?;
                 Ok(Some(Var::Node(current)))
             }
+            (Level::Kernel, BoundGenerator::Kernel { kernel, words, .. }) => {
+                let Some(Some(run)) = self.runs.get_mut(depth) else {
+                    return Err(Failure::Problem(ViewProblem::Internal(
+                        "a kernel's clause has no run".into(),
+                    )));
+                };
+                let item = run
+                    .next(&mut Program { machine })
+                    .map_err(|error| match error {
+                        RunError::Host(stop) => Failure::from(stop),
+                        RunError::Kernel(reason) => kernel_problem(kernel, reason),
+                    })?;
+                match item {
+                    Some(item) if item.len() == *words => Ok(Some(Var::Words(item))),
+                    Some(item) => Err(kernel_problem(
+                        kernel,
+                        format!(
+                            "it yielded {} words, and the view names {words}",
+                            item.len()
+                        ),
+                    )),
+                    None => Ok(None),
+                }
+            }
             _ => Err(Failure::Problem(ViewProblem::Internal(
                 "a scan's state does not match its generator".into(),
             ))),
         }
+    }
+}
+
+/// The program, as a kernel's host: its reads and its work are charged to
+/// the inspection's budget.
+struct Program<'v, 'm, M: Machine> {
+    machine: &'v mut ViewMachine<'m, M>,
+}
+
+impl<M: Machine> kernel::Host for Program<'_, '_, M> {
+    type Error = Stop;
+
+    fn read(&mut self, address: u64, length: usize) -> Result<Vec<u8>, Stop> {
+        self.machine.read(address, length)
+    }
+
+    fn pay(&mut self, units: u64) -> Result<(), Stop> {
+        for _ in 0..units {
+            self.machine.charge()?;
+        }
+        Ok(())
+    }
+}
+
+fn kernel_problem(kernel: &kernel::Kernel, reason: String) -> Failure {
+    Failure::Problem(ViewProblem::Kernel {
+        kernel: std::sync::Arc::clone(kernel.name()),
+        reason: reason.into(),
+    })
+}
+
+/// A kernel's argument, as a 64-bit word: an integer in two's complement,
+/// a pointer's address, or a truth value as 0 or 1.
+fn word<M: Machine>(
+    program: &ViewProgram<M::Step>,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<u64, Failure> {
+    match interp::value(program, machine)? {
+        Value::Int(integer) => {
+            let value = integer.value();
+            value
+                .to_i128()
+                .and_then(|value| {
+                    u64::try_from(value)
+                        .ok()
+                        .or_else(|| i64::try_from(value).ok().map(i64::cast_unsigned))
+                })
+                .ok_or_else(|| {
+                    Failure::Problem(ViewProblem::Refused(
+                        format!("a kernel's argument is {value}, which is not 64 bits").into(),
+                    ))
+                })
+        }
+        Value::Pointer(address) => Ok(address),
+        Value::Bool(value) => Ok(u64::from(value)),
+        _ => Err(Failure::Problem(ViewProblem::Internal(
+            "a kernel's argument is not a word".into(),
+        ))),
     }
 }
 

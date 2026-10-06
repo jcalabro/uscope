@@ -97,6 +97,20 @@ impl TypeViews {
 pub struct ViewCheck {
     pub types: Arc<[TypeViews]>,
     pub unused: Arc<[Arc<crate::ViewName>]>,
+    /// The kernels loaded for the session or carried by a module, which
+    /// their views may call.
+    pub kernels: Arc<[KernelSource]>,
+}
+
+/// A kernel views may call, and what it is built from, so that it is
+/// reviewed as source rather than trusted as a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelSource {
+    pub name: Arc<str>,
+    /// The file or module record it was loaded from.
+    pub origin: Arc<str>,
+    /// Its source, or a link to it.
+    pub source: Arc<str>,
 }
 
 /// Why a value is presented as it is: the views its type matched, and how
@@ -1398,6 +1412,15 @@ pub enum Request {
         frame: StackFrameId,
         reply: Reply<ViewExplanation>,
     },
+    /// Presents an expression's value and its first page of children,
+    /// recording every kernel run it takes, each as text that replays it.
+    RecordKernels {
+        expression: crate::Expression,
+        stop_id: StopId,
+        thread_id: ThreadId,
+        frame: StackFrameId,
+        reply: Reply<Vec<String>>,
+    },
     /// The views whose patterns name the types a name means, in every
     /// loaded module.
     ExplainType {
@@ -1518,6 +1541,9 @@ impl Request {
             Self::EnableViews { enabled, .. } => format!("enable views {enabled}"),
             Self::ExplainView { expression, .. } => {
                 format!("explain the view of `{}`", expression.text())
+            }
+            Self::RecordKernels { expression, .. } => {
+                format!("record the kernels of `{}`", expression.text())
             }
             Self::ExplainType { name, .. } => format!("explain the views of `{name}`"),
             Self::CheckViews { .. } => "check views".to_owned(),

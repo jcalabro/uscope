@@ -10,3 +10,10 @@ view rust embedded_views::Celsius {
     show value(self.0)
     summary "{self.0}°C"
 }
+
+# A tree whose nodes keep their children in a list, which the tree kernel
+# the program carries walks, each node before its children.
+view rust embedded_views::Tree {
+    show sequence(count) for at in kernel("tree", &root, offsetof(embedded_views::Node, child), offsetof(embedded_views::Node, sibling))
+        => (at as *embedded_views::Node)->value
+}

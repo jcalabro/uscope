@@ -5,7 +5,7 @@
 //! value, and why.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsString};
 use std::fmt::Debug;
 use std::hint::black_box;
@@ -65,6 +65,17 @@ fn main() {
     let many_hashed: HashMap<u32, u32> = (0..300).map(|key| (key, key * 2)).collect(); // VIEW: many_hashed => count: 300
     let set: HashSet<u8> = HashSet::from([7, 9]); // VIEW: set => len=2 [7, 9] (any order)
     let no_set: HashSet<u8> = HashSet::new(); // VIEW: no_set => len=0 []
+    let mut tree: BTreeMap<i32, i32> = BTreeMap::new(); // VIEW: tree => len=3 {1: 10, 2: 20, 3: 30}
+    tree.insert(2, 20);
+    tree.insert(3, 30);
+    tree.insert(1, 10);
+    let no_tree: BTreeMap<u8, u8> = BTreeMap::new(); // VIEW: no_tree => len=0 {}
+    let mut emptied: BTreeMap<u8, u8> = BTreeMap::from([(1, 2)]); // VIEW: emptied => len=0 {}
+    emptied.remove(&1);
+    let tall: BTreeMap<u32, u64> = (0..300).map(|key| (key, u64::from(key) * 3)).collect(); // VIEW: tall => count: 300
+    let titles = BTreeMap::from([(String::from("b"), vec![]), (String::from("a"), vec![1_u8])]); // VIEW: titles => len=2 {"a": len=1 [1], "b": len=0 []}
+    let tree_set: BTreeSet<u16> = BTreeSet::from([5, 1, 3]); // VIEW: tree_set => len=3 [1, 3, 5]
+    let no_tree_set: BTreeSet<u16> = BTreeSet::new(); // VIEW: no_tree_set => len=0 []
     // A pointer to a string in no mapped memory, and one to none at all.
     let lost_text = 0x10 as *const String; // VIEW: lost_text => problem: inaccessible
     let no_text: *const String = std::ptr::null(); // VIEW: no_text => stored
@@ -80,6 +91,16 @@ fn main() {
     fields[length] = 9;
     // SAFETY: as above.
     let past_capacity: ManuallyDrop<Vec<i32>> = unsafe { std::mem::transmute(fields) }; // VIEW: past_capacity.value.0 => problem: check
+    // A tree map that counts more entries than its nodes hold: its length
+    // is the word that holds 3 when its root is a leaf of 3 entries.
+    let three = BTreeMap::from([(1_i32, 1_i32), (2, 2), (3, 3)]);
+    // SAFETY: a BTreeMap is three words, and the result is never read or
+    // dropped; the debugger reads it.
+    let mut fields: [usize; 3] = unsafe { std::mem::transmute(ManuallyDrop::new(three)) };
+    let length = fields.iter().position(|field| *field == 3).expect("a length field");
+    fields[length] = 5;
+    // SAFETY: as above.
+    let overcounted: ManuallyDrop<BTreeMap<i32, i32>> = unsafe { std::mem::transmute(fields) }; // VIEW: overcounted.value.0 => problem: declares 5 elements and generates 3
     // A vector whose elements are in no mapped memory.
     // SAFETY: the vector is never read or dropped; the debugger reads it.
     let dangling = ManuallyDrop::new(unsafe { Vec::from_raw_parts(0x10 as *mut i32, 2, 2) }); // VIEW: dangling.value.0 => len=2 [<unavailable>, …]
@@ -125,9 +146,17 @@ fn main() {
         &many_hashed,
         &set,
         &no_set,
+        &tree,
+        &no_tree,
+        &emptied,
+        &tall,
+        &titles,
+        &tree_set,
+        &no_tree_set,
         &lost_text,
         &no_text,
         &past_capacity,
+        &overcounted,
         &dangling,
         &boxed,
         &rc,
