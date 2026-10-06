@@ -20,6 +20,8 @@ pub enum ErrorKind {
     Type,
     /// An index is outside an array's bounds.
     Bounds,
+    /// A map holds no entry for a key.
+    MissingKey,
     /// Arithmetic has no result: a division by zero, a result beyond 128
     /// bits, a shift out of range, or a value that does not fit.
     Arithmetic,
@@ -44,6 +46,7 @@ impl ErrorKind {
             Self::AmbiguousName => "ambiguous-name",
             Self::Type => "type",
             Self::Bounds => "bounds",
+            Self::MissingKey => "missing-key",
             Self::Arithmetic => "arithmetic",
             Self::NotAnLvalue => "not-an-lvalue",
             Self::Mode => "mode",

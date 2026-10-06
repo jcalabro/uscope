@@ -565,7 +565,18 @@ fn expression_text() -> impl Strategy<Value = String> {
             inner
                 .clone()
                 .prop_map(|operand| format!("sizeof({operand})")),
-            inner.prop_map(|operand| format!("len({operand})")),
+            inner.clone().prop_map(|operand| format!("len({operand})")),
+            inner.clone().prop_map(|operand| format!("cap({operand})")),
+            (
+                inner.clone(),
+                proptest::option::of(inner.clone()),
+                proptest::option::of(inner)
+            )
+                .prop_map(|(base, start, end)| format!(
+                    "({base})[{}:{}]",
+                    start.unwrap_or_default(),
+                    end.unwrap_or_default()
+                )),
         ]
     })
 }

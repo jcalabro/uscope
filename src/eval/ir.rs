@@ -58,7 +58,7 @@ impl<O, S> Node<O, S> {
     pub const fn is_place(&self) -> bool {
         matches!(
             self.op,
-            Op::Object(_) | Op::Step { .. } | Op::At { .. } | Op::Raw { .. }
+            Op::Object(_) | Op::Step { .. } | Op::Entry { .. } | Op::At { .. } | Op::Raw { .. }
         ) || matches!(&self.op, Op::Choose { places: true, .. })
     }
 }
@@ -87,6 +87,8 @@ pub enum Comparison {
     Bools,
     /// A place's text on the left, a string on the right.
     Text,
+    /// Two strings.
+    Texts,
 }
 
 /// A conversion of a value to another type.
@@ -117,6 +119,17 @@ pub enum Length {
     Slice,
     /// The length in bytes of text.
     Text,
+    /// The length of a string the expression computed.
+    Bytes,
+}
+
+/// How `cap` measures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capacity {
+    /// The capacity a slice's descriptor records.
+    Slice,
+    /// The `capacity` field of the view that presents the value.
+    Presented,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +138,14 @@ pub enum Op<O, S> {
     Object(O),
     /// A value the machine computes once and keeps, which is not a place.
     Bound(O),
+    /// The value a map at `base` holds for `key`, through a planned step.
+    Entry {
+        base: Box<Node<O, S>>,
+        step: S,
+        key: Box<Node<O, S>>,
+    },
+    /// The id of the stopped thread's task.
+    Task,
     /// A structural step from a place, with its index values. A step that
     /// `follows` a pointer, as a dereference or a slice's element does,
     /// leaves the storage of the place it starts from.
@@ -218,6 +239,10 @@ pub enum Op<O, S> {
         operand: Box<Node<O, S>>,
         how: Length,
     },
+    Capacity {
+        operand: Box<Node<O, S>>,
+        how: Capacity,
+    },
     /// A value converted to the node's type, refused unless the type holds
     /// it exactly.
     Fit(Box<Node<O, S>>),
@@ -226,10 +251,17 @@ pub enum Op<O, S> {
         target: Box<Node<O, S>>,
         value: Box<Node<O, S>>,
     },
-    /// `base[start..end]`.
+    /// `base[start..end]`, or `base[start:end]` of an array or slice: a
+    /// bound left out is the first element, or the end.
     Range {
         base: Box<Node<O, S>>,
-        start: Box<Node<O, S>>,
-        end: Box<Node<O, S>>,
+        start: Option<Box<Node<O, S>>>,
+        end: Option<Box<Node<O, S>>>,
+    },
+    /// `base[start:end]` of text: the bytes between, as a string.
+    TextSlice {
+        base: Box<Node<O, S>>,
+        start: Option<Box<Node<O, S>>>,
+        end: Option<Box<Node<O, S>>>,
     },
 }
