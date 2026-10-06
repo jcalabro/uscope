@@ -52,18 +52,6 @@ impl Pending {
         self.0[(signal - 1).cast_unsigned() as usize].is_some()
     }
 
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        let mut index = 0;
-        while index < self.0.len() {
-            if self.0[index].is_some() {
-                return false;
-            }
-            index += 1;
-        }
-        true
-    }
-
     /// Takes the signal the kernel delivers next: synchronous signals
     /// first, then the lowest-numbered.
     fn take_next(&mut self) -> Option<SigInfo> {
@@ -76,25 +64,16 @@ impl Pending {
 }
 
 /// What a signal does when the program has no handler for it.
+/// Signals that dump core terminate too: core dumps are off, as with a zero
+/// core size limit.
 enum DefaultAction {
     Terminate,
-    CoreDump,
     Ignore,
     Stop,
 }
 
 const fn default_action(signal: i32) -> DefaultAction {
     match signal {
-        libc::SIGQUIT
-        | libc::SIGILL
-        | libc::SIGTRAP
-        | libc::SIGABRT
-        | libc::SIGBUS
-        | libc::SIGFPE
-        | libc::SIGSEGV
-        | libc::SIGXCPU
-        | libc::SIGXFSZ
-        | libc::SIGSYS => DefaultAction::CoreDump,
         libc::SIGCHLD | libc::SIGCONT | libc::SIGURG | libc::SIGWINCH => DefaultAction::Ignore,
         libc::SIGSTOP | libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU => DefaultAction::Stop,
         _ => DefaultAction::Terminate,
@@ -231,38 +210,22 @@ impl Kernel {
         let thread = self.threads.get_mut(&tid).expect("resumed thread exists");
         thread.state = State::Running;
         thread.report = None;
-        let Some(signal) = signal else {
-            return;
-        };
-        match default_action(signal) {
-            DefaultAction::Ignore => {}
-            DefaultAction::Terminate => {
-                let group = thread.tgid;
-                self.kill_process(group, ExitStatus::Signal(signal, false));
-            }
-            DefaultAction::CoreDump => {
-                let group = thread.tgid;
-                // Core dumps are off for simulated processes, as with a
-                // zero core size limit.
-                self.kill_process(group, ExitStatus::Signal(signal, false));
-            }
-            DefaultAction::Stop => self.gap(format!("group-stop by {}", name(signal))),
+        if let Some(signal) = signal {
+            self.act_by_default(tid, signal);
         }
     }
 
-    /// Takes an untraced thread through `info`'s default action, as if no
-    /// debugger were there: SIGCHLD is ignored, and a trap or fault ends
-    /// its process (K-FORK-2).
-    pub(super) fn act_by_default(&mut self, tid: Tid, info: SigInfo) {
-        match default_action(info.signal) {
+    /// Takes a thread through `signal`'s default action, as if no debugger
+    /// were there: SIGCHLD is ignored, and a trap or fault ends its process
+    /// (K-FORK-2).
+    pub(super) fn act_by_default(&mut self, tid: Tid, signal: i32) {
+        match default_action(signal) {
             DefaultAction::Ignore => {}
-            DefaultAction::Terminate | DefaultAction::CoreDump => {
+            DefaultAction::Terminate => {
                 let group = self.threads[&tid].tgid;
-                // Core dumps are off for simulated processes, as with a zero
-                // core size limit.
-                self.kill_process(group, ExitStatus::Signal(info.signal, false));
+                self.kill_process(group, ExitStatus::Signal(signal, false));
             }
-            DefaultAction::Stop => self.gap(format!("group-stop by {}", name(info.signal))),
+            DefaultAction::Stop => self.gap(format!("group-stop by {}", name(signal))),
         }
     }
 

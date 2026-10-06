@@ -278,8 +278,7 @@ impl<'a> World<'a> {
         kernel.borrow_mut().debug_behavior = swarm.debug;
         #[cfg(test)]
         {
-            let mut kernel = kernel.borrow_mut();
-            kernel.sabotage = settings.sabotage;
+            kernel.borrow_mut().sabotage = settings.sabotage;
         }
         let marks = Rc::new(RefCell::new(Marks::default()));
         let shared = Shared::default();
@@ -1059,7 +1058,6 @@ impl<'a> World<'a> {
     }
 }
 
-/// What the client knows of the program it debugs.
 /// Starts the program untraced, for the client to attach to.
 fn start_untraced(
     kernel: &mut Kernel,
@@ -1094,16 +1092,10 @@ fn script(
         defined: variant.functions.clone(),
         source: program.source.clone(),
         source_lines: program.source_lines,
-        marker_lines: program.markers.iter().map(|marker| marker.line).collect(),
         markers: program
             .markers
             .iter()
-            .map(|marker| (marker.line, marker.text.clone()))
-            .collect(),
-        expectations: program
-            .markers
-            .iter()
-            .filter_map(|marker| Some((marker.line, marker.expect.clone()?)))
+            .map(|marker| (marker.line, marker.clone()))
             .collect(),
         marker_rows: marker_rows(program, variant),
         globals: variant.globals.clone(),
@@ -1116,7 +1108,7 @@ fn script(
 
 /// Where, in unoptimized code, a row of a marker's line starts, with the
 /// line, by image address.
-fn marker_rows(program: &Program, variant: &Variant) -> std::collections::BTreeMap<u64, u64> {
+fn marker_rows(program: &Program, variant: &Variant) -> BTreeMap<u64, u64> {
     let facts = &variant.facts;
     let source = program
         .source
@@ -1124,7 +1116,7 @@ fn marker_rows(program: &Program, variant: &Variant) -> std::collections::BTreeM
         .and_then(|name| name.to_str())
         .unwrap_or_default();
     if facts.optimized {
-        return std::collections::BTreeMap::new();
+        return BTreeMap::new();
     }
     program
         .markers

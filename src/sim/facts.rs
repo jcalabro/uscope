@@ -1,9 +1,9 @@
 //! What GNU binutils, not uscope, say about each golden binary.
 //!
 //! `scripts/golden.sh` writes each program's functions, line table, and
-//! epilogue markers to `facts.json` beside its binaries. The semantic oracles judge the
-//! debugger's steps against these, so that a mistake in uscope's own
-//! reading of the debug information cannot excuse itself.
+//! epilogue markers to `facts.json` beside its binaries. The semantic
+//! oracles judge the debugger's steps against these, so that a mistake in
+//! uscope's own reading of the debug information cannot excuse itself.
 //!
 //! Addresses here are the image's own; add the image's bias for where it
 //! loads.

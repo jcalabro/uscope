@@ -7,7 +7,7 @@
 //! what binutils say about the binary (`facts`), never by uscope's own
 //! reading of the debug information.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use iced_x86::{Decoder, DecoderOptions, Mnemonic};
 
@@ -472,7 +472,7 @@ fn missed_stop(
 ) -> Option<(Position, Option<Line>)> {
     let from = lines.line(begun.rip);
     let before = &begun.shadow.calls;
-    let mut crossed = std::collections::BTreeSet::new();
+    let mut crossed = BTreeSet::new();
     positions.iter().find_map(|&position| {
         if lines.epilogue(position.rip) {
             crossed.insert(position.activation);
