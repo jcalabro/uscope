@@ -26,7 +26,7 @@ const STATUS_HITS: u64 = 0xf;
 /// The first address Linux refuses for user hardware breakpoints
 /// (`TASK_SIZE_MAX` with 4-level paging). A watched span must end at or
 /// before it.
-pub const USER_ADDRESS_LIMIT: u64 = 0x7fff_ffff_f000;
+const USER_ADDRESS_LIMIT: u64 = 0x7fff_ffff_f000;
 
 /// The memory accesses one slot reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
