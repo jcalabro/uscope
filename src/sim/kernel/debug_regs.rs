@@ -119,13 +119,13 @@ impl DebugRegisters {
     }
 
     /// `PTRACE_PEEKUSER` of debug register `index`.
-    pub fn peek(&self, index: usize) -> Result<u64, Errno> {
-        Ok(match index {
+    pub fn peek(&self, index: usize) -> u64 {
+        match index {
             0..SLOTS => self.slots[index].map_or(0, |slot| slot.address),
             6 => self.dr6 ^ DR6_RESERVED,
             7 => self.dr7,
             _ => 0,
-        })
+        }
     }
 
     /// `PTRACE_POKEUSER` of debug register `index`, with `others` slots
@@ -219,23 +219,5 @@ impl DebugRegisters {
     /// Records a debug exception: a single step, slots that hit, or both.
     pub const fn debug_exception(&mut self, single_step: bool, hits: u64) {
         self.dr6 = if single_step { DR_STEP } else { 0 } | hits;
-    }
-
-    /// Whether any slot is enabled for data.
-    #[must_use]
-    pub fn watching(&self) -> bool {
-        self.slots
-            .iter()
-            .flatten()
-            .any(|slot| slot.enabled && slot.kind != Kind::Execute)
-    }
-
-    /// The bytes an enabled slot watches, and whether it watches loads too.
-    pub fn watched(&self) -> impl Iterator<Item = (u64, u64, bool)> + '_ {
-        self.slots
-            .iter()
-            .flatten()
-            .filter(|slot| slot.enabled && slot.kind != Kind::Execute)
-            .map(|slot| (slot.address, slot.length, slot.kind == Kind::ReadWrite))
     }
 }

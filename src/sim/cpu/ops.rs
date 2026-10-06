@@ -2,7 +2,7 @@
 //!
 //! Every instruction reads all it needs before it writes, and writes memory
 //! before it returns, so one that faults leaves the caller's registers as
-//! they were: [`super::step`] works on a copy and keeps it only on success.
+//! they were: [`super::execute`] works on a copy and keeps it only on success.
 
 use std::cell::Cell;
 

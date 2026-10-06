@@ -10,7 +10,7 @@
 use nix::errno::Errno;
 use nix::libc;
 
-use super::signals::{SI_USER, SIGSTOP};
+use super::syscalls::failure;
 use super::{
     Ended, ExitStatus, Happening, Kernel, Parent, Pending, Process, SigInfo, State, StopKind,
     Thread, Tid, Tracing, Zombie,
@@ -53,52 +53,18 @@ impl Kernel {
         let child = self.allocate_tid();
         let caller = &self.threads[&tid];
         let traced = caller.traced() && caller.options.trace_fork;
-        // K-SEIZE-1: a seized caller's child first stops for an interrupt.
-        let seized = traced && caller.seized();
         let group = caller.tgid;
-        let mut registers = caller.registers;
-        registers.general[RAX] = 0;
-        let mut pending = Pending::default();
-        if traced && !seized {
-            pending.insert(SigInfo {
-                signal: SIGSTOP,
-                code: SI_USER,
-                pid: 0,
-                address: 0,
-            });
-        }
-        let thread = Thread {
-            tid: child,
-            tgid: child,
-            tracing: if seized {
-                Tracing::Seized { interrupted: true }
-            } else if traced {
-                Tracing::Attached
-            } else {
-                Tracing::Untraced
-            },
-            registers,
-            orig_rax: super::syscalls::SYS_FORK,
-            returning: None,
-            state: State::Running,
-            options: if traced {
-                caller.options
-            } else {
-                super::Options::default()
-            },
-            pending,
-            single_step: false,
-            report: None,
-            trapped_at: None,
-            last_trap: None,
-            retired: 0,
-            // The child returns through its parent's calls, on its own copy
-            // of the stack.
-            shadow: caller.shadow.clone(),
-            // K-DR-3: no slot armed, though DR7 reads as the caller's.
-            debug: caller.debug.inherited(),
-            debug_held: caller.debug_held,
-        };
+        // The child returns through its parent's calls, on its own copy of
+        // the stack.
+        let shadow = caller.shadow.clone();
+        let thread = Thread::created(
+            caller,
+            child,
+            child,
+            super::syscalls::SYS_FORK,
+            traced,
+            shadow,
+        );
         let parent = &self.processes[&group];
         let process = Process {
             tgid: child,
@@ -134,7 +100,6 @@ impl Kernel {
     /// process that is not the caller's child. Returns the result as `rax`
     /// holds it.
     pub(super) fn wait4(&mut self, tid: Tid, pid: u64, status: u64, options: u64) -> u64 {
-        let failure = |errno: Errno| (-(errno as i64)).cast_unsigned();
         let Ok(child) = Tid::try_from(pid.cast_signed()) else {
             return failure(Errno::ECHILD);
         };

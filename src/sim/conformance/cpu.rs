@@ -25,7 +25,7 @@ use crate::backend::native_tracee::NativeTracee;
 use crate::sim::corpus::{Corpus, Variant};
 use crate::sim::cpu::{
     self, ADJUST, CARRY, DIRECTION, OVERFLOW, Outcome, PARITY, R11, RAX, RDI, RSI, Registers, SIGN,
-    STATUS_FLAGS, TRAP, ZERO,
+    STATUS_FLAGS, ZERO,
 };
 use crate::sim::kernel::{Tid, WaitStatus};
 use crate::sim::memory::{AddressSpace, Backing, Protection};
@@ -39,6 +39,8 @@ const SYS_WAIT4: u64 = 61;
 const SYS_EXIT_GROUP: u64 = 231;
 /// The resume flag, which the CPU may set as an instruction completes.
 const RESUME: u64 = 1 << 16;
+/// The trap flag.
+const TRAP: u64 = 1 << 8;
 
 /// Every golden program, in every variant and with every argument list its
 /// manifest names, executes identically in the interpreter and on the CPU.
@@ -104,7 +106,7 @@ fn lockstep(variant: &Variant, arguments: &[String]) -> Result<u64, String> {
         let instruction = cpu::decode(registers.rip, memory)
             .map_err(|fault| format!("decoding at {:#x} faulted: {fault:?}", registers.rip))?;
         let before = registers;
-        let outcome = cpu::step(&mut registers, memory);
+        let outcome = cpu::execute(&mut registers, memory).outcome;
         native.resume(tid, None, true).map_err(failed)?;
         let mut status = native.wait(tid);
         // A child's end, which the program ignores, stops the thread before

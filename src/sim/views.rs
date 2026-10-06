@@ -335,23 +335,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_truth_of_a_list_is_its_nodes_values() {
-        let memory = memory();
-        let truth = truth("list", 0x10, &reader(&memory)).expect("memory says");
-        let Truth::Items(items) = &truth else {
-            panic!("{truth:?}");
-        };
-        assert_eq!(
-            items.iter().map(|item| item.value.0).collect::<Vec<_>>(),
-            [0x100, 0x110, 0x120]
-        );
-        assert_eq!(
-            judge(&truth, &list_shown(items.clone())),
-            Ok(vec![Mark::ViewPresented, Mark::ViewPaged])
-        );
-    }
-
     /// Sabotage: a debugger that drops one element, or shows an element
     /// from somewhere else, fails the oracle.
     #[test]

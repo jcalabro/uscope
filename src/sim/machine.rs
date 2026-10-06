@@ -24,9 +24,6 @@ use crate::backend::sim_edge::{Preemption, SimWaiter};
 /// The most instructions a thread runs at one preemption point.
 const PREEMPT_BURST: u64 = 8;
 
-/// The simulated machine the controller's calls reach: the kernel, the
-/// waiter, and the faults that may strike between any two calls. The
-/// controller's edge holds it for preemption.
 pub struct Machine {
     pub kernel: Rc<RefCell<Kernel>>,
     pub waiter: Rc<RefCell<SimWaiter>>,
