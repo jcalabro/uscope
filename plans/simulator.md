@@ -36,6 +36,9 @@ Out of scope, and covered by real-kernel scenario tests instead:
 - The vDSO. The golden runtime never calls it, so the simulated kernel maps
   none, as a kernel booted with `vdso=0` would, and sessions register no
   `[vdso]` module.
+- Changing mappings after start: the simulated kernel has no `mmap`,
+  `mremap`, or `munmap`, so code never moves or goes away under a site, and
+  every site the debugger checks at a stop still holds its trap.
 - Go, Rust, Zig, and C++ programs. The corpus is libc-free C.
 - `exec`, `vfork`, signal handlers, real-time signals, and group-stops.
 - Floating-point and SSE semantics. A fixed FXSAVE area is reported.

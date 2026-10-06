@@ -735,6 +735,10 @@ run_cached_build "$c_fixtures_dir/tutorial" "$output_dir/tutorial" \
     "$embedded_views_metadata" \
     gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c "-Wa,-I$output_dir" \
     "$c_fixtures_dir/tutorial/tutorial.c" -o "$output_dir/tutorial"
+build_shared_fixture gcc "$c_fixtures_dir/moved-code/library.c" "$output_dir/libmoved-code.so" \
+    -O0 -g3 -gdwarf-5
+build_fixture gcc "$c_fixtures_dir/moved-code/main.c" "$output_dir/moved-code" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie "-L$output_dir" -lmoved-code '-Wl,-rpath,$ORIGIN'
 build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" "$output_dir/libmodule-frames.so" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
 build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-o0" \
