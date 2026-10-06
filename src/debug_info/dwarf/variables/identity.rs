@@ -104,7 +104,10 @@ pub(super) fn go_embedded(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) 
         })
 }
 
-pub(super) const fn source_language(language: Option<gimli::DwLang>, zig: bool) -> SourceLanguage {
+pub(in crate::debug_info) const fn source_language(
+    language: Option<gimli::DwLang>,
+    zig: bool,
+) -> SourceLanguage {
     if zig {
         // Zig's LLVM backend says its units are C99.
         return SourceLanguage::Zig;

@@ -38,6 +38,7 @@ use die::{
 };
 use evaluate::FrameBaseCache;
 use globals::{load_globals, public_global_type};
+pub(in crate::debug_info) use identity::source_language;
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
 use inspect::{data_object, evaluate_error_state, inspected_value};
 use location::{

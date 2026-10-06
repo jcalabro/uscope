@@ -5,6 +5,7 @@ compile_error!("uscope currently supports debug information only on Linux");
 mod dwarf;
 #[cfg(target_os = "linux")]
 mod elf;
+mod roles;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod x86_64;
 

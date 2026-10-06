@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::{Error, Result};
 
 use super::{
-    AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind,
+    AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole,
     EntryProvenance, FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, ImageAddress,
     ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup, LineEntry, LineNumber,
     ModuleImageId, SectionId, SectionInfo, SectionLocation, SourceFile, SourceFileId,
@@ -1026,6 +1026,25 @@ impl ModuleImage {
             .expect("name index references a symbol"))
     }
 
+    /// What the code at an image address is to unwinding and stepping: the
+    /// role of the physical function containing it, or else of the code
+    /// symbol naming it, or else ordinary code.
+    #[must_use]
+    pub fn code_role(&self, address: ImageAddress) -> CodeRole {
+        let physical = self
+            .code_range_index
+            .containing(address)
+            .filter_map(|instance| self.code_instance(instance))
+            .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+            .min_by_key(|instance| instance.id);
+        if let Some(function) = physical.and_then(|instance| self.function(instance.function)) {
+            return function.role;
+        }
+        self.symbolize(address)
+            .and_then(|location| self.symbol(location.symbol))
+            .map_or(CodeRole::Ordinary, |symbol| symbol.role)
+    }
+
     /// Resolves an image address to its available function and source metadata.
     #[must_use]
     pub fn locate(&self, address: ImageAddress) -> ImageLocation {
@@ -1255,6 +1274,8 @@ mod tests {
                 name: (*name).into(),
                 linkage_name: None,
                 declaration: None,
+                language: crate::SourceLanguage::C,
+                role: CodeRole::Ordinary,
             })
             .collect()
     }
@@ -1463,6 +1484,7 @@ mod tests {
                 provenance: SymbolExtentProvenance::Declared,
             }),
             storage: None,
+            role: CodeRole::Ordinary,
         };
         let section = |id, name: &str, start, end, executable| SectionInfo {
             id: SectionId::new(id),
@@ -1775,6 +1797,7 @@ mod tests {
                         start: ImageAddress::new(start),
                         end: ImageAddress::new(end),
                     }),
+                    role: CodeRole::Ordinary,
                 },
             )
             .collect();
