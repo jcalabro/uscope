@@ -422,6 +422,7 @@ impl Session {
                 Item {
                     name: &variable.name,
                     path: uscope::Expression::name(&variable.name),
+                    raw: false,
                     type_info: variable.type_info.as_ref(),
                     state: &variable.state,
                 },
@@ -492,6 +493,7 @@ impl Session {
                 Item {
                     name: &variable.name,
                     path: uscope::Expression::name(&variable.name),
+                    raw: false,
                     type_info: variable.type_info.as_ref(),
                     state: &variable.state,
                 },
@@ -538,6 +540,7 @@ impl Session {
             Item {
                 name: &format!("*{name}"),
                 path,
+                raw: false,
                 type_info: Some(&pointee.type_info),
                 state: &pointee.state,
             },
@@ -581,6 +584,7 @@ impl Session {
                 Item {
                     name: &name,
                     path: values::child_path(base.as_ref(), child),
+                    raw: false,
                     type_info: Some(&child.type_info),
                     state: &child.state,
                 },
@@ -632,6 +636,7 @@ impl Session {
                     Item {
                         name: &values::child_name(child),
                         path: values::child_path(path, child),
+                        raw: matches!(child.relationship, uscope::ValueChildRelationship::Raw),
                         type_info: Some(&child.type_info),
                         state: &child.state,
                     },
@@ -712,6 +717,7 @@ impl Session {
                 Item {
                     name: expression,
                     path: Some(computed),
+                    raw: false,
                     type_info: value.type_info.as_ref(),
                     state: &value.state,
                 },
@@ -918,6 +924,7 @@ impl Session {
             Item {
                 name,
                 path: Some(path),
+                raw: false,
                 type_info: assigned.type_info.as_ref(),
                 state: &assigned.state,
             },

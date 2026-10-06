@@ -811,6 +811,10 @@ done
 # libstdc++'s copy-on-write string, from before the C++11 ABI.
 build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-oldabi" \
     -O0 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_USE_CXX11_ABI=0
+# Only with -fstandalone-debug does clang describe the libc++ classes the
+# program never defines itself, such as a shared_ptr's control block.
+build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/containers.cpp" \
+    "$output_dir/containers-cpp-libcxx-standalone" -O0 -g3 -gdwarf-5 -fstandalone-debug -fPIE -pie
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o2" \

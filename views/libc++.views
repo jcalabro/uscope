@@ -123,3 +123,130 @@ view c++ std::deque<T, _> {
     check blocks >= 0 && start + size <= blocks * block
     show sequence(size) for i in range(size) => map[(start + i) / block][(start + i) % block]
 }
+
+# A unique_ptr keeps its pointer beside its deleter: as __ptr_ of an
+# anonymous member, or, before libc++ 20, of a compressed pair. Arrays,
+# unique_ptr<T[]>, have no size to show.
+view c++ std::unique_ptr<T, _> {
+    check sizeof(T) > 0
+    let pointer = __ptr_.__value_ or __ptr_
+    show if pointer == 0 { empty("nullptr") } else { value(*pointer) }
+}
+
+# A shared_ptr's control block counts its owners less one, and its weak
+# references less one, of which its owners together hold one. Without
+# -fstandalone-debug, its debug information describes no control block,
+# and the next view shows no counts.
+view c++ std::shared_ptr<T> {
+    check sizeof(T) > 0
+    let strong = __cntrl_ == 0 ? 0 : __cntrl_->__shared_owners_ + 1
+    show if __ptr_ == 0 { empty("nullptr") } else { value(*__ptr_) }
+    field strong = strong
+    field weak = __cntrl_ == 0 ? 0 : __cntrl_->__shared_weak_owners_ + (strong > 0 ? 0 : 1)
+}
+
+view c++ std::shared_ptr<T> {
+    check sizeof(T) > 0
+    show if __ptr_ == 0 { empty("nullptr") } else { value(*__ptr_) }
+}
+
+# Whether a weak_ptr's object still exists is in the control block alone,
+# so without it a weak_ptr shows as stored.
+view c++ std::weak_ptr<T> {
+    check sizeof(T) > 0
+    let strong = __cntrl_ == 0 ? 0 : __cntrl_->__shared_owners_ + 1
+    show if __cntrl_ == 0 || __ptr_ == 0 {
+        empty("nullptr")
+    } else if strong == 0 {
+        empty("expired")
+    } else {
+        value(*__ptr_)
+    }
+    field strong = strong
+    field weak = __cntrl_ == 0 ? 0 : __cntrl_->__shared_weak_owners_ + (strong > 0 ? 0 : 1)
+}
+
+view c++ std::optional<T> {
+    show if __engaged_ { value(__val_) } else { empty("nullopt") }
+}
+
+# Every alternative is at the start of the union __data; __index says which
+# one it holds, or all ones when it holds none.
+view c++ std::variant {
+    type Index = typeof(__impl_.__index)
+    show if __impl_.__index == (Index)-1 {
+        empty("valueless")
+    } else {
+        dynamic(&__impl_.__data, arg(typeof(self), __impl_.__index))
+    }
+}
+
+# A tuple's element N is the __value_ of its __tuple_leaf<N, T> base. These
+# views name tuples of up to six elements; libstdc++.views names the empty
+# one for both libraries.
+view c++ std::tuple<A> {
+    type L0 = std::__tuple_leaf<0, A>
+    show record { 0 = ((L0)__base_).__value_ }
+}
+
+view c++ std::tuple<A, B> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    show record { 0 = ((L0)__base_).__value_, 1 = ((L1)__base_).__value_ }
+}
+
+view c++ std::tuple<A, B, C> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    type L2 = std::__tuple_leaf<2, C>
+    show record {
+        0 = ((L0)__base_).__value_,
+        1 = ((L1)__base_).__value_,
+        2 = ((L2)__base_).__value_,
+    }
+}
+
+view c++ std::tuple<A, B, C, D> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    type L2 = std::__tuple_leaf<2, C>
+    type L3 = std::__tuple_leaf<3, D>
+    show record {
+        0 = ((L0)__base_).__value_,
+        1 = ((L1)__base_).__value_,
+        2 = ((L2)__base_).__value_,
+        3 = ((L3)__base_).__value_,
+    }
+}
+
+view c++ std::tuple<A, B, C, D, E> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    type L2 = std::__tuple_leaf<2, C>
+    type L3 = std::__tuple_leaf<3, D>
+    type L4 = std::__tuple_leaf<4, E>
+    show record {
+        0 = ((L0)__base_).__value_,
+        1 = ((L1)__base_).__value_,
+        2 = ((L2)__base_).__value_,
+        3 = ((L3)__base_).__value_,
+        4 = ((L4)__base_).__value_,
+    }
+}
+
+view c++ std::tuple<A, B, C, D, E, F> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    type L2 = std::__tuple_leaf<2, C>
+    type L3 = std::__tuple_leaf<3, D>
+    type L4 = std::__tuple_leaf<4, E>
+    type L5 = std::__tuple_leaf<5, F>
+    show record {
+        0 = ((L0)__base_).__value_,
+        1 = ((L1)__base_).__value_,
+        2 = ((L2)__base_).__value_,
+        3 = ((L3)__base_).__value_,
+        4 = ((L4)__base_).__value_,
+        5 = ((L5)__base_).__value_,
+    }
+}

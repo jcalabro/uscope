@@ -401,6 +401,18 @@ fn patterns_capture_arguments_and_anchor_at_the_root() {
             "{header}"
         );
     }
+    // A pattern that reaches a parameter pack spells all of it, so
+    // `Pair<T>` no longer names a pair whose pack holds two arguments.
+    world.pack(pair, 0);
+    assert_eq!(
+        shown(&mut world, "c++ app::detail::Pair<T, N>"),
+        "len=3 [2, 3, 4]"
+    );
+    let views = ViewSet::new([(
+        "test.views",
+        "uscope-views 1\nview c++ app::detail::Pair<T> {\n    show empty(\"one\")\n}\nview c++ app::detail::Pair {\n    show empty(\"any\")\n}\n",
+    )]);
+    assert_eq!(summary(&mut world, &views, "p", pair), "any");
 }
 
 /// However little budget there is, a presentation is the whole one or a
@@ -765,6 +777,25 @@ fn examples() -> World {
     );
     let stored = world.allocate(&ints([5]));
     world.variable("handle", handle, &bytes(&[stored]));
+    // `app::Either<int, char*>` holds one of its arguments, which `index`
+    // chooses, in `storage`.
+    let char = world.base("char", E::SignedCharacter, 1);
+    let characters = world.pointer(Some(char));
+    let either = world.record(
+        "Either<int, char*>",
+        16,
+        &[("storage", characters, 0), ("index", int, 8)],
+    );
+    world.identify(
+        either,
+        SourceLanguage::Cpp,
+        &["app"],
+        "Either",
+        vec![TypeArgument::Type(int), TypeArgument::Type(characters)],
+    );
+    world.variable("number", either, &bytes(&[7, 0]));
+    world.variable("pointer", either, &bytes(&[0x9_0000, 1]));
+    world.variable("neither", either, &bytes(&[0, 5]));
     world
 }
 

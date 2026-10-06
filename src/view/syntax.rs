@@ -30,6 +30,9 @@ const MAX_STATEMENTS: usize = 256;
 /// How deeply shapes may nest in `if` branches.
 const MAX_SHAPE_DEPTH: usize = 16;
 
+/// How many members a `record` may have.
+pub const MAX_RECORD_MEMBERS: usize = 64;
+
 /// How deeply type patterns may nest in arguments.
 const MAX_PATTERN_DEPTH: usize = 16;
 
@@ -246,6 +249,22 @@ pub enum Shape {
         then: Box<Self>,
         otherwise: Box<Self>,
     },
+    /// `record { NAME = EXPR, … }`: a record of the members it names, each
+    /// a name or a position.
+    Record(Vec<(String, Expr)>),
+    /// `dynamic(PTR, TYPE)`: what a pointer points to, as a type that may
+    /// be chosen as the program runs.
+    Dynamic { pointer: Expr, ty: DynamicType },
+}
+
+/// The type a `dynamic` shape presents its pointer's target as.
+#[derive(Debug, Clone)]
+pub enum DynamicType {
+    /// One type, as a `type` statement names it.
+    Fixed(TypeExpr),
+    /// `arg(TYPE, EXPR)`: the argument of a type at a position the
+    /// program's data holds, as a `std::variant`'s index does.
+    Argument { of: TypeExpr, index: Expr },
 }
 
 /// A path segment of a pattern.
@@ -813,12 +832,74 @@ impl<'a> Parser<'a> {
                     otherwise: Box::new(otherwise),
                 })
             }
-            "dynamic" | "match" | "record" => {
-                Err(self.error(format!("the `{word}` shape is not supported yet")))
+            "record" => {
+                self.position += word.len();
+                self.record()
             }
-            _ => {
-                Err(self
-                    .unexpected("a shape: `text`, `value`, `empty`, `sequence`, `map`, or `if`"))
+            "dynamic" => {
+                self.position += word.len();
+                self.open_call("dynamic")?;
+                let pointer = self.expression()?;
+                self.skip_blank();
+                self.expect(",", "between `dynamic`'s pointer and type")?;
+                self.skip_blank();
+                let ty = if self.peek_word() == Some("arg")
+                    && self.rest()["arg".len()..].trim_start().starts_with('(')
+                {
+                    self.position += "arg".len();
+                    self.open_call("arg")?;
+                    let of = self.type_expr(0)?;
+                    self.skip_blank();
+                    self.expect(",", "between `arg`'s type and position")?;
+                    let index = self.expression()?;
+                    self.close_call("arg")?;
+                    DynamicType::Argument { of, index }
+                } else {
+                    DynamicType::Fixed(self.type_expr(0)?)
+                };
+                self.close_call("dynamic")?;
+                Ok(Shape::Dynamic { pointer, ty })
+            }
+            "match" => Err(self.error("the `match` shape is not supported yet")),
+            _ => Err(self.unexpected(
+                "a shape: `text`, `value`, `empty`, `sequence`, `map`, `record`, `dynamic`, or `if`",
+            )),
+        }
+    }
+
+    /// `{ NAME = EXPR, … }`, after `record`: names, or positions from 0,
+    /// each once.
+    fn record(&mut self) -> Parsed<Shape> {
+        self.skip_blank();
+        self.expect("{", "to open the record")?;
+        let mut members: Vec<(String, Expr)> = Vec::new();
+        loop {
+            self.skip_blank();
+            if self.eat("}") {
+                return Ok(Shape::Record(members));
+            }
+            if members.len() == MAX_RECORD_MEMBERS {
+                return Err(self.error(format!(
+                    "a record may have at most {MAX_RECORD_MEMBERS} members"
+                )));
+            }
+            let start = self.position;
+            let digits = self.rest().bytes().take_while(u8::is_ascii_digit).count();
+            let name = if digits > 0 {
+                self.position += digits;
+                self.text[start..self.position].to_owned()
+            } else {
+                self.name("a member's name")?
+            };
+            if members.iter().any(|(existing, _)| *existing == name) {
+                return Err(self.error_at(start, format!("the record has two members `{name}`")));
+            }
+            self.skip_inline();
+            self.expect("=", "after the member's name")?;
+            members.push((name, self.expression()?));
+            self.skip_blank();
+            if !self.rest().starts_with('}') {
+                self.expect(",", "between the record's members")?;
             }
         }
     }

@@ -102,6 +102,26 @@ pub enum Step<'a> {
     /// To an element of an array or slice, holding `available` index values,
     /// of which an array takes one per dimension and a slice one.
     Index { available: usize },
+    /// To the one base class subobject of a record whose type is a target.
+    Base(BaseTarget<'a>),
+}
+
+/// Which types a [`Step::Base`] reaches: those its caller deems the same
+/// type, as one type defined in several units is.
+#[derive(Clone, Copy)]
+pub struct BaseTarget<'a> {
+    /// The base's name, for errors.
+    pub name: &'a str,
+    pub is_target: &'a dyn Fn(TypeId) -> bool,
+}
+
+impl std::fmt::Debug for BaseTarget<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BaseTarget")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A step planned from types alone, which [`VariableInfo::apply`] follows at

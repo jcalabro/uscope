@@ -303,6 +303,17 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
+    /// The DIE an attribute of a DIE in unit `unit_index` refers to.
+    pub(super) fn reference(
+        &self,
+        unit_index: usize,
+        value: Option<gimli::AttributeValue<Reader<'data>>>,
+    ) -> Option<DieKey> {
+        die_reference_with_signatures(value, unit_index, self.units, self.type_signatures)
+            .ok()
+            .flatten()
+    }
+
     /// Builds the type an attribute refers to, if any, so that the type
     /// index knows it; a malformed reference only goes unbuilt.
     pub(super) fn reach(

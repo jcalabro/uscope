@@ -1288,14 +1288,81 @@ What P3 built, and what it learned:
   passes the 262,144 data objects the DWARF loader allows, with or without
   views.
 
-**P4 Pointers, sums, and dynamic types.**
+**P4 Pointers, sums, and dynamic types.** *Done 2026-10-06.*
 
-- Rust `Box`, `Rc`, `Arc`, `Weak`, `Cell`, `RefCell`, `Mutex`.
-- C++ `unique_ptr`, `shared_ptr`, `weak_ptr`, `optional`, `variant`,
+- [x] Rust `Box`, `Rc`, `Arc`, `Weak`, `Cell`, `RefCell`, `Mutex`.
+- [x] C++ `unique_ptr`, `shared_ptr`, `weak_ptr`, `optional`, `variant`,
   `tuple`.
-- §3.6 vtables (C++ and Rust `dyn`); Go interfaces and `error`.
-- Go channels.
-- Zig's LLVM-backend optionals, error unions, and tagged unions.
+- [x] §3.6 vtables (C++ and Rust `dyn`); Go interfaces and `error`.
+- [x] Go channels.
+- [x] Zig's LLVM-backend optionals, error unions, and tagged unions.
+- [x] End of phase: `/roast`, `just`, and `just sim 60`.
+
+What P4 built, and what it learned:
+
+- **Layer 1 without a view.** When no view binds, the controller presents
+  what debug information and the program's own tables say exactly
+  (`PresentedShape::Dynamic`, and sums as `Value` or `Empty`, named by the
+  view `uscope`):
+  - a sum as its active variant: `Some(4)`, `Err("no")`, `Square {side:
+    4}`; a Zig optional's or error union's payload is itself, and its
+    other states `null` and `error.Bad`;
+  - a C++ object of a polymorphic class as the complete object its vptr
+    belongs to: the vptr must point into a `vtable for X` symbol, and the
+    offset-to-top before it must lead to an object whose own vptr is that
+    group's primary address point, 16 bytes in, so `Shape *` into a `Tile`
+    shows `Tile {tag: 2, id: 7, side: 3, row: 9}`. Both demanglers'
+    spellings, `vtable for X` and `{vtable(X)}`, name it;
+  - a Rust trait object through the `<C as Trait>::{vtable}` variables,
+    whose type's `DW_AT_containing_type` is `C`;
+  - a Go interface through `runtime.types` and `DW_AT_go_runtime_type`,
+    stored directly when Go 1.26's `TFlag` bit 5 (or `Kind_` bit 5 before)
+    says so: `int 42`, `main.Point {X: 1, Y: 2}`, and, as Delve shows an
+    `error`, `*errors.errorString *{s: "bad"}`.
+
+  A base-class subobject is never presented as its complete object, which
+  would recurse. Clang names some thunks only by their linkage names; the
+  loader refused those binaries and now names them by the demangled name.
+- **The language.** `record { NAME = EXPR, … }` presents chosen members as
+  children before the view's fields, and positions make a tuple, `(1, 99
+  'c', 2.5)`; `dynamic(PTR, arg(TYPE, EXPR))` presents what a pointer
+  points to as the type argument at a position the program's data holds,
+  which `std::variant` needs. Expressions gained the C++ upcast: `(Base)x`
+  is `x`'s `Base` subobject, as `static_cast` makes it, and ambiguous when
+  there are several; libstdc++'s tuple elements need it, because every
+  element is a `_M_head_impl` of its own base.
+- **Packs.** A type identity records where its C++ parameter pack begins,
+  and a pattern that reaches the pack spells all of it, so `std::tuple<A,
+  B>` names only pairs and `std::variant`, with no arguments, every
+  variant. GCC emits an empty pack for some instances, such as
+  `unique_ptr`'s `tuple<int*, default_delete<int>>`, so their arguments
+  come from the name; a pointer spelled there, `int*`, now resolves to the
+  pointer type to what its target spells.
+- **Views.** libstdc++ and libc++ `unique_ptr` (not of an array: `sizeof(T)`
+  of `T[]` does not bind), `shared_ptr` and `weak_ptr` with their counts
+  (an expired `weak_ptr` is `expired`, never its destroyed object),
+  `optional`, `variant` (and `valueless`), and tuples of up to six; Rust
+  `Box`, `Rc`, `Arc`, both `Weak`s (`dangling`, `dropped`), `Cell`,
+  `RefCell` with its borrow count, and `Mutex` with its lock and poison
+  flags; Go channels, whose ring starts at `recvx`. A Go channel is a
+  pointer only in representation, so `ch[i]` indexes its view.
+- **Lending.** A value view lends the value's children but no longer its
+  `[raw]`: a presented value has one `[raw]`, its own and last.
+- **Tests.** The `containers` fixtures gained every new type, empty and
+  populated, an expired `weak_ptr`, a valueless and a corrupt `variant`
+  (index 5), every tuple arity, polymorphic objects, Rust sums and trait
+  objects, Go interfaces and channels, and Zig sums, with a new `children:`
+  marker that checks every child. A libc++ `-fstandalone-debug` build joins
+  the matrix (from P6): only there does clang describe a `shared_ptr`'s
+  control block. The fake world gained base classes and packs, the
+  references' examples cover upcasts, `record`, and `dynamic`, and the
+  hostile harness covers `optional`, `variant`, a tuple, and a channel.
+- **Left for later.** Unsized tails (`Rc<str>`, `&Path`) show as stored:
+  rustc describes `str` and `[u8]` alike, as an array of `u8` with no
+  count, so nothing says which one is text. Tuples of more than six, an
+  `Rc<dyn Trait>`, and a libc++ `weak_ptr` without `-fstandalone-debug`
+  show as stored. A Go interface's pointer to anything but a struct shows
+  its address.
 
 **P5 User and embedded views, and the authoring tools.**
 

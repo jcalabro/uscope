@@ -293,6 +293,7 @@ fn containers(input: &mut Input<'_>) -> (World, Vec<(String, TypeReference)>) {
 
     // Linked and hashed containers, whose views scan.
     linked_containers(&mut world, &mut variables);
+    sums_and_tuples(&mut world, &mut variables);
 
     let heap = (0..HEAP_SIZE).map(|_| input.byte()).collect::<Vec<_>>();
     world.map(HEAP, &heap);
@@ -559,6 +560,108 @@ fn linked_containers(world: &mut World, variables: &mut Vec<(String, TypeReferen
         ],
     );
     variables.push(("Zig HashMapUnmanaged".to_owned(), zig_map));
+}
+
+/// The values whose built-in views choose among alternatives or name
+/// members: libstdc++'s `optional`, `variant`, and `tuple`, and a Go
+/// channel.
+fn sums_and_tuples(world: &mut World, variables: &mut Vec<(String, TypeReference)>) {
+    let int = world.base("int", E::Signed, 4);
+    let long = world.base("long", E::Signed, 8);
+    let uchar = world.base("unsigned char", E::UnsignedCharacter, 1);
+    let boolean = world.base("bool", E::Boolean, 1);
+    let size = world.base("unsigned long", E::Unsigned, 8);
+    let integer = |value| TypeArgument::Value(IntegerValue::Unsigned(value));
+
+    // std::optional<int>: _M_payload, of _Optional_base, holds the value
+    // and whether there is one.
+    let storage = world.record("_Storage<int>", 4, &[("_M_value", int, 0)]);
+    let payload = world.record(
+        "_Optional_payload<int>",
+        8,
+        &[("_M_payload", storage, 0), ("_M_engaged", boolean, 4)],
+    );
+    let optional = world.record("optional<int>", 8, &[("_M_payload", payload, 0)]);
+    world.identify(
+        optional,
+        SourceLanguage::Cpp,
+        &["std"],
+        "optional",
+        vec![TypeArgument::Type(int)],
+    );
+    variables.push(("libstdc++ optional".to_owned(), optional));
+
+    // std::variant<int, long>: the alternatives share _M_u, and _M_index
+    // says which one it holds.
+    let union = world.record("_Variadic_union<int, long>", 8, &[("_M_first", long, 0)]);
+    let variant = world.record(
+        "variant<int, long>",
+        16,
+        &[("_M_u", union, 0), ("_M_index", uchar, 8)],
+    );
+    world.identify(
+        variant,
+        SourceLanguage::Cpp,
+        &["std"],
+        "variant",
+        vec![TypeArgument::Type(int), TypeArgument::Type(long)],
+    );
+    world.pack(variant, 0);
+    variables.push(("libstdc++ variant".to_owned(), variant));
+
+    // std::tuple<int, long>: each element in a _Head_base<N, T> base.
+    let heads = [(0, int, 8), (1, long, 0)].map(|(index, ty, offset)| {
+        let head = world.record(
+            &format!("_Head_base<{index}, …>"),
+            world_size(world, ty),
+            &[("_M_head_impl", ty, 0)],
+        );
+        world.identify(
+            head,
+            SourceLanguage::Cpp,
+            &["std"],
+            "_Head_base",
+            vec![integer(index), TypeArgument::Type(ty), integer(0)],
+        );
+        (head, offset)
+    });
+    let tuple = world.record("tuple<int, long>", 16, &[]);
+    world.set_bases(tuple, &heads);
+    world.identify(
+        tuple,
+        SourceLanguage::Cpp,
+        &["std"],
+        "tuple",
+        vec![TypeArgument::Type(int), TypeArgument::Type(long)],
+    );
+    world.pack(tuple, 0);
+    variables.push(("libstdc++ tuple".to_owned(), tuple));
+
+    // A Go chan int: a pointer to its hchan, whose buffer is a ring.
+    let buffer = world.pointer(None);
+    let hchan = world.record(
+        "hchan<int>",
+        48,
+        &[
+            ("qcount", size, 0),
+            ("dataqsiz", size, 8),
+            ("buf", buffer, 16),
+            ("closed", int, 24),
+            ("sendx", size, 32),
+            ("recvx", size, 40),
+        ],
+    );
+    let hchan_pointer = world.pointer(Some(hchan));
+    let channel = world.typedef("chan int", hchan_pointer);
+    world.identify(
+        channel,
+        SourceLanguage::Go,
+        &[],
+        "chan int",
+        vec![TypeArgument::Type(size)],
+    );
+    world.go_kind(channel, crate::GoKind::Chan);
+    variables.push(("Go channel".to_owned(), channel));
 }
 
 fn world_size(world: &World, ty: TypeReference) -> u64 {

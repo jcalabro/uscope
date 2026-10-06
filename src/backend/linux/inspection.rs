@@ -443,6 +443,9 @@ impl<P: InspectionOps> Controller<P> {
                 &mut child.state,
                 VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
             );
+            // A base-class subobject is part of an object, not one of the
+            // type it dynamically is.
+            machine.dynamic = !matches!(child.relationship, crate::ValueChildRelationship::Base(_));
             child.state = machine.present_state(Some(child.type_info.clone()), state)?;
         }
         page.children = children.into();

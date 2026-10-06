@@ -378,8 +378,10 @@ Casting an integer truncates its two's complement. Casting a float to an
 integer rounds toward zero and saturates at the type's bounds; a NaN cannot be
 cast. Integers and pointers convert into each other as addresses, and anything
 with a truth value casts to `bool`. A cast cannot reinterpret a whole record;
-reinterpret its storage through a pointer instead. Casting a value to the type
-it already has changes nothing.
+reinterpret its storage through a pointer instead. Casting a C++ object to one
+of its base classes is that base's part of it, as `static_cast` makes it, and
+is ambiguous when the object holds several. Casting a value to the type it
+already has changes nothing.
 
 ```uscope-example
 world: scalars
@@ -420,6 +422,11 @@ world: memory
 (count) - 1 * 2        => 10 : integer
 (Color)1               => GREEN : Color
 (Color)7               => 7 : Color
+((Shape)tile).id       => 7 : int
+((Named)tile).tag      => 2 : long int
+(Shape)tile == 7       => error type at `(Shape)tile == 7`
+((Shape)twice_shaped).id => error ambiguous-name at `((Shape)twice_shaped)`
+(Tile)s                => error type at `(Tile)s`
 ```
 
 ## Enumerations

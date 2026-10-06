@@ -53,6 +53,10 @@ pub enum Error {
     MemberNotFound { member: String, type_name: Arc<str> },
     #[error("member '{member}' is ambiguous in record type '{type_name}'")]
     AmbiguousMember { member: String, type_name: Arc<str> },
+    #[error("'{base}' is not a base class of '{type_name}'")]
+    BaseNotFound { base: Arc<str>, type_name: Arc<str> },
+    #[error("'{type_name}' has several '{base}' base class subobjects")]
+    AmbiguousBase { base: Arc<str>, type_name: Arc<str> },
     #[error("cannot select member '{member}' from non-record type '{type_name}'")]
     MemberAccessOnNonRecord { member: String, type_name: Arc<str> },
     #[error("cannot index non-array or non-slice type '{type_name}'")]

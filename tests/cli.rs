@@ -1245,20 +1245,19 @@ fn print_renders_symbolic_enums_variants_and_raw_unions() {
         .output()
         .expect("render Rust enum values");
     let stdout = assert_success(output);
-    assert!(
-        stdout.contains("*value = {Integer = {__0 = 42}}"),
-        "{stdout}"
-    );
+    // A sum type shows as its active variant.
+    assert!(stdout.contains("*value = Integer(42)"), "{stdout}");
     assert!(stdout.contains("*fieldless = Negative (-3)"), "{stdout}");
     assert!(
         stdout.contains("*wide = Huge (1267650600228229401496703205385)"),
         "{stdout}"
     );
-    // A Rust variant is named by its one member.
     for summary in [
-        "value = {<Integer = 1; 1 fields>}",
-        "done = {<Ok = 0; 1 fields>}",
-        "failed = {<Err = 1; 1 fields>}",
+        "value = Integer(42)",
+        "optional = Some(0x",
+        "empty = None",
+        "done = Ok(())",
+        "failed = Err(5)",
     ] {
         assert!(stdout.contains(summary), "{summary}: {stdout}");
     }

@@ -2,6 +2,27 @@
 
 use super::*;
 
+/// Clang emits the thunks a multiply inherited virtual destructor needs
+/// with a linkage name and no other; the function is named by it.
+#[tokio::test]
+async fn functions_named_only_by_their_linkage_names_are_cataloged() {
+    let image = load_fixture_image("containers-cpp-clang-o0").await;
+    assert!(
+        image
+            .functions()
+            .iter()
+            .any(|function| function.name.contains("thunk")
+                && function.name.contains("Tile::~Tile()")
+                && function.linkage_name.as_deref() == Some("_ZThn16_N4TileD1Ev")),
+        "{:?}",
+        image
+            .functions()
+            .iter()
+            .filter(|function| function.name.contains("thunk"))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test]
 async fn discarded_functions_are_not_cataloged_at_their_tombstone_addresses() {
     // LLD points the debug information of functions it discarded at address

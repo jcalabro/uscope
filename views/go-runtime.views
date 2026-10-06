@@ -26,3 +26,16 @@ view go map<K, V> {
             => group->slots[s].key : group->slots[s].elem
     }
 }
+
+# A channel is a pointer to its hchan, whose buffer is a ring of dataqsiz
+# elements, the next to be received at recvx.
+view go chan<T> {
+    show if self == null {
+        empty("nil")
+    } else {
+        sequence(self.qcount) for i in range(self.qcount) => ((T*)self.buf)[(self.recvx + i) % self.dataqsiz]
+    }
+    check self == null || self.qcount <= self.dataqsiz && (self.dataqsiz == 0 || self.recvx < self.dataqsiz)
+    field capacity = self == null ? 0 : self.dataqsiz
+    field closed = self != null && self.closed != 0
+}

@@ -516,6 +516,58 @@ impl DwarfVariableInfo {
         Ok(found)
     }
 
+    /// Every path from the record `aggregate` to a base class subobject
+    /// whose type `is_target` accepts, through its bases' bases.
+    fn base_paths(
+        &self,
+        aggregate: TypeId,
+        is_target: &dyn Fn(TypeId) -> bool,
+        work: &mut usize,
+        depth: usize,
+    ) -> Result<Vec<Vec<MemberHop>>> {
+        *work += 1;
+        if *work > MAX_MEMBER_SEARCH || depth > MAX_AGGREGATE_DEPTH {
+            return Err(Error::InvalidValueExpression(
+                "looking up a base class exceeds its limit".to_owned(),
+            ));
+        }
+        let malformed = |description| Error::debug_info(DwarfError::MalformedVariable(description));
+        let info = self.type_info(aggregate).map_err(malformed)?;
+        let TypeKind::Record { bases, .. } = &info.kind else {
+            return Ok(Vec::new());
+        };
+        let mut found = Vec::new();
+        for (index, base) in bases.iter().enumerate() {
+            let Ok((inner, _)) = self.transparent_type(base.type_ref.id) else {
+                continue;
+            };
+            let hop = MemberHop {
+                aggregate,
+                child: DynamicAggregateChild::Base(index),
+                member: RecordMember {
+                    name: None,
+                    type_ref: base.type_ref,
+                    layout: base.layout,
+                    accessibility: base.accessibility,
+                    artificial: false,
+                    embedded: false,
+                    declaration: None,
+                },
+                virtual_base: base.virtuality == crate::BaseClassVirtuality::Virtual,
+            };
+            if is_target(base.type_ref.id) || is_target(inner) {
+                found.push(vec![hop]);
+                continue;
+            }
+            for path in self.base_paths(inner, is_target, work, depth + 1)? {
+                let mut whole = vec![hop.clone()];
+                whole.extend(path);
+                found.push(whole);
+            }
+        }
+        Ok(found)
+    }
+
     /// Plans one structural step from `from`, which reads no program
     /// state. A member step follows pointers to the record that holds the
     /// member; an index step takes one index for a slice and one per
@@ -591,6 +643,44 @@ impl DwarfVariableInfo {
                     Err(ValueShapeError::Unsupported(_)) => steps.push(unsupported()),
                 }
                 Ok(planned(steps, 0, Some(target)))
+            }
+            Step::Base(target) => {
+                let type_name = || {
+                    self.type_info(from)
+                        .map(|info| Arc::clone(&info.name))
+                        .map_err(malformed)
+                };
+                let (aggregate, _) = match self.transparent_type(from) {
+                    Ok(value) => value,
+                    Err(ValueShapeError::Malformed(description)) => {
+                        return Err(malformed(description));
+                    }
+                    Err(ValueShapeError::Unsupported(_)) => {
+                        return Ok(planned(vec![unsupported()], 0, None));
+                    }
+                };
+                let paths = self.base_paths(aggregate, target.is_target, &mut 0, 0)?;
+                let Some(path) = one_subobject(&paths) else {
+                    let base = Arc::from(target.name);
+                    let type_name = type_name()?;
+                    return Err(if paths.is_empty() {
+                        Error::BaseNotFound { base, type_name }
+                    } else {
+                        Error::AmbiguousBase { base, type_name }
+                    });
+                };
+                let mut result = None;
+                for hop in path {
+                    self.validate_static_member_layout(hop.aggregate, &hop.member)?;
+                    result = Some(hop.member.type_ref.id);
+                    steps.push(PathStep::Member(Box::new(PlannedMemberStep {
+                        aggregate: hop.aggregate,
+                        child: hop.child,
+                        member: hop.member.clone(),
+                        required_variant: None,
+                    })));
+                }
+                Ok(planned(steps, 0, result))
             }
             Step::Index { available } => {
                 let source_info = self.type_info(from).map_err(malformed)?;

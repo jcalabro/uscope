@@ -6,7 +6,7 @@
 //! const generic parameters, and Go and Zig emit none. A parsed argument
 //! names a type only when exactly one type matches it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::debug_info::dwarf::{DieKey, Reader, die_reference_with_signatures};
@@ -26,7 +26,7 @@ use super::types::{TypeArenaBuilder, TypeEntry};
 const DW_AT_GO_KIND: gimli::DwAt = gimli::DwAt(0x2900);
 const DW_AT_GO_KEY: gimli::DwAt = gimli::DwAt(0x2901);
 const DW_AT_GO_ELEM: gimli::DwAt = gimli::DwAt(0x2902);
-const DW_AT_GO_RUNTIME_TYPE: gimli::DwAt = gimli::DwAt(0x2904);
+pub(super) const DW_AT_GO_RUNTIME_TYPE: gimli::DwAt = gimli::DwAt(0x2904);
 
 /// The inline namespaces of C++ standard libraries, for units older than
 /// DWARF 5's `DW_AT_export_symbols`. libstdc++'s `__cxx1998` is not one: it
@@ -54,6 +54,8 @@ pub(super) struct IdentityParts {
     pub(super) die: DieKey,
     /// Arguments from template parameter DIEs, by position.
     pub(super) template: Vec<TypeArgument>,
+    /// Where a template parameter pack's arguments begin.
+    pub(super) pack: Option<usize>,
     pub(super) go: Option<GoParts>,
 }
 
@@ -260,33 +262,43 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         die: DieKey,
         id: TypeId,
     ) {
-        let template = match entry.tag() {
+        let (template, pack) = match entry.tag() {
             gimli::DW_TAG_structure_type
             | gimli::DW_TAG_class_type
             | gimli::DW_TAG_union_type
             | gimli::DW_TAG_enumeration_type
             | gimli::DW_TAG_template_alias => self.template_arguments(entry, die.unit),
-            _ => Vec::new(),
+            _ => (Vec::new(), None),
         };
         let go = if self.language(die.unit) == SourceLanguage::Go {
             self.go_parts(entry, die.unit)
         } else {
             None
         };
-        self.identity_parts
-            .insert(id, IdentityParts { die, template, go });
+        self.identity_parts.insert(
+            id,
+            IdentityParts {
+                die,
+                template,
+                pack,
+                go,
+            },
+        );
     }
 
     /// The arguments a type's template parameter DIEs describe, with packs
-    /// flattened. A parameter whose value or type cannot be read is unknown.
+    /// flattened, and where its pack begins. A parameter whose value or type
+    /// cannot be read is unknown.
     fn template_arguments(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
-    ) -> Vec<TypeArgument> {
+    ) -> (Vec<TypeArgument>, Option<usize>) {
         let mut arguments = Vec::new();
+        let mut pack = None;
         for child in self.child_entries(entry, unit_index) {
             if child.tag() == gimli::DW_TAG_GNU_template_parameter_pack {
+                pack = pack.or(Some(arguments.len()));
                 for parameter in self.child_entries(&child, unit_index) {
                     if let Some(argument) = self.parameter_argument(&parameter, unit_index) {
                         arguments.push(argument);
@@ -296,7 +308,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 arguments.push(argument);
             }
         }
-        arguments
+        (arguments, pack)
     }
 
     /// A DIE's children, bounded as a record's are.
@@ -467,12 +479,14 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             if !pending.is_empty() {
                 unresolved.push((index, language, pending));
             }
+            let pack = parts.pack.filter(|start| *start <= arguments.len());
             let identity = TypeIdentity {
                 language,
                 path: path.into(),
                 inline_namespaces: scopes.inline,
                 base: Arc::from(parsed.base),
                 arguments: arguments.into(),
+                pack,
                 origin,
                 go: parts.go.as_ref().map(|go| go.attributes),
             };
@@ -510,6 +524,36 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 _ => None,
             }
         });
+        // The first pointer type to each type, by the target's identity, for
+        // arguments spelled as pointers.
+        let mut pointers = HashMap::new();
+        let spelled_pointer = unresolved.iter().any(|(entry, _, positions)| {
+            matches!(
+                self.entries.get(*entry),
+                Some(TypeEntry::Resolved(TypeInfo { identity: Some(identity), .. }))
+                    if positions.iter().any(|position| matches!(
+                        identity.arguments.get(*position),
+                        Some(TypeArgument::Unknown(text)) if text.trim_end().ends_with('*')
+                    ))
+            )
+        });
+        if spelled_pointer {
+            for entry in &self.entries {
+                if let TypeEntry::Resolved(TypeInfo {
+                    reference,
+                    kind:
+                        crate::TypeKind::Pointer {
+                            target: Some(target),
+                            ..
+                        },
+                    ..
+                }) = entry
+                    && let Some(key) = index.key(*target)
+                {
+                    pointers.entry(Arc::clone(key)).or_insert(*reference);
+                }
+            }
+        }
         let mut resolved = Vec::new();
         for (entry, language, positions) in unresolved {
             let Some(TypeEntry::Resolved(info)) = self.entries.get(*entry) else {
@@ -523,7 +567,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
                 let TypeArgument::Unknown(text) = &arguments[*position] else {
                     continue;
                 };
-                if let Some(found) = resolve_argument(text, *language, &index, &lookup) {
+                if let Some(found) = resolve_argument(text, *language, &index, &lookup, &pointers) {
                     arguments[*position] = found;
                 }
             }
@@ -633,9 +677,23 @@ fn resolve_argument(
     language: SourceLanguage,
     index: &TypeIndex,
     lookup: &EntryLookup<'_>,
+    pointers: &HashMap<Arc<str>, TypeReference>,
 ) -> Option<TypeArgument> {
     if let Some(value) = parse_integer(text) {
         return Some(TypeArgument::Value(value));
+    }
+    // A pointer, as GCC spells `int*` in a pack it leaves out: the pointer
+    // type whose target is the type its spelling resolves to.
+    if let Some(target) = text.trim_end().strip_suffix('*') {
+        let Some(TypeArgument::Type(target)) =
+            resolve_argument(target.trim_end(), language, index, lookup, pointers)
+        else {
+            return None;
+        };
+        return pointers
+            .get(index.key(target)?)
+            .copied()
+            .map(TypeArgument::Type);
     }
     let candidates = index
         .named(text, true, lookup)

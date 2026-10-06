@@ -3,6 +3,7 @@
 //! values with these too, so a summary and a printed value agree.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use rustc_apfloat::Float as _;
 use rustc_apfloat::ieee::X87DoubleExtended;
@@ -163,8 +164,14 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
         VariableValue::Address(address) => format!("{:#x}", address.address.get()),
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
         VariableValue::Array { .. } | VariableValue::Slice { .. } => "[…]".to_owned(),
-        // A record with no parts, such as Rust's `()`, has nothing to elide.
-        VariableValue::Record if partless => "{}".to_owned(),
+        // A record with no parts has nothing to elide; Rust's is `()`.
+        VariableValue::Record if partless => {
+            if type_info.is_some_and(|info| info.name.as_ref() == "()") {
+                "()".to_owned()
+            } else {
+                "{}".to_owned()
+            }
+        }
         VariableValue::Record | VariableValue::Union | VariableValue::Variant { .. } => {
             "{…}".to_owned()
         }
@@ -195,6 +202,39 @@ pub fn sequence(count: PresentedCount, elements: &[String], complete: bool) -> S
 #[must_use]
 pub fn map(count: PresentedCount, entries: &[String], complete: bool) -> String {
     bracketed(count, entries, complete, ('{', '}'))
+}
+
+/// A record's summary: `{name: value, …}`, or `(value, …)` when its
+/// members are positions, as a tuple's are. `complete` says whether every
+/// member is in `members`.
+#[must_use]
+pub fn record(members: &[(Arc<str>, String)], complete: bool) -> String {
+    let positional = members
+        .iter()
+        .enumerate()
+        .all(|(index, (name, _))| name.as_ref() == index.to_string());
+    let (open, close) = if positional { ('(', ')') } else { ('{', '}') };
+    let mut output = String::from(open);
+    for (index, (name, value)) in members.iter().enumerate() {
+        if index > 0 {
+            output.push_str(", ");
+        }
+        if output.chars().count() > MAX_CHARACTERS {
+            output.push('…');
+            output.push(close);
+            return output;
+        }
+        if !positional {
+            output.push_str(name);
+            output.push_str(": ");
+        }
+        output.push_str(value);
+    }
+    if !complete {
+        output.push_str(if members.is_empty() { "…" } else { ", …" });
+    }
+    output.push(close);
+    output
 }
 
 fn bracketed(

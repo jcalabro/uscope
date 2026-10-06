@@ -77,3 +77,78 @@ view rust std::collections::hash::set::HashSet<T, _> {
     show sequence(items) for i in range(buckets) if control[i] & 0x80 == 0
         => (control as *Pair)[-1 - i].0
 }
+
+# A Box is a pointer to what it holds. A Box of a slice, str, or trait
+# object is a wider pointer, which needs no view.
+view rust alloc::**::Box<T, _> {
+    show value(*self)
+}
+
+# An Rc points at its counts and its value. Its owners together hold one
+# weak reference, which the weak count leaves out, as Rc::weak_count does.
+# An Rc of a slice or str points with a wider pointer, which this view does
+# not bind to.
+view rust alloc::**::Rc<T, _> {
+    let shared = inner(ptr)
+    show value(shared->value)
+    field strong = inner(shared->strong)
+    field weak = inner(shared->weak) - 1
+}
+
+view rust alloc::**::Arc<T, _> {
+    let shared = inner(ptr)
+    let weak = inner(shared->weak)
+    show value(shared->data)
+    field strong = inner(shared->strong)
+    field weak = weak == (usize)-1 ? 0 : weak - 1
+}
+
+# A Weak from Weak::new points nowhere, at usize::MAX; one whose owners are
+# gone holds a dropped value.
+view rust alloc::rc::Weak<T, _> {
+    let shared = inner(ptr)
+    let dangling = shared as usize == (usize)-1
+    let strong = dangling ? 0 : inner(shared->strong)
+    show if dangling {
+        empty("dangling")
+    } else if strong == 0 {
+        empty("dropped")
+    } else {
+        value(shared->value)
+    }
+    field strong = strong
+    field weak = dangling ? 0 : inner(shared->weak) - (strong > 0 ? 1 : 0)
+}
+
+view rust alloc::sync::Weak<T, _> {
+    let shared = inner(ptr)
+    let dangling = shared as usize == (usize)-1
+    let strong = dangling ? 0 : inner(shared->strong)
+    show if dangling {
+        empty("dangling")
+    } else if strong == 0 {
+        empty("dropped")
+    } else {
+        value(shared->data)
+    }
+    field strong = strong
+    field weak = dangling ? 0 : inner(shared->weak) - (strong > 0 ? 1 : 0)
+}
+
+view rust core::cell::Cell<T> {
+    show value(value.value)
+}
+
+# A RefCell's borrow counts its shared borrows, or is negative while it is
+# borrowed mutably.
+view rust core::cell::RefCell<T> {
+    show value(value.value)
+    field borrow = inner(borrow)
+}
+
+# On Linux, a Mutex is a futex word: 0 when unlocked.
+view rust std::**::Mutex<T> {
+    show value(data.value)
+    field locked = inner(inner.futex) != 0
+    field poisoned = inner(poison.failed) != 0
+}

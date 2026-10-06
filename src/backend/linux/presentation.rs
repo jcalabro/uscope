@@ -34,6 +34,7 @@ use super::evaluation::{
 };
 use super::native::InspectionOps;
 use super::{Controller, RuntimeModule};
+use crate::TypeKind;
 
 /// How deeply views present values inside the values they present.
 const MAX_DEPTH: u8 = 4;
@@ -327,11 +328,15 @@ impl<P: InspectionOps> Controller<P> {
         let pid = super::debug_pid(reference.thread)?;
         let frame = self.resolve_frame(inferior, pid, reference.frame)?;
         let scope = self.frame_for(inferior, reference.stop_id, pid, &frame);
-        let bound = Arc::clone(&view.bound)
-            .downcast::<ViewBound>()
-            .map_err(|_| {
-                Error::InvalidValueExpression("the view belongs to another debugger".into())
-            })?;
+        let bound = view
+            .bound
+            .clone()
+            .map(|bound| {
+                bound.downcast::<ViewBound>().map_err(|_| {
+                    Error::InvalidValueExpression("the view belongs to another debugger".into())
+                })
+            })
+            .transpose()?;
         let this = StopPlace {
             module: reference.module,
             located: Located {
@@ -363,7 +368,13 @@ impl<P: InspectionOps> Controller<P> {
                 completion_budget_exhausted = page.completion.exhaustion();
             }
         }
-        if completion_budget_exhausted.is_none() && next < end {
+        // What the debugger presents without a view has only `[raw]` after
+        // the elements it lends.
+        if bound.is_none() && completion_budget_exhausted.is_none() && next < end {
+            let mut machine = StopMachine::new(&scope, budget, true);
+            children.push(value_child(Child::Raw, &this, &mut machine)?);
+        }
+        if let (Some(bound), true) = (&bound, completion_budget_exhausted.is_none() && next < end) {
             let mut machine = StopMachine::new(&scope, budget, true);
             // With borrowed elements, the view's own children start at
             // its fields.
@@ -372,10 +383,10 @@ impl<P: InspectionOps> Controller<P> {
             } else {
                 (next, view.elements)
             };
-            let key = scan_key(&bound, reference.image, &this);
+            let key = scan_key(bound, reference.image, &this);
             let mut checkpoints = self.views.checkpoints(reference.stop_id, &key);
             let presented = crate::view::run::children(
-                &bound,
+                bound,
                 &mut machine,
                 this.clone(),
                 elements,
@@ -457,6 +468,234 @@ fn value_child<P: InspectionOps>(
     })
 }
 
+/// What a value dynamically is.
+enum Dynamic {
+    /// Nothing, as a nil interface holds.
+    Nil,
+    /// A value of type `ty` at `place`.
+    Value { ty: TypeReference, place: StopPlace },
+}
+
+/// A type and the types its typedefs and qualifiers stand for, outermost
+/// first.
+fn typedef_chain(types: &dyn TypeSource, ty: TypeReference) -> Vec<TypeInfo> {
+    let mut chain = Vec::new();
+    let mut current = Some(ty);
+    while let Some(ty) = current.filter(|_| chain.len() < 64) {
+        let Some(info) = types.type_info(ty) else {
+            break;
+        };
+        current = match &info.kind {
+            TypeKind::Modified { target, .. }
+            | TypeKind::Named {
+                target: Some(target),
+                ..
+            } => Some(*target),
+            _ => None,
+        };
+        chain.push(info);
+    }
+    chain
+}
+
+/// Whether a C++ class is polymorphic: it, or a base at its start, holds a
+/// vtable pointer, which GCC names `_vptr.X` and Clang `_vptr$X`.
+fn polymorphic(types: &dyn TypeSource, ty: TypeReference, depth: usize) -> bool {
+    let Ok((_, info)) = crate::eval::types::representation(types, ty) else {
+        return false;
+    };
+    let TypeKind::Record { members, bases, .. } = &info.kind else {
+        return false;
+    };
+    depth < 16
+        && (members.iter().any(|member| {
+            member.artificial
+                && member
+                    .name
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with("_vptr"))
+        }) || bases.iter().any(|base| {
+            matches!(base.layout, crate::RecordMemberLayout::ByteOffset(0))
+                && polymorphic(types, base.type_ref, depth + 1)
+        }))
+}
+
+/// The offset and type of member `name` in the record a pointer of type
+/// `pointer` points to.
+fn pointee_member(
+    types: &dyn TypeSource,
+    pointer: TypeReference,
+    name: &str,
+) -> Option<(u64, TypeReference)> {
+    let (_, info) = crate::eval::types::representation(types, pointer).ok()?;
+    let TypeKind::Pointer {
+        target: Some(target),
+        ..
+    } = info.kind
+    else {
+        return None;
+    };
+    let (_, record) = crate::eval::types::representation(types, target).ok()?;
+    let TypeKind::Record { members, .. } = &record.kind else {
+        return None;
+    };
+    let member = members
+        .iter()
+        .find(|member| member.name.as_deref() == Some(name))?;
+    match member.layout {
+        crate::RecordMemberLayout::ByteOffset(offset) => Some((offset, member.type_ref)),
+        _ => None,
+    }
+}
+
+/// The one type a name means in an image, as its several units' copies of
+/// one type are one.
+fn one_type(image: &crate::ModuleImage, name: &str) -> Option<TypeReference> {
+    let found = image
+        .types_named(name)
+        .into_iter()
+        .filter(|reference| {
+            image
+                .type_info(*reference)
+                .is_some_and(|info| info.identity.is_some())
+        })
+        .collect::<Vec<_>>();
+    let first = *found.first()?;
+    found
+        .iter()
+        .all(|other| image.same_type(first, *other))
+        .then_some(first)
+}
+
+/// The most children of a variant a sum's presentation reads.
+const MAX_SUM_CHILDREN: u32 = 64;
+
+/// How a sum type's value reads: the value standing for it, if any, and
+/// its summary.
+struct Sum {
+    payload: Option<ValueChild>,
+    summary: String,
+}
+
+impl Sum {
+    /// The sum whose active variant is `name`, with `members`. A variant
+    /// whose one member is named as it holds that member: Rust's is a record
+    /// of the variant's fields, `__0` and on for a tuple variant, and a Zig
+    /// tagged union's any value: `Some(42)`, `Ok(7)`, `Point {x: 1, y: 2}`,
+    /// `circle(3)`, `None`. A Zig optional or error union is its payload,
+    /// `null`, or its error.
+    fn of<P: InspectionOps>(
+        language: Option<crate::SourceLanguage>,
+        name: &str,
+        members: &[ValueChild],
+        machine: &mut StopMachine<'_, '_, P>,
+    ) -> std::result::Result<Self, Stop> {
+        let zig = language == Some(crate::SourceLanguage::Zig);
+        match (zig, name, members) {
+            (true, "null", []) => {
+                return Ok(Self {
+                    payload: None,
+                    summary: "null".to_owned(),
+                });
+            }
+            (true, "some" | "success" | "error", [member]) => {
+                return Ok(Self {
+                    summary: crate::view::summary::value(Some(&member.type_info), &member.state),
+                    payload: Some(member.clone()),
+                });
+            }
+            _ => {}
+        }
+        // One member named as the variant is its payload: a Rust variant's
+        // record of fields, or a Zig tagged union's value.
+        let fields = match members {
+            [member] if member_name(member) == Some(name) => match &member.state {
+                VariableState::Available {
+                    value: crate::VariableValue::Record,
+                    children: ValueChildren::Available(reference),
+                    presentation: None,
+                    ..
+                } => {
+                    let reference = Arc::clone(reference);
+                    machine.children_of(&reference)?
+                }
+                _ => {
+                    return Ok(Self {
+                        summary: format!(
+                            "{name}({})",
+                            crate::view::summary::value(Some(&member.type_info), &member.state)
+                        ),
+                        payload: Some(member.clone()),
+                    });
+                }
+            },
+            _ => members.to_vec(),
+        };
+        let tuple = fields
+            .iter()
+            .all(|field| member_name(field).is_some_and(|field| field.starts_with("__")));
+        let rendered = fields
+            .iter()
+            .map(|field| crate::view::summary::value(Some(&field.type_info), &field.state))
+            .collect::<Vec<_>>();
+        let summary = match (fields.as_slice(), tuple) {
+            ([], _) => name.to_owned(),
+            (_, true) => format!("{name}({})", rendered.join(", ")),
+            _ => format!(
+                "{name} {{{}}}",
+                fields
+                    .iter()
+                    .zip(&rendered)
+                    .map(|(field, value)| format!(
+                        "{}: {value}",
+                        member_name(field).unwrap_or("<anonymous>")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        // A variant of one field stands for that field; one of several, or
+        // a Rust variant's record, for its members.
+        let payload = match (fields.as_slice(), members) {
+            ([field], _) => Some(field.clone()),
+            ([], _) => None,
+            (_, [member]) => Some(member.clone()),
+            _ => None,
+        };
+        Ok(Self { payload, summary })
+    }
+}
+
+/// A child's member name.
+fn member_name(child: &ValueChild) -> Option<&str> {
+    match &child.relationship {
+        ValueChildRelationship::Member(member) => member.name.as_deref(),
+        _ => None,
+    }
+}
+
+/// The children a value lends the value it stands for, and how many: a
+/// presented value's elements and fields, but not its `[raw]`, which is
+/// its own; or the members of one no view presents.
+fn lent(state: &VariableState) -> Option<(Arc<ValueChildrenReference>, u64)> {
+    match state {
+        VariableState::Available {
+            presentation: Some(presentation),
+            ..
+        } if presentation.shape != PresentedShape::Raw => match &presentation.children {
+            ValueChildren::Available(reference) => {
+                Some((Arc::clone(reference), reference.total().saturating_sub(1)))
+            }
+            _ => None,
+        },
+        VariableState::Available {
+            children: ValueChildren::Available(reference),
+            ..
+        } => Some((Arc::clone(reference), reference.total())),
+        _ => None,
+    }
+}
+
 /// A type for a child whose own type is unknown.
 fn placeholder(this: &StopPlace) -> TypeInfo {
     TypeInfo {
@@ -480,7 +719,7 @@ fn stopped(stop: Stop) -> Error {
     }
 }
 
-impl<P: InspectionOps> StopMachine<'_, '_, P> {
+impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
     /// `value` with its presentation, when a view presents its type. The
     /// view runs with a share of the budget, so a presentation that runs
     /// out never takes the rest of the inspection with it.
@@ -555,7 +794,7 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
             return Ok(value);
         };
         let Some(bound) = controller.view_choice(type_info.reference).bound.clone() else {
-            return Ok(value);
+            return self.built_in(value);
         };
         // An aggregate's children say where it is; another value, such as
         // a Go map's pointer, is where its state was read from.
@@ -577,26 +816,11 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         let name = crate::view::name_of(&bound.view);
         let (presentation, text) = match result {
             Ok(presented) => {
-                let fields = bound.fields.len() as u64;
+                let fields = bound.fields.len() as u64 + presented.members;
                 let inner = presented
                     .inner
                     .as_ref()
-                    .and_then(|inner| match &inner.state {
-                        VariableState::Available {
-                            presentation: Some(presentation),
-                            ..
-                        } if presentation.shape != PresentedShape::Raw => {
-                            match &presentation.children {
-                                ValueChildren::Available(reference) => Some(Arc::clone(reference)),
-                                _ => None,
-                            }
-                        }
-                        VariableState::Available {
-                            children: ValueChildren::Available(reference),
-                            ..
-                        } => Some(Arc::clone(reference)),
-                        _ => None,
-                    });
+                    .and_then(|inner| lent(&inner.state));
                 // A value presented as a sequence or map stands for this one
                 // as that sequence or map: its elements, then this value's
                 // own fields and `[raw]`.
@@ -619,14 +843,15 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
                 let (shape, count) = collection.unwrap_or((presented.shape, presented.count));
                 let elements = match (&inner, collection) {
                     (Some(_), Some((_, count))) => count.map_or(0, PresentedCount::known),
-                    (Some(inner), None) => inner.total(),
+                    (Some((_, lent)), None) => *lent,
                     (None, _) => presented.count.map_or(0, PresentedCount::known),
                 };
+                let inner = inner.map(|(reference, _)| reference);
                 let mut reference = (*raw).clone();
                 reference.total = elements.saturating_add(fields).saturating_add(1);
                 reference.active_variant = None;
                 reference.view = Some(ViewChildren {
-                    bound: bound as Arc<dyn std::any::Any + Send + Sync>,
+                    bound: Some(bound as Arc<dyn std::any::Any + Send + Sync>),
                     elements,
                     fields,
                     inner,
@@ -658,6 +883,591 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
             *state_presentation = Some(Arc::new(presentation));
         }
         Ok(value)
+    }
+
+    /// What the debugger presents of a value no view presents, from its
+    /// debug information alone: a value as the type it dynamically is, or a
+    /// sum type as its active variant.
+    fn built_in(&mut self, value: InspectedValue) -> std::result::Result<InspectedValue, Stop> {
+        if self.dynamic
+            && let Some(dynamic) = self.dynamic(&value)?
+        {
+            return self.with_dynamic(value, dynamic);
+        }
+        let (
+            Some(type_info),
+            VariableState::Available {
+                value:
+                    crate::VariableValue::Variant {
+                        active: Some(variant),
+                        ..
+                    },
+                children: ValueChildren::Available(raw),
+                presentation: None,
+                ..
+            },
+        ) = (&value.type_info, &value.state)
+        else {
+            return Ok(value);
+        };
+        let (variant, raw) = (Arc::clone(variant), Arc::clone(raw));
+        let language = type_info
+            .identity
+            .as_ref()
+            .map(|identity| identity.language);
+        let children = self.children_of(&raw)?;
+        let first = children.len().saturating_sub(variant.members.len());
+        let members = &children[first..];
+        let name = variant
+            .name
+            .clone()
+            .or_else(|| match variant.members.as_ref() {
+                [member] => member.name.clone(),
+                _ => None,
+            })
+            .unwrap_or_else(|| Arc::from("<unnamed variant>"));
+        let sum = Sum::of(language, &name, members, self)?;
+        Ok(Self::with_sum(value, &raw, sum))
+    }
+
+    /// What a value dynamically is, when its debug information and the
+    /// program's own tables say so exactly: the object a C++ vtable
+    /// pointer belongs to, the value a Rust trait object or Go interface
+    /// holds, or nothing at all, as a nil interface holds.
+    fn dynamic(&mut self, value: &InspectedValue) -> std::result::Result<Option<Dynamic>, Stop> {
+        let Some(type_info) = &value.type_info else {
+            return Ok(None);
+        };
+        let Some(this) = self.place_of(type_info, &value.state) else {
+            return Ok(None);
+        };
+        let place = StopPlace {
+            module: this.module,
+            located: Located {
+                ty: this.target_type,
+                storage: this.storage.clone(),
+            },
+        };
+        let language = typedef_chain(self, type_info.reference)
+            .iter()
+            .find_map(|info| info.identity.as_ref().map(|identity| identity.language));
+        match language {
+            Some(crate::SourceLanguage::Cpp) => self.cpp_dynamic(type_info, &place),
+            Some(crate::SourceLanguage::Rust) => self.rust_dynamic(type_info, &place),
+            Some(crate::SourceLanguage::Go) => self.go_dynamic(type_info, &place),
+            _ => Ok(None),
+        }
+    }
+
+    /// A pointer-sized word of memory.
+    fn word(&mut self, address: u64) -> std::result::Result<u64, Stop> {
+        let bytes = self.read(address, 8)?;
+        Ok(u64::from_le_bytes(bytes.try_into().map_err(|_| {
+            Stop::Refused(Refusal::new(
+                crate::ExpressionErrorKind::Unsupported,
+                "a short read",
+            ))
+        })?))
+    }
+
+    /// The module a virtual address lies in, with the address in its image.
+    fn module_at(&self, address: u64) -> Option<(&'a RuntimeModule, crate::ImageAddress)> {
+        let controller: &'a Controller<P> = self.frame.controller;
+        controller.modules.values().find_map(|module| {
+            let image = module
+                .loaded
+                .image_address(crate::VirtualAddress::new(address))
+                .ok()?;
+            module
+                .image
+                .contains_address(image)
+                .then_some((module, image))
+        })
+    }
+
+    /// A C++ object of a polymorphic class is the object its vtable pointer
+    /// belongs to (the Itanium ABI): the pointer lies in the vtable group a
+    /// `vtable for X` symbol names, the word before the pointer's target
+    /// says how far the whole object begins before this one, and that
+    /// object's own vtable pointer must be the group's primary one.
+    fn cpp_dynamic(
+        &mut self,
+        type_info: &TypeInfo,
+        place: &StopPlace,
+    ) -> std::result::Result<Option<Dynamic>, Stop> {
+        if !polymorphic(self, type_info.reference, 0) {
+            return Ok(None);
+        }
+        let crate::model::ValueStorage::Memory(address) = place.located.storage else {
+            return Ok(None);
+        };
+        let address = address.get();
+        let vptr = self.word(address)?;
+        let Some((module, image)) = self.module_at(vptr) else {
+            return Ok(None);
+        };
+        let Some((class, group)) = module.image.vtable_class(image) else {
+            return Ok(None);
+        };
+        let offset_to_top = self.word(vptr.wrapping_sub(16))?.cast_signed();
+        let Some(whole) = address.checked_add_signed(offset_to_top) else {
+            return Ok(None);
+        };
+        let primary = module
+            .loaded
+            .load_bias
+            .wrapping_add(group.get())
+            .wrapping_add(16);
+        if self.word(whole)? != primary {
+            return Ok(None);
+        }
+        let Some(ty) = one_type(&module.image, &class) else {
+            return Ok(None);
+        };
+        if whole == address && module.image.same_type(ty, type_info.reference) {
+            return Ok(None);
+        }
+        Ok(Some(Dynamic::Value {
+            ty,
+            place: StopPlace {
+                module: module.loaded.id,
+                located: Located {
+                    ty: ty.id,
+                    storage: crate::model::ValueStorage::Memory(crate::VirtualAddress::new(whole)),
+                },
+            },
+        }))
+    }
+
+    /// A Rust trait object, `{pointer, vtable}` with a `dyn` pointee, holds
+    /// the value of the type its vtable, `<C as Trait>::{vtable}`, is for.
+    fn rust_dynamic(
+        &mut self,
+        type_info: &TypeInfo,
+        place: &StopPlace,
+    ) -> std::result::Result<Option<Dynamic>, Stop> {
+        let TypeKind::Record { members, .. } = &type_info.kind else {
+            return Ok(None);
+        };
+        let member = |name: &str| {
+            members
+                .iter()
+                .find(|member| member.name.as_deref() == Some(name))
+        };
+        let (Some(pointer), Some(vtable)) = (member("pointer"), member("vtable")) else {
+            return Ok(None);
+        };
+        let points_to_dyn = self
+            .type_info(pointer.type_ref)
+            .and_then(|info| match info.kind {
+                TypeKind::Pointer {
+                    target: Some(target),
+                    ..
+                } => self.type_info(target),
+                _ => None,
+            })
+            .is_some_and(|target| target.name.starts_with("dyn "));
+        let (
+            true,
+            crate::model::ValueStorage::Memory(address),
+            crate::RecordMemberLayout::ByteOffset(pointer_offset),
+            crate::RecordMemberLayout::ByteOffset(vtable_offset),
+        ) = (
+            points_to_dyn,
+            &place.located.storage,
+            pointer.layout,
+            vtable.layout,
+        )
+        else {
+            return Ok(None);
+        };
+        let address = address.get();
+        let data = self.word(address + pointer_offset)?;
+        let table = self.word(address + vtable_offset)?;
+        let Some((module, image)) = self.module_at(table) else {
+            return Ok(None);
+        };
+        let Some(ty) = module.image.trait_object_type(image) else {
+            return Ok(None);
+        };
+        Ok(Some(Dynamic::Value {
+            ty,
+            place: StopPlace {
+                module: module.loaded.id,
+                located: Located {
+                    ty: ty.id,
+                    storage: crate::model::ValueStorage::Memory(crate::VirtualAddress::new(data)),
+                },
+            },
+        }))
+    }
+
+    /// A Go interface holds the value of the type its runtime type
+    /// describes: its `_type`, or its `tab`'s `Type`, whose offset from
+    /// `runtime.types` a type's `DW_AT_go_runtime_type` gives. The value is
+    /// the data word itself when its type is stored directly, which Go 1.26
+    /// says in `TFlag` and earlier Go in `Kind_`, and otherwise what the
+    /// word points to. A nil interface holds nothing.
+    fn go_dynamic(
+        &mut self,
+        type_info: &TypeInfo,
+        place: &StopPlace,
+    ) -> std::result::Result<Option<Dynamic>, Stop> {
+        // Go marks a type's kind on a typedef, which a same-named typedef
+        // may stand over.
+        let is_interface = typedef_chain(self, type_info.reference).iter().any(|info| {
+            info.identity
+                .as_ref()
+                .and_then(|identity| identity.go)
+                .is_some_and(|go| go.kind == crate::GoKind::Interface)
+        });
+        let Ok((_, record)) = crate::eval::types::representation(self, type_info.reference) else {
+            return Ok(None);
+        };
+        let (true, TypeKind::Record { members, .. }, crate::model::ValueStorage::Memory(address)) =
+            (is_interface, &record.kind, &place.located.storage)
+        else {
+            return Ok(None);
+        };
+        let address = address.get();
+        let offset = |name: &str| {
+            members
+                .iter()
+                .find(|member| member.name.as_deref() == Some(name))
+                .and_then(|member| match member.layout {
+                    crate::RecordMemberLayout::ByteOffset(offset) => {
+                        Some((offset, member.type_ref))
+                    }
+                    _ => None,
+                })
+        };
+        let Some((data_offset, _)) = offset("data") else {
+            return Ok(None);
+        };
+        // The runtime type, and the pointer type its DWARF describes it by.
+        let (descriptor, descriptor_type) = if let Some((type_offset, ty)) = offset("_type") {
+            (self.word(address + type_offset)?, ty)
+        } else if let Some((tab_offset, tab_type)) = offset("tab") {
+            let Some((type_field, ty)) = pointee_member(self, tab_type, "Type") else {
+                return Ok(None);
+            };
+            let tab = self.word(address + tab_offset)?;
+            (
+                if tab == 0 {
+                    0
+                } else {
+                    self.word(tab + type_field)?
+                },
+                ty,
+            )
+        } else {
+            return Ok(None);
+        };
+        if descriptor == 0 {
+            return Ok(Some(Dynamic::Nil));
+        }
+        let Some((module, image)) = self.module_at(descriptor) else {
+            return Ok(None);
+        };
+        let Ok(types) = module.image.symbol_named("runtime.types") else {
+            return Ok(None);
+        };
+        let Some(runtime_offset) = image.get().checked_sub(types.address.get()) else {
+            return Ok(None);
+        };
+        let Some(ty) = module.image.go_runtime_type(runtime_offset) else {
+            return Ok(None);
+        };
+        let (Some((tflag, _)), Some((kind, _))) = (
+            pointee_member(self, descriptor_type, "TFlag"),
+            pointee_member(self, descriptor_type, "Kind_"),
+        ) else {
+            return Ok(None);
+        };
+        let direct = self.read(descriptor + tflag, 1)?[0] & 0x20 != 0
+            || self.read(descriptor + kind, 1)?[0] & 0x20 != 0;
+        let data = address + data_offset;
+        let storage = if direct { data } else { self.word(data)? };
+        Ok(Some(Dynamic::Value {
+            ty,
+            place: StopPlace {
+                module: module.loaded.id,
+                located: Located {
+                    ty: ty.id,
+                    storage: crate::model::ValueStorage::Memory(crate::VirtualAddress::new(
+                        storage,
+                    )),
+                },
+            },
+        }))
+    }
+
+    /// `value` with the presentation of what it dynamically is.
+    fn with_dynamic(
+        &mut self,
+        mut value: InspectedValue,
+        dynamic: Dynamic,
+    ) -> std::result::Result<InspectedValue, Stop> {
+        let Some(type_info) = value.type_info.clone() else {
+            return Ok(value);
+        };
+        let Some(raw) = self.place_of(&type_info, &value.state) else {
+            return Ok(value);
+        };
+        let (shape, summary, inner) = match dynamic {
+            Dynamic::Nil => (PresentedShape::Empty, "nil".to_owned(), None),
+            Dynamic::Value { ty, place } => {
+                let module = self.module(place.module)?;
+                let stored = self.materialize(module, &place.located)?;
+                let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
+                machine.depth = self.depth + 1;
+                let presented = machine.presented(stored)?;
+                let name = self
+                    .type_info(ty)
+                    .map_or_else(|| "<unknown type>".to_owned(), |info| info.name.to_string());
+                let go = self
+                    .type_info(ty)
+                    .and_then(|info| info.identity)
+                    .is_some_and(|identity| identity.language == crate::SourceLanguage::Go);
+                let pointee = if go {
+                    self.pointee_summary(&presented.state)?
+                } else {
+                    None
+                };
+                let shown = match pointee {
+                    Some(pointee) => pointee,
+                    None => match self.record_summary(&presented.state, 0)? {
+                        Some(fields) => fields,
+                        None => crate::view::summary::value(
+                            presented.type_info.as_ref(),
+                            &presented.state,
+                        ),
+                    },
+                };
+                let summary = format!("{name} {shown}");
+                (PresentedShape::Dynamic, summary, lent(&presented.state))
+            }
+        };
+        let elements = inner.as_ref().map_or(0, |(_, lent)| *lent);
+        let inner = inner.map(|(reference, _)| reference);
+        let mut reference = (*raw).clone();
+        reference.total = elements.saturating_add(1);
+        reference.active_variant = None;
+        reference.view = Some(ViewChildren {
+            bound: None,
+            elements,
+            fields: 0,
+            inner,
+        });
+        let presentation = Presentation {
+            view: Arc::new(crate::ViewName {
+                source: "uscope".into(),
+                line: 0,
+                header: "dynamic types".into(),
+            }),
+            shape,
+            count: None,
+            summary: summary.into(),
+            children: ValueChildren::Available(Arc::new(reference)),
+            problem: None,
+        };
+        if let VariableState::Available {
+            presentation: state_presentation,
+            ..
+        } = &mut value.state
+        {
+            *state_presentation = Some(Arc::new(presentation));
+        }
+        Ok(value)
+    }
+
+    /// A record's members on one line, `{x: 1, y: 2}`, with its base
+    /// classes' members first, as many as fit a summary; `None` for what is
+    /// no record or a view presents.
+    fn record_summary(
+        &mut self,
+        state: &VariableState,
+        depth: usize,
+    ) -> std::result::Result<Option<String>, Stop> {
+        let VariableState::Available {
+            value: crate::VariableValue::Record,
+            children: ValueChildren::Available(reference),
+            presentation: None,
+            text: None,
+            ..
+        } = state
+        else {
+            return Ok(None);
+        };
+        let reference = Arc::clone(reference);
+        let mut parts = Vec::new();
+        self.record_members(&reference, depth, &mut parts)?;
+        let mut line = String::from("{");
+        for (index, part) in parts.iter().enumerate() {
+            if line.chars().count() > crate::view::summary::MAX_CHARACTERS {
+                line.push_str(", …");
+                break;
+            }
+            if index > 0 {
+                line.push_str(", ");
+            }
+            line.push_str(part);
+        }
+        line.push('}');
+        Ok(Some(line))
+    }
+
+    /// A pointer to a record as Go's debuggers show one an interface holds,
+    /// `*{name: value, …}`, or `nil`; `None` for any other value.
+    fn pointee_summary(
+        &mut self,
+        state: &VariableState,
+    ) -> std::result::Result<Option<String>, Stop> {
+        let VariableState::Available {
+            value: crate::VariableValue::Address(address),
+            dereference:
+                crate::DereferenceState::Available(crate::DereferenceReference {
+                    module,
+                    target_type,
+                    target: crate::model::DereferenceTarget::Address(target),
+                    ..
+                }),
+            ..
+        } = state
+        else {
+            return Ok(None);
+        };
+        if address.address.get() == 0 {
+            return Ok(Some("nil".to_owned()));
+        }
+        let place = Located {
+            ty: *target_type,
+            storage: crate::model::ValueStorage::Memory(*target),
+        };
+        let module = self.module(*module)?;
+        let pointee = self.materialize(module, &place)?;
+        Ok(self
+            .record_summary(&pointee.state, 0)?
+            .map(|fields| format!("*{fields}")))
+    }
+
+    /// The `name: value` parts of a record's members, its bases' first.
+    fn record_members(
+        &mut self,
+        reference: &ValueChildrenReference,
+        depth: usize,
+        parts: &mut Vec<String>,
+    ) -> std::result::Result<(), Stop> {
+        if depth > 4 || parts.len() >= crate::view::summary::MAX_ELEMENTS {
+            return Ok(());
+        }
+        for child in self.children_of(reference)? {
+            match &child.relationship {
+                ValueChildRelationship::Base(_) => {
+                    if let VariableState::Available {
+                        children: ValueChildren::Available(base),
+                        ..
+                    } = &child.state
+                    {
+                        let base = Arc::clone(base);
+                        self.record_members(&base, depth + 1, parts)?;
+                    }
+                }
+                ValueChildRelationship::Member(member) if !member.artificial => {
+                    parts.push(format!(
+                        "{}: {}",
+                        member.name.as_deref().unwrap_or("<anonymous>"),
+                        crate::view::summary::value(Some(&child.type_info), &child.state)
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// A value's children as stored, each presented one level deeper.
+    fn children_of(
+        &mut self,
+        reference: &ValueChildrenReference,
+    ) -> std::result::Result<Vec<ValueChild>, Stop> {
+        if reference.total == 0 {
+            return Ok(Vec::new());
+        }
+        let module = self.module(reference.module)?;
+        let mut runtime = self.frame.controller.frame_runtime(
+            self.frame.inferior,
+            self.frame.pid,
+            self.frame.resolved,
+            module,
+        );
+        let limit = u32::try_from(reference.total.min(u64::from(MAX_SUM_CHILDREN)))
+            .unwrap_or(MAX_SUM_CHILDREN);
+        let page = module
+            .variables
+            .value_children(reference, 0, limit, &mut runtime, self.budget)
+            .map_err(Stop::Failed)?;
+        let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
+        machine.depth = self.depth + 1;
+        let mut children = page.children.to_vec();
+        for child in &mut children {
+            let state = std::mem::replace(
+                &mut child.state,
+                VariableState::Unavailable(crate::VariableUnavailableReason::EvaluationLimit),
+            );
+            machine.dynamic = !matches!(child.relationship, ValueChildRelationship::Base(_));
+            let presented =
+                machine.presented(machine.finish(Some(child.type_info.clone()), state))?;
+            child.state = presented.state;
+        }
+        Ok(children)
+    }
+
+    /// `value` with the presentation of the sum it is.
+    fn with_sum(
+        mut value: InspectedValue,
+        raw: &ValueChildrenReference,
+        sum: Sum,
+    ) -> InspectedValue {
+        let inner = sum
+            .payload
+            .as_ref()
+            .and_then(|payload| lent(&payload.state));
+        let elements = inner.as_ref().map_or(0, |(_, lent)| *lent);
+        let inner = inner.map(|(reference, _)| reference);
+        let mut reference = raw.clone();
+        reference.total = elements.saturating_add(1);
+        reference.active_variant = None;
+        reference.view = Some(ViewChildren {
+            bound: None,
+            elements,
+            fields: 0,
+            inner,
+        });
+        let presentation = Presentation {
+            view: Arc::new(crate::ViewName {
+                source: "uscope".into(),
+                line: 0,
+                header: "sum types".into(),
+            }),
+            shape: if sum.payload.is_some() {
+                PresentedShape::Value
+            } else {
+                PresentedShape::Empty
+            },
+            count: None,
+            summary: sum.summary.into(),
+            children: ValueChildren::Available(Arc::new(reference)),
+            problem: None,
+        };
+        if let VariableState::Available {
+            presentation: state_presentation,
+            ..
+        } = &mut value.state
+        {
+            *state_presentation = Some(Arc::new(presentation));
+        }
+        value
     }
 
     /// Runs a view one level deeper. A view presenting a value at the top

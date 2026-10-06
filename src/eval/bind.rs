@@ -1581,6 +1581,58 @@ impl<'a, S: Scope> Binder<'a, S> {
 
     // ---- Conversions ----
 
+    /// A record in memory cast to one of its base classes: that base's part
+    /// of it, as C++'s `static_cast` selects it. `None` when the target is
+    /// not one of its bases.
+    fn upcast(
+        &mut self,
+        operand: &Bound<S>,
+        target: &Ty,
+        target_category: &Category,
+        span: Span,
+    ) -> Result<Option<Bound<S>>, ExpressionError> {
+        let (Ty::Program(from), Ty::Program(base), Category::Record) =
+            (&operand.ty, target, target_category)
+        else {
+            return Ok(None);
+        };
+        if !operand.is_place() || !matches!(self.category(&operand.ty), Category::Record) {
+            return Ok(None);
+        }
+        match self.scope.plan(*from, StepKind::Base(*base)) {
+            Ok(planned) => {
+                let ty = planned.result.map_or_else(
+                    || {
+                        Err(Self::error(
+                            span,
+                            ErrorKind::Unsupported,
+                            format!(
+                                "`{}` has a type the debugger cannot compute with",
+                                self.quote(span)
+                            ),
+                        ))
+                    },
+                    |ty| Ok(Ty::Program(ty)),
+                )?;
+                self.node(
+                    Op::Step {
+                        base: Box::new(operand.clone()),
+                        step: planned.step,
+                        indices: Vec::new(),
+                        follows: false,
+                    },
+                    ty,
+                    span,
+                )
+                .map(Some)
+            }
+            Err(refusal) if refusal.kind == ErrorKind::AmbiguousName => {
+                Err(Self::refused(span, refusal))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
     fn convert(&mut self, operand: Bound<S>, target: Ty, span: Span) -> BindResult<S> {
         let operand = self.settle(operand)?;
         if operand.ty == target {
@@ -1589,6 +1641,9 @@ impl<'a, S: Scope> Binder<'a, S> {
             return Ok(operand);
         }
         let target_category = self.category(&target);
+        if let Some(base) = self.upcast(&operand, &target, &target_category, span)? {
+            return Ok(base);
+        }
         let operand = match target_category {
             Category::Pointer(_) | Category::Integer { .. } | Category::Bool => {
                 self.operand(operand)?
@@ -1672,6 +1727,37 @@ impl<'a, S: Scope> Binder<'a, S> {
     }
 
     // ---- Members, indices, lengths ----
+
+    /// Whether a pointer is only how its language represents a value of
+    /// its own kind, as Go represents a channel or a map, which nothing
+    /// indexes as a pointer.
+    fn represents(&self, ty: &Ty) -> bool {
+        let &Ty::Program(mut reference) = ty else {
+            return false;
+        };
+        for _ in 0..MAX_INNER_STEPS {
+            let Some(info) = self.scope.type_info(reference) else {
+                return false;
+            };
+            if info
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.go)
+                .is_some_and(|go| matches!(go.kind, crate::GoKind::Chan | crate::GoKind::Map))
+            {
+                return true;
+            }
+            match info.kind {
+                TypeKind::Named {
+                    target: Some(target),
+                    ..
+                }
+                | TypeKind::Modified { target, .. } => reference = target,
+                _ => return false,
+            }
+        }
+        false
+    }
 
     fn member(
         &mut self,
@@ -1813,7 +1899,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     )?;
                     pending = rest;
                 }
-                Category::Pointer(target) => {
+                Category::Pointer(target) if !self.represents(&node.ty) => {
                     let pointer = self.value(node)?;
                     let scale = self.element_size(&pointer, target.as_ref())?;
                     let index = self.bind(*first)?;
@@ -1833,11 +1919,12 @@ impl<'a, S: Scope> Binder<'a, S> {
                     node = self.deref_value(moved, &target, *span)?;
                     pending = &pending[1..];
                 }
-                Category::Record if node.is_place() => {
-                    // A record has no indexing of its own; a view that
+                ref category @ (Category::Record | Category::Pointer(_)) if node.is_place() => {
+                    // A record has no indexing of its own, nor has a value
+                    // its language represents as a pointer; a view that
                     // presents it as a sequence may give it some.
                     let Ty::Program(from) = node.ty else {
-                        unreachable!("records are program types")
+                        unreachable!("records and pointers are program types")
                     };
                     let planned = self
                         .scope
@@ -1847,9 +1934,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                                 available: pending.len(),
                             },
                         )
-                        .map_err(|_| {
-                            self.type_error(&node, &Category::Record, "cannot be indexed")
-                        })?;
+                        .map_err(|_| self.type_error(&node, category, "cannot be indexed"))?;
                     let index = self.bind(*first)?;
                     let index = self.integer_value(index)?;
                     let ty = planned.result.map_or_else(
