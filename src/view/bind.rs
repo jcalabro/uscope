@@ -216,27 +216,24 @@ pub enum BoundDynamic<St> {
 }
 
 impl<St> BoundShape<St> {
-    /// Whether any branch presents text.
-    pub fn has_text(&self) -> bool {
+    fn any_branch(&self, test: fn(&Self) -> bool) -> bool {
         match self {
-            Self::Text { .. } => true,
             Self::If {
                 then, otherwise, ..
-            } => then.has_text() || otherwise.has_text(),
-            _ => false,
+            } => then.any_branch(test) || otherwise.any_branch(test),
+            shape => test(shape),
         }
+    }
+
+    /// Whether any branch presents text.
+    pub fn has_text(&self) -> bool {
+        self.any_branch(|shape| matches!(shape, Self::Text { .. }))
     }
 
     /// Whether any branch presents a sequence or map, whose elements or
     /// entries are children.
     pub fn has_elements(&self) -> bool {
-        match self {
-            Self::Sequence { .. } | Self::Map { .. } => true,
-            Self::If {
-                then, otherwise, ..
-            } => then.has_elements() || otherwise.has_elements(),
-            _ => false,
-        }
+        self.any_branch(|shape| matches!(shape, Self::Sequence { .. } | Self::Map { .. }))
     }
 }
 
