@@ -254,14 +254,17 @@ record the same observations (statuses, errnos, siginfo, event messages,
 places relative to symbols), which must be identical. A script waits only
 for what it can observe.
 
-**CPU lockstep.** For each single-threaded golden program and variant, a
+**CPU lockstep.** For every golden program, variant, and argument list, a
 test starts the program natively, stops it at its first instruction, copies
 its registers and mappings into the interpreter, and single-steps both
-together, following new threads too. After every instruction it compares
-the general registers, `rip`, and the defined flags; flags an instruction
-leaves undefined are masked with iced-x86's `rflags_undefined`. At a
-`syscall`, the native result is copied in. The first divergence fails,
-printed decoded. This validates every instruction the corpus executes.
+together. After every instruction it compares the general registers,
+`rip`, and the flags the instruction defines (iced-x86's
+`rflags_undefined` names the rest). At a `syscall`, the native result is
+copied in and writable memory must agree. Threads and fork children take
+turns, switching at system calls, while the others wait in ptrace-stops,
+so the program interleaves on the CPU exactly as in the interpreter. The
+first divergence fails, printed decoded. This validates every instruction
+the corpus executes.
 
 ## 7. CPU, memory, and shadow state
 

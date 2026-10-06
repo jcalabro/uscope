@@ -4,8 +4,9 @@
 //! The tracer reaps a traced thread first. Once a process's last thread is
 //! gone, its parent reaps it: the tracer, which launched it; whatever
 //! started it untraced, at once; the process that forked it, with `wait4`,
-//! after SIGCHLD; or, the parent gone, init, at once. A thread that exits hands the children it forked to another of
-//! its group, or, the last, to init.
+//! after SIGCHLD; or, the parent gone, init, at once. A thread that exits
+//! hands the children it forked to another of its group, or, the last, to
+//! init.
 
 use nix::errno::Errno;
 use nix::libc;

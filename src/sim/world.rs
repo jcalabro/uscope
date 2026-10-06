@@ -278,8 +278,7 @@ impl<'a> World<'a> {
         kernel.borrow_mut().debug_behavior = swarm.debug;
         #[cfg(test)]
         {
-            let mut kernel = kernel.borrow_mut();
-            kernel.sabotage = settings.sabotage;
+            kernel.borrow_mut().sabotage = settings.sabotage;
         }
         let marks = Rc::new(RefCell::new(Marks::default()));
         let shared = Shared::default();
