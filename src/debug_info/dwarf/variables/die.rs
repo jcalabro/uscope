@@ -8,7 +8,7 @@ use gimli::Reader as _;
 
 use crate::debug_info::dwarf::{
     DieKey, DwarfError, Reader, die_reference, is_type_unit, source_file_id, source_path,
-    type_unit_source_file_id,
+    string_attribute, type_unit_source_file_id,
 };
 use crate::{
     AddressRange, ColumnNumber, ImageAddress, LineNumber, SourceFile, SourceFileId, SourceLocation,
@@ -111,12 +111,7 @@ pub(super) fn copy_name(
     unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> std::result::Result<Option<Arc<str>>, DwarfError> {
-    entry
-        .attr_value(gimli::DW_AT_name)
-        .map(|value| dwarf.attr_string(unit, value))
-        .transpose()
-        .map_err(DwarfError::from)
-        .map(|value| value.map(|value| Arc::from(value.to_string_lossy().into_owned())))
+    string_attribute(dwarf, unit, entry, gimli::DW_AT_name)
 }
 
 /// Zig's attribute for the type or namespace a declaration is in, which its
@@ -169,7 +164,9 @@ pub(super) fn zig_qualified_name(
     Ok(parts.join(".").into())
 }
 
-pub(super) fn copy_string_attribute_with_origins(
+/// A string attribute of a DIE or, failing that, of the first origin that
+/// has it.
+pub(super) fn string_with_origins(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     units: &[gimli::Unit<Reader<'_>>],
     unit: &gimli::Unit<Reader<'_>>,
@@ -177,31 +174,50 @@ pub(super) fn copy_string_attribute_with_origins(
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
     attribute: gimli::DwAt,
 ) -> std::result::Result<Option<Arc<str>>, DwarfError> {
-    if let Some(value) = entry.attr_value(attribute) {
-        return Ok(Some(Arc::from(
-            dwarf
-                .attr_string(unit, value)?
-                .to_string_lossy()
-                .into_owned(),
-        )));
+    if let Some(value) = string_attribute(dwarf, unit, entry, attribute)? {
+        return Ok(Some(value));
     }
     for (origin_unit, origin) in chain {
-        if let Some(value) = origin.attr_value(attribute) {
-            return Ok(Some(Arc::from(
-                dwarf
-                    .attr_string(&units[*origin_unit], value)?
-                    .to_string_lossy()
-                    .into_owned(),
-            )));
+        if let Some(value) = string_attribute(dwarf, &units[*origin_unit], origin, attribute)? {
+            return Ok(Some(value));
         }
     }
     Ok(None)
 }
 
-pub(super) fn flag_attribute_with_origins(
-    _unit: &gimli::Unit<Reader<'_>>,
+/// The `DW_AT_type` of a DIE or of its first origin that has one, with the
+/// index of the unit holding it.
+pub(super) fn type_with_origins<'data>(
+    unit_index: usize,
+    entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
+    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
+) -> (usize, Option<gimli::AttributeValue<Reader<'data>>>) {
+    entry
+        .attr_value(gimli::DW_AT_type)
+        .map(|value| (unit_index, Some(value)))
+        .or_else(|| {
+            chain.iter().find_map(|(origin_unit, origin)| {
+                origin
+                    .attr_value(gimli::DW_AT_type)
+                    .map(|value| (*origin_unit, Some(value)))
+            })
+        })
+        .unwrap_or((unit_index, None))
+}
+
+/// A DIE's offset in `.debug_info`, which implicit pointers name it by.
+pub(super) fn debug_info_offset(
+    unit: &gimli::Unit<Reader<'_>>,
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
-    _units: &[gimli::Unit<Reader<'_>>],
+) -> Option<u64> {
+    entry
+        .offset()
+        .to_debug_info_offset(&unit.header)
+        .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64"))
+}
+
+pub(super) fn flag_with_origins(
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
     attribute: gimli::DwAt,
 ) -> Option<bool> {
@@ -278,24 +294,6 @@ pub(super) fn strict_flag(
         Some(gimli::AttributeValue::Flag(value)) => Ok(value),
         Some(_) => Err(format!("{attribute:?} has an invalid flag encoding").into()),
     }
-}
-
-pub(super) fn copy_name_with_origins(
-    dwarf: &gimli::Dwarf<Reader<'_>>,
-    units: &[gimli::Unit<Reader<'_>>],
-    unit: &gimli::Unit<Reader<'_>>,
-    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
-    chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'_>>)],
-) -> std::result::Result<Option<Arc<str>>, DwarfError> {
-    if let Some(name) = copy_name(dwarf, unit, entry)? {
-        return Ok(Some(name));
-    }
-    for (origin_unit, origin_entry) in chain {
-        if let Some(name) = copy_name(dwarf, &units[*origin_unit], origin_entry)? {
-            return Ok(Some(name));
-        }
-    }
-    Ok(None)
 }
 
 pub(super) fn declaration_with_origins<'data>(

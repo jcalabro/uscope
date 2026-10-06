@@ -11,9 +11,8 @@ use crate::{
 };
 
 use super::die::{
-    check_data_object_capacity, copy_name, copy_name_with_origins,
-    copy_string_attribute_with_origins, declaration_with_origins, flag_attribute_with_origins,
-    origin_chain,
+    check_data_object_capacity, copy_name, debug_info_offset, declaration_with_origins,
+    flag_with_origins, origin_chain, string_with_origins, type_with_origins,
 };
 use super::location::copy_data_object_value_with_origins;
 use super::types::{TypeArenaBuilder, TypeEntry, TypeResolution};
@@ -166,39 +165,21 @@ pub(super) fn load_globals<'data>(
                 Ok(chain) => (chain, None),
                 Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
             };
-            let name = match copy_name_with_origins(dwarf, units, unit, entry, &chain) {
-                Ok(Some(name)) => name,
-                Ok(None) => format!("<anonymous global at {:#x}>", entry.offset().0).into(),
-                Err(error) => {
-                    format!("<malformed global at {:#x}: {error}>", entry.offset().0).into()
-                }
+            let name =
+                match string_with_origins(dwarf, units, unit, entry, &chain, gimli::DW_AT_name) {
+                    Ok(Some(name)) => name,
+                    Ok(None) => format!("<anonymous global at {:#x}>", entry.offset().0).into(),
+                    Err(error) => {
+                        format!("<malformed global at {:#x}: {error}>", entry.offset().0).into()
+                    }
+                };
+            // A malformed linkage name marks this entry malformed, not the module.
+            let linkage =
+                |attribute| string_with_origins(dwarf, units, unit, entry, &chain, attribute);
+            let linkage_result = match linkage(gimli::DW_AT_linkage_name) {
+                Ok(None) => linkage(gimli::DW_AT_MIPS_linkage_name),
+                result => result,
             };
-            // A malformed linkage name is an entry-local defect, not a reason to
-            // discard the whole module's debug info. Fold any error into the
-            // per-entry `malformed` state alongside declaration and chain errors.
-            let linkage_result = copy_string_attribute_with_origins(
-                dwarf,
-                units,
-                unit,
-                entry,
-                &chain,
-                gimli::DW_AT_linkage_name,
-            )
-            .and_then(|primary| {
-                primary.map_or_else(
-                    || {
-                        copy_string_attribute_with_origins(
-                            dwarf,
-                            units,
-                            unit,
-                            entry,
-                            &chain,
-                            gimli::DW_AT_MIPS_linkage_name,
-                        )
-                    },
-                    |name| Ok(Some(name)),
-                )
-            });
             let (linkage_name, linkage_error) = match linkage_result {
                 Ok(name) => (name, None),
                 Err(error) => (None, Some(Arc::<str>::from(error.to_string()))),
@@ -241,31 +222,18 @@ pub(super) fn load_globals<'data>(
                 source_files,
                 source_file_ids,
             );
-            let (type_unit, type_value) = entry
-                .attr_value(gimli::DW_AT_type)
-                .map(|value| (unit_index, Some(value)))
-                .or_else(|| {
-                    chain.iter().find_map(|(origin_unit, origin)| {
-                        origin
-                            .attr_value(gimli::DW_AT_type)
-                            .map(|value| (*origin_unit, Some(value)))
-                    })
-                })
-                .unwrap_or((unit_index, None));
+            let (type_unit, type_value) = type_with_origins(unit_index, entry, &chain);
             let type_info = types.variable_type(type_unit, type_value);
             let value =
                 copy_data_object_value_with_origins(dwarf, units, unit_index, unit, entry, &chain);
-            let declaration_only =
-                flag_attribute_with_origins(unit, entry, units, &chain, gimli::DW_AT_declaration)
-                    .unwrap_or(false)
-                    && matches!(value, Metadata::Absent(_));
+            let declaration_only = flag_with_origins(entry, &chain, gimli::DW_AT_declaration)
+                .unwrap_or(false)
+                && matches!(value, Metadata::Absent(_));
             if declaration_only {
                 continue;
             }
             let visibility =
-                if flag_attribute_with_origins(unit, entry, units, &chain, gimli::DW_AT_external)
-                    .unwrap_or(false)
-                {
+                if flag_with_origins(entry, &chain, gimli::DW_AT_external).unwrap_or(false) {
                     GlobalVariableVisibility::External
                 } else {
                     GlobalVariableVisibility::CompilationUnit
@@ -280,10 +248,7 @@ pub(super) fn load_globals<'data>(
                 .or(chain_error)
                 .or(linkage_error);
             let object = CatalogDataObject {
-                debug_info_offset: entry
-                    .offset()
-                    .to_debug_info_offset(&unit.header)
-                    .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
+                debug_info_offset: debug_info_offset(unit, entry),
                 kind: VariableKind::Global,
                 name: Arc::clone(&name),
                 declaration: declaration.as_ref().ok().cloned().flatten(),

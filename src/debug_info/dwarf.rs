@@ -391,25 +391,17 @@ fn load_unwind_info(
     target: TargetDescription,
     go_code: Vec<AddressRange<ImageAddress>>,
 ) -> std::result::Result<DwarfUnwindInfo, DwarfError> {
-    let section = object.section_by_name(".eh_frame");
-    let eh_frame = section
-        .as_ref()
-        .map(ObjectSection::uncompressed_data)
-        .transpose()?
-        .unwrap_or(Cow::Borrowed(&[]))
-        .into_owned()
-        .into();
-    let debug_frame = object
-        .section_by_name(".debug_frame")
-        .as_ref()
-        .map(ObjectSection::uncompressed_data)
-        .transpose()?
-        .unwrap_or(Cow::Borrowed(&[]))
-        .into_owned()
-        .into();
+    let section_data = |name| -> std::result::Result<Arc<[u8]>, DwarfError> {
+        Ok(object
+            .section_by_name(name)
+            .as_ref()
+            .map(ObjectSection::uncompressed_data)
+            .transpose()?
+            .unwrap_or_default()
+            .into())
+    };
     let mut bases = BaseAddresses::default();
-
-    if let Some(section) = section {
+    if let Some(section) = object.section_by_name(".eh_frame") {
         bases = bases.set_eh_frame(section.address());
     }
     if let Some(section) = object.section_by_name(".text") {
@@ -420,8 +412,8 @@ fn load_unwind_info(
     }
 
     Ok(DwarfUnwindInfo {
-        eh_frame,
-        debug_frame,
+        eh_frame: section_data(".eh_frame")?,
+        debug_frame: section_data(".debug_frame")?,
         endian: match target.byte_order {
             ByteOrder::Little => RunTimeEndian::Little,
             ByteOrder::Big => RunTimeEndian::Big,
@@ -441,13 +433,21 @@ impl DwarfUnwindInfo {
     /// result is evidence of function boundaries rather than a complete map.
     fn function_ranges(&self) -> Vec<AddressRange<ImageAddress>> {
         let mut ranges = Vec::new();
-        let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
-        eh_frame.set_address_size(self.address_size);
-        collect_function_ranges(&eh_frame, &self.bases, &mut ranges);
-        let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
-        debug_frame.set_address_size(self.address_size);
-        collect_function_ranges(&debug_frame, &self.bases, &mut ranges);
+        collect_function_ranges(&self.eh_frame(), &self.bases, &mut ranges);
+        collect_function_ranges(&self.debug_frame(), &self.bases, &mut ranges);
         ranges
+    }
+
+    fn eh_frame(&self) -> EhFrame<Reader<'_>> {
+        let mut section = EhFrame::new(&self.eh_frame, self.endian);
+        section.set_address_size(self.address_size);
+        section
+    }
+
+    fn debug_frame(&self) -> DebugFrame<Reader<'_>> {
+        let mut section = DebugFrame::new(&self.debug_frame, self.endian);
+        section.set_address_size(self.address_size);
+        section
     }
 
     /// Returns the registers the function at `address` may overwrite
@@ -496,16 +496,11 @@ impl UnwindInfo for DwarfUnwindInfo {
         registers: &RegisterFile,
         memory: &mut dyn MemoryReader,
     ) -> std::result::Result<VirtualAddress, UnwindTermination> {
-        let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
-        eh_frame.set_address_size(self.address_size);
-        let result = cfa_from_section(&eh_frame, &self.bases, address, registers, memory);
+        let result = cfa_from_section(&self.eh_frame(), &self.bases, address, registers, memory);
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
-
-        let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
-        debug_frame.set_address_size(self.address_size);
-        cfa_from_section(&debug_frame, &self.bases, address, registers, memory)
+        cfa_from_section(&self.debug_frame(), &self.bases, address, registers, memory)
     }
 
     fn unwind(
@@ -514,11 +509,9 @@ impl UnwindInfo for DwarfUnwindInfo {
         registers: &RegisterFile,
         memory: &mut dyn MemoryReader,
     ) -> std::result::Result<UnwindStep, UnwindTermination> {
-        let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
-        eh_frame.set_address_size(self.address_size);
         let clobbered = self.call_clobbered_registers(address);
         let result = unwind_from_section(
-            &eh_frame,
+            &self.eh_frame(),
             &self.bases,
             address,
             registers,
@@ -528,11 +521,8 @@ impl UnwindInfo for DwarfUnwindInfo {
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
-
-        let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
-        debug_frame.set_address_size(self.address_size);
         unwind_from_section(
-            &debug_frame,
+            &self.debug_frame(),
             &self.bases,
             address,
             registers,
@@ -552,15 +542,34 @@ fn cfa_from_section<'data, S>(
 where
     S: UnwindSection<Reader<'data>>,
 {
+    let mut context = UnwindContext::new();
+    let (fde, row) = unwind_row(section, bases, address, &mut context)?;
+    cfa_from_rule(row.cfa(), registers, section, fde.cie().encoding(), memory)
+}
+
+/// The call-frame row in effect at `address`, and the entry holding it.
+fn unwind_row<'data, 'context, S>(
+    section: &S,
+    bases: &BaseAddresses,
+    address: ImageAddress,
+    context: &'context mut UnwindContext<usize>,
+) -> std::result::Result<
+    (
+        gimli::FrameDescriptionEntry<Reader<'data>>,
+        &'context gimli::UnwindTableRow<usize>,
+    ),
+    UnwindTermination,
+>
+where
+    S: UnwindSection<Reader<'data>>,
+{
     let fde = section
         .fde_for_address(bases, address.get(), S::cie_from_offset)
         .map_err(|error| cfi_error(error, address))?;
-    let encoding = fde.cie().encoding();
-    let mut context = UnwindContext::new();
     let row = fde
-        .unwind_info_for_address(section, bases, &mut context, address.get())
+        .unwind_info_for_address(section, bases, context, address.get())
         .map_err(|error| cfi_error(error, address))?;
-    cfa_from_rule(row.cfa(), registers, section, encoding, memory)
+    Ok((fde, row))
 }
 
 fn unwind_from_section<'data, S>(
@@ -574,17 +583,10 @@ fn unwind_from_section<'data, S>(
 where
     S: UnwindSection<Reader<'data>>,
 {
-    let fde = section
-        .fde_for_address(bases, address.get(), S::cie_from_offset)
-        .map_err(|error| cfi_error(error, address))?;
-    let return_register = fde.cie().return_address_register().0;
-    let signal_frame = fde.cie().is_signal_trampoline();
-    let encoding = fde.cie().encoding();
     let mut context = UnwindContext::new();
-    let row = fde
-        .unwind_info_for_address(section, bases, &mut context, address.get())
-        .map_err(|error| cfi_error(error, address))?;
-    let cfa = cfa_from_rule(row.cfa(), registers, section, encoding, memory)?;
+    let (fde, row) = unwind_row(section, bases, address, &mut context)?;
+    let return_register = fde.cie().return_address_register().0;
+    let cfa = cfa_from_rule(row.cfa(), registers, section, fde.cie().encoding(), memory)?;
     let mut caller = registers.clone();
     // A callee may overwrite every register its calling convention does not
     // preserve across calls, so the caller's value survives only where the
@@ -611,7 +613,7 @@ where
     Ok(UnwindStep {
         registers: caller,
         cfa,
-        signal_frame,
+        signal_frame: fde.cie().is_signal_trampoline(),
     })
 }
 
@@ -645,11 +647,9 @@ where
 {
     match rule {
         CfaRule::RegisterAndOffset { register, offset } => {
-            let value = registers.get(register.0).ok_or_else(|| {
-                UnwindTermination::RegisterUnavailable {
-                    register: format!("DWARF register {}", register.0).into(),
-                }
-            })?;
+            let value = registers
+                .get(register.0)
+                .ok_or_else(|| register_unavailable(register.0))?;
             Ok(VirtualAddress::new(
                 checked_add(value, *offset).ok_or_else(|| UnwindTermination::InvalidCaller {
                     description: "CFA arithmetic overflow".into(),
@@ -690,11 +690,9 @@ where
         result = match result {
             EvaluationResult::Complete => break,
             EvaluationResult::RequiresRegister { register, .. } => {
-                let value = registers.get(register.0).ok_or_else(|| {
-                    UnwindTermination::RegisterUnavailable {
-                        register: format!("DWARF register {}", register.0).into(),
-                    }
-                })?;
+                let value = registers
+                    .get(register.0)
+                    .ok_or_else(|| register_unavailable(register.0))?;
                 evaluation
                     .resume_with_register(Value::Generic(value))
                     .map_err(corrupt)?
@@ -752,13 +750,9 @@ fn apply_register_rule(
             caller.remove(register);
             return Ok(());
         }
-        RegisterRule::SameValue => {
-            current
-                .get(register)
-                .ok_or_else(|| UnwindTermination::RegisterUnavailable {
-                    register: format!("DWARF register {register}").into(),
-                })?
-        }
+        RegisterRule::SameValue => current
+            .get(register)
+            .ok_or_else(|| register_unavailable(register))?,
         RegisterRule::Offset(offset) => {
             let address =
                 VirtualAddress::new(checked_add(cfa.get(), *offset).ok_or_else(|| {
@@ -775,13 +769,9 @@ fn apply_register_rule(
                 description: "register value overflow".into(),
             })?
         }
-        RegisterRule::Register(source) => {
-            current
-                .get(source.0)
-                .ok_or_else(|| UnwindTermination::RegisterUnavailable {
-                    register: format!("DWARF register {}", source.0).into(),
-                })?
-        }
+        RegisterRule::Register(source) => current
+            .get(source.0)
+            .ok_or_else(|| register_unavailable(source.0))?,
         RegisterRule::Constant(value) => *value,
         RegisterRule::Expression(_) | RegisterRule::ValExpression(_) => {
             return Err(UnwindTermination::UnsupportedUnwindInfo {
@@ -796,6 +786,12 @@ fn apply_register_rule(
     };
     caller.set(register, value);
     Ok(())
+}
+
+fn register_unavailable(register: u16) -> UnwindTermination {
+    UnwindTermination::RegisterUnavailable {
+        register: format!("DWARF register {register}").into(),
+    }
 }
 
 const fn checked_add(value: u64, offset: i64) -> Option<u64> {
@@ -879,27 +875,23 @@ fn load_function_metadata(
         if function_ids.contains_key(&definition) {
             continue;
         }
-        let linkage_name = inherited_value(definition, &raw, &by_key, |function| {
-            function.linkage_name.clone()
-        })?;
+        let origin = &raw[by_key[&definition]];
+        let linkage_name = origin.linkage_name.clone();
         // Clang names the thunks a multiply inherited virtual function
         // needs only by their linkage names.
-        let name = inherited_value(definition, &raw, &by_key, |function| function.name.clone())?
-            .or_else(|| {
-                linkage_name
-                    .as_deref()
-                    .and_then(crate::demangle::demangle)
-                    .map(Arc::from)
-            });
+        let name = origin.name.clone().or_else(|| {
+            linkage_name
+                .as_deref()
+                .and_then(crate::demangle::demangle)
+                .map(Arc::from)
+        });
         let Some(name) = name else {
             if concrete.contains(&definition) {
                 return Err(DwarfError::MissingFunctionName);
             }
             continue;
         };
-        let declaration = inherited_value(definition, &raw, &by_key, |function| {
-            function.declaration.clone()
-        })?;
+        let declaration = origin.declaration.clone();
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
         );
@@ -1016,12 +1008,8 @@ fn collect_function_dies(
                         unit_index,
                         units,
                     )?,
-                    name: attribute_string(dwarf, unit, entry.attr(gimli::DW_AT_name))?,
-                    linkage_name: attribute_string(
-                        dwarf,
-                        unit,
-                        entry.attr(gimli::DW_AT_linkage_name),
-                    )?,
+                    name: string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?,
+                    linkage_name: string_attribute(dwarf, unit, entry, gimli::DW_AT_linkage_name)?,
                     declaration: entry_source_location(
                         dwarf,
                         unit,
@@ -1060,16 +1048,18 @@ fn collect_function_dies(
     Ok(functions)
 }
 
-fn attribute_string(
+fn string_attribute(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit: &gimli::Unit<Reader<'_>>,
-    attribute: Option<&gimli::Attribute<Reader<'_>>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    attribute: gimli::DwAt,
 ) -> std::result::Result<Option<Arc<str>>, DwarfError> {
-    attribute
-        .map(|attribute| dwarf.attr_string(unit, attribute.value()))
+    entry
+        .attr_value(attribute)
+        .map(|value| dwarf.attr_string(unit, value))
         .transpose()
         .map_err(DwarfError::from)
-        .map(|value| value.map(|value| Arc::<str>::from(value.to_string_lossy().into_owned())))
+        .map(|value| value.map(|value| Arc::<str>::from(value.to_string_lossy().as_ref())))
 }
 
 fn die_reference(
@@ -1145,36 +1135,6 @@ fn definition_key(
         };
         key = next;
     }
-}
-
-fn inherited_value<T>(
-    start: DieKey,
-    raw: &[RawFunction],
-    by_key: &HashMap<DieKey, usize>,
-    value: impl Fn(&RawFunction) -> Option<T>,
-) -> std::result::Result<Option<T>, DwarfError> {
-    let mut key = Some(start);
-    let mut visited = HashSet::new();
-
-    while let Some(current) = key {
-        if !visited.insert(current) {
-            return Err(DwarfError::ReferenceCycle);
-        }
-        let function = by_key
-            .get(&current)
-            .and_then(|index| raw.get(*index))
-            .ok_or(DwarfError::ReferencedFunctionMissing {
-                unit: current.unit,
-                offset: current.offset,
-            })?;
-
-        if let Some(value) = value(function) {
-            return Ok(Some(value));
-        }
-        key = function.abstract_origin.or(function.specification);
-    }
-
-    Ok(None)
 }
 
 fn containing_instance(
@@ -1369,16 +1329,15 @@ fn source_file_id(
     if let Some(&id) = source_file_ids.get(&path) {
         return id;
     }
-    *source_file_ids.entry(path.clone()).or_insert_with(|| {
-        let id = SourceFileId::new(
-            u32::try_from(source_files.len()).expect("source file count fits in u32"),
-        );
-        source_files.push(SourceFile {
-            id,
-            path: Arc::new(path),
-        });
-        id
-    })
+    let id = SourceFileId::new(
+        u32::try_from(source_files.len()).expect("source file count fits in u32"),
+    );
+    source_files.push(SourceFile {
+        id,
+        path: Arc::new(path.clone()),
+    });
+    source_file_ids.insert(path, id);
+    id
 }
 
 fn type_unit_source_file_id(
