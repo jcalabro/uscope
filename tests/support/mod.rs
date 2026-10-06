@@ -679,6 +679,26 @@ pub fn wait_for_system_call(process: ProcessId, number: u64) {
     });
 }
 
+/// Sends `signal` to one thread of `process`, which takes it once it next
+/// runs, whatever its siblings do. `kill` would let any thread take it.
+pub fn signal_thread(process: ProcessId, thread: uscope::ThreadId, signal: nix::libc::c_int) {
+    let (Ok(process), Ok(thread)) = (
+        nix::libc::pid_t::try_from(process.get()),
+        nix::libc::pid_t::try_from(thread.get()),
+    ) else {
+        panic!("{process} or {thread} is no Linux process id");
+    };
+    #[allow(unsafe_code, reason = "the C library has no wrapper for tgkill")]
+    // SAFETY: tgkill takes three integers and touches no memory of ours.
+    let sent = unsafe { nix::libc::syscall(nix::libc::SYS_tgkill, process, thread, signal) };
+    assert_eq!(
+        sent,
+        0,
+        "tgkill {process} {thread}: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
 /// Returns the address of a breakpoint stop, failing on any other stop.
 pub fn breakpoint_address(reason: &StopReason) -> VirtualAddress {
     match reason {
