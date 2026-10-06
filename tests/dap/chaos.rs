@@ -47,7 +47,7 @@ fn request(random: &mut Random, thread: Option<i64>, started: bool) -> (&'static
     let path = source("c/hot-calls.c");
     // Before a program starts, a launch or attach would wait for
     // configurationDone like any other.
-    match random.below(if started { 32 } else { 29 }) {
+    match random.below(if started { 35 } else { 32 }) {
         0 => ("threads", Value::Null),
         1 => (
             "stackTrace",
@@ -119,8 +119,17 @@ fn request(random: &mut Random, thread: Option<i64>, started: bool) -> (&'static
             json!({"memoryReference": random.pick(&["0x0", "0x401000", "junk"]), "data": random.pick(&["AAAA", "", "!!"])}),
         ),
         28 => ("cancel", json!({"requestId": random.number()})),
-        29 => ("launch", json!({"program": fixture("spin")})),
-        30 => ("attach", json!({"pid": random.number()})),
+        29 => ("locations", json!({"locationReference": random.number()})),
+        30 => (
+            "uscope/setValueFormat",
+            json!({"hex": random.pick(&[json!(true), json!(false), json!("yes")])}),
+        ),
+        31 => (
+            "completions",
+            json!({"text": random.pick(&["hot_count.", "$r", "x->", "::h", "info "]), "column": random.number(), "frameId": random.number()}),
+        ),
+        32 => ("launch", json!({"program": fixture("spin")})),
+        33 => ("attach", json!({"pid": random.number()})),
         _ => (
             *random.pick(&["frobnicate", "source", "restartFrame", "goto"]),
             json!({"x": random.number()}),
