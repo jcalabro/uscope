@@ -13,7 +13,8 @@
   ],
   "main": "./extension.js",
   "activationEvents": [
-    "onDebugResolve:uscope"
+    "onDebugResolve:uscope",
+    "onDebugDynamicConfigurations:uscope"
   ],
   "contributes": {
     "configuration": {
@@ -24,8 +25,42 @@
           "default": "uscope",
           "scope": "machine-overridable",
           "markdownDescription": "The `uscope` executable: a name searched for on `PATH`, or a path, which may start with `${workspaceFolder}` or `${userHome}`. Relative paths start at the workspace folder."
+        },
+        "uscope.hexadecimal": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show integers in hexadecimal in the Variables and Watch views, hovers, and the results of expressions in the debug console; commands such as `print/x` choose their own. *Toggle Hexadecimal Display* in the Variables and Watch views' context menus flips it."
+        },
+        "uscope.logFile": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "A file the adapter appends every protocol message to, for reporting problems: `uscope dap --log`. It may start with `${workspaceFolder}` or `${userHome}`. Empty logs nothing."
         }
       }
+    },
+    "commands": [
+      {
+        "command": "uscope.toggleHexadecimal",
+        "title": "Toggle Hexadecimal Display",
+        "category": "uscope"
+      }
+    ],
+    "menus": {
+      "debug/variables/context": [
+        {
+          "command": "uscope.toggleHexadecimal",
+          "when": "debugType == 'uscope'",
+          "group": "z_uscope"
+        }
+      ],
+      "debug/watch/context": [
+        {
+          "command": "uscope.toggleHexadecimal",
+          "when": "debugType == 'uscope'",
+          "group": "z_uscope"
+        }
+      ]
     },
     "breakpoints": [
       { "language": "c" },
