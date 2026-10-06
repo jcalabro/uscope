@@ -202,6 +202,7 @@ fn load_debug_info(
 
     let mut function_metadata =
         load_function_metadata(&dwarf, &catalog, &mut source_files, &mut source_file_ids)?;
+    super::roles::mark_abi_wrappers(&mut function_metadata.functions, &source_files);
 
     for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
         load_lines(
@@ -250,6 +251,7 @@ fn load_debug_info(
                 vtables: variables.vtables,
                 constants: variables.constants,
                 producers: unit_producers(&dwarf, &catalog)?,
+                packages: go_packages(&dwarf, &catalog)?,
                 source_files,
                 statements,
                 lines,
@@ -300,6 +302,32 @@ fn unit_producers<'data>(
         }
     }
     Ok(producers)
+}
+
+/// Go's attribute naming the package a unit compiles, which its
+/// `DW_AT_name` names by import path.
+const DW_AT_GO_PACKAGE_NAME: gimli::DwAt = gimli::DwAt(0x2905);
+
+/// The Go packages the image has units for, with the names their code
+/// declares.
+fn go_packages(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    catalog: &UnitCatalog<'_>,
+) -> std::result::Result<Vec<crate::model::PackageInfo>, DwarfError> {
+    let mut packages = Vec::new();
+    for unit in catalog.units.iter().filter(|unit| !is_type_unit(unit)) {
+        let mut entries = unit.entries();
+        let Some(root) = entries.next_dfs()? else {
+            continue;
+        };
+        if let (Some(path), Some(name)) = (
+            string_attribute(dwarf, unit, root, gimli::DW_AT_name)?,
+            string_attribute(dwarf, unit, root, DW_AT_GO_PACKAGE_NAME)?,
+        ) {
+            packages.push(crate::model::PackageInfo { path, name });
+        }
+    }
+    Ok(packages)
 }
 
 /// Returns the code ranges of every unit written in Go, merged and sorted
@@ -847,6 +875,8 @@ struct RawFunction {
     specification: Option<DieKey>,
     name: Option<Arc<str>>,
     linkage_name: Option<Arc<str>>,
+    /// Whether the DIE says the code only forwards to another function.
+    trampoline: bool,
     declaration: Option<SourceLocation>,
     call_site: Option<SourceLocation>,
     ranges: Vec<AddressRange<ImageAddress>>,
@@ -908,7 +938,10 @@ fn load_function_metadata(
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
         );
-        let role = super::roles::symbol_role(linkage_name.as_deref().unwrap_or(&name));
+        let role = super::roles::function_role(
+            linkage_name.as_deref().unwrap_or(&name),
+            origin.trampoline,
+        );
 
         functions.push(FunctionInfo {
             id,
@@ -1028,6 +1061,9 @@ fn collect_function_dies(
                     )?,
                     name: string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?,
                     linkage_name: string_attribute(dwarf, unit, entry, gimli::DW_AT_linkage_name)?,
+                    trampoline: entry
+                        .attr_value(gimli::DW_AT_trampoline)
+                        .is_some_and(|value| value != gimli::AttributeValue::Flag(false)),
                     declaration: entry_source_location(
                         dwarf,
                         unit,

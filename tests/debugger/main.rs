@@ -12,6 +12,7 @@ mod globals;
 mod identities;
 mod libraries;
 mod metadata;
+mod names;
 mod signals;
 mod stepping;
 mod unwind;
