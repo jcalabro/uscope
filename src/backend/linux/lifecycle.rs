@@ -189,18 +189,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.attach_rescans = 0;
 
         for tid in seized {
-            match self.ptrace.interrupt(tid) {
-                Ok(true) => {}
-                // The thread is exiting; its exit status retires it.
-                Ok(false) => {
-                    let inferior = self.inferior.as_mut().expect("attached inferior exists");
-                    inferior.threads.remove(&tid);
-                    inferior.retired_threads.insert(tid);
-                }
-                Err(error) => {
-                    self.fail_inferior(error);
-                    return;
-                }
+            if let Err(error) = self.interrupt_or_retire(tid) {
+                self.fail_inferior(error);
+                return;
             }
         }
         // The attach stop is presented from the leader when it survives.
@@ -241,6 +232,17 @@ impl<P: LinuxTraceOps> Controller<P> {
             .spawn_waiter(self.message_sender.clone())
             .inspect_err(|_| self.rollback_seized(&seized))?;
         Ok((tgid, seized, unseized, waiter))
+    }
+
+    /// Interrupts a seized thread, or retires one that is exiting, whose exit
+    /// status is due.
+    fn interrupt_or_retire(&mut self, tid: Pid) -> Result<()> {
+        if !self.ptrace.interrupt(tid)? {
+            let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
+            inferior.threads.remove(&tid);
+            inferior.retired_threads.insert(tid);
+        }
+        Ok(())
     }
 
     /// Seizes every thread `tgid` lists, returning those seized and those
@@ -1110,18 +1112,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             })
             .collect::<Vec<_>>();
         for tid in running {
-            match self.ptrace.interrupt(tid) {
-                Ok(true) => {}
-                // The thread is exiting; its exit status retires it.
-                Ok(false) => {
-                    let inferior = self.inferior.as_mut().expect("attached inferior exists");
-                    inferior.threads.remove(&tid);
-                    inferior.retired_threads.insert(tid);
-                }
-                Err(error) => {
-                    self.finish_shutdown(Err(error));
-                    return;
-                }
+            if let Err(error) = self.interrupt_or_retire(tid) {
+                self.finish_shutdown(Err(error));
+                return;
             }
         }
         if let Err(error) = self.detach_when_stopped() {
