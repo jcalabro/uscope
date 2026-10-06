@@ -421,14 +421,11 @@ pub(super) enum ByteSize {
     Absent,
     /// A constant unsigned size in bytes.
     Constant(u64),
-    /// A valid constant size the backend cannot represent (a `u128` above
-    /// `u64::MAX`). Valid metadata, but not usable here.
+    /// A valid constant above `u64::MAX`.
     Unsupported(Arc<str>),
-    /// A valid dynamic size (a location expression or DIE reference) that this
-    /// backend cannot evaluate to a static width.
+    /// A location expression or DIE reference, known only at run time.
     Dynamic,
-    /// A present attribute whose form is neither a constant nor a supported
-    /// dynamic size, i.e. defective metadata.
+    /// A form DWARF does not permit for a byte size.
     Malformed,
 }
 
@@ -437,19 +434,14 @@ pub(super) enum ByteSize {
 pub(super) enum UnsignedConstant {
     /// A representable constant value.
     Value(u64),
-    /// A valid constant that exceeds the representable `u64` range (a
-    /// `DW_FORM_data16` value above `u64::MAX`). Valid metadata, unusable here.
+    /// A valid `DW_FORM_data16` constant above `u64::MAX`.
     Oversized,
-    /// A present attribute whose form is not an integer constant, i.e. defective.
+    /// A form that is not an integer constant.
     NonConstant,
 }
 
-/// Classifies an attribute expected to be an unsigned integer constant.
-///
-/// `udata_value` decodes the small constant forms but not the DWARF 5
-/// `DW_FORM_data16`, so that form is handled explicitly. Every attribute that
-/// must be an integer (byte size, address class, encoding) shares this so the
-/// constant-versus-oversized-versus-defective distinction is made once.
+/// Classifies an attribute expected to be an unsigned integer constant,
+/// including `DW_FORM_data16`, which `udata_value` does not decode.
 pub(super) fn unsigned_constant(attribute: &gimli::Attribute<Reader<'_>>) -> UnsignedConstant {
     if let Some(value) = attribute.udata_value() {
         return UnsignedConstant::Value(value);
@@ -462,11 +454,8 @@ pub(super) fn unsigned_constant(attribute: &gimli::Attribute<Reader<'_>>) -> Uns
     }
 }
 
-/// Extracts a base type's `DW_AT_encoding` as a one-byte `DW_ATE_*` value.
-///
-/// The encoding domain is a single byte, so a present value outside `0..=255`
-/// (or a non-constant form) is defective metadata rather than a vendor encoding
-/// this backend merely does not implement.
+/// Extracts a base type's `DW_AT_encoding` as a one-byte `DW_ATE_*` value;
+/// anything else is malformed.
 pub(super) fn base_type_encoding(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
 ) -> std::result::Result<u8, Arc<str>> {
@@ -496,11 +485,8 @@ pub(super) fn byte_size_attribute(
         UnsignedConstant::Oversized => {
             ByteSize::Unsupported("constant DW_AT_byte_size exceeds the supported u64 range".into())
         }
-        // Not an integer constant. Per DWARF a byte size may instead be a
-        // location expression or a reference to another DIE (class exprloc or
-        // reference); those are valid but not statically sizable here. Every
-        // other form is defective. `DW_FORM_sec_offset` (loclist/rnglist class)
-        // is deliberately excluded: it is not a permitted `DW_AT_byte_size` form.
+        // DWARF also permits an expression or a DIE reference, which are
+        // valid but not statically sizable; any other form is malformed.
         UnsignedConstant::NonConstant => match attribute.value() {
             gimli::AttributeValue::Exprloc(_)
             | gimli::AttributeValue::Block(_)

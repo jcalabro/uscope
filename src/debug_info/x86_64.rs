@@ -16,15 +16,11 @@ pub(super) enum PrologueAnalysisError {
     UnsupportedInstruction,
 }
 
-/// Proves that every byte before a candidate source row is a conservative,
-/// frame-pointer-based x86-64 System V prologue.
-///
-/// This deliberately recognizes a small language: the canonical frame-pointer
-/// setup, callee-save pushes, constant stack allocation, and unmodified ABI
-/// argument copies between registers and frame slots. Any control flow,
-/// arithmetic, non-stack memory access, or immediate store is rejected so an
-/// optimized function's real work is never skipped merely because it precedes
-/// the next line-table row.
+/// Proves that every byte before a candidate source row is a frame-pointer
+/// x86-64 System V prologue: frame setup, callee-save pushes, a constant
+/// stack allocation, and unmodified argument copies between registers and
+/// frame slots. Anything else is rejected, so an optimized function's real
+/// work is never skipped.
 pub(super) fn prove_prologue_prefix(
     bytes: &[u8],
     instruction_pointer: u64,

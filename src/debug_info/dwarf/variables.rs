@@ -276,10 +276,8 @@ pub(super) fn load_variable_info<'data>(
                     }
                 }),
                 // An inline instance keeps the caller's frame base and function
-                // while narrowing to its own code ranges. Unlike a lexical
-                // block, an instance with no usable ranges must not widen to
-                // the caller's extent: give it an empty extent so its locals
-                // and parameters can never contaminate lookups.
+                // but only its own code ranges; one without usable ranges gets
+                // none, unlike a lexical block, so its locals never match.
                 gimli::DW_TAG_inlined_subroutine => parent.as_ref().map(|parent| {
                     let instance = instance_ids
                         .get(&DieKey {
