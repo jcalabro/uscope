@@ -2,8 +2,9 @@
 //! own, across each of the runtime's stack switches.
 
 use uscope::{
-    Backtrace, ExecutionContext, InferiorState, StackFrameId, StackSegment, StopContext, StopId,
-    StopReason, ThreadActivity, ThreadId, ThreadState, UnwindTermination,
+    Backtrace, BreakpointSpec, CodeRole, Evaluation, ExecutionContext, Expression, InferiorState,
+    ScalarValue, StackFrameId, StackSegment, StopContext, StopId, StopReason, ThreadActivity,
+    ThreadId, ThreadState, UnwindTermination, VariableState, VariableValue, VirtualAddress,
 };
 
 use crate::support::Scenario;
@@ -40,7 +41,19 @@ async fn stop_in(
 ) -> (Scenario, Backtrace) {
     let mut scenario = Scenario::launch(fixture);
     scenario.add_breakpoint(function).await;
-    let mut reason = scenario.run_to_stop().await;
+    let reason = scenario.run_to_stop().await;
+    let trace = stop_where(&mut scenario, reason, fixture, wanted).await;
+    (scenario, trace)
+}
+
+/// From a breakpoint stop, resumes until `wanted` accepts the backtrace of
+/// a thread a breakpoint stopped.
+async fn stop_where(
+    scenario: &mut Scenario,
+    mut reason: StopReason,
+    fixture: &str,
+    wanted: impl Fn(&[(StackSegment, Vec<String>)]) -> bool,
+) -> Backtrace {
     for _ in 0..MAX_STOPS {
         assert!(
             matches!(reason, StopReason::Breakpoint { .. }),
@@ -69,12 +82,12 @@ async fn stop_in(
                 )
                 .await;
             if wanted(&segments(&trace)) {
-                return (scenario, trace);
+                return trace;
             }
         }
         reason = scenario.resume_to_stop().await;
     }
-    panic!("{fixture}: no stop in {function} was the one sought");
+    panic!("{fixture}: no stop was the one sought");
 }
 
 const fn innermost(stop: StopId, thread: ThreadId) -> StopContext {
@@ -268,6 +281,71 @@ async fn a_thread_switching_to_a_goroutine_unwinds_on_its_system_stack() {
             "{context}"
         );
         assert_eq!(trace.termination, UnwindTermination::Complete, "{context}");
+        scenario.shutdown().await;
+    }
+}
+
+/// The runtime reads the clock through the vDSO from the system stack, and
+/// keeps the goroutine's stack pointer in a register the vDSO preserves.
+#[tokio::test]
+async fn a_vdso_call_unwinds_onto_its_caller() {
+    for fixture in BUILDS {
+        let mut scenario = Scenario::launch(fixture);
+        let start = scenario.add_breakpoint("main.stats").await;
+        scenario.run_to_stop().await;
+        // The program holds the vDSO's clock_gettime itself.
+        let expression = Expression::parse("runtime.vdsoClockgettimeSym").expect("an expression");
+        let clock = scenario
+            .operation("vDSO clock", scenario.handle().evaluate(&expression))
+            .await;
+        let Evaluation::Value { value, .. } = clock else {
+            panic!("{fixture}: {clock:?}");
+        };
+        let VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Unsigned(address)),
+            ..
+        } = value.state
+        else {
+            panic!("{fixture}: {value:?}");
+        };
+        scenario.remove_breakpoint(start.id).await;
+        scenario
+            .add_breakpoint_spec(BreakpointSpec::Address(VirtualAddress::new(
+                u64::try_from(address).expect("an address"),
+            )))
+            .await;
+        let reason = scenario.resume_to_stop().await;
+        let trace = stop_where(&mut scenario, reason, fixture, |segments| {
+            segments
+                .iter()
+                .any(|(_, names)| names.iter().any(|name| name == "runtime.nanotime1"))
+        })
+        .await;
+        let context = format!("{fixture}: {trace:#?}");
+        let functions = trace
+            .frames
+            .iter()
+            .map(|frame| {
+                frame
+                    .function
+                    .as_ref()
+                    .map(|function| function.name.as_ref())
+            })
+            .collect::<Vec<_>>();
+        // The vDSO's frame has no function, and its caller's is named.
+        assert_eq!(functions[0], None, "{context}");
+        assert_eq!(functions[1], Some("runtime.nanotime1"), "{context}");
+        assert!(functions.len() > 3, "{context}");
+        assert_eq!(trace.termination, UnwindTermination::Complete, "{context}");
+        let outermost = trace
+            .frames
+            .last()
+            .and_then(|frame| frame.function.as_ref());
+        assert_eq!(
+            outermost.map(|function| function.role),
+            Some(CodeRole::Outermost),
+            "{context}"
+        );
         scenario.shutdown().await;
     }
 }
