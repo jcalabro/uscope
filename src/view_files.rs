@@ -66,15 +66,12 @@ pub fn read(path: &Path) -> Result<ViewFile, String> {
     let name = path.display().to_string();
     let bytes = read_at_most(path, MAX_FILE_BYTES)?;
     let text = String::from_utf8(bytes).map_err(|_| format!("{name}: the file is not UTF-8"))?;
-    let mut called = crate::view::syntax::parse(&name, &text)
+    let file = crate::view::syntax::parse(&name, &text);
+    let mut called = file
         .views
         .iter()
-        .flat_map(|view| {
-            view.kernel_names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|view| view.kernel_names())
+        .map(str::to_owned)
         .collect::<Vec<_>>();
     called.sort();
     called.dedup();

@@ -44,12 +44,6 @@ pub enum ViewObject<St> {
 /// A program bound in a view's scope.
 pub type ViewProgram<St> = Program<ViewObject<St>, St>;
 
-/// A `let`, computed at most once per presentation.
-#[derive(Debug, Clone)]
-pub struct BoundLet<St> {
-    pub program: ViewProgram<St>,
-}
-
 /// A `check`, with its sides when it is a comparison, for saying why it
 /// failed.
 #[derive(Debug, Clone)]
@@ -222,27 +216,24 @@ pub enum BoundDynamic<St> {
 }
 
 impl<St> BoundShape<St> {
-    /// Whether any branch presents text.
-    pub fn has_text(&self) -> bool {
+    fn any_branch(&self, test: fn(&Self) -> bool) -> bool {
         match self {
-            Self::Text { .. } => true,
             Self::If {
                 then, otherwise, ..
-            } => then.has_text() || otherwise.has_text(),
-            _ => false,
+            } => then.any_branch(test) || otherwise.any_branch(test),
+            shape => test(shape),
         }
+    }
+
+    /// Whether any branch presents text.
+    pub fn has_text(&self) -> bool {
+        self.any_branch(|shape| matches!(shape, Self::Text { .. }))
     }
 
     /// Whether any branch presents a sequence or map, whose elements or
     /// entries are children.
     pub fn has_elements(&self) -> bool {
-        match self {
-            Self::Sequence { .. } | Self::Map { .. } => true,
-            Self::If {
-                then, otherwise, ..
-            } => then.has_elements() || otherwise.has_elements(),
-            _ => false,
-        }
+        self.any_branch(|shape| matches!(shape, Self::Sequence { .. } | Self::Map { .. }))
     }
 }
 
@@ -250,7 +241,8 @@ impl<St> BoundShape<St> {
 #[derive(Debug, Clone)]
 pub struct BoundView<St> {
     pub view: Arc<View>,
-    pub lets: Vec<BoundLet<St>>,
+    /// Each `let`, computed at most once per presentation.
+    pub lets: Vec<ViewProgram<St>>,
     pub checks: Vec<BoundCheck<St>>,
     pub fields: Vec<BoundField<St>>,
     pub summary: Option<Vec<BoundPiece<St>>>,
@@ -388,39 +380,24 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
         if outermost {
             return Ok(Lookup::NotFound);
         }
-        if let Some(depth) = self
-            .variables
-            .iter()
-            .rposition(|(variable, ..)| variable == name)
-        {
-            let (_, ty, place) = &self.variables[depth];
-            return Ok(match (place, ty) {
+        let named = |names: &[(String, Ty, bool)], object: fn(usize) -> Self::Object| {
+            let index = names.iter().rposition(|(named, ..)| named == name)?;
+            let (_, ty, place) = &names[index];
+            Some(match (place, ty) {
                 (true, Ty::Program(reference)) => Lookup::Object {
-                    object: ViewObject::Variable(depth),
+                    object: object(index),
                     ty: Ok(*reference),
                 },
                 _ => Lookup::Bound {
-                    object: ViewObject::Variable(depth),
+                    object: object(index),
                     ty: ty.clone(),
                 },
-            });
-        }
-        if let Some(index) = self
-            .lets
-            .iter()
-            .rposition(|(let_name, ..)| let_name == name)
+            })
+        };
+        if let Some(found) = named(&self.variables, ViewObject::Variable)
+            .or_else(|| named(&self.lets, ViewObject::Let))
         {
-            let (_, ty, place) = &self.lets[index];
-            return Ok(match (place, ty) {
-                (true, Ty::Program(reference)) => Lookup::Object {
-                    object: ViewObject::Let(index),
-                    ty: Ok(*reference),
-                },
-                _ => Lookup::Bound {
-                    object: ViewObject::Let(index),
-                    ty: ty.clone(),
-                },
-            });
+            return Ok(found);
         }
         match self.captures.iter().find(|(captured, _)| captured == name) {
             Some((_, Captured::Value(value))) => {
@@ -523,52 +500,33 @@ pub fn bind<S: Scope>(
                 alternatives,
                 line,
             } => {
-                let mut reasons = Vec::new();
-                let mut bound = None;
-                for alternative in alternatives {
-                    match bind_value(&alternative.expression, &scope) {
-                        Ok(program) => {
-                            bound = Some(program);
-                            break;
-                        }
-                        Err(error) => reasons.push(explain(&scope, alternative, &error)),
-                    }
-                }
-                let Some(program) = bound else {
-                    return Err(Rejection {
-                        line: *line,
-                        part: format!("let {name}"),
-                        reason: reasons.join("; or "),
-                    });
-                };
+                let program = first_alternative(alternatives, |alternative| {
+                    bind_value(&alternative.expression, &scope)
+                        .map_err(|error| explain(&scope, alternative, &error))
+                })
+                .map_err(|reason| Rejection {
+                    line: *line,
+                    part: format!("let {name}"),
+                    reason,
+                })?;
                 let ty = program.result().clone();
                 let place = program.is_place() && matches!(ty, Ty::Program(_));
                 scope.lets.push((name.clone(), ty, place));
-                lets.push(BoundLet { program });
+                lets.push(program);
             }
             Statement::Type {
                 name,
                 alternatives,
                 line,
             } => {
-                let mut reasons = Vec::new();
-                let mut found = None;
-                for alternative in alternatives {
-                    match resolve_type(alternative, &scope) {
-                        Ok(reference) => {
-                            found = Some(reference);
-                            break;
-                        }
-                        Err(reason) => reasons.push(reason),
-                    }
-                }
-                let Some(reference) = found else {
-                    return Err(Rejection {
-                        line: *line,
-                        part: format!("type {name}"),
-                        reason: reasons.join("; or "),
-                    });
-                };
+                let reference = first_alternative(alternatives, |alternative| {
+                    resolve_type(alternative, &scope)
+                })
+                .map_err(|reason| Rejection {
+                    line: *line,
+                    part: format!("type {name}"),
+                    reason,
+                })?;
                 scope.types.push((name.clone(), reference));
             }
             _ => {}
@@ -643,9 +601,24 @@ pub fn bind<S: Scope>(
         extensions: Vec::new(),
     };
     if !view.extend {
-        check_names(&bound, scope.self_type, &scope)?;
+        check_against(&bound, &bound.named_programs(), scope.self_type, &scope)?;
     }
     Ok(bound)
+}
+
+/// The first alternative that binds, or every alternative's reason.
+fn first_alternative<A, T>(
+    alternatives: &[A],
+    mut bind: impl FnMut(&A) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut reasons = Vec::new();
+    for alternative in alternatives {
+        match bind(alternative) {
+            Ok(bound) => return Ok(bound),
+            Err(reason) => reasons.push(reason),
+        }
+    }
+    Err(reasons.join("; or "))
 }
 
 /// What a view that does not `show` presents: a record's members, and its
@@ -742,16 +715,6 @@ fn bind_format<S: Scope>(
     })
 }
 
-/// Every name a view hides or formats is one of its members or fields, or
-/// `self`, and every format suits what it writes.
-fn check_names<St>(
-    bound: &BoundView<St>,
-    self_type: TypeReference,
-    types: &dyn TypeSource,
-) -> Result<(), Rejection> {
-    check_against(bound, &bound.named_programs(), self_type, types)
-}
-
 /// Every name an `extend` hides or formats is one of the members or
 /// fields of the view it extends, or one of its own fields, or `self`, and
 /// every format suits what it writes.
@@ -766,6 +729,8 @@ pub fn check_extension<St>(
     check_against(extension, &named, self_type, types)
 }
 
+/// Every name `bound` hides or formats is in `named`, or is `self`, and
+/// every format suits what it writes.
 fn check_against<St>(
     bound: &BoundView<St>,
     named: &[(Arc<str>, &ViewProgram<St>)],
@@ -878,23 +843,56 @@ fn bind_part<S: Scope>(
     bind_expression(&expr.expression, scope, mode).map_err(|error| rejection(scope, expr, &error))
 }
 
-/// Binds an expression whose value must be an integer.
-fn bind_integer<S: Scope>(
+fn bind_value_part<S: Scope>(
     expr: &Expr,
     scope: &ViewScope<'_, S>,
 ) -> Result<ViewProgram<S::Step>, Rejection> {
-    let program =
-        bind_value(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))?;
-    if matches!(category(scope, program.result()), Category::Integer { .. }) {
+    bind_value(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))
+}
+
+fn bind_condition_part<S: Scope>(
+    expr: &Expr,
+    scope: &ViewScope<'_, S>,
+) -> Result<ViewProgram<S::Step>, Rejection> {
+    bind_condition(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))
+}
+
+/// Binds an expression whose value's category `accepts`, or says `reason`.
+fn bind_category<S: Scope>(
+    expr: &Expr,
+    scope: &ViewScope<'_, S>,
+    accepts: fn(&Category) -> bool,
+    reason: &str,
+) -> Result<ViewProgram<S::Step>, Rejection> {
+    let program = bind_value_part(expr, scope)?;
+    if accepts(&category(scope, program.result())) {
         Ok(program)
     } else {
         Err(Rejection {
             line: expr.line,
             part: expr.text().to_owned(),
-            reason: "is not an integer".to_owned(),
+            reason: reason.to_owned(),
         })
     }
 }
+
+fn bind_integer<S: Scope>(
+    expr: &Expr,
+    scope: &ViewScope<'_, S>,
+) -> Result<ViewProgram<S::Step>, Rejection> {
+    bind_category(
+        expr,
+        scope,
+        |category| matches!(category, Category::Integer { .. }),
+        "is not an integer",
+    )
+}
+
+const fn is_pointer(category: &Category) -> bool {
+    matches!(category, Category::Pointer(_))
+}
+
+const NODES_ARE_POINTERS: &str = "a linked structure's nodes are pointers";
 
 /// A check's conjuncts, each its own check, so a failure names the one
 /// that does not hold.
@@ -942,8 +940,7 @@ fn bind_check<S: Scope>(
     expr: &Expr,
     scope: &ViewScope<'_, S>,
 ) -> Result<BoundCheck<S::Step>, Rejection> {
-    let program =
-        bind_condition(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))?;
+    let program = bind_condition_part(expr, scope)?;
     // A comparison's sides say why it failed.
     let sides = expr.expression.tree().and_then(|tree| {
         let NodeKind::Binary { op, left, right } = tree.kind(tree.root()) else {
@@ -1015,8 +1012,7 @@ fn bind_shape<S: Scope>(
             then,
             otherwise,
         } => BoundShape::If {
-            condition: bind_condition(&condition.expression, scope)
-                .map_err(|error| rejection(scope, condition, &error))?,
+            condition: bind_condition_part(condition, scope)?,
             then: Box::new(bind_shape(then, scope)?),
             otherwise: Box::new(bind_shape(otherwise, scope)?),
         },
@@ -1032,33 +1028,14 @@ fn bind_shape<S: Scope>(
                 .collect::<Result<_, Rejection>>()?,
         ),
         Shape::Dynamic { pointer, ty } => BoundShape::Dynamic {
-            pointer: bind_pointer(pointer, scope)?,
+            pointer: bind_category(pointer, scope, is_pointer, "is not a pointer")?,
             ty: bind_dynamic_type(ty, pointer.line, scope)?,
         },
         Shape::Unmatched(expr) => BoundShape::Unmatched {
             text: expr.text().to_owned(),
-            program: bind_value(&expr.expression, scope)
-                .map_err(|error| rejection(scope, expr, &error))?,
+            program: bind_value_part(expr, scope)?,
         },
     })
-}
-
-/// Binds an expression whose value must be a pointer.
-fn bind_pointer<S: Scope>(
-    expr: &Expr,
-    scope: &ViewScope<'_, S>,
-) -> Result<ViewProgram<S::Step>, Rejection> {
-    let program =
-        bind_value(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))?;
-    if matches!(category(scope, program.result()), Category::Pointer(_)) {
-        Ok(program)
-    } else {
-        Err(Rejection {
-            line: expr.line,
-            part: expr.text().to_owned(),
-            reason: "is not a pointer".to_owned(),
-        })
-    }
 }
 
 /// The type of a `dynamic` shape: one type, or the arguments of a type
@@ -1068,19 +1045,19 @@ fn bind_dynamic_type<S: Scope>(
     line: u32,
     scope: &ViewScope<'_, S>,
 ) -> Result<BoundDynamic<S::Step>, Rejection> {
-    let rejected = |part: &str, reason: String| Rejection {
+    let rejected = |reason: String| Rejection {
         line,
-        part: part.to_owned(),
+        part: "dynamic".to_owned(),
         reason,
     };
     match ty {
         DynamicType::Fixed(ty) => resolve_type(ty, scope)
             .map(BoundDynamic::Fixed)
-            .map_err(|reason| rejected("dynamic", reason)),
+            .map_err(rejected),
         DynamicType::Argument { of, index } => {
-            let of = resolve_type(of, scope).map_err(|reason| rejected("dynamic", reason))?;
+            let of = resolve_type(of, scope).map_err(rejected)?;
             let info = representation(scope, of)
-                .map_err(|reason| rejected("dynamic", reason.to_string()))?
+                .map_err(|reason| rejected(reason.to_string()))?
                 .1;
             let types = info
                 .identity
@@ -1167,9 +1144,22 @@ fn bind_clause<S: Scope>(
                     part: format!("kernel(\"{name}\")"),
                     reason: "no kernel has that name".to_owned(),
                 })?;
+            // Each is a 64-bit word to the kernel.
             let arguments = arguments
                 .iter()
-                .map(|argument| bind_word(argument, scope))
+                .map(|argument| {
+                    bind_category(
+                        argument,
+                        scope,
+                        |category| {
+                            matches!(
+                                category,
+                                Category::Integer { .. } | Category::Pointer(_) | Category::Bool
+                            )
+                        },
+                        "a kernel's arguments are integers, pointers, and truth values",
+                    )
+                })
                 .collect::<Result<_, _>>()?;
             (
                 BoundGenerator::Kernel {
@@ -1187,13 +1177,9 @@ fn bind_clause<S: Scope>(
     let mut items = Vec::new();
     for item in &clause.items {
         items.push(match item {
-            Item::Filter(filter) => BoundItem::Filter(
-                bind_condition(&filter.expression, scope)
-                    .map_err(|error| rejection(scope, filter, &error))?,
-            ),
+            Item::Filter(filter) => BoundItem::Filter(bind_condition_part(filter, scope)?),
             Item::Let { name, value } => {
-                let program = bind_value(&value.expression, scope)
-                    .map_err(|error| rejection(scope, value, &error))?;
+                let program = bind_value_part(value, scope)?;
                 let ty = program.result().clone();
                 let place = program.is_place() && matches!(ty, Ty::Program(_));
                 scope.variables.push((name.clone(), ty, place));
@@ -1204,38 +1190,12 @@ fn bind_clause<S: Scope>(
     Ok(BoundClause { generator, items })
 }
 
-/// A kernel's argument: an integer, a pointer, or a truth value, which the
-/// kernel sees as a 64-bit word.
-fn bind_word<S: Scope>(
-    expr: &Expr,
-    scope: &ViewScope<'_, S>,
-) -> Result<ViewProgram<S::Step>, Rejection> {
-    let program =
-        bind_value(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))?;
-    match category(scope, program.result()) {
-        Category::Integer { .. } | Category::Pointer(_) | Category::Bool => Ok(program),
-        _ => Err(Rejection {
-            line: expr.line,
-            part: expr.text().to_owned(),
-            reason: "a kernel's arguments are integers, pointers, and truth values".to_owned(),
-        }),
-    }
-}
-
 /// A linked structure's first node: a pointer, whose type every node has.
 fn bind_node<S: Scope>(
     expr: &Expr,
     scope: &ViewScope<'_, S>,
 ) -> Result<(ViewProgram<S::Step>, Ty), Rejection> {
-    let program =
-        bind_value(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))?;
-    if !matches!(category(scope, program.result()), Category::Pointer(_)) {
-        return Err(Rejection {
-            line: expr.line,
-            part: expr.text().to_owned(),
-            reason: "a linked structure's nodes are pointers".to_owned(),
-        });
-    }
+    let program = bind_category(expr, scope, is_pointer, NODES_ARE_POINTERS)?;
     let ty = program.result().clone();
     Ok((program, ty))
 }
@@ -1249,17 +1209,9 @@ fn bind_link<S: Scope>(
     scope
         .variables
         .push((link.parameter.clone(), ty.clone(), false));
-    let program = bind_value(&link.expression.expression, scope);
+    let program = bind_category(&link.expression, scope, is_pointer, NODES_ARE_POINTERS);
     scope.variables.pop();
-    let program = program.map_err(|error| rejection(scope, &link.expression, &error))?;
-    if !matches!(category(scope, program.result()), Category::Pointer(_)) {
-        return Err(Rejection {
-            line: link.expression.line,
-            part: link.expression.text().to_owned(),
-            reason: "a linked structure's nodes are pointers".to_owned(),
-        });
-    }
-    Ok(program)
+    program
 }
 
 /// Whether a type's values are one byte of text: a character or a byte.
@@ -1284,8 +1236,7 @@ fn bind_text_source<S: Scope>(
     pointer: &Expr,
     scope: &ViewScope<'_, S>,
 ) -> Result<TextSource<S::Step>, Rejection> {
-    let program = bind_value(&pointer.expression, scope)
-        .map_err(|error| rejection(scope, pointer, &error))?;
+    let program = bind_value_part(pointer, scope)?;
     let refuse = || Rejection {
         line: pointer.line,
         part: pointer.text().to_owned(),
