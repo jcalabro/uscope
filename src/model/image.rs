@@ -303,9 +303,30 @@ pub struct ModuleImage {
     type_index: crate::type_identity::TypeIndex,
     /// Rust trait objects' vtables, with the concrete type each is for.
     vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
+    /// The index in `types` of the first type each Go runtime type
+    /// descriptor offset names.
+    go_runtime_types: std::collections::BTreeMap<u64, usize>,
     /// The views the image carries for its own types, in its
     /// `.debug_uscope_views` section.
     views: Arc<crate::view::ViewSet>,
+}
+
+/// The first type, in identifier order, that each Go runtime type
+/// descriptor offset names: a named type and its typedef may both.
+fn go_runtime_types(types: &[TypeNode]) -> std::collections::BTreeMap<u64, usize> {
+    let mut offsets = std::collections::BTreeMap::new();
+    for (index, node) in types.iter().enumerate() {
+        if let TypeNode::Resolved(info) = node
+            && let Some(offset) = info
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.go)
+                .and_then(|go| go.runtime_type)
+        {
+            offsets.entry(offset).or_insert(index);
+        }
+    }
+    offsets
 }
 
 impl ModuleImage {
@@ -426,7 +447,7 @@ impl ModuleImage {
             symbol_sources: metadata.symbol_sources,
             sections: metadata.sections.into(),
             globals: metadata.globals.into(),
-            types: metadata.types,
+            types: Arc::clone(&metadata.types),
             source_files: metadata.source_files.into(),
             statements: metadata.statements.into(),
             lines: metadata.lines.into(),
@@ -439,6 +460,7 @@ impl ModuleImage {
             instruction_starts,
             type_index,
             vtables: metadata.vtables.iter().copied().collect(),
+            go_runtime_types: go_runtime_types(&metadata.types),
             views: crate::view::ViewSet::empty(),
         }
     }
@@ -754,19 +776,11 @@ impl ModuleImage {
     /// several, such as a named type and its typedef, say so.
     #[must_use]
     pub fn go_runtime_type(&self, offset: u64) -> Option<TypeReference> {
-        self.types.iter().find_map(|node| match node {
-            TypeNode::Resolved(info)
-                if info
-                    .identity
-                    .as_ref()
-                    .and_then(|identity| identity.go)
-                    .and_then(|go| go.runtime_type)
-                    == Some(offset) =>
-            {
-                Some(info.reference)
-            }
-            _ => None,
-        })
+        let index = *self.go_runtime_types.get(&offset)?;
+        match &self.types[index] {
+            TypeNode::Resolved(info) => Some(info.reference),
+            TypeNode::Malformed { .. } => None,
+        }
     }
 
     /// The types whose identity has this base, whatever their language,
