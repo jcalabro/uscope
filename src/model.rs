@@ -301,11 +301,12 @@ pub struct TaskSnapshot {
 /// Whose stack a frame is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackSegment {
-    /// An OS thread's stack, which no task of a runtime owns.
+    /// An OS thread's stack, which no runtime knows.
     Thread,
     /// A task's own stack.
     Task,
-    /// A runtime's scheduler stack, running the runtime's code for a task.
+    /// A runtime's scheduler stack for a thread, on which it runs its own
+    /// code, for a task or for none.
     System,
     /// A runtime's signal-handling stack.
     Signal,

@@ -522,3 +522,53 @@ async fn backtraces_unwind_through_the_vdso() {
         }
     }
 }
+
+/// A C handler returns through glibc's signal trampoline, and the frame
+/// the signal interrupted comes from the registers the kernel saved in the
+/// signal frame; the walk goes on through it to the program's first frame.
+#[tokio::test]
+async fn backtraces_unwind_through_a_signal_handler() {
+    let mut scenario = Scenario::launch("signals");
+    scenario.add_breakpoint("handle_usr1").await;
+    let mut reason = scenario.run_to_stop().await;
+    // The signal itself stops first, and goes on to the program.
+    while let StopReason::Exception(_) = reason {
+        reason = scenario.resume_to_stop().await;
+    }
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{reason:?}"
+    );
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let names = trace
+        .frames
+        .iter()
+        .map(|frame| frame.symbol.as_ref().map(|symbol| symbol.name.to_string()))
+        .collect::<Vec<_>>();
+    let position = |name: &str| {
+        names
+            .iter()
+            .position(|found| found.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("no {name} in {trace:#?}"))
+    };
+    assert_eq!(names[0].as_deref(), Some("handle_usr1"), "{trace:#?}");
+    let trampoline = position("__restore_rt");
+    assert_eq!(trampoline, 1, "{trace:#?}");
+    // The trampoline and the interrupted frame are where they are, not
+    // after a call.
+    for frame in &trace.frames[trampoline..=trampoline + 1] {
+        assert_eq!(frame.kind, uscope::FrameKind::Signal, "{trace:#?}");
+    }
+    let raise = position("raise");
+    assert!(raise > trampoline + 1, "{trace:#?}");
+    assert_eq!(
+        names[raise + 1..raise + 3],
+        [Some("signal_point".to_owned()), Some("main".to_owned())],
+        "{trace:#?}"
+    );
+    assert_eq!(names.last().cloned().flatten().as_deref(), Some("_start"));
+    assert_eq!(trace.termination, UnwindTermination::Complete, "{trace:#?}");
+    scenario.shutdown().await;
+}

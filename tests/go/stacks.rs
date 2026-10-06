@@ -2,12 +2,13 @@
 //! own, across each of the runtime's stack switches.
 
 use uscope::{
-    Backtrace, BreakpointSpec, CodeRole, Evaluation, ExecutionContext, Expression, InferiorState,
-    ScalarValue, StackFrameId, StackSegment, StopContext, StopId, StopReason, ThreadActivity,
-    ThreadId, ThreadState, UnwindTermination, VariableState, VariableValue, VirtualAddress,
+    Backtrace, BreakpointSpec, CodeRole, Evaluation, ExecutionContext, Expression, FrameKind,
+    InferiorState, ScalarValue, StackFrameId, StackSegment, StopContext, StopId, StopReason,
+    ThreadActivity, ThreadId, ThreadState, UnwindTermination, VariableState, VariableValue,
+    VirtualAddress,
 };
 
-use crate::support::Scenario;
+use crate::support::{self, Scenario};
 
 const BUILDS: [&str; 2] = ["stacks-go-o0", "stacks-go-o2"];
 
@@ -55,6 +56,11 @@ async fn stop_where(
     wanted: impl Fn(&[(StackSegment, Vec<String>)]) -> bool,
 ) -> Backtrace {
     for _ in 0..MAX_STOPS {
+        // The program's own signals go on to it.
+        if let StopReason::Exception(_) = reason {
+            reason = scenario.resume_to_stop().await;
+            continue;
+        }
         assert!(
             matches!(reason, StopReason::Breakpoint { .. }),
             "{fixture}: {reason:?}"
@@ -156,29 +162,40 @@ async fn check_every_thread(scenario: &mut Scenario, fixture: &str) {
             .into_iter()
             .map(|(segment, _)| segment)
             .collect::<Vec<_>>();
-        let expected = match thread.activity.as_ref().expect(&context) {
-            ThreadActivity::Task { stack, .. } if *stack == StackSegment::Task => {
-                vec![StackSegment::Task]
-            }
-            ThreadActivity::Task { stack, .. } => vec![*stack, StackSegment::Task],
-            ThreadActivity::Idle => vec![StackSegment::Thread],
-            // A thread the runtime is still starting has no goroutine yet,
-            // and its stack begins where `clone` made it.
-            ThreadActivity::Unknown(_) => {
-                let innermost = trace
-                    .frames
-                    .first()
-                    .and_then(|frame| frame.function.as_ref());
-                assert_eq!(
-                    innermost.map(|function| function.name.as_ref()),
-                    Some("runtime.clone"),
-                    "{context}"
-                );
-                vec![StackSegment::Thread]
-            }
+        // A stack moves outward only, from a signal stack to a system stack
+        // and from either to the task the thread runs, each once: runs of
+        // frames on one stack are already merged.
+        let order = [
+            StackSegment::Signal,
+            StackSegment::System,
+            StackSegment::Task,
+        ];
+        let ranks = stacks
+            .iter()
+            .map(|segment| order.iter().position(|known| known == segment))
+            .collect::<Vec<_>>();
+        let innermost = trace
+            .frames
+            .first()
+            .and_then(|frame| frame.function.as_ref())
+            .map(|function| function.name.as_ref());
+        let last = match thread.activity.as_ref().expect(&context) {
+            ThreadActivity::Task { .. } => StackSegment::Task,
+            // A thread `clone` just made has no g yet, and its stack
+            // begins where `clone` made it.
+            ThreadActivity::Idle if innermost == Some("runtime.clone") => StackSegment::Thread,
+            // An idle thread runs the scheduler on its system stack.
+            ThreadActivity::Idle => StackSegment::System,
+            ThreadActivity::Unknown(reason) => panic!("{context}: {reason}"),
         };
-        assert_eq!(stacks, expected, "{context}");
-        if expected.last() == Some(&StackSegment::Task) {
+        assert_eq!(stacks.last(), Some(&last), "{context}");
+        if last != StackSegment::Thread {
+            assert!(
+                ranks.iter().all(Option::is_some) && ranks.is_sorted(),
+                "{context}: {stacks:?}"
+            );
+        }
+        if last == StackSegment::Task {
             let outermost = trace
                 .frames
                 .last()
@@ -346,6 +363,91 @@ async fn a_vdso_call_unwinds_onto_its_caller() {
             Some(CodeRole::Outermost),
             "{context}"
         );
+        scenario.shutdown().await;
+    }
+}
+
+/// A signal's handler runs on the thread's signal stack and returns
+/// through the runtime's signal trampoline, above the frame the signal
+/// interrupted, whose registers the kernel saved in the signal frame.
+#[tokio::test]
+async fn a_signal_handler_unwinds_onto_the_frame_it_interrupted() {
+    for fixture in BUILDS {
+        let (scenario, trace) = stop_in(fixture, "runtime.sighandler", |segments| {
+            segments
+                .iter()
+                .any(|(_, names)| names.iter().any(|name| name == "main.interrupt"))
+        })
+        .await;
+        let found = segments(&trace);
+        let context = format!("{fixture}: {trace:#?}");
+        assert_eq!(
+            found[0],
+            (
+                StackSegment::Signal,
+                names(&[
+                    "runtime.sighandler",
+                    "runtime.sigtrampgo",
+                    "runtime.sigtramp",
+                    "runtime.sigreturn__sigaction",
+                ])
+            ),
+            "{context}"
+        );
+        let (segment, task) = &found[1];
+        assert_eq!(*segment, StackSegment::Task, "{context}");
+        assert!(
+            task.ends_with(&names(&[
+                "syscall.Tgkill",
+                "main.interrupt",
+                "main.main",
+                "runtime.main",
+                "runtime.goexit",
+            ])),
+            "{context}"
+        );
+        // The trampoline's instruction and the interrupted frame's are
+        // their own, not return addresses.
+        let trampoline = found[0].1.len() - 1;
+        for frame in &trace.frames[trampoline..=trampoline + 1] {
+            assert_eq!(frame.kind, FrameKind::Signal, "{context}");
+        }
+        assert_eq!(found.len(), 2, "{context}");
+        assert_eq!(trace.termination, UnwindTermination::Complete, "{context}");
+        scenario.shutdown().await;
+    }
+}
+
+/// The runtime turns a fault into a call to `sigpanic` from the faulting
+/// instruction, which the caller's frame names exactly.
+#[tokio::test]
+async fn a_fault_unwinds_onto_the_instruction_that_faulted() {
+    let line = support::source_line("tests/fixtures/go/stacks/main.go", "// the fault");
+    for fixture in BUILDS {
+        let (scenario, trace) = stop_in(fixture, "runtime.sigpanic", |_| true).await;
+        let context = format!("{fixture}: {trace:#?}");
+        assert_eq!(
+            segments(&trace),
+            [(
+                StackSegment::Task,
+                names(&[
+                    "runtime.sigpanic",
+                    "main.fault",
+                    "main.main",
+                    "runtime.main",
+                    "runtime.goexit",
+                ])
+            )],
+            "{context}"
+        );
+        let faulted = &trace.frames[1];
+        assert_eq!(faulted.kind, FrameKind::Signal, "{context}");
+        assert_eq!(
+            faulted.source.as_ref().map(|source| source.line.get()),
+            Some(line),
+            "{context}"
+        );
+        assert_eq!(trace.termination, UnwindTermination::Complete, "{context}");
         scenario.shutdown().await;
     }
 }
