@@ -1,91 +1,97 @@
 # uscope
 
-`uscope` is a Linux x86-64 native debugger written in Rust.
+uscope is a native debugger for Linux x86-64, written in Rust. It debugs C,
+C++, Rust, Zig, and Go programs from a terminal REPL or, through the Debug
+Adapter Protocol, from VS Code, Neovim, Helix, Zed, and Emacs.
 
-`uscope dap` serves the Debug Adapter Protocol, so VS Code, Neovim, Zed, Helix,
-and Emacs can debug with it; `editors/vscode` is its VS Code extension. See
-[docs/dap.md](docs/dap.md).
+## Features
+
+- **Targets**: launch a program, attach to a running process, or open a core
+  dump, including one from another machine (`--sysroot`, `--module-path`).
+- **Breakpoints** on functions, lines, and addresses, with
+  [expression](docs/expressions.md) conditions and hit conditions, including
+  in shared libraries that load later.
+- **Hardware watchpoints** that stop on a value change, on every store, or on
+  any access, scoped to the lifetime of the storage they watch.
+- **Execution control**: continue, `step`, `next`, `stepi`, `nexti`, and
+  `finish`, through inlined calls, across all threads (all-stop).
+- **Stacks**: backtraces through every loaded module, with frame selection
+  that shows each caller's variables as they were at its call.
+- **Values**: one [expression language](docs/expressions.md) for every source
+  language, with exact integer arithmetic, casts, and assignment.
+- **[Views](docs/views.md)** that show containers as what they stand for, such
+  as a `Vec` as its elements, for the C++, Rust, Go, and Zig standard
+  libraries and your own types.
+- **Disassembly** that names branch targets, including indirect ones resolved
+  from the stopped state, and symbolization of code without debug information.
+- **Signals** with gdb's default policies, changeable with `handle`.
+
+uscope prefers saying what it cannot show to showing something wrong:
+optimized-out values, unreadable memory, and unverifiable core dump modules
+are reported as such.
+
+## Language support
+
+| Language | Values | Execution control |
+| --- | --- | --- |
+| C, C++, Rust (GCC, Clang, rustc) | Parameters, locals, and globals, including partly optimized-out values | Full |
+| Zig 0.16 (LLVM backend) | Parameters, locals, and globals | Full; inline frames when emitted |
+| Go 1.26 `gc` | Locals in `-N -l` builds; package globals in any build | Breakpoints and continue only: no source stepping, goroutines, or split-stack backtraces |
+
+Thread-local storage is supported for glibc only.
+
+## Quick start
+
+uscope builds inside a pinned Nix environment:
+
+```sh
+just dev                    # enter the environment (or ./scripts/dev.sh)
+just build-test-programs    # build the test programs
+just run build/test-programs/basic
+```
+
+Then, at the `(uscope)` prompt:
+
+```text
+break breakpoint_target
+run
+bt
+finish
+next
+print first
+print/x uscope_value
+```
+
+Other ways to start:
+
+```sh
+uscope ./program -- ARG...         # launch with arguments
+uscope --attach PID                # attach; detaches on exit
+uscope --core core.1234            # open a core dump
+uscope --batch -e 'break f' -e run -e bt ./program
+uscope dap                         # serve DAP on stdio
+```
+
+## Documentation
+
+- [docs/cli.md](docs/cli.md): command-line flags and REPL commands.
+- [docs/expressions.md](docs/expressions.md): the expression language.
+- [docs/views.md](docs/views.md) and [docs/writing-views.md](docs/writing-views.md): views.
+- [docs/dap.md](docs/dap.md): editor setup and DAP support.
+- [AGENTS.md](AGENTS.md): architecture and development rules.
 
 ## Development
 
-Enter the pinned development environment and run the checks:
-
 ```sh
-# either of these:
-./scripts/dev.sh
-just dev
-
-# then, build and run the test binaries
-just build-test-programs
-
-# run the linter and all tests
-just
-
-# start the debugger
-just run build/test-programs/basic
-
-# pass arguments, a working directory, and environment variables to `run`
-just run --cwd /tmp --env NAME=VALUE build/test-programs/process-environment -- ARG...
-
-# attach to a running process; uscope discovers its executable through /proc
-just dev --command cargo run -- --attach PID
-
-# open a post-mortem core dump; uscope uses the executable recorded in the dump
-just dev --command cargo run -- --core CORE
-
-# open a core dump from another machine with a copy of its files
-just dev --command cargo run -- --core CORE --sysroot DIR --module-path DIR
+just          # format check, Clippy, and the test suite
+just test X   # tests matching X
+just stress   # the suite ten times under CPU load
+just sim      # simulate random debugger sessions for 30 seconds
+just all      # everything, before committing
 ```
 
-Use `--attach PID` or `-p PID` to attach to an existing process. `uscope` reads the
-running executable through `/proc/PID/exe`, stops every native thread, and detaches
-without terminating the process when the debugger exits. If automatic executable
-discovery is unavailable, pass its path as the positional `EXECUTABLE` argument
-alongside `--attach`.
+See [AGENTS.md](AGENTS.md) for how the code is organized and tested.
 
-Use `--core CORE` to open an ELF core dump written by the Linux kernel or by gdb's `gcore`. The dump is presented as one permanent stop at the thread that triggered it, with the terminating signal, its `si_code`, and the faulting address or sending process. Backtraces, registers, variables, globals, TLS, memory reads, and thread selection work as they do at a live stop; execution control, memory writes, and breakpoints fail explicitly. `info core` lists the process, signal, and every recorded module. Compressed dumps from `systemd-coredump` must first be extracted with `coredumpctl dump -o FILE`.
+## License
 
-Each executable and shared library recorded by the dump is matched to its file on disk before use: by GNU build-id when the dump saved the note, and otherwise by comparing every saved byte of the file's read-only segments. Memory the dump did not save, such as unmodified code and read-only data, is read only from a proven file. A file that differs from the dump, or that nothing saved can verify, is a hard error. Pass `--allow-module-mismatch` to use its debug metadata anyway; its contents still never stand in for unsaved memory, and every such module is reported as a warning. A module whose file no longer exists is reported, with the build-id the dump recorded for it, and its frames and unsaved memory stay unavailable. If the executable has moved, pass its path as the positional `EXECUTABLE` argument alongside `--core`.
-
-To debug a core dump from another machine or a container, pass `--sysroot DIR`, a copy of that machine's files such as an extracted container image: every recorded path is then looked up inside `DIR` instead of on this machine, and resolves as if `DIR` were `/`, so absolute symbolic links and `..` never reach this machine's files. Pass `--module-path DIR`, repeatably, to search directories for files missing from their recorded paths or not matching the dump, first by the recorded file name and then by build-id, which finds renamed copies such as a library saved under its soname. A file found by searching is used only when proven to match, unless mismatches are allowed, while a different file at the recorded path remains an error. `info core` names the file used for each module that was not found at its recorded path. TLS is located by `libthread_db`, or, when it refuses a C library of another version than its own, as another machine's often is, by the layout descriptors that glibc exports for it.
-
-At a breakpoint, use `registers` or `regs` to print the stopped thread's general register set.
-Addresses are always written in `0x`-prefixed hexadecimal, so `break add` names a function rather than address 0xadd.
-Use `x <0xaddress> [byte-count]` to display a bounded target-memory range as hexadecimal bytes and printable ASCII. The default is 64 bytes and the CLI accepts at most 8192 bytes per command. Reads return the readable contiguous prefix and identify the first inaccessible address instead of discarding bytes read before a mapping boundary.
-Use `print <expression>` or `p <expression>` to print a value, expanding aggregates within bounded limits, and `print/x` to show integers in hexadecimal. Expressions are one small language for every program, described in [docs/expressions.md](docs/expressions.md): names, members (`a.b`, `p->b`), indices (`a[1]`), dereferences and addresses (`*p`, `&x`), exact arithmetic, comparisons, casts (`(u8)x`, `x as u8`), `sizeof`, `len`, and one terminal half-open range of an array or slice (`a[2..6]`). Lookup is local-first and then considers globals; exact namespace, module, container, linkage, and source-file qualifications are accepted. An error points at the part of the expression it is about. `whatis <expression>` shows an expression's type and `ptype <expression-or-type>` a type's definition. Views present standard library and user containers as what they stand for, such as a `std::string` as its text and a `Vec` as `len=3 [1, 2, 3]` with its elements, and `v[i]` and `len(v)` reach them in any expression; `print/r` and `set views off` show values as stored, and `info view <expression>` says which view applies and why ([docs/views.md](docs/views.md)). `print` with no argument lists the parameters followed by the locals of the selected logical frame, including an inline function frame.
-Use `globals [filter]` to list a bounded page of immutable global metadata without reading every value.
-Scalar inspection supports one-piece values in memory, general-purpose and XMM registers, constants, computed DWARF stack values, and glibc TLS. Entry values, composite locations, non-default address spaces, and general cross-DIE expression evaluation remain explicitly unavailable.
-Every inspected value has an explicit state: available, unavailable for a typed reason, readable but invalid for its source type, or backed by malformed debug metadata. Optimized-out values distinguish a missing location, an empty location, and explicitly undefined DWARF pieces. Typed reads across inaccessible memory remain all-or-unavailable and report the requested bytes, readable prefix length, and first inaccessible address; debugger operational failures remain request errors rather than convincing per-variable results.
-
-| Language/compiler | Variable inspection | Execution control |
-| --- | --- | --- |
-| C, C++, Rust | Scalar parameters, locals, and qualified globals, including optimized partial availability | Breakpoints, stepping, inline frames, backtraces, and native threads |
-| Zig 0.16 LLVM backend | Scalar parameters, locals, and qualified globals in Debug and ReleaseFast builds; PIE and non-PIE | Breakpoints, stepping, inline frames when emitted, backtraces, and native threads |
-| Go 1.26 `gc` | Scalar parameters and locals in a `-N -l` build, plus package globals in unoptimized and optimized builds, at an explicit user breakpoint | Launch and continue only; source stepping, goroutine control, split-stack backtraces, and runtime-aware composite rendering are not supported |
-
-Globals are module-aware. The runtime registry synchronizes executable shared-object mappings at coherent all-stop snapshots, publishes module load/unload events, rejects stale module identities, and relocates each value through its owning mapping. TLS lookup uses glibc's `libthread_db` for the selected native thread and supports the main executable and dynamically allocated DSO TLS. glibc is currently the only supported libc for TLS; an unavailable or incompatible provider is reported explicitly.
-Backtraces unwind through every loaded module using its own call-frame information, so stops inside libc or another shared library still reach their callers. Frames are named from the owning module's debug information, and code it does not describe, such as a library built without `-g` or the C runtime's `_start`, is named `symbol+offset` from the module's ELF symbol tables: the static and dynamic tables and Fedora-style MiniDebugInfo (`.gnu_debugdata`). Rust and C++ symbols are demangled. A symbol names only the code its declared size covers; a symbol without a size extends to the next function that a symbol or the call-frame information reveals and is marked `(unsized symbol)`. Code that no symbol covers, such as a static function in a stripped library, stays `<unknown>` rather than borrowing a neighbor's name. Frames without source also name their module, and `where` describes the module that actually contains the selected frame's instruction, including one outside every loaded module.
-Use `info symbol <0xaddress>` to name the module, section, and symbol containing an address. Data is named only within a symbol's declared size, or exactly at an unsized symbol's address; the nearest preceding symbol is never borrowed.
-Use `disassemble` or `disas` to disassemble the function containing the selected frame's instruction, `disassemble <function|0xaddress>` for another function, and `disassemble <function|0xaddress> <instruction-count>` for instructions from an address. Every range of a function split by the compiler, such as a `.cold` part, is shown, and the bytes are those the program sees, with breakpoint traps hidden, read from the live process or the core dump. Each line shows the address, its offset from the containing symbol, the instruction bytes, and the instruction in Intel syntax, or AT&T with `--disassembly-syntax att`; direct branch targets and program-counter-relative operands are named, a call through the procedure linkage table by its section, and each new source line is announced. An indirect jump, call, or return also names where it would go from the stopped state, `# slot <name> -> target <name>`: its target is read from the memory it loads it from, such as a global offset table entry, and, for the instruction the stopped thread is about to execute, from the registers, which resolves calls through registers and virtual tables, jump tables, and returns. Registers describe only that instruction, so elsewhere a target that depends on them is not shown; at the stop, a target that depends on `rax` while the kernel will restart an interrupted system call, which replaces it, is marked unknown. A slot is shown as it holds at the stop: until lazy binding resolves a call, its stub's slot points back into the stub. A slot that cannot be read, such as a global offset table that a core dump did not save, is reported, and branches whose operand size differs between Intel and AMD processors, far transfers, and interrupt returns are marked as not computed. Because x86 instructions vary in length, instructions are decoded only forward from proven instruction starts: the stopped instruction, debug-information function ranges, code symbols, and executable sections. Where decoded instructions overlap such a start, as with data placed inside code, the conflict is reported and decoding resumes there; an address that decoding from the nearest start crosses is reported as probably not an instruction; and unreadable code, such as code a core dump neither saved nor verified, is reported rather than guessed.
-Breakpoint, step, and watchpoint stops automatically print three surrounding source lines on each side when source is available.
-
-Use `break <location> <hit-condition>` to stop only at the hits a condition selects: an operator and a count, such as `==3` for the third hit only, `>=5` for the fifth and every later hit, `%10` for every tenth, or `!=`, `<`, `<=`, and `>`. A bare count is refused, because debuggers disagree whether it means only that hit, that hit and every later one, or skipping that many. Each time a thread reaches any of a breakpoint's locations is one hit, counted per breakpoint across all its locations, and hits that do not stop still count, as in gdb; `breakpoints` shows each count, which starts again in every new process. A stop names each breakpoint it stopped at with the number of its hit. `ignore <id> <count>` skips a breakpoint's next `count` hits like gdb's `ignore`, and `hits <id> <hit-condition|always>` replaces the condition and keeps the count. A hit that does not stop publishes nothing: every other thread is stopped while the trapping thread steps over the trap, so no thread passes the site uncounted, and then execution continues, including a `next` or `finish` in progress. A step that ends at such a site stops there with the hit counted once.
-Use `list` or `l` to print that source context again for the selected frame.
-
-Use `frame <level>` to select a frame by its backtrace level, `up [count]` and `down [count]` to move toward the callers or back toward the stop, and `frame` alone to show the selected frame with its source. Variables, `print`, `watch`, `where`, `list`, `disassemble`, `registers`, and `finish` then apply to that frame, in a live process or a core dump; the backtrace still describes the thread. Every new stop, and selecting another thread for the first time, starts at the innermost frame, and each thread keeps its own selection until the next stop. An outer frame shows the call it is making: its source line, and its variables as they are at that call, read from where its callees saved its registers. A value held in a register a callee may overwrite without saving, such as an argument register, is reported as not saved rather than showing the callee's value in it, which gdb would print. Callees follow the x86-64 System V convention except in Go code, past which only the stack pointer is recovered: Go's convention preserves almost no registers, and its call-frame information does not describe the frame pointer it saves. `finish` runs until the selected frame returns to its caller, so recursion that reaches the same return address from deeper activations keeps running; it supports frames of the main executable and inline frames of the innermost activation. `step`, `next`, and `stepi` always step from the innermost frame.
-
-Source files are read from the paths the debug information records. For a program built elsewhere, such as in CI, a container, or on the machine that wrote a core dump, pass `--source-map FROM TO` to read files recorded under `FROM` from `TO` instead. Rules match whole leading path components, may be repeated, and are tried in order before the recorded path; the source header names the file that was read, and a missing source names every path tried. Breakpoints still name sources by their recorded paths or trailing components, such as `break main.c:10`.
-Use `stepi`, `step`, `next`, and `finish` for instruction and source-level execution control. Like gdb, every other thread runs while a thread steps, so stepping over a call that waits for another thread, such as `pthread_join`, completes; another thread's breakpoint, watchpoint, or signal then ends the step where it happened. Breakpoints and watchpoints can be added and deleted while the inferior runs: every thread stops briefly while the change is made and resumes without a reported stop, and a hit on a breakpoint deleted meanwhile is not reported.
-
-Use `watch <expression>` to stop when a thread's store changes the memory a value occupies, as gdb's `watch` does, `watch -w <expression>` to stop at every store, and `awatch` to also stop on reads. `<0xaddress>:<byte-count>` in place of an expression watches explicit bytes. A watchpoint reports the access after the accessing instruction, with the value last observed by the debugger and the value once every thread stopped; `watch -w` and `awatch` also report a store of an identical value, or a failed `lock cmpxchg`, marked unchanged. The hardware traps every store, so `watch` compares the watched bytes after each one with those the debugger last observed, when execution last resumed, and when they are equal resumes the storing thread at once, without stopping the others or reporting anything. It compares again once every thread is stopped for a change, so, as in gdb, a change another thread undid meanwhile is not reported. A debugger write such as `set` counts as observed, so a store of the value it wrote changes nothing. One instruction touching several watchpoints reports all of them, and every thread, including threads created later, is armed. Use `watchpoints` or `info watchpoints` to list them and `unwatch <id|all>` to delete them.
-
-Watchpoints use the four x86-64 debug registers of every thread. Each register covers one naturally aligned 1, 2, 4, or 8 byte span, so a misaligned or larger value uses several, and perf hardware breakpoints held by the process can leave fewer; a watchpoint that does not fit is refused without arming anything. x86-64 cannot report reads alone, so `rwatch` is refused. Hardware only sees accesses made by user-mode instructions: the kernel filling a watched buffer in `read(2)` is never reported, which is why the reported old value is the last value the debugger observed, while vDSO code is reported. `watch` therefore notices such a change only at the next store that leaves the bytes different from those last observed, even a store of the value the kernel wrote.
-
-A watchpoint resolved from an expression keeps watching the address it resolved, even after a pointer in the expression changes. Its lifetime follows the storage it names: static storage is watched until its module unloads, thread-local storage until its thread exits, and a local or parameter until its activation returns, a tail call replaces it, `longjmp` skips it, or execution leaves its lexical block. When that happens the watchpoint is removed and reported instead of describing reused memory; storage reached through a pointer or given as an address is never invalidated. Values held in registers or computed by the compiler, bit-fields, constants, and Go stack objects, which the runtime may move, cannot be watched. Watchpoints belong to one process: they are discarded when it exits or execs, disarmed before detaching, and debug registers left armed by an earlier tracer are cleared on attach so they cannot kill the process later.
-A forked child is not followed: it is released with the breakpoints it inherited removed, so it runs normally.
-Use `threads` to list stopped threads and `thread <id>` to select the thread used by register, variable, source, and backtrace commands.
-Press Ctrl-C while the inferior is running to pause it at a coherent all-stop snapshot; with nothing running, Ctrl-C does nothing, and `quit` or end-of-input exits. A terminal Ctrl-C also signals the inferior, so, like gdb, `continue` and the stepping commands discard a pending `SIGINT` instead of delivering it.
-
-Signals follow gdb's defaults: those programs use for routine work, `SIGALRM`, `SIGURG` (Go's goroutine preemption), `SIGCHLD`, `SIGWINCH`, `SIGPROF`, `SIGVTALRM`, `SIGIO`, and `SIGPWR`, are delivered without stopping; `SIGINT` stops and is discarded; every other signal, including real-time ones, stops and is delivered when execution resumes. `handle SIGNAL [stop|nostop] [print|noprint] [pass|nopass]` changes one, as in gdb `stop` implies `print` and `noprint` implies `nostop`, and `info signals` lists them all. A signal that arrives during a step runs its handler at full speed; the step resumes when the handler returns.
-The interactive debugger is a plain terminal REPL, so output remains available in normal terminal scrollback. Submit an empty line to repeat the last stepping, `continue`, `up`, `down`, `x`, or `list` command. Use `--batch` with command files, `--eval`, or stdin when no interactive prompt is wanted.
-Interactive output uses a restrained terminal-aware color palette while leaving source code text unstyled. Color is disabled for redirected output, `TERM=dumb`, `NO_COLOR`, and automatic batch output. Use `--color always` or `--color never` to override detection; `CLICOLOR` and `CLICOLOR_FORCE` are also honored.
+MIT or Apache-2.0, at your option.
