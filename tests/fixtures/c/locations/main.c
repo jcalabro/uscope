@@ -3,14 +3,18 @@
 // across its call to the next, so a stop in `locations_stop` shows every
 // stage's at once. `locations abort` dumps that stack instead,
 // `locations tail` stops in functions entered by tail calls, `locations
-// library` in a library function, `locations pointer` past a call through
-// a pointer, and three arguments where a value is known only to an unknown
-// caller.
+// library` in a library function, `locations interposed` in one entered
+// by tail calls through the program, `locations pointer` past a call
+// through a pointer, and three arguments where a value is known only to
+// an unknown caller.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 int locations_in_library(int value, void (*stop)(void));
+int locations_interposed_target(int value, void (*stop)(void));
+int locations_interposing(int value, void (*stop)(void));
+int locations_interposed(int value, void (*stop)(void));
 
 struct pair {
     long first;
@@ -148,6 +152,12 @@ __attribute__((noinline)) static int forwarding(int value) {
 // Called through, so no call site says which function it reaches.
 static int (*volatile locations_forwarding)(int) = forwarding;
 
+// Takes the place of the library's own, so the library's tail calls from
+// `locations_interposing` pass through here.
+__attribute__((noinline)) int locations_interposed(int value, void (*stop)(void)) {
+    return locations_interposed_target(value + 100, stop);
+}
+
 int main(int argc, char **argv) {
     if (argc > 3) {
         return locations_forwarding(argc) == 0;
@@ -159,6 +169,9 @@ int main(int argc, char **argv) {
         // Kept across both calls, so the caller can say where each went.
         int (*forward)(int) = locations_forwarding;
         return forward(argc) + forward(argc + 1) == 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "interposed") == 0) {
+        return locations_interposing(7, locations_stop) == 0;
     }
     if (argc > 1 && strcmp(argv[1], "library") == 0) {
         return locations_in_library(argc + 50, locations_stop) == 0;

@@ -9,7 +9,8 @@ use gimli::{Location, Value};
 
 use crate::debug_info::dwarf::{DieKey, DwarfError, Reader, die_reference};
 use crate::debug_info::{
-    CallSite, CallSiteId, CallTarget, EntryParameter, VariableRuntime, VariableRuntimeError,
+    CallSite, CallSiteId, CallTarget, EntryParameter, TailCallChain, VariableRuntime,
+    VariableRuntimeError,
 };
 use crate::{
     AddressRange, EntryValueUnavailableReason, ImageAddress, VariableUnavailableReason,
@@ -35,6 +36,8 @@ pub(super) struct CallSiteCatalog {
 }
 
 struct CallingFunction {
+    /// The linker name other modules may call it by.
+    name: Option<Arc<str>>,
     frame_base: Metadata<LocationDescription>,
     /// Whether the function describes every tail call it makes.
     tail_calls_described: bool,
@@ -101,6 +104,7 @@ impl CallSiteBuilder {
     ) {
         let index = self.functions.len();
         let start = ranges.iter().map(|range| range.start).min();
+        let mut name = None;
         let described = [
             gimli::DW_AT_call_all_calls,
             gimli::DW_AT_call_all_tail_calls,
@@ -128,11 +132,16 @@ impl CallSiteBuilder {
             ) {
                 self.origins.push((origin, index, start));
             }
-            if let Some(name) = external_name(dwarf, units, unit_index, entry) {
-                self.external.entry(name).or_default().push(index);
+            name = external_name(dwarf, units, unit_index, entry);
+            if let Some(name) = &name {
+                self.external
+                    .entry(Arc::clone(name))
+                    .or_default()
+                    .push(index);
             }
         }
         self.functions.push(CallingFunction {
+            name,
             frame_base,
             tail_calls_described: described,
             tail_calls: Vec::new(),
@@ -576,19 +585,27 @@ impl DwarfVariableInfo {
         &self,
         from: ImageAddress,
         to: ImageAddress,
-    ) -> Result<Arc<[CallSiteId]>, VariableRuntimeError> {
+    ) -> Result<TailCallChain, VariableRuntimeError> {
         let from = self
             .function_index_at(from)
             .ok_or_else(|| unavailable(EntryValueUnavailableReason::UnknownTarget))?;
         let to = self
             .function_index_at(to)
             .ok_or_else(|| unavailable(EntryValueUnavailableReason::UnknownTarget))?;
-        Ok(self
-            .call_sites
-            .tail_path(from, to)?
-            .into_iter()
-            .map(CallSiteId)
-            .collect())
+        let catalog = &self.call_sites;
+        let links = catalog.tail_path(from, to)?;
+        let entered = links.iter().map(|site| {
+            catalog.sites[*site]
+                .enters
+                .expect("a chain stays in its module")
+        });
+        Ok(TailCallChain {
+            functions: std::iter::once(from)
+                .chain(entered)
+                .map(|function| catalog.functions[function].name.clone())
+                .collect(),
+            links: links.into_iter().map(CallSiteId).collect(),
+        })
     }
 
     pub(super) fn site_parameter_value(
@@ -727,6 +744,7 @@ mod tests {
         let mut functions = described
             .iter()
             .map(|&tail_calls_described| CallingFunction {
+                name: None,
                 frame_base: Metadata::Absent(MetadataAbsence::NotApplicable),
                 tail_calls_described,
                 tail_calls: Vec::new(),

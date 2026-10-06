@@ -839,7 +839,7 @@ impl VariableInfo for DwarfVariableInfo {
         &self,
         from: ImageAddress,
         to: ImageAddress,
-    ) -> std::result::Result<Arc<[CallSiteId]>, VariableRuntimeError> {
+    ) -> std::result::Result<crate::debug_info::TailCallChain, VariableRuntimeError> {
         self.tail_call_path(from, to)
     }
 

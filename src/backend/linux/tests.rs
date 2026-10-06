@@ -342,7 +342,7 @@ impl VariableInfo for UnusedVariableInfo {
         _from: ImageAddress,
         _to: ImageAddress,
     ) -> std::result::Result<
-        Arc<[crate::debug_info::CallSiteId]>,
+        crate::debug_info::TailCallChain,
         crate::debug_info::VariableRuntimeError,
     > {
         panic!("unexpected tail call lookup")

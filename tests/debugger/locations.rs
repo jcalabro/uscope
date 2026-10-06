@@ -380,6 +380,29 @@ async fn a_library_function_recovers_what_the_program_passed_it() {
 }
 
 #[tokio::test]
+async fn tail_calls_another_module_may_have_taken_are_not_followed() {
+    for variant in VARIANTS {
+        let scenario = stopped(variant, &["interposed"]).await;
+        // `main` called the library's `locations_interposing`, which jumped
+        // to `locations_interposed` through its procedure linkage table. The
+        // program defines one too, which took the jump and passed on 114
+        // where the library's own would have passed 15.
+        select(&scenario, "locations_interposed_target").await;
+        assert_eq!(
+            integer(&scenario, "locations_library_sink").await,
+            114,
+            "{variant}"
+        );
+        assert_eq!(
+            unavailable(&scenario, "value").await,
+            VariableUnavailableReason::EntryValue(EntryValueUnavailableReason::TailCalls),
+            "{variant}"
+        );
+        scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn a_call_through_a_kept_pointer_says_where_it_went() {
     for variant in VARIANTS {
         let scenario = stopped(variant, &["pointer"]).await;
