@@ -646,11 +646,12 @@ impl<'tokens> Parser<'tokens> {
                     self.advance();
                     NodeKind::Bool(word == "true")
                 }
-                "null" => {
+                // `nil` is Go's spelling of `null`, and means the same.
+                "null" | "nil" => {
                     self.advance();
                     NodeKind::Null
                 }
-                "nil" | "nullptr" | "NULL" => {
+                "nullptr" | "NULL" => {
                     return Err(ExpressionError::syntax(
                         span,
                         format!("`{word}` is spelled `null`"),

@@ -121,7 +121,7 @@ fn malformed_literals_point_at_themselves_and_suggest_fixes() {
     );
     assert!(error("17UL").hint.unwrap().contains("17 as unsigned long"));
     assert!(error("naïve").hint.unwrap().contains("backticks"));
-    assert_eq!(error("nil").hint.as_deref(), Some("write `null`"));
+    assert_eq!(error("nullptr").hint.as_deref(), Some("write `null`"));
 }
 
 /// Precedence levels from loosest to tightest, as the reference lists them,
