@@ -85,9 +85,10 @@ is a range. `'a'` is a character's code point, and `"text"` is a string,
 which compares with the program's text. Both take the escapes `\n`, `\r`,
 `\t`, `\0`, `\\`, `\'`, `\"`, `\xHH`, and `\u{H…}`.
 
-`true`, `false`, and `null` mean what they say. `nil`, `nullptr`, and `NULL`
-are refused with a hint to write `null`, so that one spelling reads the same
-in every language.
+`true`, `false`, and `null` mean what they say, and `nil` is a second
+spelling of `null`, which prints as `null`. `nullptr` and `NULL` are refused
+with a hint to write `null`: C's `NULL` is a macro, and the two spellings
+are enough for a condition to read the same in every language.
 
 ```uscope-example
 0x2a + 0b1010_1010 + 0o17 => reads as `42 + 170 + 15`
@@ -102,6 +103,7 @@ in every language.
 1e400                     => error syntax at `1e400`
 340282366920938463463374607431768211456 => error syntax at `340282366920938463463374607431768211456`
 'ab'                      => error syntax at `'a`
+nil                       => reads as `null`
 nullptr                   => error syntax at `nullptr`
 ```
 
@@ -275,6 +277,7 @@ are not numbers; convert one with `flag as u8`.
 world: memory
 null_ptr != null && null_ptr->a > 3 => false : bool
 ptr != null && ptr->a > 3          => true : bool
+ptr != nil                         => true : bool
 !ptr                               => false : bool
 s.a > 3 ? 1 : 2                    => 1 : integer
 false && gone > 0                  => false : bool

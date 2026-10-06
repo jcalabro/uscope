@@ -30,8 +30,13 @@ otherwise an unknown-name error. No reading is refused merely for being
 ambiguous, and such text prints as written, since parentheses one reading does
 not need may matter to another.
 
-**One spelling of null.** `nil`, `nullptr`, and `NULL` are refused with a hint,
-so a condition reads the same in every language.
+**Two spellings of null.** `null` and Go's `nil` mean the same and print as
+`null`; `nullptr` and `NULL` are refused with a hint to write `null`. A Go
+programmer writes `nil` without thinking, and refusing it only taught a
+rule; a variable named `nil`, which Go allows and nobody writes, is still
+reached in backticks. A condition still reads the same in every language,
+since both spellings mean one thing everywhere. C's `NULL` is a macro the
+debugger does not expand, and a third spelling would add nothing.
 
 **Unsupported operands are a category, not a special case.** A type the
 debugger cannot compute with (a pointer into another address space, a
