@@ -447,12 +447,19 @@ enum Resume {
     Step,
 }
 
+/// Whom a step belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StepOwner {
+    /// The thread the step runs on.
+    thread: Pid,
+}
+
 #[derive(Debug, Clone)]
 enum ActiveKind {
     Launch,
     Continue,
     Step {
-        thread: Pid,
+        owner: StepOwner,
         kind: StepKind,
         start: Box<StepStart>,
         /// The stepping thread executed an instruction whose effect on the

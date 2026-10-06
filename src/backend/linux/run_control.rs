@@ -19,7 +19,7 @@ use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
     ActiveExecution, ActiveKind, BreakpointOwner, ClassifiedStop, Controller, ExpectedStop,
     Inferior, LinuxError, NativeThreadState, PendingSignal, PublicStop, RepairGroup, Resume,
-    SignalGuard, StopBarrier, backend_error, debug_thread_id, exception_info,
+    SignalGuard, StepOwner, StopBarrier, backend_error, debug_thread_id, exception_info,
     pending_exception_info, process_id, scoped_threads, steps_instructions, validate_process,
     validate_public_stop, validate_resumable, validate_stopped_thread,
 };
@@ -102,7 +102,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 stop_id,
                 scope,
                 ActiveKind::Step {
-                    thread: pid,
+                    owner: StepOwner { thread: pid },
                     kind,
                     start: Box::new(start),
                     progress_owed: false,
@@ -343,7 +343,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         match kind {
             ActiveKind::Step {
-                thread,
+                owner: StepOwner { thread },
                 kind,
                 progress_owed,
                 ..
@@ -630,7 +630,9 @@ impl<P: LinuxTraceOps> Controller<P> {
             .active
             .as_ref()
             .and_then(|active| match &active.kind {
-                ActiveKind::Step { thread, kind, .. } if *thread == pid => Some((active.id, *kind)),
+                ActiveKind::Step { owner, kind, .. } if self.runs_step(*owner, pid) => {
+                    Some((active.id, *kind))
+                }
                 _ => None,
             });
         let planned = step.filter(|(execution, _)| {
@@ -1011,11 +1013,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
                 ActiveKind::Step {
-                    thread,
-                    kind,
-                    start,
-                    ..
-                } if *thread == pid => start
+                    owner, kind, start, ..
+                } if self.runs_step(*owner, pid) => start
                     .signal_guard
                     .filter(|guard| guard.address == address)
                     .map(|guard| {

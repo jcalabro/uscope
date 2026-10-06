@@ -170,16 +170,22 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Records that the stepping thread executed an instruction whose
     /// effect on the step is evaluated before the step resumes.
     pub(super) fn note_step_progress(&mut self, pid: Pid) {
-        if let Some(ActiveKind::Step {
-            thread,
-            progress_owed,
-            ..
-        }) = self
+        let owner = self
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .and_then(|active| match active.kind {
+                ActiveKind::Step { owner, .. } => Some(owner),
+                _ => None,
+            });
+        if !owner.is_some_and(|owner| self.runs_step(owner, pid)) {
+            return;
+        }
+        if let Some(ActiveKind::Step { progress_owed, .. }) = self
             .inferior
             .as_mut()
             .and_then(|inferior| inferior.active.as_mut())
             .map(|active| &mut active.kind)
-            && *thread == pid
         {
             *progress_owed = true;
         }

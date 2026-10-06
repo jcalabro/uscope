@@ -284,11 +284,11 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
                 ActiveKind::Step {
-                    thread,
+                    owner,
                     kind: StepKind::OverSource | StepKind::Out,
                     start,
                     ..
-                } if *thread == pid && start.plan_addresses.is_empty() => {
+                } if self.runs_step(*owner, pid) && start.plan_addresses.is_empty() => {
                     start.returned_to.map(|caller| (active.id, caller))
                 }
                 _ => None,
@@ -354,8 +354,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|active| match &active.kind {
                 // A step over begun in code no debug information describes
                 // steps as stepping in does, which follows no frame.
-                ActiveKind::Step { thread, start, .. }
-                    if *thread == pid
+                ActiveKind::Step { owner, start, .. }
+                    if self.runs_step(*owner, pid)
                         && (kind == StepKind::Out || start.code_instance.is_some())
                         && !start.running_on
                         && start.epilogue_traversal.is_none()
@@ -478,11 +478,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
                 ActiveKind::Step {
-                    thread,
-                    start,
-                    kind,
-                    ..
-                } if *thread == pid => Some((
+                    owner, start, kind, ..
+                } if self.runs_step(*owner, pid) => Some((
                     active.id,
                     start.epilogue_traversal.is_some() || start.return_traversal.is_some(),
                     start.source.clone(),
@@ -602,7 +599,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .as_ref()
             .and_then(|inferior| inferior.active.as_ref())
             .and_then(|active| match &active.kind {
-                ActiveKind::Step { thread, start, .. } if *thread == pid => Some((
+                ActiveKind::Step { owner, start, .. } if self.runs_step(*owner, pid) => Some((
                     active.id,
                     start.return_traversal.is_some() || start.epilogue_traversal.is_some(),
                     start.activation,

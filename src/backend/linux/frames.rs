@@ -24,7 +24,7 @@ use super::memory::PtraceMemory;
 use super::native::InspectionOps;
 use super::registers::x86_64_registers;
 use super::{
-    BreakpointOwner, Controller, Inferior, debug_thread_id, validate_image_current,
+    BreakpointOwner, Controller, Inferior, StepOwner, debug_thread_id, validate_image_current,
     validate_public_stop, validate_stopped_thread,
 };
 
@@ -416,6 +416,15 @@ impl<P: InspectionOps> Controller<P> {
             address: selected.instruction,
             image: location,
         })
+    }
+
+    /// Whether a stopped thread is running the step `owner` names.
+    #[expect(
+        clippy::unused_self,
+        reason = "every step is a thread's until a runtime's tasks are known"
+    )]
+    pub(super) fn runs_step(&self, owner: StepOwner, pid: Pid) -> bool {
+        owner.thread == pid
     }
 
     /// How the stack a stopped thread runs on is seen at this stop.
