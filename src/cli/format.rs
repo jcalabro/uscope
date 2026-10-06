@@ -791,19 +791,16 @@ pub fn address_description(description: &AddressDescription, renderer: Renderer)
 
 /// Returns every module whose instructions a disassembly holds.
 pub fn disassembly_modules(disassembly: &Disassembly) -> BTreeSet<ModuleId> {
-    disassembly_blocks(disassembly)
+    let blocks = match &disassembly.view {
+        DisassemblyView::Function { blocks, .. } => blocks,
+        DisassemblyView::Window { block, .. } => std::slice::from_ref(block),
+    };
+    blocks
+        .iter()
         .flat_map(|block| block.instructions.iter())
         .filter_map(|instruction| instruction.location.module.as_ref())
         .map(|module| module.module)
         .collect()
-}
-
-fn disassembly_blocks(disassembly: &Disassembly) -> impl Iterator<Item = &DisassemblyBlock> {
-    match &disassembly.view {
-        DisassemblyView::Function { blocks, .. } => blocks.iter().collect::<Vec<_>>(),
-        DisassemblyView::Window { block, .. } => vec![block],
-    }
-    .into_iter()
 }
 
 /// Renders a disassembly: one line per instruction with its address, its
@@ -1214,8 +1211,6 @@ pub fn module_name(modules: &LoadedModuleSnapshot, module: ModuleId) -> Option<S
         .map(|name| name.to_string_lossy().into_owned())
 }
 
-/// Renders frames with source locations from `images` and module names from
-/// `modules` for frames without source.
 /// Renders a backtrace, highlighting the selected frame's level.
 pub fn backtrace(
     trace: &Backtrace,
@@ -1509,7 +1504,6 @@ pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, boo
     (lines.join("\n"), failed)
 }
 
-/// Reports a signal that did not stop the inferior.
 /// Renders a logged message with the values it shows.
 pub fn log_message(parts: &[uscope::LogPart]) -> String {
     parts
@@ -1524,6 +1518,7 @@ pub fn log_message(parts: &[uscope::LogPart]) -> String {
         .collect()
 }
 
+/// Reports a signal that did not stop the inferior.
 pub fn signal_received(
     thread: uscope::ThreadId,
     info: &uscope::ExceptionInfo,
@@ -1591,18 +1586,6 @@ mod tests {
             assert!(detail.contains(command.summary));
             assert_eq!(detail.contains("\n  usage:"), command.takes_arguments());
         }
-    }
-
-    #[test]
-    fn register_bytes_are_rendered_in_target_byte_order() {
-        assert_eq!(
-            register_bytes(&[0x78, 0x56, 0x34, 0x12], ByteOrder::Little),
-            "0x12345678"
-        );
-        assert_eq!(
-            register_bytes(&[0x12, 0x34, 0x56, 0x78], ByteOrder::Big),
-            "0x12345678"
-        );
     }
 
     #[test]

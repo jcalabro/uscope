@@ -4,7 +4,6 @@ mod cli;
 mod dap;
 
 use std::ffi::OsString;
-use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -147,10 +146,8 @@ fn start_flight_recording() {
 }
 
 async fn async_main() -> ExitCode {
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|command| command == "dap")
-    {
+    let subcommand = std::env::args_os().nth(1);
+    if subcommand.as_ref().is_some_and(|command| command == "dap") {
         let args = dap::DapArgs::parse_from(std::env::args_os().skip(1));
         let code = match dap::run(args).await {
             Ok(()) => 0,
@@ -163,8 +160,8 @@ async fn async_main() -> ExitCode {
         // runtime from shutting down after the client left.
         std::process::exit(code);
     }
-    if std::env::args_os()
-        .nth(1)
+    if subcommand
+        .as_ref()
         .is_some_and(|command| command == "views")
     {
         let args = ViewsArgs::parse_from(std::env::args_os().skip(1));
@@ -183,7 +180,7 @@ async fn async_main() -> ExitCode {
     match run(&args, renderers).await {
         Ok(()) => ExitCode::SUCCESS,
         // A closed stdout pipe, such as `uscope ... | head`, is a normal end.
-        Err(error) if is_broken_pipe(&error) => ExitCode::SUCCESS,
+        Err(error) if cli::is_broken_pipe(&error) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!(
                 "{}: {error:#}",
@@ -328,7 +325,7 @@ async fn run_views(args: ViewsArgs) -> Result<bool> {
     };
     let debugger = Debugger::new(program)
         .with_context(|| format!("failed to initialize debugger for {}", program.display()))?;
-    let renderers = Renderers::detect(cli::terminal::ColorChoice::Auto, true);
+    let renderers = Renderers::detect(ColorChoice::Auto, true);
     let console = Cli::new(
         debugger.handle(),
         renderers,
@@ -336,23 +333,9 @@ async fn run_views(args: ViewsArgs) -> Result<bool> {
         LaunchSettings::default(),
     );
     let working_directory = std::env::current_dir().unwrap_or_default();
-    let mut warnings = console.load_view_sources(&working_directory, views).await;
-    warnings.extend(
-        debugger
-            .handle()
-            .module_image()
-            .view_errors()
-            .iter()
-            .map(ToString::to_string),
-    );
-    for warning in &warnings {
-        eprintln!(
-            "{}: views: {warning}",
-            renderers.stderr.paint(Role::Warning, "warning")
-        );
-    }
     // A file that could not be used fails either command, as a view that
     // binds nothing fails a check.
+    let usable = console.load_views(&working_directory, views).await;
     let handle = debugger.handle();
     let reported: Result<bool> = async {
         Ok(match &args.command {
@@ -380,7 +363,7 @@ async fn run_views(args: ViewsArgs) -> Result<bool> {
         .context("failed to shut down the debugger");
     let succeeded = reported?;
     shutdown?;
-    Ok(succeeded && warnings.is_empty())
+    Ok(succeeded && usable)
 }
 
 async fn open_debugger(args: &Args) -> Result<Debugger> {
@@ -413,11 +396,4 @@ async fn open_debugger(args: &Args) -> Result<Debugger> {
         .expect("clap requires an executable unless --attach or --core is present");
     Debugger::new(executable)
         .with_context(|| format!("failed to initialize debugger for {}", executable.display()))
-}
-
-fn is_broken_pipe(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .filter_map(|cause| cause.downcast_ref::<io::Error>())
-        .any(|cause| cause.kind() == io::ErrorKind::BrokenPipe)
 }

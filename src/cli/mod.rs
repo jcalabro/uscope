@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::ValueEnum;
 use tokio::io::{AsyncBufReadExt as _, BufReader};
-use uscope::{AssemblySyntax, DebuggerEvent, DebuggerHandle, Error, LaunchOptions, StopReason};
+use uscope::{AssemblySyntax, DebuggerHandle, Error, LaunchOptions, StopReason};
 
 use crate::Args;
 use terminal::{
@@ -183,6 +183,24 @@ impl Cli {
         warnings
     }
 
+    /// Loads view files as [`Self::load_view_sources`] does and warns about
+    /// each file or view that cannot be used, the program's own included.
+    /// Returns whether every one could be used.
+    pub async fn load_views(&self, working_directory: &std::path::Path, paths: &[PathBuf]) -> bool {
+        let mut warnings = self.load_view_sources(working_directory, paths).await;
+        warnings.extend(
+            self.debugger
+                .module_image()
+                .view_errors()
+                .iter()
+                .map(ToString::to_string),
+        );
+        for warning in &warnings {
+            self.warn(&format!("views: {warning}"));
+        }
+        warnings.is_empty()
+    }
+
     /// Presents values with the session's view files and the kernels beside
     /// them, and returns what kept parts of them out.
     async fn reload_views(&self) -> Vec<String> {
@@ -245,22 +263,7 @@ impl Cli {
             .working_directory
             .clone()
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        for warning in self
-            .load_view_sources(&working_directory, &args.views)
-            .await
-            .iter()
-            .chain(
-                self.debugger
-                    .module_image()
-                    .view_errors()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .iter(),
-            )
-        {
-            self.warn(&format!("views: {warning}"));
-        }
+        self.load_views(&working_directory, &args.views).await;
 
         for path in &args.command_files {
             let contents = fs::read_to_string(path)
@@ -395,58 +398,6 @@ impl Cli {
         }
     }
 
-    /// Waits for an execution request, prefixing its result with a line
-    /// for each signal the inferior received without stopping.
-    async fn report_signals(
-        &self,
-        execution: impl std::future::Future<Output = uscope::Result<StopReason>>,
-    ) -> Result<(String, StopReason)> {
-        let mut events = self.debugger.subscribe();
-        let mut lines = Vec::new();
-        let mut loaded = Vec::new();
-        let renderer = self.renderers.stdout;
-        let mut record = |event: Result<DebuggerEvent, _>| match event {
-            Ok(DebuggerEvent::ModuleLoaded { module, .. }) => loaded.push(module.module.id),
-            Ok(DebuggerEvent::SignalReceived {
-                thread_id,
-                exception,
-                ..
-            }) => lines.push(format::signal_received(thread_id, &exception, renderer)),
-            Ok(DebuggerEvent::LogMessage { parts, .. }) => lines.push(format::log_message(&parts)),
-            Ok(DebuggerEvent::ConditionFailed {
-                breakpoint, error, ..
-            }) => lines.push(format!(
-                "{}: the condition of breakpoint {} could not be evaluated: {error}",
-                renderer.paint(Role::Warning, "warning"),
-                renderer.paint(Role::Metadata, breakpoint)
-            )),
-            _ => {}
-        };
-        tokio::pin!(execution);
-        let reason = loop {
-            tokio::select! {
-                biased;
-                event = events.recv() => record(event),
-                reason = &mut execution => break reason?,
-            }
-        };
-        while let Ok(event) = events.try_recv() {
-            record(Ok(event));
-        }
-        // What kept a library's own views out, once, when it loads.
-        for module in loaded {
-            if let Ok(image) = self.debugger.loaded_module_image(module).await {
-                lines.extend(image.view_errors().iter().map(|error| {
-                    format!(
-                        "{}: views: {error}",
-                        renderer.paint(Role::Warning, "warning")
-                    )
-                }));
-            }
-        }
-        Ok((lines.join("\n"), reason))
-    }
-
     fn report_error(&self, error: &anyhow::Error) {
         eprintln!(
             "{}: {error:#}",
@@ -470,7 +421,7 @@ fn emit(text: &str) -> io::Result<()> {
     stdout.flush()
 }
 
-fn is_broken_pipe(error: &anyhow::Error) -> bool {
+pub fn is_broken_pipe(error: &anyhow::Error) -> bool {
     error
         .chain()
         .filter_map(|cause| cause.downcast_ref::<io::Error>())
