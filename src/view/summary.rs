@@ -174,9 +174,9 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
     let partless = matches!(children, ValueChildren::Available(parts) if parts.total() == 0);
     let rendered = match value {
         VariableValue::Scalar(value) => scalar(value, character),
-        VariableValue::Enumeration { value, matches } => matches
-            .first()
-            .map_or_else(|| integer(*value), |enumerator| enumerator.name.to_string()),
+        VariableValue::Enumeration { value, matches } => {
+            symbol(*value, matches).unwrap_or_else(|| integer(*value))
+        }
         VariableValue::Address(address) => format!("{:#x}", address.address.get()),
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
         VariableValue::Function { code, function } => self::function(*code, function.as_deref()),
@@ -197,6 +197,24 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
         (Some(text), VariableValue::Address(_)) => format!("{rendered} {}", quoted(text)),
         _ => rendered,
     }
+}
+
+/// The name an enumeration-like value has: its first exact constant's, or
+/// the flag constants it combines, joined by `|`.
+#[must_use]
+pub fn symbol(value: IntegerValue, matches: &[crate::Enumerator]) -> Option<String> {
+    if matches.iter().any(|enumerator| enumerator.value == value) {
+        return matches
+            .first()
+            .map(|enumerator| enumerator.name.to_string());
+    }
+    (!matches.is_empty()).then(|| {
+        matches
+            .iter()
+            .map(|enumerator| enumerator.name.as_ref())
+            .collect::<Vec<_>>()
+            .join("|")
+    })
 }
 
 /// A function value: the function it calls, `nil`, or the address of

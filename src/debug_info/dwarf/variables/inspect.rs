@@ -313,6 +313,59 @@ pub(super) fn static_member_layout_is_valid(
     }
 }
 
+/// An integer of an enumeration-like type: symbolic when it is one of the
+/// type's constants, or, for constants Go gave a named type, the bitwise
+/// OR of some of its single-bit constants, as Delve reads them; a
+/// language's enumeration stays symbolic with no name, and anything else
+/// is its number, so `time.Duration(1500000000)` names no constant.
+fn symbolic(
+    value: IntegerValue,
+    enumerators: &[crate::Enumerator],
+    origin: crate::EnumerationOrigin,
+    byte_size: u64,
+) -> VariableValue {
+    let exact = enumerators
+        .iter()
+        .filter(|enumerator| enumerator.value == value)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !exact.is_empty() || origin == crate::EnumerationOrigin::Language {
+        return VariableValue::Enumeration {
+            value,
+            matches: exact.into(),
+        };
+    }
+    // Bit patterns in the type's width, where a signed type's lowest
+    // value is one bit.
+    let mask = u32::try_from(byte_size.saturating_mul(8))
+        .ok()
+        .and_then(|bits| 1_u128.checked_shl(bits))
+        .map_or(u128::MAX, |limit| limit - 1);
+    let bits = |value: IntegerValue| match value {
+        IntegerValue::Signed(value) => value.cast_unsigned() & mask,
+        IntegerValue::Unsigned(value) => value & mask,
+    };
+    let mut remaining = bits(value);
+    let mut flags = Vec::new();
+    for enumerator in enumerators {
+        let flag = bits(enumerator.value);
+        if flag.is_power_of_two() && remaining & flag != 0 {
+            remaining &= !flag;
+            flags.push(enumerator.clone());
+        }
+    }
+    if remaining == 0 && !flags.is_empty() {
+        return VariableValue::Enumeration {
+            value,
+            matches: flags.into(),
+        };
+    }
+    VariableValue::Scalar(match value {
+        IntegerValue::Signed(value) => ScalarValue::Signed(value),
+        IntegerValue::Unsigned(value) => ScalarValue::Unsigned(value),
+    })
+}
+
 impl DwarfVariableInfo {
     /// Classifies an object's storage from the operations of its location
     /// expressions. Thread-local and indirect forms dominate frame-relative
@@ -1987,22 +2040,13 @@ impl DwarfVariableInfo {
                 representation,
                 enumerators,
                 byte_size,
+                origin,
             } => match read(*byte_size, runtime, budget) {
                 Ok((source, raw)) => {
                     match decode_integer_value(representation, &raw, self.target.byte_order) {
                         Ok(value) => {
-                            let matches = enumerators
-                                .iter()
-                                .filter(|enumerator| enumerator.value == value)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .into();
-                            leaf(
-                                source,
-                                raw,
-                                VariableValue::Enumeration { value, matches },
-                                DereferenceState::NotApplicable,
-                            )
+                            let value = symbolic(value, enumerators, *origin, *byte_size);
+                            leaf(source, raw, value, DereferenceState::NotApplicable)
                         }
                         Err(description) => VariableState::Malformed(malformed_reason(
                             VariableMalformedKind::InvalidTypeGraph,

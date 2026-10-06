@@ -9,7 +9,9 @@
 // Kind `summary` is how uscope writes the value, `absent` says the
 // variable must not be listed, `addressable` that it is in memory, and
 // `result` that it is listed as one of the function's results, and
-// `hidden` that it is not listed but its name reaches it.
+// `hidden` that it is not listed but its name reaches it. Kind `symbol`
+// is the constants an integer's value names, and `number` an integer
+// that names none.
 package main
 
 import (
@@ -19,6 +21,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"time"
 )
 
 var sink any
@@ -167,6 +170,36 @@ func temporaries(values []int) int {
 	return total
 }
 
+// Permission's constants are flags, which a value may combine.
+type Permission uint32
+
+const (
+	Read Permission = 1 << iota
+	Write
+	Execute
+)
+
+// constants holds values of types Go gives constants: one is a
+// constant, one combines flags, and the others are numbers no constant
+// names.
+//
+//go:noinline
+func constants() {
+	timeout := 1500 * time.Millisecond
+	second := time.Second
+	both := Read | Write
+	stray := Permission(8)
+	truth("constants", "timeout", "number", int64(timeout))
+	truth("constants", "second", "symbol", "time.Second")
+	truth("constants", "both", "symbol", "main.Read|main.Write")
+	truth("constants", "stray", "number", uint32(stray))
+	reached("constants")
+	runtime.KeepAlive(timeout)
+	runtime.KeepAlive(second)
+	runtime.KeepAlive(both)
+	runtime.KeepAlive(stray)
+}
+
 // Point is passed in two registers.
 type Point struct{ X, Y int }
 
@@ -194,6 +227,7 @@ func main() {
 	if temporaries([]int{1, 2, 3}) != 6 {
 		os.Exit(1)
 	}
+	constants()
 	text := "pieces"
 	numbers := []int{4, 5, 6}
 	truth("pieces", "text", "string", fmt.Sprintf("%q", text))
