@@ -248,6 +248,8 @@ fn load_debug_info(
                 globals: variables.globals,
                 types: variables.types,
                 vtables: variables.vtables,
+                constants: variables.constants,
+                producers: unit_producers(&dwarf, &catalog)?,
                 source_files,
                 statements,
                 lines,
@@ -278,6 +280,26 @@ fn embedded_views(
         .file_name()
         .map_or_else(|| "module".into(), |name| name.to_string_lossy());
     Ok(Arc::new(crate::view::embedded::view_set(&module, &bytes)))
+}
+
+/// The distinct producers the units name, in the order first named.
+fn unit_producers<'data>(
+    dwarf: &gimli::Dwarf<Reader<'data>>,
+    catalog: &UnitCatalog<'data>,
+) -> std::result::Result<Vec<Arc<str>>, DwarfError> {
+    let mut producers = Vec::<Arc<str>>::new();
+    for unit in &catalog.units {
+        let mut entries = unit.entries();
+        let Some(root) = entries.next_dfs()? else {
+            continue;
+        };
+        if let Some(producer) = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?
+            && !producers.contains(&producer)
+        {
+            producers.push(producer);
+        }
+    }
+    Ok(producers)
 }
 
 /// Returns the code ranges of every unit written in Go, merged and sorted

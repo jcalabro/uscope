@@ -271,6 +271,27 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
     }
 
     let go = &images["variables-go-o0"];
+    // Untyped and typed constants alike keep their names and values, which
+    // the runtime model binds to.
+    assert_eq!(
+        go.constant("runtime._Grunning"),
+        Some(uscope::IntegerValue::Signed(2))
+    );
+    assert!(
+        go.constant("runtime.waitReasonChanReceive").is_some(),
+        "typed constants are named too"
+    );
+    assert!(
+        go.producers()
+            .iter()
+            .any(|producer| producer.starts_with("Go cmd/compile go1.27.")),
+        "{:?}",
+        go.producers()
+    );
+    assert_eq!(
+        images["variables-gcc-o0"].constant("runtime._Grunning"),
+        None
+    );
     assert!(
         go.types().iter().any(|node| matches!(
             node,
