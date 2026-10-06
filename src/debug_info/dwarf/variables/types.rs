@@ -4,9 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::debug_info::dwarf::{
-    DieKey, DwarfError, Reader, TypeSignatures, die_reference_with_signatures,
-};
+use crate::debug_info::dwarf::{DieKey, Reader, TypeSignatures, die_reference_with_signatures};
 use crate::model::ArrayDimension;
 use crate::{
     Accessibility, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, ByteOrder,
@@ -18,17 +16,19 @@ use crate::{
 
 use super::codec::enumeration_constant;
 use super::die::{
-    ByteSize, UnsignedConstant, array_bound, base_type_encoding, byte_size_attribute,
-    constant_member_offset, copy_name, copy_name_with_origins, declaration_with_origins,
-    index_type_is_signed, origin_chain, strict_flag, unsigned_constant,
+    ByteSize, DW_AT_ZIG_PARENT, UnsignedConstant, array_bound, base_type_encoding,
+    byte_size_attribute, constant_member_offset, copy_name, declaration_with_origins,
+    index_type_is_signed, origin_chain, strict_flag, string_with_origins, type_with_origins,
+    unsigned_constant, zig_qualified_name,
 };
 use super::identity::{
-    IdentityParts, ScopePath, ScopeSegment, inline_namespace_path, scope_segment, source_language,
+    IdentityParts, ScopePath, ScopeSegment, go_embedded, inline_namespace_path, scope_segment,
+    source_language,
 };
 use super::location::{Expression, copy_expression};
 use super::variant::{
     VariantMetadataBudget, VariantMetadataError, copy_variant_selection,
-    validate_variant_selections, variant_metadata_limit_type,
+    validate_variant_selections,
 };
 use super::{MAX_RECORD_CHILDREN, MAX_SYMBOLIC_NAMES, MAX_TYPE_RESOLUTION_DEPTH, MAX_TYPES};
 
@@ -54,9 +54,8 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) type_definitions: HashMap<DieKey, DieKey>,
     pub(super) ambiguous_type_declarations: HashSet<DieKey>,
     pub(super) entries: Vec<TypeEntry>,
-    /// DIE-boundary offsets per unit, indexed by unit position. A `DW_AT_type`
-    /// offset that is not in its unit's set points into the middle of a DIE and
-    /// is defective. Built once so target validation stays O(1) per reference.
+    /// Each unit's DIE offsets. A reference to any other offset points into
+    /// the middle of a DIE, whose bytes could decode as convincing nonsense.
     pub(super) die_offsets: Vec<HashSet<usize>>,
     pub(super) unit_languages: Vec<Option<gimli::DwLang>>,
     pub(super) zig_units: Vec<bool>,
@@ -115,7 +114,7 @@ pub(super) enum DynamicAggregateChild {
 /// nested type, static member, or template parameter, rather than bytes of
 /// an instance. Any type may be declared in a scope: GCC nests the
 /// qualified types a class's methods use in the class.
-pub(super) const fn is_scope_only_child(tag: gimli::DwTag) -> bool {
+const fn is_scope_only_child(tag: gimli::DwTag) -> bool {
     is_type_die_tag(tag)
         || matches!(
             tag,
@@ -321,10 +320,52 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         unit_index: usize,
         value: Option<gimli::AttributeValue<Reader<'data>>>,
     ) {
-        if let Ok(Some(key)) =
+        let _ = self.type_reference(unit_index, value);
+    }
+
+    /// Builds the type an attribute of a DIE in unit `unit_index` refers to.
+    fn type_reference(
+        &mut self,
+        unit_index: usize,
+        value: Option<gimli::AttributeValue<Reader<'data>>>,
+    ) -> std::result::Result<Option<TypeReference>, Arc<str>> {
+        let key =
             die_reference_with_signatures(value, unit_index, self.units, self.type_signatures)
-        {
-            self.resolve(key);
+                .map_err(malformed)?;
+        Ok(key.map(|key| TypeReference {
+            image: self.image,
+            id: self.resolve(key),
+        }))
+    }
+
+    /// The direct children of the DIE at `offset` in unit `unit_index`.
+    pub(super) fn children(
+        &self,
+        unit_index: usize,
+        offset: gimli::UnitOffset,
+    ) -> std::result::Result<Children<'a, 'data>, Arc<str>> {
+        let units: &'a [gimli::Unit<Reader<'data>>] = self.units;
+        let unit = units.get(unit_index).ok_or("DIE unit is unavailable")?;
+        Ok(Children {
+            cursor: unit.entries_at_offset(offset).map_err(malformed)?,
+            started: false,
+            done: false,
+        })
+    }
+
+    fn is_zig(&self, unit_index: usize) -> bool {
+        self.zig_units.get(unit_index).copied().unwrap_or(false)
+    }
+
+    fn next_id(&self) -> TypeId {
+        TypeId::new(u32::try_from(self.entries.len()).expect("bounded type count fits u32"))
+    }
+
+    /// The byte size of a built type, if it has one.
+    fn byte_size_of(&self, id: TypeId) -> Option<u64> {
+        match self.entries.get(id.index())? {
+            TypeEntry::Resolved(info) => info.byte_size,
+            TypeEntry::Building | TypeEntry::Malformed(_) => None,
         }
     }
 
@@ -332,49 +373,41 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         if let Some(id) = self.by_die.get(&key) {
             return *id;
         }
-        match self.canonical_type_key(key) {
-            Ok(canonical) if canonical != key => {
-                let id = self.resolve(canonical);
-                self.by_die.insert(key, id);
-                return id;
-            }
-            Ok(_) => {}
-            Err(reason) => {
-                if self.entries.len() >= MAX_TYPES {
-                    return self.type_limit(key);
-                }
-                let id = TypeId::new(
-                    u32::try_from(self.entries.len()).expect("bounded type count fits u32"),
-                );
-                self.by_die.insert(key, id);
-                self.entries.push(TypeEntry::Malformed(reason));
-                return id;
-            }
+        let canonical = self.canonical_type_key(key);
+        if let Ok(canonical) = canonical
+            && canonical != key
+        {
+            let id = self.resolve(canonical);
+            self.by_die.insert(key, id);
+            return id;
         }
         if self.entries.len() >= MAX_TYPES {
             return self.type_limit(key);
         }
-        let id =
-            TypeId::new(u32::try_from(self.entries.len()).expect("bounded type count fits u32"));
+        let id = self.next_id();
         self.by_die.insert(key, id);
         self.entries.push(TypeEntry::Building);
-        if self.resolution_depth >= MAX_TYPE_RESOLUTION_DEPTH {
-            self.entries[id.index()] =
-                TypeEntry::Malformed("type wrapper depth exceeds its limit".into());
-            return id;
-        }
-        self.resolution_depth += 1;
-        let entry = self.build(key, id);
-        self.resolution_depth -= 1;
+        let entry = match canonical {
+            Err(reason) => TypeEntry::Malformed(reason),
+            Ok(_) if self.resolution_depth >= MAX_TYPE_RESOLUTION_DEPTH => {
+                TypeEntry::Malformed("type wrapper depth exceeds its limit".into())
+            }
+            Ok(_) => {
+                self.resolution_depth += 1;
+                let entry = self.build(key, id).unwrap_or_else(TypeEntry::Malformed);
+                self.resolution_depth -= 1;
+                entry
+            }
+        };
         self.entries[id.index()] = entry;
         id
     }
 
-    pub(super) fn type_limit(&mut self, key: DieKey) -> TypeId {
+    fn type_limit(&mut self, key: DieKey) -> TypeId {
         let id = if let Some(id) = self.limit_type {
             id
         } else {
-            let id = TypeId::new(u32::try_from(self.entries.len()).expect("type count fits u32"));
+            let id = self.next_id();
             self.entries.push(TypeEntry::Malformed(
                 "type graph exceeds its work limit".into(),
             ));
@@ -388,27 +421,23 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     /// Returns `void`. Producers omit `DW_AT_type` to mean it, so a
     /// `const void` or `typedef void T` has no target DIE to resolve.
     pub(super) fn void_type(&mut self) -> TypeReference {
-        let id = *self.void_type.get_or_insert_with(|| {
-            let id = TypeId::new(u32::try_from(self.entries.len()).expect("type count fits u32"));
-            self.entries.push(TypeEntry::Resolved(TypeInfo {
-                reference: TypeReference {
-                    image: self.image,
-                    id,
-                },
-                name: "void".into(),
-                byte_size: None,
-                kind: TypeKind::Unspecified,
-                identity: None,
-            }));
-            id
-        });
-        TypeReference {
+        let reference = TypeReference {
             image: self.image,
-            id,
+            id: self.void_type.unwrap_or_else(|| self.next_id()),
+        };
+        if self.void_type.is_none() {
+            self.entries.push(resolved(
+                reference,
+                "void".into(),
+                None,
+                TypeKind::Unspecified,
+            ));
+            self.void_type = Some(reference.id);
         }
+        reference
     }
 
-    pub(super) fn canonical_type_key(&self, key: DieKey) -> std::result::Result<DieKey, Arc<str>> {
+    fn canonical_type_key(&self, key: DieKey) -> std::result::Result<DieKey, Arc<str>> {
         let mut current = key;
         let mut visited = HashSet::new();
         while visited.insert(current) {
@@ -451,84 +480,50 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         Err("type declaration/definition references form a cycle".into())
     }
 
-    pub(super) fn build(&mut self, key: DieKey, id: TypeId) -> TypeEntry {
-        let Some(unit) = self.units.get(key.unit) else {
-            return TypeEntry::Malformed("type reference is outside loaded units".into());
-        };
-        // The offset must be a DIE boundary, not merely a byte offset that
-        // happens to decode; otherwise a dangling reference could construct
-        // convincing metadata from unrelated bytes. Every type resolution funnels
-        // through here, so validating once covers direct references, pointer
-        // targets, and wrapper chains alike.
-        if !self
-            .die_offsets
+    /// Builds the type at a DIE that [`Self::canonical_type_key`] validated
+    /// as a type DIE.
+    fn build(&mut self, key: DieKey, id: TypeId) -> Built {
+        let units: &'a [gimli::Unit<Reader<'data>>] = self.units;
+        let unit = units
             .get(key.unit)
-            .is_some_and(|offsets| offsets.contains(&key.offset))
-        {
-            return TypeEntry::Malformed("type reference does not identify a DIE".into());
-        }
-        let entry = match unit.entry(gimli::UnitOffset(key.offset)) {
-            Ok(entry) => entry,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
-        // A `DW_AT_type` edge must name a type DIE. Reject a non-type target
-        // before any attribute classification, so an oversized/dynamic size does
-        // not mask the defect as a convincing unsupported type.
-        if !is_type_die_tag(entry.tag()) {
-            return TypeEntry::Malformed(
-                format!("DW_AT_type target has non-type tag {:?}", entry.tag()).into(),
-            );
-        }
+            .ok_or("type reference is outside loaded units")?;
+        let entry = unit
+            .entry(gimli::UnitOffset(key.offset))
+            .map_err(malformed)?;
         let reference = TypeReference {
             image: self.image,
             id,
         };
-        let origins = match origin_chain(self.units, key.unit, &entry) {
-            Ok(origins) => origins,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
+        let origins = origin_chain(units, key.unit, &entry).map_err(malformed)?;
         let explicit_name =
-            match copy_name_with_origins(self.dwarf, self.units, unit, &entry, &origins) {
-                Ok(name) => name,
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-            };
+            string_with_origins(self.dwarf, units, unit, &entry, &origins, gimli::DW_AT_name)
+                .map_err(malformed)?;
         // Self-hosted Zig names a type declared in another by its own name,
         // and says which one it is in.
         let explicit_name = match explicit_name {
-            Some(name)
-                if self.zig_units.get(key.unit).copied().unwrap_or(false)
-                    && entry.attr_value(super::die::DW_AT_ZIG_PARENT).is_some() =>
-            {
-                match super::die::zig_qualified_name(self.dwarf, self.units, key.unit, &entry, name)
-                {
-                    Ok(name) => Some(name),
-                    Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                }
+            Some(name) if self.is_zig(key.unit) && entry.attr_value(DW_AT_ZIG_PARENT).is_some() => {
+                Some(
+                    zig_qualified_name(self.dwarf, units, key.unit, &entry, name)
+                        .map_err(malformed)?,
+                )
             }
             name => name,
         };
         if explicit_name.is_some() {
             self.explicit_names.insert(id);
         }
-        // Validate the tag's mandatory attributes before classifying the byte
-        // size. A dynamic or oversized size returns a terminal entry early, so
-        // without this a defective encoding or missing target would be masked as
-        // a convincing resolved type.
+        // Validate the tag's mandatory attributes first: an unusable size
+        // returns an opaque type early, which must not mask a defect.
         if let Some(defect) = self.mandatory_attribute_defect(&entry, key.unit) {
-            return TypeEntry::Malformed(defect);
+            return Err(defect);
         }
-        // An absent address class defaults to zero. A present attribute that is
-        // an oversized constant is valid but uninterpretable here; any other
-        // non-constant form is defective. Silently treating either as the
-        // default class could produce a convincing read using semantics the
-        // producer never specified.
         let address_class = match resolve_address_class(&entry, reference, explicit_name.clone()) {
             Ok(address_class) => address_class,
-            Err(resolved) => return *resolved,
+            Err(entry) => return Ok(*entry),
         };
         let explicit_size = match resolve_explicit_size(&entry, reference, explicit_name.clone()) {
             Ok(size) => size,
-            Err(resolved) => return *resolved,
+            Err(entry) => return Ok(*entry),
         };
         let pointer_size = explicit_size
             .or_else(|| (address_class == 0).then_some(u64::from(unit.encoding().address_size)));
@@ -538,18 +533,16 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         } else {
             None
         };
-
-        let built = if let Some(layout) = slice_layout {
-            self.build_slice_type(
+        let built = match slice_layout {
+            Some(layout) => self.build_slice_type(
                 &entry,
                 key.unit,
                 reference,
                 explicit_name,
                 explicit_size,
                 layout,
-            )
-        } else {
-            self.build_kind(
+            ),
+            None => self.build_kind(
                 &entry,
                 key.unit,
                 reference,
@@ -557,12 +550,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 explicit_size,
                 pointer_size,
                 address_class,
-            )
-        };
+            ),
+        }?;
         if named && matches!(built, TypeEntry::Resolved(_)) {
             self.record_identity_parts(&entry, key, id);
         }
-        built
+        Ok(built)
     }
 
     /// Builds a type by its tag.
@@ -579,25 +572,21 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_size: Option<u64>,
         pointer_size: Option<u64>,
         address_class: u64,
-    ) -> TypeEntry {
-        let key = DieKey {
-            unit: unit_index,
-            offset: entry.offset().0,
-        };
+    ) -> Built {
         match entry.tag() {
             gimli::DW_TAG_base_type => {
                 Self::build_base_type(entry, reference, explicit_name, explicit_size)
             }
             gimli::DW_TAG_enumeration_type => self.build_enumeration_type(
                 entry,
-                key.unit,
+                unit_index,
                 reference,
                 explicit_name,
                 explicit_size,
             ),
             gimli::DW_TAG_pointer_type => self.build_pointer_type(
                 entry,
-                key.unit,
+                unit_index,
                 reference,
                 explicit_name,
                 pointer_size,
@@ -606,20 +595,20 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             gimli::DW_TAG_reference_type | gimli::DW_TAG_rvalue_reference_type => self
                 .build_reference_type(
                     entry,
-                    key.unit,
+                    unit_index,
                     reference,
                     explicit_name,
                     pointer_size,
                     address_class,
                 ),
             gimli::DW_TAG_array_type => {
-                self.build_array_type(entry, key.unit, reference, explicit_name, explicit_size)
+                self.build_array_type(entry, unit_index, reference, explicit_name, explicit_size)
             }
             gimli::DW_TAG_structure_type | gimli::DW_TAG_class_type => {
-                self.build_record_type(entry, key.unit, reference, explicit_name, explicit_size)
+                self.build_record_type(entry, unit_index, reference, explicit_name, explicit_size)
             }
             gimli::DW_TAG_union_type => {
-                self.build_union_type(entry, key.unit, reference, explicit_name, explicit_size)
+                self.build_union_type(entry, unit_index, reference, explicit_name, explicit_size)
             }
             gimli::DW_TAG_typedef
             | gimli::DW_TAG_template_alias
@@ -630,31 +619,25 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             | gimli::DW_TAG_immutable_type
             | gimli::DW_TAG_packed_type
             | gimli::DW_TAG_shared_type => {
-                self.build_wrapper_type(entry, key.unit, reference, explicit_name, explicit_size)
+                self.build_wrapper_type(entry, unit_index, reference, explicit_name, explicit_size)
             }
-            gimli::DW_TAG_unspecified_type => TypeEntry::Resolved(TypeInfo {
+            gimli::DW_TAG_unspecified_type => Ok(resolved(
                 reference,
-                name: explicit_name.unwrap_or_else(|| Arc::from("void")),
-                byte_size: explicit_size,
-                kind: TypeKind::Unspecified,
-                identity: None,
-            }),
-            // A non-type tag was already rejected at the top of `build`, so any
-            // remaining tag is a type this backend does not model; surface it as
-            // opaque rather than defective.
-            tag => TypeEntry::Resolved(TypeInfo {
+                explicit_name.unwrap_or_else(|| Arc::from("void")),
+                explicit_size,
+                TypeKind::Unspecified,
+            )),
+            // A type this backend does not model is opaque, not defective.
+            tag => Ok(opaque(
                 reference,
-                name: explicit_name.unwrap_or_else(|| Arc::from(format!("{tag:?}"))),
-                byte_size: explicit_size,
-                kind: TypeKind::Opaque {
-                    description: format!("type tag {tag:?} is unsupported").into(),
-                },
-                identity: None,
-            }),
+                explicit_name.unwrap_or_else(|| Arc::from(format!("{tag:?}"))),
+                explicit_size,
+                format!("type tag {tag:?} is unsupported"),
+            )),
         }
     }
 
-    pub(super) fn record_accessibility(
+    fn record_accessibility(
         entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
         record_kind: RecordKind,
     ) -> std::result::Result<Accessibility, Arc<str>> {
@@ -680,7 +663,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
-    pub(super) fn record_byte_layout(
+    fn record_byte_layout(
         entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     ) -> RecordMemberLayout {
         entry
@@ -689,11 +672,8 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             .map_or(RecordMemberLayout::Runtime, RecordMemberLayout::ByteOffset)
     }
 
-    /// Reports a defect in a tag's mandatory attributes, independent of the byte
-    /// size. Validating these before the size classification ensures a dynamic
-    /// or oversized size cannot mask a missing encoding or target. Returns `None`
-    /// when the tag's required attributes are present and well-formed.
-    pub(super) fn mandatory_attribute_defect(
+    /// A defect in the attributes a type's tag requires.
+    fn mandatory_attribute_defect(
         &self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
@@ -729,19 +709,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             | gimli::DW_TAG_shared_type => {
                 self.target_defect(entry, unit_index, "type", TargetRequirement::Required)
             }
-            // A pointer or other type DIE may carry an optional `DW_AT_type`
-            // (e.g. `void *`). If present, it must still name a real type DIE; a
-            // dangling or non-type target is a defect even though absence is fine.
+            // A pointer's target is optional (`void *`), but must be a type.
             _ => self.target_defect(entry, unit_index, "type", TargetRequirement::Optional),
         }
     }
 
-    /// Reports a defect in a `DW_AT_type` target. Verifying the target here,
-    /// before size classification can early-return an opaque entry, prevents a
-    /// dangling or non-type edge from being masked as a convincing unsupported
-    /// type. A `Required` target must be present; an `Optional` one may be absent
-    /// but, when present, must still name a real type DIE.
-    pub(super) fn target_defect(
+    /// A defect in a `DW_AT_type` target: absent though required, or not a
+    /// type DIE.
+    fn target_defect(
         &self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
@@ -755,9 +730,6 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             self.type_signatures,
         ) {
             Ok(Some(key)) => {
-                // The offset must be a DIE boundary, not merely a byte offset
-                // that happens to decode; otherwise a dangling reference could
-                // construct convincing metadata from unrelated bytes.
                 let target = self
                     .die_offsets
                     .get(key.unit)
@@ -780,67 +752,55 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
-    pub(super) fn build_base_type(
+    fn build_base_type(
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         reference: TypeReference,
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
-    ) -> TypeEntry {
+    ) -> Built {
         let name = explicit_name.unwrap_or_else(|| Arc::from("<unnamed base type>"));
-        let Some(byte_size) = explicit_size else {
-            return TypeEntry::Malformed("base type has no byte size".into());
-        };
+        let byte_size = explicit_size.ok_or("base type has no byte size")?;
         if byte_size == 0 {
-            // Zig models its storage-less `void` payload as a zero-byte signed
-            // base type. It is not a scalar and must not poison a containing
-            // aggregate, so normalize that compiler representation to the
-            // platform-neutral unspecified type.
-            if name.as_ref() == "void" {
-                return TypeEntry::Resolved(TypeInfo {
-                    reference,
-                    name,
-                    byte_size: Some(0),
-                    kind: TypeKind::Unspecified,
-                    identity: None,
-                });
-            }
-            // Any other zero-byte base type, such as Rust's unit type `()`,
-            // has no bits to decode, whatever its encoding: it holds nothing,
-            // as an empty structure does, so normalize it to one.
-            return TypeEntry::Resolved(TypeInfo {
-                reference,
-                name,
-                byte_size: Some(0),
-                kind: TypeKind::Record {
+            // Zig's storage-less `void` payload and Rust's unit type `()` are
+            // zero-byte base types with no bits to decode, whatever their
+            // encoding: `void` is unspecified, and the others hold nothing,
+            // as an empty structure does.
+            let kind = if name.as_ref() == "void" {
+                TypeKind::Unspecified
+            } else {
+                TypeKind::Record {
                     kind: RecordKind::Struct,
                     members: Arc::from([]),
                     bases: Arc::from([]),
                     incomplete: false,
-                },
-                identity: None,
-            });
+                }
+            };
+            return Ok(resolved(reference, name, Some(0), kind));
         }
-        let raw_encoding = match base_type_encoding(entry) {
-            Ok(raw_encoding) => raw_encoding,
-            Err(reason) => return TypeEntry::Malformed(reason),
+        let raw_encoding = gimli::DwAte(base_type_encoding(entry)?);
+        let Some(encoding) = integer_encoding(raw_encoding).or_else(|| {
+            (raw_encoding == gimli::DW_ATE_float).then_some(BaseTypeEncoding::Floating)
+        }) else {
+            return Ok(opaque(
+                reference,
+                name,
+                Some(byte_size),
+                format!("base type encoding {raw_encoding:?} is unsupported"),
+            ));
         };
-        let encoding = match gimli::DwAte(raw_encoding) {
-            gimli::DW_ATE_boolean => BaseTypeEncoding::Boolean,
-            gimli::DW_ATE_signed => BaseTypeEncoding::Signed,
-            gimli::DW_ATE_signed_char => BaseTypeEncoding::SignedCharacter,
-            gimli::DW_ATE_unsigned => BaseTypeEncoding::Unsigned,
-            gimli::DW_ATE_unsigned_char => BaseTypeEncoding::UnsignedCharacter,
-            gimli::DW_ATE_float => BaseTypeEncoding::Floating,
-            other => {
-                return TypeEntry::Resolved(TypeInfo {
-                    reference,
-                    name,
-                    byte_size: Some(byte_size),
-                    kind: TypeKind::Opaque {
-                        description: format!("base type encoding {other:?} is unsupported").into(),
-                    },
-                    identity: None,
-                });
+        let bit_size = match entry.attr(gimli::DW_AT_bit_size).map(unsigned_constant) {
+            None => None,
+            Some(UnsignedConstant::Value(0)) => {
+                return Err("base type has a zero bit size".into());
+            }
+            Some(UnsignedConstant::Value(bit_size)) if bit_size <= byte_size.saturating_mul(8) => {
+                Some(bit_size)
+            }
+            Some(UnsignedConstant::Value(_) | UnsignedConstant::Oversized) => {
+                return Err("base type bit size exceeds its byte storage".into());
+            }
+            Some(UnsignedConstant::NonConstant) => {
+                return Err("DW_AT_bit_size is not an unsigned integer constant".into());
             }
         };
         let base = BaseType {
@@ -848,37 +808,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             base_name: Arc::clone(&name),
             encoding,
             byte_size,
-            bit_size: match entry.attr(gimli::DW_AT_bit_size) {
-                None => None,
-                Some(attribute) => match unsigned_constant(attribute) {
-                    UnsignedConstant::Value(0) => {
-                        return TypeEntry::Malformed("base type has a zero bit size".into());
-                    }
-                    UnsignedConstant::Value(bit_size)
-                        if bit_size <= byte_size.saturating_mul(8) =>
-                    {
-                        Some(bit_size)
-                    }
-                    UnsignedConstant::Value(_) | UnsignedConstant::Oversized => {
-                        return TypeEntry::Malformed(
-                            "base type bit size exceeds its byte storage".into(),
-                        );
-                    }
-                    UnsignedConstant::NonConstant => {
-                        return TypeEntry::Malformed(
-                            "DW_AT_bit_size is not an unsigned integer constant".into(),
-                        );
-                    }
-                },
-            },
+            bit_size,
         };
-        TypeEntry::Resolved(TypeInfo {
+        Ok(resolved(
             reference,
             name,
-            byte_size: Some(byte_size),
-            kind: TypeKind::Base(base),
-            identity: None,
-        })
+            Some(byte_size),
+            TypeKind::Base(base),
+        ))
     }
 
     pub(super) fn resolved_integer_base(
@@ -928,68 +865,44 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         clippy::too_many_lines,
         reason = "enumeration normalization validates representation and ordered symbols together"
     )]
-    pub(super) fn build_enumeration_type(
+    fn build_enumeration_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
         reference: TypeReference,
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
-    ) -> TypeEntry {
+    ) -> Built {
         let name = explicit_name.unwrap_or_else(|| {
             Arc::from(format!("<anonymous enumeration@0x{:x}>", entry.offset().0))
         });
-        let underlying = match self.target(entry, unit_index) {
-            Ok(underlying) => underlying,
-            Err(reason) => return TypeEntry::Malformed(reason),
-        };
+        let underlying = self.target(entry, unit_index)?;
         let mut representation = if let Some(underlying) = underlying {
-            match self.resolved_integer_base(underlying.id) {
-                Ok(base) => base,
-                Err(reason) => return TypeEntry::Malformed(reason),
-            }
+            self.resolved_integer_base(underlying.id)?
         } else {
-            let Some(byte_size) = explicit_size else {
-                return TypeEntry::Malformed(
-                    "enumeration has neither an underlying type nor a byte size".into(),
-                );
-            };
+            let byte_size = explicit_size
+                .ok_or("enumeration has neither an underlying type nor a byte size")?;
             if byte_size == 0 {
-                return TypeEntry::Malformed("enumeration has a zero byte size".into());
+                return Err("enumeration has a zero byte size".into());
             }
             let Ok(raw_encoding) = base_type_encoding(entry) else {
-                return TypeEntry::Malformed(
-                    "enumeration without an underlying type has no encoding".into(),
-                );
-            };
-            let encoding = match gimli::DwAte(raw_encoding) {
-                gimli::DW_ATE_boolean => BaseTypeEncoding::Boolean,
-                gimli::DW_ATE_signed => BaseTypeEncoding::Signed,
-                gimli::DW_ATE_signed_char => BaseTypeEncoding::SignedCharacter,
-                gimli::DW_ATE_unsigned => BaseTypeEncoding::Unsigned,
-                gimli::DW_ATE_unsigned_char => BaseTypeEncoding::UnsignedCharacter,
-                _ => {
-                    return TypeEntry::Malformed(
-                        "enumeration encoding is not an integral encoding".into(),
-                    );
-                }
+                return Err("enumeration without an underlying type has no encoding".into());
             };
             BaseType {
                 name: Arc::clone(&name),
                 base_name: Arc::clone(&name),
-                encoding,
+                encoding: integer_encoding(gimli::DwAte(raw_encoding))
+                    .ok_or("enumeration encoding is not an integral encoding")?,
                 byte_size,
                 bit_size: None,
             }
         };
         let byte_size = explicit_size.unwrap_or(representation.byte_size);
         if byte_size == 0 {
-            return TypeEntry::Malformed("enumeration has a zero byte size".into());
+            return Err("enumeration has a zero byte size".into());
         }
         if byte_size != representation.byte_size {
-            return TypeEntry::Malformed(
-                "enumeration byte size differs from its underlying type".into(),
-            );
+            return Err("enumeration byte size differs from its underlying type".into());
         }
         if let Some(attribute) = entry.attr(gimli::DW_AT_encoding) {
             let enum_encoding = match unsigned_constant(attribute) {
@@ -1011,15 +924,13 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 )
             });
             if !compatible {
-                return TypeEntry::Malformed(
-                    "enumeration encoding differs from its underlying type".into(),
-                );
+                return Err("enumeration encoding differs from its underlying type".into());
             }
         }
         if let Some(attribute) = entry.attr(gimli::DW_AT_bit_size) {
             representation.bit_size = match unsigned_constant(attribute) {
                 UnsignedConstant::Value(0) => {
-                    return TypeEntry::Malformed("enumeration has a zero bit size".into());
+                    return Err("enumeration has a zero bit size".into());
                 }
                 UnsignedConstant::Value(value) if value <= byte_size.saturating_mul(8) => {
                     Some(value)
@@ -1027,90 +938,57 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 UnsignedConstant::Value(_)
                 | UnsignedConstant::Oversized
                 | UnsignedConstant::NonConstant => {
-                    return TypeEntry::Malformed(
-                        "enumeration bit size is not valid for its byte storage".into(),
-                    );
+                    return Err("enumeration bit size is not valid for its byte storage".into());
                 }
             };
         }
         representation.name = Arc::clone(&name);
 
-        let Some(unit) = self.units.get(unit_index) else {
-            return TypeEntry::Malformed("enumeration type unit is unavailable".into());
-        };
-        let mut tree = match unit.entries_tree(Some(entry.offset())) {
-            Ok(tree) => tree,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
-        let root = match tree.root() {
-            Ok(root) => root,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
+        let unit = &self.units[unit_index];
         let mut enumerators = Vec::new();
-        let mut children = root.children();
-        loop {
-            let child = match children.next() {
-                Ok(Some(child)) => child,
-                Ok(None) => break,
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-            };
-            let child = child.entry();
+        for child in self.children(unit_index, entry.offset())? {
+            let child = child?;
             if child.tag() != gimli::DW_TAG_enumerator {
-                return TypeEntry::Malformed(
-                    format!(
-                        "enumeration contains unsupported direct child {:?}",
-                        child.tag()
-                    )
-                    .into(),
-                );
+                return Err(format!(
+                    "enumeration contains unsupported direct child {:?}",
+                    child.tag()
+                )
+                .into());
             }
             if enumerators.len() >= MAX_RECORD_CHILDREN || self.symbolic_names >= MAX_SYMBOLIC_NAMES
             {
-                return TypeEntry::Resolved(TypeInfo {
+                return Ok(opaque(
                     reference,
                     name,
-                    byte_size: Some(byte_size),
-                    kind: TypeKind::Opaque {
-                        description: "enumerator metadata exceeds its resource limit".into(),
-                    },
-                    identity: None,
-                });
+                    Some(byte_size),
+                    "enumerator metadata exceeds its resource limit",
+                ));
             }
             self.symbolic_names += 1;
-            let enumerator_name = match copy_name(self.dwarf, unit, child) {
-                Ok(Some(name)) => name,
-                Ok(None) => return TypeEntry::Malformed("enumerator has no name".into()),
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-            };
-            let Some(value) = child.attr_value(gimli::DW_AT_const_value) else {
-                return TypeEntry::Malformed("enumerator has no constant value".into());
-            };
-            let value = match enumeration_constant(value, &representation, self.byte_order) {
-                Ok(value) => value,
-                Err(reason) => return TypeEntry::Malformed(reason),
-            };
+            let enumerator_name = copy_name(self.dwarf, unit, &child)
+                .map_err(malformed)?
+                .ok_or("enumerator has no name")?;
+            let value = child
+                .attr_value(gimli::DW_AT_const_value)
+                .ok_or("enumerator has no constant value")?;
             enumerators.push(Enumerator {
                 name: enumerator_name,
-                value,
+                value: enumeration_constant(value, &representation, self.byte_order)?,
             });
         }
-        let scoped = match strict_flag(entry, gimli::DW_AT_enum_class) {
-            Ok(scoped) => scoped,
-            Err(reason) => return TypeEntry::Malformed(reason),
-        };
-        TypeEntry::Resolved(TypeInfo {
+        let scoped = strict_flag(entry, gimli::DW_AT_enum_class)?;
+        Ok(resolved(
             reference,
             name,
-            byte_size: Some(byte_size),
-            kind: TypeKind::Enumeration {
+            Some(byte_size),
+            TypeKind::Enumeration {
                 representation,
                 underlying,
                 enumerators: enumerators.into(),
                 origin: EnumerationOrigin::Language,
                 scoped,
             },
-            identity: None,
-        })
+        ))
     }
 
     pub(super) fn target(
@@ -1118,78 +996,24 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
     ) -> std::result::Result<Option<TypeReference>, Arc<str>> {
-        die_reference_with_signatures(
-            entry.attr_value(gimli::DW_AT_type),
-            unit_index,
-            self.units,
-            self.type_signatures,
-        )
-        .map(|key| {
-            key.map(|key| TypeReference {
-                image: self.image,
-                id: self.resolve(key),
-            })
-        })
-        .map_err(|error| error.to_string().into())
+        self.type_reference(unit_index, entry.attr_value(gimli::DW_AT_type))
     }
 
-    pub(super) fn target_with_origins(
-        &mut self,
-        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
-        unit_index: usize,
-        chain: &[(usize, gimli::DebuggingInformationEntry<Reader<'data>>)],
-    ) -> std::result::Result<Option<TypeReference>, Arc<str>> {
-        let (owner, value) = entry
-            .attr_value(gimli::DW_AT_type)
-            .map(|value| (unit_index, value))
-            .or_else(|| {
-                chain.iter().find_map(|(origin_unit, origin)| {
-                    origin
-                        .attr_value(gimli::DW_AT_type)
-                        .map(|value| (*origin_unit, value))
-                })
-            })
-            .map_or((unit_index, None), |(owner, value)| (owner, Some(value)));
-        die_reference_with_signatures(value, owner, self.units, self.type_signatures)
-            .map(|key| {
-                key.map(|key| TypeReference {
-                    image: self.image,
-                    id: self.resolve(key),
-                })
-            })
-            .map_err(|error| error.to_string().into())
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Go constant reconstruction keeps producer filtering, validation, budgets, and promotion together"
-    )]
     pub(super) fn populate_go_named_constants(&mut self) {
         let mut constants = BTreeMap::<TypeId, NamedConstantCollection>::new();
         for (unit_index, unit) in self.units.iter().enumerate() {
-            let mut entries = unit.entries();
-            let Ok(Some(root)) = entries.next_dfs() else {
-                continue;
-            };
-            if !matches!(
-                root.attr_value(gimli::DW_AT_language),
-                Some(gimli::AttributeValue::Language(language)) if language == gimli::DW_LANG_Go
-            ) {
+            if self.language(unit_index) != SourceLanguage::Go {
                 continue;
             }
+            let mut entries = unit.entries();
             while let Ok(Some(entry)) = entries.next_dfs() {
                 if entry.tag() != gimli::DW_TAG_constant {
                     continue;
                 }
-                let Ok(Some(key)) = die_reference_with_signatures(
-                    entry.attr_value(gimli::DW_AT_type),
-                    unit_index,
-                    self.units,
-                    self.type_signatures,
-                ) else {
+                let Ok(Some(target)) = self.target(entry, unit_index) else {
                     continue;
                 };
-                let target = self.resolve(key);
+                let target = target.id;
                 let Some(TypeEntry::Resolved(info)) = self.entries.get(target.index()) else {
                     continue;
                 };
@@ -1360,7 +1184,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
-    pub(super) fn target_name(&self, target: TypeReference) -> Arc<str> {
+    fn target_name(&self, target: TypeReference) -> Arc<str> {
         self.entries
             .get(target.id.index())
             .and_then(|entry| match entry {
@@ -1402,7 +1226,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         self.assign_identities();
     }
 
-    pub(super) fn reject_inline_storage_cycles(&mut self) {
+    fn reject_inline_storage_cycles(&mut self) {
         let description: Arc<str> = "type graph contains an inline-storage cycle".into();
         for node in inline_storage_cycle_nodes(&self.entries) {
             self.entries[node] = TypeEntry::Malformed(Arc::clone(&description));
@@ -1413,7 +1237,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     /// and chains deeper than the resolution limit, which only malformed
     /// metadata builds, render as `<type #N>` instead of recursing without
     /// bound on the controller thread's stack.
-    pub(super) fn render_type_name(&self, id: TypeId, visiting: &mut HashSet<TypeId>) -> Arc<str> {
+    fn render_type_name(&self, id: TypeId, visiting: &mut HashSet<TypeId>) -> Arc<str> {
         if visiting.len() >= MAX_TYPE_RESOLUTION_DEPTH || !visiting.insert(id) {
             return Arc::from(format!("<type #{}>", id.get()));
         }
@@ -1476,7 +1300,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         rendered
     }
 
-    pub(super) fn modified_target_is_indirection(&self, start: TypeId) -> bool {
+    fn modified_target_is_indirection(&self, start: TypeId) -> bool {
         let mut current = start;
         let mut visited = HashSet::new();
         while visited.insert(current) {
@@ -1492,12 +1316,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         false
     }
 
-    pub(super) fn indirection_type_name(
-        &self,
-        target: TypeId,
-        target_name: &str,
-        symbol: &str,
-    ) -> String {
+    fn indirection_type_name(&self, target: TypeId, target_name: &str, symbol: &str) -> String {
         let target_is_synthesized_array = !self.explicit_names.contains(&target)
             && self.entries.get(target.index()).is_some_and(|entry| {
                 matches!(
@@ -1518,7 +1337,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         format!("{target_name} {symbol}")
     }
 
-    pub(super) fn build_pointer_type(
+    fn build_pointer_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
@@ -1526,30 +1345,26 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_name: Option<Arc<str>>,
         byte_size: Option<u64>,
         address_class: u64,
-    ) -> TypeEntry {
-        let target = match self.target(entry, unit_index) {
-            Ok(target) => target,
-            Err(reason) => return TypeEntry::Malformed(reason),
-        };
+    ) -> Built {
+        let target = self.target(entry, unit_index)?;
         let name = explicit_name.unwrap_or_else(|| {
             target.map_or_else(
                 || Arc::from("void *"),
                 |target| Arc::from(format!("{} *", self.target_name(target))),
             )
         });
-        TypeEntry::Resolved(TypeInfo {
+        Ok(resolved(
             reference,
             name,
             byte_size,
-            kind: TypeKind::Pointer {
+            TypeKind::Pointer {
                 target,
                 address_class,
             },
-            identity: None,
-        })
+        ))
     }
 
-    pub(super) fn build_reference_type(
+    fn build_reference_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
@@ -1557,49 +1372,38 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_name: Option<Arc<str>>,
         byte_size: Option<u64>,
         address_class: u64,
-    ) -> TypeEntry {
-        let target = match self.target(entry, unit_index) {
-            Ok(Some(target)) => target,
-            Ok(None) => return TypeEntry::Malformed("reference type has no target".into()),
-            Err(reason) => return TypeEntry::Malformed(reason),
-        };
-        let kind = if entry.tag() == gimli::DW_TAG_reference_type {
-            ReferenceKind::Lvalue
+    ) -> Built {
+        let target = self
+            .target(entry, unit_index)?
+            .ok_or("reference type has no target")?;
+        let (kind, suffix) = if entry.tag() == gimli::DW_TAG_reference_type {
+            (ReferenceKind::Lvalue, "&")
         } else {
-            ReferenceKind::Rvalue
-        };
-        let suffix = if kind == ReferenceKind::Lvalue {
-            "&"
-        } else {
-            "&&"
+            (ReferenceKind::Rvalue, "&&")
         };
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("{} {suffix}", self.target_name(target))));
-        TypeEntry::Resolved(TypeInfo {
+        Ok(resolved(
             reference,
             name,
             byte_size,
-            kind: TypeKind::Reference {
+            TypeKind::Reference {
                 kind,
                 target,
                 address_class,
             },
-            identity: None,
-        })
+        ))
     }
 
-    pub(super) fn build_wrapper_type(
+    fn build_wrapper_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
         reference: TypeReference,
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
-    ) -> TypeEntry {
-        let target = match self.target(entry, unit_index) {
-            Ok(target) => target,
-            Err(reason) => return TypeEntry::Malformed(reason),
-        };
+    ) -> Built {
+        let target = self.target(entry, unit_index)?;
         // An absent target means `void`, except on a typedef declaration,
         // which is incomplete.
         let declaration = strict_flag(entry, gimli::DW_AT_declaration).unwrap_or(false);
@@ -1607,78 +1411,51 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             None if !declaration => Some(self.void_type()),
             target => target,
         };
-        let inherited_size = target
-            .and_then(|target| self.entries.get(target.id.index()))
-            .and_then(|entry| match entry {
-                TypeEntry::Resolved(info) => info.byte_size,
-                TypeEntry::Building | TypeEntry::Malformed(_) => None,
-            });
-        let byte_size = explicit_size.or(inherited_size);
+        let byte_size =
+            explicit_size.or_else(|| target.and_then(|target| self.byte_size_of(target.id)));
         if matches!(
             entry.tag(),
             gimli::DW_TAG_typedef | gimli::DW_TAG_template_alias
         ) {
-            let relationship = named_type_relationship(
-                entry.tag(),
-                self.unit_languages.get(unit_index).copied().flatten(),
-                self.zig_units.get(unit_index).copied().unwrap_or(false),
-            );
-            return TypeEntry::Resolved(TypeInfo {
+            let name = explicit_name.unwrap_or_else(|| {
+                target.map_or_else(
+                    || Arc::from("<incomplete named type>"),
+                    |target| self.target_name(target),
+                )
+            });
+            let relationship = named_type_relationship(entry.tag(), self.language(unit_index));
+            return Ok(resolved(
                 reference,
-                name: explicit_name.unwrap_or_else(|| {
-                    target.map_or_else(
-                        || Arc::from("<incomplete named type>"),
-                        |target| self.target_name(target),
-                    )
-                }),
+                name,
                 byte_size,
-                kind: TypeKind::Named {
+                TypeKind::Named {
                     target,
                     relationship,
                 },
-                identity: None,
-            });
+            ));
         }
         // Only a declaration keeps an absent target; a qualifier cannot be one.
-        let Some(target) = target else {
-            return TypeEntry::Malformed("type modifier has no target".into());
-        };
-        let qualifier =
+        let target = target.ok_or("type modifier has no target")?;
+        let modifier =
             type_modifier(entry.tag()).expect("modifier wrapper tags were matched by caller");
         let name = explicit_name
-            .unwrap_or_else(|| Arc::from(format!("{qualifier:?} {}", self.target_name(target))));
-        TypeEntry::Resolved(TypeInfo {
+            .unwrap_or_else(|| Arc::from(format!("{modifier:?} {}", self.target_name(target))));
+        Ok(resolved(
             reference,
             name,
             byte_size,
-            kind: TypeKind::Modified {
-                modifier: qualifier,
-                target,
-            },
-            identity: None,
-        })
+            TypeKind::Modified { modifier, target },
+        ))
     }
 
-    pub(super) fn has_direct_variant_part(
+    fn has_direct_variant_part(
         &self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
     ) -> std::result::Result<bool, Arc<str>> {
-        let unit = self
-            .units
-            .get(unit_index)
-            .ok_or_else(|| Arc::from("aggregate type unit is unavailable"))?;
-        let mut tree = unit
-            .entries_tree(Some(entry.offset()))
-            .map_err(|error| Arc::from(error.to_string()))?;
-        let root = tree.root().map_err(|error| Arc::from(error.to_string()))?;
         let mut found = false;
-        let mut children = root.children();
-        while let Some(child) = children
-            .next()
-            .map_err(|error| Arc::from(error.to_string()))?
-        {
-            if child.entry().tag() == gimli::DW_TAG_variant_part {
+        for child in self.children(unit_index, entry.offset())? {
+            if child?.tag() == gimli::DW_TAG_variant_part {
                 if found {
                     return Err("aggregate contains multiple direct variant parts".into());
                 }
@@ -1692,17 +1469,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         clippy::too_many_lines,
         reason = "Zig tagged-union recognition and remapping form one fail-closed structural validation"
     )]
-    pub(super) fn normalize_zig_tagged_union(
+    fn normalize_zig_tagged_union(
         &mut self,
         unit_index: usize,
         aggregate: TypeId,
         members: &[RecordMember],
         incomplete: bool,
     ) -> Option<std::result::Result<TypeKind, Arc<str>>> {
-        if incomplete
-            || !self.zig_units.get(unit_index).copied().unwrap_or(false)
-            || members.len() != 2
-        {
+        if incomplete || !self.is_zig(unit_index) || members.len() != 2 {
             return None;
         }
         let payload_index = members
@@ -1871,7 +1645,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         clippy::too_many_lines,
         reason = "Zig optional/error-union recognition remaps layout, declarations, and dynamic expressions atomically"
     )]
-    pub(super) fn normalize_zig_optional_or_error_union(
+    fn normalize_zig_optional_or_error_union(
         &mut self,
         unit_index: usize,
         aggregate: TypeId,
@@ -1879,10 +1653,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         members: &[RecordMember],
         incomplete: bool,
     ) -> Option<std::result::Result<TypeKind, Arc<str>>> {
-        if incomplete
-            || !self.zig_units.get(unit_index).copied().unwrap_or(false)
-            || members.len() != 2
-        {
+        if incomplete || !self.is_zig(unit_index) || members.len() != 2 {
             return None;
         }
         let payload_index = members
@@ -2070,72 +1841,134 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }))
     }
 
+    /// Builds one member of the aggregate `aggregate`, recording its
+    /// declaration and any location computed at run time.
     #[expect(
         clippy::too_many_arguments,
-        reason = "variant members retain owner, location identity, access, and declaration provenance"
+        reason = "a member keeps its owner, location identity, access, and declaration provenance"
     )]
-    pub(super) fn build_variant_member(
+    fn build_member(
         &mut self,
         child: &gimli::DebuggingInformationEntry<Reader<'data>>,
-        unit: &gimli::Unit<Reader<'data>>,
         unit_index: usize,
         aggregate: TypeId,
         dynamic_child: DynamicAggregateChild,
+        declaration: AggregateMemberPath,
         absent_byte_offset: Option<u64>,
         record_kind: RecordKind,
-        declaration_path: AggregateMemberPath,
+        what: &str,
     ) -> std::result::Result<RecordMember, Arc<str>> {
-        let chain = origin_chain(self.units, unit_index, child)
-            .map_err(|error| Arc::from(error.to_string()))?;
+        let units: &'a [gimli::Unit<Reader<'data>>] = self.units;
+        let chain = origin_chain(units, unit_index, child).map_err(malformed)?;
+        let (owner, value) = type_with_origins(unit_index, child, &chain);
         let target = self
-            .target_with_origins(child, unit_index, &chain)?
-            .ok_or_else(|| Arc::from("variant component has no type"))?;
-        let name = copy_name_with_origins(self.dwarf, self.units, unit, child, &chain)
-            .map_err(|error| Arc::from(error.to_string()))?;
+            .type_reference(owner, value)?
+            .ok_or_else(|| Arc::from(format!("{what} has no type")))?;
+        let name = string_with_origins(
+            self.dwarf,
+            units,
+            &units[unit_index],
+            child,
+            &chain,
+            gimli::DW_AT_name,
+        )
+        .map_err(malformed)?;
         let layout = self.record_member_layout(child, target, absent_byte_offset)?;
-        if layout == RecordMemberLayout::Runtime
-            && let Some(expression) = self
-                .copy_dynamic_record_layout(child, unit_index)
-                .map_err(|error| Arc::from(error.to_string()))?
-        {
-            self.dynamic_record_layouts.insert(
-                DynamicAggregateLayoutKey {
-                    aggregate,
-                    child: dynamic_child,
-                },
-                expression,
-            );
+        if layout == RecordMemberLayout::Runtime {
+            self.record_dynamic_layout(child, unit_index, aggregate, dynamic_child)?;
         }
-        self.record_member_declarations
-            .push(AggregateMemberDeclaration {
-                aggregate,
-                member: declaration_path,
-                die: DieKey {
-                    unit: unit_index,
-                    offset: child.offset().0,
-                },
-            });
-        Ok(RecordMember {
+        let member = RecordMember {
             name,
             type_ref: target,
             layout,
             accessibility: Self::record_accessibility(child, record_kind)?,
             artificial: strict_flag(child, gimli::DW_AT_artificial)?,
-            embedded: child.attr(gimli::DwAt(0x2903)).is_some_and(|attribute| {
-                match attribute.value() {
-                    gimli::AttributeValue::Flag(value) => value,
-                    _ => attribute.udata_value().is_some_and(|value| value != 0),
-                }
-            }),
+            embedded: go_embedded(child),
             declaration: None,
+        };
+        self.record_member_declarations
+            .push(AggregateMemberDeclaration {
+                aggregate,
+                member: declaration,
+                die: DieKey {
+                    unit: unit_index,
+                    offset: child.offset().0,
+                },
+            });
+        Ok(member)
+    }
+
+    /// Builds the `index`th base class of the aggregate `aggregate`.
+    fn build_base(
+        &mut self,
+        child: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        aggregate: TypeId,
+        index: usize,
+        record_kind: RecordKind,
+        what: &str,
+    ) -> std::result::Result<BaseClass, Arc<str>> {
+        let type_ref = self
+            .target(child, unit_index)?
+            .ok_or_else(|| Arc::from(format!("{what} has no type")))?;
+        let layout = Self::record_byte_layout(child);
+        if layout == RecordMemberLayout::Runtime {
+            self.record_dynamic_layout(
+                child,
+                unit_index,
+                aggregate,
+                DynamicAggregateChild::Base(index),
+            )?;
+        }
+        let virtuality = match child.attr_value(gimli::DW_AT_virtuality) {
+            None | Some(gimli::AttributeValue::Virtuality(gimli::DW_VIRTUALITY_none)) => {
+                BaseClassVirtuality::None
+            }
+            Some(gimli::AttributeValue::Virtuality(value))
+                if value == gimli::DW_VIRTUALITY_virtual
+                    || value == gimli::DW_VIRTUALITY_pure_virtual =>
+            {
+                BaseClassVirtuality::Virtual
+            }
+            _ => return Err("base-class virtuality has an invalid encoding".into()),
+        };
+        Ok(BaseClass {
+            type_ref,
+            layout,
+            accessibility: Self::record_accessibility(child, record_kind)?,
+            virtuality,
         })
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "standard variant normalization validates the full nested DIE contract together"
-    )]
-    pub(super) fn build_variant_type(
+    /// Records the location expression of a member whose offset is computed
+    /// at run time.
+    fn record_dynamic_layout(
+        &mut self,
+        child: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        aggregate: TypeId,
+        dynamic_child: DynamicAggregateChild,
+    ) -> std::result::Result<(), Arc<str>> {
+        let Some(expression) = child
+            .attr_value(gimli::DW_AT_data_member_location)
+            .and_then(|value| value.exprloc_value())
+        else {
+            return Ok(());
+        };
+        let unit = &self.units[unit_index];
+        let expression = copy_expression(self.dwarf, unit_index, unit, expression, unit.encoding())
+            .map_err(malformed)?;
+        self.dynamic_record_layouts.insert(
+            DynamicAggregateLayoutKey {
+                aggregate,
+                child: dynamic_child,
+            },
+            expression,
+        );
+        Ok(())
+    }
+
+    fn build_variant_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
@@ -2143,345 +1976,99 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
         storage: VariantStorageKind,
-    ) -> TypeEntry {
-        let incomplete = match strict_flag(entry, gimli::DW_AT_declaration) {
-            Ok(value) => value,
-            Err(reason) => return TypeEntry::Malformed(reason),
-        };
+    ) -> Built {
+        let incomplete = strict_flag(entry, gimli::DW_AT_declaration)?;
         if !incomplete && explicit_size.is_none() {
-            return TypeEntry::Malformed("complete variant aggregate has no byte size".into());
+            return Err("complete variant aggregate has no byte size".into());
         }
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("<anonymous variant@0x{:x}>", entry.offset().0)));
-        let mut metadata_budget = VariantMetadataBudget::default();
+        let limit = || {
+            opaque(
+                reference,
+                Arc::clone(&name),
+                explicit_size,
+                "variant metadata exceeds its resource limit",
+            )
+        };
+        let mut budget = VariantMetadataBudget::default();
         let record_kind = if storage == VariantStorageKind::Class {
             RecordKind::Class
         } else {
             RecordKind::Struct
         };
-        let Some(unit) = self.units.get(unit_index) else {
-            return TypeEntry::Malformed("variant aggregate unit is unavailable".into());
-        };
-        let mut tree = match unit.entries_tree(Some(entry.offset())) {
-            Ok(tree) => tree,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
-        let root = match tree.root() {
-            Ok(root) => root,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
         let mut common_members = Vec::new();
         let mut bases = Vec::new();
-        let mut discriminant = None;
-        let mut variants = Vec::new();
-        let mut children = root.children();
-        loop {
-            let child_node = match children.next() {
-                Ok(Some(child)) => child,
-                Ok(None) => break,
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-            };
-            let child = child_node.entry();
+        let mut part = None;
+        for child in self.children(unit_index, entry.offset())? {
+            let child = child?;
             match child.tag() {
                 gimli::DW_TAG_member => {
-                    if metadata_budget.consume().is_err() {
-                        return variant_metadata_limit_type(reference, &name, explicit_size);
+                    if budget.consume().is_err() {
+                        return Ok(limit());
                     }
                     let index = common_members.len();
-                    let absent_offset = (storage == VariantStorageKind::Union).then_some(0_u64);
-                    let member = match self.build_variant_member(
-                        child,
-                        unit,
+                    common_members.push(self.build_member(
+                        &child,
                         unit_index,
                         reference.id,
                         DynamicAggregateChild::Member(index),
-                        absent_offset,
-                        record_kind,
                         AggregateMemberPath::Direct(index),
-                    ) {
-                        Ok(member) => member,
-                        Err(reason) => return TypeEntry::Malformed(reason),
-                    };
-                    common_members.push(member);
+                        (storage == VariantStorageKind::Union).then_some(0),
+                        record_kind,
+                        "variant component",
+                    )?);
                 }
                 gimli::DW_TAG_inheritance if storage != VariantStorageKind::Union => {
-                    if metadata_budget.consume().is_err() {
-                        return variant_metadata_limit_type(reference, &name, explicit_size);
+                    if budget.consume().is_err() {
+                        return Ok(limit());
                     }
-                    let target = match self.target(child, unit_index) {
-                        Ok(Some(target)) => target,
-                        Ok(None) => {
-                            return TypeEntry::Malformed("variant base class has no type".into());
-                        }
-                        Err(reason) => return TypeEntry::Malformed(reason),
-                    };
-                    let layout = Self::record_byte_layout(child);
-                    if layout == RecordMemberLayout::Runtime {
-                        match self.copy_dynamic_record_layout(child, unit_index) {
-                            Ok(Some(expression)) => {
-                                self.dynamic_record_layouts.insert(
-                                    DynamicAggregateLayoutKey {
-                                        aggregate: reference.id,
-                                        child: DynamicAggregateChild::Base(bases.len()),
-                                    },
-                                    expression,
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        }
-                    }
-                    bases.push(BaseClass {
-                        type_ref: target,
-                        layout,
-                        accessibility: match Self::record_accessibility(child, record_kind) {
-                            Ok(accessibility) => accessibility,
-                            Err(reason) => return TypeEntry::Malformed(reason),
-                        },
-                        virtuality: BaseClassVirtuality::None,
-                    });
+                    bases.push(self.build_base(
+                        &child,
+                        unit_index,
+                        reference.id,
+                        bases.len(),
+                        record_kind,
+                        "variant base class",
+                    )?);
                 }
                 gimli::DW_TAG_variant_part => {
-                    if discriminant.is_some() || !variants.is_empty() {
-                        return TypeEntry::Malformed(
-                            "variant aggregate contains multiple variant parts".into(),
-                        );
+                    if part.is_some() {
+                        return Err("variant aggregate contains multiple variant parts".into());
                     }
-                    let discr_key = match die_reference_with_signatures(
-                        child.attr_value(gimli::DW_AT_discr),
+                    part = match self.variant_part(
+                        &child,
                         unit_index,
-                        self.units,
-                        self.type_signatures,
+                        reference.id,
+                        record_kind,
+                        &mut budget,
                     ) {
-                        Ok(key) => key,
-                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                        Ok(part) => Some(part),
+                        Err(VariantMetadataError::Malformed(reason)) => return Err(reason),
+                        Err(VariantMetadataError::Limit) => return Ok(limit()),
                     };
-                    let tag_type = match self.target(child, unit_index) {
-                        Ok(tag_type) => tag_type,
-                        Err(reason) => return TypeEntry::Malformed(reason),
-                    };
-                    let variant_part_offset = child.offset();
-                    let mut part_children = child_node.children();
-                    if let Some(discr_key) = discr_key {
-                        let mut stored = None;
-                        loop {
-                            let part_child = match part_children.next() {
-                                Ok(Some(part_child)) => part_child,
-                                Ok(None) => break,
-                                Err(error) => {
-                                    return TypeEntry::Malformed(error.to_string().into());
-                                }
-                            };
-                            let part_child = part_child.entry();
-                            if part_child.offset().0 != discr_key.offset
-                                || discr_key.unit != unit_index
-                            {
-                                continue;
-                            }
-                            if part_child.tag() != gimli::DW_TAG_member {
-                                return TypeEntry::Malformed(
-                                    "DW_AT_discr does not reference a member child".into(),
-                                );
-                            }
-                            if metadata_budget.consume().is_err() {
-                                return variant_metadata_limit_type(
-                                    reference,
-                                    &name,
-                                    explicit_size,
-                                );
-                            }
-                            let member = match self.build_variant_member(
-                                part_child,
-                                unit,
-                                unit_index,
-                                reference.id,
-                                DynamicAggregateChild::Discriminant,
-                                None,
-                                record_kind,
-                                AggregateMemberPath::Discriminant,
-                            ) {
-                                Ok(member) => member,
-                                Err(reason) => return TypeEntry::Malformed(reason),
-                            };
-                            stored = Some(member);
-                        }
-                        let Some(stored) = stored else {
-                            return TypeEntry::Malformed(
-                                "DW_AT_discr references a non-child discriminator".into(),
-                            );
-                        };
-                        if let Some(tag_type) = tag_type
-                            && tag_type.id != stored.type_ref.id
-                        {
-                            return TypeEntry::Malformed(
-                                "variant tag type differs from its discriminator member".into(),
-                            );
-                        }
-                        discriminant = Some(VariantDiscriminant::Stored(stored));
-                    } else {
-                        let Some(tag_type) = tag_type else {
-                            return TypeEntry::Malformed(
-                                "variant part has neither a discriminator nor a tag type".into(),
-                            );
-                        };
-                        discriminant = Some(VariantDiscriminant::TagType(tag_type));
-                    }
-                    let representation = match discriminant.as_ref().expect("set above") {
-                        VariantDiscriminant::Stored(member) => {
-                            match self.resolved_integer_base(member.type_ref.id) {
-                                Ok(base) => base,
-                                Err(reason) => return TypeEntry::Malformed(reason),
-                            }
-                        }
-                        VariantDiscriminant::TagType(tag_type) => {
-                            match self.resolved_integer_base(tag_type.id) {
-                                Ok(base) => base,
-                                Err(reason) => return TypeEntry::Malformed(reason),
-                            }
-                        }
-                    };
-
-                    let mut variant_part_tree = match unit.entries_tree(Some(variant_part_offset)) {
-                        Ok(tree) => tree,
-                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                    };
-                    let variant_part_root = match variant_part_tree.root() {
-                        Ok(root) => root,
-                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                    };
-                    let mut part_children = variant_part_root.children();
-                    loop {
-                        let variant_node = match part_children.next() {
-                            Ok(Some(part_child)) => part_child,
-                            Ok(None) => break,
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        };
-                        let variant_entry = variant_node.entry();
-                        if variant_entry.tag() == gimli::DW_TAG_member {
-                            continue;
-                        }
-                        if variant_entry.tag() != gimli::DW_TAG_variant {
-                            return TypeEntry::Malformed(
-                                format!(
-                                    "variant part contains unsupported direct child {:?}",
-                                    variant_entry.tag()
-                                )
-                                .into(),
-                            );
-                        }
-                        if metadata_budget.consume().is_err() {
-                            return variant_metadata_limit_type(reference, &name, explicit_size);
-                        }
-                        let selection = match copy_variant_selection(
-                            variant_entry,
-                            &representation,
-                            self.byte_order,
-                            &mut metadata_budget,
-                        ) {
-                            Ok(selection) => selection,
-                            Err(VariantMetadataError::Malformed(reason)) => {
-                                return TypeEntry::Malformed(reason);
-                            }
-                            Err(VariantMetadataError::Limit) => {
-                                return variant_metadata_limit_type(
-                                    reference,
-                                    &name,
-                                    explicit_size,
-                                );
-                            }
-                        };
-                        let variant_name = match copy_name(self.dwarf, unit, variant_entry) {
-                            Ok(name) => name,
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        };
-                        let variant_index = variants.len();
-                        let mut members = Vec::new();
-                        let mut variant_children = variant_node.children();
-                        loop {
-                            let member_node = match variant_children.next() {
-                                Ok(Some(member)) => member,
-                                Ok(None) => break,
-                                Err(error) => {
-                                    return TypeEntry::Malformed(error.to_string().into());
-                                }
-                            };
-                            let member_entry = member_node.entry();
-                            if member_entry.tag() != gimli::DW_TAG_member {
-                                return TypeEntry::Malformed(
-                                    format!(
-                                        "variant contains unsupported component {:?}",
-                                        member_entry.tag()
-                                    )
-                                    .into(),
-                                );
-                            }
-                            if metadata_budget.consume().is_err() {
-                                return variant_metadata_limit_type(
-                                    reference,
-                                    &name,
-                                    explicit_size,
-                                );
-                            }
-                            let member_index = members.len();
-                            let member = match self.build_variant_member(
-                                member_entry,
-                                unit,
-                                unit_index,
-                                reference.id,
-                                DynamicAggregateChild::VariantMember {
-                                    variant: variant_index,
-                                    member: member_index,
-                                },
-                                None,
-                                record_kind,
-                                AggregateMemberPath::Variant {
-                                    variant: variant_index,
-                                    member: member_index,
-                                },
-                            ) {
-                                Ok(member) => member,
-                                Err(reason) => return TypeEntry::Malformed(reason),
-                            };
-                            members.push(member);
-                        }
-                        variants.push(Variant {
-                            name: variant_name,
-                            selection,
-                            members: members.into(),
-                        });
-                    }
                 }
                 tag if is_scope_only_child(tag) => {}
                 tag => {
-                    return TypeEntry::Resolved(TypeInfo {
+                    return Ok(opaque(
                         reference,
                         name,
-                        byte_size: explicit_size,
-                        kind: TypeKind::Opaque {
-                            description: format!(
-                                "variant aggregate contains unsupported direct child {tag:?}"
-                            )
-                            .into(),
-                        },
-                        identity: None,
-                    });
+                        explicit_size,
+                        format!("variant aggregate contains unsupported direct child {tag:?}"),
+                    ));
                 }
             }
         }
-        let Some(discriminant) = discriminant else {
-            return TypeEntry::Malformed("variant aggregate has no variant part".into());
-        };
+        let (discriminant, variants) = part.ok_or("variant aggregate has no variant part")?;
         if variants.is_empty() {
-            return TypeEntry::Malformed("variant part has no variants".into());
+            return Err("variant part has no variants".into());
         }
-        if let Err(reason) = validate_variant_selections(&variants) {
-            return TypeEntry::Malformed(reason);
-        }
-        TypeEntry::Resolved(TypeInfo {
+        validate_variant_selections(&variants)?;
+        Ok(resolved(
             reference,
             name,
-            byte_size: explicit_size,
-            kind: TypeKind::Variant {
+            explicit_size,
+            TypeKind::Variant {
                 storage,
                 common_members: common_members.into(),
                 bases: bases.into(),
@@ -2489,283 +2076,235 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 variants: variants.into(),
                 incomplete,
             },
-            identity: None,
-        })
+        ))
     }
 
+    /// A variant part's discriminant and variants.
     #[expect(
         clippy::too_many_lines,
-        reason = "record normalization keeps all storage and scope child tags in one auditable dispatch"
+        reason = "a variant part's discriminator and arms validate one nested DIE contract"
     )]
-    pub(super) fn build_record_type(
+    fn variant_part(
+        &mut self,
+        part: &gimli::DebuggingInformationEntry<Reader<'data>>,
+        unit_index: usize,
+        aggregate: TypeId,
+        record_kind: RecordKind,
+        budget: &mut VariantMetadataBudget,
+    ) -> std::result::Result<(VariantDiscriminant, Vec<Variant>), VariantMetadataError> {
+        let discriminator = die_reference_with_signatures(
+            part.attr_value(gimli::DW_AT_discr),
+            unit_index,
+            self.units,
+            self.type_signatures,
+        )
+        .map_err(malformed)?;
+        let tag_type = self.target(part, unit_index)?;
+        let discriminant = if let Some(discriminator) = discriminator {
+            let mut stored = None;
+            for child in self.children(unit_index, part.offset())? {
+                let child = child?;
+                if child.offset().0 != discriminator.offset || discriminator.unit != unit_index {
+                    continue;
+                }
+                if child.tag() != gimli::DW_TAG_member {
+                    return Err(VariantMetadataError::Malformed(
+                        "DW_AT_discr does not reference a member child".into(),
+                    ));
+                }
+                budget.consume()?;
+                stored = Some(self.build_member(
+                    &child,
+                    unit_index,
+                    aggregate,
+                    DynamicAggregateChild::Discriminant,
+                    AggregateMemberPath::Discriminant,
+                    None,
+                    record_kind,
+                    "variant component",
+                )?);
+            }
+            let stored = stored
+                .ok_or_else(|| Arc::from("DW_AT_discr references a non-child discriminator"))?;
+            if let Some(tag_type) = tag_type
+                && tag_type.id != stored.type_ref.id
+            {
+                return Err(VariantMetadataError::Malformed(
+                    "variant tag type differs from its discriminator member".into(),
+                ));
+            }
+            VariantDiscriminant::Stored(stored)
+        } else {
+            VariantDiscriminant::TagType(tag_type.ok_or_else(|| {
+                Arc::from("variant part has neither a discriminator nor a tag type")
+            })?)
+        };
+        let representation = self.resolved_integer_base(match &discriminant {
+            VariantDiscriminant::Stored(member) => member.type_ref.id,
+            VariantDiscriminant::TagType(tag_type) => tag_type.id,
+        })?;
+
+        let unit = &self.units[unit_index];
+        let mut variants = Vec::new();
+        for variant in self.children(unit_index, part.offset())? {
+            let variant = variant?;
+            if variant.tag() == gimli::DW_TAG_member {
+                continue;
+            }
+            if variant.tag() != gimli::DW_TAG_variant {
+                return Err(VariantMetadataError::Malformed(
+                    format!(
+                        "variant part contains unsupported direct child {:?}",
+                        variant.tag()
+                    )
+                    .into(),
+                ));
+            }
+            budget.consume()?;
+            let selection =
+                copy_variant_selection(&variant, &representation, self.byte_order, budget)?;
+            let name = copy_name(self.dwarf, unit, &variant).map_err(malformed)?;
+            let variant_index = variants.len();
+            let mut members = Vec::new();
+            for member in self.children(unit_index, variant.offset())? {
+                let member = member?;
+                if member.tag() != gimli::DW_TAG_member {
+                    return Err(VariantMetadataError::Malformed(
+                        format!("variant contains unsupported component {:?}", member.tag()).into(),
+                    ));
+                }
+                budget.consume()?;
+                let member_index = members.len();
+                members.push(self.build_member(
+                    &member,
+                    unit_index,
+                    aggregate,
+                    DynamicAggregateChild::VariantMember {
+                        variant: variant_index,
+                        member: member_index,
+                    },
+                    AggregateMemberPath::Variant {
+                        variant: variant_index,
+                        member: member_index,
+                    },
+                    None,
+                    record_kind,
+                    "variant component",
+                )?);
+            }
+            variants.push(Variant {
+                name,
+                selection,
+                members: members.into(),
+            });
+        }
+        Ok((discriminant, variants))
+    }
+
+    fn build_record_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
         reference: TypeReference,
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
-    ) -> TypeEntry {
+    ) -> Built {
         let kind = if entry.tag() == gimli::DW_TAG_class_type {
             RecordKind::Class
         } else {
             RecordKind::Struct
         };
-        let incomplete = match strict_flag(entry, gimli::DW_AT_declaration) {
-            Ok(value) => value,
-            Err(reason) => return TypeEntry::Malformed(reason),
-        };
+        let incomplete = strict_flag(entry, gimli::DW_AT_declaration)?;
         if !incomplete && explicit_size.is_none() {
-            return TypeEntry::Malformed("complete record type has no byte size".into());
+            return Err("complete record type has no byte size".into());
         }
-        match self.has_direct_variant_part(entry, unit_index) {
-            Ok(true) => {
-                return self.build_variant_type(
-                    entry,
-                    unit_index,
-                    reference,
-                    explicit_name,
-                    explicit_size,
-                    if kind == RecordKind::Class {
-                        VariantStorageKind::Class
-                    } else {
-                        VariantStorageKind::Struct
-                    },
-                );
-            }
-            Ok(false) => {}
-            Err(reason) => return TypeEntry::Malformed(reason),
-        }
-        let Some(unit) = self.units.get(unit_index) else {
-            return TypeEntry::Malformed("record type unit is unavailable".into());
-        };
-        let mut tree = match unit.entries_tree(Some(entry.offset())) {
-            Ok(tree) => tree,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
-        let root = match tree.root() {
-            Ok(root) => root,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
-        let mut members = Vec::new();
-        let mut bases = Vec::new();
-        let mut children = root.children();
-        loop {
-            let child = match children.next() {
-                Ok(Some(child)) => child,
-                Ok(None) => break,
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        if self.has_direct_variant_part(entry, unit_index)? {
+            let storage = if kind == RecordKind::Class {
+                VariantStorageKind::Class
+            } else {
+                VariantStorageKind::Struct
             };
-            let child = child.entry();
-            match child.tag() {
-                // A DWARF 4 static data member is a declaration with no bytes
-                // in an instance.
-                gimli::DW_TAG_member
-                    if strict_flag(child, gimli::DW_AT_declaration).unwrap_or(false) => {}
-                gimli::DW_TAG_member => {
-                    if members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN {
-                        return TypeEntry::Malformed("record child count exceeds its limit".into());
-                    }
-                    let chain = match origin_chain(self.units, unit_index, child) {
-                        Ok(chain) => chain,
-                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                    };
-                    let target = match self.target_with_origins(child, unit_index, &chain) {
-                        Ok(Some(target)) => target,
-                        Ok(None) => {
-                            return TypeEntry::Malformed("record member has no type".into());
-                        }
-                        Err(reason) => return TypeEntry::Malformed(reason),
-                    };
-                    let name =
-                        match copy_name_with_origins(self.dwarf, self.units, unit, child, &chain) {
-                            Ok(name) => name,
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        };
-                    let layout = match self.record_member_layout(child, target, None) {
-                        Ok(layout) => layout,
-                        Err(reason) => return TypeEntry::Malformed(reason),
-                    };
-                    if layout == RecordMemberLayout::Runtime {
-                        match self.copy_dynamic_record_layout(child, unit_index) {
-                            Ok(Some(expression)) => {
-                                self.dynamic_record_layouts.insert(
-                                    DynamicAggregateLayoutKey {
-                                        aggregate: reference.id,
-                                        child: DynamicAggregateChild::Member(members.len()),
-                                    },
-                                    expression,
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        }
-                    }
-                    let member_index = members.len();
-                    members.push(RecordMember {
-                        name,
-                        type_ref: target,
-                        layout,
-                        accessibility: match Self::record_accessibility(child, kind) {
-                            Ok(accessibility) => accessibility,
-                            Err(reason) => return TypeEntry::Malformed(reason),
-                        },
-                        artificial: match strict_flag(child, gimli::DW_AT_artificial) {
-                            Ok(value) => value,
-                            Err(reason) => return TypeEntry::Malformed(reason),
-                        },
-                        embedded: child.attr(gimli::DwAt(0x2903)).is_some_and(|attribute| {
-                            match attribute.value() {
-                                gimli::AttributeValue::Flag(value) => value,
-                                _ => attribute.udata_value().is_some_and(|value| value != 0),
-                            }
-                        }),
-                        declaration: None,
-                    });
-                    self.record_member_declarations
-                        .push(AggregateMemberDeclaration {
-                            aggregate: reference.id,
-                            member: AggregateMemberPath::Direct(member_index),
-                            die: DieKey {
-                                unit: unit_index,
-                                offset: child.offset().0,
-                            },
-                        });
-                }
-                gimli::DW_TAG_inheritance => {
-                    if members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN {
-                        return TypeEntry::Malformed("record child count exceeds its limit".into());
-                    }
-                    let target = match self.target(child, unit_index) {
-                        Ok(Some(target)) => target,
-                        Ok(None) => return TypeEntry::Malformed("base class has no type".into()),
-                        Err(reason) => return TypeEntry::Malformed(reason),
-                    };
-                    let layout = Self::record_byte_layout(child);
-                    if layout == RecordMemberLayout::Runtime {
-                        match self.copy_dynamic_record_layout(child, unit_index) {
-                            Ok(Some(expression)) => {
-                                self.dynamic_record_layouts.insert(
-                                    DynamicAggregateLayoutKey {
-                                        aggregate: reference.id,
-                                        child: DynamicAggregateChild::Base(bases.len()),
-                                    },
-                                    expression,
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        }
-                    }
-                    let virtuality = match child.attr_value(gimli::DW_AT_virtuality) {
-                        None
-                        | Some(gimli::AttributeValue::Virtuality(gimli::DW_VIRTUALITY_none)) => {
-                            BaseClassVirtuality::None
-                        }
-                        Some(gimli::AttributeValue::Virtuality(value))
-                            if value == gimli::DW_VIRTUALITY_virtual
-                                || value == gimli::DW_VIRTUALITY_pure_virtual =>
-                        {
-                            BaseClassVirtuality::Virtual
-                        }
-                        _ => {
-                            return TypeEntry::Malformed(
-                                "base-class virtuality has an invalid encoding".into(),
-                            );
-                        }
-                    };
-                    bases.push(BaseClass {
-                        type_ref: target,
-                        layout,
-                        accessibility: match Self::record_accessibility(child, kind) {
-                            Ok(accessibility) => accessibility,
-                            Err(reason) => return TypeEntry::Malformed(reason),
-                        },
-                        virtuality,
-                    });
-                }
-                gimli::DW_TAG_variant_part => {
-                    let name = explicit_name.unwrap_or_else(|| {
-                        Arc::from(format!("<anonymous {:?}@0x{:x}>", kind, entry.offset().0))
-                    });
-                    return TypeEntry::Resolved(TypeInfo {
-                        reference,
-                        name,
-                        byte_size: explicit_size,
-                        kind: TypeKind::Opaque {
-                            description:
-                                "record contains a discriminated variant part that is unsupported"
-                                    .into(),
-                        },
-                        identity: None,
-                    });
-                }
-                tag if is_scope_only_child(tag) => {}
-                tag => {
-                    let name = explicit_name.unwrap_or_else(|| {
-                        Arc::from(format!("<anonymous {:?}@0x{:x}>", kind, entry.offset().0))
-                    });
-                    return TypeEntry::Resolved(TypeInfo {
-                        reference,
-                        name,
-                        byte_size: explicit_size,
-                        kind: TypeKind::Opaque {
-                            description: format!(
-                                "record contains unsupported direct child {tag:?}"
-                            )
-                            .into(),
-                        },
-                        identity: None,
-                    });
-                }
-            }
+            return self.build_variant_type(
+                entry,
+                unit_index,
+                reference,
+                explicit_name,
+                explicit_size,
+                storage,
+            );
         }
         let name = explicit_name.unwrap_or_else(|| {
             Arc::from(format!("<anonymous {:?}@0x{:x}>", kind, entry.offset().0))
         });
-        if let Some(normalized) = self.normalize_zig_optional_or_error_union(
-            unit_index,
-            reference.id,
-            &name,
-            &members,
-            incomplete,
-        ) {
-            return match normalized {
-                Ok(kind) => TypeEntry::Resolved(TypeInfo {
-                    reference,
-                    name,
-                    byte_size: explicit_size,
-                    kind,
-                    identity: None,
-                }),
-                Err(reason) => TypeEntry::Malformed(reason),
-            };
+        let mut members = Vec::new();
+        let mut bases = Vec::new();
+        for child in self.children(unit_index, entry.offset())? {
+            let child = child?;
+            match child.tag() {
+                // A DWARF 4 static data member is a declaration with no bytes
+                // in an instance.
+                gimli::DW_TAG_member
+                    if strict_flag(&child, gimli::DW_AT_declaration).unwrap_or(false) => {}
+                gimli::DW_TAG_member | gimli::DW_TAG_inheritance
+                    if members.len().saturating_add(bases.len()) >= MAX_RECORD_CHILDREN =>
+                {
+                    return Err("record child count exceeds its limit".into());
+                }
+                gimli::DW_TAG_member => {
+                    let index = members.len();
+                    members.push(self.build_member(
+                        &child,
+                        unit_index,
+                        reference.id,
+                        DynamicAggregateChild::Member(index),
+                        AggregateMemberPath::Direct(index),
+                        None,
+                        kind,
+                        "record member",
+                    )?);
+                }
+                gimli::DW_TAG_inheritance => {
+                    bases.push(self.build_base(
+                        &child,
+                        unit_index,
+                        reference.id,
+                        bases.len(),
+                        kind,
+                        "base class",
+                    )?);
+                }
+                tag if is_scope_only_child(tag) => {}
+                tag => {
+                    return Ok(opaque(
+                        reference,
+                        name,
+                        explicit_size,
+                        format!("record contains unsupported direct child {tag:?}"),
+                    ));
+                }
+            }
         }
-        if let Some(normalized) =
-            self.normalize_zig_tagged_union(unit_index, reference.id, &members, incomplete)
-        {
-            return match normalized {
-                Ok(kind) => TypeEntry::Resolved(TypeInfo {
-                    reference,
-                    name,
-                    byte_size: explicit_size,
-                    kind,
-                    identity: None,
-                }),
-                Err(reason) => TypeEntry::Malformed(reason),
-            };
-        }
-        TypeEntry::Resolved(TypeInfo {
-            reference,
-            name,
-            byte_size: explicit_size,
-            kind: TypeKind::Record {
+        let normalized = self
+            .normalize_zig_optional_or_error_union(
+                unit_index,
+                reference.id,
+                &name,
+                &members,
+                incomplete,
+            )
+            .or_else(|| {
+                self.normalize_zig_tagged_union(unit_index, reference.id, &members, incomplete)
+            });
+        let kind = match normalized {
+            Some(kind) => kind?,
+            None => TypeKind::Record {
                 kind,
                 members: members.into(),
                 bases: bases.into(),
                 incomplete,
             },
-            identity: None,
-        })
+        };
+        Ok(resolved(reference, name, explicit_size, kind))
     }
 
     /// A self-hosted Zig optional pointer, `?*T` or `?[*]T`, as the pointer
@@ -2774,7 +2313,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
     /// is the pointer, as the LLVM backend describes it. Any other type is
     /// itself.
     fn zig_nullable_pointer(&self, info: TypeInfo) -> TypeInfo {
-        let resolved = |reference: TypeReference| match self.entries.get(reference.id.index()) {
+        let info_of = |reference: TypeReference| match self.entries.get(reference.id.index()) {
             Some(TypeEntry::Resolved(info)) => Some(info),
             _ => None,
         };
@@ -2793,7 +2332,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         };
         let whole = |member: &RecordMember| {
             member.layout == RecordMemberLayout::ByteOffset(0)
-                && resolved(member.type_ref).and_then(|member| member.byte_size) == info.byte_size
+                && info_of(member.type_ref).and_then(|member| member.byte_size) == info.byte_size
         };
         let pointer = match variants.as_ref() {
             [null, some]
@@ -2808,7 +2347,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     && some.selection == VariantSelection::Default =>
             {
                 match some.members.as_ref() {
-                    [payload] if whole(payload) => resolved(payload.type_ref)
+                    [payload] if whole(payload) => info_of(payload.type_ref)
                         .filter(|payload| matches!(payload.kind, TypeKind::Pointer { .. })),
                     _ => None,
                 }
@@ -2824,184 +2363,86 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "union normalization keeps overlapping storage and scope children explicit"
-    )]
-    pub(super) fn build_union_type(
+    fn build_union_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
         reference: TypeReference,
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
-    ) -> TypeEntry {
-        let incomplete = match strict_flag(entry, gimli::DW_AT_declaration) {
-            Ok(value) => value,
-            Err(reason) => return TypeEntry::Malformed(reason),
-        };
+    ) -> Built {
+        let incomplete = strict_flag(entry, gimli::DW_AT_declaration)?;
         if !incomplete && explicit_size.is_none() {
-            return TypeEntry::Malformed("complete union type has no byte size".into());
+            return Err("complete union type has no byte size".into());
         }
-        match self.has_direct_variant_part(entry, unit_index) {
-            Ok(true) => {
-                let built = self.build_variant_type(
-                    entry,
-                    unit_index,
-                    reference,
-                    explicit_name,
-                    explicit_size,
-                    VariantStorageKind::Union,
-                );
-                return match built {
-                    TypeEntry::Resolved(info)
-                        if self.zig_units.get(unit_index).copied().unwrap_or(false) =>
-                    {
-                        TypeEntry::Resolved(self.zig_nullable_pointer(info))
-                    }
-                    built => built,
-                };
-            }
-            Ok(false) => {}
-            Err(reason) => return TypeEntry::Malformed(reason),
+        if self.has_direct_variant_part(entry, unit_index)? {
+            let built = self.build_variant_type(
+                entry,
+                unit_index,
+                reference,
+                explicit_name,
+                explicit_size,
+                VariantStorageKind::Union,
+            )?;
+            return Ok(match built {
+                TypeEntry::Resolved(info) if self.is_zig(unit_index) => {
+                    TypeEntry::Resolved(self.zig_nullable_pointer(info))
+                }
+                built => built,
+            });
         }
         let name = explicit_name
             .unwrap_or_else(|| Arc::from(format!("<anonymous union@0x{:x}>", entry.offset().0)));
-        let Some(unit) = self.units.get(unit_index) else {
-            return TypeEntry::Malformed("union type unit is unavailable".into());
-        };
-        let mut tree = match unit.entries_tree(Some(entry.offset())) {
-            Ok(tree) => tree,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
-        let root = match tree.root() {
-            Ok(root) => root,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
         let mut members = Vec::new();
-        let mut children = root.children();
-        loop {
-            let child = match children.next() {
-                Ok(Some(child)) => child,
-                Ok(None) => break,
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-            };
-            let child = child.entry();
+        for child in self.children(unit_index, entry.offset())? {
+            let child = child?;
             match child.tag() {
                 gimli::DW_TAG_member
-                    if strict_flag(child, gimli::DW_AT_declaration).unwrap_or(false) => {}
-                gimli::DW_TAG_member => {
-                    if members.len() >= MAX_RECORD_CHILDREN {
-                        return TypeEntry::Resolved(TypeInfo {
-                            reference,
-                            name,
-                            byte_size: explicit_size,
-                            kind: TypeKind::Opaque {
-                                description: "union member count exceeds its resource limit".into(),
-                            },
-                            identity: None,
-                        });
-                    }
-                    let chain = match origin_chain(self.units, unit_index, child) {
-                        Ok(chain) => chain,
-                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                    };
-                    let target = match self.target_with_origins(child, unit_index, &chain) {
-                        Ok(Some(target)) => target,
-                        Ok(None) => return TypeEntry::Malformed("union member has no type".into()),
-                        Err(reason) => return TypeEntry::Malformed(reason),
-                    };
-                    let member_name =
-                        match copy_name_with_origins(self.dwarf, self.units, unit, child, &chain) {
-                            Ok(name) => name,
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        };
-                    let layout = match self.record_member_layout(child, target, Some(0)) {
-                        Ok(layout) => layout,
-                        Err(reason) => return TypeEntry::Malformed(reason),
-                    };
-                    if layout == RecordMemberLayout::Runtime {
-                        match self.copy_dynamic_record_layout(child, unit_index) {
-                            Ok(Some(expression)) => {
-                                self.dynamic_record_layouts.insert(
-                                    DynamicAggregateLayoutKey {
-                                        aggregate: reference.id,
-                                        child: DynamicAggregateChild::Member(members.len()),
-                                    },
-                                    expression,
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        }
-                    }
-                    let member_index = members.len();
-                    members.push(RecordMember {
-                        name: member_name,
-                        type_ref: target,
-                        layout,
-                        accessibility: match Self::record_accessibility(child, RecordKind::Struct) {
-                            Ok(accessibility) => accessibility,
-                            Err(reason) => return TypeEntry::Malformed(reason),
-                        },
-                        artificial: match strict_flag(child, gimli::DW_AT_artificial) {
-                            Ok(value) => value,
-                            Err(reason) => return TypeEntry::Malformed(reason),
-                        },
-                        embedded: false,
-                        declaration: None,
-                    });
-                    self.record_member_declarations
-                        .push(AggregateMemberDeclaration {
-                            aggregate: reference.id,
-                            member: AggregateMemberPath::Direct(member_index),
-                            die: DieKey {
-                                unit: unit_index,
-                                offset: child.offset().0,
-                            },
-                        });
-                }
-                gimli::DW_TAG_variant_part => {
-                    return TypeEntry::Resolved(TypeInfo {
+                    if strict_flag(&child, gimli::DW_AT_declaration).unwrap_or(false) => {}
+                gimli::DW_TAG_member if members.len() >= MAX_RECORD_CHILDREN => {
+                    return Ok(opaque(
                         reference,
                         name,
-                        byte_size: explicit_size,
-                        kind: TypeKind::Opaque {
-                            description:
-                                "union contains a discriminated variant part that is unsupported"
-                                    .into(),
-                        },
-                        identity: None,
-                    });
+                        explicit_size,
+                        "union member count exceeds its resource limit",
+                    ));
+                }
+                gimli::DW_TAG_member => {
+                    let index = members.len();
+                    members.push(self.build_member(
+                        &child,
+                        unit_index,
+                        reference.id,
+                        DynamicAggregateChild::Member(index),
+                        AggregateMemberPath::Direct(index),
+                        Some(0),
+                        RecordKind::Struct,
+                        "union member",
+                    )?);
                 }
                 tag if is_scope_only_child(tag) => {}
                 tag => {
-                    return TypeEntry::Resolved(TypeInfo {
+                    return Ok(opaque(
                         reference,
                         name,
-                        byte_size: explicit_size,
-                        kind: TypeKind::Opaque {
-                            description: format!("union contains unsupported direct child {tag:?}")
-                                .into(),
-                        },
-                        identity: None,
-                    });
+                        explicit_size,
+                        format!("union contains unsupported direct child {tag:?}"),
+                    ));
                 }
             }
         }
-        TypeEntry::Resolved(TypeInfo {
+        Ok(resolved(
             reference,
             name,
-            byte_size: explicit_size,
-            kind: TypeKind::Union {
+            explicit_size,
+            TypeKind::Union {
                 members: members.into(),
                 incomplete,
             },
-            identity: None,
-        })
+        ))
     }
 
-    pub(super) fn record_member_layout(
+    fn record_member_layout(
         &self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         target: TypeReference,
@@ -3038,14 +2479,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 let storage_bytes = entry
                     .attr(gimli::DW_AT_byte_size)
                     .and_then(gimli::Attribute::udata_value)
-                    .or_else(|| {
-                        self.entries
-                            .get(target.id.index())
-                            .and_then(|entry| match entry {
-                                TypeEntry::Resolved(info) => info.byte_size,
-                                TypeEntry::Building | TypeEntry::Malformed(_) => None,
-                            })
-                    })
+                    .or_else(|| self.byte_size_of(target.id))
                     .ok_or_else(|| Arc::from("legacy bit-field has no storage size"))?;
                 let storage_bits = storage_bytes
                     .checked_mul(8)
@@ -3080,63 +2514,27 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         ))
     }
 
-    pub(super) fn copy_dynamic_record_layout(
-        &self,
-        entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
-        unit_index: usize,
-    ) -> std::result::Result<Option<Expression>, DwarfError> {
-        let Some(expression) = entry
-            .attr_value(gimli::DW_AT_data_member_location)
-            .and_then(|value| value.exprloc_value())
-        else {
-            return Ok(None);
-        };
-        let unit = self
-            .units
-            .get(unit_index)
-            .ok_or(DwarfError::ReferenceOutsideUnits(unit_index))?;
-        copy_expression(self.dwarf, unit_index, unit, expression, unit.encoding()).map(Some)
-    }
-
-    pub(super) fn build_array_type(
+    fn build_array_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
         reference: TypeReference,
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
-    ) -> TypeEntry {
-        let element = match self.target(entry, unit_index) {
-            Ok(Some(target)) => target,
-            Ok(None) => return TypeEntry::Malformed("array type has no element type".into()),
-            Err(reason) => return TypeEntry::Malformed(reason),
-        };
-        let Some(unit) = self.units.get(unit_index) else {
-            return TypeEntry::Malformed("array type unit is unavailable".into());
-        };
-        let mut tree = match unit.entries_tree(Some(entry.offset())) {
-            Ok(tree) => tree,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
-        let root = match tree.root() {
-            Ok(root) => root,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
+    ) -> Built {
+        let element = self
+            .target(entry, unit_index)?
+            .ok_or("array type has no element type")?;
+        let unit = &self.units[unit_index];
         let mut dimensions = Vec::new();
         let mut strided = has_stride(entry);
-        let mut children = root.children();
-        loop {
-            let child = match children.next() {
-                Ok(Some(child)) => child,
-                Ok(None) => break,
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-            };
-            if child.entry().tag() != gimli::DW_TAG_subrange_type {
+        for child in self.children(unit_index, entry.offset())? {
+            let child = child?;
+            if child.tag() != gimli::DW_TAG_subrange_type {
                 continue;
             }
-            let child = child.entry();
-            strided |= has_stride(child);
-            let signed_index = index_type_is_signed(unit, child);
+            strided |= has_stride(&child);
+            let signed_index = index_type_is_signed(unit, &child);
             let lower = child
                 .attr(gimli::DW_AT_lower_bound)
                 .and_then(|attribute| array_bound(attribute, signed_index))
@@ -3149,15 +2547,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     u64::try_from(upper.checked_sub(lower)?.checked_add(1)?).ok()
                 });
             let Some(count) = count else {
-                return TypeEntry::Resolved(TypeInfo {
+                return Ok(opaque(
                     reference,
-                    name: explicit_name.unwrap_or_else(|| Arc::from("<dynamic array>")),
-                    byte_size: explicit_size,
-                    kind: TypeKind::Opaque {
-                        description: "array bounds are dynamic or missing".into(),
-                    },
-                    identity: None,
-                });
+                    explicit_name.unwrap_or_else(|| Arc::from("<dynamic array>")),
+                    explicit_size,
+                    "array bounds are dynamic or missing",
+                ));
             };
             dimensions.push(ArrayDimension {
                 lower_bound: lower,
@@ -3165,17 +2560,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             });
         }
         if dimensions.is_empty() {
-            return TypeEntry::Malformed("array type has no subrange dimensions".into());
+            return Err("array type has no subrange dimensions".into());
         }
         let name =
             explicit_name.unwrap_or_else(|| Arc::from(format!("{}[]", self.target_name(element))));
         // Producers rarely give a C array a size of its own: it is its
         // elements', laid end to end unless a stride spaces them.
         let byte_size = explicit_size.or_else(|| {
-            let element_size = match self.entries.get(element.id.index())? {
-                TypeEntry::Resolved(info) => info.byte_size?,
-                TypeEntry::Building | TypeEntry::Malformed(_) => return None,
-            };
+            let element_size = self.byte_size_of(element.id)?;
             if strided {
                 return None;
             }
@@ -3183,23 +2575,18 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 size.checked_mul(dimension.count)
             })
         });
-        TypeEntry::Resolved(TypeInfo {
+        Ok(resolved(
             reference,
             name,
             byte_size,
-            kind: TypeKind::Array {
+            TypeKind::Array {
                 element,
                 dimensions: dimensions.into(),
             },
-            identity: None,
-        })
+        ))
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "slice normalization validates both compiler layouts and every field invariant"
-    )]
-    pub(super) fn build_slice_type(
+    fn build_slice_type(
         &mut self,
         entry: &gimli::DebuggingInformationEntry<Reader<'data>>,
         unit_index: usize,
@@ -3207,22 +2594,10 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         explicit_name: Option<Arc<str>>,
         explicit_size: Option<u64>,
         layout: SliceLayout,
-    ) -> TypeEntry {
+    ) -> Built {
         let name = explicit_name.unwrap_or_else(|| Arc::from("<slice>"));
-        let Some(byte_size) = explicit_size else {
-            return TypeEntry::Malformed("slice descriptor has no byte size".into());
-        };
-        let Some(unit) = self.units.get(unit_index) else {
-            return TypeEntry::Malformed("slice type unit is unavailable".into());
-        };
-        let mut tree = match unit.entries_tree(Some(entry.offset())) {
-            Ok(tree) => tree,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
-        let root = match tree.root() {
-            Ok(root) => root,
-            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-        };
+        let byte_size = explicit_size.ok_or("slice descriptor has no byte size")?;
+        let unit = &self.units[unit_index];
         let address_size = u64::from(unit.encoding().address_size);
         let field_names = match layout {
             SliceLayout::Rust => &["data_ptr", "length"][..],
@@ -3230,48 +2605,33 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             SliceLayout::Go => &["array", "len", "cap"][..],
         };
         let field_count = u64::try_from(field_names.len()).expect("slice field count fits u64");
-        let Some(word_size) = byte_size.checked_div(field_count) else {
-            return TypeEntry::Malformed("slice descriptor size is invalid".into());
-        };
+        let word_size = byte_size
+            .checked_div(field_count)
+            .ok_or("slice descriptor size is invalid")?;
         if byte_size != word_size * field_count || word_size != address_size {
-            return TypeEntry::Resolved(TypeInfo {
+            return Ok(opaque(
                 reference,
                 name,
-                byte_size: Some(byte_size),
-                kind: TypeKind::Opaque {
-                    description: "slice descriptor does not use target-sized words".into(),
-                },
-                identity: None,
-            });
+                Some(byte_size),
+                "slice descriptor does not use target-sized words",
+            ));
         }
         let mut fields = Vec::new();
-        let mut children = root.children();
-        loop {
-            let child = match children.next() {
-                Ok(Some(child)) => child,
-                Ok(None) => break,
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-            };
-            if child.entry().tag() != gimli::DW_TAG_member {
+        for child in self.children(unit_index, entry.offset())? {
+            let child = child?;
+            if child.tag() != gimli::DW_TAG_member {
                 continue;
             }
-            let child = child.entry();
-            let field_name = match copy_name(self.dwarf, unit, child) {
-                Ok(Some(name)) => name,
-                Ok(None) => return TypeEntry::Malformed("slice member has no name".into()),
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-            };
-            let Some(offset) = child
+            let field_name = copy_name(self.dwarf, unit, &child)
+                .map_err(malformed)?
+                .ok_or("slice member has no name")?;
+            let offset = child
                 .attr(gimli::DW_AT_data_member_location)
                 .and_then(gimli::Attribute::udata_value)
-            else {
-                return TypeEntry::Malformed("slice member has no constant offset".into());
-            };
-            let field_type = match self.target(child, unit_index) {
-                Ok(Some(target)) => target,
-                Ok(None) => return TypeEntry::Malformed("slice member has no type".into()),
-                Err(reason) => return TypeEntry::Malformed(reason),
-            };
+                .ok_or("slice member has no constant offset")?;
+            let field_type = self
+                .target(&child, unit_index)?
+                .ok_or("slice member has no type")?;
             fields.push((field_name, offset, field_type));
         }
         if fields.len() != field_names.len()
@@ -3283,18 +2643,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 },
             )
         {
-            return TypeEntry::Resolved(TypeInfo {
+            return Ok(opaque(
                 reference,
                 name,
-                byte_size: Some(byte_size),
-                kind: TypeKind::Opaque {
-                    description: "unrecognized slice descriptor layout".into(),
-                },
-                identity: None,
-            });
+                Some(byte_size),
+                "unrecognized slice descriptor layout",
+            ));
         }
-        let pointer = fields[0].2;
-        let element = match self.entries.get(pointer.id.index()) {
+        let element = match self.entries.get(fields[0].2.id.index()) {
             Some(TypeEntry::Resolved(TypeInfo {
                 kind:
                     TypeKind::Pointer {
@@ -3303,7 +2659,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     },
                 ..
             })) => *target,
-            _ => return TypeEntry::Malformed("slice data member is not a typed pointer".into()),
+            _ => return Err("slice data member is not a typed pointer".into()),
         };
         for (_, _, field_type) in &fields[1..] {
             let valid = self
@@ -3320,24 +2676,23 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     }) if *size == word_size)
                 });
             if !valid {
-                return TypeEntry::Malformed(
+                return Err(
                     "slice length and capacity members must be target-sized unsigned integers"
                         .into(),
                 );
             }
         }
         let text = layout.is_text(&name);
-        TypeEntry::Resolved(TypeInfo {
+        Ok(resolved(
             reference,
             name,
-            byte_size: Some(byte_size),
-            kind: TypeKind::Slice {
+            Some(byte_size),
+            TypeKind::Slice {
                 element,
                 has_capacity: layout == SliceLayout::Go,
                 text,
             },
-            identity: None,
-        })
+        ))
     }
 }
 
@@ -3416,19 +2771,16 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         unit_index: usize,
     ) -> Option<Vec<(Arc<str>, Option<DieKey>)>> {
         let unit = self.units.get(unit_index)?;
-        let mut tree = unit.entries_tree(Some(entry.offset())).ok()?;
-        let root = tree.root().ok()?;
-        let mut children = root.children();
         let mut members = Vec::new();
-        while let Some(child) = children.next().ok()? {
-            let child = child.entry();
+        for child in self.children(unit_index, entry.offset()).ok()? {
+            let child = child.ok()?;
             if child.tag() != gimli::DW_TAG_member {
                 continue;
             }
             if members.len() >= MAX_RECORD_CHILDREN {
                 return None;
             }
-            let name = copy_name(self.dwarf, unit, child).ok()??;
+            let name = copy_name(self.dwarf, unit, &child).ok()??;
             let target = die_reference_with_signatures(
                 child.attr_value(gimli::DW_AT_type),
                 unit_index,
@@ -3497,36 +2849,22 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
 
     /// Whether an array type DIE has a dimension with no count.
     fn array_is_unsized(&self, array: DieKey) -> bool {
-        let Some(unit) = self.units.get(array.unit) else {
+        let Ok(children) = self.children(array.unit, gimli::UnitOffset(array.offset)) else {
             return true;
         };
-        let Ok(mut tree) = unit.entries_tree(Some(gimli::UnitOffset(array.offset))) else {
-            return true;
-        };
-        let Ok(root) = tree.root() else {
-            return true;
-        };
-        let mut children = root.children();
-        while let Ok(Some(child)) = children.next() {
-            let child = child.entry();
-            if child.tag() == gimli::DW_TAG_subrange_type
+        children.map_while(Result::ok).any(|child| {
+            child.tag() == gimli::DW_TAG_subrange_type
                 && child.attr(gimli::DW_AT_count).is_none()
                 && child.attr(gimli::DW_AT_upper_bound).is_none()
-            {
-                return true;
-            }
-        }
-        false
+        })
     }
 }
 
-/// Resolves a type DIE's `DW_AT_address_class`.
-///
-/// An absent attribute defaults to zero. A present oversized constant is valid
-/// but uninterpretable here (opaque); any other non-constant form is defective.
-/// Silently treating either as the default class could produce a convincing read
-/// using semantics the producer never specified.
-pub(super) fn resolve_address_class(
+/// Resolves a type DIE's `DW_AT_address_class`, which defaults to zero. A
+/// class too large to represent is unsupported, and any other non-constant
+/// form defective: either read as the default class would use semantics the
+/// producer never specified.
+fn resolve_address_class(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     reference: TypeReference,
     explicit_name: Option<Arc<str>>,
@@ -3536,30 +2874,22 @@ pub(super) fn resolve_address_class(
     };
     match unsigned_constant(attribute) {
         UnsignedConstant::Value(value) => Ok(value),
-        UnsignedConstant::Oversized => Err(Box::new(TypeEntry::Resolved(TypeInfo {
+        UnsignedConstant::Oversized => Err(Box::new(opaque(
             reference,
-            name: explicit_name.unwrap_or_else(|| Arc::from("<unsupported type>")),
-            byte_size: None,
-            kind: TypeKind::Opaque {
-                description: "DW_AT_address_class exceeds the supported u64 range".into(),
-            },
-            identity: None,
-        }))),
+            explicit_name.unwrap_or_else(|| Arc::from("<unsupported type>")),
+            None,
+            "DW_AT_address_class exceeds the supported u64 range",
+        ))),
         UnsignedConstant::NonConstant => Err(Box::new(TypeEntry::Malformed(
             "DW_AT_address_class is not an unsigned integer constant".into(),
         ))),
     }
 }
 
-/// Resolves the explicit `DW_AT_byte_size` for a type DIE.
-///
-/// Returns `Ok(Some(size))` for a usable constant, `Ok(None)` when the attribute
-/// is absent (a default size may apply), or `Err(entry)` with the terminal
-/// `TypeEntry` for a size that is valid-but-unusable or defective. Only a
-/// genuinely absent attribute may fall back to a default; collapsing dynamic,
-/// oversized, or malformed forms to "absent" would silently decode the wrong
-/// width using semantics the producer never specified.
-pub(super) fn resolve_explicit_size(
+/// Resolves a type DIE's `DW_AT_byte_size`: `None` when it is absent, and
+/// otherwise the size or the terminal entry for a size that is unusable or
+/// defective. Only an absent size may fall back to a default.
+fn resolve_explicit_size(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     reference: TypeReference,
     explicit_name: Option<Arc<str>>,
@@ -3567,73 +2897,145 @@ pub(super) fn resolve_explicit_size(
     match byte_size_attribute(entry) {
         ByteSize::Absent => Ok(None),
         ByteSize::Constant(size) => Ok(Some(size)),
-        ByteSize::Unsupported(description) => Err(Box::new(TypeEntry::Resolved(TypeInfo {
+        ByteSize::Unsupported(description) => Err(Box::new(opaque(
             reference,
-            name: explicit_name.unwrap_or_else(|| Arc::from("<oversized type>")),
-            byte_size: None,
-            kind: TypeKind::Opaque { description },
-            identity: None,
-        }))),
-        // A dynamic size is valid metadata this backend cannot statically size.
-        // Mandatory tag attributes were already validated by the caller, so a
-        // defect cannot be masked here.
-        ByteSize::Dynamic => Err(Box::new(TypeEntry::Resolved(TypeInfo {
+            explicit_name.unwrap_or_else(|| Arc::from("<oversized type>")),
+            None,
+            description,
+        ))),
+        ByteSize::Dynamic => Err(Box::new(opaque(
             reference,
-            name: explicit_name.unwrap_or_else(|| Arc::from("<dynamically sized type>")),
-            byte_size: None,
-            kind: TypeKind::Opaque {
-                description: "dynamic DW_AT_byte_size is unsupported".into(),
-            },
-            identity: None,
-        }))),
+            explicit_name.unwrap_or_else(|| Arc::from("<dynamically sized type>")),
+            None,
+            "dynamic DW_AT_byte_size is unsupported",
+        ))),
         ByteSize::Malformed => Err(Box::new(TypeEntry::Malformed(
             "DW_AT_byte_size is neither a constant nor a supported dynamic form".into(),
         ))),
     }
 }
 
-/// Whether a type DIE's `DW_AT_type` edge must be present.
+/// A type built, or why its metadata is malformed.
+type Built = std::result::Result<TypeEntry, Arc<str>>;
+
+fn malformed(error: impl std::fmt::Display) -> Arc<str> {
+    error.to_string().into()
+}
+
+/// A type with no identity yet.
+const fn resolved(
+    reference: TypeReference,
+    name: Arc<str>,
+    byte_size: Option<u64>,
+    kind: TypeKind,
+) -> TypeEntry {
+    TypeEntry::Resolved(TypeInfo {
+        reference,
+        name,
+        byte_size,
+        kind,
+        identity: None,
+    })
+}
+
+/// A type whose representation is unsupported.
+fn opaque(
+    reference: TypeReference,
+    name: Arc<str>,
+    byte_size: Option<u64>,
+    description: impl Into<Arc<str>>,
+) -> TypeEntry {
+    resolved(
+        reference,
+        name,
+        byte_size,
+        TypeKind::Opaque {
+            description: description.into(),
+        },
+    )
+}
+
+/// The integral `BaseTypeEncoding` of a `DW_ATE_*` encoding.
+const fn integer_encoding(encoding: gimli::DwAte) -> Option<BaseTypeEncoding> {
+    Some(match encoding {
+        gimli::DW_ATE_boolean => BaseTypeEncoding::Boolean,
+        gimli::DW_ATE_signed => BaseTypeEncoding::Signed,
+        gimli::DW_ATE_signed_char => BaseTypeEncoding::SignedCharacter,
+        gimli::DW_ATE_unsigned => BaseTypeEncoding::Unsigned,
+        gimli::DW_ATE_unsigned_char => BaseTypeEncoding::UnsignedCharacter,
+        _ => return None,
+    })
+}
+
+/// The direct children of one DIE, read one at a time.
+pub(super) struct Children<'a, 'data> {
+    cursor: gimli::EntriesCursor<'a, Reader<'data>>,
+    started: bool,
+    done: bool,
+}
+
+impl<'data> Iterator for Children<'_, 'data> {
+    type Item = std::result::Result<gimli::DebuggingInformationEntry<Reader<'data>>, Arc<str>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let next = if self.started {
+            self.cursor.next_sibling().map(Option::<&_>::cloned)
+        } else {
+            self.started = true;
+            self.first_child()
+        };
+        match next {
+            Ok(Some(child)) => Some(Ok(child)),
+            Ok(None) => {
+                self.done = true;
+                None
+            }
+            Err(error) => {
+                self.done = true;
+                Some(Err(malformed(error)))
+            }
+        }
+    }
+}
+
+impl<'data> Children<'_, 'data> {
+    fn first_child(
+        &mut self,
+    ) -> gimli::Result<Option<gimli::DebuggingInformationEntry<Reader<'data>>>> {
+        let has_children = self
+            .cursor
+            .next_dfs()?
+            .is_some_and(gimli::DebuggingInformationEntry::has_children);
+        if !has_children || !self.cursor.next_entry()? {
+            return Ok(None);
+        }
+        Ok(self.cursor.current().cloned())
+    }
+}
+
+/// Whether a type DIE's `DW_AT_type` must be present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TargetRequirement {
-    /// The tag mandates a target (e.g. a reference or qualifier).
+enum TargetRequirement {
     Required,
-    /// The target is optional (e.g. a `void` pointer), but if present it must
-    /// still name a real type DIE.
     Optional,
 }
 
-pub(super) fn named_type_relationship(
-    tag: gimli::DwTag,
-    language: Option<gimli::DwLang>,
-    zig_producer: bool,
-) -> NamedTypeRelationship {
+fn named_type_relationship(tag: gimli::DwTag, language: SourceLanguage) -> NamedTypeRelationship {
     if tag == gimli::DW_TAG_template_alias {
         return NamedTypeRelationship::Synonym;
     }
-    if zig_producer {
-        return NamedTypeRelationship::Encoding;
-    }
     match language {
-        Some(
-            gimli::DW_LANG_C89
-            | gimli::DW_LANG_C
-            | gimli::DW_LANG_C99
-            | gimli::DW_LANG_C11
-            | gimli::DW_LANG_C17
-            | gimli::DW_LANG_C_plus_plus
-            | gimli::DW_LANG_C_plus_plus_03
-            | gimli::DW_LANG_C_plus_plus_11
-            | gimli::DW_LANG_C_plus_plus_14
-            | gimli::DW_LANG_C_plus_plus_17
-            | gimli::DW_LANG_C_plus_plus_20,
-        ) => NamedTypeRelationship::Synonym,
-        Some(gimli::DW_LANG_Go) => NamedTypeRelationship::Distinct,
-        Some(gimli::DW_LANG_Zig) => NamedTypeRelationship::Encoding,
+        SourceLanguage::C | SourceLanguage::Cpp => NamedTypeRelationship::Synonym,
+        SourceLanguage::Go => NamedTypeRelationship::Distinct,
+        SourceLanguage::Zig => NamedTypeRelationship::Encoding,
         _ => NamedTypeRelationship::Unspecified,
     }
 }
 
-pub(super) const fn type_modifier(tag: gimli::DwTag) -> Option<TypeModifier> {
+const fn type_modifier(tag: gimli::DwTag) -> Option<TypeModifier> {
     match tag {
         gimli::DW_TAG_const_type => Some(TypeModifier::Const),
         gimli::DW_TAG_volatile_type => Some(TypeModifier::Volatile),
@@ -3818,7 +3220,7 @@ pub(super) fn inline_storage_cycle_nodes(types: &[TypeEntry]) -> Vec<usize> {
     cyclic_nodes
 }
 
-pub(super) fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
+fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) {
     let mut push = |reference: TypeReference| {
         targets.push(reference.id.index());
     };
@@ -3881,11 +3283,7 @@ pub(super) fn inline_storage_targets(kind: &TypeKind, targets: &mut Vec<usize>) 
     }
 }
 
-pub(super) fn modifier_type_name(
-    modifier: TypeModifier,
-    target: &str,
-    indirection: bool,
-) -> String {
+fn modifier_type_name(modifier: TypeModifier, target: &str, indirection: bool) -> String {
     let keyword = match modifier {
         TypeModifier::Const => "const",
         TypeModifier::Volatile => "volatile",

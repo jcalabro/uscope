@@ -22,15 +22,15 @@ use super::codec::{
 use super::die::checked_reference_chain;
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, dwarf_value_bytes, evaluate,
-    evaluate_frame_base, incomplete_piece_reason, materialize_constant, materialize_pieces,
+    incomplete_piece_reason, materialize_constant, materialize_pieces,
 };
 use super::globals::{DefinitionIndex, DefinitionResolution};
 use super::inspect::{
-    ArrayIndexCalculationError, ScalarDecodeError, implicit_pointer_range, path_error_state,
-    row_major_array_index, static_member_layout_is_valid,
+    PathStep, ScalarDecodeError, array_byte_offset, evaluate_error_state, implicit_pointer_range,
+    static_member_layout_is_valid,
 };
 use super::location::{EvaluationUnit, Expression, LocationDescription, LocationEntry};
-use super::shape::{ValueShape, ValueShapeError, ValueShapeKind, value_shape_from};
+use super::shape::{ValueShape, ValueShapeError, value_shape_from};
 use super::types::{
     TypeArenaBuilder, TypeEntry, TypeResolution, inline_storage_cycle_nodes,
     propagate_wrapper_sizes, zig_error_union_type_names, zig_optional_payload_name,
@@ -42,49 +42,35 @@ use super::variant::{
 use super::*;
 
 #[test]
-fn row_major_array_indices_honor_lower_bounds_and_reject_overflow() {
-    let dimensions = [
-        ArrayDimension {
-            lower_bound: -2,
-            count: 3,
-        },
-        ArrayDimension {
-            lower_bound: 10,
-            count: 2,
-        },
-    ];
-    assert_eq!(row_major_array_index(&dimensions, &[0, 11]), Ok(5));
+fn array_indices_honor_lower_bounds_and_reject_overflow() {
+    let step = |dimensions: &[(i128, u64)], element_size| PathStep::ArrayIndex {
+        dimensions: dimensions
+            .iter()
+            .map(|&(lower_bound, count)| ArrayDimension { lower_bound, count })
+            .collect(),
+        element_size,
+    };
+    let bounded = step(&[(-2, 3), (10, 2)], 4);
+    assert_eq!(array_byte_offset(&bounded, &[0, 11]).ok(), Some(Some(20)));
+    for (indices, bad_index, bad_lower_bound, bad_count) in
+        [([-3, 10], -3, -2, 3), ([0, 12], 12, 10, 2)]
+    {
+        assert!(matches!(
+            array_byte_offset(&bounded, &indices),
+            Err(Error::ValueIndexOutOfBounds { index, lower_bound, count })
+                if (index, lower_bound, count) == (bad_index, bad_lower_bound, bad_count)
+        ));
+    }
     assert!(matches!(
-        row_major_array_index(&dimensions, &[-3, 10]),
-        Err(ArrayIndexCalculationError::OutOfBounds {
-            index: -3,
-            lower_bound: -2,
-            count: 3,
-        })
-    ));
-    assert!(matches!(
-        row_major_array_index(&dimensions, &[0, 12]),
-        Err(ArrayIndexCalculationError::OutOfBounds {
-            index: 12,
-            lower_bound: 10,
-            count: 2,
-        })
+        array_byte_offset(&bounded, &[0]),
+        Err(Error::InvalidValueExpression(_))
     ));
 
-    let overflowing = [
-        ArrayDimension {
-            lower_bound: 0,
-            count: u64::MAX,
-        },
-        ArrayDimension {
-            lower_bound: 0,
-            count: 2,
-        },
-    ];
-    assert_eq!(
-        row_major_array_index(&overflowing, &[i128::from(u64::MAX - 1), 1]),
-        Err(ArrayIndexCalculationError::Overflow)
-    );
+    let overflowing = step(&[(0, u64::MAX), (0, 2)], 1);
+    assert!(matches!(
+        array_byte_offset(&overflowing, &[i128::from(u64::MAX - 1), 1]),
+        Err(Error::InvalidValueExpression(message)) if message.contains("row-major")
+    ));
 }
 
 #[test]
@@ -249,35 +235,6 @@ fn zig_synthetic_variant_names_require_canonical_type_syntax() {
 }
 
 #[test]
-fn sub_byte_integer_representations_mask_and_sign_extend() {
-    let base = |encoding, bit_size| BaseType {
-        name: "bits".into(),
-        base_name: "bits".into(),
-        encoding,
-        byte_size: 1,
-        bit_size: Some(bit_size),
-    };
-    assert_eq!(
-        decode_integer_value(
-            &base(BaseTypeEncoding::Unsigned, 3),
-            &[0xff],
-            ByteOrder::Little
-        )
-        .unwrap(),
-        IntegerValue::Unsigned(7)
-    );
-    assert_eq!(
-        decode_integer_value(
-            &base(BaseTypeEncoding::Signed, 3),
-            &[0x05],
-            ByteOrder::Little
-        )
-        .unwrap(),
-        IntegerValue::Signed(-3)
-    );
-}
-
-#[test]
 fn specification_chains_reject_cycles() {
     let first = DieKey {
         unit: 0,
@@ -374,6 +331,74 @@ impl VariableRuntime for Runtime {
     }
 }
 
+impl Runtime {
+    fn new(registers: impl IntoIterator<Item = (u16, u64)>) -> Self {
+        Self {
+            registers: registers.into_iter().collect(),
+            cfa: Ok(VirtualAddress::new(0x3000)),
+            memory: None,
+            memory_reads: 0,
+        }
+    }
+}
+
+/// Evaluates an expression with no frame base and an unlimited budget.
+fn run<'a>(
+    expression: &'a Expression,
+    units: &[EvaluationUnit],
+    runtime: &mut Runtime,
+) -> std::result::Result<Vec<gimli::Piece<Reader<'a>>>, EvaluateError> {
+    evaluate(
+        expression,
+        RunTimeEndian::Little,
+        &mut FrameBase::Unsupported,
+        units,
+        runtime,
+        &mut InspectionBudget::default(),
+    )
+}
+
+fn reference(id: u32) -> TypeReference {
+    TypeReference {
+        image: ModuleImageId::new(7),
+        id: TypeId::new(id),
+    }
+}
+
+fn node(id: u32, name: &str, byte_size: Option<u64>, kind: TypeKind) -> TypeEntry {
+    TypeEntry::Resolved(TypeInfo {
+        reference: reference(id),
+        name: name.into(),
+        byte_size,
+        kind,
+        identity: None,
+    })
+}
+
+/// Two wrapper types that wrap each other.
+fn wrapper_cycle() -> [TypeEntry; 2] {
+    [
+        node(
+            0,
+            "left",
+            Some(8),
+            TypeKind::Named {
+                target: Some(reference(1)),
+                relationship: NamedTypeRelationship::Synonym,
+            },
+        ),
+        node(
+            1,
+            "right",
+            Some(8),
+            TypeKind::Modified {
+                modifier: TypeModifier::Const,
+                target: reference(0),
+            },
+        ),
+    ]
+}
+
 fn expression(bytes: &[u8]) -> Expression {
     Expression {
         bytes: Arc::from(bytes),
@@ -413,109 +438,8 @@ fn units(base_types: impl IntoIterator<Item = (usize, gimli::ValueType)>) -> Vec
 }
 
 #[test]
-fn frame_base_register_and_fbreg_location_have_distinct_meanings() {
-    let mut runtime = Runtime {
-        registers: BTreeMap::from([(6, 0x2000)]),
-        cfa: Ok(VirtualAddress::new(0x3000)),
-        memory: None,
-        memory_reads: 0,
-    };
-    let frame_base = evaluate_frame_base(
-        &expression(&[gimli::DW_OP_reg6.0]),
-        RunTimeEndian::Little,
-        &units([]),
-        &mut runtime,
-        &mut InspectionBudget::default(),
-    )
-    .expect("register-valued frame base");
-    assert_eq!(frame_base, VirtualAddress::new(0x2000));
-
-    let fbreg = expression(&[gimli::DW_OP_fbreg.0, 0x70]);
-    let location = Metadata::Value(LocationDescription {
-        entries: vec![LocationEntry {
-            range: None,
-            expression: expression(&[gimli::DW_OP_reg6.0]),
-        }]
-        .into(),
-    });
-    let mut cache = FrameBaseCache::Empty;
-    let pieces = evaluate(
-        &fbreg,
-        RunTimeEndian::Little,
-        &mut FrameBase::Lazy(FrameBaseContext {
-            location: &location,
-            address: Some(ImageAddress::new(0)),
-            cache: &mut cache,
-        }),
-        &units([]),
-        &mut runtime,
-        &mut InspectionBudget::default(),
-    )
-    .expect("frame-relative memory location");
-    assert!(matches!(cache, FrameBaseCache::Available(_)));
-    assert!(matches!(
-        pieces.as_slice(),
-        [gimli::Piece {
-            location: Location::Address { address: 0x1ff0 },
-            ..
-        }]
-    ));
-
-    let direct_register = expression(&[gimli::DW_OP_reg6.0]);
-    let pieces = evaluate(
-        &direct_register,
-        RunTimeEndian::Little,
-        &mut FrameBase::Unsupported,
-        &units([]),
-        &mut runtime,
-        &mut InspectionBudget::default(),
-    )
-    .expect("direct register location");
-    assert!(matches!(
-        pieces.as_slice(),
-        [gimli::Piece {
-            location: Location::Register {
-                register: gimli::Register(6)
-            },
-            ..
-        }]
-    ));
-}
-
-#[test]
-fn cfa_expression_limit_remains_a_typed_unavailable_reason() {
-    let mut runtime = Runtime {
-        registers: BTreeMap::new(),
-        cfa: Err(VariableUnavailableReason::CallFrameUnavailable(
-            crate::CallFrameUnavailableReason::NoInstructionContext,
-        )),
-        memory: None,
-        memory_reads: 0,
-    };
-    assert_eq!(
-        evaluate_frame_base(
-            &expression(&[gimli::DW_OP_call_frame_cfa.0]),
-            RunTimeEndian::Little,
-            &units([]),
-            &mut runtime,
-            &mut InspectionBudget::default(),
-        ),
-        Err(EvaluateError::Unavailable(
-            VariableUnavailableReason::CallFrameUnavailable(
-                crate::CallFrameUnavailableReason::NoInstructionContext,
-            )
-        ))
-    );
-}
-
-#[test]
 fn malformed_backward_branch_expression_fails_instead_of_hanging() {
-    let mut runtime = Runtime {
-        registers: BTreeMap::new(),
-        cfa: Ok(VirtualAddress::new(0x3000)),
-        memory: None,
-        memory_reads: 0,
-    };
+    let mut runtime = Runtime::new([]);
     // DW_OP_skip with a -3 offset branches back onto itself forever.
     let looping = expression(&[gimli::DW_OP_skip.0, 0xfd, 0xff]);
     let mut budget = InspectionBudget::default();
@@ -538,12 +462,7 @@ fn malformed_backward_branch_expression_fails_instead_of_hanging() {
 
 #[test]
 fn typed_register_values_are_evaluated_with_the_referenced_base_type() {
-    let mut runtime = Runtime {
-        registers: BTreeMap::from([(6, 0x2000)]),
-        cfa: Ok(VirtualAddress::new(0x3000)),
-        memory: None,
-        memory_reads: 0,
-    };
+    let mut runtime = Runtime::new([(6, 0x2000)]);
     // DW_OP_regval_type register 6, base type DIE offset 0x10.
     let typed = expression(&[
         gimli::DW_OP_regval_type.0,
@@ -551,13 +470,10 @@ fn typed_register_values_are_evaluated_with_the_referenced_base_type() {
         0x10,
         gimli::DW_OP_stack_value.0,
     ]);
-    let result = evaluate(
+    let result = run(
         &typed,
-        RunTimeEndian::Little,
-        &mut FrameBase::Unsupported,
         &units([(0x10, gimli::ValueType::U64)]),
         &mut runtime,
-        &mut InspectionBudget::default(),
     )
     .expect("typed register expression");
     assert!(matches!(
@@ -573,22 +489,9 @@ fn typed_register_values_are_evaluated_with_the_referenced_base_type() {
 
 #[test]
 fn implicit_and_computed_values_materialize_with_source_provenance() {
-    let mut runtime = Runtime {
-        registers: BTreeMap::new(),
-        cfa: Ok(VirtualAddress::new(0x3000)),
-        memory: None,
-        memory_reads: 0,
-    };
+    let mut runtime = Runtime::new([]);
     let implicit = expression(&[gimli::DW_OP_implicit_value.0, 4, 0xd6, 0xff, 0xff, 0xff]);
-    let pieces = evaluate(
-        &implicit,
-        RunTimeEndian::Little,
-        &mut FrameBase::Unsupported,
-        &units([]),
-        &mut runtime,
-        &mut InspectionBudget::default(),
-    )
-    .expect("implicit scalar expression");
+    let pieces = run(&implicit, &units([]), &mut runtime).expect("implicit scalar expression");
     let materialized = materialize_pieces(
         &pieces,
         4,
@@ -655,20 +558,8 @@ fn undefined_location_pieces_report_exact_destination_ranges() {
 #[test]
 fn an_empty_location_expression_describes_an_optimized_out_value() {
     let empty = expression(&[]);
-    let pieces = evaluate(
-        &empty,
-        RunTimeEndian::Little,
-        &mut FrameBase::Unsupported,
-        &units([]),
-        &mut Runtime {
-            registers: BTreeMap::new(),
-            cfa: Ok(VirtualAddress::new(0x3000)),
-            memory: None,
-            memory_reads: 0,
-        },
-        &mut InspectionBudget::default(),
-    )
-    .expect("an empty expression is valid");
+    let pieces =
+        run(&empty, &units([]), &mut Runtime::new([])).expect("an empty expression is valid");
 
     assert_eq!(
         incomplete_piece_reason(&pieces, 64),
@@ -680,12 +571,7 @@ fn an_empty_location_expression_describes_an_optimized_out_value() {
 
 #[test]
 fn deferred_operations_and_missing_types_have_stable_typed_reasons() {
-    let mut runtime = Runtime {
-        registers: BTreeMap::from([(0, 1)]),
-        cfa: Ok(VirtualAddress::new(0x3000)),
-        memory: None,
-        memory_reads: 0,
-    };
+    let mut runtime = Runtime::new([(0, 1)]);
     let entry = expression(&[
         gimli::DW_OP_entry_value.0,
         1,
@@ -693,14 +579,7 @@ fn deferred_operations_and_missing_types_have_stable_typed_reasons() {
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(
-        evaluate(
-            &entry,
-            RunTimeEndian::Little,
-            &mut FrameBase::Unsupported,
-            &units([]),
-            &mut runtime,
-            &mut InspectionBudget::default(),
-        ),
+        run(&entry, &units([]), &mut runtime),
         Err(crate::UnsupportedVariableFeature::EntryValue.into())
     );
 
@@ -711,14 +590,7 @@ fn deferred_operations_and_missing_types_have_stable_typed_reasons() {
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(
-        evaluate(
-            &missing_type,
-            RunTimeEndian::Little,
-            &mut FrameBase::Unsupported,
-            &units([]),
-            &mut runtime,
-            &mut InspectionBudget::default(),
-        ),
+        run(&missing_type, &units([]), &mut runtime),
         Err(crate::UnsupportedVariableFeature::TypedValue.into())
     );
 }
@@ -734,10 +606,8 @@ fn expression_memory_reads_are_strictly_bounded() {
     bytes.extend_from_slice(&[gimli::DW_OP_lit0.0, gimli::DW_OP_stack_value.0]);
     let expression = expression(&bytes);
     let mut runtime = Runtime {
-        registers: BTreeMap::new(),
-        cfa: Ok(VirtualAddress::new(0x3000)),
         memory: Some(Arc::from([0_u8; 16])),
-        memory_reads: 0,
+        ..Runtime::new([])
     };
     assert_eq!(
         evaluate(
@@ -769,26 +639,17 @@ fn operational_memory_failures_escape_the_per_variable_result_lane() {
     let mut bytes = vec![gimli::DW_OP_addr.0];
     bytes.extend_from_slice(&0x1000_u64.to_le_bytes());
     bytes.extend_from_slice(&[gimli::DW_OP_deref.0, gimli::DW_OP_stack_value.0]);
-    let mut runtime = Runtime {
-        registers: BTreeMap::new(),
-        cfa: Ok(VirtualAddress::new(0x3000)),
-        memory: None,
-        memory_reads: 0,
-    };
+    let mut runtime = Runtime::new([]);
 
     assert_eq!(
-        evaluate(
-            &expression(&bytes),
-            RunTimeEndian::Little,
-            &mut FrameBase::Unsupported,
-            &units([]),
-            &mut runtime,
-            &mut InspectionBudget::default(),
-        ),
+        run(&expression(&bytes), &units([]), &mut runtime),
         Err(EvaluateError::Fatal("unexpected memory read".into()))
     );
     assert!(matches!(
-        path_error_state(EvaluateError::Fatal("ptrace failed".into())),
+        evaluate_error_state(
+            EvaluateError::Fatal("ptrace failed".into()),
+            VariableMalformedKind::InvalidExpression
+        ),
         Err(Error::VariableRuntime(description)) if description.as_ref() == "ptrace failed"
     ));
 }
@@ -832,12 +693,7 @@ fn fixed_form_constants_zero_extend_and_signed_forms_sign_extend() {
 
 #[test]
 fn unexecuted_fbreg_branches_do_not_require_a_frame_base() {
-    let mut runtime = Runtime {
-        registers: BTreeMap::new(),
-        cfa: Ok(VirtualAddress::new(0x3000)),
-        memory: None,
-        memory_reads: 0,
-    };
+    let mut runtime = Runtime::new([]);
     // DW_OP_lit1 then DW_OP_bra +2 skips the DW_OP_fbreg on the executed
     // path; the frame base must not be resolved eagerly.
     let branching = expression(&[
@@ -970,7 +826,7 @@ fn specific_location_entries_override_default_entries() {
 }
 
 #[test]
-fn scalar_decoding_obeys_width_sign_and_target_byte_order() {
+fn scalar_decoding_obeys_bit_width_sign_and_target_byte_order() {
     for (bytes, byte_order, signed, unsigned) in [
         (&[0xfe][..], ByteOrder::Little, -2_i128, 254_u128),
         (&[0xfe, 0xff], ByteOrder::Little, -2, 65_534),
@@ -1001,6 +857,33 @@ fn scalar_decoding_obeys_width_sign_and_target_byte_order() {
             ScalarValue::Unsigned(unsigned)
         );
     }
+
+    // A sub-byte integer masks its padding and sign-extends from its width.
+    let base = |encoding, bit_size| BaseType {
+        name: "bits".into(),
+        base_name: "bits".into(),
+        encoding,
+        byte_size: 1,
+        bit_size: Some(bit_size),
+    };
+    assert_eq!(
+        decode_integer_value(
+            &base(BaseTypeEncoding::Unsigned, 3),
+            &[0xff],
+            ByteOrder::Little
+        )
+        .unwrap(),
+        IntegerValue::Unsigned(7)
+    );
+    assert_eq!(
+        decode_integer_value(
+            &base(BaseTypeEncoding::Signed, 3),
+            &[0x05],
+            ByteOrder::Little
+        )
+        .unwrap(),
+        IntegerValue::Signed(-3)
+    );
 }
 
 #[test]
@@ -1050,141 +933,166 @@ fn implicit_pointer_offsets_are_bounded_and_never_return_partial_values() {
 
 #[test]
 fn static_member_layouts_cannot_escape_their_containing_record() {
-    assert!(static_member_layout_is_valid(
-        Some(8),
-        Some(4),
-        RecordMemberLayout::ByteOffset(4)
-    ));
-    assert!(!static_member_layout_is_valid(
-        Some(8),
-        Some(4),
-        RecordMemberLayout::ByteOffset(5)
-    ));
-    assert!(!static_member_layout_is_valid(
-        Some(u64::MAX),
-        Some(2),
-        RecordMemberLayout::ByteOffset(u64::MAX)
-    ));
-    assert!(static_member_layout_is_valid(
-        Some(8),
-        Some(1),
-        RecordMemberLayout::BitRange {
-            bit_offset: 63,
-            bit_size: 1,
-        }
-    ));
-    assert!(!static_member_layout_is_valid(
-        Some(8),
-        Some(1),
-        RecordMemberLayout::BitRange {
-            bit_offset: 63,
-            bit_size: 2,
-        }
-    ));
-    assert!(!static_member_layout_is_valid(
-        None,
-        Some(1),
-        RecordMemberLayout::ByteOffset(0)
-    ));
-    assert!(static_member_layout_is_valid(
-        None,
-        Some(1),
-        RecordMemberLayout::Runtime
-    ));
+    let bits = |bit_offset, bit_size| RecordMemberLayout::BitRange {
+        bit_offset,
+        bit_size,
+    };
+    for (record, member, layout, valid) in [
+        (Some(8), Some(4), RecordMemberLayout::ByteOffset(4), true),
+        (Some(8), Some(4), RecordMemberLayout::ByteOffset(5), false),
+        (
+            Some(u64::MAX),
+            Some(2),
+            RecordMemberLayout::ByteOffset(u64::MAX),
+            false,
+        ),
+        (Some(8), Some(1), bits(63, 1), true),
+        (Some(8), Some(1), bits(63, 2), false),
+        (None, Some(1), RecordMemberLayout::ByteOffset(0), false),
+        (None, Some(1), RecordMemberLayout::Runtime, true),
+    ] {
+        assert_eq!(
+            static_member_layout_is_valid(record, member, layout),
+            valid,
+            "{record:?} {member:?} {layout:?}"
+        );
+    }
 }
 
 #[test]
-fn type_graph_rejects_wrapper_cycles_but_permits_recursive_pointer_edges() {
-    let image = ModuleImageId::new(7);
-    let reference = |id| TypeReference {
-        image,
-        id: TypeId::new(id),
+fn value_shapes_separate_malformed_from_unsupported_types() {
+    let pointer = |byte_size, address_class| {
+        node(
+            0,
+            "p *",
+            byte_size,
+            TypeKind::Pointer {
+                target: Some(reference(0)),
+                address_class,
+            },
+        )
     };
-    let cycle = [
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(0),
-            name: "left".into(),
-            byte_size: Some(8),
-            kind: TypeKind::Named {
-                target: Some(reference(1)),
-                relationship: NamedTypeRelationship::Synonym,
-            },
-            identity: None,
-        }),
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(1),
-            name: "right".into(),
-            byte_size: Some(8),
-            kind: TypeKind::Modified {
-                modifier: TypeModifier::Const,
-                target: reference(0),
-            },
-            identity: None,
-        }),
-    ];
-    let cycle_error = value_shape_from(&cycle, TypeId::new(0)).unwrap_err();
-    assert!(
-        matches!(&cycle_error, ValueShapeError::Malformed(description) if description.as_ref() == "type wrapper cycle"),
-        "wrapper cycle must classify as malformed metadata",
-    );
-
-    let recursive_pointer = [TypeEntry::Resolved(TypeInfo {
-        reference: reference(0),
-        name: "node *".into(),
-        byte_size: Some(8),
-        kind: TypeKind::Pointer {
-            target: Some(reference(0)),
-            address_class: 0,
+    let representation = node(
+        1,
+        "representation",
+        Some(8),
+        TypeKind::Opaque {
+            description: "test representation".into(),
         },
-        identity: None,
-    })];
+    );
+    let encoded = node(
+        0,
+        "encoded",
+        Some(4),
+        TypeKind::Named {
+            target: Some(reference(1)),
+            relationship: NamedTypeRelationship::Encoding,
+        },
+    );
+    let shared = node(
+        0,
+        "shared representation",
+        Some(8),
+        TypeKind::Modified {
+            modifier: TypeModifier::Shared,
+            target: reference(1),
+        },
+    );
+    let broken = TypeEntry::Malformed("broken representation".into());
+    let empty = node(
+        0,
+        "empty",
+        Some(0),
+        TypeKind::Base(scalar_type(BaseTypeEncoding::Unsigned, 0)),
+    );
+    for (types, malformed, message) in [
+        (wrapper_cycle().to_vec(), true, "type wrapper cycle"),
+        (
+            vec![encoded.clone(), representation.clone()],
+            false,
+            "transparent type wrapper size 4 differs from target size 8",
+        ),
+        (vec![encoded, broken.clone()], true, "broken representation"),
+        (
+            vec![shared.clone(), representation],
+            false,
+            "shared-qualified values require UPC distributed-memory semantics",
+        ),
+        (vec![shared, broken], true, "broken representation"),
+        (
+            vec![pointer(None, 2)],
+            false,
+            "pointer representation for address class 2 is unsupported",
+        ),
+        (
+            vec![pointer(None, 0)],
+            true,
+            "pointer type has no byte size",
+        ),
+        (
+            vec![pointer(Some(0), 0)],
+            true,
+            "pointer type has a zero byte size",
+        ),
+        (vec![empty], true, "base type has a zero byte size"),
+        (
+            vec![pointer(Some(16), 0)],
+            false,
+            "pointer type occupies 16 bytes; addresses wider than 8 bytes are unsupported",
+        ),
+    ] {
+        let error = value_shape_from(&types, TypeId::new(0)).unwrap_err();
+        let (ValueShapeError::Malformed(description) | ValueShapeError::Unsupported(description)) =
+            &error;
+        assert_eq!(
+            (
+                matches!(error, ValueShapeError::Malformed(_)),
+                description.as_ref()
+            ),
+            (malformed, message)
+        );
+    }
+
+    // A pointer may point to itself.
     assert!(matches!(
-        value_shape_from(&recursive_pointer, TypeId::new(0)),
-        Ok(ValueShape { kind: ValueShapeKind::Indirection {
+        value_shape_from(&[pointer(Some(8), 0)], TypeId::new(0)),
+        Ok(ValueShape::Indirection {
             target: Some(id),
             byte_size: 8,
             address_class: 0,
-        }, .. }) if id == TypeId::new(0)
+        }) if id == TypeId::new(0)
     ));
 }
 
 #[test]
 fn graph_finalization_propagates_wrapper_sizes_to_a_fixpoint() {
-    let image = ModuleImageId::new(7);
-    let reference = |id| TypeReference {
-        image,
-        id: TypeId::new(id),
-    };
     let mut types = [
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(0),
-            name: "outer".into(),
-            byte_size: None,
-            kind: TypeKind::Named {
+        node(
+            0,
+            "outer",
+            None,
+            TypeKind::Named {
                 target: Some(reference(1)),
                 relationship: NamedTypeRelationship::Synonym,
             },
-            identity: None,
-        }),
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(1),
-            name: "const inner".into(),
-            byte_size: None,
-            kind: TypeKind::Modified {
+        ),
+        node(
+            1,
+            "const inner",
+            None,
+            TypeKind::Modified {
                 modifier: TypeModifier::Const,
                 target: reference(2),
             },
-            identity: None,
-        }),
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(2),
-            name: "inner".into(),
-            byte_size: Some(8),
-            kind: TypeKind::Opaque {
+        ),
+        node(
+            2,
+            "inner",
+            Some(8),
+            TypeKind::Opaque {
                 description: "test representation".into(),
             },
-            identity: None,
-        }),
+        ),
     ];
 
     propagate_wrapper_sizes(&mut types);
@@ -1199,43 +1107,16 @@ fn graph_finalization_propagates_wrapper_sizes_to_a_fixpoint() {
 
 #[test]
 fn inline_cycle_analysis_distinguishes_storage_from_indirection() {
-    let image = ModuleImageId::new(7);
-    let reference = |id| TypeReference {
-        image,
-        id: TypeId::new(id),
-    };
-    let by_value_cycle = [
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(0),
-            name: "left".into(),
-            byte_size: Some(8),
-            kind: TypeKind::Named {
-                target: Some(reference(1)),
-                relationship: NamedTypeRelationship::Synonym,
-            },
-            identity: None,
-        }),
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(1),
-            name: "right".into(),
-            byte_size: Some(8),
-            kind: TypeKind::Modified {
-                modifier: TypeModifier::Const,
-                target: reference(0),
-            },
-            identity: None,
-        }),
-    ];
-    let mut cycle_nodes = inline_storage_cycle_nodes(&by_value_cycle);
+    let mut cycle_nodes = inline_storage_cycle_nodes(&wrapper_cycle());
     cycle_nodes.sort_unstable();
     assert_eq!(cycle_nodes, [0, 1]);
 
     let pointer_recursion = [
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(0),
-            name: "node".into(),
-            byte_size: Some(8),
-            kind: TypeKind::Record {
+        node(
+            0,
+            "node",
+            Some(8),
+            TypeKind::Record {
                 kind: RecordKind::Struct,
                 members: Arc::from([RecordMember {
                     name: Some("next".into()),
@@ -1249,186 +1130,18 @@ fn inline_cycle_analysis_distinguishes_storage_from_indirection() {
                 bases: Arc::default(),
                 incomplete: false,
             },
-            identity: None,
-        }),
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(1),
-            name: "node *".into(),
-            byte_size: Some(8),
-            kind: TypeKind::Pointer {
+        ),
+        node(
+            1,
+            "node *",
+            Some(8),
+            TypeKind::Pointer {
                 target: Some(reference(0)),
                 address_class: 0,
             },
-            identity: None,
-        }),
+        ),
     ];
     assert!(inline_storage_cycle_nodes(&pointer_recursion).is_empty());
-}
-
-#[test]
-fn transparent_wrappers_reject_incompatible_storage_sizes() {
-    let image = ModuleImageId::new(7);
-    let reference = |id| TypeReference {
-        image,
-        id: TypeId::new(id),
-    };
-    let types = [
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(0),
-            name: "encoded".into(),
-            byte_size: Some(4),
-            kind: TypeKind::Named {
-                target: Some(reference(1)),
-                relationship: NamedTypeRelationship::Encoding,
-            },
-            identity: None,
-        }),
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(1),
-            name: "representation".into(),
-            byte_size: Some(8),
-            kind: TypeKind::Opaque {
-                description: "test representation".into(),
-            },
-            identity: None,
-        }),
-    ];
-
-    assert!(matches!(
-        value_shape_from(&types, TypeId::new(0)),
-        Err(ValueShapeError::Unsupported(description))
-            if description.contains("wrapper size 4 differs from target size 8")
-    ));
-
-    let malformed_target = [
-        types[0].clone(),
-        TypeEntry::Malformed("broken representation".into()),
-    ];
-    assert!(matches!(
-        value_shape_from(&malformed_target, TypeId::new(0)),
-        Err(ValueShapeError::Malformed(description))
-            if description.as_ref() == "broken representation"
-    ));
-
-    let shared = [
-        TypeEntry::Resolved(TypeInfo {
-            reference: reference(0),
-            name: "shared representation".into(),
-            byte_size: Some(8),
-            kind: TypeKind::Modified {
-                modifier: TypeModifier::Shared,
-                target: reference(1),
-            },
-            identity: None,
-        }),
-        types[1].clone(),
-    ];
-    assert!(matches!(
-        value_shape_from(&shared, TypeId::new(0)),
-        Err(ValueShapeError::Unsupported(description))
-            if description.contains("distributed-memory semantics")
-    ));
-    let malformed_shared_target = [
-        shared[0].clone(),
-        TypeEntry::Malformed("broken shared representation".into()),
-    ];
-    assert!(matches!(
-        value_shape_from(&malformed_shared_target, TypeId::new(0)),
-        Err(ValueShapeError::Malformed(description))
-            if description.as_ref() == "broken shared representation"
-    ));
-}
-
-#[test]
-fn sizeless_pointers_separate_unsupported_address_classes_from_defective_metadata() {
-    let reference = |id| TypeReference {
-        image: ModuleImageId::new(7),
-        id: TypeId::new(id),
-    };
-    let sizeless = |address_class| {
-        [TypeEntry::Resolved(TypeInfo {
-            reference: reference(0),
-            name: "opaque *".into(),
-            byte_size: None,
-            kind: TypeKind::Pointer {
-                target: Some(reference(0)),
-                address_class,
-            },
-            identity: None,
-        })]
-    };
-
-    // A non-default address class the backend cannot size is valid but
-    // unsupported metadata, not a defect.
-    let unsupported = value_shape_from(&sizeless(2), TypeId::new(0)).unwrap_err();
-    assert!(
-        matches!(&unsupported, ValueShapeError::Unsupported(description)
-            if description.contains("address class 2")),
-        "non-default address class without a size must be unsupported: {unsupported:?}",
-    );
-
-    // A missing size under the default address class is an internal
-    // inconsistency the builder never emits, so it stays malformed.
-    let malformed = value_shape_from(&sizeless(0), TypeId::new(0)).unwrap_err();
-    assert!(
-        matches!(&malformed, ValueShapeError::Malformed(description)
-            if description.as_ref() == "pointer type has no byte size"),
-        "default address class without a size must be malformed: {malformed:?}",
-    );
-
-    // A zero-byte indirection cannot hold an address, so it is defective
-    // rather than a usable shape that would later read zero bytes.
-    let zero_sized = [TypeEntry::Resolved(TypeInfo {
-        reference: reference(0),
-        name: "opaque *".into(),
-        byte_size: Some(0),
-        kind: TypeKind::Pointer {
-            target: Some(reference(0)),
-            address_class: 0,
-        },
-        identity: None,
-    })];
-    let zero_error = value_shape_from(&zero_sized, TypeId::new(0)).unwrap_err();
-    assert!(
-        matches!(&zero_error, ValueShapeError::Malformed(description)
-            if description.as_ref() == "pointer type has a zero byte size"),
-        "zero-sized pointer must be malformed: {zero_error:?}",
-    );
-
-    // A scalar encoding likewise cannot occupy zero bytes.
-    let zero_scalar = [TypeEntry::Resolved(TypeInfo {
-        reference: reference(0),
-        name: "empty".into(),
-        byte_size: Some(0),
-        kind: TypeKind::Base(scalar_type(BaseTypeEncoding::Unsigned, 0)),
-        identity: None,
-    })];
-    let zero_scalar_error = value_shape_from(&zero_scalar, TypeId::new(0)).unwrap_err();
-    assert!(
-        matches!(&zero_scalar_error, ValueShapeError::Malformed(description)
-            if description.as_ref() == "base type has a zero byte size"),
-        "zero-sized base type must be malformed: {zero_scalar_error:?}",
-    );
-
-    // A width wider than a decodable address is valid metadata this backend
-    // cannot use, so it is unsupported rather than a usable shape that would
-    // drive a doomed inferior read.
-    let oversized = [TypeEntry::Resolved(TypeInfo {
-        reference: reference(0),
-        name: "wide *".into(),
-        byte_size: Some(16),
-        kind: TypeKind::Pointer {
-            target: Some(reference(0)),
-            address_class: 0,
-        },
-        identity: None,
-    })];
-    let oversized_error = value_shape_from(&oversized, TypeId::new(0)).unwrap_err();
-    assert!(
-        matches!(&oversized_error, ValueShapeError::Unsupported(description)
-            if description.contains("wider than")),
-        "over-wide pointer must be unsupported: {oversized_error:?}",
-    );
 }
 
 #[test]

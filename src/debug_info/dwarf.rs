@@ -127,15 +127,7 @@ fn die_code_ranges<'data>(
 
 mod variables;
 
-pub(in crate::debug_info) use variables::PathStep;
-
-/// Checks an array index step's index values against its static bounds.
-pub(in crate::debug_info) fn check_step_indices(
-    step: &PathStep,
-    indices: &[i128],
-) -> crate::Result<()> {
-    variables::array_byte_offset(step, indices).map(drop)
-}
+pub(in crate::debug_info) use variables::{PathStep, array_byte_offset};
 
 #[cfg(feature = "fuzzing")]
 pub(super) fn fuzz_expression(data: &[u8]) {
@@ -391,25 +383,17 @@ fn load_unwind_info(
     target: TargetDescription,
     go_code: Vec<AddressRange<ImageAddress>>,
 ) -> std::result::Result<DwarfUnwindInfo, DwarfError> {
-    let section = object.section_by_name(".eh_frame");
-    let eh_frame = section
-        .as_ref()
-        .map(ObjectSection::uncompressed_data)
-        .transpose()?
-        .unwrap_or(Cow::Borrowed(&[]))
-        .into_owned()
-        .into();
-    let debug_frame = object
-        .section_by_name(".debug_frame")
-        .as_ref()
-        .map(ObjectSection::uncompressed_data)
-        .transpose()?
-        .unwrap_or(Cow::Borrowed(&[]))
-        .into_owned()
-        .into();
+    let section_data = |name| -> std::result::Result<Arc<[u8]>, DwarfError> {
+        Ok(object
+            .section_by_name(name)
+            .as_ref()
+            .map(ObjectSection::uncompressed_data)
+            .transpose()?
+            .unwrap_or_default()
+            .into())
+    };
     let mut bases = BaseAddresses::default();
-
-    if let Some(section) = section {
+    if let Some(section) = object.section_by_name(".eh_frame") {
         bases = bases.set_eh_frame(section.address());
     }
     if let Some(section) = object.section_by_name(".text") {
@@ -420,8 +404,8 @@ fn load_unwind_info(
     }
 
     Ok(DwarfUnwindInfo {
-        eh_frame,
-        debug_frame,
+        eh_frame: section_data(".eh_frame")?,
+        debug_frame: section_data(".debug_frame")?,
         endian: match target.byte_order {
             ByteOrder::Little => RunTimeEndian::Little,
             ByteOrder::Big => RunTimeEndian::Big,
@@ -441,13 +425,21 @@ impl DwarfUnwindInfo {
     /// result is evidence of function boundaries rather than a complete map.
     fn function_ranges(&self) -> Vec<AddressRange<ImageAddress>> {
         let mut ranges = Vec::new();
-        let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
-        eh_frame.set_address_size(self.address_size);
-        collect_function_ranges(&eh_frame, &self.bases, &mut ranges);
-        let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
-        debug_frame.set_address_size(self.address_size);
-        collect_function_ranges(&debug_frame, &self.bases, &mut ranges);
+        collect_function_ranges(&self.eh_frame(), &self.bases, &mut ranges);
+        collect_function_ranges(&self.debug_frame(), &self.bases, &mut ranges);
         ranges
+    }
+
+    fn eh_frame(&self) -> EhFrame<Reader<'_>> {
+        let mut section = EhFrame::new(&self.eh_frame, self.endian);
+        section.set_address_size(self.address_size);
+        section
+    }
+
+    fn debug_frame(&self) -> DebugFrame<Reader<'_>> {
+        let mut section = DebugFrame::new(&self.debug_frame, self.endian);
+        section.set_address_size(self.address_size);
+        section
     }
 
     /// Returns the registers the function at `address` may overwrite
@@ -496,16 +488,11 @@ impl UnwindInfo for DwarfUnwindInfo {
         registers: &RegisterFile,
         memory: &mut dyn MemoryReader,
     ) -> std::result::Result<VirtualAddress, UnwindTermination> {
-        let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
-        eh_frame.set_address_size(self.address_size);
-        let result = cfa_from_section(&eh_frame, &self.bases, address, registers, memory);
+        let result = cfa_from_section(&self.eh_frame(), &self.bases, address, registers, memory);
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
-
-        let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
-        debug_frame.set_address_size(self.address_size);
-        cfa_from_section(&debug_frame, &self.bases, address, registers, memory)
+        cfa_from_section(&self.debug_frame(), &self.bases, address, registers, memory)
     }
 
     fn unwind(
@@ -514,11 +501,9 @@ impl UnwindInfo for DwarfUnwindInfo {
         registers: &RegisterFile,
         memory: &mut dyn MemoryReader,
     ) -> std::result::Result<UnwindStep, UnwindTermination> {
-        let mut eh_frame = EhFrame::new(&self.eh_frame, self.endian);
-        eh_frame.set_address_size(self.address_size);
         let clobbered = self.call_clobbered_registers(address);
         let result = unwind_from_section(
-            &eh_frame,
+            &self.eh_frame(),
             &self.bases,
             address,
             registers,
@@ -528,11 +513,8 @@ impl UnwindInfo for DwarfUnwindInfo {
         if !matches!(result, Err(UnwindTermination::NoUnwindInfo { .. })) {
             return result;
         }
-
-        let mut debug_frame = DebugFrame::new(&self.debug_frame, self.endian);
-        debug_frame.set_address_size(self.address_size);
         unwind_from_section(
-            &debug_frame,
+            &self.debug_frame(),
             &self.bases,
             address,
             registers,
@@ -552,15 +534,34 @@ fn cfa_from_section<'data, S>(
 where
     S: UnwindSection<Reader<'data>>,
 {
+    let mut context = UnwindContext::new();
+    let (fde, row) = unwind_row(section, bases, address, &mut context)?;
+    cfa_from_rule(row.cfa(), registers, section, fde.cie().encoding(), memory)
+}
+
+/// The call-frame row in effect at `address`, and the entry holding it.
+fn unwind_row<'data, 'context, S>(
+    section: &S,
+    bases: &BaseAddresses,
+    address: ImageAddress,
+    context: &'context mut UnwindContext<usize>,
+) -> std::result::Result<
+    (
+        gimli::FrameDescriptionEntry<Reader<'data>>,
+        &'context gimli::UnwindTableRow<usize>,
+    ),
+    UnwindTermination,
+>
+where
+    S: UnwindSection<Reader<'data>>,
+{
     let fde = section
         .fde_for_address(bases, address.get(), S::cie_from_offset)
         .map_err(|error| cfi_error(error, address))?;
-    let encoding = fde.cie().encoding();
-    let mut context = UnwindContext::new();
     let row = fde
-        .unwind_info_for_address(section, bases, &mut context, address.get())
+        .unwind_info_for_address(section, bases, context, address.get())
         .map_err(|error| cfi_error(error, address))?;
-    cfa_from_rule(row.cfa(), registers, section, encoding, memory)
+    Ok((fde, row))
 }
 
 fn unwind_from_section<'data, S>(
@@ -574,17 +575,10 @@ fn unwind_from_section<'data, S>(
 where
     S: UnwindSection<Reader<'data>>,
 {
-    let fde = section
-        .fde_for_address(bases, address.get(), S::cie_from_offset)
-        .map_err(|error| cfi_error(error, address))?;
-    let return_register = fde.cie().return_address_register().0;
-    let signal_frame = fde.cie().is_signal_trampoline();
-    let encoding = fde.cie().encoding();
     let mut context = UnwindContext::new();
-    let row = fde
-        .unwind_info_for_address(section, bases, &mut context, address.get())
-        .map_err(|error| cfi_error(error, address))?;
-    let cfa = cfa_from_rule(row.cfa(), registers, section, encoding, memory)?;
+    let (fde, row) = unwind_row(section, bases, address, &mut context)?;
+    let return_register = fde.cie().return_address_register().0;
+    let cfa = cfa_from_rule(row.cfa(), registers, section, fde.cie().encoding(), memory)?;
     let mut caller = registers.clone();
     // A callee may overwrite every register its calling convention does not
     // preserve across calls, so the caller's value survives only where the
@@ -611,7 +605,7 @@ where
     Ok(UnwindStep {
         registers: caller,
         cfa,
-        signal_frame,
+        signal_frame: fde.cie().is_signal_trampoline(),
     })
 }
 
@@ -645,11 +639,9 @@ where
 {
     match rule {
         CfaRule::RegisterAndOffset { register, offset } => {
-            let value = registers.get(register.0).ok_or_else(|| {
-                UnwindTermination::RegisterUnavailable {
-                    register: format!("DWARF register {}", register.0).into(),
-                }
-            })?;
+            let value = registers
+                .get(register.0)
+                .ok_or_else(|| register_unavailable(register.0))?;
             Ok(VirtualAddress::new(
                 checked_add(value, *offset).ok_or_else(|| UnwindTermination::InvalidCaller {
                     description: "CFA arithmetic overflow".into(),
@@ -690,11 +682,9 @@ where
         result = match result {
             EvaluationResult::Complete => break,
             EvaluationResult::RequiresRegister { register, .. } => {
-                let value = registers.get(register.0).ok_or_else(|| {
-                    UnwindTermination::RegisterUnavailable {
-                        register: format!("DWARF register {}", register.0).into(),
-                    }
-                })?;
+                let value = registers
+                    .get(register.0)
+                    .ok_or_else(|| register_unavailable(register.0))?;
                 evaluation
                     .resume_with_register(Value::Generic(value))
                     .map_err(corrupt)?
@@ -752,13 +742,9 @@ fn apply_register_rule(
             caller.remove(register);
             return Ok(());
         }
-        RegisterRule::SameValue => {
-            current
-                .get(register)
-                .ok_or_else(|| UnwindTermination::RegisterUnavailable {
-                    register: format!("DWARF register {register}").into(),
-                })?
-        }
+        RegisterRule::SameValue => current
+            .get(register)
+            .ok_or_else(|| register_unavailable(register))?,
         RegisterRule::Offset(offset) => {
             let address =
                 VirtualAddress::new(checked_add(cfa.get(), *offset).ok_or_else(|| {
@@ -775,13 +761,9 @@ fn apply_register_rule(
                 description: "register value overflow".into(),
             })?
         }
-        RegisterRule::Register(source) => {
-            current
-                .get(source.0)
-                .ok_or_else(|| UnwindTermination::RegisterUnavailable {
-                    register: format!("DWARF register {}", source.0).into(),
-                })?
-        }
+        RegisterRule::Register(source) => current
+            .get(source.0)
+            .ok_or_else(|| register_unavailable(source.0))?,
         RegisterRule::Constant(value) => *value,
         RegisterRule::Expression(_) | RegisterRule::ValExpression(_) => {
             return Err(UnwindTermination::UnsupportedUnwindInfo {
@@ -796,6 +778,12 @@ fn apply_register_rule(
     };
     caller.set(register, value);
     Ok(())
+}
+
+fn register_unavailable(register: u16) -> UnwindTermination {
+    UnwindTermination::RegisterUnavailable {
+        register: format!("DWARF register {register}").into(),
+    }
 }
 
 const fn checked_add(value: u64, offset: i64) -> Option<u64> {
@@ -879,27 +867,23 @@ fn load_function_metadata(
         if function_ids.contains_key(&definition) {
             continue;
         }
-        let linkage_name = inherited_value(definition, &raw, &by_key, |function| {
-            function.linkage_name.clone()
-        })?;
+        let origin = &raw[by_key[&definition]];
+        let linkage_name = origin.linkage_name.clone();
         // Clang names the thunks a multiply inherited virtual function
         // needs only by their linkage names.
-        let name = inherited_value(definition, &raw, &by_key, |function| function.name.clone())?
-            .or_else(|| {
-                linkage_name
-                    .as_deref()
-                    .and_then(crate::demangle::demangle)
-                    .map(Arc::from)
-            });
+        let name = origin.name.clone().or_else(|| {
+            linkage_name
+                .as_deref()
+                .and_then(crate::demangle::demangle)
+                .map(Arc::from)
+        });
         let Some(name) = name else {
             if concrete.contains(&definition) {
                 return Err(DwarfError::MissingFunctionName);
             }
             continue;
         };
-        let declaration = inherited_value(definition, &raw, &by_key, |function| {
-            function.declaration.clone()
-        })?;
+        let declaration = origin.declaration.clone();
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
         );
@@ -1016,12 +1000,8 @@ fn collect_function_dies(
                         unit_index,
                         units,
                     )?,
-                    name: attribute_string(dwarf, unit, entry.attr(gimli::DW_AT_name))?,
-                    linkage_name: attribute_string(
-                        dwarf,
-                        unit,
-                        entry.attr(gimli::DW_AT_linkage_name),
-                    )?,
+                    name: string_attribute(dwarf, unit, entry, gimli::DW_AT_name)?,
+                    linkage_name: string_attribute(dwarf, unit, entry, gimli::DW_AT_linkage_name)?,
                     declaration: entry_source_location(
                         dwarf,
                         unit,
@@ -1060,16 +1040,18 @@ fn collect_function_dies(
     Ok(functions)
 }
 
-fn attribute_string(
+fn string_attribute(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit: &gimli::Unit<Reader<'_>>,
-    attribute: Option<&gimli::Attribute<Reader<'_>>>,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    attribute: gimli::DwAt,
 ) -> std::result::Result<Option<Arc<str>>, DwarfError> {
-    attribute
-        .map(|attribute| dwarf.attr_string(unit, attribute.value()))
+    entry
+        .attr_value(attribute)
+        .map(|value| dwarf.attr_string(unit, value))
         .transpose()
         .map_err(DwarfError::from)
-        .map(|value| value.map(|value| Arc::<str>::from(value.to_string_lossy().into_owned())))
+        .map(|value| value.map(|value| Arc::<str>::from(value.to_string_lossy().as_ref())))
 }
 
 fn die_reference(
@@ -1145,36 +1127,6 @@ fn definition_key(
         };
         key = next;
     }
-}
-
-fn inherited_value<T>(
-    start: DieKey,
-    raw: &[RawFunction],
-    by_key: &HashMap<DieKey, usize>,
-    value: impl Fn(&RawFunction) -> Option<T>,
-) -> std::result::Result<Option<T>, DwarfError> {
-    let mut key = Some(start);
-    let mut visited = HashSet::new();
-
-    while let Some(current) = key {
-        if !visited.insert(current) {
-            return Err(DwarfError::ReferenceCycle);
-        }
-        let function = by_key
-            .get(&current)
-            .and_then(|index| raw.get(*index))
-            .ok_or(DwarfError::ReferencedFunctionMissing {
-                unit: current.unit,
-                offset: current.offset,
-            })?;
-
-        if let Some(value) = value(function) {
-            return Ok(Some(value));
-        }
-        key = function.abstract_origin.or(function.specification);
-    }
-
-    Ok(None)
 }
 
 fn containing_instance(
@@ -1289,11 +1241,10 @@ fn load_lines(
                 .checked_add(1)
                 .ok_or(gimli::Error::UnsupportedOffset)?;
 
-            // Rows without a resolvable file or with line 0 mark compiler-
-            // generated code with no source attribution. They still terminate
-            // the previous entry's range; extending it would misattribute the
-            // gap to a neighboring source line. A prologue or epilogue marker
-            // remains actionable even when that source attribution is absent.
+            // A row without a file or with line 0 is compiler-generated code.
+            // It still ends the previous entry's range, so the gap is not
+            // attributed to a neighboring line, and keeps its prologue and
+            // epilogue markers.
             let location = match (
                 row.file(header),
                 row.line().and_then(|line| LineNumber::new(line.get())),
@@ -1368,16 +1319,15 @@ fn source_file_id(
     if let Some(&id) = source_file_ids.get(&path) {
         return id;
     }
-    *source_file_ids.entry(path.clone()).or_insert_with(|| {
-        let id = SourceFileId::new(
-            u32::try_from(source_files.len()).expect("source file count fits in u32"),
-        );
-        source_files.push(SourceFile {
-            id,
-            path: Arc::new(path),
-        });
-        id
-    })
+    let id = SourceFileId::new(
+        u32::try_from(source_files.len()).expect("source file count fits in u32"),
+    );
+    source_files.push(SourceFile {
+        id,
+        path: Arc::new(path.clone()),
+    });
+    source_file_ids.insert(path, id);
+    id
 }
 
 fn type_unit_source_file_id(
@@ -1814,65 +1764,49 @@ mod tests {
     }
 
     #[test]
-    fn analyzed_entry_ignores_later_rows_for_the_signature_line() {
-        let statements = [
-            analyzed_entry_row(0x100, 10, 0, 0),
-            analyzed_entry_row(0x110, 10, 0, 1),
-            analyzed_entry_row(0x120, 11, 0, 2),
-        ];
-
-        assert_eq!(
-            first_distinct_source_statement(
-                &StatementIndex::new(&statements),
-                AddressRange {
-                    start: ImageAddress::new(0x100),
-                    end: ImageAddress::new(0x130),
-                },
-                ImageAddress::new(0x100),
+    fn analyzed_entry_skips_the_signature_line_within_one_sequence() {
+        let row = analyzed_entry_row;
+        for (rows, expected) in [
+            (
+                [
+                    row(0x100, 10, 0, 0),
+                    row(0x110, 10, 0, 1),
+                    row(0x120, 11, 0, 2),
+                ],
+                Some(0x120),
             ),
-            Some(ImageAddress::new(0x120))
-        );
-    }
-
-    #[test]
-    fn analyzed_entry_stays_within_one_line_program_sequence() {
-        // A foreign sequence overlapping the entry address makes attribution
-        // ambiguous: no candidate may be derived from mixed sequences.
-        let ambiguous = [
-            analyzed_entry_row(0x100, 10, 0, 0),
-            analyzed_entry_row(0x100, 50, 1, 0),
-            analyzed_entry_row(0x120, 11, 0, 1),
-        ];
-        assert_eq!(
-            first_distinct_source_statement(
-                &StatementIndex::new(&ambiguous),
-                AddressRange {
-                    start: ImageAddress::new(0x100),
-                    end: ImageAddress::new(0x130),
-                },
-                ImageAddress::new(0x100),
+            // A foreign sequence at the entry address makes attribution
+            // ambiguous.
+            (
+                [
+                    row(0x100, 10, 0, 0),
+                    row(0x100, 50, 1, 0),
+                    row(0x120, 11, 0, 1),
+                ],
+                None,
             ),
-            None
-        );
-
-        // A foreign sequence that only overlaps the body must not supply the
-        // candidate address for the entry's sequence.
-        let foreign_candidate = [
-            analyzed_entry_row(0x100, 10, 0, 0),
-            analyzed_entry_row(0x110, 50, 1, 0),
-            analyzed_entry_row(0x120, 11, 0, 1),
-        ];
-        assert_eq!(
-            first_distinct_source_statement(
-                &StatementIndex::new(&foreign_candidate),
-                AddressRange {
-                    start: ImageAddress::new(0x100),
-                    end: ImageAddress::new(0x130),
-                },
-                ImageAddress::new(0x100),
+            // A foreign sequence within the body supplies no candidate.
+            (
+                [
+                    row(0x100, 10, 0, 0),
+                    row(0x110, 50, 1, 0),
+                    row(0x120, 11, 0, 1),
+                ],
+                Some(0x120),
             ),
-            Some(ImageAddress::new(0x120))
-        );
+        ] {
+            assert_eq!(
+                first_distinct_source_statement(
+                    &StatementIndex::new(&rows),
+                    AddressRange {
+                        start: ImageAddress::new(0x100),
+                        end: ImageAddress::new(0x130),
+                    },
+                    ImageAddress::new(0x100),
+                ),
+                expected.map(ImageAddress::new)
+            );
+        }
     }
 
     impl MemoryReader for TestMemory {
@@ -1885,111 +1819,59 @@ mod tests {
     fn register_rules_distinguish_locations_values_and_frozen_registers() {
         let current = RegisterFile::new([(1, 100), (2, 200), (3, 300)]);
         let mut caller = current.clone();
-        let cfa = VirtualAddress::new(0x1000);
         let mut memory = TestMemory {
             values: std::iter::once((VirtualAddress::new(0xff8), 0xfeed)).collect(),
         };
-
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            1,
-            &RegisterRule::Constant(999),
-        )
-        .unwrap();
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            4,
-            &RegisterRule::Register(Register(1)),
-        )
-        .unwrap();
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            5,
-            &RegisterRule::Offset(-8),
-        )
-        .unwrap();
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            6,
-            &RegisterRule::ValOffset(-8),
-        )
-        .unwrap();
-        apply_register_rule(
-            &mut caller,
-            &current,
-            &mut memory,
-            cfa,
-            3,
-            &RegisterRule::Undefined,
-        )
-        .unwrap();
-
+        let mut apply = |caller: &mut RegisterFile, cfa, register, rule| {
+            apply_register_rule(
+                caller,
+                &current,
+                &mut memory,
+                VirtualAddress::new(cfa),
+                register,
+                &rule,
+            )
+        };
+        for (register, rule) in [
+            (1, RegisterRule::Constant(999)),
+            (4, RegisterRule::Register(Register(1))),
+            (5, RegisterRule::Offset(-8)),
+            (6, RegisterRule::ValOffset(-8)),
+            (3, RegisterRule::Undefined),
+        ] {
+            apply(&mut caller, 0x1000, register, rule).unwrap();
+        }
         assert_eq!(caller.get(1), Some(999));
         assert_eq!(caller.get(4), Some(100), "rule read mutated caller state");
         assert_eq!(caller.get(5), Some(0xfeed));
         assert_eq!(caller.get(6), Some(0xff8));
         assert_eq!(caller.get(3), None);
-    }
 
-    #[test]
-    fn register_rule_failures_are_typed() {
-        let current = RegisterFile::new([]);
-        let mut caller = current.clone();
-        let mut memory = TestMemory {
-            values: BTreeMap::new(),
-        };
-
-        assert_eq!(
-            apply_register_rule(
-                &mut caller,
-                &current,
-                &mut memory,
-                VirtualAddress::new(0),
-                1,
-                &RegisterRule::Offset(-1),
+        for (cfa, rule, failure) in [
+            (
+                0,
+                RegisterRule::Offset(-1),
+                UnwindTermination::InvalidCaller {
+                    description: "saved-register address overflow".into(),
+                },
             ),
-            Err(UnwindTermination::InvalidCaller {
-                description: "saved-register address overflow".into()
-            })
-        );
-        assert_eq!(
-            apply_register_rule(
-                &mut caller,
-                &current,
-                &mut memory,
-                VirtualAddress::new(0x1000),
-                1,
-                &RegisterRule::Offset(0),
+            (
+                0x1000,
+                RegisterRule::Offset(0),
+                UnwindTermination::MemoryReadFailed {
+                    address: VirtualAddress::new(0x1000),
+                },
             ),
-            Err(UnwindTermination::MemoryReadFailed {
-                address: VirtualAddress::new(0x1000)
-            })
-        );
-        assert_eq!(
-            apply_register_rule(
-                &mut caller,
-                &current,
-                &mut memory,
-                VirtualAddress::new(0),
-                1,
-                &RegisterRule::Register(Register(9)),
+            (
+                0,
+                RegisterRule::Register(Register(9)),
+                UnwindTermination::RegisterUnavailable {
+                    register: "DWARF register 9".into(),
+                },
             ),
-            Err(UnwindTermination::RegisterUnavailable {
-                register: "DWARF register 9".into()
-            })
-        );
+        ] {
+            assert_eq!(apply(&mut caller, cfa, 1, rule), Err(failure));
+        }
     }
 
     #[test]
