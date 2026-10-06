@@ -102,17 +102,16 @@ impl CoreTarget {
 }
 
 impl InspectionOps for CoreTarget {
-    fn read_word(&self, _pid: Pid, address: u64) -> Result<u64> {
-        let mut bytes = [0; 8];
-        match self.memory.read(address, &mut bytes) {
-            Ok(()) => Ok(u64::from_le_bytes(bytes)),
-            Err(CoreMemoryError::Unavailable) => {
-                Err(backend_error(LinuxError::MemoryInaccessible {
-                    address: VirtualAddress::new(address),
-                }))
-            }
-            Err(CoreMemoryError::Io(error)) => Err(error.into()),
-        }
+    fn read_word(&self, pid: Pid, address: u64) -> Result<u64> {
+        self.read_memory_word(pid, address)
+            .map_err(|error| match error {
+                MemoryAccessError::Fatal(error) => error,
+                MemoryAccessError::Inaccessible | MemoryAccessError::Partial { .. } => {
+                    backend_error(LinuxError::MemoryInaccessible {
+                        address: VirtualAddress::new(address),
+                    })
+                }
+            })
     }
 
     fn read_memory_word(

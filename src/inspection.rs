@@ -272,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_reservations_are_atomic_and_precede_later_work() {
+    fn reservations_are_atomic_and_exhaustion_is_sticky() {
         let mut budget = InspectionBudget::new(limits());
         budget.consume_memory(4).expect("exact byte limit");
         assert_eq!(
@@ -286,21 +286,17 @@ mod tests {
         assert_eq!(budget.usage().memory_bytes, 4);
         assert!(budget.consume_value_nodes(1).is_err());
         assert_eq!(budget.usage().value_nodes, 0);
-    }
 
-    #[test]
-    fn variable_value_reservations_are_atomic() {
+        // A variable and its value node are reserved together or not at all.
         let mut limits = limits();
         limits.value_nodes = 1;
         let mut budget = InspectionBudget::new(limits);
-
         budget
             .consume_variable_value()
             .expect("first variable and value node fit");
         let exhaustion = budget
             .consume_variable_value()
             .expect_err("second value node exceeds its limit");
-
         assert_eq!(exhaustion.resource, InspectionLimit::ValueNodes);
         assert_eq!(budget.usage().variables, 1);
         assert_eq!(budget.usage().value_nodes, 1);
