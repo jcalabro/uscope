@@ -244,6 +244,7 @@ struct Target {
     recorded_paths: Option<HashMap<PathBuf, PathBuf>>,
     process: Option<ProcessId>,
     pumps: Vec<JoinHandle<()>>,
+    threads: config::ThreadListing,
 }
 
 /// The stop the client was last told about.
@@ -251,6 +252,9 @@ struct Target {
 pub(super) struct Stop {
     pub id: StopId,
     pub thread: ThreadId,
+    /// What the client knows as the thread that stopped: the task the
+    /// thread runs, when the client's threads are tasks, or the thread.
+    pub context: ExecutionContext,
     pub reason: StopReason,
 }
 
@@ -285,6 +289,8 @@ pub struct Session {
     pub(super) thread_ids: ThreadHandles,
     /// The threads the client was told about, with their client ids.
     threads: BTreeMap<ThreadId, i64>,
+    /// The tasks the client was told about, with their client ids.
+    pub(super) tasks: BTreeMap<uscope::TaskId, i64>,
     /// The modules the client was told are loaded.
     pub(super) modules: BTreeMap<ModuleId, uscope::LoadedModuleRecord>,
     /// The execution the client last started, whose resume it already knows.
@@ -324,6 +330,7 @@ impl Session {
             variables: HashMap::new(),
             thread_ids: ThreadHandles::default(),
             threads: BTreeMap::new(),
+            tasks: BTreeMap::new(),
             modules: BTreeMap::new(),
             resumed: None,
             restarting: false,
@@ -641,6 +648,7 @@ impl Session {
             signals,
             view_files,
             working_directory,
+            threads,
         } = configuration;
         let launched = matches!(start, Start::Launch(_));
         let core = matches!(start, Start::Core(_));
@@ -671,6 +679,7 @@ impl Session {
             recorded_paths: None,
             process: None,
             pumps: Vec::new(),
+            threads,
         });
         self.load_views(working_directory, &view_files).await?;
         self.apply_signal_policies().await?;
@@ -870,6 +879,7 @@ impl Session {
             }
             *launch = new;
             target.stop_on_entry = configuration.stop_on_entry;
+            target.threads = configuration.threads;
         }
         let handle = target.handle.clone();
         self.restarting = true;
@@ -1268,7 +1278,7 @@ impl Session {
             return Ok(());
         };
         self.leave_stop();
-        let Some(&id) = self.threads.get(&stop.thread) else {
+        let Some(id) = self.client_id(stop.context) else {
             return Ok(());
         };
         self.client
@@ -1320,12 +1330,13 @@ impl Session {
         reason: StopReason,
     ) -> Result<(), Closed> {
         self.leave_stop();
-        self.announce_thread(thread).await?;
+        let context = self.stopped_context(thread).await;
+        self.announce(context).await?;
         let mut body = json!({
             "allThreadsStopped": true,
             "preserveFocusHint": false,
         });
-        if let Some(&id) = self.threads.get(&thread) {
+        if let Some(id) = self.client_id(context) {
             body["threadId"] = id.into();
         }
         let (kind, description, text) = match &reason {
@@ -1375,6 +1386,7 @@ impl Session {
         self.stop = Some(Stop {
             id: stop,
             thread,
+            context,
             reason,
         });
         self.client.event("stopped", body).await
@@ -1412,13 +1424,92 @@ impl Session {
         }
         // The program's threads end with it, also for a client that keeps
         // the session for a restart.
-        for id in std::mem::take(&mut self.threads).into_values() {
+        let tasks = std::mem::take(&mut self.tasks).into_values();
+        for id in std::mem::take(&mut self.threads).into_values().chain(tasks) {
             self.client.thread("exited", id).await?;
         }
         if self.restarting {
             return Ok(());
         }
         self.client.event("terminated", json!({})).await
+    }
+
+    /// Tells the client which tasks it was told about have ended.
+    pub(super) async fn forget_tasks(
+        &mut self,
+        live: &[uscope::TaskSnapshot],
+    ) -> Result<(), Closed> {
+        let live = live.iter().map(|task| task.id).collect::<BTreeSet<_>>();
+        let gone = self
+            .tasks
+            .keys()
+            .filter(|task| !live.contains(task))
+            .copied()
+            .collect::<Vec<_>>();
+        for task in gone {
+            if let Some(id) = self.tasks.remove(&task) {
+                self.client.thread("exited", id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// What the client's threads are, once a program is loaded.
+    pub(super) fn thread_listing(&self) -> Option<config::ThreadListing> {
+        self.target.as_ref().map(|target| target.threads)
+    }
+
+    /// What the client knows as a stopped thread: the task it runs, when
+    /// the client's threads are tasks and it runs one, or the thread.
+    async fn stopped_context(&self, thread: ThreadId) -> ExecutionContext {
+        let lists_tasks = self
+            .target
+            .as_ref()
+            .is_some_and(|target| target.threads.tasks);
+        let snapshot = match self.target_handle() {
+            Ok(handle) if lists_tasks => handle.snapshot().await.ok(),
+            _ => None,
+        };
+        snapshot
+            .and_then(|snapshot| {
+                snapshot
+                    .threads
+                    .iter()
+                    .find(|listed| listed.id == thread)
+                    .and_then(|listed| match listed.activity {
+                        Some(uscope::ThreadActivity::Task { task, .. }) => {
+                            Some(ExecutionContext::Task(task))
+                        }
+                        _ => None,
+                    })
+            })
+            .unwrap_or(ExecutionContext::Thread(thread))
+    }
+
+    /// The client's id for a thread or task it was told about.
+    fn client_id(&self, context: ExecutionContext) -> Option<i64> {
+        match context {
+            ExecutionContext::Thread(thread) => self.threads.get(&thread).copied(),
+            ExecutionContext::Task(task) => self.tasks.get(&task).copied(),
+        }
+    }
+
+    /// Tells the client of a thread or task it does not know yet.
+    async fn announce(&mut self, context: ExecutionContext) -> Result<(), Closed> {
+        let task = match context {
+            ExecutionContext::Thread(thread) => return self.announce_thread(thread).await,
+            ExecutionContext::Task(task) => task,
+        };
+        if self.tasks.contains_key(&task) {
+            return Ok(());
+        }
+        match self.thread_ids.id(context) {
+            Ok(id) => {
+                self.tasks.insert(task, id);
+                self.client.thread("started", id).await
+            }
+            Err(error) => self.client.important(error.short).await,
+        }
     }
 
     async fn announce_thread(&mut self, thread: ThreadId) -> Result<(), Closed> {
@@ -2226,6 +2317,11 @@ fn exit_code(status: &ExitStatus) -> i64 {
 
 /// The `stopped` event's reason, description, and text for a stop that
 /// needs nothing from the session to describe.
+/// The DAP reason for a stop.
+pub(super) fn stop_kind(reason: &StopReason) -> &'static str {
+    describe_stop(reason).0
+}
+
 fn describe_stop(reason: &StopReason) -> (&'static str, Option<String>, Option<String>) {
     match reason {
         StopReason::Step { .. } => ("step", None, None),
