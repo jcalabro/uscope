@@ -3,7 +3,7 @@
 ## Debugger
 
 - The rest of the DWARF expression language: entry values, parameter references, and implicit pointers in pieces.
-- Unwind through signal trampolines: evaluate CFI expression rules and present the signal frame.
+- Evaluate CFI expression rules (`DW_CFA_expression` and `DW_CFA_val_expression`).
 - Synthesize `name@plt` symbols for PLT stubs.
 - Break on symbol names in modules without DWARF.
 - Show symbol versions where they distinguish otherwise identical names.

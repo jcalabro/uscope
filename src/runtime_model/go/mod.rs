@@ -66,7 +66,9 @@ struct GoRuntime {
     /// Why every result may be wrong: a release the contract was not
     /// checked against.
     unverified: Option<Arc<str>>,
-    /// Where a new thread runs before its thread-local g is set.
+    /// Where the first thread runs before its thread pointer is set. A
+    /// thread `clone` makes starts with the thread pointer of its own m,
+    /// whose g slot is empty until the thread sets it.
     starting: Vec<AddressRange<ImageAddress>>,
     /// The functions whose goroutines are the runtime's own work, with
     /// those that are the program's despite being in the runtime.
@@ -101,10 +103,7 @@ impl GoRuntime {
                 end: ImageAddress::new(symbol.address.get().checked_add(symbol.size?)?),
             })
         };
-        let starting = ["runtime.clone", "runtime.settls"]
-            .into_iter()
-            .filter_map(code)
-            .collect();
+        let starting = code("runtime.settls").into_iter().collect();
 
         Ok(Self {
             layout: Layout::bind(image.as_ref()),
@@ -347,6 +346,37 @@ impl RuntimeModel for GoRuntime {
         }))
     }
 
+    fn thread_stacks(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+    ) -> Result<Vec<(std::ops::Range<u64>, StackSegment)>, Arc<str>> {
+        let threads = self.threads()?;
+        let Some(gs) = self.thread_gs(stop, thread)? else {
+            return Ok(Vec::new());
+        };
+        let bounds = |g: u64| {
+            let read = |offset: u64| word(stop, VirtualAddress::new(g.wrapping_add(offset)));
+            Some(read(threads.g_stack_lo)?..read(threads.g_stack_hi)?)
+        };
+        let mut stacks = Vec::new();
+        for (g, segment) in [
+            (gs.curg, StackSegment::Task),
+            (gs.g0, StackSegment::System),
+            (gs.gsignal, StackSegment::Signal),
+        ] {
+            if g == 0 {
+                continue;
+            }
+            let stack = bounds(g)
+                .ok_or_else(|| format!("the stack bounds of the g at {g:#x} are unreadable"))?;
+            if !stack.is_empty() {
+                stacks.push((stack, segment));
+            }
+        }
+        Ok(stacks)
+    }
+
     /// The runtime's own traceback crosses the same switches
     /// (`runtime/traceback.go`): on a thread's system stack, with a
     /// goroutine on the thread, the frames go on at the registers the
@@ -374,10 +404,7 @@ impl RuntimeModel for GoRuntime {
             Some("runtime.nanotime1" | "runtime.vgetrandom1") => {
                 let mut registers = frame.clone();
                 registers.set(RSP, register(R12, "r12")?);
-                return Ok(Crossing::Resume {
-                    registers,
-                    segment: None,
-                });
+                return Ok(Crossing::Resume(registers));
             }
             // A new thread begins on the stack `clone` gives it, whose
             // address is still in rsi; the thread that made it goes on on
@@ -440,10 +467,7 @@ impl RuntimeModel for GoRuntime {
         Ok(match switch {
             Switch::Returns => {
                 registers.set(RIP, pc);
-                Crossing::Resume {
-                    registers,
-                    segment: Some(StackSegment::Task),
-                }
+                Crossing::Resume(registers)
             }
             Switch::Abandons | Switch::Resumes if saved_pc == 0 => {
                 return Err("the thread's goroutine saved no instruction".into());

@@ -149,13 +149,8 @@ pub enum Crossing {
     Stay,
     /// The frame's own stack pointer is elsewhere than its registers say,
     /// as for a frame called on a task's stack that runs on the system
-    /// stack. It unwinds as any other frame does, from these registers, and
-    /// its callers are on `segment`, or on its own stack when that is
-    /// `None`.
-    Resume {
-        registers: RegisterFile,
-        segment: Option<StackSegment>,
-    },
+    /// stack. It unwinds as any other frame does, from these registers.
+    Resume(RegisterFile),
     /// The frame never returns to its caller. The registers the task it
     /// switched from saved begin the next frame, whose instruction is a
     /// return address.
@@ -178,6 +173,14 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
         stop: &dyn RuntimeStop,
         number: u64,
     ) -> Result<Option<TaskContext>, Arc<str>>;
+    /// The stacks a stopped thread may run on for the runtime, each with
+    /// whose it is: the bounds of the stack of the task it runs, and of the
+    /// runtime's own stacks for it.
+    fn thread_stacks(
+        &self,
+        stop: &dyn RuntimeStop,
+        thread: ThreadId,
+    ) -> Result<Vec<(std::ops::Range<u64>, StackSegment)>, Arc<str>>;
     /// Where unwinding goes from a frame of a stopped thread whose code
     /// switches stacks, given the frame's registers.
     fn cross(

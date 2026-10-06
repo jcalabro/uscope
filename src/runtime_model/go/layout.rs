@@ -141,6 +141,9 @@ pub struct Threads {
     /// thread pointer.
     pub tls_g: i64,
     pub g_m: u64,
+    /// The bounds of a g's stack, `[lo, hi)`.
+    pub g_stack_lo: u64,
+    pub g_stack_hi: u64,
     pub m_g0: u64,
     pub m_gsignal: u64,
     pub m_curg: u64,
@@ -163,6 +166,8 @@ impl Threads {
         Ok(Self {
             tls_g: -8,
             g_m: offset(image, "runtime.g", &["m"], 8)?,
+            g_stack_lo: offset(image, "runtime.g", &["stack", "lo"], 8)?,
+            g_stack_hi: offset(image, "runtime.g", &["stack", "hi"], 8)?,
             m_g0: m(&["g0"])?,
             m_gsignal: m(&["gsignal"])?,
             m_curg: m(&["curg"])?,
