@@ -1,23 +1,14 @@
-use crate::CodeInstanceKind;
-use crate::ExceptionDisposition;
-use crate::InlineFrameLookup;
-use crate::LaunchOptions;
-use crate::MemoryReadCompletion;
-use crate::MemoryReadUnavailableReason;
-use crate::Path;
-use crate::PresentedFrame;
-use crate::VariableQuery;
-use crate::WatchpointHit;
-use crate::WatchpointSpec;
-use crate::debug_info::VariableContext;
-use crate::debug_info::VariableRuntime;
+use crate::debug_info::{VariableContext, VariableRuntime};
 use crate::inspection::InspectionBudget;
 use crate::protocol::{
     BreakpointHit, BreakpointSpec, ResolvedBreakpointLocation, ResumeScope, SignalPolicy,
 };
-use crate::unwind::FrameContext;
-use crate::unwind::MemoryReader;
-use crate::unwind::RegisterFile;
+use crate::unwind::{FrameContext, MemoryReader, RegisterFile};
+use crate::{
+    AddressRange, CodeInstanceKind, ExceptionDisposition, ImageAddress, InlineFrameLookup,
+    LaunchOptions, MemoryReadCompletion, MemoryReadUnavailableReason, Path, PresentedFrame,
+    VariableQuery, WatchpointHit, WatchpointSpec,
+};
 use std::cell::RefCell;
 use tokio::sync::broadcast;
 
@@ -27,7 +18,6 @@ use super::memory::{MemoryAccessError, read_logical_memory_with};
 use super::modules::{ModuleMapping, parse_maps};
 use super::native::{InspectionOps, LinuxTraceOps, interrupt_outcome, queued_trap_in_status};
 use super::*;
-use crate::{AddressRange, ImageAddress};
 
 #[test]
 fn maps_parser_preserves_distinct_loads_and_rejects_corruption() {
@@ -4879,80 +4869,57 @@ fn a_pause_completes_when_the_main_thread_exits_alone() {
     assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
 }
 
-/// A main thread resumed alone that exits leaves its held siblings with no
-/// way to run: its exit is reported only after theirs. A pause then stops
-/// at once with them.
+/// A pause stops at once when every thread is stopped or a main thread
+/// past its exit event, which Linux reports only after its siblings' exits,
+/// and otherwise waits for a starting thread's first stop or an exiting
+/// thread's exit, as no request stops either.
 #[test]
-fn a_pause_after_a_lone_main_thread_exited_stops_at_once() {
-    let mut harness = watch_harness(2);
-    let [leader, worker] = harness.threads[..] else {
-        panic!("two threads");
-    };
-    harness.start_continue();
-    harness.thread(worker).state = NativeThreadState::Stopped;
-    harness.thread(leader).state = NativeThreadState::Exiting;
-    harness.trace().killed.borrow_mut().insert(leader);
+fn a_pause_waits_only_for_threads_that_will_report() {
+    use NativeThreadState::{Exiting, Starting, Stopped};
+    for (leader_state, worker_state) in
+        [(Exiting, Stopped), (Exiting, Starting), (Stopped, Exiting)]
+    {
+        let mut harness = watch_harness(2);
+        let [leader, worker] = harness.threads[..] else {
+            panic!("two threads");
+        };
+        harness.start_continue();
+        harness.thread(leader).state = leader_state;
+        harness.thread(worker).state = worker_state;
+        if leader_state == Exiting {
+            harness.trace().killed.borrow_mut().insert(leader);
+        }
 
-    harness
-        .controller
-        .begin_pause(process_id(leader))
-        .expect("the pause is accepted");
-    let stopped = harness.stopped();
-    assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
-}
-
-/// A thread that has not reported its first stop stops by itself, so a
-/// pause waits for it, even when no other thread runs: here the main
-/// thread exited right after creating it.
-#[test]
-fn a_pause_waits_for_a_starting_thread_to_stop() {
-    let mut harness = watch_harness(2);
-    let [leader, worker] = harness.threads[..] else {
-        panic!("two threads");
-    };
-    harness.start_continue();
-    harness.thread(worker).state = NativeThreadState::Starting;
-    harness.thread(leader).state = NativeThreadState::Exiting;
-    harness.trace().killed.borrow_mut().insert(leader);
-
-    harness
-        .controller
-        .begin_pause(process_id(leader))
-        .expect("the pause is accepted");
-    assert_eq!(harness.public_reason(), None);
-    harness.trace().set_siginfo(worker, libc::SI_USER, Some(0));
-    harness
-        .controller
-        .process_wait(WaitEvent::Stopped(worker, Signal::SIGSTOP))
-        .expect("the worker's first stop");
-    let stopped = harness.stopped();
-    assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
-}
-
-/// A pause that finds no thread to ask, the others being stopped and one
-/// past its exit event, as after a thread resumed alone exited, stops once
-/// that exit is reported.
-#[test]
-fn a_pause_waits_for_an_exiting_thread() {
-    let mut harness = watch_harness(2);
-    let [leader, worker] = harness.threads[..] else {
-        panic!("two threads");
-    };
-    harness.start_continue();
-    harness.thread(leader).state = NativeThreadState::Stopped;
-    harness.thread(worker).state = NativeThreadState::Exiting;
-
-    harness
-        .controller
-        .begin_pause(process_id(leader))
-        .expect("the pause is accepted");
-    assert_eq!(harness.public_reason(), None);
-    harness
-        .controller
-        .process_wait(WaitEvent::Exited(worker, 0))
-        .expect("the worker exits");
-    let stopped = harness.stopped();
-    assert_eq!(stopped, Some((debug_thread_id(leader), StopReason::Pause)));
+        harness
+            .controller
+            .begin_pause(process_id(leader))
+            .expect("the pause is accepted");
+        let presenting = match worker_state {
+            Stopped => worker,
+            Starting => {
+                assert_eq!(harness.public_reason(), None);
+                harness.trace().set_siginfo(worker, libc::SI_USER, Some(0));
+                harness
+                    .controller
+                    .process_wait(WaitEvent::Stopped(worker, Signal::SIGSTOP))
+                    .expect("the worker's first stop");
+                worker
+            }
+            _ => {
+                assert_eq!(harness.public_reason(), None);
+                harness
+                    .controller
+                    .process_wait(WaitEvent::Exited(worker, 0))
+                    .expect("the worker exits");
+                leader
+            }
+        };
+        assert_eq!(
+            harness.stopped(),
+            Some((debug_thread_id(presenting), StopReason::Pause)),
+            "{leader_state:?} {worker_state:?}"
+        );
+    }
 }
 
 /// Where the debug information describes two inlined calls that overlap
