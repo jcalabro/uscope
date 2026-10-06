@@ -3,7 +3,7 @@
 use super::*;
 
 #[tokio::test]
-async fn dwarf_cfi_unwinds_the_compiler_and_linker_matrix() {
+async fn dwarf_cfi_unwinds_and_finishes_across_the_compiler_and_linker_matrix() {
     for fixture in ["unwind-o0", "unwind-o2", "unwind-nopie", "unwind-clang-o2"] {
         let mut scenario = Scenario::launch(fixture);
 
@@ -54,6 +54,22 @@ async fn dwarf_cfi_unwinds_the_compiler_and_linker_matrix() {
             UnwindTermination::Complete,
             "unexpected {fixture} backtrace: {trace:?}"
         );
+
+        // Finishing uses the same unwind information to find the caller.
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Step {
+                kind: StepKind::Out
+            },
+            "{fixture}"
+        );
+        let location = scenario
+            .operation(
+                "location after finish",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(location_function(&location), Some("middle"), "{fixture}");
 
         scenario.shutdown().await;
     }
