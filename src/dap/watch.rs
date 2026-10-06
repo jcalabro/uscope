@@ -4,18 +4,11 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use uscope::{
-    StackFrameId, StopContext, VirtualAddress, WatchAccess, WatchScope, WatchpointHit,
-    WatchpointId, WatchpointSpec,
+    VirtualAddress, WatchAccess, WatchScope, WatchpointHit, WatchpointId, WatchpointSpec,
 };
 
 use super::protocol::{self, DataBreakpointInfoArguments, ErrorBody, SetDataBreakpointsArguments};
 use super::session::{Closed, Session, error, parse};
-
-/// What a data id the client was given watches.
-#[derive(Debug, Clone)]
-pub struct DataTarget {
-    spec: WatchpointSpec,
-}
 
 /// One data breakpoint the client set.
 #[derive(Debug, Clone)]
@@ -29,7 +22,8 @@ pub struct DataEntry {
 /// The data breakpoints of a session.
 #[derive(Debug, Default)]
 pub struct Data {
-    targets: HashMap<String, DataTarget>,
+    /// What each data id the client was given watches.
+    targets: HashMap<String, WatchpointSpec>,
     next_target: u64,
     pub entries: Vec<DataEntry>,
 }
@@ -166,11 +160,7 @@ impl Session {
                     Some(frame) => self.references.frame_context(frame).ok_or_else(|| {
                         ErrorBody::new(format!("frame reference {frame} is stale"))
                     })?,
-                    None => StopContext {
-                        stop: stop.id,
-                        thread: stop.thread,
-                        frame: StackFrameId::INNERMOST,
-                    },
+                    None => stop.innermost(),
                 };
                 match uscope::Expression::parse(arguments.name.trim()) {
                     Ok(expression) => (context, expression),
@@ -193,9 +183,7 @@ impl Session {
         };
         self.data.next_target += 1;
         let data_id = format!("data-{}", self.data.next_target);
-        self.data
-            .targets
-            .insert(data_id.clone(), DataTarget { spec });
+        self.data.targets.insert(data_id.clone(), spec);
         let access = handle
             .watchpoint_capabilities()
             .access
@@ -294,7 +282,7 @@ impl Session {
         {
             return Err("hit conditions on data breakpoints are not supported".to_owned());
         }
-        let target = self.data.targets.get(&breakpoint.data_id).ok_or_else(|| {
+        let spec = self.data.targets.get(&breakpoint.data_id).ok_or_else(|| {
             format!(
                 "unknown data id '{}'; ask for it with dataBreakpointInfo",
                 breakpoint.data_id
@@ -302,7 +290,7 @@ impl Session {
         })?;
         let handle = self.target_handle().map_err(|error| error.format)?;
         handle
-            .add_watchpoint(target.spec.clone(), access)
+            .add_watchpoint(spec.clone(), access)
             .await
             .map(|watchpoint| watchpoint.id)
             .map_err(|error| error.to_string())
@@ -330,14 +318,18 @@ impl Session {
             })
             .collect::<Vec<_>>();
         for id in self.data.forget(&gone) {
-            self.client
-                .event(
-                    "breakpoint",
-                    json!({"reason": "removed", "breakpoint": {"id": id, "verified": false}}),
-                )
-                .await?;
+            self.data_removed(id).await?;
         }
         Ok(())
+    }
+
+    async fn data_removed(&self, id: i64) -> Result<(), Closed> {
+        self.client
+            .event(
+                "breakpoint",
+                json!({"reason": "removed", "breakpoint": {"id": id, "verified": false}}),
+            )
+            .await
     }
 
     /// Reports data breakpoints whose watched storage ended.
@@ -346,14 +338,8 @@ impl Session {
         invalidated: &[uscope::InvalidatedWatchpoint],
     ) -> Result<(), Closed> {
         for entry in invalidated {
-            let ids = self.data.forget(&[entry.watchpoint.id]);
-            for id in ids {
-                self.client
-                    .event(
-                        "breakpoint",
-                        json!({"reason": "removed", "breakpoint": {"id": id, "verified": false}}),
-                    )
-                    .await?;
+            for id in self.data.forget(&[entry.watchpoint.id]) {
+                self.data_removed(id).await?;
                 self.client
                     .event(
                         "output",
@@ -368,43 +354,7 @@ impl Session {
         }
         Ok(())
     }
-}
 
-pub const fn invalidation_text(reason: uscope::WatchpointInvalidation) -> &'static str {
-    match reason {
-        uscope::WatchpointInvalidation::ScopeExited => "its frame or block is no longer active",
-        uscope::WatchpointInvalidation::OwnerThreadExited => "the thread owning it exited",
-        uscope::WatchpointInvalidation::ModuleUnloaded => "the module owning it was unloaded",
-    }
-}
-
-fn scope_text(scope: &WatchScope) -> String {
-    match scope {
-        WatchScope::Location | WatchScope::Static { .. } => String::new(),
-        WatchScope::ThreadLocal { thread } => format!(", thread {thread}'s instance"),
-        WatchScope::Frame { .. } => ", until its function returns".to_owned(),
-    }
-}
-
-fn unwatchable(reason: &str) -> Value {
-    json!({"dataId": null, "description": reason})
-}
-
-fn data_json(entry: &DataEntry) -> Value {
-    match &entry.watchpoint {
-        Ok(_) => json!({"id": entry.id, "verified": true}),
-        Err(message) => {
-            json!({"id": entry.id, "verified": false, "message": message, "reason": "failed"})
-        }
-    }
-}
-
-/// The expression a child shown in a variables list evaluates as.
-pub fn child_expression(path: &str) -> Option<uscope::Expression> {
-    uscope::Expression::parse(path).ok()
-}
-
-impl Session {
     /// Describes what a data breakpoint stop's accesses did to each value.
     pub(super) async fn watch_description(&self, hits: &[WatchpointHit]) -> String {
         let Ok(handle) = self.target_handle() else {
@@ -451,5 +401,34 @@ impl Session {
             })
             .collect::<Vec<_>>()
             .join("; ")
+    }
+}
+
+pub const fn invalidation_text(reason: uscope::WatchpointInvalidation) -> &'static str {
+    match reason {
+        uscope::WatchpointInvalidation::ScopeExited => "its frame or block is no longer active",
+        uscope::WatchpointInvalidation::OwnerThreadExited => "the thread owning it exited",
+        uscope::WatchpointInvalidation::ModuleUnloaded => "the module owning it was unloaded",
+    }
+}
+
+fn scope_text(scope: &WatchScope) -> String {
+    match scope {
+        WatchScope::Location | WatchScope::Static { .. } => String::new(),
+        WatchScope::ThreadLocal { thread } => format!(", thread {thread}'s instance"),
+        WatchScope::Frame { .. } => ", until its function returns".to_owned(),
+    }
+}
+
+fn unwatchable(reason: &str) -> Value {
+    json!({"dataId": null, "description": reason})
+}
+
+fn data_json(entry: &DataEntry) -> Value {
+    match &entry.watchpoint {
+        Ok(_) => json!({"id": entry.id, "verified": true}),
+        Err(message) => {
+            json!({"id": entry.id, "verified": false, "message": message, "reason": "failed"})
+        }
     }
 }

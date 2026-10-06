@@ -47,7 +47,7 @@ impl Session {
             .modules
             .iter()
             .map(|record| record.module.id)
-            .collect::<std::collections::BTreeSet<_>>();
+            .collect::<BTreeSet<_>>();
         let unloaded = self
             .modules
             .keys()
@@ -186,7 +186,7 @@ impl Session {
             .source
             .path
             .ok_or_else(|| ErrorBody::new("the source has no path"))?;
-        let recorded = self.recorded_path(std::path::Path::new(&path));
+        let recorded = self.recorded_path(Path::new(&path));
         let line = |line: i64| self.line_from_client(line).and_then(LineNumber::new);
         let (Some(first), Some(last)) = (
             line(arguments.line),

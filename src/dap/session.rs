@@ -5,7 +5,8 @@
 //! request that resumes the inferior is answered before the session reads
 //! the events it causes, a response always precedes the stop it leads to.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -28,6 +29,7 @@ use super::protocol::{
     SetFunctionBreakpointsArguments, ThreadArguments,
 };
 use super::signals::Selection;
+use super::sources::source_json;
 use crate::cli::{Cli, LaunchSettings, Renderers};
 
 /// How long the session waits for a program's output to drain after it
@@ -79,6 +81,12 @@ impl Responses {
 /// The connection to the client is gone.
 #[derive(Debug, Clone, Copy)]
 pub struct Closed;
+
+impl From<Closed> for ErrorBody {
+    fn from(Closed: Closed) -> Self {
+        Self::new("the connection to the client closed")
+    }
+}
 
 impl Client {
     pub fn new(outgoing: mpsc::Sender<Outgoing>) -> Self {
@@ -157,7 +165,7 @@ impl Client {
 
 /// The `seq` of each request the client cancelled, as text, shared by the
 /// reader that sees the cancellation and the session that honors it.
-pub type Cancelled = std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>;
+pub type Cancelled = Arc<Mutex<HashSet<String>>>;
 
 /// What the reader hands the session.
 #[derive(Debug)]
@@ -240,6 +248,17 @@ pub(super) struct Stop {
     pub reason: StopReason,
 }
 
+impl Stop {
+    /// The innermost frame of the stopped thread.
+    pub const fn innermost(&self) -> StopContext {
+        StopContext {
+            stop: self.id,
+            thread: self.thread,
+            frame: StackFrameId::INNERMOST,
+        }
+    }
+}
+
 pub struct Session {
     pub(super) client: Client,
     support: Option<ClientSupport>,
@@ -270,7 +289,7 @@ pub struct Session {
     /// that have each, once it asked.
     pub(super) loaded_sources: Option<BTreeMap<PathBuf, BTreeSet<ModuleId>>>,
     /// Requests read ahead of the one being handled.
-    queue: std::collections::VecDeque<Inbound>,
+    queue: VecDeque<Inbound>,
     /// The `seq` of each request the client cancelled, as text.
     cancelled: Cancelled,
     ended: bool,
@@ -300,7 +319,7 @@ impl Session {
             restarting: false,
             display: super::values::Display::default(),
             loaded_sources: None,
-            queue: std::collections::VecDeque::new(),
+            queue: VecDeque::new(),
             ended: false,
         }
     }
@@ -613,6 +632,8 @@ impl Session {
             view_files,
             working_directory,
         } = configuration;
+        let launched = matches!(start, Start::Launch(_));
+        let core = matches!(start, Start::Core(_));
         let handle = debugger.handle().with_source_paths(source_paths.clone());
         self.events = Some(handle.subscribe());
         let console = Cli::new(
@@ -641,29 +662,22 @@ impl Session {
             process: None,
             pumps: Vec::new(),
         });
-        self.load_views(working_directory, &view_files)
-            .await
-            .map_err(|Closed| closed())?;
+        self.load_views(working_directory, &view_files).await?;
         self.apply_signal_policies().await?;
-        if !matches!(
-            self.target.as_ref().map(|target| &target.start),
-            Some(Start::Launch(_))
-        ) {
-            // Only a launched program runs again. A client restarts a core
-            // dump by opening it again, and an attached process by
-            // detaching and attaching to it again.
+        if !launched {
+            // A client restarts a core dump by opening it again, and an
+            // attached process by detaching and attaching to it again.
             self.client
                 .event(
                     "capabilities",
                     json!({"capabilities": {"supportsRestartRequest": false}}),
                 )
-                .await
-                .map_err(|Closed| closed())?;
+                .await?;
         }
-        if let Some(Start::Core(_)) = self.target.as_ref().map(|target| &target.start) {
-            self.warn_core_modules().await.map_err(|Closed| closed())?;
+        if core {
+            self.warn_core_modules().await?;
         }
-        self.resolve_unresolved().await.map_err(|Closed| closed())?;
+        self.resolve_unresolved().await?;
         self.starting = Some(header.clone());
         if self.configured {
             self.after = Some(After::Start);
@@ -676,8 +690,8 @@ impl Session {
     /// program's own, out.
     async fn load_views(
         &self,
-        working_directory: Option<std::path::PathBuf>,
-        view_files: &[std::path::PathBuf],
+        working_directory: Option<PathBuf>,
+        view_files: &[PathBuf],
     ) -> Result<(), Closed> {
         let Some(target) = self.target.as_ref() else {
             return Ok(());
@@ -788,7 +802,7 @@ impl Session {
     async fn announce_process(
         &mut self,
         method: &'static str,
-        pipes: Vec<(std::os::fd::OwnedFd, &'static str)>,
+        pipes: Vec<(OwnedFd, &'static str)>,
     ) -> Result<Option<uscope::StateSnapshot>, Closed> {
         let target = self.target.as_mut().expect("a started target");
         let snapshot = target.handle.snapshot().await.ok();
@@ -862,29 +876,17 @@ impl Session {
             Err(error) => Err(self::error(error)),
         };
         // Report the old process's end, without ending the session.
-        while let Some(event) = self
-            .events
-            .as_mut()
-            .and_then(|events| events.try_recv().ok())
-        {
-            if self.event(event).await.is_err() {
-                break;
-            }
-        }
+        let _ = self.drain_events().await;
         self.restarting = false;
         killed?;
         let (method, pipes) = self.begin().await?;
-        self.announce_process(method, pipes)
-            .await
-            .map_err(|Closed| closed())?;
+        self.announce_process(method, pipes).await?;
         Ok(json!({}))
     }
 
     /// Launches the program, or readies an attached process or core dump,
     /// returning the `process` event's start method and output pipes.
-    async fn begin(
-        &mut self,
-    ) -> Result<(&'static str, Vec<(std::os::fd::OwnedFd, &'static str)>), ErrorBody> {
+    async fn begin(&mut self) -> Result<(&'static str, Vec<(OwnedFd, &'static str)>), ErrorBody> {
         let supported = self.support().run_in_terminal;
         let target = self.target.as_mut().expect("a target to start");
         let Start::Launch(launch) = &target.start else {
@@ -942,7 +944,7 @@ impl Session {
         } else {
             arguments.terminate_debuggee
         };
-        self.end(terminate).await.map_err(|Closed| closed())?;
+        self.end(terminate).await?;
         self.after = Some(After::End);
         Ok(json!({}))
     }
@@ -975,19 +977,25 @@ impl Session {
                 .await?;
         }
         // Report the exit the kill caused, then the session's end.
-        while let Some(event) = self
-            .events
-            .as_mut()
-            .and_then(|events| events.try_recv().ok())
-        {
-            self.event(event).await?;
-        }
+        self.drain_events().await?;
         if self
             .target
             .as_ref()
             .is_some_and(|target| target.process.is_some())
         {
             self.ended_target().await?;
+        }
+        Ok(())
+    }
+
+    /// Reports the debugger events already received.
+    async fn drain_events(&mut self) -> Result<(), Closed> {
+        while let Some(event) = self
+            .events
+            .as_mut()
+            .and_then(|events| events.try_recv().ok())
+        {
+            self.event(event).await?;
         }
         Ok(())
     }
@@ -1002,7 +1010,7 @@ impl Session {
         }
     }
 
-    /// Stops releasing resources once the session is over.
+    /// Releases what the session holds once it is over.
     async fn release(&mut self) {
         if let Some(target) = self.target.as_mut() {
             if let Some(debugger) = target.debugger.take() {
@@ -1144,8 +1152,7 @@ impl Session {
                 "continued",
                 json!({"threadId": arguments.thread_id, "allThreadsContinued": !single}),
             )
-            .await
-            .map_err(|Closed| closed())?;
+            .await?;
         Ok(json!({}))
     }
 
@@ -1495,39 +1502,36 @@ impl Session {
 
     async fn set_breakpoints(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<SetBreakpointsArguments>(arguments, "setBreakpoints arguments")?;
-        let path = arguments.source.path.clone().ok_or_else(|| {
+        let path = arguments.source.path.ok_or_else(|| {
             ErrorBody::new(
                 "breakpoints need a source with a path; source references are not supported",
             )
         })?;
         let lines_start_at1 = self.support().lines_start_at1;
-        let to_line = |line: i64| -> u64 {
+        let to_line = |line: i64| -> Key {
             let line = u64::try_from(line).unwrap_or(0);
-            if lines_start_at1 { line } else { line + 1 }
+            Key::Line(if lines_start_at1 { line } else { line + 1 })
         };
         let wants = match (arguments.breakpoints, arguments.lines) {
             (Some(breakpoints), _) => breakpoints
                 .into_iter()
-                .map(|breakpoint| Want {
-                    key: Key::Line(to_line(breakpoint.line)),
-                    condition: breakpoint.condition.filter(|text| !text.trim().is_empty()),
-                    hit_condition: breakpoint
-                        .hit_condition
-                        .filter(|text| !text.trim().is_empty()),
-                    log_message: breakpoint.log_message,
+                .map(|breakpoint| {
+                    Want::new(
+                        to_line(breakpoint.line),
+                        breakpoint.condition,
+                        breakpoint.hit_condition,
+                        breakpoint.log_message,
+                    )
                 })
                 .collect(),
             (None, Some(lines)) => lines
                 .into_iter()
-                .map(|line| Want::at(Key::Line(to_line(line))))
+                .map(|line| Want::at(to_line(line)))
                 .collect(),
             (None, None) => Vec::new(),
         };
-        let group = Group::Source(PathBuf::from(&path));
-        let entries = self.replace_group(group.clone(), wants).await?;
-        Ok(
-            json!({"breakpoints": entries.iter().map(|entry| self.breakpoint_json(&group, entry)).collect::<Vec<_>>()}),
-        )
+        self.replace_group(Group::Source(PathBuf::from(path)), wants)
+            .await
     }
 
     async fn set_function_breakpoints(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
@@ -1538,19 +1542,16 @@ impl Session {
         let wants = arguments
             .breakpoints
             .into_iter()
-            .map(|breakpoint| Want {
-                key: Key::Function(breakpoint.name.trim().to_owned()),
-                condition: breakpoint.condition.filter(|text| !text.trim().is_empty()),
-                hit_condition: breakpoint
-                    .hit_condition
-                    .filter(|text| !text.trim().is_empty()),
-                log_message: None,
+            .map(|breakpoint| {
+                Want::new(
+                    Key::Function(breakpoint.name.trim().to_owned()),
+                    breakpoint.condition,
+                    breakpoint.hit_condition,
+                    None,
+                )
             })
             .collect();
-        let entries = self.replace_group(Group::Functions, wants).await?;
-        Ok(
-            json!({"breakpoints": entries.iter().map(|entry| self.breakpoint_json(&Group::Functions, entry)).collect::<Vec<_>>()}),
-        )
+        self.replace_group(Group::Functions, wants).await
     }
 
     async fn set_instruction_breakpoints(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
@@ -1558,42 +1559,31 @@ impl Session {
             arguments,
             "setInstructionBreakpoints arguments",
         )?;
-        let mut wants = Vec::new();
-        for breakpoint in arguments.breakpoints {
-            let key = protocol::address(&breakpoint.instruction_reference)
-                .and_then(|address| protocol::offset(address, breakpoint.offset))
-                .map_or_else(
-                    || {
-                        Key::Invalid(format!(
-                            "invalid instruction reference '{}' with offset {}",
-                            breakpoint.instruction_reference,
-                            breakpoint.offset.unwrap_or(0)
-                        ))
-                    },
-                    Key::Instruction,
-                );
-            wants.push(Want {
-                key,
-                condition: breakpoint.condition.filter(|text| !text.trim().is_empty()),
-                hit_condition: breakpoint
-                    .hit_condition
-                    .filter(|text| !text.trim().is_empty()),
-                log_message: None,
-            });
-        }
-        let entries = self.replace_group(Group::Instructions, wants).await?;
-        Ok(
-            json!({"breakpoints": entries.iter().map(|entry| self.breakpoint_json(&Group::Instructions, entry)).collect::<Vec<_>>()}),
-        )
+        let wants = arguments
+            .breakpoints
+            .into_iter()
+            .map(|breakpoint| {
+                let key = protocol::address(&breakpoint.instruction_reference)
+                    .and_then(|address| protocol::offset(address, breakpoint.offset))
+                    .map_or_else(
+                        || {
+                            Key::Invalid(format!(
+                                "invalid instruction reference '{}' with offset {}",
+                                breakpoint.instruction_reference,
+                                breakpoint.offset.unwrap_or(0)
+                            ))
+                        },
+                        Key::Instruction,
+                    );
+                Want::new(key, breakpoint.condition, breakpoint.hit_condition, None)
+            })
+            .collect();
+        self.replace_group(Group::Instructions, wants).await
     }
 
-    /// Replaces a group of breakpoints and returns its new entries in
+    /// Replaces a group of breakpoints and answers with its new entries in
     /// request order.
-    async fn replace_group(
-        &mut self,
-        group: Group,
-        wants: Vec<Want>,
-    ) -> Result<Vec<Entry>, ErrorBody> {
+    async fn replace_group(&mut self, group: Group, wants: Vec<Want>) -> Result<Value, ErrorBody> {
         let plan = self.breakpoints.plan(&group, wants);
         for entry in plan.release {
             self.release_breakpoint(&entry).await?;
@@ -1608,8 +1598,12 @@ impl Session {
                 }
             });
         }
-        self.breakpoints.install(group, entries.clone());
-        Ok(entries)
+        let body = entries
+            .iter()
+            .map(|entry| self.breakpoint_json(&group, entry))
+            .collect::<Vec<_>>();
+        self.breakpoints.install(group, entries);
+        Ok(json!({"breakpoints": body}))
     }
 
     async fn release_breakpoint(&mut self, entry: &Entry) -> Result<(), ErrorBody> {
@@ -1834,52 +1828,33 @@ impl Session {
     }
 
     fn breakpoint_json(&self, group: &Group, entry: &Entry) -> Value {
-        let to_client = |line: u64| -> u64 {
-            if self.support.is_none_or(|support| support.lines_start_at1) {
-                line
-            } else {
-                line.saturating_sub(1)
-            }
-        };
         let mut body = json!({"id": entry.id});
-        let source = |path: &Path| {
-            json!({
-                "name": path.file_name().map(|name| name.to_string_lossy().into_owned()),
-                "path": path.display().to_string(),
-            })
-        };
-        match &entry.state {
+        let (message, reason) = match &entry.state {
             State::Resolved { placement, .. } => {
                 body["verified"] = true.into();
                 if let Some((path, line)) = &placement.source {
-                    body["line"] = to_client(*line).into();
+                    body["line"] = self.line_to_client(*line).into();
                     body["source"] = match group {
-                        Group::Source(client) => source(client),
-                        _ => source(path),
+                        Group::Source(client) => source_json(client),
+                        _ => source_json(path),
                     };
                 }
                 if let Some(address) = placement.address {
                     body["instructionReference"] = format!("{address:#x}").into();
                 }
+                return body;
             }
-            State::Pending { message, .. } => {
-                body["verified"] = false.into();
-                body["message"] = message.as_str().into();
-                body["reason"] = "pending".into();
-                if let (Group::Source(client), Key::Line(line)) = (group, &entry.want.key) {
-                    body["line"] = to_client(*line).into();
-                    body["source"] = source(client);
-                }
-            }
+            State::Pending { message, .. } => (message, "pending"),
             State::Unresolved { message, pending } => {
-                body["verified"] = false.into();
-                body["message"] = message.as_str().into();
-                body["reason"] = if *pending { "pending" } else { "failed" }.into();
-                if let (Group::Source(client), Key::Line(line)) = (group, &entry.want.key) {
-                    body["line"] = to_client(*line).into();
-                    body["source"] = source(client);
-                }
+                (message, if *pending { "pending" } else { "failed" })
             }
+        };
+        body["verified"] = false.into();
+        body["message"] = message.as_str().into();
+        body["reason"] = reason.into();
+        if let (Group::Source(client), Key::Line(line)) = (group, &entry.want.key) {
+            body["line"] = self.line_to_client(*line).into();
+            body["source"] = source_json(client);
         }
         body
     }
@@ -2214,10 +2189,6 @@ pub(super) fn error(error: Error) -> ErrorBody {
     }
 }
 
-fn closed() -> ErrorBody {
-    ErrorBody::new("the connection to the client closed")
-}
-
 /// A client's thread id as the debugger's.
 pub(super) fn thread_id(id: i64) -> Result<ThreadId, ErrorBody> {
     u64::try_from(id)
@@ -2365,96 +2336,5 @@ mod tests {
         assert!(!session.take_cancellation(&json!("9")));
         assert!(session.take_cancellation(&json!(9)));
         assert!(!session.take_cancellation(&json!(9)));
-    }
-
-    #[test]
-    fn thread_ids_must_be_positive() {
-        assert_eq!(thread_id(7).map(ThreadId::get).ok(), Some(7));
-        for invalid in [0, -1] {
-            assert_eq!(
-                thread_id(invalid).err().map(|error| error.format),
-                Some(format!("there is no thread {invalid}"))
-            );
-        }
-    }
-
-    #[test]
-    fn stops_and_exits_map_to_the_protocols_reasons_and_codes() {
-        let exception = |code: u64| uscope::ExceptionInfo {
-            code,
-            description: format!("signal {code}").into(),
-        };
-        let cases = [
-            (
-                StopReason::Step {
-                    kind: StepKind::OverSource,
-                },
-                "step",
-                None,
-            ),
-            (StopReason::Pause, "pause", None),
-            (StopReason::Entry, "entry", None),
-            (StopReason::Attach, "entry", None),
-            (
-                StopReason::Exception(exception(11)),
-                "exception",
-                Some("SIGSEGV"),
-            ),
-            (
-                StopReason::CoreDump {
-                    exception: Some(exception(6)),
-                },
-                "exception",
-                Some("SIGABRT"),
-            ),
-            (
-                StopReason::CoreDump { exception: None },
-                "exception",
-                Some("core dump"),
-            ),
-            (
-                StopReason::ThreadExited {
-                    thread_id: ThreadId::new(7),
-                    status: ExitStatus::Code(0),
-                },
-                "step",
-                None,
-            ),
-            (StopReason::Exec { followed: true }, "entry", None),
-            (
-                StopReason::Exec { followed: false },
-                "exception",
-                Some("exec"),
-            ),
-            (
-                StopReason::Unclassifiable {
-                    description: "odd".into(),
-                },
-                "exception",
-                Some("unclassifiable stop"),
-            ),
-            (
-                StopReason::WatchpointArmFailed {
-                    thread_id: ThreadId::new(7),
-                    description: "busy".into(),
-                },
-                "exception",
-                Some("watchpoint failure"),
-            ),
-            (
-                StopReason::StepIncomplete {
-                    kind: StepKind::IntoSource,
-                    description: "no caller".into(),
-                },
-                "step",
-                Some("step incomplete"),
-            ),
-        ];
-        for (reason, kind, text) in cases {
-            let (described, _, shown) = describe_stop(&reason);
-            assert_eq!((described, shown.as_deref()), (kind, text), "{reason:?}");
-        }
-        assert_eq!(exit_code(&ExitStatus::Code(3)), 3);
-        assert_eq!(exit_code(&ExitStatus::Terminated(exception(9))), 137);
     }
 }

@@ -4,7 +4,7 @@
 //! ignored, absent or `null` arguments read as empty, and a client's `seq`
 //! is echoed exactly as sent, since some clients send strings.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// A message received from the client.
@@ -141,7 +141,7 @@ impl Outgoing {
                 "command": command,
                 "message": error.short,
                 "body": {"error": {
-                    "id": error.id,
+                    "id": 1,
                     "format": error.format,
                     "showUser": error.show_user,
                 }},
@@ -180,7 +180,6 @@ pub struct ErrorBody {
     pub short: String,
     /// The message shown to the user.
     pub format: String,
-    pub id: u32,
     pub show_user: bool,
 }
 
@@ -191,7 +190,6 @@ impl ErrorBody {
         Self {
             short: message.clone(),
             format: escape_format(&message),
-            id: 1,
             show_user: false,
         }
     }
@@ -211,9 +209,7 @@ impl ErrorBody {
             ..Self::new("the program is running; this request needs it stopped")
         }
     }
-}
 
-impl ErrorBody {
     /// The well-known error for a request that was cancelled.
     pub fn cancelled() -> Self {
         Self {
@@ -228,20 +224,13 @@ fn escape_format(message: &str) -> String {
     message.replace('{', "{{").replace('}', "}}")
 }
 
-/// `initialize` arguments: the client's identity and capabilities.
+/// `initialize` arguments: the client's capabilities.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InitializeArguments {
-    #[serde(rename = "clientID")]
-    pub client_id: Option<String>,
-    pub client_name: Option<String>,
-    #[serde(rename = "adapterID")]
-    pub adapter_id: Option<String>,
     pub lines_start_at1: Option<bool>,
     pub columns_start_at1: Option<bool>,
-    pub path_format: Option<String>,
     pub supports_variable_type: Option<bool>,
-    pub supports_variable_paging: Option<bool>,
     pub supports_run_in_terminal_request: Option<bool>,
     pub supports_memory_references: Option<bool>,
     pub supports_progress_reporting: Option<bool>,
@@ -252,21 +241,10 @@ pub struct InitializeArguments {
 }
 
 /// A source file as the client names it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-#[allow(
-    clippy::struct_field_names,
-    reason = "the protocol names the field sourceReference"
-)]
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct Source {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_reference: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub presentation_hint: Option<String>,
 }
 
 /// One requested source breakpoint.
@@ -274,7 +252,6 @@ pub struct Source {
 #[serde(rename_all = "camelCase", default)]
 pub struct SourceBreakpoint {
     pub line: i64,
-    pub column: Option<i64>,
     pub condition: Option<String>,
     pub hit_condition: Option<String>,
     pub log_message: Option<String>,
@@ -304,7 +281,6 @@ pub struct SetFunctionBreakpointsArguments {
     pub breakpoints: Vec<FunctionBreakpoint>,
 }
 
-/// One requested instruction breakpoint.
 /// One requested instruction breakpoint.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -398,7 +374,6 @@ pub struct DisassembleArguments {
     pub offset: Option<i64>,
     pub instruction_offset: Option<i64>,
     pub instruction_count: i64,
-    pub resolve_symbols: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -414,7 +389,6 @@ pub struct CompletionsArguments {
     pub frame_id: Option<i64>,
     pub text: String,
     pub column: i64,
-    pub line: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -497,7 +471,6 @@ pub struct EvaluateArguments {
 pub struct DisconnectArguments {
     pub restart: Option<bool>,
     pub terminate_debuggee: Option<bool>,
-    pub suspend_debuggee: Option<bool>,
 }
 
 /// `uscope/setValueFormat` arguments: how values are shown when a request

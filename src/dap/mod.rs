@@ -12,12 +12,12 @@ mod inspect;
 pub mod launcher;
 mod memory;
 mod output;
-pub mod protocol;
+mod protocol;
 mod session;
 mod signals;
 mod sources;
 mod terminal;
-pub mod transport;
+mod transport;
 mod values;
 mod watch;
 

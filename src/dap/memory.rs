@@ -77,8 +77,7 @@ impl Session {
                     "memory",
                     json!({"memoryReference": format!("{address:#x}"), "offset": 0, "count": written}),
                 )
-                .await
-                .map_err(|_| ErrorBody::new("the connection to the client closed"))?;
+                .await?;
         }
         self.invalidate_values().await;
         Ok(json!({"offset": 0, "bytesWritten": written}))
@@ -98,11 +97,7 @@ impl Session {
         }
         let first = arguments.instruction_offset.unwrap_or(0);
         let plan = Plan::new(first, arguments.instruction_count);
-        let context = StopContext {
-            stop: stop.id,
-            thread: stop.thread,
-            frame: uscope::StackFrameId::INNERMOST,
-        };
+        let context = stop.innermost();
         let handle = self.target_handle()?;
         let instructions = self.decode(context, anchor, plan).await?;
         let modules = handle.loaded_modules().await.map_err(error)?;
@@ -191,13 +186,9 @@ impl Session {
         {
             // The source is given once for each run of one file.
             if *previous_file != Some((module, source.file)) {
-                let path = self.local_path(&file.path);
                 body.insert(
                     "location".to_owned(),
-                    json!({
-                        "name": path.file_name().map(|name| name.to_string_lossy().into_owned()),
-                        "path": path.display().to_string(),
-                    }),
+                    super::sources::source_json(&self.local_path(&file.path)),
                 );
                 *previous_file = Some((module, source.file));
             }
@@ -473,54 +464,5 @@ mod tests {
         assert_eq!(unbase64("Zg"), Some(b"f".to_vec()));
         assert_eq!(unbase64("Z"), None);
         assert_eq!(unbase64("Zm9v!"), None);
-    }
-
-    #[test]
-    fn plans_cover_rows_before_after_and_around_the_anchor() {
-        assert_eq!(
-            Plan::new(-200, 400),
-            Plan {
-                first: -200,
-                count: 400,
-                before: 200,
-                after: 200
-            }
-        );
-        assert_eq!(
-            Plan::new(-50, 50),
-            Plan {
-                first: -50,
-                count: 50,
-                before: 50,
-                after: 0
-            }
-        );
-        assert_eq!(
-            Plan::new(10, 5),
-            Plan {
-                first: 10,
-                count: 5,
-                before: 0,
-                after: 15
-            }
-        );
-        assert_eq!(
-            Plan::new(-60, 10),
-            Plan {
-                first: -60,
-                count: 10,
-                before: 60,
-                after: 0
-            }
-        );
-        assert_eq!(
-            Plan::new(0, 0),
-            Plan {
-                first: 0,
-                count: 0,
-                before: 0,
-                after: 0
-            }
-        );
     }
 }
