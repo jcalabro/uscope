@@ -395,6 +395,31 @@ const fn unavailable(reason: EntryValueUnavailableReason) -> VariableRuntimeErro
     VariableRuntimeError::Unavailable(VariableUnavailableReason::EntryValue(reason))
 }
 
+impl CatalogCallSite {
+    /// What the call passed for `parameter`: the value, or for a referent
+    /// the value at the address passed.
+    fn passed(&self, parameter: EntryParameter) -> Result<&Expression, VariableRuntimeError> {
+        let mut entries = self.parameters.iter().filter(|passed| match parameter {
+            EntryParameter::Register(register) | EntryParameter::Referent(register) => {
+                passed.register == Some(register)
+            }
+            EntryParameter::Parameter(offset) => passed.parameter == Some(offset),
+        });
+        let not_passed = || unavailable(EntryValueUnavailableReason::NoParameter);
+        let passed = entries.next().ok_or_else(not_passed)?;
+        if entries.next().is_some() {
+            return Err(VariableRuntimeError::Malformed(
+                "a call site describes one parameter twice".into(),
+            ));
+        }
+        match parameter {
+            EntryParameter::Referent(_) => passed.data_value.as_ref(),
+            EntryParameter::Register(_) | EntryParameter::Parameter(_) => passed.value.as_ref(),
+        }
+        .ok_or_else(not_passed)
+    }
+}
+
 impl CallSiteCatalog {
     /// The chain of tail calls from function `from`, entered by a call, to
     /// function `to`, when exactly one is possible.
@@ -582,22 +607,7 @@ impl DwarfVariableInfo {
         if let Some(description) = &catalog_site.malformed {
             return Err(VariableRuntimeError::Malformed(Arc::clone(description)));
         }
-        let expression = catalog_site
-            .parameters
-            .iter()
-            .find_map(|passed| match parameter {
-                EntryParameter::Register(register) if passed.register == Some(register) => {
-                    passed.value.as_ref()
-                }
-                EntryParameter::Referent(register) if passed.register == Some(register) => {
-                    passed.data_value.as_ref()
-                }
-                EntryParameter::Parameter(offset) if passed.parameter == Some(offset) => {
-                    passed.value.as_ref()
-                }
-                _ => None,
-            })
-            .ok_or_else(|| unavailable(EntryValueUnavailableReason::NoParameter))?;
+        let expression = catalog_site.passed(parameter)?;
         let location = LocationDescription {
             entries: vec![super::location::LocationEntry {
                 range: None,
@@ -672,10 +682,8 @@ impl DwarfVariableInfo {
                 let register = runtime.register(register.0)?;
                 bytes_to_u64(&register.bytes, self.endian).map_err(runtime_error)
             }
-            Location::Bytes { value } if value.len() <= 8 => {
-                let mut bytes = [0; 8];
-                bytes[..value.len()].copy_from_slice(value.slice());
-                Ok(u64::from_le_bytes(bytes))
+            Location::Bytes { value } => {
+                bytes_to_u64(value.slice(), self.endian).map_err(runtime_error)
             }
             _ => Err(VariableRuntimeError::Malformed(
                 "a call site's value is not a value".into(),
@@ -744,6 +752,56 @@ mod tests {
             functions,
             returns: BTreeMap::new(),
         }
+    }
+
+    /// What a call passed is what the one parameter entry naming the place
+    /// says; a call that describes one place twice could have passed either.
+    #[test]
+    fn a_call_passes_what_its_one_parameter_entry_says() {
+        let value = |bytes: &[u8]| Expression {
+            bytes: Arc::from(bytes),
+            encoding: gimli::Encoding {
+                format: gimli::Format::Dwarf32,
+                version: 5,
+                address_size: 8,
+            },
+            unit: 0,
+            indexed_addresses: Arc::default(),
+            procedures: Arc::default(),
+        };
+        let site = |parameters| CatalogCallSite {
+            function: 0,
+            return_address: None,
+            target: SiteTarget::Unknown,
+            enters: None,
+            parameters,
+            malformed: None,
+        };
+        let in_register = |register, bytes: &[u8]| SiteParameter {
+            register: Some(register),
+            parameter: None,
+            value: Some(value(bytes)),
+            data_value: None,
+        };
+        let one = site(vec![in_register(5, &[1]), in_register(4, &[2])]);
+        let passed = |site: &CatalogCallSite, parameter| match site.passed(parameter) {
+            Ok(expression) => Ok(expression.bytes.to_vec()),
+            Err(VariableRuntimeError::Unavailable(VariableUnavailableReason::EntryValue(
+                EntryValueUnavailableReason::NoParameter,
+            ))) => Err("not passed"),
+            Err(VariableRuntimeError::Malformed(_)) => Err("malformed"),
+            Err(VariableRuntimeError::Unavailable(_) | VariableRuntimeError::Fatal(_)) => {
+                panic!("refused for another reason")
+            }
+        };
+        assert_eq!(passed(&one, EntryParameter::Register(4)), Ok(vec![2]));
+        assert_eq!(passed(&one, EntryParameter::Register(1)), Err("not passed"));
+        assert_eq!(passed(&one, EntryParameter::Referent(4)), Err("not passed"));
+        let twice = site(vec![in_register(5, &[1]), in_register(5, &[2])]);
+        assert_eq!(
+            passed(&twice, EntryParameter::Register(5)),
+            Err("malformed")
+        );
     }
 
     /// A frame's function was entered by the call its caller made, or by
