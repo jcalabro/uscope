@@ -187,19 +187,14 @@ pub struct HeardTrap {
 }
 
 /// Breakpoint accounting, hit counts: handling one message counts at most
-/// the one trap it reports. A thread's arrival at a trap counts one hit for
-/// every user breakpoint owning the site then, and no more. Executed again
-/// before the thread has executed anything else, as when a signal
-/// interrupts the step over it, the trap counts nothing for a breakpoint
-/// that counted the arrival, and may count it once for one that came to
-/// the site since: whether a thread resumed there ever ran, a debugger can
-/// only guess. Nothing else changes a count, except a new inferior,
-/// launched or attached, which starts every count again, whatever message
-/// started it. A trap may go uncounted once its process is exiting as a
-/// whole, which takes the thread out of its stop. One heard during a
-/// shutdown is no hit: the controller kills a launched process, and
-/// releases an attached one with the thread rewound to execute the
-/// instruction once untraced, as if the breakpoint had gone first.
+/// the trap it reports, one hit for every user breakpoint owning the site.
+/// The same arrival again (a signal interrupted the step over the trap)
+/// counts nothing for a breakpoint that counted it, and at most one for one
+/// that came to the site since: whether the thread ever ran there, a
+/// debugger can only guess. A new inferior starts every count again. A trap
+/// may go uncounted once its process is exiting as a whole, and one heard
+/// during a shutdown is no hit: the controller kills a launched process and
+/// releases an attached one with the thread rewound.
 pub fn hit_counts(
     before: &Truth,
     after: &Truth,
@@ -330,9 +325,9 @@ pub fn clean_exit(kernel: &Kernel) -> Result<(), String> {
 /// Transparency, once the program ended. A process the tracer launched or
 /// attached to that exited by itself wrote, with the children it forked,
 /// exactly what it writes undisturbed, and exited as it does; one killed
-/// wrote only a beginning of that. A child its parent reaped shows in what the parent
-/// wrote. A child init reaped ran on alone once released: the corpus's
-/// children check their own work and exit 0 when it is right.
+/// wrote only a beginning of that. A child its parent reaped shows in what
+/// the parent wrote. A child init reaped ran on alone once released: the
+/// corpus's children check their own work and exit 0 when it is right.
 pub fn transparency(kernel: &Kernel, run: &Run) -> Result<(), String> {
     for (tgid, ended) in &kernel.ended {
         match ended.reaper {
