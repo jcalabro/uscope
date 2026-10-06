@@ -127,6 +127,9 @@ struct CatalogDataObject {
     /// names `&name`, the type of the pointer its location holds; the
     /// variable is what that points to.
     escaped: Option<TypeId>,
+    /// Whether the compiler made it for itself, such as Go's `.dict` and
+    /// `#yield1`: listings leave it out, but its name still reaches it.
+    hidden: bool,
     value: Metadata<ValueDescription>,
     frame_base: Metadata<LocationDescription>,
     malformed: Option<Arc<str>>,
@@ -714,6 +717,9 @@ pub(super) fn load_variable_info<'data>(
                         }
                         _ => (name, type_info, None),
                     };
+                    // Go starts the names of its own variables with
+                    // characters no Go identifier can.
+                    let hidden = go && name.starts_with(['.', '#']);
                     check_data_object_capacity(objects.len())?;
                     functions[scope.function].objects.push(objects.len());
                     objects.push(CatalogDataObject {
@@ -727,6 +733,7 @@ pub(super) fn load_variable_info<'data>(
                         order,
                         type_info,
                         escaped,
+                        hidden,
                         value: copy_data_object_value(dwarf, unit_index, unit, entry),
                         frame_base: scope.frame_base.clone(),
                         malformed: declaration
@@ -885,6 +892,7 @@ impl VariableInfo for DwarfVariableInfo {
                     .map(|&index| &self.objects[index])
                     .filter(|object| {
                         object.instance == selected
+                            && !object.hidden
                             && object.ranges.iter().any(|range| range.contains(address))
                     })
                     .collect()

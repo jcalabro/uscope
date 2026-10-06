@@ -150,6 +150,22 @@ async fn check_truth(
     truth: &Truth,
     may_be_unavailable: bool,
 ) -> Result<(), String> {
+    // A variable the compiler made for itself is named by the whole path,
+    // which may begin with a dot.
+    if truth.kind == "hidden" {
+        let name = truth.path.as_str();
+        if let Some(variable) = variables
+            .iter()
+            .find(|variable| variable.name.as_ref() == name)
+        {
+            return Err(format!("is listed: {variable:?}"));
+        }
+        return match scenario.handle().variable(name).await {
+            Ok(_) => Ok(()),
+            Err(_) if may_be_unavailable => Ok(()),
+            Err(error) => Err(format!("is not reachable by name: {error:?}")),
+        };
+    }
     let mut segments = truth.path.split('.');
     let name = segments.next().expect("a path names a variable");
     let variable = variables
@@ -159,7 +175,15 @@ async fn check_truth(
     if truth.kind == "absent" {
         return variable.map_or(Ok(()), |variable| Err(format!("is listed: {variable:?}")));
     }
-    let variable = variable.ok_or_else(|| "is not listed".to_owned())?;
+    // Optimized code may describe no variable at all where its value is
+    // gone.
+    let Some(variable) = variable else {
+        return if may_be_unavailable {
+            Ok(())
+        } else {
+            Err("is not listed".to_owned())
+        };
+    };
     if truth.kind == "result" {
         return if variable.kind == VariableKind::Result {
             Ok(())
@@ -359,6 +383,7 @@ async fn go_values_agree_with_their_program() {
                 "unnamed-results",
                 "visibility-before",
                 "visibility-after",
+                "temporaries",
                 "pieces",
             ],
             optimized,
