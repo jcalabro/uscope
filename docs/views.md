@@ -548,6 +548,36 @@ values as they print.
 
 ## Where views come from
 
+Views come from four places, and a type's view is the first that binds,
+in this order:
+
+1. **The session's files**: those given with `--views FILE` or the debug
+   adapter's `viewFiles`, and those `views load FILE` loads, the latest
+   first. `views clear` forgets those loaded, and `views` lists them all.
+2. **The project's and the user's files**: every `*.views` file in
+   `.uscope/views` under the working directory, then in
+   `$XDG_CONFIG_HOME/uscope/views` (or `~/.config/uscope/views`), each
+   directory's in name order.
+3. **The program's own**: views a module carries in its
+   `.debug_uscope_views` section, which present only that module's own
+   types, so that one library never restyles another's.
+4. **The built-in views**, described below.
+
+Loading views never asks first, since a view can only read. A file, or a
+view in one, that cannot be used is reported once, with where and why, and
+the session goes on without it.
+
+A C or C++ program carries a view file by including `uscope_views.h`,
+from uscope's `sdk/c`, and writing `USCOPE_VIEWS_FILE("views/app.views");`
+at file scope; a Rust program, with the `uscope-views` crate in
+`sdk/rust`, by writing
+`uscope_views::uscope_views_file!(concat!(env!("CARGO_MANIFEST_DIR"), "/app.views"));`.
+Both read the file when the program is built, into a section that is not
+loaded when it runs and that `strip --strip-debug` removes with the rest of
+the debug information. The section holds records, each a kind (1 for a
+view file), a format (1), a 32-bit little-endian length, and that many
+bytes; zero bytes between them are padding.
+
 The views built into uscope cover:
 
 - C++, in libstdc++ and libc++: `std::string` and its other characters,

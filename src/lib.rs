@@ -34,6 +34,7 @@ mod test_memory;
 mod type_identity;
 mod unwind;
 mod view;
+pub mod view_files;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1064,11 +1065,12 @@ impl DebuggerHandle {
         self.selected().await?.explain_view(expression).await
     }
 
-    /// Presents values with these view files ahead of the built-in views,
-    /// replacing any loaded before, and returns what kept parts of them
-    /// out. Files are parsed here, before the debugger sees them.
+    /// Presents values with these view files ahead of the views modules
+    /// embed and the built-in views, replacing any loaded before, and
+    /// returns what kept parts of them out. Files are parsed here, before
+    /// the debugger sees them.
     pub async fn load_views(&self, files: &[(&str, &str)]) -> Result<Arc<[ViewFileError]>> {
-        let views = Arc::new(view::ViewSet::with_session(files.iter().copied()));
+        let views = Arc::new(view::ViewSet::new(files.iter().copied()));
         let errors: Arc<[ViewFileError]> = views.errors().into();
         self.request(|reply| Request::SetViews { views, reply })
             .await?;

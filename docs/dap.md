@@ -54,6 +54,7 @@ A launch configuration:
   "stopOnEntry": false,          // stop at the first instruction, in the dynamic loader
   "console": "internalConsole",  // or "integratedTerminal" or "externalTerminal"
   "sourceMap": [["/build/src", "${workspaceFolder}/src"]],  // earlier rules first; {"from": "to"} also works
+  "viewFiles": ["${workspaceFolder}/app.views"],  // ahead of .uscope/views, the user's, the program's, the built-in
   "disassemblySyntax": "intel",  // or "att"
   "signals": { "SIGUSR1": "nostop", "SIGPIPE": ["stop", "print"] }
 }

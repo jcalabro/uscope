@@ -1370,9 +1370,9 @@ What P4 built, and what it learned:
 
 **P5 User and embedded views, and the authoring tools.**
 
-- [ ] Session, user, and project files, and the DAP `viewFiles` launch
+- [x] Session, user, and project files, and the DAP `viewFiles` launch
   argument.
-- [ ] `.debug_uscope_views`, with its C header and Rust macro, and module
+- [x] `.debug_uscope_views`, with its C header and Rust macro, and module
   scoping.
 - [x] `extend`, `hide`, `format`, `match`, `record` (in P4),
   `container_of`, `global`.

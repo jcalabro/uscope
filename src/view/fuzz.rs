@@ -674,6 +674,10 @@ fn world_size(world: &World, ty: TypeReference) -> u64 {
 
 /// Runs every view that binds each container over memory from `data`.
 pub fn hostile(data: &[u8]) {
+    // The same bytes, read as a module's embedded records, are refused or
+    // read, never more than they hold.
+    let embedded = super::embedded::view_set("fuzz", data);
+    assert!(embedded.views().len() <= data.len());
     // A budget, the length of a view file of the input's own, which is
     // tried first, the file, and then memory.
     let (&budget, data) = data.split_first().unwrap_or((&0, &[]));

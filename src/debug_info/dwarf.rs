@@ -262,7 +262,8 @@ fn load_debug_info(
                 sections: super::elf::load_sections(&object),
             },
         )
-        .with_id(image_id),
+        .with_id(image_id)
+        .with_views(embedded_views(path, &object)?),
     );
 
     Ok(DebugInfo {
@@ -270,6 +271,21 @@ fn load_debug_info(
         unwind,
         variables: variables.info,
     })
+}
+
+/// The views a module carries for its own types, named after its file.
+fn embedded_views(
+    path: &Path,
+    object: &object::File<'_>,
+) -> std::result::Result<Arc<crate::view::ViewSet>, DwarfError> {
+    let Some(section) = object.section_by_name(crate::view::embedded::SECTION) else {
+        return Ok(crate::view::ViewSet::empty());
+    };
+    let bytes = section.uncompressed_data()?;
+    let module = path
+        .file_name()
+        .map_or_else(|| "module".into(), |name| name.to_string_lossy());
+    Ok(Arc::new(crate::view::embedded::view_set(&module, &bytes)))
 }
 
 /// Returns the code ranges of every unit written in Go, merged and sorted

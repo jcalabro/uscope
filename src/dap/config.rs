@@ -60,6 +60,10 @@ pub struct Configuration {
     /// Signal handling applied over the exception filters: each signal's
     /// actions, as the console's `handle` command takes them.
     pub signals: Vec<(u64, Vec<String>)>,
+    /// View files to present values with, ahead of the project's and the
+    /// user's, and where the project's are: in `.uscope/views` under it.
+    pub view_files: Vec<PathBuf>,
+    pub working_directory: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +91,8 @@ struct Arguments {
     module_paths: Vec<PathBuf>,
     #[serde(default)]
     allow_module_mismatch: bool,
+    #[serde(default)]
+    view_files: Vec<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -207,6 +213,8 @@ fn common(parsed: Arguments, start: Start, what: &str) -> Result<Configuration, 
     Ok(Configuration {
         start,
         stop_on_entry: parsed.stop_on_entry,
+        view_files: parsed.view_files,
+        working_directory: parsed.cwd,
         source_paths,
         syntax: match parsed.disassembly_syntax {
             None | Some(Syntax::Intel) => AssemblySyntax::Intel,

@@ -890,3 +890,68 @@ view rust nowhere {
     );
     scenario.shutdown().await;
 }
+
+/// Views a module carries in its `.debug_uscope_views` section present
+/// that module's own types, and never another module's type of the same
+/// name.
+#[tokio::test]
+async fn embedded_views_present_only_their_own_modules_types() {
+    let mut scenario = Scenario::launch("embedded-views");
+    scenario.add_breakpoint("barrier").await;
+    scenario.run_to_stop().await;
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    scenario
+        .operation(
+            "select caller",
+            scenario.handle().select_frame(trace.frames[1].id),
+        )
+        .await;
+    let numbers = evaluate(&scenario, "numbers").await;
+    let presented = presentation(&numbers).expect("the program's view presents it");
+    assert_eq!(
+        (presented.summary.as_ref(), presented.view.source.as_ref()),
+        ("len=3 [1, 2, 3]", "embedded-views.views[0]")
+    );
+    let origin = evaluate(&scenario, "library_origin").await;
+    let presented = presentation(&origin).expect("the library's view presents it");
+    assert_eq!(
+        (presented.summary.as_ref(), presented.view.source.as_ref()),
+        ("{x: 0x3, y: 4}", "libembedded-views.so.views[0]")
+    );
+    // The program's own point has the library's point's name, and no view.
+    let here = evaluate(&scenario, "here").await;
+    assert!(presentation(&here).is_none(), "{:?}", here.state);
+    scenario.shutdown().await;
+}
+
+/// The Rust SDK's macro embeds a program's views as the C header does.
+#[tokio::test]
+async fn the_rust_sdk_embeds_a_programs_views() {
+    let mut scenario = Scenario::launch("embedded-views-rust");
+    scenario.add_breakpoint("barrier").await;
+    scenario.run_to_stop().await;
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    scenario
+        .operation(
+            "select caller",
+            scenario.handle().select_frame(trace.frames[1].id),
+        )
+        .await;
+    for (expression, expected) in [
+        ("tags", r#"len=2 ["red", "green"]"#),
+        ("temperature", "21.5°C"),
+    ] {
+        let value = evaluate(&scenario, expression).await;
+        let presented = presentation(&value).expect("the program's views present it");
+        assert_eq!(
+            (presented.summary.as_ref(), presented.view.source.as_ref()),
+            (expected, "embedded-views-rust.views[0]"),
+            "{expression}"
+        );
+    }
+    scenario.shutdown().await;
+}

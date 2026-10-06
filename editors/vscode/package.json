@@ -87,6 +87,12 @@
                 "default": [],
                 "description": "Rules that read source files recorded under one path from another: [[\"/build/src\", \"${workspaceFolder}/src\"]]. Earlier rules are tried first."
               },
+              "viewFiles": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": [],
+                "description": "View files that present values, ahead of the project's .uscope/views, the user's, the program's own, and the built-in views. Later files come first."
+              },
               "disassemblySyntax": {
                 "type": "string",
                 "enum": ["intel", "att"],
@@ -143,6 +149,12 @@
                 "type": ["array", "object"],
                 "default": [],
                 "description": "Rules that read source files recorded under one path from another."
+              },
+              "viewFiles": {
+                "type": "array",
+                "items": { "type": "string" },
+                "default": [],
+                "description": "View files that present values, ahead of the project's .uscope/views, the user's, the program's own, and the built-in views. Later files come first."
               },
               "disassemblySyntax": {
                 "type": "string",

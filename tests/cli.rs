@@ -471,6 +471,87 @@ fn views_present_values_raw_is_one_step_away_and_info_view_explains() {
     );
 }
 
+/// Values are presented with the session's view files first, then the
+/// project's in `.uscope/views` where the program runs and the user's, then
+/// the program's own;
+/// `views clear` forgets the session's, and a file with an error is
+/// reported without ending the session.
+#[test]
+fn view_files_come_from_the_session_the_project_and_the_user() {
+    let directory = support::ScratchDir::new("cli-view-files");
+    let project = directory.path().join(".uscope/views");
+    let user = directory.path().join("config/uscope/views");
+    fs::create_dir_all(&project).expect("make the project's view directory");
+    fs::create_dir_all(&user).expect("make the user's view directory");
+    fs::write(
+        project.join("points.views"),
+        "uscope-views 1\nview c point {\n    format y as hex\n}\n",
+    )
+    .expect("write the project's views");
+    fs::write(
+        user.join("mine.views"),
+        "uscope-views 1\nview c point {\n    show empty(\"the user's\")\n}\nview c intvec {\n    show empty(\"the user's vector\")\n}\n",
+    )
+    .expect("write the user's views");
+    let session = directory.path().join("session.views");
+    fs::write(
+        &session,
+        "uscope-views 1\nview c point {\n    show empty(\"the session's\")\n}\n",
+    )
+    .expect("write the session's views");
+    let broken = directory.path().join("broken.views");
+    fs::write(
+        &broken,
+        "uscope-views 1\nview c point {\n    show nothing\n}\n",
+    )
+    .expect("write a broken view file");
+    let load_broken = format!("views load {}", broken.display());
+    // The project is where the program runs, wherever uscope does.
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("XDG_CONFIG_HOME", directory.path().join("config"))
+        .arg("--batch")
+        .arg("--cwd")
+        .arg(directory.path())
+        .arg("--views")
+        .arg(&session)
+        .args(["-e", "break barrier", "-e", "run", "-e", "up"])
+        .args(["-e", "print here", "-e", "views clear", "-e", "print here"])
+        .args([
+            "-e",
+            "print numbers",
+            "-e",
+            &load_broken,
+            "-e",
+            "print here",
+        ])
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/build/test-programs/embedded-views"
+        ))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run uscope");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = assert_success(output);
+    assert_in_order(
+        &stdout,
+        &[
+            "here = the session's",
+            "forgot the loaded view files",
+            "here = {x: 1, y: 0x2}",
+            // The user's view comes before the program's own.
+            "numbers = the user's vector",
+            "loaded 1 view file",
+            "here = {x: 1, y: 0x2}",
+        ],
+    );
+    assert!(
+        stderr.contains("broken.views:3:10: expected a shape"),
+        "{stderr}"
+    );
+}
+
 /// `print` shows a map's entries as `key: value` and a linked structure's
 /// elements, and says why a broken one shows as stored.
 #[test]
