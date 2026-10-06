@@ -1,14 +1,14 @@
 //! Renders inspected values within a fixed output budget.
 
 use std::fmt::Write as _;
-
 use std::sync::Arc;
 
 use uscope::{
     BaseTypeEncoding, ByteOrder, DebuggerHandle, InspectionExhaustion, InspectionLimit,
     InspectionLimits, IntegerValue, ModuleImage, Presentation, PresentedCount, PresentedShape,
     ScalarValue, TypeInfo, TypeKind, ValueChildPage, ValueChildQuery, ValueChildRelationship,
-    ValueChildren, Variable, VariableSnapshot, VariableState, VariableValue,
+    ValueChildren, ValueChildrenReference, Variable, VariableSnapshot, VariableState,
+    VariableValue,
 };
 
 use super::format::register_bytes;
@@ -243,8 +243,10 @@ fn rendered_summary(type_info: &TypeInfo, state: &VariableState, raw: bool) -> S
             let summary = match (stored_text(state), value) {
                 (None, _) => summary,
                 // A pointer keeps its address; the text follows it.
-                (Some(text), VariableValue::Address(_)) => format!("{summary} {}", quoted(text)),
-                (Some(text), _) => quoted(text),
+                (Some(text), VariableValue::Address(_)) => {
+                    format!("{summary} {}", uscope::quoted_text(text))
+                }
+                (Some(text), _) => uscope::quoted_text(text),
             };
             match presentation.as_ref().filter(|_| !raw) {
                 Some(presentation) => format!("{summary} {}", view_failure(presentation)),
@@ -298,9 +300,9 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
         _ => 0,
     };
     match value {
-        VariableValue::Scalar(value) => scalar(value, is_character(type_info)),
+        VariableValue::Scalar(value) => uscope::scalar_text(value, is_character(type_info)),
         VariableValue::Enumeration { value, matches } => {
-            let raw = integer(*value);
+            let raw = uscope::integer_text(*value);
             match matches.as_ref() {
                 [] => raw,
                 [enumerator] => format!("{} ({raw})", enumerator.name),
@@ -346,17 +348,16 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
             });
             discriminant.map_or_else(
                 || format!("{{<{active}; {total} fields>}}"),
-                |value| format!("{{<{active} = {}; {total} fields>}}", integer(value)),
+                |value| {
+                    format!(
+                        "{{<{active} = {}; {total} fields>}}",
+                        uscope::integer_text(value)
+                    )
+                },
             )
         }
         _ => "<unsupported value>".to_owned(),
     }
-}
-
-/// Renders text in double quotes, escaping what is not printable, and says
-/// when more text follows or could not be read.
-pub fn quoted(text: &uscope::TextSummary) -> String {
-    uscope::quoted_text(text)
 }
 
 /// Whether a value has no parts to expand.
@@ -443,23 +444,7 @@ pub async fn expanded(
                 }
             };
             let count = count.known();
-            let requested = count.min(MAX_EXPANDED_CHILDREN).min(remaining.value_nodes);
-            let page = if requested == 0 {
-                None
-            } else {
-                let page = debugger
-                    .value_children_with_limits(
-                        reference.clone(),
-                        ValueChildQuery {
-                            offset: 0,
-                            limit: u32::try_from(requested).expect("bounded page fits u32"),
-                        },
-                        remaining,
-                    )
-                    .await?;
-                remaining = remaining.remaining_after(page.usage);
-                Some(page)
-            };
+            let page = first_children(debugger, reference, count, &mut remaining).await?;
             let (opening, closing) = if shape == PresentedShape::Map {
                 ("{", "}")
             } else {
@@ -499,26 +484,7 @@ pub async fn expanded(
             continue;
         }
 
-        let requested = reference
-            .total()
-            .min(MAX_EXPANDED_CHILDREN)
-            .min(remaining.value_nodes);
-        let page = if requested == 0 {
-            None
-        } else {
-            let page = debugger
-                .value_children_with_limits(
-                    reference.clone(),
-                    ValueChildQuery {
-                        offset: 0,
-                        limit: u32::try_from(requested).expect("bounded page fits u32"),
-                    },
-                    remaining,
-                )
-                .await?;
-            remaining = remaining.remaining_after(page.usage);
-            Some(page)
-        };
+        let page = first_children(debugger, reference, reference.total(), &mut remaining).await?;
         let (opening, closing) = match value {
             VariableValue::Array { .. } | VariableValue::Slice { .. } => ("[", "]".to_owned()),
             VariableValue::Variant { active, .. } => (
@@ -543,6 +509,32 @@ pub async fn expanded(
             .to_string(),
         renderer,
     ))
+}
+
+/// Fetches the first page of up to `count` children that the expansion
+/// and the remaining limits allow, charging it to `remaining`.
+async fn first_children(
+    debugger: &DebuggerHandle,
+    reference: &Arc<ValueChildrenReference>,
+    count: u64,
+    remaining: &mut InspectionLimits,
+) -> uscope::Result<Option<ValueChildPage>> {
+    let requested = count.min(MAX_EXPANDED_CHILDREN).min(remaining.value_nodes);
+    if requested == 0 {
+        return Ok(None);
+    }
+    let page = debugger
+        .value_children_with_limits(
+            reference.clone(),
+            ValueChildQuery {
+                offset: 0,
+                limit: u32::try_from(requested).expect("bounded page fits u32"),
+            },
+            *remaining,
+        )
+        .await?;
+    *remaining = remaining.remaining_after(page.usage);
+    Ok(Some(page))
 }
 
 /// Schedules one aggregate's children, then any truncation markers, as
@@ -608,20 +600,6 @@ const fn is_character(type_info: &TypeInfo) -> bool {
         TypeKind::Base(base) if base.byte_size == 1
             && matches!(base.encoding, BaseTypeEncoding::SignedCharacter | BaseTypeEncoding::UnsignedCharacter)
     )
-}
-
-fn integer(value: IntegerValue) -> String {
-    uscope::integer_text(value)
-}
-
-#[cfg(test)]
-fn float(value: uscope::FloatValue) -> String {
-    uscope::float_text(value)
-}
-
-/// Renders a scalar, adding the printable ASCII character for characters.
-fn scalar(value: &ScalarValue, character: bool) -> String {
-    uscope::scalar_text(value, character)
 }
 
 /// How watched bytes are decoded.
@@ -948,18 +926,19 @@ mod tests {
     }
 
     #[test]
-    fn characters_render_their_escaped_ascii_form() {
-        let render = |value: i128| scalar(&ScalarValue::Signed(value), true);
-        assert_eq!(render(65), "65 'A'");
-        assert_eq!(render(39), r"39 '\''");
-        assert_eq!(render(92), r"92 '\\'");
-        assert_eq!(render(-1), "-1");
-        assert_eq!(scalar(&ScalarValue::Unsigned(66), true), "66 'B'");
-        assert_eq!(scalar(&ScalarValue::Unsigned(66), false), "66");
-    }
+    fn scalars_render_characters_and_special_floats() {
+        let character = |value: i128| uscope::scalar_text(&ScalarValue::Signed(value), true);
+        assert_eq!(character(65), "65 'A'");
+        assert_eq!(character(39), r"39 '\''");
+        assert_eq!(character(92), r"92 '\\'");
+        assert_eq!(character(-1), "-1");
+        assert_eq!(
+            uscope::scalar_text(&ScalarValue::Unsigned(66), true),
+            "66 'B'"
+        );
+        assert_eq!(uscope::scalar_text(&ScalarValue::Unsigned(66), false), "66");
 
-    #[test]
-    fn floating_values_preserve_special_signs_and_extended_precision() {
+        let float = uscope::float_text;
         assert_eq!(
             float(uscope::FloatValue::Binary32(f32::INFINITY.to_bits())),
             "inf"
