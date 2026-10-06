@@ -49,6 +49,7 @@ use crate::{
 };
 
 use super::{ControllerChannels, ControllerMessage, EventSender, ExecutableSource, FileIdentity};
+use activation::{Activation, StackPosition};
 use classify::{is_stopping_signal, is_superseded};
 use debug_registers::DebugRegisterPlan;
 use memory::MemoryAccessError;
@@ -56,6 +57,7 @@ use modules::{ModuleMapping, loader_link_maps, mapped_module_load_bias, module_m
 use native::{InspectionOps, LinuxPtrace, LinuxTraceOps, is_vanished_tracee};
 use registers::Fxsave;
 
+mod activation;
 mod breakpoints;
 mod classify;
 mod core_dump;
@@ -379,17 +381,17 @@ struct StepStart {
     source: Option<SourceLocation>,
     code_instance: Option<CodeInstanceId>,
     physical_instance: Option<CodeInstanceId>,
-    activation: Option<VirtualAddress>,
+    activation: Option<Activation>,
     /// The stack pointer where the step began. Where no activation is
     /// known, a frame below it was entered by a call, and code above it was
     /// returned to.
-    stack_pointer: u64,
+    stack_pointer: Option<StackPosition>,
     /// For a step over or out, the activation its frame returned to, once
     /// the frame it began in returned short of where the step ends, and
     /// the one that returned to in turn. The step then goes on by single
     /// steps and judges frames by this: a later call can make a new
     /// activation at the returned one's CFA.
-    returned_to: Option<VirtualAddress>,
+    returned_to: Option<Activation>,
     /// Whether the step returned into code without source and runs on, to
     /// be ended only by a stop the user sees.
     running_on: bool,
@@ -400,7 +402,7 @@ struct StepStart {
     signal_guard: Option<SignalGuard>,
     /// For a step over a call instruction, the return address and the stack
     /// pointer the call returns with.
-    call_return: Option<(VirtualAddress, u64)>,
+    call_return: Option<(VirtualAddress, StackPosition)>,
 }
 
 /// Whether a step kind executes machine instructions rather than source
@@ -414,7 +416,7 @@ const fn steps_instructions(kind: StepKind) -> bool {
 #[derive(Debug, Clone, Copy)]
 struct SignalGuard {
     address: VirtualAddress,
-    stack: u64,
+    stack: StackPosition,
 }
 
 #[derive(Debug, Clone)]
@@ -425,7 +427,7 @@ struct ReturnTraversal {
     /// The activation whose return reaches `return_address`. For a tail call
     /// this is the step's starting activation; for a regular call it is the
     /// nested callee activation.
-    guarded_activation: VirtualAddress,
+    guarded_activation: Activation,
     retire_return_after_repair: bool,
 }
 

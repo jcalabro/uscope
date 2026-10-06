@@ -18,6 +18,7 @@ use crate::{
     StackFrame, StackFrameId, UnwindTermination, VariableUnavailableReason, VirtualAddress,
 };
 
+use super::activation::{StackPosition, StackView};
 use super::breakpoints::runtime_breakpoint_address;
 use super::memory::PtraceMemory;
 use super::native::InspectionOps;
@@ -415,6 +416,24 @@ impl<P: InspectionOps> Controller<P> {
             address: selected.instruction,
             image: location,
         })
+    }
+
+    /// How the stack a stopped thread runs on is seen at this stop.
+    #[expect(
+        clippy::unused_self,
+        reason = "every stack is a thread's until a runtime's tasks are known"
+    )]
+    pub(super) const fn stack_view(&self, pid: Pid) -> StackView {
+        StackView::thread(pid)
+    }
+
+    /// Where a stopped thread's stack pointer lies on its stack.
+    pub(super) const fn stack_position(
+        &self,
+        pid: Pid,
+        native: &libc::user_regs_struct,
+    ) -> StackPosition {
+        self.stack_view(pid).position(native.rsp)
     }
 
     /// The main executable's unwind context, used by stepping plans that are

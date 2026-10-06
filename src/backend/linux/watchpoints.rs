@@ -27,7 +27,6 @@ use super::frames::{DwarfCallerProvider, frame_lookup_address};
 use super::memory::{PtraceMemory, read_logical_memory};
 use super::native::{InspectionOps, LinuxTraceOps, is_vanished_tracee};
 use super::registers::x86_64_registers;
-use super::stepping::x86_64_activation_has_returned;
 use super::{
     Controller, Inferior, LinuxError, NativeThreadState, WatchRecord, backend_error, debug_pid,
     debug_thread_id, validate_image_current,
@@ -734,14 +733,17 @@ impl<P: InspectionOps> Controller<P> {
             cfa: None,
             signal_frame: false,
         };
-        let unproven = !x86_64_activation_has_returned(native.rsp, activation);
+        let view = self.stack_view(pid);
+        let activation = view.activation(activation);
+        let unproven = !activation.has_returned(view.position(native.rsp));
         for level in 0..DEFAULT_MAX_FRAMES {
             let caller = match provider.caller(&context) {
                 CallerResult::Caller(caller) => caller,
                 CallerResult::Finished(UnwindTermination::Complete) => return Ok(false),
                 CallerResult::Finished(_) => return Ok(unproven),
             };
-            if caller.cfa == Some(activation) {
+            let frame = caller.cfa.map(|cfa| view.activation(cfa));
+            if frame == Some(activation) {
                 let level = u32::try_from(level).expect("frame limit fits u32");
                 let Some(image_address) = frame_lookup_address(level, &context)
                     .and_then(|address| module.loaded.image_address(address).ok())
@@ -756,7 +758,7 @@ impl<P: InspectionOps> Controller<P> {
                         .iter()
                         .any(|range| range.contains(image_address)));
             }
-            if caller.cfa.is_some_and(|cfa| cfa > activation) {
+            if frame.is_some_and(|frame| activation.is_callee_of(frame)) {
                 return Ok(false);
             }
             context = caller;
