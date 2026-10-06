@@ -24,7 +24,7 @@ dump; pass `EXECUTABLE` only when that fails. `uscope dap` is described in
 | `--module-path DIR` | Search `DIR` for a core dump's files missing or different at their recorded paths, by name and then by build-id. Repeatable. |
 | `--allow-module-mismatch` | Use a core dump's module files that cannot be proven to match it. |
 | `--source-map FROM TO` | Read sources recorded under `FROM` from `TO`. Repeatable; the first matching rule wins. |
-| `--views FILE` | Load views from `FILE` ahead of the others. Repeatable. |
+| `--views FILE` | Load views from `FILE` ahead of the others. Repeatable; later files come first. |
 | `-c, --command FILE` | Run the commands in `FILE`. Repeatable. |
 | `-e, --eval COMMAND` | Run one command, after any `-c` files. Repeatable. |
 | `--batch` | Exit after the commands instead of starting the REPL; with no `-c` or `-e`, read commands from stdin. A failing command ends the session with an error naming its source. |

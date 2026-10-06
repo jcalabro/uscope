@@ -1021,7 +1021,7 @@ impl Cli {
                     .map_err(|error| anyhow!(error))?;
                 {
                     let mut views = self.views.lock().expect("the view sources are whole");
-                    views.session.splice(0..0, files);
+                    views.session.splice(0..0, files.into_iter().rev());
                 }
                 for warning in self.reload_views().await {
                     self.warn(&format!("views: {warning}"));

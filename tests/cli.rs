@@ -797,6 +797,38 @@ fn views_present_values_raw_is_one_step_away_and_info_view_explains() {
 /// the program's own;
 /// `views clear` forgets the session's, and a file with an error is
 /// reported without ending the session.
+/// Files given together to `views load` stack as `--views` does: later
+/// files come first.
+#[test]
+fn view_files_loaded_together_stack_as_on_the_command_line() {
+    let directory = support::ScratchDir::new("cli-view-order");
+    let first = directory.path().join("first.views");
+    let second = directory.path().join("second.views");
+    for path in [&first, &second] {
+        fs::write(path, "uscope-views 1\n").expect("write a view file");
+    }
+    let (first, second) = (first.display().to_string(), second.display().to_string());
+    let load_both = format!("views load {first} {second}");
+    let output = batch(
+        &[
+            "--views",
+            &first,
+            "--views",
+            &second,
+            "build/test-programs/basic",
+        ],
+        &["views", "views clear", &load_both, "views"],
+    );
+    let listings = output
+        .split("values are presented with, in order:")
+        .skip(1)
+        .map(|listing| listing.lines().take(3).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert_eq!(listings.len(), 2, "{output}");
+    assert!(listings[0][1].contains("second.views"), "{output}");
+    assert_eq!(listings[0], listings[1], "{output}");
+}
+
 #[test]
 fn view_files_come_from_the_session_the_project_and_the_user() {
     let directory = support::ScratchDir::new("cli-view-files");
