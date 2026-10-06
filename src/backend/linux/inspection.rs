@@ -29,6 +29,16 @@ use super::{
 };
 
 impl<P: InspectionOps> Controller<P> {
+    /// The inferior, once `stop_id` is its current stop, `pid` one of its
+    /// stopped threads, and its image the one the thread executes.
+    pub(super) fn stopped_inferior(&self, stop_id: StopId, pid: Pid) -> Result<&Inferior> {
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        validate_stopped_thread(inferior, pid)?;
+        validate_image_current(inferior)?;
+        Ok(inferior)
+    }
+
     pub(super) fn registers(
         &self,
         stop_id: StopId,
@@ -104,18 +114,9 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Result<VariableSnapshot> {
         validate_inspection_limits(limits)?;
         let mut budget = InspectionBudget::new(limits);
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        // After exec(2) the retained module catalog and image metadata describe
-        // the previous program, but the stopped thread now executes the new
-        // image. Resolving a variable against stale metadata would silently
-        // produce a convincing but incorrect value, so refuse inspection in the
-        // exec-replaced state exactly as run control does.
-        validate_image_current(inferior)?;
-        // Source-level visibility follows the frame's logical scope: an inline
-        // frame scopes lookup to that instance's variables, a physical frame
-        // to the containing function's own variables.
+        let inferior = self.stopped_inferior(stop_id, pid)?;
+        // An inline frame sees its instance's variables; a physical frame,
+        // its function's own.
         let resolved = self.resolve_frame(inferior, pid, frame)?;
         let scope = self.frame_scope(&resolved);
         let inspect_locals = |budget: &mut InspectionBudget| {

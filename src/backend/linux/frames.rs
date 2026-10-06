@@ -181,10 +181,7 @@ impl<P: InspectionOps> Controller<P> {
         pid: Pid,
         frame: StackFrameId,
     ) -> Result<ExecutionLocation> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         if frame.get() != 0 {
             return self.outer_frame_location(inferior, pid, frame);
         }
@@ -221,10 +218,7 @@ impl<P: InspectionOps> Controller<P> {
     }
 
     pub(super) fn backtrace(&self, stop_id: StopId, pid: Pid) -> Result<Backtrace> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         let presentation = self.presentation_for_stopped_thread(pid)?;
         let stack = self.physical_stack(inferior, pid, DEFAULT_MAX_FRAMES)?;
         let modules = self.unwind_modules(inferior);
@@ -469,10 +463,7 @@ impl<P: InspectionOps> Controller<P> {
         pid: Pid,
         frame: StackFrameId,
     ) -> Result<StackFrame> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         let selected = self
             .resolve_frame(inferior, pid, frame)?
             .frame
