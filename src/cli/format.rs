@@ -661,6 +661,7 @@ pub fn core_dump(core: &CoreDumpInfo, renderer: Renderer) -> String {
                     ModuleIdentity::Unverified => {
                         renderer.paint(Role::Warning, "unverified").to_string()
                     }
+                    ModuleIdentity::DumpedMemory => "read from the dump".to_owned(),
                 };
                 // A file found under a sysroot or in a module path is named.
                 let file = if module.path == core_module.recorded_path {

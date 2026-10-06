@@ -19,7 +19,7 @@ use nix::unistd::Pid;
 use tokio::sync::{broadcast, mpsc};
 
 use super::memory::MemoryAccessError;
-use super::modules::{ModuleMapping, load_bias_in, parse_maps};
+use super::modules::{ModuleMapping, ProcessMappings, load_bias_in, process_mappings_in};
 use super::native::{
     InspectionOps, LinuxTraceOps, maps_executable, siginfo_has_fault_address, siginfo_names_sender,
 };
@@ -522,10 +522,8 @@ impl LinuxTraceOps for SimTrace {
         load_bias_in(&self.maps(pid)?, executable, executable_data, identity)
     }
 
-    fn module_mappings(&self, pid: Pid) -> Result<Vec<ModuleMapping>> {
-        let mut mappings = parse_maps(&self.maps(pid)?)?;
-        mappings.retain(|mapping| mapping.executable);
-        Ok(mappings)
+    fn module_mappings(&self, pid: Pid) -> Result<ProcessMappings> {
+        process_mappings_in(&self.maps(pid)?)
     }
 
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()> {

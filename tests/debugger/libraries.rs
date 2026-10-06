@@ -207,3 +207,164 @@ async fn functions_without_debug_information_break_at_their_symbol() {
     );
     scenario.shutdown().await;
 }
+
+/// The vDSO's symbols name code the program runs, so function breakpoints
+/// resolve there, as gdb's do: libc binds `time` straight to the vDSO's, and
+/// libc's own `clock_gettime` calls the vDSO's.
+#[tokio::test]
+async fn function_breakpoints_resolve_in_the_vdso() {
+    const FIXTURE: &str = "vdso-gcc-o0";
+    let mut scenario = Scenario::launch(FIXTURE);
+    let time = pending_function(&scenario, "time").await;
+    let clock = pending_function(&scenario, "clock_gettime").await;
+    let reason = scenario
+        .run_with_to_stop(LaunchOptions {
+            arguments: vec!["calls".into()],
+            ..LaunchOptions::default()
+        })
+        .await;
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    let vdso = support::vdso_module(&modules).module.id;
+    let libc = modules
+        .modules
+        .iter()
+        .find(|record| {
+            record
+                .path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("libc.so"))
+        })
+        .expect("libc is loaded")
+        .module
+        .id;
+    let libraries = |breakpoint: &Breakpoint| {
+        breakpoint
+            .locations
+            .iter()
+            .map(|location| location.library)
+            .collect::<BTreeSet<_>>()
+    };
+    // libc's own `time` names its resolver, which never runs as `time`.
+    let time = breakpoint(&mut scenario, time.id).await;
+    assert_eq!(libraries(&time), BTreeSet::from([Some(vdso)]), "{time:#?}");
+    let clock = breakpoint(&mut scenario, clock.id).await;
+    assert_eq!(
+        libraries(&clock),
+        BTreeSet::from([Some(libc), Some(vdso)]),
+        "{clock:#?}"
+    );
+
+    // Each stop is at the start of a function, in the module the
+    // breakpoint's location belongs to, below the program's caller.
+    let expected = [
+        (time.id, vdso, "vdso_time"),
+        (clock.id, libc, "vdso_clock"),
+        (clock.id, vdso, "vdso_clock"),
+    ];
+    let mut reason = reason;
+    for (index, (id, module, caller)) in expected.into_iter().enumerate() {
+        assert!(
+            matches!(&reason, StopReason::Breakpoint { hits, .. } if hits[0].breakpoint == id),
+            "stop {index}: {reason:?}"
+        );
+        let trace = scenario
+            .operation("backtrace", scenario.handle().backtrace())
+            .await;
+        let frames = frame_modules(&trace, &modules);
+        assert_eq!(
+            trace.frames[0].module,
+            Some(module),
+            "stop {index}: {frames:#?}"
+        );
+        let symbol = trace.frames[0].symbol.as_ref().expect("a symbol");
+        assert_eq!(symbol.offset, 0, "stop {index}: {symbol:?}");
+        assert!(
+            position_of(&frames, FIXTURE, caller) <= 2,
+            "stop {index}: {frames:#?}"
+        );
+        reason = scenario.resume_to_stop().await;
+    }
+    assert_eq!(reason, StopReason::Exited(ExitStatus::Code(0)));
+    scenario.shutdown().await;
+}
+
+/// A process may move its vDSO, as a checkpoint restore does, or unmap it.
+/// The vDSO's module is read again where it moved to, and goes with it.
+#[tokio::test]
+async fn the_vdso_module_follows_the_vdso_as_it_moves_and_goes() {
+    let mut scenario = Scenario::launch("vdso-gcc-o0");
+    scenario.add_breakpoint("vdso_moved").await;
+    scenario.add_breakpoint("vdso_unmapped").await;
+    let mut events = scenario.handle().subscribe();
+    let reason = scenario
+        .run_with_to_stop(LaunchOptions {
+            arguments: vec!["move".into()],
+            ..LaunchOptions::default()
+        })
+        .await;
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{reason:?}"
+    );
+    let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
+        panic!("the program is stopped");
+    };
+    let mut vdso_events = || {
+        std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                DebuggerEvent::ModuleLoaded { module, .. } => Some((true, module)),
+                DebuggerEvent::ModuleUnloaded { module, .. } => Some((false, module)),
+                _ => None,
+            })
+            .filter(|(_, module)| module.path.as_os_str() == support::VDSO)
+            .map(|(loaded, module)| (loaded, module.module.load_bias))
+            .collect::<Vec<_>>()
+    };
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    let moved = support::vdso_mapping(process_id).start;
+    assert_eq!(support::vdso_module(&modules).module.load_bias, moved);
+    let target = scenario
+        .operation("address", scenario.handle().variable("address"))
+        .await;
+    assert!(
+        matches!(
+            available_value(&target.state),
+            uscope::VariableValue::Address(value) if value.address.get() == moved
+        ),
+        "{target:?}"
+    );
+    // The vDSO the program started with was registered, then replaced.
+    let changes = vdso_events();
+    let [(true, first), (false, unloaded), (true, loaded)] = changes[..] else {
+        panic!("{changes:x?}");
+    };
+    assert!(
+        first == unloaded && first != moved && loaded == moved,
+        "{changes:x?}"
+    );
+
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let modules = scenario
+        .operation("modules", scenario.handle().loaded_modules())
+        .await;
+    assert!(
+        modules
+            .modules
+            .iter()
+            .all(|record| record.path.as_os_str() != support::VDSO),
+        "{modules:#?}"
+    );
+    assert_eq!(vdso_events(), [(false, moved)]);
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    scenario.shutdown().await;
+}

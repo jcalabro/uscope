@@ -15,8 +15,9 @@ Adapter Protocol, from VS Code, Neovim, Helix, Zed, and Emacs.
   any access, scoped to the lifetime of the storage they watch.
 - **Execution control**: continue, `step`, `next`, `stepi`, `nexti`, and
   `finish`, through inlined calls, across all threads (all-stop).
-- **Stacks**: backtraces through every loaded module, with frame selection
-  that shows each caller's variables as they were at its call.
+- **Stacks**: backtraces through every loaded module, the kernel's vDSO
+  included, with frame selection that shows each caller's variables as they
+  were at its call.
 - **Values**: one [expression language](docs/expressions.md) for every source
   language, with exact integer arithmetic, casts, and assignment.
 - **[Views](docs/views.md)** that show containers as what they stand for, such

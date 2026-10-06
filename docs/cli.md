@@ -145,7 +145,9 @@ Backtraces unwind through every loaded module using its own call-frame
 information. Frames without debug information are named `symbol+offset` from
 the module's ELF symbol tables, including MiniDebugInfo; code no symbol covers
 is `<unknown>` rather than borrowing a neighbor's name. Rust and C++ symbols
-are demangled.
+are demangled. The vDSO, the code the kernel maps into every process for
+calls such as `clock_gettime`, is the module `[vdso]`; no file backs it, so
+it is read from the process's memory.
 
 The selected frame applies to `print`, `watch`, `where`, `list`,
 `disassemble`, `registers`, and `finish`. Each stop selects the innermost
@@ -223,7 +225,8 @@ read-only segments. Memory the dump did not save, such as code, is read only
 from a matching file. A file that does not match is an error unless
 `--allow-module-mismatch` is given, and even then it is used only for debug
 information. A missing file is reported with its build-id, and its frames
-and unsaved memory are unavailable.
+and unsaved memory are unavailable. The vDSO is read from the dump itself,
+and is reported missing if the dump did not save it.
 
 For a dump from another machine or a container, `--sysroot DIR` resolves
 every recorded path inside `DIR` as if it were `/`, and `--module-path DIR`

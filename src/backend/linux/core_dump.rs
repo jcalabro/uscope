@@ -1189,6 +1189,16 @@ pub(super) fn fuzz(data: &[u8]) {
         })
         .chain(core.files.iter().map(|file| file.start))
         .collect::<Vec<_>>();
+    // An image no file backs, as the vDSO, is read from saved memory alone.
+    for start in addresses
+        .iter()
+        .copied()
+        .chain(core.auxv_value(super::vdso::AT_SYSINFO_EHDR))
+    {
+        let _ = super::vdso::read_memory_image(start, u64::MAX, |address, buffer| {
+            core.read_saved(address, buffer).is_ok()
+        });
+    }
     let memory = CoreMemory::new(Arc::new(core), backings);
     for address in addresses {
         let mut buffer = [0; 64];

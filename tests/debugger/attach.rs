@@ -27,6 +27,12 @@ async fn attach_discovers_the_executable_and_detaches_without_harming_the_proces
             ..
         } if process_id == process
     ));
+    // The vDSO, which no file backs, is found where the kernel mapped it.
+    let modules = handle.loaded_modules().await.expect("attached modules");
+    assert_eq!(
+        support::vdso_module(&modules).module.load_bias,
+        support::vdso_mapping(process).start
+    );
 
     handle
         .add_breakpoint(uscope::BreakpointSpec::Function(

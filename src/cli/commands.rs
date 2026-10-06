@@ -1114,8 +1114,8 @@ impl Cli {
             }
         });
         let disassembly = match self.disassemble_query(range).await {
-            // Code outside every function, such as a stop in the vDSO, is
-            // shown around the frame's instruction instead.
+            // Code outside every function, such as the vDSO's unexported
+            // helpers, is shown around the frame's instruction instead.
             Err(uscope::Error::NoFunctionContainsAddress(_)) if target.is_none() => {
                 self.disassemble_query(DisassemblyRange::Window {
                     address: marked,
@@ -1282,7 +1282,7 @@ impl Cli {
         let location = match self.debugger.current_location().await {
             Ok(location) => location,
             // No loaded module describes the frame's code, such as a stop in
-            // the vDSO.
+            // JIT-compiled code.
             Err(uscope::Error::AddressOutsideModule) => {
                 return Ok(format!(
                     "{} at {} outside every loaded module",

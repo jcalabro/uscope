@@ -85,6 +85,7 @@ mod signals;
 pub mod sim_edge;
 mod stepping;
 mod thread_db;
+mod vdso;
 mod watchpoints;
 mod writes;
 
