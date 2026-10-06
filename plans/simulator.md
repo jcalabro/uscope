@@ -378,12 +378,13 @@ scheduling, or transparency would fail sessions for nothing.
 **Facts.** `facts.json` holds, for every variant, its functions from `nm`,
 its line table rows from `readelf --debug-dump=decodedline`, the addresses
 `--debug-dump=rawline` marks `epilogue_begin`, the address ranges where
-`--debug-dump=loc` says a variable is exactly a register's entry value,
-whether it was optimized, and how many inlined calls its DWARF describes. Coming from GNU binutils
-rather than uscope, they let the stepping oracle check uscope against
-another implementation. Rows at one address collapse as gdb collapses them,
-and a row never describes code past the start of another function (GCC's
-last row before hand-written assembly runs on through it).
+`--debug-dump=loc` says a variable outside inlined code is exactly a
+register's entry value, whether it was optimized, and how many inlined
+calls its DWARF describes. Coming from GNU binutils rather than uscope,
+they let the stepping oracle check uscope against another implementation.
+Rows at one address collapse as gdb collapses them, and a row never
+describes code past the start of another function (GCC's last row before
+hand-written assembly runs on through it).
 
 **Markers.** A condition on a line's variables is written beside the line,
 where the source hash covers it:
@@ -590,7 +591,8 @@ judged once its stop is over or its process is ending.
   debugger shows for it is what that register held when the call that
   began the activation entered the function; the shadow call stack
   records each call's target and registers. An activation a jump entered
-  is not judged, nor a name two variables in view share.
+  is not judged, nor an inline frame, a name two variables in view share,
+  or bytes beyond the register.
 - *Views* (`views.rs`): a container's presentation is what its view makes
   of memory, walked exactly as `containers.views` says from the program's
   C layout, never from uscope's reading of the debug information: its

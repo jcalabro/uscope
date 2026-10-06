@@ -777,7 +777,9 @@ fn stored(
 /// exactly what a register held when its function was entered, the value
 /// the debugger shows for it is what the call that began the activation
 /// left in that register. An activation a jump entered is not judged: no
-/// call says what it began with.
+/// call says what it began with. Nor is an inline frame, whose variables
+/// may share names with its function's: the facts describe only variables
+/// outside inlined code.
 pub fn entry_values(
     kernel: &Kernel,
     snapshot: &VariableSnapshot,
@@ -788,7 +790,7 @@ pub fn entry_values(
         .frames
         .iter()
         .find(|frame| frame.id == snapshot.stack_frame)
-        .is_some_and(|frame| frame.level == 0);
+        .is_some_and(|frame| frame.level == 0 && frame.kind == FrameKind::Physical);
     let Some(thread) = stopped(kernel, snapshot.thread).filter(|_| innermost) else {
         return Ok(Vec::new());
     };
@@ -804,30 +806,46 @@ pub fn entry_values(
     }) else {
         return Ok(Vec::new());
     };
+    let shown = snapshot
+        .variables
+        .iter()
+        .map(|variable| match &variable.state {
+            VariableState::Available { raw: Some(raw), .. } => (&*variable.name, Some(&raw[..])),
+            _ => (&*variable.name, None),
+        })
+        .collect::<Vec<_>>();
+    judge_entry_values(&variant.facts, address, &call.entry, &shown)
+}
+
+/// Judges the bytes `shown` for each variable in view at image `address`
+/// against the general registers its function was `entered` with.
+fn judge_entry_values(
+    facts: &Facts,
+    address: u64,
+    entered: &[u64; 16],
+    shown: &[(&str, Option<&[u8]>)],
+) -> Result<Vec<Mark>, String> {
     let mut marks = Vec::new();
-    for variable in snapshot.variables.iter() {
-        let VariableState::Available { raw: Some(raw), .. } = &variable.state else {
+    for &(name, raw) in shown {
+        // Bytes beyond a register's say nothing of what it held.
+        let Some(raw) = raw.filter(|raw| raw.len() <= 8) else {
             continue;
         };
-        let Some(register) = variant.facts.entry_register(&variable.name, address) else {
+        let Some(register) = facts.entry_register(name, address) else {
             continue;
         };
         let Some(index) = GENERAL_REGISTERS.iter().position(|name| *name == register) else {
             continue;
         };
         // Variables of one name in nested scopes may be different things.
-        let named = snapshot
-            .variables
-            .iter()
-            .filter(|other| other.name == variable.name);
-        if named.count() > 1 {
+        if shown.iter().filter(|(other, _)| *other == name).count() > 1 {
             continue;
         }
-        let entered = call.entry[index].to_le_bytes();
-        if entered.get(..raw.len()) != Some(&raw[..]) {
+        let value = entered[index].to_le_bytes();
+        if value.get(..raw.len()) != Some(raw) {
             return Err(format!(
-                "`{}` showed bytes {raw:?}, but its function was entered with {register} = {:#x}",
-                variable.name, call.entry[index]
+                "`{name}` showed bytes {raw:?}, but its function was entered with {register} = {:#x}",
+                entered[index]
             ));
         }
         marks.push(Mark::EntryValueTrue);
@@ -987,6 +1005,41 @@ mod tests {
         assert!(judge(&kernel, &[rip, 0x40_2222, 1], complete).is_err());
         assert!(judge(&kernel, &[rip, 0x40_2222, 0x40_1111], stopped.clone()).is_err());
         assert!(judge(&kernel, &[rip, 0x40_2222, 1, 0x40_4444], stopped).is_err());
+    }
+
+    /// Where binutils say a variable is a register's entry value, the bytes
+    /// shown for it are that register's as the call entered the function.
+    /// A name two variables in view share, or bytes beyond the register,
+    /// say nothing of what it held.
+    #[test]
+    fn entry_values_are_what_the_call_entered_with() {
+        let mut corpus = Corpus::load().expect("load the golden corpus");
+        let facts = &mut corpus.programs[0].variants[0].facts;
+        facts.entry_values = vec![facts::EntryValue {
+            name: "n".into(),
+            addresses: 0x10..0x20,
+            register: "rdi".into(),
+        }];
+        let facts = &*facts;
+        let mut entered = [0; 16];
+        entered[7] = 0x1122_3344_5566_7788;
+        let judge =
+            |shown: &[(&str, Option<&[u8]>)]| judge_entry_values(facts, 0x18, &entered, shown);
+
+        let low = [0x88, 0x77, 0x66, 0x55];
+        assert_eq!(
+            judge(&[("n", Some(&low)), ("m", Some(&[1]))]),
+            Ok(vec![Mark::EntryValueTrue])
+        );
+        assert!(judge(&[("n", Some(&[0x87, 0x77, 0x66, 0x55]))]).is_err());
+        assert_eq!(judge(&[("n", Some(&low)), ("n", Some(&[1]))]), Ok(vec![]));
+        let mut wide = [0; 16];
+        wide[..8].copy_from_slice(&entered[7].to_le_bytes());
+        assert_eq!(judge(&[("n", Some(&wide))]), Ok(vec![]));
+        assert_eq!(
+            judge_entry_values(facts, 0x20, &entered, &[("n", Some(&[1]))]),
+            Ok(vec![])
+        );
     }
 
     /// In unoptimized code, a source step stops at the first start of a
