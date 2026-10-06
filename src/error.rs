@@ -19,6 +19,13 @@ pub enum Error {
     FunctionNotFound(String),
     #[error("multiple functions named '{0}' were found")]
     DuplicateFunction(String),
+    /// A location that names several functions where it must name one,
+    /// with a location for each that names it alone.
+    #[error("'{name}' names more than one function: {}", candidates.join(", "))]
+    AmbiguousFunction {
+        name: String,
+        candidates: Vec<String>,
+    },
     #[error("no source file matching '{0}' was found")]
     SourceFileNotFound(PathBuf),
     #[error("source path '{path}' is ambiguous; matches: {matches:?}")]
@@ -28,6 +35,19 @@ pub enum Error {
     },
     #[error("source line {line} in {path} has no code at or after it in its function")]
     SourceLineUnavailable { path: PathBuf, line: u64 },
+    /// A source line with no statement, in a language whose line
+    /// breakpoints stay where they were asked for, with the nearest lines
+    /// before and after it that have one.
+    #[error(
+        "source line {line} in {path} has no statement{}",
+        nearest_statement_lines(*before, *after)
+    )]
+    SourceLineWithoutStatement {
+        path: PathBuf,
+        line: u64,
+        before: Option<u64>,
+        after: Option<u64>,
+    },
     #[error("breakpoint {0} was not found")]
     BreakpointNotFound(u64),
     #[error("invalid hit condition: {0}")]
@@ -287,4 +307,16 @@ fn missing_source_detail(tried: &[PathBuf]) -> String {
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>();
     format!(", nor do its mapped paths {}", paths.join(", "))
+}
+
+fn nearest_statement_lines(before: Option<u64>, after: Option<u64>) -> String {
+    match (before, after) {
+        (Some(before), Some(after)) => {
+            format!("; the nearest lines that have one are {before} and {after}")
+        }
+        (Some(line), None) | (None, Some(line)) => {
+            format!("; the nearest line that has one is {line}")
+        }
+        (None, None) => String::new(),
+    }
 }

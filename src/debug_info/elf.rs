@@ -526,6 +526,7 @@ pub(super) fn fuzz(data: &[u8]) {
             vtables: Vec::new(),
             constants: std::collections::BTreeMap::new(),
             producers: Vec::new(),
+            packages: Vec::new(),
         },
     );
     fuzz_lookups(&image, &symbols, data);

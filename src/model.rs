@@ -6,7 +6,7 @@ use crate::{Error, Result};
 
 mod image;
 
-pub use image::{ModuleImage, ModuleMetadata};
+pub use image::{ModuleImage, ModuleMetadata, PackageInfo};
 
 macro_rules! address_type {
     ($name:ident, $description:literal) => {
