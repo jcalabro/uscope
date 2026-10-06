@@ -274,7 +274,7 @@ pub(super) fn checked_reference_chain(
     Ok(chain)
 }
 
-pub(super) fn origin_reference(
+fn origin_reference(
     entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
     unit_index: usize,
     units: &[gimli::Unit<Reader<'_>>],

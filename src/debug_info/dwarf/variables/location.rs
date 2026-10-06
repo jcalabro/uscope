@@ -159,7 +159,7 @@ pub(super) fn copy_data_object_value_with_origins(
     direct
 }
 
-pub(super) fn copy_constant(
+fn copy_constant(
     value: gimli::AttributeValue<Reader<'_>>,
 ) -> std::result::Result<ConstantValue, Arc<str>> {
     Ok(match value {
@@ -181,7 +181,7 @@ pub(super) fn copy_constant(
     })
 }
 
-pub(super) fn copy_location(
+fn copy_location(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
@@ -305,10 +305,7 @@ pub(super) fn load_evaluation_units(
         .collect()
 }
 
-pub(super) const fn dwarf_value_type(
-    encoding: gimli::DwAte,
-    byte_size: u64,
-) -> Option<gimli::ValueType> {
+const fn dwarf_value_type(encoding: gimli::DwAte, byte_size: u64) -> Option<gimli::ValueType> {
     use gimli::ValueType::{F32, F64, I8, I16, I32, I64, U8, U16, U32, U64};
     if encoding.0 == gimli::DW_ATE_float.0 {
         return match byte_size {

@@ -325,7 +325,7 @@ impl DwarfVariableInfo {
         ObjectStorage { class, ranges }
     }
 
-    pub(super) fn expression_uses(
+    fn expression_uses(
         &self,
         expression: &Expression,
         uses: &mut BTreeSet<ExpressionUse>,
@@ -377,7 +377,7 @@ impl DwarfVariableInfo {
             })
     }
 
-    pub(super) fn transparent_type(
+    fn transparent_type(
         &self,
         id: TypeId,
     ) -> std::result::Result<(TypeId, &TypeInfo), ValueShapeError> {
@@ -418,11 +418,7 @@ impl DwarfVariableInfo {
         }
     }
 
-    pub(super) fn validate_static_member_layout(
-        &self,
-        record: TypeId,
-        member: &RecordMember,
-    ) -> Result<()> {
+    fn validate_static_member_layout(&self, record: TypeId, member: &RecordMember) -> Result<()> {
         let record_size = self.type_info(record).ok().and_then(|info| info.byte_size);
         let member_size = self
             .type_info(member.type_ref.id)
@@ -1085,7 +1081,7 @@ impl DwarfVariableInfo {
         }
     }
 
-    pub(super) fn storage_with_offset(
+    fn storage_with_offset(
         storage: LocatedStorage,
         offset: i64,
     ) -> std::result::Result<LocatedStorage, EvaluateError> {
@@ -1147,7 +1143,7 @@ impl DwarfVariableInfo {
         }
     }
 
-    pub(super) fn read_storage(
+    fn read_storage(
         storage: &LocatedStorage,
         size: usize,
         runtime: &mut dyn VariableRuntime,
@@ -1181,7 +1177,7 @@ impl DwarfVariableInfo {
         }
     }
 
-    pub(super) fn decode_slice(
+    fn decode_slice(
         &self,
         storage: &LocatedStorage,
         byte_size: u64,
@@ -1243,9 +1239,7 @@ impl DwarfVariableInfo {
         })
     }
 
-    pub(super) const fn concrete_storage_address(
-        storage: &LocatedStorage,
-    ) -> Option<VirtualAddress> {
+    const fn concrete_storage_address(storage: &LocatedStorage) -> Option<VirtualAddress> {
         match storage {
             LocatedStorage::Memory(address) => Some(*address),
             LocatedStorage::Bytes { address, .. } => *address,
@@ -1307,7 +1301,7 @@ impl DwarfVariableInfo {
 
     /// Describes where a storage's bytes came from. Bytes read once for a
     /// whole page of elements still report each element's own address.
-    pub(super) fn storage_source(storage: &LocatedStorage) -> VariableValueSource {
+    fn storage_source(storage: &LocatedStorage) -> VariableValueSource {
         match storage {
             LocatedStorage::Memory(address) => VariableValueSource::Memory(*address),
             LocatedStorage::Bytes {
@@ -1317,7 +1311,7 @@ impl DwarfVariableInfo {
         }
     }
 
-    pub(super) fn child_reference(
+    fn child_reference(
         storage: &LocatedStorage,
         context: VariableContext,
         target_type: TypeId,
@@ -1339,7 +1333,7 @@ impl DwarfVariableInfo {
         })
     }
 
-    pub(super) fn bit_field_storage(
+    fn bit_field_storage(
         &self,
         storage: LocatedStorage,
         type_id: TypeId,
@@ -1416,7 +1410,7 @@ impl DwarfVariableInfo {
         })
     }
 
-    pub(super) fn runtime_member_storage(
+    fn runtime_member_storage(
         &self,
         storage: &LocatedStorage,
         aggregate: TypeId,
@@ -1442,7 +1436,7 @@ impl DwarfVariableInfo {
         Ok(LocatedStorage::Memory(address))
     }
 
-    pub(super) fn active_variant_from_storage(
+    fn active_variant_from_storage(
         &self,
         storage: &LocatedStorage,
         aggregate: TypeId,
@@ -1462,7 +1456,7 @@ impl DwarfVariableInfo {
         .map(|(_, active)| active)
     }
 
-    pub(super) fn variant_selection_from_storage(
+    fn variant_selection_from_storage(
         &self,
         storage: &LocatedStorage,
         aggregate: TypeId,
@@ -1533,7 +1527,7 @@ impl DwarfVariableInfo {
         clippy::too_many_arguments,
         reason = "implicit-pointer resolution requires target bounds and the shared evaluation context"
     )]
-    pub(super) fn resolve_implicit_pointer(
+    fn resolve_implicit_pointer(
         &self,
         debug_info_offset: u64,
         byte_offset: i64,
@@ -1819,7 +1813,7 @@ impl DwarfVariableInfo {
     }
 
     /// Materializes a value, with its text when it is a string.
-    pub(super) fn materialize_value_state(
+    fn materialize_value_state(
         &self,
         type_id: TypeId,
         shape: &ValueShape,
@@ -2195,7 +2189,7 @@ impl DwarfVariableInfo {
         clippy::too_many_arguments,
         reason = "child layout evaluation keeps aggregate identity, storage, type, runtime, and budget explicit"
     )]
-    pub(super) fn aggregate_child_storage(
+    fn aggregate_child_storage(
         &self,
         storage: &LocatedStorage,
         aggregate: TypeId,
@@ -2227,7 +2221,7 @@ impl DwarfVariableInfo {
         }
     }
 
-    pub(super) fn materialize_child(
+    fn materialize_child(
         &self,
         relationship: ValueChildRelationship,
         type_id: TypeId,
@@ -2749,7 +2743,7 @@ impl DwarfVariableInfo {
         })
     }
 
-    pub(super) fn constrain_dereference(&self, state: &mut VariableState, shape: &ValueShape) {
+    fn constrain_dereference(&self, state: &mut VariableState, shape: &ValueShape) {
         let ValueShapeKind::Indirection {
             target: Some(target),
             ..
