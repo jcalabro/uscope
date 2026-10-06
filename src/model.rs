@@ -1203,9 +1203,6 @@ pub struct ValueChild {
     pub state: VariableState,
 }
 
-/// Backwards-compatible name for child-page inspection completion.
-pub type ValuePageCompletion = InspectionCompletion;
-
 /// One immutable page of children evaluated at a stopped snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueChildPage {
@@ -1218,7 +1215,7 @@ pub struct ValueChildPage {
     /// Children represented in stable parent order.
     pub children: Arc<[ValueChild]>,
     /// Whether the requested interval completed.
-    pub completion: ValuePageCompletion,
+    pub completion: InspectionCompletion,
     /// Resources consumed while producing this page.
     pub usage: InspectionUsage,
 }
@@ -2830,6 +2827,7 @@ impl StatementFlags {
     }
 }
 
+#[derive(Default)]
 pub struct ModuleMetadata {
     pub functions: Vec<FunctionInfo>,
     pub code_instances: Vec<CodeInstanceInfo>,
@@ -2904,202 +2902,89 @@ impl<T: Copy + Ord> RangeIndex<T> {
     }
 }
 
-struct ModuleIndexes {
-    functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
-    symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
-    globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
-    instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
-    statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
-    control_boundaries_by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
-    control_boundaries_by_instance: BTreeMap<CodeInstanceId, Arc<[u32]>>,
-    recommended_entries_by_instance: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
-}
-
-struct ControlBoundaryIndexes {
-    by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
-    by_instance: BTreeMap<CodeInstanceId, Arc<[u32]>>,
-    recommended_entries: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
-}
-
-fn grouped_index<K: Ord, V>(entries: impl IntoIterator<Item = (K, V)>) -> BTreeMap<K, Arc<[V]>> {
-    let mut grouped = BTreeMap::<K, Vec<V>>::new();
+/// Groups values by key, each group sorted and without duplicates.
+fn grouped_index<K: Ord, V: Ord>(
+    entries: impl IntoIterator<Item = (K, V)>,
+) -> BTreeMap<K, Arc<[V]>> {
+    let mut grouped = BTreeMap::<K, BTreeSet<V>>::new();
     for (key, value) in entries {
-        grouped.entry(key).or_default().push(value);
+        grouped.entry(key).or_default().insert(value);
     }
-
     grouped
         .into_iter()
-        .map(|(key, values)| (key, values.into()))
+        .map(|(key, values)| (key, values.into_iter().collect()))
         .collect()
 }
 
-fn build_module_indexes(
-    metadata: &ModuleMetadata,
-    code_range_index: &RangeIndex<CodeInstanceId>,
-) -> ModuleIndexes {
-    let functions_by_name = grouped_index(
-        metadata
-            .functions
-            .iter()
-            .map(|function| (Arc::clone(&function.name), function.id)),
-    );
-    let symbols_by_name = grouped_index(
-        metadata
-            .symbols
-            .iter()
-            .map(|symbol| (Arc::clone(&symbol.name), symbol.id)),
-    );
-    let mut global_selectors = Vec::new();
+/// Every selector naming a global: its name, qualified name, and linkage
+/// name, and its qualified name after its declaring file's path or name.
+fn global_selectors(metadata: &ModuleMetadata) -> Vec<(Arc<str>, GlobalVariableId)> {
+    let mut selectors = Vec::new();
     for global in &metadata.globals {
-        global_selectors.push((Arc::clone(&global.name), global.id));
-        if global.qualified_name != global.name {
-            global_selectors.push((Arc::clone(&global.qualified_name), global.id));
-        }
+        selectors.push((Arc::clone(&global.name), global.id));
+        selectors.push((Arc::clone(&global.qualified_name), global.id));
         if let Some(linkage_name) = &global.linkage_name {
-            global_selectors.push((Arc::clone(linkage_name), global.id));
+            selectors.push((Arc::clone(linkage_name), global.id));
         }
         if let Some(declaration) = &global.declaration
             && let Some(source) = metadata.source_files.get(declaration.file.index())
         {
             let path = source.path.to_string_lossy();
-            global_selectors.push((
-                Arc::from(format!("{path}::{}", global.qualified_name)),
+            selectors.push((
+                format!("{path}::{}", global.qualified_name).into(),
                 global.id,
             ));
             if let Some(file_name) = source.path.file_name() {
-                global_selectors.push((
-                    Arc::from(format!(
-                        "{}::{}",
-                        file_name.to_string_lossy(),
-                        global.qualified_name
-                    )),
+                let file_name = file_name.to_string_lossy();
+                selectors.push((
+                    format!("{file_name}::{}", global.qualified_name).into(),
                     global.id,
                 ));
             }
         }
     }
-    let mut globals_by_selector = grouped_index(global_selectors);
-    for ids in globals_by_selector.values_mut() {
-        let mut unique = ids.to_vec();
-        unique.sort_unstable();
-        unique.dedup();
-        *ids = unique.into();
-    }
-    let instances_by_function = grouped_index(
-        metadata
-            .code_instances
-            .iter()
-            .map(|instance| (instance.function, instance.id)),
-    );
-    let mut statements_by_source_line =
-        grouped_index(metadata.statements.iter().filter_map(|statement| {
-            let location = statement.location.as_ref()?;
-            statement
-                .flags
-                .is_statement()
-                .then_some(((location.file, location.line), statement.address))
-        }));
-    for addresses in statements_by_source_line.values_mut() {
-        let mut unique = addresses.to_vec();
-        unique.sort_unstable();
-        unique.dedup();
-        *addresses = unique.into();
-    }
-
-    let control_boundaries = build_control_boundary_indexes(metadata, code_range_index);
-
-    ModuleIndexes {
-        functions_by_name,
-        symbols_by_name,
-        globals_by_selector,
-        instances_by_function,
-        statements_by_source_line,
-        control_boundaries_by_address: control_boundaries.by_address,
-        control_boundaries_by_instance: control_boundaries.by_instance,
-        recommended_entries_by_instance: control_boundaries.recommended_entries,
-    }
+    selectors
 }
 
-fn build_control_boundary_indexes(
+/// The entries of each code instance: every distinct `prologue_end` address
+/// within an out-of-line instance, or otherwise its own breakpoint entry.
+fn recommended_entries(
     metadata: &ModuleMetadata,
     code_range_index: &RangeIndex<CodeInstanceId>,
-) -> ControlBoundaryIndexes {
-    let by_address = grouped_index(
-        metadata
-            .statements
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.flags.prologue_end() || row.flags.epilogue_begin())
-            .map(|(index, row)| {
-                (
-                    row.address,
-                    u32::try_from(index).expect("line-program row count fits u32"),
-                )
-            }),
-    );
-    let mut by_instance = grouped_index(
-        metadata
-            .statements
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.flags.prologue_end() || row.flags.epilogue_begin())
-            .flat_map(|(index, row)| {
-                code_range_index
-                    .containing(row.address)
-                    .filter(|id| {
-                        metadata
-                            .code_instances
-                            .get(id.index())
-                            .is_some_and(|instance| {
-                                matches!(instance.kind, CodeInstanceKind::OutOfLine)
-                            })
-                    })
-                    .map(move |id| {
-                        (
-                            id,
-                            u32::try_from(index).expect("line-program row count fits u32"),
-                        )
-                    })
-            }),
-    );
-    for rows in by_instance.values_mut() {
-        let mut unique = rows.to_vec();
-        let mut seen_rows = BTreeSet::new();
-        unique.retain(|row| seen_rows.insert(*row));
-        *rows = unique.into();
+) -> BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>> {
+    let mut prologue_ends = BTreeMap::<CodeInstanceId, Vec<BreakpointEntry>>::new();
+    for row in metadata
+        .statements
+        .iter()
+        .filter(|row| row.flags.prologue_end())
+    {
+        for id in code_range_index.containing(row.address) {
+            if !matches!(
+                metadata.code_instances[id.index()].kind,
+                CodeInstanceKind::OutOfLine
+            ) {
+                continue;
+            }
+            let entries = prologue_ends.entry(id).or_default();
+            if !entries.iter().any(|entry| entry.address == row.address) {
+                entries.push(BreakpointEntry {
+                    address: row.address,
+                    provenance: EntryProvenance::Statement,
+                });
+            }
+        }
     }
-    let recommended_entries_by_instance = metadata
+    metadata
         .code_instances
         .iter()
         .filter_map(|instance| {
-            let mut entries = by_instance
-                .get(&instance.id)
-                .into_iter()
-                .flat_map(|rows| rows.iter())
-                .filter_map(|row| metadata.statements.get(*row as usize))
-                .filter(|row| row.flags.prologue_end())
-                .map(|row| BreakpointEntry {
-                    address: row.address,
-                    provenance: EntryProvenance::Statement,
-                })
-                .collect::<Vec<_>>();
-
-            let mut seen_addresses = BTreeSet::new();
-            entries.retain(|entry| seen_addresses.insert(entry.address));
-            if entries.is_empty()
-                && let Some(entry) = instance.breakpoint_entry
-            {
-                entries.push(entry);
-            }
-            (!entries.is_empty()).then_some((instance.id, Arc::from(entries)))
+            let entries = match prologue_ends.remove(&instance.id) {
+                Some(entries) => entries,
+                None => vec![instance.breakpoint_entry?],
+            };
+            Some((instance.id, entries.into()))
         })
-        .collect();
-
-    ControlBoundaryIndexes {
-        by_address,
-        by_instance,
-        recommended_entries: recommended_entries_by_instance,
-    }
+        .collect()
 }
 
 /// Ends each line entry where a function symbol begins inside it. A line
@@ -3215,7 +3100,6 @@ pub struct ModuleImage {
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
     statements_by_source_line: BTreeMap<(SourceFileId, LineNumber), Arc<[ImageAddress]>>,
     control_boundaries_by_address: BTreeMap<ImageAddress, Arc<[u32]>>,
-    control_boundaries_by_instance: BTreeMap<CodeInstanceId, Arc<[u32]>>,
     recommended_entries_by_instance: BTreeMap<CodeInstanceId, Arc<[BreakpointEntry]>>,
     code_range_index: RangeIndex<CodeInstanceId>,
     line_range_index: RangeIndex<u32>,
@@ -3235,6 +3119,7 @@ pub struct ModuleImage {
 }
 
 impl ModuleImage {
+    #[expect(clippy::too_many_lines, reason = "one constructor builds every index")]
     pub(crate) fn new(
         path: PathBuf,
         target: TargetDescription,
@@ -3251,7 +3136,6 @@ impl ModuleImage {
                     .copied()
                     .map(|range| (range, instance.id))
             }));
-        let indexes = build_module_indexes(&metadata, &code_range_index);
         let line_range_index =
             RangeIndex::new(metadata.lines.iter().enumerate().map(|(index, line)| {
                 (
@@ -3303,6 +3187,45 @@ impl ModuleImage {
         );
 
         Self {
+            functions_by_name: grouped_index(
+                metadata
+                    .functions
+                    .iter()
+                    .map(|function| (Arc::clone(&function.name), function.id)),
+            ),
+            symbols_by_name: grouped_index(
+                metadata
+                    .symbols
+                    .iter()
+                    .map(|symbol| (Arc::clone(&symbol.name), symbol.id)),
+            ),
+            globals_by_selector: grouped_index(global_selectors(&metadata)),
+            instances_by_function: grouped_index(
+                metadata
+                    .code_instances
+                    .iter()
+                    .map(|instance| (instance.function, instance.id)),
+            ),
+            statements_by_source_line: grouped_index(metadata.statements.iter().filter_map(
+                |row| {
+                    let location = row.location.as_ref()?;
+                    row.flags
+                        .is_statement()
+                        .then_some(((location.file, location.line), row.address))
+                },
+            )),
+            control_boundaries_by_address: grouped_index(
+                metadata
+                    .statements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| row.flags.prologue_end() || row.flags.epilogue_begin())
+                    .map(|(index, row)| {
+                        let index = u32::try_from(index).expect("line-program row count fits u32");
+                        (row.address, index)
+                    }),
+            ),
+            recommended_entries_by_instance: recommended_entries(&metadata, &code_range_index),
             id: ModuleImageId::new(0),
             path: Arc::new(path),
             target,
@@ -3317,14 +3240,6 @@ impl ModuleImage {
             source_files: metadata.source_files.into(),
             statements: metadata.statements.into(),
             lines: metadata.lines.into(),
-            functions_by_name: indexes.functions_by_name,
-            symbols_by_name: indexes.symbols_by_name,
-            globals_by_selector: indexes.globals_by_selector,
-            instances_by_function: indexes.instances_by_function,
-            statements_by_source_line: indexes.statements_by_source_line,
-            control_boundaries_by_address: indexes.control_boundaries_by_address,
-            control_boundaries_by_instance: indexes.control_boundaries_by_instance,
-            recommended_entries_by_instance: indexes.recommended_entries_by_instance,
             code_range_index,
             line_range_index,
             symbol_range_index,
@@ -3451,8 +3366,7 @@ impl ModuleImage {
 
     /// Finds the allocated section containing an image address. Should
     /// malformed sections overlap, the innermost one wins.
-    #[must_use]
-    pub fn section_containing(&self, address: ImageAddress) -> Option<&SectionInfo> {
+    fn section_containing(&self, address: ImageAddress) -> Option<&SectionInfo> {
         self.section_range_index
             .containing(address)
             .filter_map(|id| self.section(id))
@@ -3502,8 +3416,7 @@ impl ModuleImage {
     /// [`Self::symbolize`] chooses among code extents, or otherwise an
     /// unsized data symbol at exactly that address. An address inside no
     /// declared storage is never attributed to the nearest preceding object.
-    #[must_use]
-    pub fn symbolize_data(&self, address: ImageAddress) -> Option<SymbolLocation> {
+    fn symbolize_data(&self, address: ImageAddress) -> Option<SymbolLocation> {
         let symbol = self
             .storage_range_index
             .containing(address)
@@ -3769,28 +3682,9 @@ impl ModuleImage {
             .filter_map(|row| self.statements.get(*row as usize))
     }
 
-    /// Returns line-program control boundaries contained by one physical code
-    /// instance.
-    ///
-    /// Inline instances deliberately have no independently inferred physical
-    /// prologue or epilogue boundaries.
-    pub fn control_boundaries_for_instance(
-        &self,
-        instance: CodeInstanceId,
-    ) -> impl Iterator<Item = &StatementRow> {
-        self.control_boundaries_by_instance
-            .get(&instance)
-            .into_iter()
-            .flat_map(|rows| rows.iter())
-            .filter_map(|row| self.statements.get(*row as usize))
-    }
-
-    /// Returns the recommended physical locations for entering one concrete
-    /// function instance.
-    ///
-    /// Every applicable `prologue_end` row is returned for an out-of-line
-    /// instance. When no such row exists, or when the instance is inline, the
-    /// instance's existing singular entry semantics are retained.
+    /// Returns where a function breakpoint enters one code instance: every
+    /// `prologue_end` address of an out-of-line instance, or otherwise the
+    /// instance's own breakpoint entry.
     pub fn recommended_entries_for_instance(
         &self,
         instance: CodeInstanceId,
@@ -4208,25 +4102,52 @@ impl LoadedModule {
 mod tests {
     use super::*;
 
-    fn global_test_image() -> ModuleImage {
-        let scalar = || {
-            let base = BaseType {
+    fn test_image(end: u64, metadata: ModuleMetadata) -> ModuleImage {
+        ModuleImage::new(
+            PathBuf::from("/test"),
+            TargetDescription {
+                architecture: Architecture::X86_64,
+                byte_order: ByteOrder::Little,
+                pointer_width: PointerWidth::Bits64,
+            },
+            AddressRange {
+                start: ImageAddress::new(0),
+                end: ImageAddress::new(end),
+            },
+            metadata,
+        )
+    }
+
+    fn functions(names: &[&str]) -> Vec<FunctionInfo> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(id, name)| FunctionInfo {
+                id: FunctionId::new(u32::try_from(id).expect("small function count")),
+                name: (*name).into(),
+                linkage_name: None,
+                declaration: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn global_indexes_support_exact_qualification_and_structured_ambiguity() {
+        let int = TypeInfo {
+            reference: TypeReference {
+                image: ModuleImageId::new(0),
+                id: TypeId::new(0),
+            },
+            name: "int".into(),
+            byte_size: Some(4),
+            kind: TypeKind::Base(BaseType {
                 name: "int".into(),
                 base_name: "int".into(),
                 encoding: BaseTypeEncoding::Signed,
                 byte_size: 4,
                 bit_size: None,
-            };
-            GlobalVariableType::Resolved(TypeInfo {
-                reference: TypeReference {
-                    image: ModuleImageId::new(0),
-                    id: TypeId::new(0),
-                },
-                name: "int".into(),
-                byte_size: Some(4),
-                kind: TypeKind::Base(base),
-                identity: None,
-            })
+            }),
+            identity: None,
         };
         let globals = [
             ("left::shared", "_ZL11left_shared", 0),
@@ -4245,80 +4166,37 @@ mod tests {
                     line: LineNumber::new(7).expect("nonzero line"),
                     column: None,
                 }),
-                type_info: scalar(),
+                type_info: GlobalVariableType::Resolved(int.clone()),
                 visibility: GlobalVariableVisibility::CompilationUnit,
             },
         )
         .collect();
-        ModuleImage::new(
-            PathBuf::from("/test/globals"),
-            TargetDescription {
-                architecture: Architecture::X86_64,
-                byte_order: ByteOrder::Little,
-                pointer_width: PointerWidth::Bits64,
-            },
-            AddressRange {
-                start: ImageAddress::new(0),
-                end: ImageAddress::new(1),
-            },
+        let image = test_image(
+            1,
             ModuleMetadata {
-                functions: Vec::new(),
-                code_instances: Vec::new(),
-                symbols: Vec::new(),
-                symbol_sources: crate::model::SymbolTableSources::default(),
                 globals,
-                types: Arc::default(),
-                source_files: vec![
-                    SourceFile {
-                        id: SourceFileId::new(0),
-                        path: Arc::new(PathBuf::from("/build/src/left.c")),
-                    },
-                    SourceFile {
-                        id: SourceFileId::new(1),
-                        path: Arc::new(PathBuf::from("/build/src/right.c")),
-                    },
-                ],
-                statements: Vec::new(),
-                lines: Vec::new(),
-                sections: Vec::new(),
-                vtables: Vec::new(),
+                source_files: ["/build/src/left.c", "/build/src/right.c"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, path)| SourceFile {
+                        id: SourceFileId::new(u32::try_from(id).expect("small file count")),
+                        path: Arc::new(PathBuf::from(path)),
+                    })
+                    .collect(),
+                ..ModuleMetadata::default()
             },
-        )
-    }
+        );
 
-    #[test]
-    fn global_indexes_support_exact_qualification_and_structured_ambiguity() {
-        let image = global_test_image();
-
-        assert_eq!(
-            image
-                .global_named("left::shared")
-                .expect("qualified global")
-                .id,
-            GlobalVariableId::new(0)
-        );
-        assert_eq!(
-            image
-                .global_named("right.c::right::shared")
-                .expect("source-qualified global")
-                .id,
-            GlobalVariableId::new(1)
-        );
-        assert_eq!(
-            image
-                .global_named("_ZL11left_shared")
-                .expect("linkage-qualified global")
-                .id,
-            GlobalVariableId::new(0)
-        );
-        let Error::AmbiguousGlobalVariable {
+        let selected = |selector| image.global_named(selector).expect(selector).id;
+        assert_eq!(selected("left::shared"), GlobalVariableId::new(0));
+        assert_eq!(selected("right.c::right::shared"), GlobalVariableId::new(1));
+        assert_eq!(selected("_ZL11left_shared"), GlobalVariableId::new(0));
+        let Err(Error::AmbiguousGlobalVariable {
             selector,
             candidates,
-        } = image
-            .global_named("shared")
-            .expect_err("ambiguous basename")
+        }) = image.global_named("shared")
         else {
-            panic!("unexpected ambiguity error");
+            panic!("the basename is not ambiguous");
         };
         assert_eq!(selector, "shared");
         assert_eq!(
@@ -4336,34 +4214,16 @@ mod tests {
     #[test]
     fn module_type_graph_resolves_only_owned_dense_references() {
         let image_id = ModuleImageId::new(7);
-        let resolved_reference = TypeReference {
-            image: image_id,
-            id: TypeId::new(0),
+        let reference = |image, id| TypeReference {
+            image,
+            id: TypeId::new(id),
         };
-        let malformed_reference = TypeReference {
-            image: image_id,
-            id: TypeId::new(1),
-        };
-        let image = ModuleImage::new(
-            PathBuf::from("/test/types"),
-            TargetDescription {
-                architecture: Architecture::X86_64,
-                byte_order: ByteOrder::Little,
-                pointer_width: PointerWidth::Bits64,
-            },
-            AddressRange {
-                start: ImageAddress::new(0),
-                end: ImageAddress::new(1),
-            },
+        let image = test_image(
+            1,
             ModuleMetadata {
-                functions: Vec::new(),
-                code_instances: Vec::new(),
-                symbols: Vec::new(),
-                symbol_sources: crate::model::SymbolTableSources::default(),
-                globals: Vec::new(),
                 types: Arc::from([
                     TypeNode::Resolved(TypeInfo {
-                        reference: resolved_reference,
+                        reference: reference(image_id, 0),
                         name: "int".into(),
                         byte_size: Some(4),
                         kind: TypeKind::Opaque {
@@ -4372,53 +4232,32 @@ mod tests {
                         identity: None,
                     }),
                     TypeNode::Malformed {
-                        reference: malformed_reference,
+                        reference: reference(image_id, 1),
                         description: "bad type".into(),
                     },
                 ]),
-                source_files: Vec::new(),
-                statements: Vec::new(),
-                lines: Vec::new(),
-                sections: Vec::new(),
-                vtables: Vec::new(),
+                ..ModuleMetadata::default()
             },
         )
         .with_id(image_id);
 
-        assert_eq!(image.types().len(), 2);
-        assert!(matches!(
-            image.type_node(resolved_reference),
-            Some(TypeNode::Resolved(info)) if info.name.as_ref() == "int"
-        ));
         assert_eq!(
             image
-                .type_info(resolved_reference)
-                .expect("resolved type")
-                .name
-                .as_ref(),
-            "int"
+                .type_info(reference(image_id, 0))
+                .map(|info| &*info.name),
+            Some("int")
         );
         assert!(matches!(
-            image.type_node(malformed_reference),
-            Some(TypeNode::Malformed { description, .. }) if description.as_ref() == "bad type"
+            image.type_node(reference(image_id, 1)),
+            Some(TypeNode::Malformed { description, .. }) if &**description == "bad type"
         ));
-        assert!(image.type_info(malformed_reference).is_none());
+        assert!(image.type_info(reference(image_id, 1)).is_none());
         assert!(
             image
-                .type_node(TypeReference {
-                    image: ModuleImageId::new(8),
-                    id: TypeId::new(0),
-                })
+                .type_node(reference(ModuleImageId::new(8), 0))
                 .is_none()
         );
-        assert!(
-            image
-                .type_node(TypeReference {
-                    image: image_id,
-                    id: TypeId::new(2),
-                })
-                .is_none()
-        );
+        assert!(image.type_node(reference(image_id, 2)).is_none());
     }
 
     #[test]
@@ -4467,40 +4306,12 @@ mod tests {
     }
 
     fn inline_test_image(code_instances: Vec<CodeInstanceInfo>) -> ModuleImage {
-        let functions = ["physical", "middle", "leaf", "sibling"]
-            .into_iter()
-            .enumerate()
-            .map(|(id, name)| FunctionInfo {
-                id: FunctionId::new(u32::try_from(id).expect("small function count")),
-                name: name.into(),
-                linkage_name: None,
-                declaration: None,
-            })
-            .collect();
-
-        ModuleImage::new(
-            PathBuf::from("/test/inline"),
-            TargetDescription {
-                architecture: Architecture::X86_64,
-                byte_order: ByteOrder::Little,
-                pointer_width: PointerWidth::Bits64,
-            },
-            AddressRange {
-                start: ImageAddress::new(0),
-                end: ImageAddress::new(100),
-            },
+        test_image(
+            100,
             ModuleMetadata {
-                functions,
+                functions: functions(&["physical", "middle", "leaf", "sibling"]),
                 code_instances,
-                symbols: Vec::new(),
-                symbol_sources: crate::model::SymbolTableSources::default(),
-                globals: Vec::new(),
-                types: Arc::default(),
-                source_files: Vec::new(),
-                statements: Vec::new(),
-                lines: Vec::new(),
-                sections: Vec::new(),
-                vtables: Vec::new(),
+                ..ModuleMetadata::default()
             },
         )
     }
@@ -4535,24 +4346,10 @@ mod tests {
             executable,
             writable: !executable,
         };
-        let image = ModuleImage::new(
-            PathBuf::from("/test/starts"),
-            TargetDescription {
-                architecture: Architecture::X86_64,
-                byte_order: ByteOrder::Little,
-                pointer_width: PointerWidth::Bits64,
-            },
-            AddressRange {
-                start: ImageAddress::new(0),
-                end: ImageAddress::new(0x100),
-            },
+        let image = test_image(
+            0x100,
             ModuleMetadata {
-                functions: vec![FunctionInfo {
-                    id: FunctionId::new(0),
-                    name: "split".into(),
-                    linkage_name: None,
-                    declaration: None,
-                }],
+                functions: functions(&["split"]),
                 code_instances: vec![
                     // A function split into two ranges, and an inline
                     // expansion whose start proves nothing on its own.
@@ -4577,17 +4374,11 @@ mod tests {
                     code_symbol(0, "split", 0x20, 0x30),
                     code_symbol(1, "symbol_only", 0x40, 0x48),
                 ],
-                symbol_sources: SymbolTableSources::default(),
-                globals: Vec::new(),
-                types: Arc::default(),
-                source_files: Vec::new(),
-                statements: Vec::new(),
-                lines: Vec::new(),
                 sections: vec![
                     section(0, ".text", 0x10, 0x70, true),
                     section(1, ".data", 0x80, 0x90, false),
                 ],
-                vtables: Vec::new(),
+                ..ModuleMetadata::default()
             },
         );
         let starts = |start, end| {
@@ -4614,49 +4405,9 @@ mod tests {
         );
     }
 
-    fn boundary_test_instances() -> Vec<CodeInstanceInfo> {
-        let physical = CodeInstanceInfo {
-            id: CodeInstanceId::new(0),
-            function: FunctionId::new(0),
-            parent: None,
-            kind: CodeInstanceKind::OutOfLine,
-            ranges: Arc::from([AddressRange {
-                start: ImageAddress::new(0x10),
-                end: ImageAddress::new(0x30),
-            }]),
-            breakpoint_entry: Some(BreakpointEntry {
-                address: ImageAddress::new(0x10),
-                provenance: EntryProvenance::Explicit,
-            }),
-        };
-        let inline = CodeInstanceInfo {
-            id: CodeInstanceId::new(1),
-            function: FunctionId::new(1),
-            parent: Some(physical.id),
-            kind: CodeInstanceKind::Inline {
-                call_site: Some(source(7)),
-            },
-            ranges: Arc::from([AddressRange {
-                start: ImageAddress::new(0x14),
-                end: ImageAddress::new(0x20),
-            }]),
-            breakpoint_entry: Some(BreakpointEntry {
-                address: ImageAddress::new(0x14),
-                provenance: EntryProvenance::RangeStart,
-            }),
-        };
-
-        vec![physical, inline]
-    }
-
-    fn boundary_test_row(
-        address: u64,
-        location: Option<SourceLocation>,
-        flags: StatementFlags,
-        sequence: u32,
-        ordinal: u32,
-    ) -> StatementRow {
-        StatementRow {
+    #[test]
+    fn control_boundaries_keep_exact_rows_and_enter_physical_instances_after_prologues() {
+        let row = |address, location, flags, sequence, ordinal| StatementRow {
             address: ImageAddress::new(address),
             operation_index: 0,
             location,
@@ -4665,171 +4416,88 @@ mod tests {
             isa: 0,
             sequence: LineSequenceId::new(sequence),
             ordinal,
-        }
-    }
-
-    fn boundary_test_rows() -> Vec<StatementRow> {
-        vec![
-            boundary_test_row(
-                0x14,
-                None,
-                StatementFlags::empty()
-                    .with_statement(true)
-                    .with_prologue_end(true),
-                0,
-                2,
-            ),
-            boundary_test_row(
-                0x14,
-                Some(source(8)),
-                StatementFlags::empty().with_epilogue_begin(true),
-                0,
-                3,
-            ),
-            boundary_test_row(
-                0x18,
-                Some(source(9)),
-                StatementFlags::empty().with_prologue_end(true),
-                1,
-                0,
-            ),
-            boundary_test_row(
-                0x20,
-                None,
-                StatementFlags::empty().with_epilogue_begin(true),
-                1,
-                1,
-            ),
-        ]
-    }
-
-    fn control_boundary_test_image() -> ModuleImage {
-        let functions = ["physical", "inline"]
-            .into_iter()
-            .enumerate()
-            .map(|(id, name)| FunctionInfo {
-                id: FunctionId::new(u32::try_from(id).expect("small function count")),
-                name: name.into(),
-                linkage_name: None,
-                declaration: None,
-            })
-            .collect();
-        ModuleImage::new(
-            PathBuf::from("/test/boundaries"),
-            TargetDescription {
-                architecture: Architecture::X86_64,
-                byte_order: ByteOrder::Little,
-                pointer_width: PointerWidth::Bits64,
+        };
+        let entry = |address, provenance| BreakpointEntry {
+            address: ImageAddress::new(address),
+            provenance,
+        };
+        let mut physical = instance(0, 0, None, CodeInstanceKind::OutOfLine, &[(0x10, 0x30)]);
+        physical.breakpoint_entry = Some(entry(0x10, EntryProvenance::Explicit));
+        let mut inline = instance(
+            1,
+            1,
+            Some(0),
+            CodeInstanceKind::Inline {
+                call_site: Some(source(7)),
             },
-            AddressRange {
-                start: ImageAddress::new(0),
-                end: ImageAddress::new(0x40),
-            },
+            &[(0x14, 0x20)],
+        );
+        inline.breakpoint_entry = Some(entry(0x14, EntryProvenance::RangeStart));
+        let flags = StatementFlags::empty;
+        let image = test_image(
+            0x40,
             ModuleMetadata {
-                functions,
-                code_instances: boundary_test_instances(),
-                symbols: Vec::new(),
-                symbol_sources: crate::model::SymbolTableSources::default(),
-                globals: Vec::new(),
-                types: Arc::default(),
-                source_files: Vec::new(),
-                statements: boundary_test_rows(),
-                lines: Vec::new(),
-                sections: Vec::new(),
-                vtables: Vec::new(),
+                functions: functions(&["physical", "inline"]),
+                code_instances: vec![physical, inline],
+                statements: vec![
+                    row(
+                        0x14,
+                        None,
+                        flags().with_statement(true).with_prologue_end(true),
+                        0,
+                        2,
+                    ),
+                    row(
+                        0x14,
+                        Some(source(8)),
+                        flags().with_epilogue_begin(true),
+                        0,
+                        3,
+                    ),
+                    row(0x18, Some(source(9)), flags().with_prologue_end(true), 1, 0),
+                    row(0x20, None, flags().with_epilogue_begin(true), 1, 1),
+                ],
+                ..ModuleMetadata::default()
             },
-        )
-    }
-
-    #[test]
-    fn control_boundary_indexes_preserve_exact_rows_and_physical_instance_ownership() {
-        let image = control_boundary_test_image();
+        );
 
         let exact = image
             .control_boundaries_at(ImageAddress::new(0x14))
+            .map(|row| (row.sequence, row.ordinal, row.location.is_some()))
             .collect::<Vec<_>>();
-        assert_eq!(exact.len(), 2);
         assert_eq!(
-            (exact[0].sequence, exact[0].ordinal),
-            (LineSequenceId::new(0), 2)
+            exact,
+            [
+                (LineSequenceId::new(0), 2, false),
+                (LineSequenceId::new(0), 3, true)
+            ]
         );
-        assert_eq!(
-            (exact[1].sequence, exact[1].ordinal),
-            (LineSequenceId::new(0), 3)
-        );
-        assert!(exact[0].location.is_none());
         assert!(
             image
                 .control_boundaries_at(ImageAddress::new(0x15))
                 .next()
                 .is_none()
         );
-
+        let entries = |id| {
+            image
+                .recommended_entries_for_instance(CodeInstanceId::new(id))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            image
-                .control_boundaries_for_instance(CodeInstanceId::new(0))
-                .map(|row| row.address)
-                .collect::<Vec<_>>(),
-            [0x14, 0x14, 0x18, 0x20].map(ImageAddress::new)
-        );
-        assert!(
-            image
-                .control_boundaries_for_instance(CodeInstanceId::new(1))
-                .next()
-                .is_none()
-        );
-        assert_eq!(
-            image
-                .recommended_entries_for_instance(CodeInstanceId::new(0))
-                .collect::<Vec<_>>(),
-            vec![
-                BreakpointEntry {
-                    address: ImageAddress::new(0x14),
-                    provenance: EntryProvenance::Statement,
-                },
-                BreakpointEntry {
-                    address: ImageAddress::new(0x18),
-                    provenance: EntryProvenance::Statement,
-                },
+            entries(0),
+            [
+                entry(0x14, EntryProvenance::Statement),
+                entry(0x18, EntryProvenance::Statement)
             ]
         );
-        assert_eq!(
-            image
-                .recommended_entries_for_instance(CodeInstanceId::new(1))
-                .collect::<Vec<_>>(),
-            vec![BreakpointEntry {
-                address: ImageAddress::new(0x14),
-                provenance: EntryProvenance::RangeStart,
-            }]
-        );
+        // Inline instances have no prologue of their own.
+        assert_eq!(entries(1), [entry(0x14, EntryProvenance::RangeStart)]);
         assert!(
             image
                 .statement_addresses(SourceFileId::new(0), LineNumber::new(8).unwrap())
                 .next()
                 .is_none()
         );
-    }
-
-    #[test]
-    fn loaded_module_translates_between_address_spaces_with_checked_arithmetic() {
-        let module = LoadedModule::main(ModuleImageId::new(0), 0x4000);
-
-        assert_eq!(
-            module.virtual_address(ImageAddress::new(0x123)).unwrap(),
-            VirtualAddress::new(0x4123)
-        );
-        assert_eq!(
-            module.image_address(VirtualAddress::new(0x4123)).unwrap(),
-            ImageAddress::new(0x123)
-        );
-        assert!(matches!(
-            module.image_address(VirtualAddress::new(0x3fff)),
-            Err(Error::AddressOutsideModule)
-        ));
-        assert!(matches!(
-            module.virtual_address(ImageAddress::new(u64::MAX)),
-            Err(Error::AddressOverflow)
-        ));
     }
 
     #[test]
@@ -4982,29 +4650,12 @@ mod tests {
                 },
             )
             .collect();
-        ModuleImage::new(
-            PathBuf::from("/test/symbols"),
-            TargetDescription {
-                architecture: Architecture::X86_64,
-                byte_order: ByteOrder::Little,
-                pointer_width: PointerWidth::Bits64,
-            },
-            AddressRange {
-                start: ImageAddress::new(0),
-                end: ImageAddress::new(0x1000),
-            },
+        test_image(
+            0x1000,
             ModuleMetadata {
-                functions: Vec::new(),
-                code_instances: Vec::new(),
                 symbols,
-                symbol_sources: SymbolTableSources::default(),
-                globals: Vec::new(),
-                types: Arc::default(),
-                source_files: Vec::new(),
-                statements: Vec::new(),
-                lines: Vec::new(),
                 sections,
-                vtables: Vec::new(),
+                ..ModuleMetadata::default()
             },
         )
     }

@@ -1297,19 +1297,6 @@ pub enum Request {
         bytes: Arc<[u8]>,
         reply: Reply<u64>,
     },
-    ReadWord {
-        process_id: ProcessId,
-        stop_id: StopId,
-        address: VirtualAddress,
-        reply: Reply<u64>,
-    },
-    WriteWord {
-        process_id: ProcessId,
-        stop_id: StopId,
-        address: VirtualAddress,
-        value: u64,
-        reply: Reply<()>,
-    },
     LoadedModule {
         reply: Reply<LoadedModule>,
     },
@@ -1507,12 +1494,6 @@ impl Request {
                 bytes,
                 ..
             } => format!("write {} bytes at {address} {stop_id:?}", bytes.len()),
-            Self::WriteWord {
-                stop_id,
-                address,
-                value,
-                ..
-            } => format!("write word {value:#x} at {address} {stop_id:?}"),
             Self::SetSignalPolicy { signal, policy, .. } => {
                 format!("set signal policy {signal} {policy:?}")
             }
@@ -1520,7 +1501,6 @@ impl Request {
             Self::ResolveWatchTarget { .. } => "resolve watch target".to_owned(),
             Self::RemoveAllWatchpoints { .. } => "remove all watchpoints".to_owned(),
             Self::ReadMemory { .. } => "read memory".to_owned(),
-            Self::ReadWord { .. } => "read word".to_owned(),
             Self::LoadedModule { .. } => "loaded module".to_owned(),
             Self::LoadedModules { .. } => "loaded modules".to_owned(),
             Self::ModuleImage { .. } => "module image".to_owned(),

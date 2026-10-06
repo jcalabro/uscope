@@ -1252,16 +1252,6 @@ impl<P: LinuxTraceOps> Controller<P> {
                 }
             },
             Request::Pause { process_id, reply } => self.pause(process_id, reply),
-            Request::WriteWord {
-                process_id,
-                stop_id,
-                address,
-                value,
-                reply,
-            } => {
-                let result = self.write_word(process_id, stop_id, address, value);
-                let _ = reply.send(result);
-            }
             Request::WriteMemory {
                 process_id,
                 stop_id,
@@ -1317,14 +1307,6 @@ impl<P: InspectionOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.read_memory(process_id, stop_id, address, byte_count));
-            }
-            Request::ReadWord {
-                process_id,
-                stop_id,
-                address,
-                reply,
-            } => {
-                let _ = reply.send(self.read_word(process_id, stop_id, address));
             }
             Request::LoadedModule { reply } => {
                 let _ = reply.send(self.loaded_module());
@@ -1606,7 +1588,6 @@ impl<P: InspectionOps> Controller<P> {
             | Request::Continue { .. }
             | Request::Step { .. }
             | Request::Pause { .. }
-            | Request::WriteWord { .. }
             | Request::WriteMemory { .. }
             | Request::Kill { .. }
             | Request::Terminate { .. }
