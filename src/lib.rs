@@ -31,7 +31,10 @@ pub mod sim;
 mod source_map;
 #[cfg(test)]
 mod test_memory;
+mod type_identity;
 mod unwind;
+mod view;
+pub mod view_files;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -59,45 +62,111 @@ pub use eval::bind::Mode as EvaluationMode;
 pub use eval::error::{ErrorKind as ExpressionErrorKind, ExpressionError};
 pub use eval::syntax::{Expression, Span};
 pub use model::{
-    Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArrayDimension,
-    Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding, BreakpointEntry,
-    BreakpointLocation, ByteOrder, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo,
-    CodeInstanceKind, ColumnNumber, DereferenceReference, DereferenceState,
+    Accessibility, AddressDescription, AddressRange, AddressValue, Architecture, ArgumentOrigin,
+    ArrayDimension, Backtrace, BaseClass, BaseClassVirtuality, BaseType, BaseTypeEncoding,
+    BreakpointEntry, BreakpointLocation, ByteOrder, CallFrameUnavailableReason, CodeInstanceId,
+    CodeInstanceInfo, CodeInstanceKind, ColumnNumber, DereferenceReference, DereferenceState,
     DereferenceUnavailableReason, DereferencedValue, EmbeddedSymbolTable, EntryProvenance,
     EnumerationOrigin, Enumerator, ExecutionLocation, FloatValue, FrameKind, FunctionId,
     FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
     GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
-    ImageAddress, ImageAddressDescription, ImageLocation, InlineChain, InlineFrameLookup,
-    InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit, InspectionLimits,
-    InspectionUsage, IntegerValue, LineNumber, LineSequenceId, LoadedGlobalVariableInfo,
-    LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion,
-    MemoryReadUnavailableReason, ModuleAddress, ModuleId, ModuleImage, ModuleImageId,
-    NamedTypeRelationship, OptimizedOutReason, PointerWidth, RecordKind, RecordMember,
-    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
-    RegisterSnapshot, RegisterValue, ScalarValue, SectionId, SectionInfo, SectionLocation,
-    SourceContext, SourceFile, SourceFileId, SourceLine, SourceLocation, StackFrame, StackFrameId,
-    StatementFlags, StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId,
-    SymbolInfo, SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TextCompletion,
-    TextSummary, ThreadId, TlsUnavailableReason, TypeId, TypeInfo, TypeKind, TypeModifier,
-    TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
+    GoKind, GoTypeAttributes, ImageAddress, ImageAddressDescription, ImageLocation, InlineChain,
+    InlineFrameLookup, InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit,
+    InspectionLimits, InspectionUsage, IntegerValue, LineNumber, LineSequenceId,
+    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MapKey,
+    MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason, ModuleAddress, ModuleId,
+    ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason, PointerWidth,
+    Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember, RecordMemberLayout,
+    ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
+    ScalarValue, SectionId, SectionInfo, SectionLocation, SourceContext, SourceFile, SourceFileId,
+    SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags,
+    StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo,
+    SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TextCompletion, TextSummary,
+    ThreadId, TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind,
+    TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
     ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
     ValueChildRelationship, ValueChildren, ValueChildrenReference, ValuePageCompletion, Variable,
     VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
     VariableSnapshot, VariableState, VariableUnavailableReason, VariableValue, VariableValueSource,
-    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
-    VirtualAddress,
+    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind, ViewName,
+    ViewProblem, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CoreDumpInfo,
     CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent, ExceptionDisposition,
     ExceptionInfo, ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, HitComparison,
-    HitCondition, InferiorState, InvalidatedWatchpoint, LaunchOptions, LogPart, ModuleIdentity,
-    PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope, SignalPolicy,
-    StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState, ValueChildQuery,
-    VariableQuery, WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities,
-    WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointSpec,
+    HitCondition, InferiorState, InvalidatedWatchpoint, KernelSource, LaunchOptions, LogPart,
+    ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope,
+    SignalPolicy, StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState,
+    TypeViews, ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck, ViewExplanation,
+    WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit,
+    WatchpointId, WatchpointInvalidation, WatchpointSpec,
 };
 pub use source_map::SourcePathMap;
+pub use view::summary::{
+    float as float_text, integer as integer_text, quoted as quoted_text, scalar as scalar_text,
+    value as value_summary,
+};
+pub use view::syntax::Error as ViewFileError;
+
+/// The views built into uscope, in the order they are tried.
+#[must_use]
+pub fn built_in_views() -> Vec<Arc<ViewName>> {
+    view::ViewSet::built_in()
+        .views()
+        .iter()
+        .map(|view| view::name_of(view))
+        .collect()
+}
+
+/// One recorded kernel run, replayed without a program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayedRun {
+    pub kernel: String,
+    /// The reads and items the recording holds.
+    pub events: usize,
+    /// How many of them the kernel reproduced, or the first difference.
+    pub outcome: std::result::Result<usize, String>,
+}
+
+/// Replays the kernel runs `text` records, as `record_kernels` writes them,
+/// with the kernel module `wasm` when one is given, and otherwise with the
+/// built-in kernel each run names.
+pub fn replay_kernel_runs(
+    text: &str,
+    wasm: Option<&[u8]>,
+) -> std::result::Result<Vec<ReplayedRun>, String> {
+    let recordings = view::kernel::parse_recordings(text)?;
+    let mut replayed = Vec::new();
+    for recording in &recordings {
+        let kernel = match wasm {
+            Some(wasm) => Arc::new(view::kernel::Kernel::new(
+                &recording.kernel,
+                "replayed",
+                wasm,
+            )?),
+            None => view::ViewSet::built_in()
+                .kernel(&recording.kernel)
+                .ok_or_else(|| format!("no built-in kernel is named `{}`", recording.kernel))?,
+        };
+        replayed.push(ReplayedRun {
+            kernel: recording.kernel.clone(),
+            events: recording.events.len(),
+            outcome: view::kernel::replay(&kernel, recording),
+        });
+    }
+    Ok(replayed)
+}
+
+/// Whether a view is one uscope builds in, rather than one loaded for the
+/// session or carried by a module.
+#[must_use]
+pub fn is_built_in_view(name: &ViewName) -> bool {
+    view::ViewSet::built_in()
+        .views()
+        .iter()
+        .any(|view| view.source == name.source && view.line == name.line)
+}
 
 /// Finds a signal's exception code by name, with or without its `SIG`
 /// prefix and in any case, or by number: `SIGUSR1`, `usr1`, `10`, `SIG34`.
@@ -155,6 +224,15 @@ pub fn fuzz_elf_symbols(data: &[u8]) {
 #[doc(hidden)]
 pub fn fuzz_disassembly(data: &[u8]) {
     disassembly::fuzz(data);
+}
+
+/// Runs every built-in view, and a view file made of the input's tail,
+/// over memory made of its bytes, for the hostile fuzz harness
+/// (`plans/views.md` §3.14).
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn fuzz_views(data: &[u8]) {
+    view::fuzz::hostile(data);
 }
 
 /// Checks the expression parser's invariants on `text` for the fuzz
@@ -1029,6 +1107,69 @@ impl DebuggerHandle {
         self.selected().await?.expression_type(expression).await
     }
 
+    /// Why an expression's value in the selected frame is presented as it
+    /// is: the views its type matched, and how the one that binds presents
+    /// it.
+    pub async fn explain_view(&self, expression: &Expression) -> Result<ViewExplanation> {
+        self.selected().await?.explain_view(expression).await
+    }
+
+    /// Presents an expression's value in the selected frame, and its first
+    /// page of children, and returns a recording of each kernel run that
+    /// took, as text that `uscope views replay` replays without a program.
+    pub async fn record_kernels(&self, expression: &Expression) -> Result<Vec<String>> {
+        self.selected().await?.record_kernels(expression).await
+    }
+
+    /// Presents values with these view files ahead of the views modules
+    /// embed and the built-in views, replacing any loaded before, with the
+    /// kernels beside them, and returns what kept parts of them out. Files
+    /// are parsed, and kernels loaded, here, before the debugger sees
+    /// them; a kernel whose name an earlier one has is left out.
+    pub async fn load_views(
+        &self,
+        files: &[(&str, &str)],
+        kernels: &[view_files::KernelFile],
+    ) -> Result<Arc<[ViewFileError]>> {
+        let mut views = view::ViewSet::new(files.iter().copied());
+        for kernel in kernels {
+            views.add_kernels(
+                &kernel.path,
+                [(
+                    kernel.name.as_str(),
+                    kernel.path.as_str(),
+                    kernel.module.as_slice(),
+                )],
+            );
+        }
+        let views = Arc::new(views);
+        let errors: Arc<[ViewFileError]> = views.errors().into();
+        self.request(|reply| Request::SetViews { views, reply })
+            .await?;
+        Ok(errors)
+    }
+
+    /// The views whose patterns name the types `name` means in each loaded
+    /// module, and why each did not bind, with no process needed.
+    pub async fn explain_type(&self, name: &str) -> Result<Vec<TypeViews>> {
+        let name = name.to_owned();
+        self.request(|reply| Request::ExplainType { name, reply })
+            .await
+    }
+
+    /// How every loaded module's types are presented: each type a view's
+    /// pattern names, with the views tried, and the loaded and embedded
+    /// views that present no type. Needs no process.
+    pub async fn check_views(&self) -> Result<ViewCheck> {
+        self.request(|reply| Request::CheckViews { reply }).await
+    }
+
+    /// Turns presenting values with views on or off.
+    pub async fn enable_views(&self, enabled: bool) -> Result<()> {
+        self.request(|reply| Request::EnableViews { enabled, reply })
+            .await
+    }
+
     /// Evaluates an expression in the selected frame of the selected stopped
     /// thread and returns its value; see [`StopView::inspect`].
     pub async fn inspect(&self, expression: &Expression) -> Result<InspectedValue> {
@@ -1440,6 +1581,37 @@ impl StopView<'_> {
                 expression,
                 mode,
                 limits,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Why an expression's value in the frame is presented as it is.
+    pub async fn explain_view(&self, expression: &Expression) -> Result<ViewExplanation> {
+        let context = self.context;
+        let expression = expression.clone();
+        self.handle
+            .request(|reply| Request::ExplainView {
+                expression,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Presents an expression's value in the frame, and its first page of
+    /// children, and records each kernel run that took.
+    pub async fn record_kernels(&self, expression: &Expression) -> Result<Vec<String>> {
+        let context = self.context;
+        let expression = expression.clone();
+        self.handle
+            .request(|reply| Request::RecordKernels {
+                expression,
                 stop_id: context.stop,
                 thread_id: context.thread,
                 frame: context.frame,

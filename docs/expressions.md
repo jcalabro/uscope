@@ -142,7 +142,10 @@ From loosest to tightest:
 Bit operations bind tighter than comparisons, so `x & 1 == 0` means
 `(x & 1) == 0`, and comparisons do not chain. `.` selects a member, and also
 selects through one pointer; `->` selects through a pointer as in C;
-`t.0` selects a tuple's field. `a[start..end]` is a half-open range of an
+`t.0` selects a tuple's field. A member of an anonymous struct or union, or
+of a base class, is selected by its own name, as C and C++ select it: a
+record's own members hide its bases', and a name that two paths reach in
+different objects is ambiguous. `a[start..end]` is a half-open range of an
 array or slice, and must be the whole expression. `len(x)` is a length and
 `sizeof(x)` a size. The language does not call functions.
 
@@ -284,11 +287,14 @@ s && true                          => error type at `s`
 ## Pointers, arrays, and members
 
 `*p` dereferences, `&x` takes an address, `p[i]` is `*(p + i)`, and `p + n`
-moves by `n` elements. `p - q` counts the elements between two pointers.
-Pointers compare with pointers, `null`, and `0`; to compare an address with
-another number, cast the pointer. Arrays index by each of their dimensions,
-and decay to a pointer to their first element in arithmetic. A slice's index
-is checked against its length when the expression runs.
+moves by `n` elements. `p - q` counts the elements between two pointers,
+which must be a whole number of elements apart. Elements of a zero-sized
+type, such as Rust's `()`, all share one address, so a pointer to one moves
+nowhere and two such pointers have no count between them. Pointers compare
+with pointers, `null`, and `0`; to compare an address with another number,
+cast the pointer. Arrays index by each of their dimensions, and decay to a
+pointer to their first element in arithmetic. A slice's index is checked
+against its length when the expression runs.
 
 ```uscope-example
 world: memory
@@ -313,6 +319,9 @@ ptr != 0               => true : bool
 ptr == 3               => error type at `ptr == 3`
 (u64)ip - (u64)&arr[0] => 4 : integer
 ip - arr               => 1 : integer
+(int*)((u8*)ip + 1) - ip => error arithmetic at `(int*)((u8*)ip + 1) - ip`
+&ep[5] == ep           => true : bool
+ep - ep                => error type at `ep - ep`
 arr + 1 == ip          => true : bool
 vp + 1                 => error type at `vp`
 *vp                    => error type at `vp`
@@ -332,6 +341,13 @@ program defines, a C base type written with its words in any order, or a
 accepted and ignored. A pointer type is `T*` inside a cast's parentheses,
 where `(*p)` dereferences, and `*T` after `as`, where a trailing `*` would
 multiply.
+
+A program type is named by what it is, not by how its compiler spelled it.
+Its outer namespaces, modules, and packages may be left off, as may inline
+namespaces such as libc++'s `std::__1`, and a template's trailing arguments,
+which C++ fills with defaults: `` std::`vector<int>` `` names
+`std::vector<int, std::allocator<int> >`. A name that fits several different
+types is ambiguous, and the error lists them.
 
 `(name) - 1` subtracts when `name` is a value and casts `-1` when it is a
 type, and the two readings group the rest of the expression differently:
@@ -362,8 +378,10 @@ Casting an integer truncates its two's complement. Casting a float to an
 integer rounds toward zero and saturates at the type's bounds; a NaN cannot be
 cast. Integers and pointers convert into each other as addresses, and anything
 with a truth value casts to `bool`. A cast cannot reinterpret a whole record;
-reinterpret its storage through a pointer instead. Casting a value to the type
-it already has changes nothing.
+reinterpret its storage through a pointer instead. Casting a C++ object to one
+of its base classes is that base's part of it, as `static_cast` makes it, and
+is ambiguous when the object holds several. Casting a value to the type it
+already has changes nothing.
 
 ```uscope-example
 world: scalars
@@ -404,6 +422,11 @@ world: memory
 (count) - 1 * 2        => 10 : integer
 (Color)1               => GREEN : Color
 (Color)7               => 7 : Color
+((Shape)tile).id       => 7 : int
+((Named)tile).tag      => 2 : long int
+(Shape)tile == 7       => error type at `(Shape)tile == 7`
+((Shape)twice_shaped).id => error ambiguous-name at `((Shape)twice_shaped)`
+(Tile)s                => error type at `(Tile)s`
 ```
 
 ## Enumerations

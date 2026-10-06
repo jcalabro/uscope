@@ -1,11 +1,11 @@
 //! One Pratt parser over one precedence table.
 
 use super::ast::{
-    BinaryOp, CWord, CastForm, Field, Node, NodeId, NodeKind, Path, Segment, Separator, SizeOf,
-    Tag, Tree, TypeBase, TypeName, UnaryOp,
+    BinaryOp, Builtin, CWord, CastForm, Field, Node, NodeId, NodeKind, Path, Segment, Separator,
+    SizeOf, Tag, Tree, TypeBase, TypeName, UnaryOp,
 };
 use super::lexer::{Punct, Token, TokenKind, lex};
-use super::{Ambiguity, MAX_AMBIGUITIES, Span};
+use super::{Ambiguity, Dialect, MAX_AMBIGUITIES, Span};
 use crate::eval::error::{ErrorKind, ExpressionError};
 
 /// The deepest nesting accepted. Binding, running, and printing recurse
@@ -162,7 +162,7 @@ pub fn assignment_text(op: Option<BinaryOp>) -> &'static str {
 pub type Readings = Vec<Result<Tree, ExpressionError>>;
 
 /// Every reading of `text`, with the ambiguities that tell them apart.
-pub fn parse(text: &str) -> Result<(Vec<Ambiguity>, Readings), ExpressionError> {
+pub fn parse(text: &str, dialect: Dialect) -> Result<(Vec<Ambiguity>, Readings), ExpressionError> {
     let tokens = lex(text)?;
     let starts = ambiguities(&tokens);
     if starts.len() > MAX_AMBIGUITIES {
@@ -176,7 +176,7 @@ pub fn parse(text: &str) -> Result<(Vec<Ambiguity>, Readings), ExpressionError> 
     }
     let mut ambiguity_list = Vec::with_capacity(starts.len());
     for &start in &starts {
-        let mut parser = Parser::new(text, &tokens, &starts, 0);
+        let mut parser = Parser::new(text, &tokens, &starts, 0, dialect);
         parser.position = start + 1;
         let name = parser.path(true)?;
         let close = parser.peek_span();
@@ -186,7 +186,7 @@ pub fn parse(text: &str) -> Result<(Vec<Ambiguity>, Readings), ExpressionError> 
         });
     }
     let readings: Vec<_> = (0..1_usize << starts.len())
-        .map(|casts| Parser::new(text, &tokens, &starts, casts).expression_tree())
+        .map(|casts| Parser::new(text, &tokens, &starts, casts, dialect).expression_tree())
         .collect();
     if readings.iter().all(Result::is_err) {
         let first = readings.into_iter().next();
@@ -215,7 +215,13 @@ fn ambiguities(tokens: &[Token]) -> Vec<usize> {
     let mut starts = Vec::new();
     for open in 0..tokens.len() {
         if punct(open) != Some(Punct::OpenParen)
-            || open > 0 && matches!(ident(open - 1), Some("sizeof" | "len"))
+            || open > 0
+                && ident(open - 1).is_some_and(|word| {
+                    matches!(
+                        word,
+                        "sizeof" | "len" | "offsetof" | "container_of" | "global"
+                    ) || Builtin::parse(word).is_some()
+                })
         {
             continue;
         }
@@ -252,6 +258,7 @@ struct Parser<'tokens> {
     ambiguities: &'tokens [usize],
     /// Bit `i` set reads ambiguity `i` as a cast.
     casts: usize,
+    dialect: Dialect,
 }
 
 impl<'tokens> Parser<'tokens> {
@@ -260,6 +267,7 @@ impl<'tokens> Parser<'tokens> {
         tokens: &'tokens [Token],
         ambiguities: &'tokens [usize],
         casts: usize,
+        dialect: Dialect,
     ) -> Self {
         Self {
             text,
@@ -269,6 +277,7 @@ impl<'tokens> Parser<'tokens> {
             depth: 0,
             ambiguities,
             casts,
+            dialect,
         }
     }
 
@@ -528,6 +537,55 @@ impl<'tokens> Parser<'tokens> {
         self.push(NodeKind::SizeOf(SizeOf::Operand(operand)), start.to(close))
     }
 
+    /// `offsetof(TYPE, member)`, which only views write.
+    fn offset_of(&mut self) -> Result<NodeId, ExpressionError> {
+        let start = self.advance();
+        self.expect(Punct::OpenParen, "after `offsetof`")?;
+        let (ty, _) = self.type_name(true)?;
+        self.expect(Punct::Comma, "between `offsetof`'s type and member")?;
+        let (TokenKind::Ident(member) | TokenKind::Quoted(member)) = self.peek().clone() else {
+            return Err(self.unexpected("a member's name"));
+        };
+        self.advance();
+        let close = self.expect(Punct::CloseParen, "to close `offsetof(`")?;
+        self.push(NodeKind::OffsetOf { ty, member }, start.to(close))
+    }
+
+    /// `global(NAME)`, which only views write.
+    fn global(&mut self) -> Result<NodeId, ExpressionError> {
+        let start = self.advance();
+        self.expect(Punct::OpenParen, "after `global`")?;
+        let (TokenKind::Ident(name) | TokenKind::Quoted(name)) = self.peek().clone() else {
+            return Err(self.unexpected("a global's name"));
+        };
+        self.advance();
+        let close = self.expect(Punct::CloseParen, "to close `global(`")?;
+        self.push(NodeKind::Global(name), start.to(close))
+    }
+
+    /// `container_of(PTR, TYPE, member)`, which only views write.
+    fn container_of(&mut self) -> Result<NodeId, ExpressionError> {
+        let start = self.advance();
+        self.expect(Punct::OpenParen, "after `container_of`")?;
+        let pointer = self.expression(ASSIGN)?;
+        self.expect(Punct::Comma, "between `container_of`'s pointer and type")?;
+        let (ty, _) = self.type_name(true)?;
+        self.expect(Punct::Comma, "between `container_of`'s type and member")?;
+        let (TokenKind::Ident(member) | TokenKind::Quoted(member)) = self.peek().clone() else {
+            return Err(self.unexpected("a member's name"));
+        };
+        self.advance();
+        let close = self.expect(Punct::CloseParen, "to close `container_of(`")?;
+        self.push(
+            NodeKind::ContainerOf {
+                pointer,
+                ty,
+                member,
+            },
+            start.to(close),
+        )
+    }
+
     /// `(` begins a cast or a parenthesized expression.
     fn parenthesized(&mut self) -> Result<NodeId, ExpressionError> {
         let open = self.position;
@@ -604,12 +662,45 @@ impl<'tokens> Parser<'tokens> {
                     )
                     .with_hint("write `null`"));
                 }
+                "offsetof"
+                    if self.dialect == Dialect::View
+                        && self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) =>
+                {
+                    return self.offset_of();
+                }
+                "container_of"
+                    if self.dialect == Dialect::View
+                        && self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) =>
+                {
+                    return self.container_of();
+                }
+                "global"
+                    if self.dialect == Dialect::View
+                        && self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) =>
+                {
+                    return self.global();
+                }
                 "len" if self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen) => {
                     self.advance();
                     self.advance();
                     let operand = self.expression(ASSIGN)?;
                     let close = self.expect(Punct::CloseParen, "to close `len(`")?;
                     return self.push(NodeKind::Len(operand), span.to(close));
+                }
+                function
+                    if self.dialect == Dialect::View
+                        && self.peek_at(1) == &TokenKind::Punct(Punct::OpenParen)
+                        && Builtin::parse(function).is_some() =>
+                {
+                    let function = Builtin::parse(function).expect("a built-in function");
+                    self.advance();
+                    self.advance();
+                    let operand = self.expression(ASSIGN)?;
+                    let close = self.expect(
+                        Punct::CloseParen,
+                        &format!("to close `{}(`", function.name()),
+                    )?;
+                    return self.push(NodeKind::Call { function, operand }, span.to(close));
                 }
                 "as" | "sizeof" => return Err(self.unexpected("an operand")),
                 _ => NodeKind::Name(self.path(false)?),

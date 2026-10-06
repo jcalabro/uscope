@@ -1,0 +1,145 @@
+//! The view files a client loads for a session, besides those it is
+//! given.
+//!
+//! They are the project's, every `*.views` file in `.uscope/views` under the
+//! working directory, and the user's, in `$XDG_CONFIG_HOME/uscope/views` or
+//! `~/.config/uscope/views`, each directory's in name order. A project's
+//! views come before the user's, being about the project's own types.
+
+use std::fs;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+
+use crate::view::syntax::MAX_FILE_BYTES;
+
+/// One view file's name, as errors and `info view` give it, and text, with
+/// the kernels beside it that its views call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewFile {
+    pub name: String,
+    pub text: String,
+    pub kernels: Vec<KernelFile>,
+}
+
+/// A kernel beside a view file, `NAME.wasm` for the kernel `NAME`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelFile {
+    pub name: String,
+    pub path: String,
+    pub module: Vec<u8>,
+}
+
+/// The project's and then the user's view files, and why any could not be
+/// read. A directory that does not exist holds none.
+#[must_use]
+pub fn discover(working_directory: &Path) -> (Vec<ViewFile>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    let directories = [
+        Some(working_directory.join(".uscope/views")),
+        user_directory(),
+    ];
+    for directory in directories.into_iter().flatten() {
+        let (found, failed) = read_directory(&directory);
+        files.extend(found);
+        errors.extend(failed);
+    }
+    (files, errors)
+}
+
+/// Where the user's view files are.
+#[must_use]
+pub fn user_directory() -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config.join("uscope/views"))
+}
+
+/// Reads one view file and the kernels beside it that its views call.
+///
+/// It reads at most one byte more than a view file may hold, so that the
+/// parser refuses one too long without reading all of it. A kernel with no
+/// file beside it may be a built-in one.
+pub fn read(path: &Path) -> Result<ViewFile, String> {
+    let name = path.display().to_string();
+    let bytes = read_at_most(path, MAX_FILE_BYTES)?;
+    let text = String::from_utf8(bytes).map_err(|_| format!("{name}: the file is not UTF-8"))?;
+    let mut called = crate::view::syntax::parse(&name, &text)
+        .views
+        .iter()
+        .flat_map(|view| {
+            view.kernel_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    called.sort();
+    called.dedup();
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut kernels = Vec::new();
+    for kernel in called {
+        let path = directory.join(format!("{kernel}.wasm"));
+        if !path.exists() {
+            continue;
+        }
+        kernels.push(KernelFile {
+            name: kernel,
+            path: path.display().to_string(),
+            module: read_at_most(&path, crate::view::kernel::MAX_MODULE_BYTES)?,
+        });
+    }
+    Ok(ViewFile {
+        name,
+        text,
+        kernels,
+    })
+}
+
+/// A file's bytes, up to one more than `limit`, so that what reads them
+/// can refuse one too long without reading all of it.
+fn read_at_most(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+    let name = path.display();
+    let file = fs::File::open(path).map_err(|error| format!("{name}: {error}"))?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("{name}: {error}"))?;
+    Ok(bytes)
+}
+
+/// Every `*.views` file in a directory, in name order.
+fn read_directory(directory: &Path) -> (Vec<ViewFile>, Vec<String>) {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (Vec::new(), Vec::new());
+        }
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![format!("{}: {error}", directory.display())],
+            );
+        }
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "views")
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    let mut files = Vec::new();
+    let mut errors = Vec::new();
+    for path in paths {
+        match read(&path) {
+            Ok(file) => files.push(file),
+            Err(error) => errors.push(error),
+        }
+    }
+    (files, errors)
+}

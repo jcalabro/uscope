@@ -148,10 +148,16 @@ pub enum Mark {
     Detached,
     /// A released program ran on to its own end, which transparency judged.
     FinishedAfterDetach,
+    /// A container's presentation was what its view makes of memory.
+    ViewPresented,
+    /// A container's elements read the same in one page and in small ones.
+    ViewPaged,
+    /// A cyclic list was refused as the cycle it is.
+    ViewCycleRefused,
 }
 
 impl Mark {
-    pub const ALL: [Self; 68] = [
+    pub const ALL: [Self; 71] = [
         Self::EntryStop,
         Self::BreakpointStop,
         Self::StepStop,
@@ -220,6 +226,9 @@ impl Mark {
         Self::SeizedChildStarted,
         Self::Detached,
         Self::FinishedAfterDetach,
+        Self::ViewPresented,
+        Self::ViewPaged,
+        Self::ViewCycleRefused,
     ];
 }
 

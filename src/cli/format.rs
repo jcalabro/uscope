@@ -1354,6 +1354,161 @@ pub fn signal_policies(policies: &[(u64, uscope::SignalPolicy)], renderer: Rende
     .join("\n")
 }
 
+/// Says which view presents a value, and why each view tried before it did
+/// not bind.
+pub fn view_explanation(
+    expression: &str,
+    explanation: &uscope::ViewExplanation,
+    renderer: Renderer,
+) -> String {
+    let type_name = explanation
+        .type_info
+        .as_ref()
+        .map_or("<unknown type>", |info| &info.name);
+    let mut lines = vec![format!(
+        "`{expression}` has type {}",
+        renderer.paint(Role::Type, type_name)
+    )];
+    match &explanation.presentation {
+        Some(presentation) if presentation.shape == uscope::PresentedShape::Raw => {
+            lines.push(format!(
+                "{} binds, but shows the value as stored: {}",
+                presentation.view,
+                presentation
+                    .problem
+                    .as_ref()
+                    .map_or_else(|| "it failed".to_owned(), ToString::to_string)
+            ));
+        }
+        Some(presentation) => {
+            lines.push(format!("presented by {}", presentation.view));
+            lines.push(format!(
+                "as {}",
+                renderer.paint(Role::Value, &presentation.summary)
+            ));
+            if let Some(problem) = &presentation.problem {
+                lines.push(format!("the summary stopped short: {problem}"));
+            }
+        }
+        None if !explanation.enabled => lines
+            .push("views are off, so it shows as stored; `set views on` turns them on".to_owned()),
+        None if explanation.candidates.is_empty() => {
+            lines.push("no view's pattern names the type, so it shows as stored".to_owned());
+        }
+        None => lines.push("no view binds, so it shows as stored".to_owned()),
+    }
+    if !explanation.candidates.is_empty() {
+        lines.push("views tried, in order:".to_owned());
+        lines.extend(candidate_lines(&explanation.candidates, "  "));
+    }
+    lines.join("\n")
+}
+
+/// Each view a type was matched against, and why it did not bind or that
+/// it did.
+fn candidate_lines<'a>(
+    candidates: &'a [uscope::ViewCandidate],
+    indent: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    candidates.iter().map(move |candidate| {
+        format!(
+            "{indent}{}: {}",
+            candidate.view,
+            candidate.rejection.as_deref().unwrap_or("binds")
+        )
+    })
+}
+
+/// How each type a name means is presented, as `views explain` says.
+pub fn type_views(name: &str, types: &[uscope::TypeViews], renderer: Renderer) -> String {
+    if types.is_empty() {
+        return format!("no type is named `{name}`");
+    }
+    let mut lines = Vec::new();
+    for views in types {
+        lines.push(format!(
+            "{} in {}",
+            renderer.paint(Role::Type, &views.type_info.name),
+            renderer.paint(Role::Metadata, views.module.display())
+        ));
+        match views.presented_by() {
+            Some(view) => lines.push(format!("  presented by {view}")),
+            None if views.candidates.is_empty() => {
+                lines.push("  no view's pattern names it".to_owned());
+            }
+            None => lines.push("  no view binds".to_owned()),
+        }
+        if !views.candidates.is_empty() {
+            lines.push("  views tried, in order:".to_owned());
+            lines.extend(candidate_lines(&views.candidates, "    "));
+        }
+    }
+    lines.join("\n")
+}
+
+/// What `views check` finds, and whether any view loaded for the session
+/// or carried by a module presents no type or binds no type it names.
+pub fn view_check(check: &uscope::ViewCheck, renderer: Renderer) -> (String, bool) {
+    let mut lines = Vec::new();
+    let mut failed = false;
+    let presented = check
+        .types
+        .iter()
+        .filter_map(|views| Some((views, views.presented_by()?)))
+        .collect::<Vec<_>>();
+    if !presented.is_empty() {
+        lines.push("presented:".to_owned());
+        for (views, view) in presented {
+            lines.push(format!(
+                "  {} by {view}",
+                renderer.paint(Role::Type, &views.type_info.name)
+            ));
+        }
+    }
+    let refused = check
+        .types
+        .iter()
+        .filter(|views| views.presented_by().is_none())
+        .collect::<Vec<_>>();
+    if !refused.is_empty() {
+        lines.push("not presented, though views name them:".to_owned());
+        for views in refused {
+            lines.push(format!(
+                "  {}",
+                renderer.paint(Role::Type, &views.type_info.name)
+            ));
+            lines.extend(candidate_lines(&views.candidates, "    "));
+            failed |= views
+                .candidates
+                .iter()
+                .any(|candidate| !uscope::is_built_in_view(&candidate.view));
+        }
+    }
+    if !check.unused.is_empty() {
+        failed = true;
+        lines.push("views that present no type:".to_owned());
+        lines.extend(check.unused.iter().map(|view| format!("  {view}")));
+    }
+    if lines.is_empty() {
+        lines.push("no view's pattern names any type".to_owned());
+    }
+    // A kernel is shown as what it is built from, to be reviewed as that.
+    if !check.kernels.is_empty() {
+        lines.push("kernels, and what they are built from:".to_owned());
+        for kernel in check.kernels.iter() {
+            lines.push(format!("  {} ({}):", kernel.name, kernel.origin));
+            lines.extend(kernel.source.lines().map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("    {line}")
+                }
+            }));
+        }
+    }
+    (lines.join("\n"), failed)
+}
+
 /// Reports a signal that did not stop the inferior.
 /// Renders a logged message with the values it shows.
 pub fn log_message(parts: &[uscope::LogPart]) -> String {

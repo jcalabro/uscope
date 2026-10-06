@@ -255,13 +255,15 @@ fn load_debug_info(
                 symbol_sources: symbols.sources,
                 globals: variables.globals,
                 types: variables.types,
+                vtables: variables.vtables,
                 source_files,
                 statements,
                 lines,
                 sections: super::elf::load_sections(&object),
             },
         )
-        .with_id(image_id),
+        .with_id(image_id)
+        .with_views(embedded_views(path, &object)?),
     );
 
     Ok(DebugInfo {
@@ -269,6 +271,21 @@ fn load_debug_info(
         unwind,
         variables: variables.info,
     })
+}
+
+/// The views a module carries for its own types, named after its file.
+fn embedded_views(
+    path: &Path,
+    object: &object::File<'_>,
+) -> std::result::Result<Arc<crate::view::ViewSet>, DwarfError> {
+    let Some(section) = object.section_by_name(crate::view::embedded::SECTION) else {
+        return Ok(crate::view::ViewSet::empty());
+    };
+    let bytes = section.uncompressed_data()?;
+    let module = path
+        .file_name()
+        .map_or_else(|| "module".into(), |name| name.to_string_lossy());
+    Ok(Arc::new(crate::view::embedded::view_set(&module, &bytes)))
 }
 
 /// Returns the code ranges of every unit written in Go, merged and sorted
@@ -849,6 +866,12 @@ fn load_function_metadata(
         .collect();
     let mut functions = Vec::new();
     let mut function_ids = HashMap::new();
+    // The definitions code belongs to. Clang also emits subprograms with
+    // no code and no name, only to scope a function's local types.
+    let mut concrete = HashSet::new();
+    for function in raw.iter().filter(|function| !function.ranges.is_empty()) {
+        concrete.insert(definition_key(function.key, &raw, &by_key)?);
+    }
 
     for function in &raw {
         let definition = definition_key(function.key, &raw, &by_key)?;
@@ -856,11 +879,24 @@ fn load_function_metadata(
         if function_ids.contains_key(&definition) {
             continue;
         }
-        let name = inherited_value(definition, &raw, &by_key, |function| function.name.clone())?
-            .ok_or(DwarfError::MissingFunctionName)?;
         let linkage_name = inherited_value(definition, &raw, &by_key, |function| {
             function.linkage_name.clone()
         })?;
+        // Clang names the thunks a multiply inherited virtual function
+        // needs only by their linkage names.
+        let name = inherited_value(definition, &raw, &by_key, |function| function.name.clone())?
+            .or_else(|| {
+                linkage_name
+                    .as_deref()
+                    .and_then(crate::demangle::demangle)
+                    .map(Arc::from)
+            });
+        let Some(name) = name else {
+            if concrete.contains(&definition) {
+                return Err(DwarfError::MissingFunctionName);
+            }
+            continue;
+        };
         let declaration = inherited_value(definition, &raw, &by_key, |function| {
             function.declaration.clone()
         })?;

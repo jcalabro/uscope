@@ -12,9 +12,10 @@ use crate::{
     CallFrameUnavailableReason, CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference,
     ImageAddress, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion,
     RegisterSnapshot, Result, StackFrameId, TlsUnavailableReason, UnwindTermination,
-    VariableSnapshot, VariableUnavailableReason, VirtualAddress,
+    VariableSnapshot, VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
+use super::evaluation::StopMachine;
 use super::frames::{FrameRegisters, FrameScope, ResolvedFrame};
 use super::memory::read_logical_memory;
 use super::native::InspectionOps;
@@ -129,7 +130,7 @@ impl<P: InspectionOps> Controller<P> {
                 budget,
             )
         };
-        let variables = match query {
+        let mut variables = match query {
             VariableQuery::Global(global) => {
                 vec![self.inspect_loaded_global(inferior, pid, &resolved, *global, &mut budget)?]
             }
@@ -176,6 +177,18 @@ impl<P: InspectionOps> Controller<P> {
                 }
             }
         };
+        // Views present what the provider read, with the same budget.
+        {
+            let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+            let mut machine = StopMachine::new(&scope, &mut budget, true);
+            for variable in &mut variables {
+                let state = std::mem::replace(
+                    &mut variable.state,
+                    VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
+                );
+                variable.state = machine.present_state(variable.type_info.clone(), state)?;
+            }
+        }
         Ok(VariableSnapshot {
             revision: self.revision,
             stop_id,
@@ -365,9 +378,15 @@ impl<P: InspectionOps> Controller<P> {
         // frame is selected now.
         let frame = self.resolve_frame(inferior, pid, reference.frame)?;
         let mut runtime = self.frame_runtime(inferior, pid, &frame, module);
-        module
+        let mut value = module
             .variables
-            .dereference(reference, &mut runtime, &mut budget)
+            .dereference(reference, &mut runtime, &mut budget)?;
+        let scope = self.frame_for(inferior, reference.stop_id, pid, &frame);
+        let mut machine = StopMachine::new(&scope, &mut budget, true);
+        value.state = machine.present_state(Some(value.type_info.clone()), value.state)?;
+        value.completion = budget.completion();
+        value.usage = budget.usage();
+        Ok(value)
     }
 
     pub(super) fn value_children(
@@ -404,11 +423,35 @@ impl<P: InspectionOps> Controller<P> {
         if module.loaded.image != reference.image {
             return Err(Error::StaleModuleImage);
         }
+        if let Some(view) = &reference.view {
+            return self.view_children(reference, view, query.offset, query.limit, budget);
+        }
         let frame = self.resolve_frame(inferior, pid, reference.frame)?;
         let mut runtime = self.frame_runtime(inferior, pid, &frame, module);
-        module
-            .variables
-            .value_children(reference, query.offset, query.limit, &mut runtime, budget)
+        let mut page = module.variables.value_children(
+            reference,
+            query.offset,
+            query.limit,
+            &mut runtime,
+            budget,
+        )?;
+        let scope = self.frame_for(inferior, reference.stop_id, pid, &frame);
+        let mut machine = StopMachine::new(&scope, budget, true);
+        let mut children = page.children.to_vec();
+        for child in &mut children {
+            let state = std::mem::replace(
+                &mut child.state,
+                VariableState::Unavailable(VariableUnavailableReason::EvaluationLimit),
+            );
+            // A base-class subobject is part of an object, not one of the
+            // type it dynamically is.
+            machine.dynamic = !matches!(child.relationship, crate::ValueChildRelationship::Base(_));
+            child.state = machine.present_state(Some(child.type_info.clone()), state)?;
+        }
+        page.children = children.into();
+        page.completion = budget.completion();
+        page.usage = budget.usage();
+        Ok(page)
     }
 
     pub(super) fn globals(&self, query: &GlobalVariableQuery) -> Result<GlobalVariablePage> {

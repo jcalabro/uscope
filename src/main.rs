@@ -50,6 +50,12 @@ struct Args {
     #[arg(long, requires = "core")]
     allow_module_mismatch: bool,
 
+    /// Present values with the views in FILE, ahead of the project's, the
+    /// user's, the program's own, and the built-in ones. May be repeated;
+    /// later files come first.
+    #[arg(long = "views", value_name = "FILE")]
+    views: Vec<PathBuf>,
+
     /// Execute commands from a file. May be repeated.
     #[arg(short = 'c', long = "command", value_name = "FILE")]
     command_files: Vec<PathBuf>,
@@ -157,6 +163,20 @@ async fn async_main() -> ExitCode {
         // runtime from shutting down after the client left.
         std::process::exit(code);
     }
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|command| command == "views")
+    {
+        let args = ViewsArgs::parse_from(std::env::args_os().skip(1));
+        return match run_views(args).await {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let args = Args::parse();
     let renderers = Renderers::detect(args.color, args.batch);
 
@@ -202,6 +222,165 @@ async fn run(args: &Args, renderers: Renderers) -> Result<()> {
 
     result?;
     shutdown
+}
+
+/// `uscope views`: which views present a program's types, checked from its
+/// debug information alone, with no process.
+#[derive(Parser)]
+#[command(name = "uscope views")]
+struct ViewsArgs {
+    #[command(subcommand)]
+    command: ViewsCommand,
+}
+
+#[derive(clap::Subcommand)]
+enum ViewsCommand {
+    /// Report which view presents each of the program's types that a view's
+    /// pattern names, and the loaded views that present no type. Fails
+    /// when a view file, or a view loaded for the session or carried by
+    /// the program, cannot be used.
+    Check {
+        /// The program whose types to check.
+        program: PathBuf,
+        /// Also present values with the views in FILE. May be repeated.
+        #[arg(long = "views", value_name = "FILE")]
+        views: Vec<PathBuf>,
+    },
+    /// Explain which view presents a type of the program, and why each
+    /// view tried before it did not bind.
+    Explain {
+        /// The program that defines the type.
+        program: PathBuf,
+        /// The type, as an expression names one: `intvec`, `std::vector<int>`.
+        #[arg(value_name = "TYPE")]
+        name: String,
+        /// Also present values with the views in FILE. May be repeated.
+        #[arg(long = "views", value_name = "FILE")]
+        views: Vec<PathBuf>,
+    },
+    /// Replay kernel runs that `views record` recorded, with no program.
+    /// Fails unless every run does again what it did.
+    Replay {
+        /// The recorded runs.
+        recording: PathBuf,
+        /// Replay with the kernel module in FILE, rather than the built-in
+        /// kernel each run names.
+        #[arg(long = "kernel", value_name = "FILE")]
+        kernel: Option<PathBuf>,
+    },
+}
+
+/// The largest recording `uscope views replay` reads: far more than the
+/// largest inspection's runs record.
+const MAX_RECORDING_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Replays recorded kernel runs, saying for each whether it reproduced.
+fn replay_views(recording: &std::path::Path, kernel: Option<&std::path::Path>) -> Result<bool> {
+    use std::io::Read as _;
+    let mut text = String::new();
+    std::fs::File::open(recording)
+        .and_then(|file| file.take(MAX_RECORDING_BYTES + 1).read_to_string(&mut text))
+        .with_context(|| format!("failed to read {}", recording.display()))?;
+    if text.len() as u64 > MAX_RECORDING_BYTES {
+        anyhow::bail!(
+            "{} is larger than a recording may be, {MAX_RECORDING_BYTES} bytes",
+            recording.display()
+        );
+    }
+    let wasm = kernel
+        .map(|path| {
+            std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+        })
+        .transpose()?;
+    let runs = uscope::replay_kernel_runs(&text, wasm.as_deref())
+        .map_err(|error| anyhow::anyhow!("{}: {error}", recording.display()))?;
+    let mut reproduced = true;
+    for (index, run) in runs.iter().enumerate() {
+        match &run.outcome {
+            Ok(events) => println!(
+                "run {}: kernel `{}` reproduced {events} of {} events",
+                index + 1,
+                run.kernel,
+                run.events
+            ),
+            Err(difference) => {
+                reproduced = false;
+                println!(
+                    "run {}: kernel `{}` differs: {difference}",
+                    index + 1,
+                    run.kernel
+                );
+            }
+        }
+    }
+    Ok(reproduced && !runs.is_empty())
+}
+
+/// Runs `uscope views check`, `explain`, or `replay`.
+async fn run_views(args: ViewsArgs) -> Result<bool> {
+    let (program, views) = match &args.command {
+        ViewsCommand::Check { program, views } | ViewsCommand::Explain { program, views, .. } => {
+            (program, views)
+        }
+        ViewsCommand::Replay { recording, kernel } => {
+            return replay_views(recording, kernel.as_deref());
+        }
+    };
+    let debugger = Debugger::new(program)
+        .with_context(|| format!("failed to initialize debugger for {}", program.display()))?;
+    let renderers = Renderers::detect(cli::terminal::ColorChoice::Auto, true);
+    let console = Cli::new(
+        debugger.handle(),
+        renderers,
+        uscope::AssemblySyntax::Intel,
+        LaunchSettings::default(),
+    );
+    let working_directory = std::env::current_dir().unwrap_or_default();
+    let mut warnings = console.load_view_sources(&working_directory, views).await;
+    warnings.extend(
+        debugger
+            .handle()
+            .module_image()
+            .view_errors()
+            .iter()
+            .map(ToString::to_string),
+    );
+    for warning in &warnings {
+        eprintln!(
+            "{}: views: {warning}",
+            renderers.stderr.paint(Role::Warning, "warning")
+        );
+    }
+    // A file that could not be used fails either command, as a view that
+    // binds nothing fails a check.
+    let handle = debugger.handle();
+    let reported: Result<bool> = async {
+        Ok(match &args.command {
+            ViewsCommand::Check { .. } => {
+                let check = handle.check_views().await?;
+                let (report, failed) = cli::format::view_check(&check, renderers.stdout);
+                println!("{report}");
+                !failed
+            }
+            ViewsCommand::Replay { .. } => unreachable!("a replay needs no program"),
+            ViewsCommand::Explain { name, .. } => {
+                let types = handle.explain_type(name).await?;
+                println!(
+                    "{}",
+                    cli::format::type_views(name, &types, renderers.stdout)
+                );
+                !types.is_empty()
+            }
+        })
+    }
+    .await;
+    let shutdown = debugger
+        .shutdown()
+        .await
+        .context("failed to shut down the debugger");
+    let succeeded = reported?;
+    shutdown?;
+    Ok(succeeded && warnings.is_empty())
 }
 
 async fn open_debugger(args: &Args) -> Result<Debugger> {

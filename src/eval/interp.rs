@@ -52,7 +52,10 @@ pub enum Failure {
     Debugger(crate::Error),
 }
 
-enum Value<P> {
+/// What a node evaluates to before it is presented.
+#[derive(Debug, Clone)]
+pub enum Value<P> {
+    /// Storage of a program type, read only when a value is needed.
     Place(P),
     /// A language-typed value in memory.
     Raw(u64),
@@ -100,6 +103,21 @@ pub fn run<M: Machine>(
         Err(Halt::Error(error)) => Err(Failure::Expression(error)),
         Err(Halt::Failed(error)) => Err(Failure::Debugger(error)),
     }
+}
+
+/// Evaluates `program` to its value without presenting it: a place stays
+/// a place, and a scalar is read. A machine computes the values it binds
+/// for a scope this way.
+pub fn value<M: Machine>(
+    program: &Program<M::Object, M::Step>,
+    machine: &mut M,
+) -> Result<Value<M::Place>, Stop> {
+    let mut interpreter = Interpreter { machine };
+    interpreter.eval(&program.root).map_err(|halt| match halt {
+        Halt::Missing { state, .. } => Stop::Missing(state),
+        Halt::Error(error) => Stop::Refused(Refusal::new(error.kind, error.message)),
+        Halt::Failed(error) => Stop::Failed(error),
+    })
 }
 
 struct Interpreter<'m, M: Machine> {
@@ -197,6 +215,7 @@ impl<M: Machine> Interpreter<'_, M> {
         Self::at(span, self.machine.charge())?;
         Ok(match &node.op {
             Op::Object(object) => Value::Place(Self::at(span, self.machine.locate(object))?),
+            Op::Bound(object) => Self::at(span, self.machine.bound(object))?,
             Op::Step {
                 base,
                 step,
@@ -379,9 +398,20 @@ impl<M: Machine> Interpreter<'_, M> {
                 let bytes = left
                     .sub(right)
                     .map_err(|error| Self::arithmetic(span, error))?;
+                let scale = Exact::from(u128::from(*scale));
+                let apart = bytes
+                    .rem(scale)
+                    .map_err(|error| Self::arithmetic(span, error))?;
+                if !apart.is_zero() {
+                    return Err(Self::error(
+                        span,
+                        ErrorKind::Arithmetic,
+                        "the pointers are not a whole number of elements apart",
+                    ));
+                }
                 Value::Int(Integer::Exact(
                     bytes
-                        .div(Exact::from(u128::from(*scale)))
+                        .div(scale)
                         .map_err(|error| Self::arithmetic(span, error))?,
                 ))
             }
@@ -658,6 +688,9 @@ impl<M: Machine> Interpreter<'_, M> {
     }
 
     fn text_length(&mut self, place: &M::Place, span: Span) -> Result<u64, Halt> {
+        if let Some(length) = Self::at(span, self.machine.presented_length(place))? {
+            return Ok(length);
+        }
         let Some(text) = Self::at(span, self.machine.text(place))? else {
             return Err(Self::error(
                 span,
@@ -669,6 +702,10 @@ impl<M: Machine> Interpreter<'_, M> {
             TextCompletion::Complete => Ok(u64::try_from(text.bytes.len()).unwrap_or(u64::MAX)),
             TextCompletion::Truncated {
                 length: Some(length),
+            }
+            | TextCompletion::Limited {
+                length: Some(length),
+                ..
             } => Ok(length),
             completion => Err(Halt::Missing {
                 state: Box::new(unavailable(Self::incomplete(completion))),
@@ -686,6 +723,9 @@ impl<M: Machine> Interpreter<'_, M> {
                     completed: 0,
                     next_address: address,
                 }
+            }
+            TextCompletion::Limited { exhaustion, .. } => {
+                VariableUnavailableReason::InspectionLimit(exhaustion)
             }
             _ => VariableUnavailableReason::EvaluationLimit,
         }
@@ -867,6 +907,7 @@ impl<M: Machine> Interpreter<'_, M> {
             dereference: DereferenceState::NotApplicable,
             children: ValueChildren::NotApplicable,
             text: None,
+            presentation: None,
         };
         Ok(self
             .machine

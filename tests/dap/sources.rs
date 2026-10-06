@@ -150,6 +150,7 @@ fn completions_offer_commands_subcommands_and_variables() {
         "{commands:?}"
     );
     assert_eq!(labels(&mut dap, "info sig"), [("signals".to_owned(), 6, 3)]);
+    assert_eq!(labels(&mut dap, "info vi"), [("view".to_owned(), 6, 2)]);
     let variables = labels(&mut dap, "print poin");
     assert!(
         variables

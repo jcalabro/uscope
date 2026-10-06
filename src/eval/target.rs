@@ -4,6 +4,7 @@
 use std::fmt;
 
 use super::error::ErrorKind;
+use super::interp::Value;
 use super::number::Exact;
 use super::syntax::ast::Tag;
 use super::types::TypeSource;
@@ -40,6 +41,15 @@ pub enum Lookup<O> {
         value: Exact,
         ty: TypeReference,
     },
+    /// An exact integer the scope knows, such as an argument a view's
+    /// pattern captured.
+    Constant(Exact),
+    /// A value the scope's machine computes once and keeps, of any type,
+    /// such as a view's `let`: never a place.
+    Bound {
+        object: O,
+        ty: super::types::Ty,
+    },
     /// Several things the name could mean, each written as it is selected.
     Ambiguous(Vec<String>),
     NotFound,
@@ -71,6 +81,8 @@ pub enum StepKind<'a> {
     Member(&'a str),
     /// To an element of an array or slice, holding `available` indices.
     Index { available: usize },
+    /// To the one base class subobject of a record of the given type.
+    Base(TypeReference),
 }
 
 /// A step a scope planned from types alone.
@@ -112,6 +124,34 @@ pub trait Scope: TypeSource {
 
     /// The register a name, without its `$`, means.
     fn register(&self, name: &str) -> Option<Register>;
+
+    /// Whether a view presents values of `ty` with a length, as one
+    /// presents a Go map, which is a pointer.
+    fn has_view(&self, ty: TypeReference) -> bool {
+        let _ = ty;
+        false
+    }
+
+    /// The types whose identity has this base, in a stable order, for
+    /// views that construct a type from its arguments.
+    fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
+        let _ = base;
+        Vec::new()
+    }
+
+    /// The global `name` of the module a view presents a value of, for a
+    /// view's `global(NAME)`; nothing for any other scope.
+    fn global(&self, name: &str) -> Result<Lookup<Self::Object>, Refusal> {
+        let _ = name;
+        Ok(Lookup::NotFound)
+    }
+
+    /// The global `name` of the module whose types this scope binds views
+    /// against, as a step that reaches it from anywhere, and its type.
+    fn global_step(&self, name: &str) -> Result<Option<(Self::Step, TypeReference)>, Refusal> {
+        let _ = name;
+        Ok(None)
+    }
 }
 
 /// Why running stopped short of a value.
@@ -201,4 +241,21 @@ pub trait Machine: TypeSource {
     /// The inspection's completion and usage so far, for results the
     /// evaluator builds itself.
     fn finish(&self, type_info: Option<TypeInfo>, state: VariableState) -> InspectedValue;
+
+    /// How many elements a value with no length of its own holds, or the
+    /// length of its text, as a view presents it; `None` when no view
+    /// presents its type.
+    fn presented_length(&mut self, at: &Self::Place) -> Result<Option<u64>, Stop> {
+        let _ = at;
+        Ok(None)
+    }
+
+    /// The value a scope bound to `object` with [`Lookup::Bound`].
+    fn bound(&mut self, object: &Self::Object) -> Result<Value<Self::Place>, Stop> {
+        let _ = object;
+        Err(Stop::Refused(Refusal::new(
+            ErrorKind::Unsupported,
+            "this machine computes no bound values",
+        )))
+    }
 }

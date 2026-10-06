@@ -1,0 +1,8 @@
+[package]
+name = "uscope-views"
+version = "0.1.0"
+edition = "2024"
+description = "Views for uscope, carried in a program's debug information"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

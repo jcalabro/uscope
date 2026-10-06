@@ -23,7 +23,10 @@ use serde_json::{Value, json};
 
 use crate::support::flight_recordings;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+// A response may wait for the program to load, as `setBreakpoints` sent
+// beside `launch` does, which takes seconds for the largest fixtures under
+// `just stress`, so responses are bounded as events are.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A position in the stream of received messages; waits look only after it.

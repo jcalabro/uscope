@@ -428,6 +428,39 @@ fn sizeof_and_len_measure_types_and_operands() {
     assert_eq!(points_at("sizeof x"), (ErrorKind::Syntax, "x"));
 }
 
+/// A view's expressions may call the views' built-in functions; the
+/// console's may not, and in neither is a built-in's name reserved.
+#[test]
+fn only_views_call_built_in_functions() {
+    let view = |text: &str| {
+        Expression::parse_view(text).unwrap_or_else(|error| panic!("`{text}`: {error}"))
+    };
+    let expression = view("inner(inner(buf) . ptr) as *T");
+    assert_eq!(expression.to_string(), "inner(inner(buf).ptr) as *T");
+    assert_eq!(
+        Expression::parse_view(&expression.to_string())
+            .expect("the normal form parses")
+            .to_string(),
+        expression.to_string()
+    );
+    // A parenthesized name after a built-in is its operand, not a cast.
+    let expression = view("inner(x) - 1");
+    assert!(expression.ambiguities().is_empty());
+    let tree = expression.tree().expect("one reading");
+    assert!(matches!(
+        tree.kind(tree.root()),
+        NodeKind::Binary {
+            op: BinaryOp::Sub,
+            ..
+        }
+    ));
+    assert_eq!(view("inner.inner").to_string(), "inner.inner");
+    assert_eq!(points_at("inner(x)"), (ErrorKind::Syntax, "inner("));
+    assert_eq!(normal("inner + 1"), "inner + 1");
+    let unclosed = Expression::parse_view("inner(x").expect_err("unclosed");
+    assert_eq!(unclosed.kind, ErrorKind::Syntax);
+}
+
 #[test]
 fn syntax_errors_point_at_the_offending_text() {
     for (text, kind, pointed) in [

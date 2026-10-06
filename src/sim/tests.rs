@@ -250,3 +250,14 @@ fn missed_watch_traps_fail_watch_accounting() {
         "watch accounting"
     );
 }
+
+/// A kernel whose reads skip a linked node makes the debugger present a
+/// list without one of its elements, which the views oracle catches.
+#[test]
+fn skipped_linked_nodes_fail_the_views_oracle() {
+    some_failure_with(
+        Sabotage::SkipLinkedNodes,
+        "views",
+        &["views", "variables", "expressions", "breakpoint conditions"],
+    );
+}

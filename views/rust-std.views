@@ -1,0 +1,179 @@
+uscope-views 1
+
+# Rust's standard library. Verified against rustc nightly 2026-07-10, by
+# tests/fixtures/rust/containers.rs.
+#
+# Since Rust 1.84 a vector's buffer holds an erased pointer, so its element
+# type comes from the pattern. inner() steps through the wrapper layers std
+# adds and removes: RawVec, RawVecInner's Unique and NonNull, and Cap.
+#
+# Zero-sized elements need no room, so std stores no capacity for them and
+# reports the largest, as these views do.
+
+view rust alloc::vec::Vec<T, _> {
+    let data = inner(inner(buf).ptr) as *T
+    let capacity = sizeof(T) == 0 ? (usize)-1 : inner(inner(buf).cap)
+    check len <= capacity
+    show sequence(len) for i in range(len) => data[i]
+    field capacity = capacity
+}
+
+# A ring buffer: element i is at (head + i) modulo the capacity.
+view rust alloc::collections::vec_deque::VecDeque<T, _> {
+    let data = inner(inner(buf).ptr) as *T
+    let capacity = sizeof(T) == 0 ? (usize)-1 : inner(inner(buf).cap)
+    let start = inner(head)
+    check len <= capacity && (capacity == 0 || start < capacity)
+    show sequence(len) for i in range(len) => data[(start + i) % capacity]
+    field capacity = capacity
+}
+
+view rust alloc::string::String {
+    let capacity = inner(inner(vec.buf).cap)
+    check vec.len <= capacity
+    show text(inner(inner(vec.buf).ptr), vec.len)
+    field capacity = capacity
+}
+
+# An OsString, and a PathBuf around one, hold their bytes in a Vec<u8>,
+# which inner() reaches through std's platform layers.
+view rust std::**::OsString {
+    let bytes = inner(self)
+    show text(inner(inner(bytes.buf).ptr), bytes.len)
+}
+
+view rust std::**::PathBuf {
+    let bytes = inner(self)
+    show text(inner(inner(bytes.buf).ptr), bytes.len)
+}
+
+# A CString's bytes end with its NUL, which is not part of its text.
+view rust alloc::**::CString {
+    check len(inner) >= 1
+    show text(inner, len(inner) - 1)
+}
+
+# hashbrown's table, under std::collections::HashMap and HashSet. A bucket
+# is full when its control byte's top bit is clear, and the buckets lie
+# just below the control bytes, the first nearest.
+view rust std::collections::hash::map::HashMap<K, V, _> {
+    let table = base.table.table
+    type Pair = arg(typeof(base.table), 0)
+    let buckets = table.bucket_mask + 1
+    let control = inner(table.ctrl) as *u8
+    let items = table.items
+    check items <= buckets
+    show map(items) for i in range(buckets) if control[i] & 0x80 == 0
+        => (control as *Pair)[-1 - i].0 : (control as *Pair)[-1 - i].1
+}
+
+view rust std::collections::hash::set::HashSet<T, _> {
+    let table = base.map.table.table
+    type Pair = arg(typeof(base.map.table), 0)
+    let buckets = table.bucket_mask + 1
+    let control = inner(table.ctrl) as *u8
+    let items = table.items
+    check items <= buckets
+    show sequence(items) for i in range(buckets) if control[i] & 0x80 == 0
+        => (control as *Pair)[-1 - i].0
+}
+
+# A BTreeMap's entries are in its nodes, each holding up to eleven keys and
+# values, and in order among them, which the rust-btree kernel walks
+# (views/kernels/rust-btree.zig). An empty map may have no root, and a set
+# is a map of keys to nothing.
+view rust alloc::collections::btree::map::BTreeMap<K, V, _> {
+    type Leaf = alloc::collections::btree::node::LeafNode<K, V>
+    type Internal = alloc::collections::btree::node::InternalNode<K, V>
+    let tree = root.Some.0
+    let node = length == 0 ? 0 : inner(tree.node) as usize
+    let height = length == 0 ? 0 : tree.height
+    show map(length) for key, value in kernel("rust-btree", node, height, offsetof(Leaf, len), offsetof(Leaf, keys), offsetof(Leaf, vals), sizeof(K), sizeof(V), offsetof(Internal, edges), 11)
+        => *(key as *K) : *(value as *V)
+}
+
+view rust alloc::collections::btree::set::BTreeSet<T, _> {
+    type Nothing = arg(typeof(map), 1)
+    type Leaf = alloc::collections::btree::node::LeafNode<T, Nothing>
+    type Internal = alloc::collections::btree::node::InternalNode<T, Nothing>
+    let tree = map.root.Some.0
+    let node = map.length == 0 ? 0 : inner(tree.node) as usize
+    let height = map.length == 0 ? 0 : tree.height
+    show sequence(map.length) for key, value in kernel("rust-btree", node, height, offsetof(Leaf, len), offsetof(Leaf, keys), offsetof(Leaf, vals), sizeof(T), 0, offsetof(Internal, edges), 11)
+        => *(key as *T)
+}
+
+# A Box is a pointer to what it holds. A Box of a slice, str, or trait
+# object is a wider pointer, which needs no view.
+view rust alloc::**::Box<T, _> {
+    show value(*self)
+}
+
+# An Rc points at its counts and its value. Its owners together hold one
+# weak reference, which the weak count leaves out, as Rc::weak_count does.
+# An Rc of a slice or str points with a wider pointer, which this view does
+# not bind to.
+view rust alloc::**::Rc<T, _> {
+    let shared = inner(ptr)
+    show value(shared->value)
+    field strong = inner(shared->strong)
+    field weak = inner(shared->weak) - 1
+}
+
+view rust alloc::**::Arc<T, _> {
+    let shared = inner(ptr)
+    let weak = inner(shared->weak)
+    show value(shared->data)
+    field strong = inner(shared->strong)
+    field weak = weak == (usize)-1 ? 0 : weak - 1
+}
+
+# A Weak from Weak::new points nowhere, at usize::MAX; one whose owners are
+# gone holds a dropped value.
+view rust alloc::rc::Weak<T, _> {
+    let shared = inner(ptr)
+    let dangling = shared as usize == (usize)-1
+    let strong = dangling ? 0 : inner(shared->strong)
+    show if dangling {
+        empty("dangling")
+    } else if strong == 0 {
+        empty("dropped")
+    } else {
+        value(shared->value)
+    }
+    field strong = strong
+    field weak = dangling ? 0 : inner(shared->weak) - (strong > 0 ? 1 : 0)
+}
+
+view rust alloc::sync::Weak<T, _> {
+    let shared = inner(ptr)
+    let dangling = shared as usize == (usize)-1
+    let strong = dangling ? 0 : inner(shared->strong)
+    show if dangling {
+        empty("dangling")
+    } else if strong == 0 {
+        empty("dropped")
+    } else {
+        value(shared->data)
+    }
+    field strong = strong
+    field weak = dangling ? 0 : inner(shared->weak) - (strong > 0 ? 1 : 0)
+}
+
+view rust core::cell::Cell<T> {
+    show value(value.value)
+}
+
+# A RefCell's borrow counts its shared borrows, or is negative while it is
+# borrowed mutably.
+view rust core::cell::RefCell<T> {
+    show value(value.value)
+    field borrow = inner(borrow)
+}
+
+# On Linux, a Mutex is a futex word: 0 when unlocked.
+view rust std::**::Mutex<T> {
+    show value(data.value)
+    field locked = inner(inner.futex) != 0
+    field poisoned = inner(poison.failed) != 0
+}

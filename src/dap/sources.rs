@@ -78,6 +78,15 @@ impl Session {
                 json!({"reason": "new", "module": module_json(record, image.as_deref())}),
             )
             .await?;
+        // What kept a library's own views out, once, when it loads; the
+        // program's are said when the session starts.
+        if let (Some(image), Ok(handle)) = (&image, self.target_handle())
+            && image.id() != handle.module_image().id()
+        {
+            for error in image.view_errors() {
+                self.client.important(format!("views: {error}")).await?;
+            }
+        }
         self.add_loaded_sources(record.module.id, image.as_deref())
             .await
     }

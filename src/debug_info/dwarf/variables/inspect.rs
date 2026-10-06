@@ -74,6 +74,46 @@ pub(in crate::debug_info) struct PlannedMemberStep {
     pub(super) required_variant: Option<(usize, VariantDiscriminant, Arc<[Variant]>)>,
 }
 
+/// One step from an aggregate into a member or base on the way to a member
+/// found through anonymous members and base classes.
+#[derive(Clone)]
+struct MemberHop {
+    aggregate: TypeId,
+    child: DynamicAggregateChild,
+    /// The member, or a base class as the member it amounts to.
+    member: RecordMember,
+    /// Whether the hop enters a virtual base, which every path through it
+    /// shares.
+    virtual_base: bool,
+}
+
+/// How many aggregates one member lookup may examine.
+const MAX_MEMBER_SEARCH: usize = 4_096;
+
+/// The one path when every path found reaches the same subobject: paths
+/// through one virtual base reach one object, since the derived object
+/// holds a virtual base once however many classes derive from it.
+fn one_subobject(paths: &[Vec<MemberHop>]) -> Option<&[MemberHop]> {
+    // A path's subobject: from its last virtual base onward, or all of it.
+    let key = |path: &[MemberHop]| {
+        let start = path.iter().rposition(|hop| hop.virtual_base);
+        let tail = &path[start.unwrap_or(0)..];
+        let base = start.map(|start| path[start].member.type_ref.id);
+        (
+            base,
+            tail.iter()
+                .skip(usize::from(start.is_some()))
+                .map(|hop| (hop.aggregate, hop.child))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (first, rest) = paths.split_first()?;
+    let expected = key(first);
+    rest.iter()
+        .all(|path| key(path) == expected)
+        .then_some(first.as_slice())
+}
+
 #[derive(Clone)]
 pub(super) enum LocatedStorage {
     Memory(VirtualAddress),
@@ -396,6 +436,138 @@ impl DwarfVariableInfo {
         Ok(())
     }
 
+    /// Every path to a member named `name` of the record or union
+    /// `aggregate`, found as C and C++ find names: among its own members,
+    /// counting the members of its anonymous members as its own, and only
+    /// then in its base classes, whose names it hides.
+    fn member_paths(
+        &self,
+        aggregate: TypeId,
+        name: &str,
+        work: &mut usize,
+        depth: usize,
+    ) -> Result<Vec<Vec<MemberHop>>> {
+        *work += 1;
+        if *work > MAX_MEMBER_SEARCH || depth > MAX_AGGREGATE_DEPTH {
+            return Err(Error::InvalidValueExpression(
+                "looking up a member through anonymous members and base classes exceeds its limit"
+                    .to_owned(),
+            ));
+        }
+        let malformed = |description| Error::debug_info(DwarfError::MalformedVariable(description));
+        let info = self.type_info(aggregate).map_err(malformed)?;
+        let (members, bases): (&[RecordMember], &[crate::BaseClass]) = match &info.kind {
+            TypeKind::Record { members, bases, .. } => (members, bases),
+            TypeKind::Union { members, .. } => (members, &[]),
+            _ => return Ok(Vec::new()),
+        };
+        let hop = |child, member: &RecordMember, virtual_base| MemberHop {
+            aggregate,
+            child,
+            member: member.clone(),
+            virtual_base,
+        };
+        let mut found = members
+            .iter()
+            .enumerate()
+            .filter(|(_, member)| !member.artificial && member.name.as_deref() == Some(name))
+            .map(|(index, member)| vec![hop(DynamicAggregateChild::Member(index), member, false)])
+            .collect::<Vec<_>>();
+        for (index, member) in members.iter().enumerate() {
+            if member.name.is_some() || member.artificial || !found.is_empty() {
+                continue;
+            }
+            let Ok((inner, _)) = self.transparent_type(member.type_ref.id) else {
+                continue;
+            };
+            for path in self.member_paths(inner, name, work, depth + 1)? {
+                let mut whole = vec![hop(DynamicAggregateChild::Member(index), member, false)];
+                whole.extend(path);
+                found.push(whole);
+            }
+        }
+        if !found.is_empty() {
+            return Ok(found);
+        }
+        for (index, base) in bases.iter().enumerate() {
+            let Ok((inner, _)) = self.transparent_type(base.type_ref.id) else {
+                continue;
+            };
+            let subobject = RecordMember {
+                name: None,
+                type_ref: base.type_ref,
+                layout: base.layout,
+                accessibility: base.accessibility,
+                artificial: false,
+                embedded: false,
+                declaration: None,
+            };
+            let virtual_base = base.virtuality == crate::BaseClassVirtuality::Virtual;
+            for path in self.member_paths(inner, name, work, depth + 1)? {
+                let mut whole = vec![hop(
+                    DynamicAggregateChild::Base(index),
+                    &subobject,
+                    virtual_base,
+                )];
+                whole.extend(path);
+                found.push(whole);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Every path from the record `aggregate` to a base class subobject
+    /// whose type `is_target` accepts, through its bases' bases.
+    fn base_paths(
+        &self,
+        aggregate: TypeId,
+        is_target: &dyn Fn(TypeId) -> bool,
+        work: &mut usize,
+        depth: usize,
+    ) -> Result<Vec<Vec<MemberHop>>> {
+        *work += 1;
+        if *work > MAX_MEMBER_SEARCH || depth > MAX_AGGREGATE_DEPTH {
+            return Err(Error::InvalidValueExpression(
+                "looking up a base class exceeds its limit".to_owned(),
+            ));
+        }
+        let malformed = |description| Error::debug_info(DwarfError::MalformedVariable(description));
+        let info = self.type_info(aggregate).map_err(malformed)?;
+        let TypeKind::Record { bases, .. } = &info.kind else {
+            return Ok(Vec::new());
+        };
+        let mut found = Vec::new();
+        for (index, base) in bases.iter().enumerate() {
+            let Ok((inner, _)) = self.transparent_type(base.type_ref.id) else {
+                continue;
+            };
+            let hop = MemberHop {
+                aggregate,
+                child: DynamicAggregateChild::Base(index),
+                member: RecordMember {
+                    name: None,
+                    type_ref: base.type_ref,
+                    layout: base.layout,
+                    accessibility: base.accessibility,
+                    artificial: false,
+                    embedded: false,
+                    declaration: None,
+                },
+                virtual_base: base.virtuality == crate::BaseClassVirtuality::Virtual,
+            };
+            if is_target(base.type_ref.id) || is_target(inner) {
+                found.push(vec![hop]);
+                continue;
+            }
+            for path in self.base_paths(inner, is_target, work, depth + 1)? {
+                let mut whole = vec![hop.clone()];
+                whole.extend(path);
+                found.push(whole);
+            }
+        }
+        Ok(found)
+    }
+
     /// Plans one structural step from `from`, which reads no program
     /// state. A member step follows pointers to the record that holds the
     /// member; an index step takes one index for a slice and one per
@@ -406,7 +578,9 @@ impl DwarfVariableInfo {
     )]
     pub(super) fn plan_step(&self, from: TypeId, step: Step<'_>) -> Result<PlannedStep> {
         enum AggregateMembers<'a> {
-            Direct(&'a [RecordMember]),
+            /// A record's or union's, which are searched through anonymous
+            /// members and bases.
+            Direct,
             Variant {
                 common_members: &'a [RecordMember],
                 discriminant: &'a VariantDiscriminant,
@@ -469,6 +643,44 @@ impl DwarfVariableInfo {
                     Err(ValueShapeError::Unsupported(_)) => steps.push(unsupported()),
                 }
                 Ok(planned(steps, 0, Some(target)))
+            }
+            Step::Base(target) => {
+                let type_name = || {
+                    self.type_info(from)
+                        .map(|info| Arc::clone(&info.name))
+                        .map_err(malformed)
+                };
+                let (aggregate, _) = match self.transparent_type(from) {
+                    Ok(value) => value,
+                    Err(ValueShapeError::Malformed(description)) => {
+                        return Err(malformed(description));
+                    }
+                    Err(ValueShapeError::Unsupported(_)) => {
+                        return Ok(planned(vec![unsupported()], 0, None));
+                    }
+                };
+                let paths = self.base_paths(aggregate, target.is_target, &mut 0, 0)?;
+                let Some(path) = one_subobject(&paths) else {
+                    let base = Arc::from(target.name);
+                    let type_name = type_name()?;
+                    return Err(if paths.is_empty() {
+                        Error::BaseNotFound { base, type_name }
+                    } else {
+                        Error::AmbiguousBase { base, type_name }
+                    });
+                };
+                let mut result = None;
+                for hop in path {
+                    self.validate_static_member_layout(hop.aggregate, &hop.member)?;
+                    result = Some(hop.member.type_ref.id);
+                    steps.push(PathStep::Member(Box::new(PlannedMemberStep {
+                        aggregate: hop.aggregate,
+                        child: hop.child,
+                        member: hop.member.clone(),
+                        required_variant: None,
+                    })));
+                }
+                Ok(planned(steps, 0, result))
             }
             Step::Index { available } => {
                 let source_info = self.type_info(from).map_err(malformed)?;
@@ -579,8 +791,8 @@ impl DwarfVariableInfo {
                             }
                             current = target.id;
                         }
-                        TypeKind::Record { members, .. } | TypeKind::Union { members, .. } => {
-                            break (canonical, AggregateMembers::Direct(members));
+                        TypeKind::Record { .. } | TypeKind::Union { .. } => {
+                            break (canonical, AggregateMembers::Direct);
                         }
                         TypeKind::Variant {
                             common_members,
@@ -610,16 +822,35 @@ impl DwarfVariableInfo {
                 };
                 let mut matching = Vec::new();
                 match aggregate_members {
-                    AggregateMembers::Direct(members) => {
-                        matching.extend(
-                            members
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, member)| named(member))
-                                .map(|(index, member)| {
-                                    (DynamicAggregateChild::Member(index), None, member)
-                                }),
-                        );
+                    AggregateMembers::Direct => {
+                        let mut work = 0;
+                        let paths = self.member_paths(aggregate, member_name, &mut work, 0)?;
+                        let Some(path) = one_subobject(&paths) else {
+                            let type_name =
+                                Arc::clone(&self.type_info(aggregate).map_err(malformed)?.name);
+                            if paths.is_empty() {
+                                return Err(Error::MemberNotFound {
+                                    member: member_name.to_owned(),
+                                    type_name,
+                                });
+                            }
+                            return Err(Error::AmbiguousMember {
+                                member: member_name.to_owned(),
+                                type_name,
+                            });
+                        };
+                        let mut result = None;
+                        for hop in path {
+                            self.validate_static_member_layout(hop.aggregate, &hop.member)?;
+                            result = Some(hop.member.type_ref.id);
+                            steps.push(PathStep::Member(Box::new(PlannedMemberStep {
+                                aggregate: hop.aggregate,
+                                child: hop.child,
+                                member: hop.member.clone(),
+                                required_variant: None,
+                            })));
+                        }
+                        return Ok(planned(steps, 0, result));
                     }
                     AggregateMembers::Variant {
                         common_members,
@@ -1104,6 +1335,7 @@ impl DwarfVariableInfo {
             storage: Self::retained_storage(storage),
             total,
             active_variant,
+            view: None,
         })
     }
 
@@ -1600,7 +1832,7 @@ impl DwarfVariableInfo {
             self.materialize_shape_state(type_id, shape, storage, context, runtime, budget)?;
         if let VariableState::Available { value, text, .. } = &mut state {
             *text = self
-                .text_summary(shape, value, storage, runtime)
+                .text_summary(type_id, shape, value, storage, runtime, budget)
                 .map(Arc::new);
         }
         Ok(state)
@@ -1626,6 +1858,7 @@ impl DwarfVariableInfo {
             dereference,
             children: ValueChildren::NotApplicable,
             text: None,
+            presentation: None,
         };
         let read =
             |size: u64,
@@ -1737,6 +1970,7 @@ impl DwarfVariableInfo {
                         dereference,
                         children: ValueChildren::NotApplicable,
                         text: None,
+                        presentation: None,
                     }
                 }
                 _ => match read(*byte_size, runtime, budget) {
@@ -1820,12 +2054,14 @@ impl DwarfVariableInfo {
                         storage, context, type_id, total, None,
                     )),
                     text: None,
+                    presentation: None,
                 }
             }
             ValueShapeKind::Slice {
                 element: _,
                 byte_size,
                 has_capacity,
+                ..
             } => {
                 let decoded =
                     match self.decode_slice(storage, *byte_size, *has_capacity, runtime, budget) {
@@ -1860,6 +2096,7 @@ impl DwarfVariableInfo {
                         None,
                     )),
                     text: None,
+                    presentation: None,
                 }
             }
             ValueShapeKind::Record { members, bases, .. } => {
@@ -1874,6 +2111,7 @@ impl DwarfVariableInfo {
                         storage, context, type_id, total, None,
                     )),
                     text: None,
+                    presentation: None,
                 }
             }
             ValueShapeKind::Union { members, .. } => {
@@ -1887,6 +2125,7 @@ impl DwarfVariableInfo {
                         storage, context, type_id, total, None,
                     )),
                     text: None,
+                    presentation: None,
                 }
             }
             ValueShapeKind::Variant {
@@ -1946,6 +2185,7 @@ impl DwarfVariableInfo {
                         active,
                     )),
                     text: None,
+                    presentation: None,
                 }
             }
         })

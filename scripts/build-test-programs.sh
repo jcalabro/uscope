@@ -375,6 +375,25 @@ build_zig_fixture() {
         "${command[@]}"
 }
 
+# Zig's own backend, which Debug builds use by default, describes optionals,
+# error unions, and tagged unions as variant parts, and a type declared in
+# another by its parent.
+build_zig_self_hosted_fixture() {
+    local source="$1"
+    local output="$2"
+    shift 2
+    local -a command=(
+        zig build-exe "$source" -target x86_64-linux-gnu -fno-llvm -fno-strip "$@"
+        "-femit-bin=${output}"
+    )
+    if [[ -z "$zig_version" ]]; then
+        zig_version=$(zig version)
+    fi
+    run_cached_build "$source" "$output" \
+        "compiler=zig ${zig_version}"$'\n'"target=x86_64-linux-gnu"$'\n'"backend=self-hosted" \
+        "${command[@]}"
+}
+
 validation_is_cached() {
     local output="$1"
     local stamp="$2"
@@ -548,7 +567,7 @@ generate_core() {
 suite_signature() {
     local -a paths=()
     local tool path
-    for tool in gcc g++ clang clang++ rustc go zig objdump gdb setarch; do
+    for tool in gcc g++ clang clang++ clang++-libc++ rustc go zig objdump gdb setarch; do
         if path=$(type -P "$tool"); then
             paths+=("$path")
         fi
@@ -557,13 +576,14 @@ suite_signature() {
     stat -L --format='%n %Y' "${paths[@]}"
 }
 
-# Skips every per-fixture probe when no fixture source, this script, or tool
-# changed and every previously built output still exists.
+# Skips every per-fixture probe when no fixture source, SDK, kernel, this
+# script, or tool changed and every previously built output still exists.
 suite_is_current() {
     local signature="$1"
     [[ -f "$suite_stamp" && -f "$suite_outputs" ]] || return 1
     [[ "$(<"$suite_stamp")" == "$signature" ]] || return 1
-    [[ -z "$(find "$fixtures_dir" "${BASH_SOURCE[0]}" -newer "$suite_stamp" -print -quit)" ]] \
+    [[ -z "$(find "$fixtures_dir" sdk views/kernels "${BASH_SOURCE[0]}" -newer "$suite_stamp" \
+        -print -quit)" ]] \
         || return 1
     local output
     while IFS= read -r output; do
@@ -683,6 +703,41 @@ build_shared_fixture gcc "$c_fixtures_dir/shared/library.c" "$output_dir/libglob
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
 build_fixture gcc "$c_fixtures_dir/shared/main.c" "$output_dir/globals-shared" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -ldl
+# A program and a library that carry views in .debug_uscope_views, which
+# the assembler reads from the fixture's directory, so the cache watches the
+# directory whole.
+embedded_views_dir="$c_fixtures_dir/embedded-views"
+read_dash_version gcc
+embedded_views_metadata="compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=gcc"
+run_cached_build "$embedded_views_dir" "$output_dir/libembedded-views.so" \
+    "$embedded_views_metadata" \
+    gcc -std=c17 -Wall -Wextra -Werror -shared -fPIC -O0 -g3 -gdwarf-5 -Isdk/c \
+    "$embedded_views_dir/library.c" -o "$output_dir/libembedded-views.so"
+run_cached_build "$embedded_views_dir" "$output_dir/embedded-views" \
+    "$embedded_views_metadata" \
+    gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c \
+    "$embedded_views_dir/main.c" -o "$output_dir/embedded-views" \
+    "-L$output_dir" -lembedded-views '-Wl,-rpath,$ORIGIN'
+# The kernels uscope carries must be what their sources build, so that each
+# is reviewed as its source; zig caches the build.
+zig build-exe -target wasm32-freestanding -O ReleaseSmall -fno-entry -rdynamic \
+    --stack 16384 --dep uscope_kernel -Mroot=views/kernels/rust-btree.zig \
+    -Muscope_kernel=sdk/zig/uscope_kernel.zig -femit-bin="$output_dir/rust-btree.wasm"
+if ! cmp -s "$output_dir/rust-btree.wasm" views/kernels/rust-btree.wasm; then
+    printf 'views/kernels/rust-btree.wasm is not what its source builds: copy %s there\n' \
+        "$output_dir/rust-btree.wasm" >&2
+    exit 1
+fi
+rebuilt_outputs["$output_dir/rust-btree.wasm"]=true
+# The program docs/writing-views.md writes views for, which carries them, and
+# the kernel one of them calls, written with the C SDK.
+zig cc --target=wasm32-freestanding -Os -nostdlib -Wl,--no-entry -Wl,-z,stack-size=16384 \
+    -Isdk/c "$c_fixtures_dir/tutorial/tree.c" -o "$output_dir/tutorial-tree.wasm"
+rebuilt_outputs["$output_dir/tutorial-tree.wasm"]=true
+run_cached_build "$c_fixtures_dir/tutorial" "$output_dir/tutorial" \
+    "$embedded_views_metadata" \
+    gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c "-Wa,-I$output_dir" \
+    "$c_fixtures_dir/tutorial/tutorial.c" -o "$output_dir/tutorial"
 build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" "$output_dir/libmodule-frames.so" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
 build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-o0" \
@@ -788,6 +843,45 @@ build_cpp_fixture g++ "$cpp_fixtures_dir/types.cpp" "$output_dir/types-cpp-gcc-d
     -O0 -g3 -gdwarf-5 -fdebug-types-section -fno-omit-frame-pointer -fPIE -pie
 require_dwarf_operation "$output_dir/types-cpp-gcc-dwarf4" 'DW_AT_type.*signature:'
 require_dwarf_operation "$output_dir/types-cpp-gcc-dwarf5" 'DW_AT_type.*signature:'
+build_cpp_fixture g++ "$cpp_fixtures_dir/templates.cpp" "$output_dir/templates-cpp-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_cpp_fixture clang++ "$cpp_fixtures_dir/templates.cpp" "$output_dir/templates-cpp-clang-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+# DWARF 4 type units, without DWARF 5's marks on inline namespaces.
+build_cpp_fixture g++ "$cpp_fixtures_dir/templates.cpp" "$output_dir/templates-cpp-gcc-dwarf4" \
+    -O0 -g3 -gdwarf-4 -fdebug-types-section -fno-omit-frame-pointer -fPIE -pie
+require_dwarf_operation "$output_dir/templates-cpp-gcc-dwarf4" 'DW_AT_type.*signature:'
+# LLVM's libc++ lays out and names the standard library differently.
+build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/templates.cpp" "$output_dir/templates-cpp-libcxx-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+require_dwarf_operation "$output_dir/templates-cpp-libcxx-o0" 'DW_AT_name.*: __1$'
+# The containers the built-in views present, across the libraries' matrix.
+for optimization in o0 o2; do
+    level="-O${optimization#o}"
+    build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" \
+        "$output_dir/containers-cpp-gcc-$optimization" "$level" -g3 -gdwarf-5 -fPIE -pie
+    build_cpp_fixture clang++ "$cpp_fixtures_dir/containers.cpp" \
+        "$output_dir/containers-cpp-clang-$optimization" "$level" -g3 -gdwarf-5 -fPIE -pie
+    build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/containers.cpp" \
+        "$output_dir/containers-cpp-libcxx-$optimization" "$level" -g3 -gdwarf-5 -fPIE -pie
+done
+# libstdc++'s copy-on-write string, from before the C++11 ABI.
+build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-oldabi" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_USE_CXX11_ABI=0
+# libstdc++'s debug mode, whose containers wrap the ordinary ones.
+build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-debug" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_DEBUG
+# libstdc++ linked into the program.
+build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-static" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -static-libstdc++
+# Template names without their arguments, which only the arguments'
+# entries give.
+build_cpp_fixture clang++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-clang-simple" \
+    -O0 -g3 -gdwarf-5 -gsimple-template-names -fPIE -pie
+# Only with -fstandalone-debug does clang describe the libc++ classes the
+# program never defines itself, such as a shared_ptr's control block.
+build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/containers.cpp" \
+    "$output_dir/containers-cpp-libcxx-standalone" -O0 -g3 -gdwarf-5 -fstandalone-debug -fPIE -pie
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o0" \
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/variables.rs" "$output_dir/variables-rust-o2" \
@@ -810,6 +904,41 @@ build_rust_fixture "$rust_fixtures_dir/expressions.rs" "$output_dir/expressions-
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/expressions.rs" "$output_dir/expressions-rust-o2" \
     -C opt-level=2 -C force-frame-pointers=no
+build_rust_fixture "$rust_fixtures_dir/generics.rs" "$output_dir/generics-rust-o0" \
+    -C opt-level=0 -C force-frame-pointers=yes
+build_rust_fixture "$rust_fixtures_dir/generics.rs" "$output_dir/generics-rust-o2" \
+    -C opt-level=2 -C force-frame-pointers=no
+# The Rust SDK's macro, as a dependency of a program that carries views,
+# whose directory the cache watches whole for the same reason as the C one.
+read_dash_version rustc
+rust_sdk_metadata="compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=rustc"
+run_cached_build sdk/rust "$output_dir/libuscope_views.rlib" "$rust_sdk_metadata" \
+    rustc --edition=2024 -D warnings --crate-type rlib --crate-name uscope_views \
+    sdk/rust/src/lib.rs -o "$output_dir/libuscope_views.rlib"
+# A kernel written with the Rust SDK, which the next program carries; its
+# target's core is built here, so it needs no other toolchain.
+env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= CARGO_TARGET_DIR=build/kernels \
+    cargo build --quiet --release --target wasm32-unknown-unknown \
+    -Zbuild-std=core,panic_abort \
+    --manifest-path "$rust_fixtures_dir/embedded-views/kernel/Cargo.toml"
+cp build/kernels/wasm32-unknown-unknown/release/tree.wasm \
+    "$output_dir/embedded-views-rust-tree.wasm"
+rebuilt_outputs["$output_dir/embedded-views-rust-tree.wasm"]=true
+run_cached_build "$rust_fixtures_dir/embedded-views" "$output_dir/embedded-views-rust" \
+    "$rust_sdk_metadata" \
+    env "USCOPE_TREE_KERNEL=$output_dir/embedded-views-rust-tree.wasm" \
+    rustc --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0 \
+    --crate-name embedded_views \
+    --extern "uscope_views=$output_dir/libuscope_views.rlib" \
+    "$rust_fixtures_dir/embedded-views/main.rs" -o "$output_dir/embedded-views-rust"
+# Unlike the other Rust fixtures, the containers use std.
+build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o0" \
+    --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0
+build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o2" \
+    --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=2
+# Line tables only: no variables or types, so nothing to present.
+build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-limited" \
+    --edition=2024 -D warnings -C debuginfo=limited -C codegen-units=1 -C opt-level=0
 build_go_fixture "$go_fixtures_dir/expressions" "$output_dir/expressions-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/expressions" "$output_dir/expressions-go-o2" \
@@ -830,9 +959,25 @@ build_go_fixture "$go_fixtures_dir/enums" "$output_dir/enums-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/enums" "$output_dir/enums-go-o2" \
     -buildmode=pie
+build_go_fixture "$go_fixtures_dir/generics" "$output_dir/generics-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/generics" "$output_dir/generics-go-o2" \
+    -buildmode=pie
+build_go_fixture "$go_fixtures_dir/containers" "$output_dir/containers-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/containers" "$output_dir/containers-go-o2" \
+    -buildmode=pie
 require_dwarf_operation "$output_dir/variables-go-o0" 'DW_AT_language.*Go'
 require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
 require_dwarf_operation "$output_dir/enums-go-o0" 'DW_TAG_constant'
+build_zig_fixture "$zig_fixtures_dir/generics.zig" "$output_dir/generics-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig-o0" \
+    -O Debug -fPIE -fno-omit-frame-pointer
+build_zig_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig-o2" \
+    -O ReleaseSafe -fPIE -fomit-frame-pointer
+build_zig_self_hosted_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig-self-hosted" \
+    -O Debug
 build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-zig-o2" \
