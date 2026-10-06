@@ -208,41 +208,36 @@ errors. Every other signal is passed straight through.
 
 **Goroutines are tasks, a neutral concept.** The public model gains a
 *task*: a unit of execution a language runtime schedules on OS threads.
-Each task has:
+A task is a scheduling identity, not a stack. Each task has:
 
-- a stable id;
-- a state and a wait reason;
+- an id;
+- a state, with the runtime's own detail;
 - the thread it runs on, if any;
-- locations: current, first user frame, creation site, and start function;
+- locations: current, first user frame, creation site, and entry;
 - labels;
 - a parent task.
 
-Tasks are listed from immutable snapshots per stop, and paged. Threads
-stay what they are; a task links to its thread, not the other way round.
-Go's goroutines are the only provider this plan builds. The concept is
-neutral so that tokio tasks (TODO "First-class tokio support") could
-arrive through the same interface later; nothing here is built for them.
-Clients address inspection by thread or by task. A `StopContext` names a task when there is one.
+Threads stay what they are; a task links to its thread. Clients address
+inspection by thread or by task. Go's goroutines are the only kind of task
+this plan builds. The types leave room for stackless runtimes such as
+tokio without being built for them (see Architecture).
 
-**A runtime-model layer sits beside the debug-info providers.**
-`src/runtime_model` is pure in the way `src/eval` is. It reaches the
-program only through traits for memory, types, and symbols, and a boundary
-test keeps ptrace and I/O out. The Go model is in
-`src/runtime_model/go/`. For one stop, from DWARF layouts and memory, it
-answers:
+**Runtime knowledge sits in a pure runtime-model layer, beside the
+debug-info providers.** `src/runtime_model/go` answers questions about
+one stop:
 
-- the Go version;
-- the current g of a thread;
-- the task list;
-- a parked task's registers;
+- which goroutine a thread runs;
+- the goroutine list;
+- where a parked goroutine's frames begin;
 - how to cross a stack switch;
-- which functions are wrappers or private runtime functions;
-- where panics and throws report;
-- how to read a panic's value.
+- frame identities that survive a moving stack;
+- the panic and throw hooks;
+- the signal policies Go needs.
 
-It is unit-tested against fake memory built from real layouts, and its
-results are checked on live fixtures. ELF and `pclntab` parsing stay at
-the edge in `src/debug_info`.
+Static facts about Go's code are recorded by the debug-info provider as
+neutral code roles. Examples are wrappers, runtime internals, stack
+switches, and outermost frames. The Architecture section sets out the
+traits, types, and tests that keep this separation.
 
 **Layouts come from DWARF. Only conventions are written down.**
 
@@ -323,7 +318,7 @@ provider covers code in Go compile units and the runtime's assembly:
   frame: its PC is exact, not a return address.
 - Any other `SPWRITE` function ends the stack with a typed termination,
   never a guess.
-- `StackFrame` gains a stack segment: goroutine, system (g0), signal, or
+- `StackFrame` gains a stack segment: task, system (g0), signal, or
   foreign. Backtraces show where the stack switched.
 - **Every frame is shown, and runtime frames are marked** *(settled)*.
   Nothing is hidden: the user's code, the runtime, wrappers, and
@@ -546,39 +541,428 @@ ever wanted, that is a redesign of its own.
 
 ## Architecture
 
-- **`src/model.rs`, `src/protocol.rs`.**
-  - Add `TaskId`, `TaskSnapshot`, and `TaskQuery`/`TaskPage`, with filters
-    by state, by user or system, by location, and by label, applied
-    *before* paging.
-  - Add an optional task in `StopContext`, and a stack segment on
-    `StackFrame`.
-  - Add `StopReason::LanguageException` and `StopReason::ProgramBreakpoint`.
-  - Add `FunctionInfo` language, and the Go step-filter class of each
-    function.
-  - All of this is neutral; nothing names Go.
-- **`src/runtime_model`**, which is pure:
-  - the `RuntimeModel` trait;
-  - `go/` with `version`, `contract`, `tls`, `tasks`, `switches`,
-    `panics`, and `names`;
-  - tests on fake memory.
-- **`src/debug_info`.**
-  - A `pclntab` reader with a fuzz target, beside the ELF symbol reader.
-  - An FDE index.
-  - Go attributes 0x2905–0x2907.
-  - Result, escape, and visibility normalization in
-    `dwarf/variables/inspect.rs`.
-  - Complex numbers and composite locations.
-- **`src/backend/linux`.**
-  - `frames.rs`: the Go caller provider, built with stack-switch rules.
-  - `stepping.rs`, `run_control.rs`: task-keyed activations and plans, the
-    held SIGURG, and step filters.
-  - `breakpoints.rs`: internal panic and throw breakpoints (they are not
-    user breakpoints, and never count hits), the program-breakpoint
-    classification, and Go name resolution.
-  - `watchpoints.rs`: stack moves.
-  - `core_dump.rs`: tasks in cores.
-  - Tasks are computed lazily on the controller thread for one stop, and
-    cached by `StopId`.
+Go is the first language whose runtime uscope has to understand, and
+it will not be the last. Tokio is next on the TODO list. C++ coroutines,
+fibers, and Zig's `std.Io` would follow. This section fixes where
+runtime knowledge lives, so that supporting Go leaves the codebase
+simpler rather than full of `if language == Go`, and so that the next
+runtime is a new module rather than another pass through run control.
+
+It rests on a review of the code (module graph, every
+language-specific branch, the edge traits, and the frame, step, and
+protocol types). It also draws on how other debuggers support runtime
+tasks:
+
+- Delve, for goroutines.
+- LLDB, for Swift concurrency, the most mature stackless design.
+- BugStalker, for tokio.
+- folly and Clang, for C++ coroutines.
+- folly fibers and Seastar, for stackful fibers.
+- DAP and vscode-js-debug, for async stacks.
+
+### Where things stand
+
+- **Pure layers are enforced by a text scan.** `src/eval` and `src/view`
+  are pure, checked by tests that scan their sources for forbidden paths
+  (`the_evaluator_stays_pure`, `views_stay_pure`). `src/debug_info` is
+  the edge that reads files: it owns gimli and object, and never reaches
+  `backend`. `unwind.rs` is pure by construction.
+- **The backend is one `Controller` impl spread over files.** `Controller`
+  is extended by `impl` blocks in every file of `src/backend/linux/`, with
+  no component boundaries between them. The ptrace-shaped edge traits
+  (`InspectionOps`, `LinuxTraceOps`) let one controller run against
+  ptrace, the simulator, core dumps, and fakes.
+- **Stacks and steps assume an OS thread.**
+  - A backtrace always starts from `ptrace.registers(pid)`.
+  - `FrameContext` carries no stack identity.
+  - A step is `ActiveKind::Step { thread: Pid }`. Its activation is a raw
+    CFA, compared with `<` and `rsp >= cfa` at about 18 sites in
+    `stepping.rs` and two in `watchpoints.rs`.
+  - Stepping unwinds only the main image (`main_image_unwinder`), which
+    breaks cgo and `c-shared` hosts.
+- **Thirteen request variants carry a `thread_id`,** as do `StopContext`,
+  the value capabilities, and `Backtrace`. DAP thread ids are raw thread
+  ids.
+- **Breakpoint sites already have a non-user owner.** `BreakpointOwner`
+  is `User`, `Plan(ExecutionId)`, or `Loader`. `Loader` is the precedent
+  for a persistent internal hook. Signal policies are gdb's defaults with
+  user changes on top. The stop classifier (`classify_stop_evidence`) is
+  pure.
+- **There is no language or runtime registry.** Language-specific code is
+  either at a good seam or ad hoc.
+  - At a good seam: the debug-info provider's Go and Zig normalizations,
+    `NameSyntax`, and the view language's `go` keyword.
+  - Ad hoc:
+    - `presentation.rs::dynamic()` matches `SourceLanguage` and contains
+      Go's interface convention: the ELF symbol `runtime.types`, which
+      stripping removes, and a hard-coded `0x20` flag bit.
+    - The pure evaluator tests `GoKind` (`eval/bind.rs`).
+    - `presentation.rs` keeps a `zig` flag for sum types.
+    - `GoKind` and `GoTypeAttributes` are in the public model.
+  - `glibc_tls.rs`, which reads glibc's layouts from the inferior, is the
+    nearest thing to a runtime model, and it is not pure.
+
+### Principles
+
+1. **Static facts belong to code; dynamic facts belong to a runtime.**
+   Facts that hold for every execution of a function are normalized by
+   the debug-info provider into `ModuleImage`. Examples:
+   - its calling convention;
+   - whether it is a wrapper, a stack switch, a signal trampoline, or an
+     outermost frame;
+   - whether the user wrote it.
+
+   Facts about one stop of one process are answered by a runtime model.
+   Examples:
+   - which goroutine a thread runs;
+   - where a parked goroutine stopped;
+   - what a panic holds.
+
+   Unwinding and stepping act on the static facts, and ask the runtime
+   model only for what needs memory.
+2. **Neutral vocabulary at every boundary.** The protocol, the model, run
+   control, the evaluator, the CLI, and DAP speak of tasks, activations,
+   stack segments, code roles, language exceptions, and runtime hooks.
+   Go is named in three places only:
+   - the debug-info provider's Go normalizations;
+   - `src/runtime_model/go`;
+   - `views/go-*.views`.
+
+   A test enforces this.
+3. **Build the seam; implement one runtime.** Types are designed so a
+   stackless runtime fits without redesign, but only what Go needs
+   exists. Each later runtime adds enum variants and a module; it does
+   not reshape what is here. No tokio code is written now.
+4. **A task is a scheduling identity, not a stack.** Whether a task has a
+   stack, registers, or bounds depends on the runtime and the task's
+   state. Nothing in the public model or run control may assume one. A
+   tokio task, a C++ coroutine, or a suspended Swift task has no stack of
+   its own.
+5. **Reuse the existing mechanisms rather than add parallel ones.**
+   - Caller providers compose.
+   - Breakpoint owners gain a variant.
+   - Signal policies gain a layer.
+   - Purity is enforced by the same kind of test.
+   - Per-stop state is cached by `StopId`, as view scans are.
+6. **Refactor before adding.** Each place that assumes an OS thread is
+   first changed to a neutral type, in a change that alters no behavior,
+   with every existing test passing. Go then plugs into the new type.
+
+### Layers
+
+| Concern | Lives in | Go's part |
+|---|---|---|
+| Reading ELF, DWARF, `.gopclntab`; normalizing code and types | `src/debug_info` | `pclntab` reader; Go attributes; code roles; result, escape, and visibility normalization; runtime-type index |
+| Static per-module facts | `ModuleImage` (`src/model`) | `FunctionInfo { language, role }`; the runtime-type index beside `vtables` |
+| Dynamic runtime state at one stop | `src/runtime_model` (pure) | `go/`: contract, TLS, tasks, switches, hooks, interface convention |
+| Neutral types for all of the above | `src/model`, `src/protocol` | none |
+| Process control, unwinding, stepping, sites, signals | `src/backend/linux` | none |
+| Language syntax for names and types | `src/type_identity`, the provider | Go name parsing and location syntax |
+| Values that need a library's layout | `views/*.views` | `go-runtime.views`, new `go-time.views`, `go-sync.views` |
+| Clients | `src/cli`, `src/dap` | none beyond names of things |
+
+### Static facts: code roles
+
+`FunctionInfo` gains `language: SourceLanguage` and `role: CodeRole`.
+The provider sets them once, at load.
+
+```rust
+pub enum CodeRole {
+    /// Code the program's author wrote, or a library they call.
+    Ordinary,
+    /// Forwards to another function and never shows to a step:
+    /// trampolines, ABI wrappers, Go's `<autogenerated>` code.
+    Wrapper,
+    /// The language runtime's own machinery: a step passes through it to
+    /// user code it calls, and a backtrace marks it.
+    RuntimeInternal,
+    /// Continues on another stack; only a runtime model can say where.
+    StackSwitch,
+    /// The outermost frame of any stack: unwinding ends here, complete.
+    Outermost,
+    /// Entered by a trap, not a call: its caller's pc is the instruction
+    /// that trapped, not a return address.
+    TrapEntry,
+    /// The kernel's signal-return trampoline: the interrupted registers
+    /// are in the signal frame above it.
+    SignalTrampoline,
+}
+```
+
+For Go the provider fills these from `pclntab`'s function flags
+(`TOPFRAME`, `SPWRITE`, `ASM`), the stack-switch functions by name,
+`DW_AT_trampoline` and `<autogenerated>`, and the runtime's package
+prefixes.
+
+The same roles close existing TODO items without any language check:
+- glibc's `__restore_rt` is a `SignalTrampoline`, which is "unwind through
+  signal trampolines".
+- `_start` and `clone`'s child are `Outermost`.
+- Rust's std internals can later be `RuntimeInternal`, for a Rust step
+  filter.
+
+The unwinder and stepping read only roles, never names or languages.
+
+The register rule Go code follows (it preserves nothing across a call)
+is already a static per-range fact in `src/debug_info/dwarf.rs`. It
+stays there, expressed as each range's calling convention, not as Go.
+
+### Dynamic facts: the runtime model
+
+`src/runtime_model` is pure, under a boundary test copied from the
+evaluator's. The test also forbids `object` and `crate::debug_info`, so
+it reaches neither files nor gimli. The module reaches a program through
+two small traits:
+
+- **`RuntimeImage`** — static, per module. It answers:
+  - a type by name, and a member's offset and size by path;
+  - a constant's value;
+  - a global's image address;
+  - a function's image range and role.
+
+  `ModuleImage` implements it.
+- **`RuntimeStop`** — one validated stop. It answers:
+  - reading memory, which hides breakpoint bytes;
+  - a thread's registers and `fs_base`;
+  - the load bias of the module that declared the runtime.
+
+  It needs nothing beyond `InspectionOps`, so cores and the simulator
+  edge implement it for free.
+
+A runtime model is detected from loaded images and binds its contract
+once per image, the way views are bound before they run.
+
+```rust
+/// What a language runtime tells the debugger about one stop.
+pub trait RuntimeModel: Send + Sync {
+    /// The runtime's tasks, filtered, then paged.
+    fn tasks(&self, stop: &dyn RuntimeStop, query: &TaskQuery) -> Partial<TaskPage>;
+    /// Which task a stopped thread is running, or is running runtime
+    /// code for.
+    fn thread_task(&self, stop: &dyn RuntimeStop, thread: ThreadId) -> Partial<ThreadBinding>;
+    /// Where a task's frames begin.
+    fn task_context(&self, stop: &dyn RuntimeStop, task: TaskId) -> Partial<TaskContext>;
+    /// Where unwinding continues after a frame whose role is
+    /// `StackSwitch`.
+    fn cross(&self, stop: &dyn RuntimeStop, frame: &FrameContext) -> Partial<Crossing>;
+    /// An identity for a frame that survives resuming the program.
+    fn activation(&self, stop: &dyn RuntimeStop, task: TaskId, frame: &FrameContext)
+        -> Partial<Activation>;
+    /// Code the debugger plants internal breakpoints on, and what each
+    /// means.
+    fn hooks(&self) -> &[RuntimeHook];
+    /// What a hit on a hook reports, or that execution should go on.
+    fn on_hook(&self, stop: &dyn RuntimeStop, hook: HookId, thread: ThreadId)
+        -> Partial<HookOutcome>;
+    /// Signal policies that differ from the defaults, and signals that
+    /// may wait while one instruction is stepped.
+    fn signals(&self) -> &RuntimeSignals;
+}
+
+/// Run-time knowledge of one runtime, bound against the module that
+/// carries it.
+pub fn detect(image: &dyn RuntimeImage) -> Option<Result<Arc<dyn RuntimeModel>, Unsupported>>;
+```
+
+The model's behavior is pinned down as follows:
+
+- **Results are partial or say why they are not.** `Partial<T>` carries a
+  value with a completeness flag and its reasons, for example "goroutine
+  12 is unreadable" or "version 1.25 is unverified". Every runtime
+  debugger in the survey that lists tasks marks lists that may be
+  incomplete; LLDB's Swift support is one.
+- **There is one model per runtime instance, not per language.**
+  - A cgo program has one Go model, for its executable.
+  - A `c-shared` Go library has one, for its module.
+  - A Rust program with tokio and an embedded Go library would have two.
+  - Detection is per image, so libraries that load later can add models.
+- **The set of runtimes is closed.** `detect` tries each known runtime in
+  turn. There is no plugin loading, no scripting, and no registration.
+  The trait exists to keep a boundary, to keep each runtime's code in
+  one module, and to let backend tests use a fake runtime. It is not
+  there for open extension.
+- **Every result is computed lazily and cached by `StopId`**, and nothing
+  survives a resume, as view scans work today. Task lists are paged with
+  the existing inspection budgets, so a program with a million goroutines
+  costs what a client reads.
+
+### Neutral types
+
+Each type below has only the variants Go needs. The comments name what a
+stackless runtime would add, so the extension path is recorded but not
+built.
+
+- **`TaskId`.** An opaque `u64` scoped to a runtime instance
+  (`RuntimeId`, assigned per stop session). Delve's goroutine ids are
+  stable, but tokio ids can be reused after a task exits. Ids are never
+  compared across processes.
+- **`TaskSnapshot`.** It holds:
+  - `id`;
+  - `state`;
+  - `thread: Option<ThreadId>`;
+  - `locations`: current, first user frame, creation site, and entry;
+  - `parent: Option<TaskId>`;
+  - `labels: Vec<(Arc<str>, Arc<str>)>`;
+  - `detail: Arc<str>`, the runtime's own status words, such as Go's
+    "chan receive".
+
+  Its `TaskState` is `Running`, `Runnable`, `Blocked`, or `Exited`, plus
+  `Unknown(reason)` for a state uscope cannot read. A stackless runtime
+  adds `Suspended`. There is no stack in it, by principle 4.
+- **`TaskContext`,** where a task's frames begin:
+  - `OnThread(ThreadId)` — running; unwind from the thread.
+  - `Saved(RegisterFile)` — parked with saved registers (Go's `g.sched`);
+    absent registers are unknown, never zero.
+  - A stackless runtime adds `Suspended { object, ty }`, a state machine
+    in memory with no physical frames.
+- **`StackRoot`** replaces the `pid` and `user_regs_struct` that start a
+  backtrace today. It is `Thread(Pid)` or `Saved(RegisterFile)`.
+  `FrameRegisters::Thread` keeps the live register set only for a real
+  thread. Inventing a `user_regs_struct` for a parked goroutine would
+  fill unknown registers with zeros, the convincing wrong answer AGENTS.md
+  forbids.
+- **`StackSegment` on `FrameContext` and `StackFrame`:** `Thread` (an OS
+  thread's own stack), `Task`, `System` (a runtime's scheduler stack),
+  `Signal`, or `Foreign` (C on a runtime's stack).
+  - Backtraces mark where the segment changes. DAP shows that as a
+    `presentationHint: "label"` frame, as vscode-js-debug shows its async
+    separators.
+  - A stackless runtime adds `FrameKind::Async` frames between segments.
+    They are built from state-machine objects, and their variables are
+    relative to an object rather than a CFA.
+- **`Crossing`,** the answer for a `StackSwitch` frame:
+  - `Continue { registers, segment }`;
+  - `End(UnwindTermination)`.
+
+  A `RuntimeCallerProvider` wraps `DwarfCallerProvider`. Before each step
+  it checks the frame's role: `Outermost` ends the stack, `StackSwitch`
+  asks the model, `TrapEntry` marks its caller as exact, and
+  `SignalTrampoline` reads the signal frame. Otherwise it defers to
+  DWARF.
+  - CFI stays in gimli. Memory reads for runtime state stay in the model.
+  - Cycle detection keys on `(segment, cfa, pc)`, since CFAs are not
+    monotonic across segments.
+- **`Activation`** replaces raw CFAs in run control.
+  - Its owner is `Thread(Pid)` or `Task(TaskId)`.
+  - Its depth is `Cfa(VirtualAddress)` for a stack that never moves, and
+    `BelowTop(u64)` (stack top minus CFA, read at each stop) for one that
+    does.
+  - It has three predicates: `same`, `returned_from(current)`, and
+    `is_callee_of`. These replace every `<`, `!=`, and
+    `x86_64_activation_has_returned` in `stepping.rs` and
+    `watchpoints.rs`.
+  - A stackless runtime adds `Object { address, generation }` for a
+    pinned state machine (LLDB keys Swift steps on async-context
+    pointers; BugStalker keys tokio steps on the future).
+- **`StepOwner`** replaces `ActiveKind::Step { thread }`. It holds the
+  thread the step started on and the task it belongs to, and has one
+  predicate: "is this stopped thread running my step?" That predicate
+  replaces the five sites that match on the stepping thread today. With a
+  task, the predicate asks the model for each hitting thread's task, so a
+  step follows its goroutine across threads, as LLDB moves a thread plan
+  stack with a migrating Swift task.
+- **`ExecutionContext`** is `Thread(ThreadId)` or `Task(TaskId)`. It
+  replaces the `thread_id` in the 13 request variants, `StopContext`, and
+  the value capabilities.
+  - The backend resolves a task to its thread, or to its saved context
+    for inspection.
+  - A step on a parked task is planned exactly as on a running one: its
+    breakpoints are conditioned on the task, and every thread resumes.
+  - DAP keeps a handle table from DAP thread ids to execution contexts,
+    because DAP's ids are `i32` and goroutine ids are `u64`.
+- **`BreakpointOwner::Runtime(HookId)`** sits beside `Loader`. A hook is
+  handled before user breakpoints and never counts a user hit. It either
+  becomes a stop (`StopReason::LanguageException`) or resumes invisibly.
+  The same mechanism serves the panic and throw hooks, and the
+  `copystack` hook that moves stack watchpoints.
+- **Signal policies** gain a layer: user changes, over a runtime's
+  defaults, over gdb's defaults.
+  - Go's layer passes SIGSEGV, SIGBUS, SIGFPE, and SIGURG silently.
+  - It marks SIGURG as one that may wait while one instruction is
+    stepped.
+  - `signal_during_step` reads that mark and holds the signal; it knows no
+    signal by name.
+- **`StopReason::LanguageException`** carries:
+  - `kind`: a panic or a fatal error;
+  - the runtime's own message;
+  - the value as an expression the client can inspect;
+  - the chain of nested exceptions;
+  - the frame to select.
+
+  Rust panics and C++ throws can use it later.
+- **`StopReason::ProgramBreakpoint`** reports a trap the program planted
+  itself. It is classified in `classify_stop_evidence` from evidence: an
+  `int3` uscope did not plant, at an address in executable code.
+
+### Language-specific presentation and evaluation
+
+- **Dynamic types.** `presentation.rs::dynamic()` stays a table keyed by
+  language, as it is for C++ and Rust. Go's entry becomes a call into the
+  Go runtime model (`go::interface_target`), which owns the convention
+  (`TFlagDirectIface` against `Kind_`, `moduledata.types` through
+  `runtime.firstmoduledata`). The type map from runtime-type offsets to
+  DWARF types moves into `ModuleImage` as an index beside `vtables`, so
+  the backend keeps no Go constants and no linear scan.
+- **The evaluator** loses its `GoKind` test. "This pointer stands for a
+  container a view presents" becomes a `Scope` capability the backend
+  answers. The neutral expression additions (`cap`, promoted fields, map
+  keys, slices, `$task`, `nil`) are language features with no Go in them.
+- **`GoTypeAttributes` stays in `TypeIdentity`.** Views match on it, and
+  it is data, not behavior. No new Go-only fields join it. Dictionary
+  indices and closure offsets are consumed inside the provider, which
+  hands out resolved types and captures.
+
+### Keeping it clean
+
+- **`runtime_model_stays_pure`** is a boundary test like the evaluator's,
+  with `object` and `crate::debug_info` added to the forbidden list.
+- **`languages_stay_at_their_seams`** scans `src/backend`, `src/eval`,
+  `src/protocol`, `src/cli`, and `src/dap` for `SourceLanguage::Go`,
+  `GoKind`, `GoTypeAttributes`, and Go runtime symbol literals (`"runtime.`).
+  - An explicit allowlist starts with today's two sites and must shrink.
+  - The same test can grow a row per language as Zig and Rust code moves.
+- **Each refactor of principle 6 is its own commit,** and the whole
+  existing suite passes on it before any Go code depends on it:
+  `Activation`, `StepOwner`, `StackRoot` and segments, `ExecutionContext`,
+  code roles, the runtime breakpoint owner, and the signal layer.
+- **Runtime-model tests run on fake memory and on cores.**
+  - A gcore of a fixture at a known point is real memory, read without
+    a process, deterministically.
+  - The runtime model sees cores and live processes alike, so these
+    tests cover both.
+  - Backend tests use a fake runtime model on `FakeTrace` to test
+    following a task across threads without a Go binary.
+  - The simulator is not given a runtime.
+- **`stepping.rs` must stop unwinding only the main image** before the
+  run-control phase. cgo puts C frames in other modules on a goroutine's
+  path, and `main_image_unwinder` would silently stop there.
+
+### What a second runtime would need
+
+This is a check that the seams are right, not a plan to build anything.
+For tokio, the survey found:
+
+- tasks in the scheduler's `OwnedTasks` lists, reached through the
+  `CONTEXT` thread-local;
+- each task's future type through the `poll::<T, S>` instance its vtable
+  points to;
+- await chains through rustc's `Suspend0..N` variants and their
+  `__awaitee` fields;
+- a step kept across `.await` by keying on the pinned future's address.
+
+Mapped onto this design, tokio needs:
+
+- a `tokio` runtime model, using the same traits;
+- the `Suspended` task context, `Async` frames, object-relative variable
+  scopes, and the `Object` activation;
+- a step that, at a suspend point, waits for the same object's next poll.
+
+The protocol, the code roles, the caller-provider composition, the
+breakpoint owner, and the signal layer are unchanged. Nothing in the Go
+design blocks it.
+
+### Clients
+
 - **`src/cli`.**
   - `goroutines` (alias `tasks`), with filters, grouping by location, and
     `-t` for stacks.
@@ -608,6 +992,19 @@ ever wanted, that is a redesign of its own.
 Each phase ends with its fixtures, docs, and README row updated, and with
 `just all`, plus `just stress` and `just sim 600` for run-control phases.
 
+0. **Neutral seams, with no change in behavior.** Each is its own commit,
+   and the whole existing suite passes on it:
+   - `Activation` replaces raw CFA comparisons in `stepping.rs` and
+     `watchpoints.rs`.
+   - `StepOwner` replaces matches on the stepping thread.
+   - `StackRoot` and `StackSegment` in frames.
+   - `ExecutionContext` replaces `thread_id` in the protocol, with DAP's
+     handle table.
+   - `FunctionInfo { language, role }`, with `CodeRole` set for C as well:
+     `__restore_rt` and `_start`.
+   - `BreakpointOwner::Runtime` and the runtime signal layer, each empty.
+   - The `RuntimeModel` traits, both boundary tests, and stepping that
+     unwinds every module, not only the main image.
 1. **Foundations.**
    - Move the pin to the current release, in a change of its own. Build
      the Go fixtures with PIE and non-PIE (`go build`'s default) where it
@@ -615,7 +1012,9 @@ Each phase ends with its fixtures, docs, and README row updated, and with
    - The `pclntab` reader, and the FDE index.
    - The runtime contract, its test, and the version gate.
    - Language on `FunctionInfo`.
-   - TLS g, with `m.curg` mapping.
+   - Go's runtime model: detection, the contract, and TLS g with `m.curg`
+     mapping.
+   - Go code roles from `pclntab` flags and DWARF.
 2. **Goroutines and stacks.**
    - Tasks in the model, the protocol, the CLI, and DAP.
    - Unwinding across `systemstack`, `mcall`, `morestack`, `asmcgocall`,
