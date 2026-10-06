@@ -144,6 +144,7 @@ impl ControllerMessage {
                     }
                     | Request::ExpressionType { .. }
                     | Request::ExplainView { .. }
+                    | Request::RecordKernels { .. }
                     | Request::Dereference { .. }
                     | Request::ValueChildren { .. }
                     | Request::Backtrace { .. }

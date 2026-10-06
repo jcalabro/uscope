@@ -1523,6 +1523,27 @@ impl<P: InspectionOps> Controller<P> {
                     let _ = reply.send(result);
                 }
             }
+            Request::RecordKernels {
+                expression,
+                stop_id,
+                thread_id,
+                frame,
+                reply,
+            } => {
+                let result = debug_pid(thread_id)
+                    .and_then(|pid| self.record_kernels(stop_id, pid, frame, &expression));
+                if matches!(result, Err(Error::Interrupted)) {
+                    self.serve_later(Request::RecordKernels {
+                        expression,
+                        stop_id,
+                        thread_id,
+                        frame,
+                        reply,
+                    });
+                } else {
+                    let _ = reply.send(result);
+                }
+            }
             Request::SelectThread {
                 stop_id,
                 thread_id,

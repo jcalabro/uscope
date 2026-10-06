@@ -1,0 +1,17 @@
+[package]
+name = "tree"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+uscope-views = { path = "../../../../../sdk/rust" }
+
+[profile.release]
+opt-level = "s"
+panic = "abort"
+lto = true

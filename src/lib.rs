@@ -95,12 +95,12 @@ pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CoreDumpInfo,
     CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent, ExceptionDisposition,
     ExceptionInfo, ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, HitComparison,
-    HitCondition, InferiorState, InvalidatedWatchpoint, LaunchOptions, LogPart, ModuleIdentity,
-    PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope, SignalPolicy,
-    StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState, TypeViews,
-    ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck, ViewExplanation, WatchAccess,
-    WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
-    WatchpointInvalidation, WatchpointSpec,
+    HitCondition, InferiorState, InvalidatedWatchpoint, KernelSource, LaunchOptions, LogPart,
+    ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope,
+    SignalPolicy, StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState,
+    TypeViews, ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck, ViewExplanation,
+    WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit,
+    WatchpointId, WatchpointInvalidation, WatchpointSpec,
 };
 pub use source_map::SourcePathMap;
 pub use view::summary::{
@@ -117,6 +117,45 @@ pub fn built_in_views() -> Vec<Arc<ViewName>> {
         .iter()
         .map(|view| view::name_of(view))
         .collect()
+}
+
+/// One recorded kernel run, replayed without a program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayedRun {
+    pub kernel: String,
+    /// The reads and items the recording holds.
+    pub events: usize,
+    /// How many of them the kernel reproduced, or the first difference.
+    pub outcome: std::result::Result<usize, String>,
+}
+
+/// Replays the kernel runs `text` records, as `record_kernels` writes them,
+/// with the kernel module `wasm` when one is given, and otherwise with the
+/// built-in kernel each run names.
+pub fn replay_kernel_runs(
+    text: &str,
+    wasm: Option<&[u8]>,
+) -> std::result::Result<Vec<ReplayedRun>, String> {
+    let recordings = view::kernel::parse_recordings(text)?;
+    let mut replayed = Vec::new();
+    for recording in &recordings {
+        let kernel = match wasm {
+            Some(wasm) => Arc::new(view::kernel::Kernel::new(
+                &recording.kernel,
+                "replayed",
+                wasm,
+            )?),
+            None => view::ViewSet::built_in()
+                .kernel(&recording.kernel)
+                .ok_or_else(|| format!("no built-in kernel is named `{}`", recording.kernel))?,
+        };
+        replayed.push(ReplayedRun {
+            kernel: recording.kernel.clone(),
+            events: recording.events.len(),
+            outcome: view::kernel::replay(&kernel, recording),
+        });
+    }
+    Ok(replayed)
 }
 
 /// Whether a view is one uscope builds in, rather than one loaded for the
@@ -1075,12 +1114,35 @@ impl DebuggerHandle {
         self.selected().await?.explain_view(expression).await
     }
 
+    /// Presents an expression's value in the selected frame, and its first
+    /// page of children, and returns a recording of each kernel run that
+    /// took, as text that `uscope views replay` replays without a program.
+    pub async fn record_kernels(&self, expression: &Expression) -> Result<Vec<String>> {
+        self.selected().await?.record_kernels(expression).await
+    }
+
     /// Presents values with these view files ahead of the views modules
-    /// embed and the built-in views, replacing any loaded before, and
-    /// returns what kept parts of them out. Files are parsed here, before
-    /// the debugger sees them.
-    pub async fn load_views(&self, files: &[(&str, &str)]) -> Result<Arc<[ViewFileError]>> {
-        let views = Arc::new(view::ViewSet::new(files.iter().copied()));
+    /// embed and the built-in views, replacing any loaded before, with the
+    /// kernels beside them, and returns what kept parts of them out. Files
+    /// are parsed, and kernels loaded, here, before the debugger sees
+    /// them; a kernel whose name an earlier one has is left out.
+    pub async fn load_views(
+        &self,
+        files: &[(&str, &str)],
+        kernels: &[view_files::KernelFile],
+    ) -> Result<Arc<[ViewFileError]>> {
+        let mut views = view::ViewSet::new(files.iter().copied());
+        for kernel in kernels {
+            views.add_kernels(
+                &kernel.path,
+                [(
+                    kernel.name.as_str(),
+                    kernel.path.as_str(),
+                    kernel.module.as_slice(),
+                )],
+            );
+        }
+        let views = Arc::new(views);
         let errors: Arc<[ViewFileError]> = views.errors().into();
         self.request(|reply| Request::SetViews { views, reply })
             .await?;
@@ -1533,6 +1595,22 @@ impl StopView<'_> {
         let expression = expression.clone();
         self.handle
             .request(|reply| Request::ExplainView {
+                expression,
+                stop_id: context.stop,
+                thread_id: context.thread,
+                frame: context.frame,
+                reply,
+            })
+            .await
+    }
+
+    /// Presents an expression's value in the frame, and its first page of
+    /// children, and records each kernel run that took.
+    pub async fn record_kernels(&self, expression: &Expression) -> Result<Vec<String>> {
+        let context = self.context;
+        let expression = expression.clone();
+        self.handle
+            .request(|reply| Request::RecordKernels {
                 expression,
                 stop_id: context.stop,
                 thread_id: context.thread,

@@ -14,6 +14,7 @@ pub mod embedded;
 pub mod format;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzz;
+pub mod kernel;
 pub mod pattern;
 pub mod run;
 pub mod scan;
@@ -48,14 +49,26 @@ const BUILT_IN: [(&str, &str); 5] = [
     ),
 ];
 
+/// The kernels built into uscope: each one's name, the source it is built
+/// from, and its module, which `just build-test-programs` checks is what
+/// that source builds.
+const BUILT_IN_KERNELS: [(&str, &str, &[u8]); 1] = [(
+    "rust-btree",
+    "views/kernels/rust-btree.zig",
+    include_bytes!("../../views/kernels/rust-btree.wasm"),
+)];
+
 /// Views from one source, such as the files loaded for a session, a
 /// module's embedded views, or the built-in ones, in the order they are
-/// tried. Immutable once made; loading views makes a new set.
+/// tried, and the kernels they may call. Immutable once made; loading
+/// views makes a new set.
 #[derive(Debug)]
 pub struct ViewSet {
     views: Vec<Arc<View>>,
     /// Each base name's views, in order.
     by_base: BTreeMap<String, Vec<usize>>,
+    /// Each kernel, by name, with where it was loaded from.
+    kernels: BTreeMap<String, (Arc<str>, Arc<kernel::Kernel>)>,
     errors: Vec<syntax::Error>,
 }
 
@@ -80,15 +93,72 @@ impl ViewSet {
         Self {
             views,
             by_base,
+            kernels: BTreeMap::new(),
             errors,
         }
     }
 
-    /// The built-in views alone.
+    /// Adds kernels loaded from `origin`, each a name, its source or a link
+    /// to it, and its module. A kernel that cannot load, or whose name an
+    /// earlier one has, is an error of `origin`.
+    pub fn add_kernels<'a>(
+        &mut self,
+        origin: &str,
+        kernels: impl IntoIterator<Item = (&'a str, &'a str, &'a [u8])>,
+    ) {
+        for (name, source, wasm) in kernels {
+            let error = |message: String| syntax::Error {
+                source: Arc::from(origin),
+                line: 0,
+                column: 0,
+                message: format!("kernel `{name}`: {message}"),
+            };
+            if !syntax::is_kernel_name(name) {
+                self.errors.push(error(syntax::KERNEL_NAME.to_owned()));
+                continue;
+            }
+            if self.kernels.contains_key(name) {
+                self.errors
+                    .push(error("an earlier kernel has the same name".to_owned()));
+                continue;
+            }
+            match kernel::Kernel::new(name, source, wasm) {
+                Ok(kernel) => {
+                    self.kernels
+                        .insert(name.to_owned(), (Arc::from(origin), Arc::new(kernel)));
+                }
+                Err(message) => self.errors.push(error(message)),
+            }
+        }
+    }
+
+    /// The kernel named `name`, if the set has one.
+    #[must_use]
+    pub fn kernel(&self, name: &str) -> Option<Arc<kernel::Kernel>> {
+        self.kernels.get(name).map(|(_, kernel)| Arc::clone(kernel))
+    }
+
+    /// The set's kernels, with where each was loaded from and what it is
+    /// built from.
+    pub fn kernels(&self) -> impl Iterator<Item = crate::KernelSource> + '_ {
+        self.kernels
+            .values()
+            .map(|(origin, kernel)| crate::KernelSource {
+                name: Arc::clone(kernel.name()),
+                origin: Arc::clone(origin),
+                source: Arc::from(kernel.source()),
+            })
+    }
+
+    /// The built-in views alone, with the built-in kernels.
     #[must_use]
     pub fn built_in() -> Arc<Self> {
         static BUILT_IN_SET: OnceLock<Arc<ViewSet>> = OnceLock::new();
-        Arc::clone(BUILT_IN_SET.get_or_init(|| Arc::new(Self::new(BUILT_IN))))
+        Arc::clone(BUILT_IN_SET.get_or_init(|| {
+            let mut set = Self::new(BUILT_IN);
+            set.add_kernels("built-in", BUILT_IN_KERNELS);
+            Arc::new(set)
+        }))
     }
 
     /// A set of no views.
@@ -196,11 +266,11 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
                 .collect::<Vec<_>>();
             found.sort_unstable();
             found.dedup();
-            candidates.extend(found.into_iter().map(|index| &views.views[index]));
+            candidates.extend(found.into_iter().map(|index| (&views.views[index], *views)));
         }
         let mut base = None;
         let mut extensions = Vec::new();
-        for view in candidates {
+        for (view, set) in candidates {
             // Views after the one that binds are not tried; `extend`s are.
             if base.is_some() && !view.extend {
                 continue;
@@ -211,8 +281,8 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
             let Some(captures) = pattern::matches(&view.pattern, identity, scope) else {
                 continue;
             };
-            match bind::bind(view, ty, &captures, scope) {
-                Ok(bound) if view.extend => extensions.push((view, captures, bound)),
+            match bind::bind(view, set, ty, &captures, scope) {
+                Ok(bound) if view.extend => extensions.push((view, set, captures, bound)),
                 Ok(bound) => {
                     choice.candidates.push(Candidate {
                         name: name_of(view),
@@ -228,14 +298,14 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
         }
         // `extend`s with no view to add to add to the value's members.
         if base.is_none()
-            && let Some((view, captures, _)) = extensions.first()
+            && let Some((view, set, captures, _)) = extensions.first()
         {
             let members = Arc::new(View {
                 extend: false,
                 statements: Vec::new(),
                 ..(***view).clone()
             });
-            match bind::bind(&members, ty, captures, scope) {
+            match bind::bind(&members, set, ty, captures, scope) {
                 Ok(bound) => base = Some(bound),
                 Err(rejection) => choice.candidates.push(Candidate {
                     name: name_of(view),
@@ -246,7 +316,7 @@ pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -
         let Some(mut base) = base else {
             continue;
         };
-        for (view, _, extension) in extensions {
+        for (view, _, _, extension) in extensions {
             let rejection = bind::check_extension(&base, &extension, ty, scope).err();
             if rejection.is_none() {
                 base.extensions.push(Arc::new(extension));

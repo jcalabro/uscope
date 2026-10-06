@@ -109,6 +109,12 @@ pub enum BoundGenerator<St> {
         left: ViewProgram<St>,
         right: ViewProgram<St>,
     },
+    /// A kernel's items, each as many words as the clause has variables.
+    Kernel {
+        kernel: Arc<super::kernel::Kernel>,
+        arguments: Vec<ViewProgram<St>>,
+        words: usize,
+    },
 }
 
 /// What follows a clause's generator, bound.
@@ -129,13 +135,18 @@ pub struct BoundClause<St> {
 }
 
 impl<St> BoundClause<St> {
-    /// How many positions the clause's variable and `let`s take.
+    /// How many positions the clause's variables and `let`s take.
     pub fn width(&self) -> usize {
-        1 + self
-            .items
-            .iter()
-            .filter(|item| matches!(item, BoundItem::Let(_)))
-            .count()
+        let variables = match &self.generator {
+            BoundGenerator::Kernel { words, .. } => *words,
+            _ => 1,
+        };
+        variables
+            + self
+                .items
+                .iter()
+                .filter(|item| matches!(item, BoundItem::Let(_)))
+                .count()
     }
 }
 
@@ -316,6 +327,9 @@ pub struct ViewScope<'a, S: Scope> {
     base: &'a S,
     self_type: TypeReference,
     captures: &'a Captures,
+    /// The set the view came from, whose kernels it calls before the
+    /// built-in ones.
+    set: &'a super::ViewSet,
     types: Vec<(String, TypeReference)>,
     lets: Vec<(String, Ty, bool)>,
     /// The generators' variables and clauses' `let`s in scope, by
@@ -324,11 +338,17 @@ pub struct ViewScope<'a, S: Scope> {
 }
 
 impl<'a, S: Scope> ViewScope<'a, S> {
-    pub const fn new(base: &'a S, self_type: TypeReference, captures: &'a Captures) -> Self {
+    pub const fn new(
+        base: &'a S,
+        self_type: TypeReference,
+        captures: &'a Captures,
+        set: &'a super::ViewSet,
+    ) -> Self {
         Self {
             base,
             self_type,
             captures,
+            set,
             types: Vec::new(),
             lets: Vec::new(),
             variables: Vec::new(),
@@ -480,19 +500,20 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
     }
 }
 
-/// Binds `view` against `self_type`, whose identity its pattern matched,
-/// capturing `captures`.
+/// Binds `view`, from `set`, against `self_type`, whose identity its
+/// pattern matched, capturing `captures`.
 #[expect(
     clippy::too_many_lines,
     reason = "each statement binds in its own arm, in the order the view writes them"
 )]
 pub fn bind<S: Scope>(
     view: &Arc<View>,
+    set: &super::ViewSet,
     self_type: TypeReference,
     captures: &Captures,
     base: &S,
 ) -> Result<BoundView<S::Step>, Rejection> {
-    let mut scope = ViewScope::new(base, self_type, captures);
+    let mut scope = ViewScope::new(base, self_type, captures, set);
     let mut lets = Vec::new();
     // `let`s and `type`s, in order: each sees those before it.
     for statement in &view.statements {
@@ -1132,8 +1153,37 @@ fn bind_clause<S: Scope>(
             let right = bind_link(right, &ty, scope)?;
             (BoundGenerator::Inorder { root, left, right }, ty)
         }
+        Generator::Kernel {
+            name,
+            line,
+            arguments,
+        } => {
+            let kernel = scope
+                .set
+                .kernel(name)
+                .or_else(|| super::ViewSet::built_in().kernel(name))
+                .ok_or_else(|| Rejection {
+                    line: *line,
+                    part: format!("kernel(\"{name}\")"),
+                    reason: "no kernel has that name".to_owned(),
+                })?;
+            let arguments = arguments
+                .iter()
+                .map(|argument| bind_word(argument, scope))
+                .collect::<Result<_, _>>()?;
+            (
+                BoundGenerator::Kernel {
+                    kernel,
+                    arguments,
+                    words: clause.variables.len(),
+                },
+                Ty::Exact,
+            )
+        }
     };
-    scope.variables.push((clause.variable.clone(), ty, false));
+    for variable in &clause.variables {
+        scope.variables.push((variable.clone(), ty.clone(), false));
+    }
     let mut items = Vec::new();
     for item in &clause.items {
         items.push(match item {
@@ -1152,6 +1202,24 @@ fn bind_clause<S: Scope>(
         });
     }
     Ok(BoundClause { generator, items })
+}
+
+/// A kernel's argument: an integer, a pointer, or a truth value, which the
+/// kernel sees as a 64-bit word.
+fn bind_word<S: Scope>(
+    expr: &Expr,
+    scope: &ViewScope<'_, S>,
+) -> Result<ViewProgram<S::Step>, Rejection> {
+    let program =
+        bind_value(&expr.expression, scope).map_err(|error| rejection(scope, expr, &error))?;
+    match category(scope, program.result()) {
+        Category::Integer { .. } | Category::Pointer(_) | Category::Bool => Ok(program),
+        _ => Err(Rejection {
+            line: expr.line,
+            part: expr.text().to_owned(),
+            reason: "a kernel's arguments are integers, pointers, and truth values".to_owned(),
+        }),
+    }
 }
 
 /// A linked structure's first node: a pointer, whose type every node has.

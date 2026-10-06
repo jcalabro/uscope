@@ -294,6 +294,7 @@ fn containers(input: &mut Input<'_>) -> (World, Vec<(String, TypeReference)>) {
     // Linked and hashed containers, whose views scan.
     linked_containers(&mut world, &mut variables);
     sums_and_tuples(&mut world, &mut variables);
+    btree_map(&mut world, &mut variables);
 
     let heap = (0..HEAP_SIZE).map(|_| input.byte()).collect::<Vec<_>>();
     world.map(HEAP, &heap);
@@ -662,6 +663,75 @@ fn sums_and_tuples(world: &mut World, variables: &mut Vec<(String, TypeReference
     );
     world.go_kind(channel, crate::GoKind::Chan);
     variables.push(("Go channel".to_owned(), channel));
+}
+
+/// Rust's `BTreeMap<i32, i32>`, whose view a kernel walks. The harness has
+/// no sums, so its root's `Some` is a plain member here: what the harness
+/// exercises is the kernel's walk over whatever the nodes hold.
+fn btree_map(world: &mut World, variables: &mut Vec<(String, TypeReference)>) {
+    let i32 = world.base("i32", E::Signed, 4);
+    let u16 = world.base("u16", E::Unsigned, 2);
+    let usize = world.base("usize", E::Unsigned, 8);
+    let arguments = vec![TypeArgument::Type(i32), TypeArgument::Type(i32)];
+    let path = ["alloc", "collections", "btree", "node"];
+    let entries = world.array(i32, &[11]);
+    let leaf = world.record("LeafNode<i32, i32>", 104, &[]);
+    let leaf_pointer = world.pointer(Some(leaf));
+    world.set_members(
+        leaf,
+        &[
+            ("parent", leaf_pointer, 0),
+            ("keys", entries, 8),
+            ("vals", entries, 52),
+            ("parent_idx", u16, 96),
+            ("len", u16, 98),
+        ],
+    );
+    world.identify(
+        leaf,
+        SourceLanguage::Rust,
+        &path,
+        "LeafNode",
+        arguments.clone(),
+    );
+    let edges = world.array(leaf_pointer, &[12]);
+    let internal = world.record(
+        "InternalNode<i32, i32>",
+        200,
+        &[("data", leaf, 0), ("edges", edges, 104)],
+    );
+    world.identify(
+        internal,
+        SourceLanguage::Rust,
+        &path,
+        "InternalNode",
+        arguments.clone(),
+    );
+    let non_null = world.record(
+        "NonNull<LeafNode<i32, i32>>",
+        8,
+        &[("pointer", leaf_pointer, 0)],
+    );
+    let node = world.record(
+        "NodeRef",
+        16,
+        &[("height", usize, 0), ("node", non_null, 8)],
+    );
+    let some = world.record("Some", 16, &[("__0", node, 0)]);
+    let root = world.record("Option<NodeRef>", 16, &[("Some", some, 0)]);
+    let map = world.record(
+        "BTreeMap<i32, i32>",
+        24,
+        &[("root", root, 0), ("length", usize, 16)],
+    );
+    world.identify(
+        map,
+        SourceLanguage::Rust,
+        &["alloc", "collections", "btree", "map"],
+        "BTreeMap",
+        [arguments, vec![TypeArgument::Unknown("Global".into())]].concat(),
+    );
+    variables.push(("Rust BTreeMap".to_owned(), map));
 }
 
 fn world_size(world: &World, ty: TypeReference) -> u64 {

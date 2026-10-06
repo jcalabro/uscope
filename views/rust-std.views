@@ -78,6 +78,31 @@ view rust std::collections::hash::set::HashSet<T, _> {
         => (control as *Pair)[-1 - i].0
 }
 
+# A BTreeMap's entries are in its nodes, each holding up to eleven keys and
+# values, and in order among them, which the rust-btree kernel walks
+# (views/kernels/rust-btree.zig). An empty map may have no root, and a set
+# is a map of keys to nothing.
+view rust alloc::collections::btree::map::BTreeMap<K, V, _> {
+    type Leaf = alloc::collections::btree::node::LeafNode<K, V>
+    type Internal = alloc::collections::btree::node::InternalNode<K, V>
+    let tree = root.Some.0
+    let node = length == 0 ? 0 : inner(tree.node) as usize
+    let height = length == 0 ? 0 : tree.height
+    show map(length) for key, value in kernel("rust-btree", node, height, offsetof(Leaf, len), offsetof(Leaf, keys), offsetof(Leaf, vals), sizeof(K), sizeof(V), offsetof(Internal, edges), 11)
+        => *(key as *K) : *(value as *V)
+}
+
+view rust alloc::collections::btree::set::BTreeSet<T, _> {
+    type Nothing = arg(typeof(map), 1)
+    type Leaf = alloc::collections::btree::node::LeafNode<T, Nothing>
+    type Internal = alloc::collections::btree::node::InternalNode<T, Nothing>
+    let tree = map.root.Some.0
+    let node = map.length == 0 ? 0 : inner(tree.node) as usize
+    let height = map.length == 0 ? 0 : tree.height
+    show sequence(map.length) for key, value in kernel("rust-btree", node, height, offsetof(Leaf, len), offsetof(Leaf, keys), offsetof(Leaf, vals), sizeof(T), 0, offsetof(Internal, edges), 11)
+        => *(key as *T)
+}
+
 # A Box is a pointer to what it holds. A Box of a slice, str, or trait
 # object is a wider pointer, which needs no view.
 view rust alloc::**::Box<T, _> {

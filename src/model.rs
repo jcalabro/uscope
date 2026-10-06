@@ -1814,6 +1814,9 @@ pub enum ViewProblem {
     /// The generators passed the most elements a view generates without a
     /// count.
     TooMany { limit: u64 },
+    /// A kernel the view calls failed: it trapped, returned a failure, or
+    /// used the host wrongly.
+    Kernel { kernel: Arc<str>, reason: Arc<str> },
     /// The debugger failed presenting the value; a defect in uscope.
     Internal(Arc<str>),
 }
@@ -1849,6 +1852,9 @@ impl fmt::Display for ViewProblem {
                 formatter,
                 "the view generates more than {limit} elements without a count"
             ),
+            Self::Kernel { kernel, reason } => {
+                write!(formatter, "kernel `{kernel}` failed: {reason}")
+            }
         }
     }
 }

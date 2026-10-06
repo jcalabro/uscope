@@ -632,6 +632,113 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
     );
 }
 
+/// A kernel beside a view file is loaded with it, as `NAME.wasm`; the runs
+/// a presentation takes are recorded, and replay with no program; and
+/// `views check` shows each kernel as the source it is built from.
+#[test]
+fn kernels_beside_view_files_present_values_and_their_runs_replay() {
+    let directory = support::ScratchDir::new("cli-kernels");
+    let root = env!("CARGO_MANIFEST_DIR");
+    let views = directory.path().join("forest.views");
+    fs::write(
+        &views,
+        "uscope-views 1\nview c tree {\n    show sequence(count) for at in kernel(\"preorder\", root, offsetof(node, child), offsetof(node, sibling))\n        => ((node *)at)->value * 10\n}\n",
+    )
+    .expect("write the views");
+    fs::copy(
+        format!("{root}/build/test-programs/tutorial-tree.wasm"),
+        directory.path().join("preorder.wasm"),
+    )
+    .expect("put the kernel beside the views");
+    let junk = directory.path().join("junk.views");
+    fs::write(
+        &junk,
+        "uscope-views 1\nview c intvec {\n    show sequence(n) for at in kernel(\"junk\") => at\n}\n",
+    )
+    .expect("write views that call a broken kernel");
+    fs::write(directory.path().join("junk.wasm"), b"\0asm junk").expect("write a broken kernel");
+    let runs = directory.path().join("family.runs");
+    let record = format!("views record {} family", runs.display());
+    let load_junk = format!("views load {}", junk.display());
+    let program = format!("{root}/build/test-programs/tutorial");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", directory.path().join("config"))
+        .arg("--batch")
+        .arg("--views")
+        .arg(&views)
+        .args(["-e", "break barrier", "-e", "run", "-e", "up"])
+        .args([
+            "-e",
+            "print family",
+            "-e",
+            &record,
+            "-e",
+            "info view family",
+        ])
+        .args(["-e", &load_junk])
+        .arg(&program)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run uscope");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = assert_success(output);
+    assert_in_order(
+        &stdout,
+        &[
+            "family = len=5 [10, 20, 30, 40, 50]",
+            "recorded 2 kernel runs to",
+            "presented by ",
+            "forest.views:2 `c tree`",
+        ],
+    );
+    assert!(
+        stderr.contains("junk.wasm:0:0: kernel `junk`: it is not a module a kernel may be"),
+        "{stderr}"
+    );
+    let replay = |arguments: &[&std::ffi::OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .args(["views".as_ref(), "replay".as_ref(), runs.as_os_str()])
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope views replay")
+    };
+    let kernel = directory.path().join("preorder.wasm");
+    assert_in_order(
+        &assert_success(replay(&["--kernel".as_ref(), kernel.as_os_str()])),
+        &[
+            "run 1: kernel `preorder` reproduced",
+            "run 2: kernel `preorder` reproduced",
+        ],
+    );
+    // A run replays only with the kernel it recorded.
+    let unknown = replay(&[]);
+    assert!(!unknown.status.success(), "{unknown:?}");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("no built-in kernel is named `preorder`"),
+        "{unknown:?}"
+    );
+    let other = replay(&[
+        "--kernel".as_ref(),
+        format!("{root}/views/kernels/rust-btree.wasm").as_ref(),
+    ]);
+    assert!(!other.status.success(), "{other:?}");
+    assert!(
+        String::from_utf8_lossy(&other.stdout).contains("differs"),
+        "{other:?}"
+    );
+    let check = uscope(&["views", "check", "build/test-programs/tutorial"]);
+    assert_in_order(
+        &assert_success(check),
+        &[
+            "kernels, and what they are built from:",
+            "  tree (tutorial.views[1]):",
+            "    // The values of a tree whose nodes keep their children in a list, each",
+        ],
+    );
+}
+
 /// A program built with line tables only describes no variables or types,
 /// so nothing is presented, and uscope says so rather than guessing.
 #[test]

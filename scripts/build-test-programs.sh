@@ -576,13 +576,14 @@ suite_signature() {
     stat -L --format='%n %Y' "${paths[@]}"
 }
 
-# Skips every per-fixture probe when no fixture source, this script, or tool
-# changed and every previously built output still exists.
+# Skips every per-fixture probe when no fixture source, SDK, kernel, this
+# script, or tool changed and every previously built output still exists.
 suite_is_current() {
     local signature="$1"
     [[ -f "$suite_stamp" && -f "$suite_outputs" ]] || return 1
     [[ "$(<"$suite_stamp")" == "$signature" ]] || return 1
-    [[ -z "$(find "$fixtures_dir" "${BASH_SOURCE[0]}" -newer "$suite_stamp" -print -quit)" ]] \
+    [[ -z "$(find "$fixtures_dir" sdk views/kernels "${BASH_SOURCE[0]}" -newer "$suite_stamp" \
+        -print -quit)" ]] \
         || return 1
     local output
     while IFS= read -r output; do
@@ -715,10 +716,25 @@ run_cached_build "$embedded_views_dir" "$output_dir/embedded-views" \
     gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c \
     "$embedded_views_dir/main.c" -o "$output_dir/embedded-views" \
     "-L$output_dir" -lembedded-views '-Wl,-rpath,$ORIGIN'
-# The program docs/writing-views.md writes views for, which carries them.
+# The kernels uscope carries must be what their sources build, so that each
+# is reviewed as its source; zig caches the build.
+zig build-exe -target wasm32-freestanding -O ReleaseSmall -fno-entry -rdynamic \
+    --stack 16384 --dep uscope_kernel -Mroot=views/kernels/rust-btree.zig \
+    -Muscope_kernel=sdk/zig/uscope_kernel.zig -femit-bin="$output_dir/rust-btree.wasm"
+if ! cmp -s "$output_dir/rust-btree.wasm" views/kernels/rust-btree.wasm; then
+    printf 'views/kernels/rust-btree.wasm is not what its source builds: copy %s there\n' \
+        "$output_dir/rust-btree.wasm" >&2
+    exit 1
+fi
+rebuilt_outputs["$output_dir/rust-btree.wasm"]=true
+# The program docs/writing-views.md writes views for, which carries them, and
+# the kernel one of them calls, written with the C SDK.
+zig cc --target=wasm32-freestanding -Os -nostdlib -Wl,--no-entry -Wl,-z,stack-size=16384 \
+    -Isdk/c "$c_fixtures_dir/tutorial/tree.c" -o "$output_dir/tutorial-tree.wasm"
+rebuilt_outputs["$output_dir/tutorial-tree.wasm"]=true
 run_cached_build "$c_fixtures_dir/tutorial" "$output_dir/tutorial" \
     "$embedded_views_metadata" \
-    gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c \
+    gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c "-Wa,-I$output_dir" \
     "$c_fixtures_dir/tutorial/tutorial.c" -o "$output_dir/tutorial"
 build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" "$output_dir/libmodule-frames.so" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
@@ -897,8 +913,18 @@ rust_sdk_metadata="compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"back
 run_cached_build sdk/rust "$output_dir/libuscope_views.rlib" "$rust_sdk_metadata" \
     rustc --edition=2024 -D warnings --crate-type rlib --crate-name uscope_views \
     sdk/rust/src/lib.rs -o "$output_dir/libuscope_views.rlib"
+# A kernel written with the Rust SDK, which the next program carries; its
+# target's core is built here, so it needs no other toolchain.
+env RUSTFLAGS= CARGO_ENCODED_RUSTFLAGS= CARGO_TARGET_DIR=build/kernels \
+    cargo build --quiet --release --target wasm32-unknown-unknown \
+    -Zbuild-std=core,panic_abort \
+    --manifest-path "$rust_fixtures_dir/embedded-views/kernel/Cargo.toml"
+cp build/kernels/wasm32-unknown-unknown/release/tree.wasm \
+    "$output_dir/embedded-views-rust-tree.wasm"
+rebuilt_outputs["$output_dir/embedded-views-rust-tree.wasm"]=true
 run_cached_build "$rust_fixtures_dir/embedded-views" "$output_dir/embedded-views-rust" \
     "$rust_sdk_metadata" \
+    env "USCOPE_TREE_KERNEL=$output_dir/embedded-views-rust-tree.wasm" \
     rustc --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0 \
     --crate-name embedded_views \
     --extern "uscope_views=$output_dir/libuscope_views.rlib" \

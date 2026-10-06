@@ -42,6 +42,19 @@ const MAX_PATTERN_DEPTH: usize = 16;
 /// The most generators one sequence or map may nest.
 pub const MAX_CLAUSES: usize = 4;
 
+/// What a kernel's name may be, which is also the name of its file.
+pub const KERNEL_NAME: &str = "a kernel's name is 1 to 64 letters, digits, `_`, and `-`";
+
+/// Whether `name` may name a kernel: see [`KERNEL_NAME`].
+#[must_use]
+pub fn is_kernel_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "_-".contains(character))
+}
+
 /// Words that end an expression, so a member with one of these names must
 /// be written in backticks.
 const STOP_WORDS: [&str; 5] = ["or", "for", "if", "else", "let"];
@@ -120,6 +133,37 @@ pub struct View {
     /// the type rather than presenting it.
     pub extend: bool,
     pub statements: Vec<Statement>,
+}
+
+impl View {
+    /// The names of the kernels the view calls.
+    #[must_use]
+    pub fn kernel_names(&self) -> Vec<&str> {
+        fn walk<'v>(shape: &'v Shape, names: &mut Vec<&'v str>) {
+            match shape {
+                Shape::Sequence { clauses, .. } | Shape::Map { clauses, .. } => {
+                    names.extend(clauses.iter().filter_map(|clause| match &clause.generator {
+                        Generator::Kernel { name, .. } => Some(name.as_str()),
+                        _ => None,
+                    }));
+                }
+                Shape::If {
+                    then, otherwise, ..
+                } => {
+                    walk(then, names);
+                    walk(otherwise, names);
+                }
+                _ => {}
+            }
+        }
+        let mut names = Vec::new();
+        for statement in &self.statements {
+            if let Statement::Show(shape) = statement {
+                walk(shape, &mut names);
+            }
+        }
+        names
+    }
 }
 
 /// An expression and the line it was written on.
@@ -269,6 +313,13 @@ pub enum Generator {
     /// after its left subtree and before its right; a null pointer is an
     /// empty tree.
     Inorder { root: Expr, left: Link, right: Link },
+    /// `kernel("NAME", ARG, …)`: the items a kernel yields, each a word
+    /// for each of the clause's variables.
+    Kernel {
+        name: String,
+        line: u32,
+        arguments: Vec<Expr>,
+    },
 }
 
 /// What follows a clause's generator, in order: a condition each value
@@ -279,10 +330,11 @@ pub enum Item {
     Let { name: String, value: Expr },
 }
 
-/// `for VAR in GENERATOR [if FILTER | let NAME = EXPR]…`.
+/// `for VAR[, VAR…] in GENERATOR [if FILTER | let NAME = EXPR]…`. Only a
+/// kernel's items have several variables.
 #[derive(Debug, Clone)]
 pub struct Clause {
-    pub variable: String,
+    pub variables: Vec<String>,
     pub generator: Generator,
     pub items: Vec<Item>,
 }
@@ -1133,11 +1185,27 @@ impl<'a> Parser<'a> {
                 return Err(self.error(format!("generators may nest at most {MAX_CLAUSES} deep")));
             }
             self.position += "for".len();
-            let variable = self.name("the generator's variable")?;
-            self.skip_inline();
+            let mut variables = vec![self.name("the generator's variable")?];
+            loop {
+                self.skip_inline();
+                if !self.eat(",") {
+                    break;
+                }
+                if variables.len() == crate::view::kernel::MAX_WORDS {
+                    return Err(self.error(format!(
+                        "a kernel's items have at most {} words",
+                        crate::view::kernel::MAX_WORDS
+                    )));
+                }
+                variables.push(self.name("the generator's next variable")?);
+            }
             self.expect_word("in", "after the generator's variable")?;
             self.skip_inline();
+            let start = self.position;
             let generator = self.generator()?;
+            if variables.len() > 1 && !matches!(generator, Generator::Kernel { .. }) {
+                return Err(self.error_at(start, "only a kernel's items have several variables"));
+            }
             let mut items = Vec::new();
             loop {
                 self.skip_blank();
@@ -1156,7 +1224,7 @@ impl<'a> Parser<'a> {
                 }
             }
             clauses.push(Clause {
-                variable,
+                variables,
                 generator,
                 items,
             });
@@ -1167,14 +1235,17 @@ impl<'a> Parser<'a> {
         Ok(clauses)
     }
 
-    /// `range(N)`, `list(HEAD, P => NEXT)`, or `inorder(ROOT, P => LEFT,
-    /// P => RIGHT)`.
+    /// `range(N)`, `list(HEAD, P => NEXT)`, `inorder(ROOT, P => LEFT,
+    /// P => RIGHT)`, or `kernel("NAME", ARG, …)`.
     fn generator(&mut self) -> Parsed<Generator> {
-        let Some(word @ ("range" | "list" | "inorder")) = self.peek_word() else {
-            return Err(self.unexpected("a generator: `range`, `list`, or `inorder`"));
+        let Some(word @ ("range" | "list" | "inorder" | "kernel")) = self.peek_word() else {
+            return Err(self.unexpected("a generator: `range`, `list`, `inorder`, or `kernel`"));
         };
         self.position += word.len();
         self.open_call(word)?;
+        if word == "kernel" {
+            return self.kernel();
+        }
         let first = self.expression()?;
         let generator = match word {
             "range" => Generator::Range(first),
@@ -1190,6 +1261,37 @@ impl<'a> Parser<'a> {
         };
         self.close_call(word)?;
         Ok(generator)
+    }
+
+    /// A kernel's name and arguments, after `kernel(`.
+    fn kernel(&mut self) -> Parsed<Generator> {
+        self.skip_blank();
+        let start = self.position;
+        let name = self.string()?;
+        if !is_kernel_name(&name) {
+            return Err(self.error_at(start, KERNEL_NAME.to_owned()));
+        }
+        let mut arguments = Vec::new();
+        loop {
+            self.skip_blank();
+            if !self.eat(",") {
+                break;
+            }
+            if arguments.len() == crate::view::kernel::MAX_ARGUMENTS {
+                return Err(self.error(format!(
+                    "a kernel takes at most {} arguments",
+                    crate::view::kernel::MAX_ARGUMENTS
+                )));
+            }
+            self.skip_blank();
+            arguments.push(self.expression()?);
+        }
+        self.close_call("kernel")?;
+        Ok(Generator::Kernel {
+            name,
+            line: self.location(start).0,
+            arguments,
+        })
     }
 
     /// `, P => EXPR`.

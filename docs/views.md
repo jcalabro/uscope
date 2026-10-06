@@ -472,6 +472,95 @@ short => problem: the view declares 5 elements and generates 3
 deep => problem: the tree is deeper than 128 levels
 ```
 
+## Kernels
+
+Some structures are algorithms more than layouts. A Rust `BTreeMap` keeps
+up to eleven entries in each node, and its entries lie in order within and
+between its nodes, which no generator walks. For those, a generator calls a
+**kernel**: a small WebAssembly function that reads memory and yields
+items. Types, layout, and presentation stay in the view, as in the
+built-in view of a `BTreeMap`:
+
+```text
+view rust alloc::collections::btree::map::BTreeMap<K, V, _> {
+    type Leaf = alloc::collections::btree::node::LeafNode<K, V>
+    type Internal = alloc::collections::btree::node::InternalNode<K, V>
+    let tree = root.Some.0
+    let node = length == 0 ? 0 : inner(tree.node) as usize
+    let height = length == 0 ? 0 : tree.height
+    show map(length) for key, value in kernel("rust-btree", node, height, offsetof(Leaf, len), offsetof(Leaf, keys), offsetof(Leaf, vals), sizeof(K), sizeof(V), offsetof(Internal, edges), 11)
+        => *(key as *K) : *(value as *V)
+}
+```
+
+- `kernel("NAME", ARG, …)` runs the kernel `NAME` with up to 32
+  arguments, each a 64-bit word: an integer in two's complement, a
+  pointer's address, or a truth value as 0 or 1.
+- Each item the kernel yields is a word for each variable its clause
+  names, one to eight of them, and each variable is that word, an integer,
+  which the view casts to the pointer it is.
+- A kernel can only compute. It may import nothing but uscope's `read` and
+  `yield`, so it cannot write memory, call the program, or perform I/O,
+  and a module that imports anything else, starts itself, or uses floats or
+  SIMD is refused. Its reads and its work are charged to the inspection's
+  budget like the view's own.
+- A kernel that traps, returns a failure, or yields the wrong number of
+  words makes the value's presentation a problem.
+- A scan with a kernel keeps no checkpoints: a kernel's run cannot be
+  resumed, only run again, so reading a later page costs the reads of the
+  pages before it.
+
+```uscope-view-example
+uscope-views 1
+view c list {
+    show sequence(count) for at in kernel("rust-btree", head) => at
+}
+view c tree {
+    show sequence(count) for at in kernel("rust-btree", *root) => at
+}
+view c table {
+    show sequence(n) for at in kernel("nowhere", slots) => at
+}
+---
+three => problem: kernel `rust-btree` failed: it returned 1
+balanced => unbound: `*root`: a kernel's arguments are integers, pointers, and truth values
+sparse => unbound: `kernel("nowhere")`: no kernel has that name
+```
+
+A view calls the kernels of its own source before the built-in ones:
+
+- uscope builds in `rust-btree`, from `views/kernels/rust-btree.zig`;
+- a view file's kernels are `NAME.wasm` files beside it, loaded with it;
+- a module's own views call the kernels the module carries in its
+  `.debug_uscope_views` section, as records of kind 2, format 1: a 16-bit
+  length and the kernel's name, a 32-bit length and its source, or a link
+  to it, and the module. A C or C++ program writes
+  `USCOPE_KERNEL("tree", "kernels/tree.c", "build/tree.wasm");` and a Rust
+  one `uscope_views::uscope_kernel!("tree", SOURCE, MODULE);`.
+
+`views check` lists each kernel loaded for the session or carried by a
+module with its source, so a kernel is reviewed as its source rather than
+trusted as a module.
+
+A kernel is a core WebAssembly module of at most 256 KiB. It imports at
+most `read(address: i64, buffer: i32, length: i32) -> i32`, which fills
+its buffer from the program's memory, and `yield(words: i32, count: i32)
+-> i32`, which yields an item and returns whether uscope wants another,
+both from the module `uscope_kernel_v1`. It exports its `memory` and
+`run(arguments: i32, count: i32) -> i32`, which uscope calls with the
+arguments in memory it adds after the kernel's own, and which returns 0
+once it has yielded every item. A read that uscope cannot make ends the
+run, as any read a view makes does. `sdk/c/uscope_kernel.h`,
+`sdk/zig/uscope_kernel.zig`, and the `uscope-views` crate's `kernel`
+module write the rest, and `docs/writing-views.md` writes a kernel in C.
+
+A run is a pure function of its arguments and the bytes its reads return,
+so a recording of them replays it without the program. `views record FILE
+EXPR` presents a value and its first page of children and writes each
+kernel run that took to `FILE`, and `uscope views replay FILE` runs the
+kernels again, the built-in one each names or the module given with
+`--kernel FILE.wasm`, and fails unless each does what it did.
+
 ## Choosing a view
 
 Each view whose pattern names a value's type is bound against the type, in
@@ -575,8 +664,9 @@ at file scope; a Rust program, with the `uscope-views` crate in
 Both read the file when the program is built, into a section that is not
 loaded when it runs and that `strip --strip-debug` removes with the rest of
 the debug information. The section holds records, each a kind (1 for a
-view file), a format (1), a 32-bit little-endian length, and that many
-bytes; zero bytes between them are padding.
+view file, 2 for a kernel, described under Kernels), a format (1), a 32-bit
+little-endian length, and that many bytes; zero bytes between them are
+padding.
 
 The views built into uscope cover:
 
@@ -592,9 +682,9 @@ The views built into uscope cover:
   them a `shared_ptr` shows no counts, and a `weak_ptr`, which cannot say
   whether its object still exists, shows as stored.
 - Rust: `String`, `PathBuf`, `OsString`, `CString`, `Vec`, `VecDeque`,
-  `HashMap`, `HashSet`, `Box`, `Rc`, `Arc`, both `Weak`s, `Cell`, `RefCell`,
-  and `Mutex`. `&str`, `Box<str>`, and slices are text and elements without
-  a view.
+  `HashMap`, `HashSet`, `BTreeMap`, `BTreeSet`, `Box`, `Rc`, `Arc`, both
+  `Weak`s, `Cell`, `RefCell`, and `Mutex`. `&str`, `Box<str>`, and slices
+  are text and elements without a view.
 - Go: maps and channels, including nil ones, which show as `nil`.
 - Zig: `std.ArrayList` and the managed list, `std.HashMap`, its unmanaged
   map, and `std.ArrayHashMapUnmanaged`.
@@ -642,7 +732,10 @@ are:
   entry is named by its key, and evaluates as the place its value is in,
   `*(T*)ADDRESS`.
 - Reading a later page of a list, tree, or table resumes where the reads
-  before it were, at most 256 elements back, rather than from the start.
+  before it were, at most 256 elements back, rather than from the start;
+  one a kernel walks runs the kernel again.
+- `views record FILE EXPR` records the kernel runs presenting a value, and
+  `uscope views replay FILE` replays them with no program.
 
 ## Limits
 
@@ -653,4 +746,7 @@ it presents share, and running out ends the summary early without failing
 the inspection. Text is read up to 256 bytes. Views present values inside
 the values they present at most four deep. Generators nest at most four
 deep, trees are walked at most 128 levels deep, and a sequence without a
-count generates at most 16,777,216 elements.
+count generates at most 16,777,216 elements. A kernel is at most 256 KiB,
+its memory at most 4 MiB, its calls nest at most 1024 deep, and each read
+it makes is at most 64 KiB; it takes at most 32 arguments, and its items
+are at most eight words.
