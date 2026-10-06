@@ -1,0 +1,12 @@
+uscope-views 1
+
+# Tags, as the names they hold.
+view rust embedded_views::Tags {
+    show value(names)
+}
+
+# A temperature, a newtype around its degrees.
+view rust embedded_views::Celsius {
+    show value(self.0)
+    summary "{self.0}°C"
+}

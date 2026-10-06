@@ -681,6 +681,21 @@ build_shared_fixture gcc "$c_fixtures_dir/shared/library.c" "$output_dir/libglob
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
 build_fixture gcc "$c_fixtures_dir/shared/main.c" "$output_dir/globals-shared" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -ldl
+# A program and a library that carry views in .debug_uscope_views, which
+# the assembler reads from the fixture's directory, so the cache watches the
+# directory whole.
+embedded_views_dir="$c_fixtures_dir/embedded-views"
+read_dash_version gcc
+embedded_views_metadata="compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=gcc"
+run_cached_build "$embedded_views_dir" "$output_dir/libembedded-views.so" \
+    "$embedded_views_metadata" \
+    gcc -std=c17 -Wall -Wextra -Werror -shared -fPIC -O0 -g3 -gdwarf-5 -Isdk/c \
+    "$embedded_views_dir/library.c" -o "$output_dir/libembedded-views.so"
+run_cached_build "$embedded_views_dir" "$output_dir/embedded-views" \
+    "$embedded_views_metadata" \
+    gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c \
+    "$embedded_views_dir/main.c" -o "$output_dir/embedded-views" \
+    "-L$output_dir" -lembedded-views '-Wl,-rpath,$ORIGIN'
 build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" "$output_dir/libmodule-frames.so" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
 build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-o0" \
@@ -841,6 +856,19 @@ build_rust_fixture "$rust_fixtures_dir/generics.rs" "$output_dir/generics-rust-o
     -C opt-level=0 -C force-frame-pointers=yes
 build_rust_fixture "$rust_fixtures_dir/generics.rs" "$output_dir/generics-rust-o2" \
     -C opt-level=2 -C force-frame-pointers=no
+# The Rust SDK's macro, as a dependency of a program that carries views,
+# whose directory the cache watches whole for the same reason as the C one.
+read_dash_version rustc
+rust_sdk_metadata="compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=rustc"
+run_cached_build sdk/rust "$output_dir/libuscope_views.rlib" "$rust_sdk_metadata" \
+    rustc --edition=2024 -D warnings --crate-type rlib --crate-name uscope_views \
+    sdk/rust/src/lib.rs -o "$output_dir/libuscope_views.rlib"
+run_cached_build "$rust_fixtures_dir/embedded-views" "$output_dir/embedded-views-rust" \
+    "$rust_sdk_metadata" \
+    rustc --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0 \
+    --crate-name embedded_views \
+    --extern "uscope_views=$output_dir/libuscope_views.rlib" \
+    "$rust_fixtures_dir/embedded-views/main.rs" -o "$output_dir/embedded-views-rust"
 # Unlike the other Rust fixtures, the containers use std.
 build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o0" \
     --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0

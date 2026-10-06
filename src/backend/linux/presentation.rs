@@ -46,6 +46,8 @@ const MAX_SCANS: usize = 64;
 /// The views a controller presents values with, the view each type has,
 /// and where the scans of values presented at this stop have been.
 pub(super) struct Views {
+    /// The files loaded for the session, tried before a module's own views
+    /// and the built-in ones.
     pub(super) set: Arc<ViewSet>,
     pub(super) enabled: bool,
     /// The view each type has under this set, bound when first needed.
@@ -72,7 +74,7 @@ struct Scans {
 impl Default for Views {
     fn default() -> Self {
         Self {
-            set: ViewSet::built_in(),
+            set: ViewSet::empty(),
             enabled: true,
             choices: RefCell::default(),
             scans: RefCell::default(),
@@ -279,8 +281,8 @@ impl<P: InspectionOps> Controller<P> {
                 .values()
                 .find(|module| module.loaded.image == ty.image)
                 .map_or_else(Choice::default, |module| {
-                    crate::view::choose(
-                        &self.views.set,
+                    crate::view::choose_among(
+                        &[&self.views.set, module.image.views(), &ViewSet::built_in()],
                         ty,
                         &ModuleScope {
                             controller: self,

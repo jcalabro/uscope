@@ -3216,6 +3216,9 @@ pub struct ModuleImage {
     type_index: crate::type_identity::TypeIndex,
     /// Rust trait objects' vtables, with the concrete type each is for.
     vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
+    /// The views the image carries for its own types, in its
+    /// `.debug_uscope_views` section.
+    views: Arc<crate::view::ViewSet>,
 }
 
 impl ModuleImage {
@@ -3318,6 +3321,7 @@ impl ModuleImage {
             instruction_starts,
             type_index,
             vtables: metadata.vtables.iter().copied().collect(),
+            views: crate::view::ViewSet::empty(),
         }
     }
 
@@ -3328,6 +3332,24 @@ impl ModuleImage {
         );
         self.id = id;
         self
+    }
+
+    /// Gives the image the views it carries for its own types.
+    pub(crate) fn with_views(mut self, views: Arc<crate::view::ViewSet>) -> Self {
+        self.views = views;
+        self
+    }
+
+    /// The views the image carries for its own types.
+    #[must_use]
+    pub(crate) const fn views(&self) -> &Arc<crate::view::ViewSet> {
+        &self.views
+    }
+
+    /// What kept parts of the views the image carries out.
+    #[must_use]
+    pub fn view_errors(&self) -> &[crate::ViewFileError] {
+        self.views.errors()
     }
 
     /// Returns this image's session-scoped identifier.

@@ -50,6 +50,12 @@ struct Args {
     #[arg(long, requires = "core")]
     allow_module_mismatch: bool,
 
+    /// Present values with the views in FILE, ahead of the project's, the
+    /// user's, the program's own, and the built-in ones. May be repeated;
+    /// later files come first.
+    #[arg(long = "views", value_name = "FILE")]
+    views: Vec<PathBuf>,
+
     /// Execute commands from a file. May be repeated.
     #[arg(short = 'c', long = "command", value_name = "FILE")]
     command_files: Vec<PathBuf>,

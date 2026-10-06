@@ -10,6 +10,7 @@
 //! then run at stops, charging every read to the inspection's budget.
 
 pub mod bind;
+pub mod embedded;
 pub mod format;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzz;
@@ -47,9 +48,9 @@ const BUILT_IN: [(&str, &str); 5] = [
     ),
 ];
 
-/// Every view uscope knows, in the order they are tried: those loaded for
-/// the session, then the built-in ones. Immutable once made; loading views
-/// makes a new set.
+/// Views from one source, such as the files loaded for a session, a
+/// module's embedded views, or the built-in ones, in the order they are
+/// tried. Immutable once made; loading views makes a new set.
 #[derive(Debug)]
 pub struct ViewSet {
     views: Vec<Arc<View>>,
@@ -90,10 +91,16 @@ impl ViewSet {
         Arc::clone(BUILT_IN_SET.get_or_init(|| Arc::new(Self::new(BUILT_IN))))
     }
 
-    /// Session files ahead of the built-in views.
+    /// A set of no views.
     #[must_use]
-    pub fn with_session<'a>(files: impl IntoIterator<Item = (&'a str, &'a str)>) -> Self {
-        Self::new(files.into_iter().chain(BUILT_IN))
+    pub fn empty() -> Arc<Self> {
+        static EMPTY: OnceLock<Arc<ViewSet>> = OnceLock::new();
+        Arc::clone(EMPTY.get_or_init(|| Arc::new(Self::new([]))))
+    }
+
+    /// Replaces what kept parts of the files out.
+    pub(crate) fn set_errors(&mut self, errors: Vec<syntax::Error>) {
+        self.errors = errors;
     }
 
     /// The views, in the order they are tried.
@@ -149,32 +156,42 @@ pub fn name_of(view: &View) -> Arc<ViewName> {
 /// whose pattern names the type and which binds against it in `scope`. A
 /// typedef's own identity is tried before what it stands for, as Go's map
 /// types are typedefs of a pointer.
+#[cfg(any(test, feature = "fuzzing"))]
 pub fn choose<S: Scope>(views: &ViewSet, ty: TypeReference, scope: &S) -> Choice<S::Step> {
+    choose_among(&[views], ty, scope)
+}
+
+/// As [`choose`], among the views of several sets, each set's before the
+/// next's.
+pub fn choose_among<S: Scope>(sets: &[&ViewSet], ty: TypeReference, scope: &S) -> Choice<S::Step> {
     let mut choice = Choice::default();
     for (ty, info) in wrappers(scope, ty) {
         let Some(identity) = info.identity.as_deref() else {
             continue;
         };
-        // A Go type is also named by its kind, as every map is by `map`.
-        let mut candidates = views
-            .by_base
-            .get(identity.base.as_ref())
-            .into_iter()
-            .flatten()
-            .chain(
-                pattern::go_kind_word(identity)
-                    .and_then(|kind| views.by_base.get(kind))
-                    .into_iter()
-                    .flatten(),
-            )
-            .copied()
-            .collect::<Vec<_>>();
-        candidates.sort_unstable();
-        candidates.dedup();
+        let mut candidates = Vec::new();
+        for views in sets {
+            // A Go type is also named by its kind, as every map is by `map`.
+            let mut found = views
+                .by_base
+                .get(identity.base.as_ref())
+                .into_iter()
+                .flatten()
+                .chain(
+                    pattern::go_kind_word(identity)
+                        .and_then(|kind| views.by_base.get(kind))
+                        .into_iter()
+                        .flatten(),
+                )
+                .copied()
+                .collect::<Vec<_>>();
+            found.sort_unstable();
+            found.dedup();
+            candidates.extend(found.into_iter().map(|index| &views.views[index]));
+        }
         let mut base = None;
         let mut extensions = Vec::new();
-        for index in candidates {
-            let view = &views.views[index];
+        for view in candidates {
             // Views after the one that binds are not tried; `extend`s are.
             if base.is_some() && !view.extend {
                 continue;

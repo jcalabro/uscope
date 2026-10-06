@@ -710,3 +710,45 @@ fn views_present_maps_as_entries_named_by_their_keys() {
     assert_eq!(third["result"], "6");
     dap.finish();
 }
+
+/// A launch's `viewFiles` present values ahead of the program's own views,
+/// and what kept a view out is said as output.
+#[test]
+fn launch_view_files_present_values_and_report_their_errors() {
+    let directory = crate::support::ScratchDir::new("dap-view-files");
+    let views = directory.path().join("launch.views");
+    std::fs::write(
+        &views,
+        "uscope-views 1\nview c point {\n    show empty(\"from the launch\")\n}\nview c intvec {\n    show nothing\n}\n",
+    )
+    .expect("write the launch's views");
+    let mut dap = Dap::start("view files");
+    let path = source("c/embedded-views/main.c");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("embedded-views"),
+        json!({"viewFiles": [views], "cwd": directory.path()}),
+        &Configuration {
+            sources: vec![(path.clone(), vec![line_of(&path, "barrier(&numbers)")])],
+            ..Configuration::default()
+        },
+    );
+    let stop = dap.stopped(started.mark);
+    let frame = frames(&mut dap, stop.thread)[0].clone();
+    let scopes = scopes(&mut dap, &frame);
+    let locals = variables(&mut dap, &scopes["Locals"]["variablesReference"]);
+    assert_eq!(named(&locals, "here")["value"], "from the launch");
+    // The launch's broken view of a vector leaves it to the program's own.
+    assert_eq!(named(&locals, "numbers")["value"], "len=3 [1, 2, 3]");
+    let said = dap
+        .events(started.mark, "output")
+        .iter()
+        .filter_map(|event| event["output"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert!(
+        said.iter()
+            .any(|output| output.contains("launch.views:6:10: expected a shape")),
+        "{said:?}"
+    );
+    dap.finish();
+}

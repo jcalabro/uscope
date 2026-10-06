@@ -26,6 +26,7 @@ const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Handle,
+    Views,
     Break,
     Breakpoints,
     Info,
@@ -254,6 +255,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1; set views on|off shows values as their views present them or as stored"
     ),
     command!(
+        Views,
+        "views",
+        [],
+        "views [load|clear] [file...]",
+        "List the view files values are presented with, load more, or clear those loaded"
+    ),
+    command!(
         Globals,
         "globals",
         [],
@@ -461,6 +469,7 @@ impl Cli {
             Command::Whatis => self.whatis(rest).await?,
             Command::Ptype => self.ptype(rest).await?,
             Command::Globals => self.globals(first).await?,
+            Command::Views => self.views(&arguments).await?,
             Command::Set => self.set(rest, spec).await?,
             Command::Stepi => self.step(StepKind::Instruction).await?,
             Command::Nexti => self.step(StepKind::OverInstruction).await?,
@@ -911,6 +920,66 @@ impl Cli {
             ),
             None => value::untyped(target, &assigned.state, renderer),
         })
+    }
+
+    /// `views` lists the view files values are presented with, `views load
+    /// FILE…` loads more ahead of them, and `views clear` forgets those
+    /// loaded.
+    async fn views(&self, arguments: &[&str]) -> Result<String> {
+        match arguments {
+            [] => {
+                let mut lines = vec!["values are presented with, in order:".to_owned()];
+                {
+                    let views = self.views.lock().expect("the view sources are whole");
+                    lines.extend(
+                        views
+                            .session
+                            .iter()
+                            .map(|file| format!("  {} (loaded)", file.name)),
+                    );
+                    lines.extend(
+                        views
+                            .discovered
+                            .iter()
+                            .map(|file| format!("  {}", file.name)),
+                    );
+                }
+                lines.push("  the views each module carries for its own types".to_owned());
+                lines.push("  the built-in views".to_owned());
+                Ok(lines.join("\n"))
+            }
+            ["load", paths @ ..] if !paths.is_empty() => {
+                let files = paths
+                    .iter()
+                    .map(|path| uscope::view_files::read(std::path::Path::new(path)))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|error| anyhow!(error))?;
+                {
+                    let mut views = self.views.lock().expect("the view sources are whole");
+                    views.session.splice(0..0, files);
+                }
+                for warning in self.reload_views().await {
+                    self.warn(&format!("views: {warning}"));
+                }
+                Ok(format!(
+                    "loaded {} view file{}",
+                    paths.len(),
+                    if paths.len() == 1 { "" } else { "s" }
+                ))
+            }
+            ["clear"] => {
+                self.views
+                    .lock()
+                    .expect("the view sources are whole")
+                    .session
+                    .clear();
+                for warning in self.reload_views().await {
+                    self.warn(&format!("views: {warning}"));
+                }
+                Ok("forgot the loaded view files".to_owned())
+            }
+            _ => bail!("usage: views [load <file...>|clear]"),
+        }
     }
 
     async fn globals(&self, filter: Option<&str>) -> Result<String> {

@@ -140,7 +140,7 @@ impl Client {
             .map_err(|_| Closed)
     }
 
-    async fn important(&self, text: impl Into<String>) -> Result<(), Closed> {
+    pub(super) async fn important(&self, text: impl Into<String>) -> Result<(), Closed> {
         let mut text = text.into();
         text.push('\n');
         self.event("output", json!({"category": "important", "output": text}))
@@ -595,6 +595,8 @@ impl Session {
             source_paths,
             syntax,
             signals,
+            view_files,
+            working_directory,
         } = configuration;
         let handle = debugger.handle().with_source_paths(source_paths.clone());
         self.events = Some(handle.subscribe());
@@ -624,6 +626,9 @@ impl Session {
             process: None,
             pumps: Vec::new(),
         });
+        self.load_views(working_directory, &view_files)
+            .await
+            .map_err(|Closed| closed())?;
         self.apply_signal_policies().await?;
         if let Some(Start::Core(_)) = self.target.as_ref().map(|target| &target.start) {
             self.warn_core_modules().await.map_err(|Closed| closed())?;
@@ -634,6 +639,38 @@ impl Session {
             self.after = Some(After::Start);
         }
         Ok(None)
+    }
+
+    /// Presents values with the configuration's view files and the
+    /// project's and user's, and says what kept any of them, or the
+    /// program's own, out.
+    async fn load_views(
+        &self,
+        working_directory: Option<std::path::PathBuf>,
+        view_files: &[std::path::PathBuf],
+    ) -> Result<(), Closed> {
+        let Some(target) = self.target.as_ref() else {
+            return Ok(());
+        };
+        let working_directory = working_directory
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let mut warnings = target
+            .console
+            .load_view_sources(&working_directory, view_files)
+            .await;
+        warnings.extend(
+            target
+                .handle
+                .module_image()
+                .view_errors()
+                .iter()
+                .map(ToString::to_string),
+        );
+        for warning in warnings {
+            self.client.important(format!("views: {warning}")).await?;
+        }
+        Ok(())
     }
 
     async fn warn_core_modules(&self) -> Result<(), Closed> {
