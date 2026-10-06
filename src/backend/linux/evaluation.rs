@@ -32,13 +32,12 @@ use crate::{
 };
 
 use super::frames::{FrameRegisters, ResolvedFrame};
-use super::inspection::{global_context_address, validate_inspection_limits, variable_context};
+use super::inspection::{
+    LinuxVariableRuntime, global_context_address, validate_inspection_limits, variable_context,
+};
 use super::native::{InspectionOps, LinuxTraceOps};
 use super::registers::x86_64_register_snapshot;
-use super::{
-    Controller, Inferior, RuntimeModule, validate_image_current, validate_public_stop,
-    validate_stopped_thread,
-};
+use super::{Controller, Inferior, RuntimeModule, validate_image_current};
 
 /// A data object a frame names.
 #[derive(Debug, Clone, Copy)]
@@ -107,16 +106,31 @@ pub(super) struct Frame<'a, P: InspectionOps> {
     charges: Cell<u32>,
 }
 
+impl<P: InspectionOps> Controller<P> {
+    /// The loaded module whose image defines `ty`.
+    pub(super) fn module_of(&self, ty: TypeReference) -> Option<&RuntimeModule> {
+        self.modules
+            .values()
+            .find(|module| module.loaded.image == ty.image)
+    }
+
+    pub(super) fn pointer_size(&self) -> u8 {
+        match self.module_image.target().pointer_width {
+            PointerWidth::Bits32 => 4,
+            PointerWidth::Bits64 => 8,
+        }
+    }
+}
+
 impl<'a, P: InspectionOps> Frame<'a, P> {
     pub(super) fn module(&self, id: ModuleId) -> Option<&'a RuntimeModule> {
         self.controller.modules.get(&id)
     }
 
-    pub(super) fn module_of(&self, ty: TypeReference) -> Option<&'a RuntimeModule> {
+    /// Reads the frame's registers and memory for values `module` describes.
+    pub(super) fn runtime(&self, module: &'a RuntimeModule) -> LinuxVariableRuntime<'a, P> {
         self.controller
-            .modules
-            .values()
-            .find(|module| module.loaded.image == ty.image)
+            .frame_runtime(self.inferior, self.pid, self.resolved, module)
     }
 
     /// Modules in the order names are looked up: the frame's first.
@@ -160,14 +174,11 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
 
 impl<P: InspectionOps> TypeSource for Frame<'_, P> {
     fn type_info(&self, ty: TypeReference) -> Option<TypeInfo> {
-        self.module_of(ty)?.image.type_info(ty).cloned()
+        self.controller.module_of(ty)?.image.type_info(ty).cloned()
     }
 
     fn pointer_size(&self) -> u8 {
-        match self.controller.module_image.target().pointer_width {
-            PointerWidth::Bits32 => 4,
-            PointerWidth::Bits64 => 8,
-        }
+        self.controller.pointer_size()
     }
 
     fn byte_order(&self) -> ByteOrder {
@@ -263,9 +274,7 @@ pub(super) fn plan_in<P: InspectionOps>(
     step: StepKind<'_>,
 ) -> std::result::Result<Planned<StopStep>, Refusal> {
     let module = controller
-        .modules
-        .values()
-        .find(|module| module.loaded.image == from.image)
+        .module_of(from)
         .ok_or_else(|| Refusal::new(ErrorKind::Unsupported, "the type's module is not loaded"))?;
     let image = &module.image;
     let base_name;
@@ -565,10 +574,6 @@ pub(super) struct StopMachine<'a, 'b, P: InspectionOps> {
 /// run control.
 pub(super) const INTERRUPT_INTERVAL: u32 = 64;
 
-const fn failed(error: Error) -> Stop {
-    Stop::Failed(error)
-}
-
 impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
     pub(super) const fn new(
         frame: &'b Frame<'a, P>,
@@ -584,10 +589,17 @@ impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
         }
     }
 
+    /// A machine on this one's budget, presenting values `depth` views deep.
+    pub(super) const fn nested(&mut self, depth: u8) -> StopMachine<'a, '_, P> {
+        let mut machine = StopMachine::new(self.frame, self.budget, self.interruptible);
+        machine.depth = depth;
+        machine
+    }
+
     pub(super) fn module(&self, id: ModuleId) -> std::result::Result<&'a RuntimeModule, Stop> {
         self.frame
             .module(id)
-            .ok_or_else(|| failed(Error::ModuleNotLoaded(id)))
+            .ok_or_else(|| Stop::Failed(Error::ModuleNotLoaded(id)))
     }
 
     /// The instruction context values of `module` are evaluated at.
@@ -608,20 +620,15 @@ impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
     /// A value as it is stored, without a view.
     pub(super) fn materialize(
         &mut self,
-        module: &RuntimeModule,
+        module: &'a RuntimeModule,
         located: &Located,
     ) -> std::result::Result<InspectedValue, Stop> {
         let context = self.context(module);
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         module
             .variables
             .materialize(located, context, &mut runtime, self.budget)
-            .map_err(failed)
+            .map_err(Stop::Failed)
     }
 
     fn accessed(
@@ -670,7 +677,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             && charges.is_multiple_of(INTERRUPT_INTERVAL)
             && self.frame.controller.run_control_waiting()
         {
-            return Err(failed(Error::Interrupted));
+            return Err(Stop::Failed(Error::Interrupted));
         }
         Ok(())
     }
@@ -678,16 +685,11 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     fn locate(&mut self, object: &StopObject) -> std::result::Result<StopPlace, Stop> {
         let module = self.module(object.module)?;
         let address = self.address(module);
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         let accessed = module
             .variables
             .locate(object.key, address, &mut runtime, self.budget)
-            .map_err(failed)?;
+            .map_err(Stop::Failed)?;
         Self::accessed(accessed, object.module)
     }
 
@@ -721,12 +723,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         };
         let module = self.module(module_id)?;
         let address = self.address(module);
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         let accessed = module
             .variables
             .apply(
@@ -739,7 +736,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             )
             .map_err(|error| match error {
                 Error::ValueIndexOutOfBounds { .. } => Stop::Refused(refusal(&error)),
-                error => failed(error),
+                error => Stop::Failed(error),
             })?;
         Self::accessed(accessed, module_id)
     }
@@ -749,7 +746,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         address: u64,
         ty: TypeReference,
     ) -> std::result::Result<StopPlace, Stop> {
-        let module = self.frame.module_of(ty).ok_or_else(|| {
+        let module = self.frame.controller.module_of(ty).ok_or_else(|| {
             Stop::Refused(Refusal::new(
                 ErrorKind::Unsupported,
                 "the type's module is not loaded",
@@ -795,16 +792,11 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
     fn load(&mut self, at: &StopPlace) -> std::result::Result<VariableValue, Stop> {
         let module = self.module(at.module)?;
         let context = self.context(module);
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         module
             .variables
             .load(&at.located, context, &mut runtime, self.budget)
-            .map_err(failed)?
+            .map_err(Stop::Failed)?
             .map_err(Stop::missing)
     }
 
@@ -814,12 +806,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             .consume_memory(size)
             .map_err(|exhaustion| Stop::missing(VariableState::Unavailable(exhaustion.into())))?;
         let module = self.memory_module()?;
-        let mut runtime = self.frame.controller.frame_runtime(
-            self.frame.inferior,
-            self.frame.pid,
-            self.frame.resolved,
-            module,
-        );
+        let mut runtime = self.frame.runtime(module);
         runtime
             .read_memory(VirtualAddress::new(address), size)
             .map(|bytes| bytes.to_vec())
@@ -829,7 +816,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 }
                 crate::debug_info::VariableRuntimeError::Malformed(description)
                 | crate::debug_info::VariableRuntimeError::Fatal(description) => {
-                    failed(Error::VariableRuntime(description))
+                    Stop::Failed(Error::VariableRuntime(description))
                 }
             })
     }
@@ -888,7 +875,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         ty: TypeReference,
         bytes: &[u8],
     ) -> std::result::Result<InspectedValue, Stop> {
-        let module = self.frame.module_of(ty).ok_or_else(|| {
+        let module = self.frame.controller.module_of(ty).ok_or_else(|| {
             Stop::Refused(Refusal::new(
                 ErrorKind::Unsupported,
                 "the type's module is not loaded",
@@ -928,7 +915,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 pointee: self.type_info(pointee).map(Box::new),
                 reason: DereferenceUnavailableReason::Null,
             },
-            (Some(pointee), address) => match self.frame.module_of(pointee) {
+            (Some(pointee), address) => match self.frame.controller.module_of(pointee) {
                 Some(module) => DereferenceState::Available(DereferenceReference {
                     stop_id: self.frame.stop_id,
                     thread: super::debug_thread_id(self.frame.pid),
@@ -972,7 +959,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
 }
 
 /// What evaluating an expression asks of the controller.
-pub(super) enum Evaluated {
+enum Evaluated {
     Done(Box<Evaluation>),
     /// Store `bytes` in `target`, then read it again.
     Write {
@@ -981,6 +968,14 @@ pub(super) enum Evaluated {
         whole: bool,
         span: Span,
     },
+}
+
+/// An interpreter failure as the debugger's error.
+fn failure(failure: Failure) -> Error {
+    match failure {
+        Failure::Expression(error) => Error::Expression(error),
+        Failure::Debugger(error) => error,
+    }
 }
 
 impl<P: LinuxTraceOps> Controller<P> {
@@ -994,31 +989,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         expression: &Expression,
         limits: crate::InspectionLimits,
     ) -> Result<Evaluation> {
-        validate_inspection_limits(limits)?;
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
-        let resolved = self.resolve_frame(inferior, pid, frame)?;
-        let mut budget = InspectionBudget::new(limits);
-        let evaluated = self.evaluate_in_frame(
-            inferior,
-            stop_id,
-            pid,
-            &resolved,
-            expression,
-            Mode::Assign,
-            &mut budget,
-        )?;
-        let (target, bytes, whole, span) = match evaluated {
-            Evaluated::Done(evaluation) => return Ok(*evaluation),
-            Evaluated::Write {
-                target,
-                bytes,
-                whole,
-                span,
-            } => (target, bytes, whole, span),
-        };
+        let (target, bytes, whole, span) =
+            match self.run_expression(stop_id, pid, frame, expression, Mode::Assign, limits)? {
+                Evaluated::Done(evaluation) => return Ok(*evaluation),
+                Evaluated::Write {
+                    target,
+                    bytes,
+                    whole,
+                    span,
+                } => (target, bytes, whole, span),
+            };
         let refused = |reason: String| {
             Error::Expression(crate::ExpressionError::new(
                 ErrorKind::Assignment,
@@ -1087,23 +1067,7 @@ impl<P: InspectionOps> Controller<P> {
         mode: Mode,
         limits: crate::InspectionLimits,
     ) -> Result<Evaluation> {
-        validate_inspection_limits(limits)?;
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
-        let resolved = self.resolve_frame(inferior, pid, frame)?;
-        let mut budget = InspectionBudget::new(limits);
-        let evaluated = self.evaluate_in_frame(
-            inferior,
-            stop_id,
-            pid,
-            &resolved,
-            expression,
-            mode,
-            &mut budget,
-        )?;
-        match evaluated {
+        match self.run_expression(stop_id, pid, frame, expression, mode, limits)? {
             Evaluated::Done(evaluation) => Ok(*evaluation),
             Evaluated::Write { span, .. } => Err(Error::Expression(crate::ExpressionError::new(
                 ErrorKind::Mode,
@@ -1111,6 +1075,47 @@ impl<P: InspectionOps> Controller<P> {
                 "this process's state cannot be changed",
             ))),
         }
+    }
+
+    fn run_expression(
+        &self,
+        stop_id: StopId,
+        pid: Pid,
+        frame: StackFrameId,
+        expression: &Expression,
+        mode: Mode,
+        limits: crate::InspectionLimits,
+    ) -> Result<Evaluated> {
+        validate_inspection_limits(limits)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
+        let resolved = self.resolve_frame(inferior, pid, frame)?;
+        let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+        let program = bind(expression, &scope, mode).map_err(Error::Expression)?;
+        let mut budget = InspectionBudget::new(limits);
+        // Reading may wait for run control; an assignment, which changes
+        // the stop, may not.
+        let mut machine = StopMachine::new(&scope, &mut budget, mode == Mode::Read);
+        let outcome = run(&program, &mut machine);
+        record!("evaluate `{}`: {outcome:?}", expression.text());
+        Ok(match outcome.map_err(failure)? {
+            Outcome::Value { value, cause } => {
+                Evaluated::Done(Box::new(Evaluation::Value { value, cause }))
+            }
+            Outcome::Range { base, start, end } => Evaluated::Done(Box::new(Evaluation::Range(
+                self.range_page(stop_id, &base, start, end, &mut budget)?,
+            ))),
+            Outcome::Assign {
+                target,
+                bytes,
+                whole,
+                span,
+            } => Evaluated::Write {
+                target,
+                bytes,
+                whole,
+                span,
+            },
+        })
     }
 
     /// Evaluates an expression where a breakpoint hit stopped one thread
@@ -1138,8 +1143,7 @@ impl<P: InspectionOps> Controller<P> {
         )?;
         let resolved =
             self.resolve_presented_frame(inferior, pid, StackFrameId::INNERMOST, presentation)?;
-        let stop_id = StopId::new(0);
-        let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+        let scope = self.frame_for(inferior, StopId::new(0), pid, &resolved);
         let program = if condition {
             crate::eval::bind::bind_condition(expression, &scope)
         } else {
@@ -1150,15 +1154,13 @@ impl<P: InspectionOps> Controller<P> {
         let mut machine = StopMachine::new(&scope, &mut budget, false);
         let outcome = run(&program, &mut machine);
         record!("evaluate `{}` at a hit: {outcome:?}", expression.text());
-        match outcome {
-            Ok(Outcome::Value { value, cause }) => Ok(Evaluation::Value { value, cause }),
-            Ok(_) => Err(Error::Expression(crate::ExpressionError::new(
+        match outcome.map_err(failure)? {
+            Outcome::Value { value, cause } => Ok(Evaluation::Value { value, cause }),
+            _ => Err(Error::Expression(crate::ExpressionError::new(
                 ErrorKind::Type,
                 Span::new(0, expression.text().len()),
                 "a breakpoint's expression must have a value",
             ))),
-            Err(Failure::Expression(error)) => Err(Error::Expression(error)),
-            Err(Failure::Debugger(error)) => Err(error),
         }
     }
 
@@ -1172,24 +1174,16 @@ impl<P: InspectionOps> Controller<P> {
         frame: StackFrameId,
         expression: &Expression,
     ) -> Result<crate::WatchTarget> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         let resolved = self.resolve_frame(inferior, pid, frame)?;
         let scope = self.frame_for(inferior, stop_id, pid, &resolved);
         let program = bind(expression, &scope, Mode::Read).map_err(Error::Expression)?;
         let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
         let mut machine = StopMachine::new(&scope, &mut budget, false);
-        let value = match run(&program, &mut machine) {
-            Ok(Outcome::Value { value, .. }) => value,
-            Ok(_) => {
-                return Err(Error::WatchTargetUnsupported(
-                    "a range cannot be watched; watch one element".into(),
-                ));
-            }
-            Err(Failure::Expression(error)) => return Err(Error::Expression(error)),
-            Err(Failure::Debugger(error)) => return Err(error),
+        let Outcome::Value { value, .. } = run(&program, &mut machine).map_err(failure)? else {
+            return Err(Error::WatchTargetUnsupported(
+                "a range cannot be watched; watch one element".into(),
+            ));
         };
         let (address, byte_size) = super::watchpoints::watchable_storage(&value)?;
         let (watch_scope, evidence) = match program.root_object() {
@@ -1226,10 +1220,7 @@ impl<P: InspectionOps> Controller<P> {
         frame: StackFrameId,
         expression: &Expression,
     ) -> Result<TypeInfo> {
-        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        validate_stopped_thread(inferior, pid)?;
-        validate_image_current(inferior)?;
+        let inferior = self.stopped_inferior(stop_id, pid)?;
         let resolved = self.resolve_frame(inferior, pid, frame)?;
         let scope = self.frame_for(inferior, stop_id, pid, &resolved);
         let program = bind(expression, &scope, Mode::Read).map_err(Error::Expression)?;
@@ -1252,53 +1243,6 @@ impl<P: InspectionOps> Controller<P> {
             code: self.frame_scope(resolved),
             registers: OnceCell::new(),
             charges: Cell::new(0),
-        }
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "evaluation keeps the stop, frame, expression, mode, and budget explicit"
-    )]
-    pub(super) fn evaluate_in_frame(
-        &self,
-        inferior: &Inferior,
-        stop_id: StopId,
-        pid: Pid,
-        resolved: &ResolvedFrame,
-        expression: &Expression,
-        mode: Mode,
-        budget: &mut InspectionBudget,
-    ) -> Result<Evaluated> {
-        let scope = self.frame_for(inferior, stop_id, pid, resolved);
-        let program = bind(expression, &scope, mode).map_err(Error::Expression)?;
-        // Reading may wait for run control; an assignment, which changes
-        // the stop, may not.
-        let mut machine = StopMachine::new(&scope, budget, mode == Mode::Read);
-        let outcome = run(&program, &mut machine);
-        record!("evaluate `{}`: {outcome:?}", expression.text());
-        match outcome {
-            Ok(Outcome::Value { value, cause }) => {
-                Ok(Evaluated::Done(Box::new(Evaluation::Value {
-                    value,
-                    cause,
-                })))
-            }
-            Ok(Outcome::Range { base, start, end }) => self
-                .range_page(stop_id, &base, start, end, budget)
-                .map(|page| Evaluated::Done(Box::new(Evaluation::Range(page)))),
-            Ok(Outcome::Assign {
-                target,
-                bytes,
-                whole,
-                span,
-            }) => Ok(Evaluated::Write {
-                target,
-                bytes,
-                whole,
-                span,
-            }),
-            Err(Failure::Expression(error)) => Err(Error::Expression(error)),
-            Err(Failure::Debugger(error)) => Err(error),
         }
     }
 }
