@@ -110,64 +110,77 @@ async fn check_fixture(fixture: &str, barrier: &str, optimized: bool) {
             }
         };
         let result = scenario.handle().evaluate(&expression).await;
-        let message = match (expectation.kind.as_str(), result) {
-            ("error", Err(Error::Expression(error))) if error.kind.name() == expectation.value => {
-                continue;
-            }
-            ("range", Ok(Evaluation::Range(page))) => {
-                let elements = page
-                    .children
-                    .iter()
-                    .map(|child| match &child.state {
-                        VariableState::Available { value, .. } => {
-                            rendered("int", value).unwrap_or_else(|| format!("{value:?}"))
-                        }
-                        state => format!("{state:?}"),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
-                if elements == expectation.value {
-                    continue;
-                }
-                format!("{elements} instead of {}", expectation.value)
-            }
-            ("text", Ok(Evaluation::Value { value, .. })) => match &value.state {
-                VariableState::Available {
-                    text: Some(text), ..
-                } if text.completion == uscope::TextCompletion::Complete
-                    && text.bytes.as_ref() == expectation.value.as_bytes() =>
-                {
-                    continue;
-                }
-                state => format!("{state:?} instead of {:?}", expectation.value),
-            },
-            (_, result) => match result {
-                Ok(Evaluation::Value { value, cause }) => match &value.state {
-                    VariableState::Available { value: decoded, .. } => {
-                        match rendered(&expectation.kind, decoded) {
-                            Some(actual) if actual == expectation.value => continue,
-                            actual => format!(
-                                "{} ({}) instead of {}",
-                                actual.unwrap_or_else(|| format!("{decoded:?}")),
-                                value
-                                    .type_info
-                                    .map(|info| info.name)
-                                    .as_deref()
-                                    .unwrap_or("?"),
-                                expectation.value
-                            ),
-                        }
-                    }
-                    VariableState::Unavailable(_) if optimized && cause.is_some() => continue,
-                    state => format!("{state:?} at {cause:?}"),
-                },
-                other => format!("{other:?}"),
-            },
-        };
-        failures.push(format!("`{}`: {message}", expectation.expression));
+        if let Some(message) = disagreement(expectation, result, optimized) {
+            failures.push(format!("`{}`: {message}", expectation.expression));
+        }
     }
     assert!(failures.is_empty(), "{fixture}:\n{}", failures.join("\n"));
     scenario.shutdown().await;
+}
+
+/// Why an expression's result disagrees with what the program expects, if
+/// it does. In optimized builds a value may be explicitly unavailable.
+fn disagreement(
+    expectation: &Expectation,
+    result: Result<Evaluation, Error>,
+    optimized: bool,
+) -> Option<String> {
+    let message = match (expectation.kind.as_str(), result) {
+        ("error", Err(Error::Expression(error))) if error.kind.name() == expectation.value => {
+            return None;
+        }
+        ("range", Ok(Evaluation::Range(page))) => {
+            let elements = page
+                .children
+                .iter()
+                .map(|child| match &child.state {
+                    VariableState::Available { value, .. } => {
+                        rendered("int", value).unwrap_or_else(|| format!("{value:?}"))
+                    }
+                    state => format!("{state:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            if elements == expectation.value {
+                return None;
+            }
+            format!("{elements} instead of {}", expectation.value)
+        }
+        ("text", Ok(Evaluation::Value { value, cause })) => match &value.state {
+            VariableState::Available {
+                text: Some(text), ..
+            } if text.completion == uscope::TextCompletion::Complete
+                && text.bytes.as_ref() == expectation.value.as_bytes() =>
+            {
+                return None;
+            }
+            VariableState::Unavailable(_) if optimized && cause.is_some() => return None,
+            state => format!("{state:?} instead of {:?}", expectation.value),
+        },
+        (_, result) => match result {
+            Ok(Evaluation::Value { value, cause }) => match &value.state {
+                VariableState::Available { value: decoded, .. } => {
+                    match rendered(&expectation.kind, decoded) {
+                        Some(actual) if actual == expectation.value => return None,
+                        actual => format!(
+                            "{} ({}) instead of {}",
+                            actual.unwrap_or_else(|| format!("{decoded:?}")),
+                            value
+                                .type_info
+                                .map(|info| info.name)
+                                .as_deref()
+                                .unwrap_or("?"),
+                            expectation.value
+                        ),
+                    }
+                }
+                VariableState::Unavailable(_) if optimized && cause.is_some() => return None,
+                state => format!("{state:?} at {cause:?}"),
+            },
+            other => format!("{other:?}"),
+        },
+    };
+    Some(message)
 }
 
 #[tokio::test]
