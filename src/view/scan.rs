@@ -19,11 +19,12 @@ use std::collections::BTreeSet;
 
 use crate::ViewProblem;
 use crate::eval::interp::{self, Value};
+use crate::eval::number::{Exact, Integer};
 use crate::eval::target::{Machine, Stop};
 
 use super::bind::{BoundClause, BoundGenerator, BoundItem, BoundScan, ViewProgram};
 use super::kernel::{self, Recordings, RunError};
-use super::run::{Failure, ViewMachine};
+use super::run::{Failure, ViewMachine, internal};
 
 /// How many elements apart the controller keeps cursors.
 pub const CHECKPOINT_INTERVAL: u64 = 256;
@@ -46,29 +47,24 @@ pub enum Var {
     Words(Box<[u64]>),
 }
 
+fn exact<P>(value: impl Into<Exact>) -> Value<P> {
+    Value::Int(Integer::Exact(value.into()))
+}
+
 impl Var {
     /// A single variable as the evaluator sees it.
     pub fn value<P>(&self) -> Value<P> {
-        let exact = |value: i128| {
-            Value::Int(crate::eval::number::Integer::Exact(
-                crate::eval::number::Exact::from(value),
-            ))
-        };
         match self {
             Self::Integer(value) => exact(*value),
             Self::Node(address) => Value::Pointer(*address),
-            Self::Words(words) => exact(words.first().copied().map_or(0, i128::from)),
+            Self::Words(words) => exact(words.first().copied().unwrap_or(0)),
         }
     }
 
     /// The variables as the evaluator sees them, appended to `values`.
     fn push<P>(&self, values: &mut Vec<Value<P>>) {
         match self {
-            Self::Words(words) => values.extend(words.iter().map(|word| {
-                Value::Int(crate::eval::number::Integer::Exact(
-                    crate::eval::number::Exact::from(*word),
-                ))
-            })),
+            Self::Words(words) => values.extend(words.iter().map(|word| exact(*word))),
             _ => values.push(self.value()),
         }
     }
@@ -314,9 +310,9 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
         for depth in 0..self.cursor.levels.len() {
             self.cursor.variables[depth].push(&mut self.values);
             if !self.items(depth, machine)? {
-                return Err(Failure::Problem(ViewProblem::Internal(
-                    "a checkpoint's values no longer pass their filters".into(),
-                )));
+                return Err(internal(
+                    "a checkpoint's values no longer pass their filters",
+                ));
             }
         }
         self.restored = true;
@@ -512,9 +508,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
             }
             (Level::Kernel, BoundGenerator::Kernel { kernel, words, .. }) => {
                 let Some(Some(run)) = self.runs.get_mut(depth) else {
-                    return Err(Failure::Problem(ViewProblem::Internal(
-                        "a kernel's clause has no run".into(),
-                    )));
+                    return Err(internal("a kernel's clause has no run"));
                 };
                 let item = run
                     .next(&mut Program { machine })
@@ -534,9 +528,7 @@ impl<'b, St, P: Clone> Scanner<'b, St, P> {
                     None => Ok(None),
                 }
             }
-            _ => Err(Failure::Problem(ViewProblem::Internal(
-                "a scan's state does not match its generator".into(),
-            ))),
+            _ => Err(internal("a scan's state does not match its generator")),
         }
     }
 }
@@ -593,9 +585,7 @@ fn word<M: Machine>(
         }
         Value::Pointer(address) => Ok(address),
         Value::Bool(value) => Ok(u64::from(value)),
-        _ => Err(Failure::Problem(ViewProblem::Internal(
-            "a kernel's argument is not a word".into(),
-        ))),
+        _ => Err(internal("a kernel's argument is not a word")),
     }
 }
 
@@ -606,9 +596,7 @@ fn node<M: Machine>(
 ) -> Result<u64, Failure> {
     match interp::value(program, machine)? {
         Value::Pointer(address) => Ok(address),
-        _ => Err(Failure::Problem(ViewProblem::Internal(
-            "a node is not a pointer".into(),
-        ))),
+        _ => Err(internal("a node is not a pointer")),
     }
 }
 

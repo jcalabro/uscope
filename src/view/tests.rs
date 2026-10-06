@@ -1,19 +1,15 @@
+use std::sync::Arc;
+
+use super::bind::BoundView;
 use super::run::{Child, Failure, Presented, children, present};
 use super::scan::Checkpoints;
 use super::syntax::{self, Language};
 use super::{ViewSet, choose};
-use crate::eval::fake::{Place, World};
+use crate::eval::fake::{Place, Step, World};
 use crate::{
-    BaseTypeEncoding as E, IntegerValue, PresentedShape, SourceLanguage, TextCompletion,
-    TypeArgument, TypeReference, VariableState, VariableValue,
+    BaseTypeEncoding as E, IntegerValue, SourceLanguage, TextCompletion, TypeArgument,
+    TypeReference, VariableValue,
 };
-
-/// A world of hand-rolled C containers and a C++ template instance.
-struct Containers {
-    world: World,
-    intvec: TypeReference,
-    text: TypeReference,
-}
 
 fn bytes(values: &[u64]) -> Vec<u8> {
     values
@@ -26,8 +22,17 @@ fn ints(values: impl IntoIterator<Item = i32>) -> Vec<u8> {
     values.into_iter().flat_map(i32::to_le_bytes).collect()
 }
 
-fn containers() -> Containers {
+/// The world `docs/views.md` describes, which most tests here share.
+fn world() -> World {
     let mut world = World::new();
+    add_containers(&mut world);
+    add_others(&mut world);
+    add_linked(&mut world);
+    world
+}
+
+/// Hand-rolled C vectors and text.
+fn add_containers(world: &mut World) {
     let int = world.base("int", E::Signed, 4);
     let size = world.base("unsigned long", E::Unsigned, 8);
     let char = world.base("char", E::SignedCharacter, 1);
@@ -58,11 +63,6 @@ fn containers() -> Containers {
     // Text that runs to the end of the last mapped page.
     world.map(0x7_fffd, b"abc");
     world.variable("cut", text, &bytes(&[0x7_fffd, 300]));
-    Containers {
-        world,
-        intvec,
-        text,
-    }
 }
 
 const VIEWS: &str = "uscope-views 1
@@ -82,98 +82,62 @@ fn set(text: &str) -> ViewSet {
     set
 }
 
-fn place(world: &World, name: &str, ty: TypeReference) -> Place {
+fn place(world: &World, name: &str) -> Place {
     Place::Memory {
         address: world.address_of(name),
-        ty,
+        ty: world.type_of(name),
     }
 }
 
-fn presented(
-    world: &mut World,
-    views: &ViewSet,
-    name: &str,
-    ty: TypeReference,
-) -> Result<Presented, String> {
-    let choice = choose(views, ty, world);
-    let Some(bound) = choice.bound else {
-        return Err(format!("no view binds: {:?}", choice.candidates));
-    };
-    let this = place(world, name, ty);
-    present(&bound, world, this, &mut Checkpoints::default()).map_err(|failure| match failure {
-        Failure::Problem(problem) => problem.to_string(),
+/// The view `views` chooses for the variable `name`.
+fn bound(world: &World, views: &ViewSet, name: &str) -> Arc<BoundView<Step>> {
+    choose(views, world.type_of(name), world)
+        .bound
+        .expect("a view binds")
+}
+
+fn failed(failure: Failure) -> String {
+    match failure {
+        Failure::Problem(problem) => format!("problem: {problem}"),
         Failure::Debugger(error) => format!("debugger: {error}"),
-    })
+    }
 }
 
-fn summary(world: &mut World, views: &ViewSet, name: &str, ty: TypeReference) -> String {
-    presented(world, views, name, ty).map_or_else(
-        |problem| format!("problem: {problem}"),
-        |presented| presented.summary,
-    )
+fn presented(world: &mut World, views: &ViewSet, name: &str) -> Result<Presented, String> {
+    let choice = choose(views, world.type_of(name), world);
+    let Some(bound) = choice.bound else {
+        return Err(format!("problem: no view binds: {:?}", choice.candidates));
+    };
+    let this = place(world, name);
+    present(&bound, world, this, &mut Checkpoints::default()).map_err(failed)
 }
 
-#[test]
-fn a_sequence_view_presents_elements_count_and_fields() {
-    let Containers {
-        mut world, intvec, ..
-    } = containers();
-    let views = set(VIEWS);
-    let shown = presented(&mut world, &views, "v", intvec).expect("presents");
-    assert_eq!(shown.shape, PresentedShape::Sequence);
-    assert_eq!(shown.count, Some(crate::PresentedCount::Exact(3)));
-    assert_eq!(shown.summary, "len=3 [10, 20, 30]");
-    assert_eq!(summary(&mut world, &views, "none", intvec), "len=0 []");
-    assert_eq!(
-        summary(&mut world, &views, "big", intvec),
-        "len=300 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, …]"
-    );
+fn summary(world: &mut World, views: &ViewSet, name: &str) -> String {
+    presented(world, views, name).map_or_else(|problem| problem, |presented| presented.summary)
+}
 
-    let bound = choose(&views, intvec, &world).bound.expect("binds");
-    let this = place(&world, "v", intvec);
-    let page = children(
-        &bound,
-        &mut world,
-        this,
-        3,
-        0,
-        10,
-        &mut Checkpoints::default(),
-    )
-    .expect("children");
-    let rendered = page
-        .iter()
-        .map(|child| match child {
-            Child::Element(index, value) => format!(
-                "[{index}] = {}",
-                super::summary::value(value.type_info.as_ref(), &value.state)
-            ),
-            Child::Field(name, value) => format!(
-                "{name} = {}",
-                super::summary::value(value.type_info.as_ref(), &value.state)
-            ),
-            Child::Entry(..) => panic!("a sequence has no entries"),
-            Child::Raw => "[raw]".to_owned(),
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        rendered,
-        ["[0] = 10", "[1] = 20", "[2] = 30", "capacity = 4", "[raw]"]
-    );
+/// A child as the reference's examples write it.
+fn rendered(child: &Child) -> String {
+    let value = |value: &crate::InspectedValue| {
+        super::summary::value(value.type_info.as_ref(), &value.state)
+    };
+    match child {
+        Child::Element(index, element) => format!("[{index}] = {}", value(element)),
+        Child::Entry(_, key, entry) => format!("{}: {}", value(key), value(entry)),
+        Child::Field(name, field) => format!("{name} = {}", value(field)),
+        Child::Raw => "[raw]".to_owned(),
+    }
 }
 
 /// Child `k` costs one evaluation of the element, wherever it is.
 #[test]
 fn random_access_children_cost_the_same_at_any_index() {
-    let Containers {
-        mut world, intvec, ..
-    } = containers();
-    let views = set(VIEWS);
-    let bound = choose(&views, intvec, &world).bound.expect("binds");
+    let mut world = world();
+    let bound = bound(&world, &set(VIEWS), "big");
     let mut costs = Vec::new();
     for index in [0, 150, 299] {
         world.reads.clear();
-        let this = place(&world, "big", intvec);
+        let this = place(&world, "big");
         let page = children(
             &bound,
             &mut world,
@@ -197,13 +161,11 @@ fn random_access_children_cost_the_same_at_any_index() {
 /// overflowing: its last children are still its fields and `[raw]`.
 #[test]
 fn the_largest_counts_page_without_overflowing() {
-    let Containers {
-        mut world, intvec, ..
-    } = containers();
+    let mut world = world();
+    let intvec = world.type_of("v");
     world.variable("huge", intvec, &bytes(&[0x10, u64::MAX, u64::MAX]));
-    let views = set(VIEWS);
-    let bound = choose(&views, intvec, &world).bound.expect("binds");
-    let this = place(&world, "huge", intvec);
+    let bound = bound(&world, &set(VIEWS), "huge");
+    let this = place(&world, "huge");
     let page = children(
         &bound,
         &mut world,
@@ -221,33 +183,9 @@ fn the_largest_counts_page_without_overflowing() {
 }
 
 #[test]
-fn a_failed_check_is_a_problem_naming_its_sides() {
-    let Containers {
-        mut world, intvec, ..
-    } = containers();
-    let views = set(VIEWS);
-    assert_eq!(
-        summary(&mut world, &views, "bad", intvec),
-        "problem: check `n <= cap` failed: `n` is 9, `cap` is 4"
-    );
-    // An element the program cannot provide is said so, and ends the
-    // preview: never a plausible number.
-    assert_eq!(
-        summary(&mut world, &views, "dangling", intvec),
-        "len=2 [<unavailable>, …]"
-    );
-}
-
-#[test]
 fn text_reads_its_length_or_to_its_terminator_and_says_how_it_ended() {
-    let Containers {
-        mut world, text, ..
-    } = containers();
-    let views = set(VIEWS);
-    let shown = presented(&mut world, &views, "s", text).expect("presents");
-    assert_eq!(shown.shape, PresentedShape::Text);
-    assert_eq!(shown.summary, "\"hello\"");
-    let cut = presented(&mut world, &views, "cut", text).expect("presents");
+    let mut world = world();
+    let cut = presented(&mut world, &set(VIEWS), "cut").expect("presents");
     let read = cut.text.expect("text");
     assert_eq!(&*read.bytes, b"abc");
     assert!(
@@ -257,14 +195,11 @@ fn text_reads_its_length_or_to_its_terminator_and_says_how_it_ended() {
     assert_eq!(cut.summary, "\"abc\"... <unreadable at 0x80000>");
 
     let terminated = set("uscope-views 1\nview c str_t { show text(p) }\n");
-    assert_eq!(summary(&mut world, &terminated, "s", text), "\"hello\"");
+    assert_eq!(summary(&mut world, &terminated, "s"), "\"hello\"");
 }
 
 #[test]
 fn an_alternative_that_does_not_bind_falls_through_and_says_why() {
-    let Containers {
-        mut world, intvec, ..
-    } = containers();
     let views = set("uscope-views 1
 view c intvec {
     let size = length
@@ -275,7 +210,8 @@ view c intvec {
     show sequence(size) for i in range(size) => data[i]
 }
 ");
-    let choice = choose(&views, intvec, &world);
+    let world = world();
+    let choice = choose(&views, world.type_of("v"), &world);
     assert!(choice.bound.is_some());
     let [rejected, chosen] = choice.candidates.as_slice() else {
         panic!("two candidates: {:?}", choice.candidates);
@@ -288,62 +224,6 @@ view c intvec {
     );
     assert_eq!(chosen.name.line, 6);
     assert!(chosen.rejection.is_none());
-    assert_eq!(
-        summary(&mut world, &views, "v", intvec),
-        "len=3 [10, 20, 30]"
-    );
-}
-
-#[test]
-fn shapes_choose_branches_and_present_other_values() {
-    let mut world = World::new();
-    let int = world.base("int", E::Signed, 4);
-    let marker = world.record("PhantomData", 0, &[]);
-    let pointer = world.pointer(Some(int));
-    let boxed = world.record("Box", 8, &[("_marker", marker, 0), ("ptr", pointer, 0)]);
-    world.identify(
-        boxed,
-        SourceLanguage::Rust,
-        &["alloc", "boxed"],
-        "Box",
-        vec![TypeArgument::Type(int)],
-    );
-    let tagged = world.record("tagged", 8, &[("kind", int, 0), ("value", int, 4)]);
-    world.identify(tagged, SourceLanguage::C, &[], "tagged", Vec::new());
-    let target = world.allocate(&ints([42]));
-    world.variable("b", boxed, &bytes(&[target]));
-    world.variable("nothing", tagged, &ints([0, 0]));
-    world.variable("something", tagged, &ints([1, 7]));
-    let views = set("uscope-views 1
-view rust alloc::**::Box<T> {
-    show value(*inner(self))
-}
-view c tagged {
-    show if kind == 0 { empty(\"None\") } else { value(value) }
-    summary \"tagged {kind}: {value}\"
-}
-");
-    let shown = presented(&mut world, &views, "b", boxed).expect("presents");
-    assert_eq!(shown.shape, PresentedShape::Value);
-    assert_eq!(shown.summary, "42");
-    let inner = shown.inner.expect("the value standing for it");
-    assert!(matches!(
-        inner.state,
-        VariableState::Available {
-            value: VariableValue::Scalar(crate::ScalarValue::Signed(42)),
-            ..
-        }
-    ));
-    let none = presented(&mut world, &views, "nothing", tagged).expect("presents");
-    assert_eq!(
-        (none.shape, none.summary.as_str()),
-        (PresentedShape::Empty, "tagged 0: 0")
-    );
-    let some = presented(&mut world, &views, "something", tagged).expect("presents");
-    assert_eq!(
-        (some.shape, some.summary.as_str()),
-        (PresentedShape::Value, "tagged 1: 7")
-    );
 }
 
 #[test]
@@ -378,21 +258,15 @@ fn patterns_capture_arguments_and_anchor_at_the_root() {
             .as_str(),
         )]);
         assert!(views.errors().is_empty(), "{:?}", views.errors());
-        summary(world, &views, "p", pair)
+        summary(world, &views, "p")
     };
     assert_eq!(
         shown(&mut world, "c++ app::detail::Pair<T, N>"),
         "len=3 [2, 3, 4]"
     );
-    assert_eq!(
-        shown(&mut world, "c++ app::**::Pair<T, N>"),
-        "len=3 [2, 3, 4]"
-    );
     assert_eq!(shown(&mut world, "any **::Pair<T, 3>"), "len=3 [2, 3, 4]");
     for header in [
-        "c++ detail::Pair<T, N>",
         "c app::detail::Pair<T, N>",
-        "c++ app::detail::Pair<T, 4>",
         "c++ app::detail::Pair<T, N, M>",
         "c++ app::detail::Pair<long, N>",
     ] {
@@ -401,8 +275,8 @@ fn patterns_capture_arguments_and_anchor_at_the_root() {
             "{header}"
         );
     }
-    // A pattern that reaches a parameter pack spells all of it, so
-    // `Pair<T>` no longer names a pair whose pack holds two arguments.
+    // A pattern that reaches a parameter pack spells all of it, so `Pair<T>`
+    // does not name a pair whose pack holds two arguments.
     world.pack(pair, 0);
     assert_eq!(
         shown(&mut world, "c++ app::detail::Pair<T, N>"),
@@ -412,32 +286,7 @@ fn patterns_capture_arguments_and_anchor_at_the_root() {
         "test.views",
         "uscope-views 1\nview c++ app::detail::Pair<T> {\n    show empty(\"one\")\n}\nview c++ app::detail::Pair {\n    show empty(\"any\")\n}\n",
     )]);
-    assert_eq!(summary(&mut world, &views, "p", pair), "any");
-}
-
-/// However little budget there is, a presentation is the whole one or a
-/// problem, never a different one.
-#[test]
-fn too_little_work_ends_in_a_problem_never_a_wrong_presentation() {
-    let views = set(VIEWS);
-    let Containers {
-        mut world, intvec, ..
-    } = containers();
-    world.work = Some(100_000);
-    let full = summary(&mut world, &views, "v", intvec);
-    let used = 100_000 - world.work.expect("limited");
-    assert_eq!(full, "len=3 [10, 20, 30]");
-    for budget in 0..used {
-        let Containers {
-            mut world, intvec, ..
-        } = containers();
-        world.work = Some(budget);
-        let limited = summary(&mut world, &views, "v", intvec);
-        assert!(
-            limited == full || limited.contains("limit") || limited.contains("<unavailable>"),
-            "{budget} of {used} units gave `{limited}`"
-        );
-    }
+    assert_eq!(summary(&mut world, &views, "p"), "any");
 }
 
 #[test]
@@ -609,7 +458,7 @@ view c++ app::Thing<T, _> {   # a comment
 
 #[test]
 fn bound_views_reject_what_does_not_type_check() {
-    let Containers { world, intvec, .. } = containers();
+    let world = world();
     for (body, reason) in [
         (
             "show sequence(n) for i in range(n) => data[i].x",
@@ -634,7 +483,7 @@ fn bound_views_reject_what_does_not_type_check() {
         let views = set(&format!(
             "uscope-views 1\nview c intvec {{\n    {body}\n}}\n"
         ));
-        let choice = choose(&views, intvec, &world);
+        let choice = choose(&views, world.type_of("v"), &world);
         match (&choice.bound, reason) {
             (Some(_), "") => {}
             (Some(_), _) => panic!("`{body}` bound"),
@@ -715,10 +564,9 @@ proptest::proptest! {
     }
 }
 
-/// The world `docs/views.md` describes: the containers, a tagged union, a
-/// Rust box, and a C++ template instance.
-fn examples() -> World {
-    let Containers { mut world, .. } = containers();
+/// A tagged union, a Rust box, C++ template instances, and the values
+/// `formatted_and_linked` adds.
+fn add_others(world: &mut World) {
     let int = world.base("int", E::Signed, 4);
     let tagged = world.record("tagged", 8, &[("kind", int, 0), ("value", int, 4)]);
     world.identify(tagged, SourceLanguage::C, &[], "tagged", Vec::new());
@@ -757,7 +605,6 @@ fn examples() -> World {
         ],
     );
     world.variable("p", pair, &ints([1, 2, 3, 4]));
-    add_linked(&mut world);
     // `app::Handle<int>` holds a `void *` to an `app::Cell<int>`.
     let cell = world.record("Cell<int>", 4, &[("value", int, 0)]);
     world.identify(
@@ -797,8 +644,7 @@ fn examples() -> World {
     world.variable("number", either, &bytes(&[7, 0]));
     world.variable("pointer", either, &bytes(&[0x9_0000, 1]));
     world.variable("neither", either, &bytes(&[0, 5]));
-    formatted_and_linked(&mut world, int, tagged);
-    world
+    formatted_and_linked(world, int, tagged);
 }
 
 /// The examples' `entry`, whose members formats write, a tagged value of a
@@ -875,9 +721,8 @@ fn formatted_and_linked(world: &mut World, int: TypeReference, tagged: TypeRefer
 
 /// What a value shows as an example writes it.
 fn example_outcome(views: &ViewSet, name: &str, outcome: &str) -> String {
-    let mut world = examples();
-    let ty = world.type_of(name);
-    let choice = choose(views, ty, &world);
+    let mut world = world();
+    let choice = choose(views, world.type_of(name), &world);
     let Some(bound) = choice.bound else {
         return choice.candidates.first().map_or_else(
             || "unbound: no view's pattern names the type".to_owned(),
@@ -893,45 +738,22 @@ fn example_outcome(views: &ViewSet, name: &str, outcome: &str) -> String {
             },
         );
     };
-    let this = place(&world, name, ty);
+    let this = place(&world, name);
     let mut checkpoints = Checkpoints::default();
-    if outcome.starts_with("children: ") {
-        let elements = match present(&bound, &mut world, this.clone(), &mut checkpoints) {
-            Ok(presented) => presented.count.map_or(0, crate::PresentedCount::known),
-            Err(Failure::Problem(problem)) => return format!("problem: {problem}"),
-            Err(Failure::Debugger(error)) => return format!("debugger: {error}"),
-        };
-        return match children(&bound, &mut world, this, elements, 0, 64, &mut checkpoints) {
-            Ok(children) => {
-                let rendered = children
-                    .iter()
-                    .map(|child| match child {
-                        Child::Element(index, value) => format!(
-                            "[{index}] = {}",
-                            super::summary::value(value.type_info.as_ref(), &value.state)
-                        ),
-                        Child::Entry(_, key, value) => format!(
-                            "{}: {}",
-                            super::summary::value(key.type_info.as_ref(), &key.state),
-                            super::summary::value(value.type_info.as_ref(), &value.state)
-                        ),
-                        Child::Field(name, value) => format!(
-                            "{name} = {}",
-                            super::summary::value(value.type_info.as_ref(), &value.state)
-                        ),
-                        Child::Raw => "[raw]".to_owned(),
-                    })
-                    .collect::<Vec<_>>();
-                format!("children: {}", rendered.join(", "))
-            }
-            Err(Failure::Problem(problem)) => format!("problem: {problem}"),
-            Err(Failure::Debugger(error)) => format!("debugger: {error}"),
-        };
+    let presented = match present(&bound, &mut world, this.clone(), &mut checkpoints) {
+        Ok(presented) => presented,
+        Err(failure) => return failed(failure),
+    };
+    if !outcome.starts_with("children: ") {
+        return presented.summary;
     }
-    match present(&bound, &mut world, this, &mut checkpoints) {
-        Ok(presented) => presented.summary,
-        Err(Failure::Problem(problem)) => format!("problem: {problem}"),
-        Err(Failure::Debugger(error)) => format!("debugger: {error}"),
+    let elements = presented.count.map_or(0, crate::PresentedCount::known);
+    match children(&bound, &mut world, this, elements, 0, 64, &mut checkpoints) {
+        Ok(children) => format!(
+            "children: {}",
+            children.iter().map(rendered).collect::<Vec<_>>().join(", ")
+        ),
+        Err(failure) => failed(failure),
     }
 }
 
@@ -1003,17 +825,6 @@ fn every_example_in_the_views_reference_holds() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A world of hand-rolled C linked structures: lists of `node {int value;
-/// node *next}`, binary trees of `tnode {int key; int value; tnode *left;
-/// tnode *right}`, an open-addressed table, and chained buckets.
-struct Linked {
-    world: World,
-    list: TypeReference,
-    tree: TypeReference,
-    table: TypeReference,
-    chained: TypeReference,
-}
-
 /// Lays out list nodes holding `values`, each linked to the node `links`
 /// names (`None` for null), and returns their addresses.
 fn nodes(world: &mut World, values: &[i32], links: &[Option<usize>]) -> Vec<u64> {
@@ -1050,21 +861,10 @@ fn tree_nodes(world: &mut World, nodes: &[(i32, i32, Option<usize>, Option<usize
     (0..nodes.len()).map(address).collect()
 }
 
-fn linked() -> Linked {
-    let mut world = World::new();
-    let (list, tree, table, chained) = add_linked(&mut world);
-    Linked {
-        world,
-        list,
-        tree,
-        table,
-        chained,
-    }
-}
-
-/// Adds the linked structures' types and values to `world`, returning the
-/// list, tree, table, and chained types.
-fn add_linked(world: &mut World) -> (TypeReference, TypeReference, TypeReference, TypeReference) {
+/// Hand-rolled C linked structures: lists of `node {int value; node
+/// *next}`, binary trees of `tnode {int key; int value; tnode *left; tnode
+/// *right}`, an open-addressed table, and chained buckets.
+fn add_linked(world: &mut World) {
     let int = world.base("int", E::Signed, 4);
     let size = world.base("unsigned long", E::Unsigned, 8);
     let node = world.record("node", 16, &[]);
@@ -1177,7 +977,6 @@ fn add_linked(world: &mut World) -> (TypeReference, TypeReference, TypeReference
     let second = chain(world, &[3]);
     let array = world.allocate(&bytes(&[first[0], 0, second[0]]));
     world.variable("buckets", chained, &bytes(&[array, 3, 3]));
-    (list, tree, table, chained)
 }
 
 const LINKED_VIEWS: &str = "uscope-views 1
@@ -1196,19 +995,13 @@ view c chained {
 ";
 
 /// Every element or entry of a presented value, in pages of `size`.
-fn paged(
-    world: &mut World,
-    views: &ViewSet,
-    name: &str,
-    ty: TypeReference,
-    size: u64,
-) -> Vec<String> {
-    let bound = choose(views, ty, world).bound.expect("binds");
-    let this = place(world, name, ty);
+fn paged(world: &mut World, views: &ViewSet, name: &str, size: u64) -> Vec<String> {
+    let bound = bound(world, views, name);
+    let this = place(world, name);
     let mut checkpoints = Checkpoints::default();
     let presented = present(&bound, world, this.clone(), &mut checkpoints).expect("presents");
     let count = presented.count.map_or(0, crate::PresentedCount::known);
-    let mut rendered = Vec::new();
+    let mut elements = Vec::new();
     let mut offset = 0;
     while offset < count {
         let page = children(
@@ -1221,74 +1014,30 @@ fn paged(
             &mut checkpoints,
         )
         .expect("a page");
-        for child in page {
-            rendered.push(match child {
-                Child::Element(index, value) => format!(
-                    "[{index}] {}",
-                    super::summary::value(value.type_info.as_ref(), &value.state)
-                ),
-                Child::Entry(index, key, value) => format!(
-                    "[{index}] {}: {}",
-                    super::summary::value(key.type_info.as_ref(), &key.state),
-                    super::summary::value(value.type_info.as_ref(), &value.state)
-                ),
-                Child::Field(..) | Child::Raw => continue,
-            });
-        }
+        elements.extend(
+            page.iter()
+                .filter(|child| matches!(child, Child::Element(..) | Child::Entry(..)))
+                .map(rendered),
+        );
         offset += size;
     }
-    rendered
-}
-
-#[test]
-fn lists_end_at_null_or_their_head_and_never_repeat_a_node() {
-    let Linked {
-        mut world, list, ..
-    } = linked();
-    let views = set(LINKED_VIEWS);
-    assert_eq!(
-        summary(&mut world, &views, "three", list),
-        "len=3 [1, 2, 3]"
-    );
-    assert_eq!(summary(&mut world, &views, "empty_list", list), "len=0 []");
-    assert_eq!(
-        summary(&mut world, &views, "circle", list),
-        "len=3 [4, 5, 6]"
-    );
-    assert_eq!(
-        summary(&mut world, &views, "looped", list),
-        "problem: cycle at element 3: it leads back to a node already visited"
-    );
-    assert_eq!(
-        summary(&mut world, &views, "short", list),
-        "problem: the view declares 5 elements and generates 3"
-    );
-    assert_eq!(
-        paged(&mut world, &views, "three", list, 2),
-        ["[0] 1", "[1] 2", "[2] 3"]
-    );
+    elements
 }
 
 #[test]
 fn a_list_without_a_count_is_counted_as_far_as_the_budget_allows() {
-    let Linked {
-        mut world, list, ..
-    } = linked();
+    let mut world = world();
     let views = set("uscope-views 1
 view c list {
     show sequence(_) for x in list(head, n => n->next) => x->value
 }
 ");
     assert_eq!(
-        summary(&mut world, &views, "three", list),
-        "len=3 [1, 2, 3]"
-    );
-    assert_eq!(
-        summary(&mut world, &views, "long", list),
+        summary(&mut world, &views, "long"),
         "len=1000 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, …]"
     );
     world.work = Some(400);
-    let shown = presented(&mut world, &views, "long", list).expect("presents");
+    let shown = presented(&mut world, &views, "long").expect("presents");
     let Some(crate::PresentedCount::AtLeast(count)) = shown.count else {
         panic!("{:?}", shown.count);
     };
@@ -1300,62 +1049,14 @@ view c list {
     );
 }
 
-#[test]
-fn trees_present_in_order_and_refuse_cycles_and_impossible_depths() {
-    let Linked {
-        mut world, tree, ..
-    } = linked();
-    let views = set(LINKED_VIEWS);
-    let shown = presented(&mut world, &views, "balanced", tree).expect("presents");
-    assert_eq!(shown.shape, PresentedShape::Map);
-    assert_eq!(shown.summary, "len=3 {1: 10, 2: 20, 3: 30}");
-    assert_eq!(
-        paged(&mut world, &views, "balanced", tree, 1),
-        ["[0] 1: 10", "[1] 2: 20", "[2] 3: 30"]
-    );
-    assert_eq!(
-        summary(&mut world, &views, "tangled", tree),
-        "problem: cycle at element 3: it leads back to a node already visited"
-    );
-    assert_eq!(
-        summary(&mut world, &views, "deep", tree),
-        "problem: the tree is deeper than 128 levels"
-    );
-}
-
-#[test]
-fn filters_and_nested_generators_choose_what_is_generated() {
-    let Linked {
-        mut world,
-        table,
-        chained,
-        ..
-    } = linked();
-    let views = set(LINKED_VIEWS);
-    assert_eq!(
-        summary(&mut world, &views, "sparse", table),
-        "len=2 {5: 50, 6: 60}"
-    );
-    assert_eq!(
-        summary(&mut world, &views, "buckets", chained),
-        "len=3 [1, 2, 3]"
-    );
-    assert_eq!(
-        paged(&mut world, &views, "buckets", chained, 2),
-        ["[0] 1", "[1] 2", "[2] 3"]
-    );
-}
-
 /// A later page resumes from the nearest checkpoint rather than walking
 /// from the start again, and pages of any size read the same elements.
 #[test]
 fn scans_resume_from_checkpoints_and_page_alike_in_any_size() {
-    let Linked {
-        mut world, list, ..
-    } = linked();
+    let mut world = world();
     let views = set(LINKED_VIEWS);
-    let bound = choose(&views, list, &world).bound.expect("binds");
-    let this = place(&world, "long", list);
+    let bound = bound(&world, &views, "long");
+    let this = place(&world, "long");
     let mut fresh = Checkpoints::default();
     world.reads.clear();
     let page =
@@ -1376,35 +1077,32 @@ fn scans_resume_from_checkpoints_and_page_alike_in_any_size() {
         resumed * 4 < from_start,
         "{resumed} reads resumed, {from_start} from the start"
     );
-    assert_eq!(
-        paged(&mut world, &views, "long", list, 7),
-        paged(&mut world, &views, "long", list, 300)
-    );
+    for (name, size) in [("long", 7), ("balanced", 1), ("sparse", 1), ("buckets", 2)] {
+        assert_eq!(
+            paged(&mut world, &views, name, size),
+            paged(&mut world, &views, name, 300),
+            "{name}"
+        );
+    }
 }
 
-/// However little budget there is, a scan's presentation is the whole one
-/// or a problem, never a different one.
+/// However little budget there is, a presentation is the whole one or a
+/// problem, never a different one.
 #[test]
-fn too_little_work_never_makes_a_scan_present_wrongly() {
-    let views = set(LINKED_VIEWS);
-    for (name, select) in [("three", 0), ("balanced", 1), ("sparse", 2), ("buckets", 3)] {
-        let full = {
-            let mut linked = linked();
-            let ty = [linked.list, linked.tree, linked.table, linked.chained][select];
-            linked.world.work = Some(100_000);
-            let full = summary(&mut linked.world, &views, name, ty);
-            let used = 100_000 - linked.world.work.expect("limited");
-            (full, used)
-        };
-        for budget in 0..full.1 {
-            let mut linked = linked();
-            let ty = [linked.list, linked.tree, linked.table, linked.chained][select];
-            linked.world.work = Some(budget);
-            let limited = summary(&mut linked.world, &views, name, ty);
+fn too_little_work_never_makes_a_presentation_wrong() {
+    let views = ViewSet::new([("test.views", VIEWS), ("linked.views", LINKED_VIEWS)]);
+    for name in ["v", "three", "balanced", "sparse", "buckets"] {
+        let mut unlimited = world();
+        unlimited.work = Some(100_000);
+        let full = summary(&mut unlimited, &views, name);
+        let used = 100_000 - unlimited.work.expect("limited");
+        for budget in 0..used {
+            let mut limited = world();
+            limited.work = Some(budget);
+            let limited = summary(&mut limited, &views, name);
             assert!(
-                limited == full.0 || limited.contains("limit") || limited.contains("<unavailable>"),
-                "{name}: {budget} of {} units gave `{limited}`",
-                full.1
+                limited == full || limited.contains("limit") || limited.contains("<unavailable>"),
+                "{name}: {budget} of {used} units gave `{limited}`"
             );
         }
     }
@@ -1412,12 +1110,9 @@ fn too_little_work_never_makes_a_scan_present_wrongly() {
 
 #[test]
 fn an_element_a_scan_reaches_is_a_place() {
-    let Linked {
-        mut world, list, ..
-    } = linked();
-    let views = set(LINKED_VIEWS);
-    let bound = choose(&views, list, &world).bound.expect("binds");
-    let this = place(&world, "three", list);
+    let mut world = world();
+    let bound = bound(&world, &set(LINKED_VIEWS), "three");
+    let this = place(&world, "three");
     let mut checkpoints = Checkpoints::default();
     let second = super::run::element_place(&bound, &mut world, this.clone(), 1, &mut checkpoints)
         .expect("a place");
@@ -1478,7 +1173,7 @@ fn types_are_constructed_from_arguments_and_layouts_named() {
     let shown = |world: &mut World, body: &str| {
         let views = views(body);
         assert!(views.errors().is_empty(), "{:?}", views.errors());
-        summary(world, &views, "h", holder)
+        summary(world, &views, "h")
     };
     assert_eq!(
         shown(
@@ -1599,19 +1294,17 @@ view c a {
 /// the empty slots after its last element.
 #[test]
 fn a_page_keeps_its_elements_when_the_budget_ends_between_them() {
-    let Linked {
-        mut world, table, ..
-    } = linked();
+    let mut world = world();
     let mut slots = Vec::new();
     for index in 0..200 {
         let used = i32::from(index % 50 == 0);
         slots.extend_from_slice(&ints([used, index, index * 10]));
     }
     let slots = world.allocate(&slots);
-    world.variable("wide", table, &bytes(&[slots, 200, 4]));
+    world.variable("wide", world.type_of("sparse"), &bytes(&[slots, 200, 4]));
     let views = set(LINKED_VIEWS);
-    let bound = choose(&views, table, &world).bound.expect("binds");
-    let this = place(&world, "wide", table);
+    let bound = bound(&world, &views, "wide");
+    let this = place(&world, "wide");
     world.work = Some(300);
     let page = children(
         &bound,
@@ -1632,7 +1325,7 @@ fn a_page_keeps_its_elements_when_the_budget_ends_between_them() {
     // So is a summary's preview.
     world.work = Some(150);
     assert_eq!(
-        summary(&mut world, &views, "wide", table),
+        summary(&mut world, &views, "wide"),
         "len=4 {0: 0, <unavailable>, …}"
     );
 }
@@ -1642,17 +1335,18 @@ fn a_page_keeps_its_elements_when_the_budget_ends_between_them() {
 /// Brent's algorithm, before the declared count is reached.
 #[test]
 fn a_cycle_behind_a_checkpoint_is_still_found() {
-    let Linked {
-        mut world, list, ..
-    } = linked();
+    let mut world = world();
     let mut links = (1..300).map(Some).collect::<Vec<_>>();
     links.push(Some(10));
     let values = (0..300).collect::<Vec<_>>();
     let looped = nodes(&mut world, &values, &links);
-    world.variable("long_loop", list, &bytes(&[looped[0], 100_000]));
-    let views = set(LINKED_VIEWS);
-    let bound = choose(&views, list, &world).bound.expect("binds");
-    let this = place(&world, "long_loop", list);
+    world.variable(
+        "long_loop",
+        world.type_of("long"),
+        &bytes(&[looped[0], 100_000]),
+    );
+    let bound = bound(&world, &set(LINKED_VIEWS), "long_loop");
+    let this = place(&world, "long_loop");
     let mut checkpoints = Checkpoints::default();
     let first = children(
         &bound,

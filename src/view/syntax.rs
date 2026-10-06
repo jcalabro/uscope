@@ -897,11 +897,10 @@ impl<'a> Parser<'a> {
             "bytes" => Format::Bytes,
             "utf16" => Format::Utf16,
             "flags" | "enum" => {
-                let flags = word == "flags";
-                self.open_call(if flags { "flags" } else { "enum" })?;
+                self.open_call(&word)?;
                 let ty = self.type_expr(0)?;
-                self.close_call(if flags { "flags" } else { "enum" })?;
-                if flags {
+                self.close_call(&word)?;
+                if word == "flags" {
                     Format::Flags(ty)
                 } else {
                     Format::Enum(ty)
@@ -978,15 +977,7 @@ impl<'a> Parser<'a> {
                 self.position += word.len();
                 self.open_call(word)?;
                 self.skip_blank();
-                let count = if self.rest().starts_with('_')
-                    && !self
-                        .rest()
-                        .as_bytes()
-                        .get(1)
-                        .copied()
-                        .is_some_and(is_word_continue)
-                {
-                    self.position += 1;
+                let count = if self.eat_word("_") {
                     Count::Unknown
                 } else {
                     Count::Known(self.expression()?)
@@ -1044,11 +1035,7 @@ impl<'a> Parser<'a> {
                 self.skip_blank();
                 self.expect(",", "between `dynamic`'s pointer and type")?;
                 self.skip_blank();
-                let ty = if self.peek_word() == Some("arg")
-                    && self.rest()["arg".len()..].trim_start().starts_with('(')
-                {
-                    self.position += "arg".len();
-                    self.open_call("arg")?;
+                let ty = if self.eat_call("arg")? {
                     let of = self.type_expr(0)?;
                     self.skip_blank();
                     self.expect(",", "between `arg`'s type and position")?;
@@ -1092,15 +1079,7 @@ impl<'a> Parser<'a> {
             if default.is_some() {
                 return Err(self.error("the `_` arm is a match's last"));
             }
-            let value = if self.rest().starts_with('_')
-                && !self
-                    .rest()
-                    .as_bytes()
-                    .get(1)
-                    .copied()
-                    .is_some_and(is_word_continue)
-            {
-                self.position += 1;
+            let value = if self.eat_word("_") {
                 None
             } else {
                 Some(self.expression()?)
@@ -1331,6 +1310,17 @@ impl<'a> Parser<'a> {
         Ok(shape)
     }
 
+    /// Takes `name(` when it is next, as a call rather than a name.
+    fn eat_call(&mut self, name: &str) -> Parsed<bool> {
+        let call = self.peek_word() == Some(name)
+            && self.rest()[name.len()..].trim_start().starts_with('(');
+        if call {
+            self.position += name.len();
+            self.open_call(name)?;
+        }
+        Ok(call)
+    }
+
     fn open_call(&mut self, name: &str) -> Parsed<()> {
         self.skip_inline();
         self.expect("(", &format!("after `{name}`"))
@@ -1468,50 +1458,41 @@ impl<'a> Parser<'a> {
 
     /// A type for a `type` statement, without the types declared inside it.
     fn type_operand(&mut self, depth: usize) -> Parsed<TypeExpr> {
-        match self.peek_word() {
-            Some("typeof") if self.rest()["typeof".len()..].trim_start().starts_with('(') => {
-                self.position += "typeof".len();
-                self.open_call("typeof")?;
-                let expression = self.expression()?;
-                self.close_call("typeof")?;
-                Ok(TypeExpr::TypeOf(expression))
-            }
-            Some("arg") if self.rest()["arg".len()..].trim_start().starts_with('(') => {
-                self.position += "arg".len();
-                self.open_call("arg")?;
-                let of = self.type_expr(depth + 1)?;
-                self.skip_blank();
-                self.expect(",", "between `arg`'s type and position")?;
-                self.skip_blank();
-                let digits = self.rest().bytes().take_while(u8::is_ascii_digit).count();
-                let index = self.rest()[..digits]
-                    .parse::<u32>()
-                    .map_err(|_| self.unexpected("an argument's position"))?;
-                self.position += digits;
-                self.close_call("arg")?;
-                Ok(TypeExpr::Arg {
-                    of: Box::new(of),
-                    index,
-                })
-            }
-            _ => {
-                let start = self.position;
-                let end = self.scan_type_name();
-                let text = self.text[start..end].trim();
-                if text.is_empty() {
-                    return Err(self.unexpected("a type"));
-                }
-                self.position = end;
-                let name = text.trim_end_matches(|character: char| {
-                    character == '*' || character.is_whitespace()
-                });
-                let pointers = text[name.len()..].matches('*').count();
-                Ok(TypeExpr::Named {
-                    name: name.to_owned(),
-                    pointers: u8::try_from(pointers).unwrap_or(u8::MAX),
-                })
-            }
+        if self.eat_call("typeof")? {
+            let expression = self.expression()?;
+            self.close_call("typeof")?;
+            return Ok(TypeExpr::TypeOf(expression));
         }
+        if self.eat_call("arg")? {
+            let of = self.type_expr(depth + 1)?;
+            self.skip_blank();
+            self.expect(",", "between `arg`'s type and position")?;
+            self.skip_blank();
+            let digits = self.rest().bytes().take_while(u8::is_ascii_digit).count();
+            let index = self.rest()[..digits]
+                .parse::<u32>()
+                .map_err(|_| self.unexpected("an argument's position"))?;
+            self.position += digits;
+            self.close_call("arg")?;
+            return Ok(TypeExpr::Arg {
+                of: Box::new(of),
+                index,
+            });
+        }
+        let start = self.position;
+        let end = self.scan_type_name();
+        let text = self.text[start..end].trim();
+        if text.is_empty() {
+            return Err(self.unexpected("a type"));
+        }
+        self.position = end;
+        let name =
+            text.trim_end_matches(|character: char| character == '*' || character.is_whitespace());
+        let pointers = text[name.len()..].matches('*').count();
+        Ok(TypeExpr::Named {
+            name: name.to_owned(),
+            pointers: u8::try_from(pointers).unwrap_or(u8::MAX),
+        })
     }
 
     /// The end of a type's name: before `or`, `,`, or `)` outside its
@@ -1548,7 +1529,7 @@ impl<'a> Parser<'a> {
     fn expression(&mut self) -> Parsed<Expr> {
         self.skip_inline();
         let start = self.position;
-        let end = self.scan_expression();
+        let end = self.scan_expression_until(false);
         let expression = self.expression_text(start, end)?;
         self.position = end;
         Ok(expression)
@@ -1569,11 +1550,6 @@ impl<'a> Parser<'a> {
                 let at = start + (error.span.start as usize).min(raw.len());
                 self.error_at(at, error.to_string())
             })
-    }
-
-    /// Where the expression at the cursor ends.
-    fn scan_expression(&self) -> usize {
-        self.scan_expression_until(false)
     }
 
     /// Where the expression at the cursor ends; with `colon`, also at a `:`
