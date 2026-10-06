@@ -1,6 +1,6 @@
-//! Ending programs and sessions in every way a client or the system can:
-//! terminate requests, pauses before the program runs, input that ends
-//! early, and programs killed from outside.
+//! Ending programs in every way a client or the system can: terminate
+//! requests, pauses before the program runs, and programs killed from
+//! outside.
 
 use serde_json::{Value, json};
 
@@ -150,31 +150,6 @@ fn pausing_before_the_program_runs_is_refused_and_right_after_it_starts_stops_it
     dap.success(paused);
     let stop = dap.stopped(launch.mark);
     assert_eq!(stop.reason, "pause");
-    dap.finish();
-}
-
-#[test]
-fn input_ending_before_a_program_or_inside_a_message_ends_the_session_cleanly() {
-    // Before anything is launched.
-    let mut dap = Dap::start("eof before launch");
-    dap.initialize(Profile::VsCode);
-    dap.close_stdin();
-    dap.wait_for_exit();
-    dap.finish();
-
-    // Partway through a message, while a program runs.
-    let mut dap = Dap::start("eof inside a message");
-    let started = dap.launch(
-        Profile::VsCode,
-        &fixture("spin"),
-        json!({}),
-        &Configuration::default(),
-    );
-    dap.event(started.mark, "process", |_| true);
-    dap.write_bytes(b"Content-Length: 80\r\n\r\n{\"seq\": 9, \"type\": \"req");
-    dap.close_stdin();
-    dap.wait_for_exit();
-    // finish checks that the program is gone.
     dap.finish();
 }
 

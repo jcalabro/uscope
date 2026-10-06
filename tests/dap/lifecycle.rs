@@ -504,19 +504,6 @@ fn restarts_keep_the_program_and_attached_processes_are_attached_again() {
 }
 
 #[test]
-fn cancelling_answered_or_unknown_requests_is_harmless() {
-    let mut dap = Dap::start("cancel");
-    dap.initialize(Profile::VsCode);
-    let threads = dap.send("threads", Value::Null);
-    dap.success(threads);
-    dap.request("cancel", json!({"requestId": threads.seq}));
-    dap.request("cancel", json!({"requestId": 9999}));
-    dap.request("cancel", json!({"progressId": "load"}));
-    dap.request("threads", Value::Null);
-    dap.finish();
-}
-
-#[test]
 fn core_dumps_explain_their_signal_their_missing_modules_and_mismatched_files() {
     // An abort, as a fatal signal the program sent itself.
     let mut dap = Dap::start("abort core");

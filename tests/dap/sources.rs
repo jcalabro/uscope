@@ -1,4 +1,5 @@
-//! Modules, source files, breakpoint lines, completions, and progress.
+//! Modules, source files, breakpoint lines, completions, frame formats,
+//! and line numbering.
 
 use serde_json::{Value, json};
 
@@ -108,66 +109,6 @@ fn breakpoint_locations_list_the_lines_with_code() {
 }
 
 #[test]
-fn completions_offer_commands_subcommands_and_variables() {
-    let mut dap = Dap::start("completions");
-    let started = dap.launch(
-        Profile::VsCode,
-        &fixture("variables-gcc-o0"),
-        json!({}),
-        &Configuration {
-            functions: vec!["pointer_target".to_owned()],
-            ..Configuration::default()
-        },
-    );
-    let stop = dap.stopped(started.mark);
-    let frame =
-        dap.request("stackTrace", json!({"threadId": stop.thread}))["stackFrames"][0]["id"].clone();
-    let labels = |dap: &mut Dap, text: &str| {
-        let body = dap.request(
-            "completions",
-            json!({"text": text, "column": text.chars().count() + 1, "frameId": frame}),
-        );
-        body["targets"]
-            .as_array()
-            .expect("targets")
-            .iter()
-            .map(|target| {
-                (
-                    target["label"].as_str().expect("label").to_owned(),
-                    target["start"].as_u64().expect("start"),
-                    target["length"].as_u64().expect("length"),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    let commands = labels(&mut dap, "wat");
-    assert!(
-        commands.contains(&("watch".to_owned(), 1, 3)),
-        "{commands:?}"
-    );
-    assert!(
-        commands.contains(&("watchpoints".to_owned(), 1, 3)),
-        "{commands:?}"
-    );
-    assert_eq!(labels(&mut dap, "info sig"), [("signals".to_owned(), 6, 3)]);
-    assert_eq!(labels(&mut dap, "info vi"), [("view".to_owned(), 6, 2)]);
-    let variables = labels(&mut dap, "print poin");
-    assert!(
-        variables
-            .iter()
-            .any(|(label, start, _)| label == "pointee" && *start == 7),
-        "{variables:?}"
-    );
-    assert!(
-        variables
-            .iter()
-            .any(|(label, ..)| label == "pointer_parameter"),
-        "{variables:?}"
-    );
-    dap.finish();
-}
-
-#[test]
 fn stack_frames_show_the_parameters_line_and_module_a_client_asks_for() {
     let mut dap = Dap::start("frame format");
     let started = dap.launch(
@@ -252,7 +193,7 @@ fn clients_counting_lines_and_columns_from_zero_see_every_position_one_less() {
 }
 
 #[test]
-fn completions_inside_expressions_offer_members_registers_and_globals() {
+fn completions_offer_commands_members_registers_and_names() {
     let path = source("c/command-names.c");
     let mut dap = Dap::start("expression completions");
     let started = dap.launch(
@@ -318,6 +259,22 @@ fn completions_inside_expressions_offer_members_registers_and_globals() {
         assert!(registers.contains(&register.to_owned()), "{registers:?}");
     }
     assert!(registers.iter().all(|register| register.starts_with('r')));
+    // Commands as a line's first word, and their subcommands.
+    let commands = complete(&mut dap, "wat");
+    for command in ["watch", "watchpoints"] {
+        assert!(
+            commands.contains(&(command.to_owned(), "keyword".to_owned(), 1, 3)),
+            "{commands:?}"
+        );
+    }
+    assert_eq!(
+        complete(&mut dap, "info sig"),
+        [("signals".to_owned(), "value".to_owned(), 6, 3)]
+    );
+    assert_eq!(
+        complete(&mut dap, "info vi"),
+        [("view".to_owned(), "value".to_owned(), 6, 2)]
+    );
     // Names: the frame's variables and the program's globals.
     let names = complete(&mut dap, "x + cou");
     assert_eq!(names, [("counter".to_owned(), "variable".to_owned(), 5, 3)]);
@@ -362,10 +319,6 @@ fn library_sources_come_and_go_with_their_library() {
     );
     let resumed = dap.send("continue", json!({"threadId": entry.thread}));
     dap.success(resumed);
-    let started = crate::dap::Started {
-        mark: resumed.mark,
-        ..started
-    };
     let lines = |dap: &mut Dap| {
         dap.request(
             "breakpointLocations",
@@ -373,7 +326,7 @@ fn library_sources_come_and_go_with_their_library() {
         )["breakpoints"]
             .clone()
     };
-    let mut mark = started.mark;
+    let mut mark = resumed.mark;
     for round in 0..2 {
         let stop = dap.stopped(mark);
         assert_eq!(stop.reason, "breakpoint", "round {round}");
