@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::debug_registers::{DebugRegisterPlan, SlotAccess};
-use super::frames::{DwarfCallerProvider, frame_lookup_address};
+use super::frames::{DwarfCallerProvider, StackRoot, frame_lookup_address};
 use super::memory::{PtraceMemory, read_logical_memory};
 use super::native::{InspectionOps, LinuxTraceOps, is_vanished_tracee};
 use super::registers::x86_64_registers;
@@ -809,21 +809,19 @@ impl<P: InspectionOps> Controller<P> {
                     .get(&module)
                     .ok_or(Error::ModuleNotLoaded(module))?
                     .image;
-                let activation =
-                    self.resolve_frame(inferior, pid, frame)?
-                        .cfa
-                        .map_err(|error| {
-                            let reason: Arc<str> = match error {
-                                VariableRuntimeError::Unavailable(reason) => {
-                                    reason.to_string().into()
-                                }
-                                VariableRuntimeError::Malformed(reason)
-                                | VariableRuntimeError::Fatal(reason) => reason,
-                            };
-                            Error::WatchTargetUnsupported(
-                                format!("the declaring activation is unavailable: {reason}").into(),
-                            )
-                        })?;
+                let activation = self
+                    .resolve_frame(inferior, &StackRoot::of_thread(pid), frame)?
+                    .cfa
+                    .map_err(|error| {
+                        let reason: Arc<str> = match error {
+                            VariableRuntimeError::Unavailable(reason) => reason.to_string().into(),
+                            VariableRuntimeError::Malformed(reason)
+                            | VariableRuntimeError::Fatal(reason) => reason,
+                        };
+                        Error::WatchTargetUnsupported(
+                            format!("the declaring activation is unavailable: {reason}").into(),
+                        )
+                    })?;
                 let function = image.locate(address).physical_instance.ok_or_else(|| {
                     Error::WatchTargetUnsupported(
                         "no function describes the declaring activation".into(),

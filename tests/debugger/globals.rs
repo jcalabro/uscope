@@ -791,7 +791,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
             )
             .await;
         for (origin, value, reference) in thread_references {
-            assert_eq!(reference.thread(), origin);
+            assert_eq!(reference.context(), origin.into());
             let tls_referent = scenario
                 .operation(
                     "dereference TLS capability after changing selection",

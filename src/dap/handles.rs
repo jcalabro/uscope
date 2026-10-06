@@ -45,7 +45,7 @@ pub enum Variables {
     /// What a pointer or reference refers to.
     Pointee {
         context: StopContext,
-        reference: DereferenceReference,
+        reference: Box<DereferenceReference>,
         name: Arc<str>,
         path: Option<uscope::Expression>,
     },

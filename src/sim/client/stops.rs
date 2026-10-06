@@ -153,9 +153,9 @@ impl Client {
             Err(error) => return Err(protocol(format!("reading variables failed: {error}"))),
         };
         self.note(format!(
-            "variables of frame {} in thread {}: {}",
+            "variables of frame {} in {}: {}",
             variables.stack_frame,
-            variables.thread,
+            variables.context,
             variables
                 .variables
                 .iter()

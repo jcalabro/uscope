@@ -32,7 +32,7 @@ use crate::{
     VariableValue, VariableValueSource, VirtualAddress,
 };
 
-use super::frames::{FrameRegisters, ResolvedFrame};
+use super::frames::{FrameRegisters, ResolvedFrame, StackRoot};
 use super::inspection::{
     LinuxVariableRuntime, global_context_address, validate_inspection_limits, variable_context,
 };
@@ -98,7 +98,7 @@ pub(super) struct StopPlace {
 pub(super) struct Frame<'a, P: InspectionOps> {
     pub(super) controller: &'a Controller<P>,
     inferior: &'a Inferior,
-    pid: Pid,
+    root: &'a StackRoot,
     pub(super) stop_id: StopId,
     resolved: &'a ResolvedFrame,
     /// The frame's module, address, and inline instance, when it has debug
@@ -131,7 +131,7 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
     /// Reads the frame's registers and memory for values `module` describes.
     pub(super) fn runtime(&self, module: &'a RuntimeModule) -> LinuxVariableRuntime<'a, P> {
         self.controller
-            .frame_runtime(self.inferior, self.pid, self.resolved, module)
+            .frame_runtime(self.inferior, self.root, self.resolved, module)
     }
 
     /// Modules in the order names are looked up: the frame's first.
@@ -149,16 +149,21 @@ impl<'a, P: InspectionOps> Frame<'a, P> {
     fn registers(&self) -> Option<&RegisterSnapshot> {
         self.registers
             .get_or_init(|| {
-                let native = self.controller.ptrace.registers(self.pid).ok()?;
-                let caller = match &self.resolved.registers {
-                    FrameRegisters::Caller(registers) => Some(registers),
-                    FrameRegisters::Thread(_) => None,
+                let (native, caller) = match &self.resolved.registers {
+                    FrameRegisters::Caller(registers) => {
+                        let native = self
+                            .root
+                            .thread()
+                            .map(|pid| self.controller.ptrace.registers(pid));
+                        (native.transpose().ok()?, Some(registers))
+                    }
+                    FrameRegisters::Thread(native) => (Some(*native), None),
                 };
                 Some(x86_64_register_snapshot(
                     self.controller.revision,
-                    self.pid,
+                    self.root.context,
                     self.controller.module_image.target(),
-                    &native,
+                    native.as_ref(),
                     caller,
                 ))
             })
@@ -618,7 +623,7 @@ impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
     pub(super) fn context(&self, module: &RuntimeModule) -> crate::debug_info::VariableContext {
         variable_context(
             self.frame.stop_id,
-            self.frame.pid,
+            self.frame.root.context,
             self.frame.resolved.id,
             module,
             self.address(module),
@@ -1012,16 +1017,16 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 reason: DereferenceUnavailableReason::Null,
             },
             (Some(pointee), address) => match self.frame.controller.module_of(pointee) {
-                Some(module) => DereferenceState::Available(DereferenceReference {
+                Some(module) => DereferenceState::Available(Box::new(DereferenceReference {
                     stop_id: self.frame.stop_id,
-                    thread: super::debug_thread_id(self.frame.pid),
+                    context: self.frame.root.context,
                     frame: self.frame.resolved.id,
                     module: module.loaded.id,
                     image: module.loaded.image,
                     context_address: self.address(module),
                     target_type: pointee.id,
                     target: DereferenceTarget::Address(VirtualAddress::new(address)),
-                }),
+                })),
                 None => DereferenceState::Unavailable {
                     pointee: None,
                     reason: DereferenceUnavailableReason::UnspecifiedPointee,
@@ -1080,13 +1085,13 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn evaluate_assigning(
         &mut self,
         stop_id: StopId,
-        pid: Pid,
+        root: &StackRoot,
         frame: StackFrameId,
         expression: &Expression,
         limits: crate::InspectionLimits,
     ) -> Result<Evaluation> {
         let (target, bytes, whole, span) =
-            match self.run_expression(stop_id, pid, frame, expression, Mode::Assign, limits)? {
+            match self.run_expression(stop_id, root, frame, expression, Mode::Assign, limits)? {
                 Evaluated::Done(evaluation) => return Ok(*evaluation),
                 Evaluated::Write {
                     target,
@@ -1108,7 +1113,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 address: Some(address),
                 ..
             } => {
-                let written = self.write_memory_as(pid, *address, &bytes)?;
+                let written = self.write_memory_as(root.reader(), *address, &bytes)?;
                 if written != bytes.len() as u64 {
                     return Err(Error::MemoryNotWritable(*address));
                 }
@@ -1125,6 +1130,11 @@ impl<P: LinuxTraceOps> Controller<P> {
                         "it is held in a register of a caller's frame".into(),
                     ));
                 }
+                let Some(pid) = root.thread() else {
+                    return Err(refused(
+                        "it is held in a register the task's runtime saved".into(),
+                    ));
+                };
                 if !whole {
                     return Err(refused("it is part of a value held in a register".into()));
                 }
@@ -1148,7 +1158,7 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .unwrap_or_else(|| expression.text()),
         )
         .map_err(Error::Expression)?;
-        self.evaluate(stop_id, pid, frame, &target, Mode::Assign, limits)
+        self.evaluate(stop_id, root, frame, &target, Mode::Assign, limits)
     }
 }
 
@@ -1157,13 +1167,13 @@ impl<P: InspectionOps> Controller<P> {
     pub(super) fn evaluate(
         &self,
         stop_id: StopId,
-        pid: Pid,
+        root: &StackRoot,
         frame: StackFrameId,
         expression: &Expression,
         mode: Mode,
         limits: crate::InspectionLimits,
     ) -> Result<Evaluation> {
-        match self.run_expression(stop_id, pid, frame, expression, mode, limits)? {
+        match self.run_expression(stop_id, root, frame, expression, mode, limits)? {
             Evaluated::Done(evaluation) => Ok(*evaluation),
             Evaluated::Write { span, .. } => Err(Error::Expression(crate::ExpressionError::new(
                 ErrorKind::Mode,
@@ -1176,16 +1186,16 @@ impl<P: InspectionOps> Controller<P> {
     fn run_expression(
         &self,
         stop_id: StopId,
-        pid: Pid,
+        root: &StackRoot,
         frame: StackFrameId,
         expression: &Expression,
         mode: Mode,
         limits: crate::InspectionLimits,
     ) -> Result<Evaluated> {
         validate_inspection_limits(limits)?;
-        let inferior = self.stopped_inferior(stop_id, pid)?;
-        let resolved = self.resolve_frame(inferior, pid, frame)?;
-        let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+        let inferior = self.stopped_root(stop_id, root)?;
+        let resolved = self.resolve_frame(inferior, root, frame)?;
+        let scope = self.frame_for(inferior, stop_id, root, &resolved);
         let program = bind(expression, &scope, mode).map_err(Error::Expression)?;
         let mut budget = InspectionBudget::new(limits);
         // Reading may wait for run control; an assignment, which changes
@@ -1232,9 +1242,14 @@ impl<P: InspectionOps> Controller<P> {
         validate_image_current(inferior)?;
         let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
         let presentation = self.presentation_for_thread(pid, Some(reason))?;
-        let resolved =
-            self.resolve_presented_frame(inferior, pid, StackFrameId::INNERMOST, presentation)?;
-        let scope = self.frame_for(inferior, StopId::new(0), pid, &resolved);
+        let root = StackRoot::of_thread(pid);
+        let resolved = self.resolve_presented_frame(
+            inferior,
+            &root,
+            StackFrameId::INNERMOST,
+            Some(&presentation),
+        )?;
+        let scope = self.frame_for(inferior, StopId::new(0), &root, &resolved);
         let program = if condition {
             crate::eval::bind::bind_condition(expression, &scope)
         } else {
@@ -1266,8 +1281,9 @@ impl<P: InspectionOps> Controller<P> {
         expression: &Expression,
     ) -> Result<crate::WatchTarget> {
         let inferior = self.stopped_inferior(stop_id, pid)?;
-        let resolved = self.resolve_frame(inferior, pid, frame)?;
-        let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+        let root = StackRoot::of_thread(pid);
+        let resolved = self.resolve_frame(inferior, &root, frame)?;
+        let scope = self.frame_for(inferior, stop_id, &root, &resolved);
         let program = bind(expression, &scope, Mode::Read).map_err(Error::Expression)?;
         let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
         let mut machine = StopMachine::new(&scope, &mut budget, false);
@@ -1307,13 +1323,13 @@ impl<P: InspectionOps> Controller<P> {
     pub(super) fn expression_type(
         &self,
         stop_id: StopId,
-        pid: Pid,
+        root: &StackRoot,
         frame: StackFrameId,
         expression: &Expression,
     ) -> Result<TypeInfo> {
-        let inferior = self.stopped_inferior(stop_id, pid)?;
-        let resolved = self.resolve_frame(inferior, pid, frame)?;
-        let scope = self.frame_for(inferior, stop_id, pid, &resolved);
+        let inferior = self.stopped_root(stop_id, root)?;
+        let resolved = self.resolve_frame(inferior, root, frame)?;
+        let scope = self.frame_for(inferior, stop_id, root, &resolved);
         let program = bind(expression, &scope, Mode::Read).map_err(Error::Expression)?;
         Ok(type_info(&scope, program.result()))
     }
@@ -1322,13 +1338,13 @@ impl<P: InspectionOps> Controller<P> {
         &'a self,
         inferior: &'a Inferior,
         stop_id: StopId,
-        pid: Pid,
+        root: &'a StackRoot,
         resolved: &'a ResolvedFrame,
     ) -> Frame<'a, P> {
         Frame {
             controller: self,
             inferior,
-            pid,
+            root,
             stop_id,
             resolved,
             code: self.frame_scope(resolved),

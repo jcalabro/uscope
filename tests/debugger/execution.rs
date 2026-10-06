@@ -620,8 +620,8 @@ async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
         let backtrace = scenario
             .operation("unwind stopped thread", scenario.handle().backtrace())
             .await;
-        assert_eq!(registers.thread, thread.id);
-        assert_eq!(backtrace.thread, thread.id);
+        assert_eq!(registers.context, thread.id.into());
+        assert_eq!(backtrace.context, thread.id.into());
         assert!(!backtrace.frames.is_empty());
     }
     scenario
@@ -1700,7 +1700,7 @@ fn assert_register_snapshot(
     assert_eq!(registers.target.byte_order, ByteOrder::Little);
     assert_eq!(registers.target.pointer_width, PointerWidth::Bits64);
     assert_eq!(
-        registers.thread.get(),
+        registers.context.as_thread().expect("a thread").get(),
         match &state.inferior {
             InferiorState::Stopped { process_id, .. } => process_id.get(),
             _ => panic!("inferior was not stopped"),

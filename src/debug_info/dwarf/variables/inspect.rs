@@ -206,7 +206,7 @@ const fn dereference_reference(
 ) -> DereferenceReference {
     DereferenceReference {
         stop_id: context.stop_id,
-        thread: context.thread,
+        context: context.context,
         frame: context.frame,
         module: context.module,
         image: context.image,
@@ -1302,7 +1302,7 @@ impl DwarfVariableInfo {
     ) -> Arc<ValueChildrenReference> {
         Arc::new(ValueChildrenReference {
             stop_id: context.stop_id,
-            thread: context.thread,
+            context: context.context,
             frame: context.frame,
             module: context.module,
             image: context.image,
@@ -1882,14 +1882,14 @@ impl DwarfVariableInfo {
                             reason: DereferenceUnavailableReason::UnspecifiedPointee,
                         },
                         |target_type| {
-                            DereferenceState::Available(dereference_reference(
+                            DereferenceState::Available(Box::new(dereference_reference(
                                 context,
                                 target_type,
                                 crate::model::DereferenceTarget::ImplicitPointer {
                                     debug_info_offset: *debug_info_offset,
                                     byte_offset: *byte_offset,
                                 },
-                            ))
+                            )))
                         },
                     );
                     VariableState::Available {
@@ -1918,11 +1918,11 @@ impl DwarfVariableInfo {
                                     reason: DereferenceUnavailableReason::Null,
                                 }
                             } else if let Some(target_type) = target {
-                                DereferenceState::Available(dereference_reference(
+                                DereferenceState::Available(Box::new(dereference_reference(
                                     context,
                                     *target_type,
                                     crate::model::DereferenceTarget::Address(address),
-                                ))
+                                )))
                             } else {
                                 DereferenceState::Unavailable {
                                     pointee: None,
@@ -2132,7 +2132,7 @@ impl DwarfVariableInfo {
     ) -> Result<ValueChildPage> {
         let context = VariableContext {
             stop_id: reference.stop_id,
-            thread: reference.thread,
+            context: reference.context,
             frame: reference.frame,
             module: reference.module,
             image: reference.image,
@@ -2575,7 +2575,7 @@ impl DwarfVariableInfo {
         };
         let context = VariableContext {
             stop_id: reference.stop_id,
-            thread: reference.thread,
+            context: reference.context,
             frame: reference.frame,
             module: reference.module,
             image: reference.image,

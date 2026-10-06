@@ -12,15 +12,21 @@ use std::sync::{Arc, OnceLock};
 use layout::{Goroutines, Layout, Missing, Threads};
 
 use super::{
-    CodeAddress, Partial, RuntimeImage, RuntimeModel, RuntimeStop, RuntimeTask, TaskPage,
-    ThreadActivity,
+    CodeAddress, Partial, RuntimeImage, RuntimeModel, RuntimeStop, RuntimeTask, TaskContext,
+    TaskPage, ThreadActivity,
 };
+use crate::unwind::RegisterFile;
 use crate::{AddressRange, ImageAddress, TaskStack, TaskState, ThreadId, VirtualAddress};
 
 /// The release the contract was checked against. Another release is read
 /// the same way wherever its debug information binds, and says it is
 /// unverified.
 const VERIFIED: (u64, u64) = (1, 27);
+/// x86-64's DWARF register numbers for the registers a parked goroutine
+/// saves.
+const RBP: u16 = 6;
+const RSP: u16 = 7;
+const RIP: u16 = 16;
 /// The first release whose runtime the model can read at all.
 const OLDEST: (u64, u64) = (1, 20);
 /// The most goroutines one list reads, so a corrupted `allglen` cannot
@@ -292,9 +298,74 @@ impl RuntimeModel for GoRuntime {
             Err(reason) => ThreadActivity::Unknown(reason),
         }
     }
+
+    fn task_context(
+        &self,
+        stop: &dyn RuntimeStop,
+        number: u64,
+    ) -> Result<Option<TaskContext>, Arc<str>> {
+        let layout = self.goroutines()?;
+        let Some((g, task)) = self.find(stop, number)? else {
+            return Ok(None);
+        };
+        // A goroutine that runs, or makes a system call, has its registers
+        // on its thread; any other saved them when it last stopped running.
+        if task.state == TaskState::Running {
+            return task
+                .thread
+                .map(|thread| Some(TaskContext::OnThread(thread)))
+                .ok_or_else(|| format!("the thread running goroutine {number} is unknown").into());
+        }
+        let word = |offset: u64| {
+            read_unsigned(stop, VirtualAddress::new(g.wrapping_add(offset)), 8).ok_or_else(|| {
+                Arc::<str>::from(format!(
+                    "goroutine {number}'s saved registers are unreadable"
+                ))
+            })
+        };
+        let (pc, sp, bp) = (
+            word(layout.sched_pc)?,
+            word(layout.sched_sp)?,
+            word(layout.sched_bp)?,
+        );
+        if pc == 0 || sp == 0 {
+            return Err(format!("goroutine {number} has no saved registers").into());
+        }
+        let mut registers = RegisterFile::new([(RIP, pc), (RSP, sp)]);
+        // A saved frame pointer of zero is unknown, not a frame at zero.
+        if bp != 0 {
+            registers.set(RBP, bp);
+        }
+        Ok(Some(TaskContext::Saved {
+            registers,
+            after_call: task.resume.is_none_or(|resume| resume.after_call),
+        }))
+    }
 }
 
 impl GoRuntime {
+    /// The goroutine numbered `number`: its g, and what it is.
+    fn find(
+        &self,
+        stop: &dyn RuntimeStop,
+        number: u64,
+    ) -> Result<Option<(u64, RuntimeTask)>, Arc<str>> {
+        let names = self.names(stop);
+        // An unreadable goroutine may be the one sought, so it is absent
+        // only once every goroutine was read.
+        let mut unreadable = None;
+        for g in self.allgs(stop)? {
+            match self.goroutine(stop, names, g) {
+                Ok(Some(task)) if task.number == number => return Ok(Some((g, task))),
+                Ok(_) => {}
+                Err(reason) => unreadable = unreadable.or(Some(reason)),
+            }
+        }
+        unreadable.map_or(Ok(None), |reason| {
+            Err(format!("goroutine {number} was not found, and {reason}").into())
+        })
+    }
+
     fn activity(
         &self,
         stop: &dyn RuntimeStop,

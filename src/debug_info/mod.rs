@@ -28,14 +28,14 @@ use crate::unwind::{MemoryReader, RegisterFile, UnwindStep};
 use crate::{
     CodeInstanceId, DereferenceReference, DereferencedValue, GlobalVariableId, ImageAddress,
     InspectedValue, ModuleId, ModuleImage, ModuleImageId, RegisterDescriptor, Result, StackFrameId,
-    StopId, ThreadId, TypeId, UnwindTermination, ValueChildPage, ValueChildrenReference, Variable,
+    StopId, TypeId, UnwindTermination, ValueChildPage, ValueChildrenReference, Variable,
     VariableQuery, VariableState, VariableUnavailableReason, VirtualAddress,
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct VariableContext {
     pub stop_id: StopId,
-    pub thread: ThreadId,
+    pub context: crate::ExecutionContext,
     /// The backtrace frame whose registers and call-frame address evaluate
     /// the values, which every capability they produce keeps.
     pub frame: StackFrameId,

@@ -9,12 +9,16 @@ use std::sync::Arc;
 use nix::unistd::Pid;
 
 use crate::protocol::StopId;
-use crate::runtime_model::{self, CodeAddress, RuntimeModel, RuntimeStop, RuntimeTask};
+use crate::runtime_model::{
+    self, CodeAddress, RuntimeModel, RuntimeStop, RuntimeTask, TaskContext,
+};
 use crate::{
-    Error, ImageAddress, LoadedModule, ModuleImage, Result, RuntimeId, TaskCursor, TaskId,
-    TaskLocation, TaskPage, TaskSnapshot, ThreadActivity, ThreadId, VirtualAddress,
+    Error, ExecutionContext, ImageAddress, LoadedModule, ModuleImage, Result, RuntimeId,
+    TaskCursor, TaskId, TaskLocation, TaskPage, TaskSnapshot, ThreadActivity, ThreadId,
+    VirtualAddress,
 };
 
+use super::frames::{RootOrigin, StackRoot};
 use super::memory::read_logical_memory;
 use super::native::InspectionOps;
 use super::{
@@ -102,7 +106,7 @@ impl<P: InspectionOps> Controller<P> {
             .filter_map(|(module, image)| {
                 let model = self.bind_runtime(image)?.ok()?;
                 Some(BoundRuntime {
-                    id: RuntimeId::new(module.id.index() as u64),
+                    id: RuntimeId::new(module.id.get()),
                     module,
                     model,
                 })
@@ -295,5 +299,65 @@ impl<P: InspectionOps> Controller<P> {
             }
         }
         found
+    }
+}
+
+impl<P: InspectionOps> Controller<P> {
+    /// Where the frames of a thread or task begin at a stop: a task
+    /// running on a thread begins in that thread's registers, and a parked
+    /// one in the registers its runtime saved.
+    pub(super) fn stack_root(
+        &self,
+        stop_id: StopId,
+        context: ExecutionContext,
+    ) -> Result<StackRoot> {
+        let task = match context {
+            ExecutionContext::Thread(thread) => {
+                return Ok(StackRoot::of_thread(debug_pid(thread)?));
+            }
+            ExecutionContext::Task(task) => task,
+        };
+        let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
+        validate_public_stop(inferior, Some(stop_id))?;
+        let reader = inferior
+            .public_stop
+            .as_ref()
+            .ok_or(Error::NotStopped)?
+            .triggering_thread;
+        let runtime = self
+            .runtimes(inferior)
+            .into_iter()
+            .find(|runtime| runtime.id == task.runtime)
+            .ok_or(Error::UnknownTask(task))?;
+        let found = self.with_runtime_stop(inferior, &runtime, |stop| {
+            runtime.model.task_context(stop, task.number)
+        })?;
+        let origin = match found {
+            Ok(Some(TaskContext::OnThread(thread))) => RootOrigin::Thread(debug_pid(thread)?),
+            Ok(Some(TaskContext::Saved {
+                registers,
+                after_call,
+            })) => RootOrigin::Saved {
+                registers,
+                after_call,
+                reader,
+            },
+            Ok(None) => return Err(Error::UnknownTask(task)),
+            Err(reason) => return Err(Error::TaskUnavailable { task, reason }),
+        };
+        Ok(StackRoot { context, origin })
+    }
+}
+
+impl<P: InspectionOps> Controller<P> {
+    /// The thread a thread or task runs on at a stop, for requests that
+    /// act on a thread, such as stepping.
+    pub(super) fn context_thread(&self, stop_id: StopId, context: ExecutionContext) -> Result<Pid> {
+        let root = self.stack_root(stop_id, context)?;
+        match (root.thread(), context) {
+            (Some(pid), _) => Ok(pid),
+            (None, ExecutionContext::Task(task)) => Err(Error::TaskParked(task)),
+            (None, ExecutionContext::Thread(thread)) => Err(Error::UnknownThread(thread)),
+        }
     }
 }

@@ -1269,7 +1269,10 @@ impl DebuggerHandle {
 
     /// Explicitly dereferences a pointer or reference value produced at the
     /// current stopped snapshot.
-    pub async fn dereference(&self, reference: DereferenceReference) -> Result<DereferencedValue> {
+    pub async fn dereference(
+        &self,
+        reference: Box<DereferenceReference>,
+    ) -> Result<DereferencedValue> {
         self.dereference_with_limits(reference, InspectionLimits::default())
             .await
     }
@@ -1277,7 +1280,7 @@ impl DebuggerHandle {
     /// Dereferences a value under explicit bounded resource limits.
     pub async fn dereference_with_limits(
         &self,
-        reference: DereferenceReference,
+        reference: Box<DereferenceReference>,
         limits: InspectionLimits,
     ) -> Result<DereferencedValue> {
         self.request(|reply| Request::Dereference {

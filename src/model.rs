@@ -205,10 +205,29 @@ numeric_id!(
     "Identifies a thread within a debug session by its platform value."
 );
 
-numeric_id!(
-    RuntimeId,
-    "Identifies one language runtime instance within a stopped process."
-);
+/// Identifies one language runtime instance within a debug session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeId(u32);
+
+impl RuntimeId {
+    /// Creates an identifier from its numeric representation.
+    #[must_use]
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    /// Returns the numeric representation of this identifier.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl fmt::Display for RuntimeId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Identifies one task, such as a goroutine, of one language runtime.
 ///
@@ -408,8 +427,8 @@ pub struct RegisterValue {
 pub struct RegisterSnapshot {
     /// The debugger revision at which these values were read.
     pub revision: u64,
-    /// The thread whose registers were read.
-    pub thread: ThreadId,
+    /// The thread or task whose registers were read.
+    pub context: ExecutionContext,
     /// The architecture and data representation of the register values.
     pub target: TargetDescription,
     /// Register values in the architecture's canonical display order.
@@ -1225,7 +1244,7 @@ pub enum ValueStorage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueChildrenReference {
     pub(crate) stop_id: crate::StopId,
-    pub(crate) thread: ThreadId,
+    pub(crate) context: ExecutionContext,
     pub(crate) frame: StackFrameId,
     pub(crate) module: ModuleId,
     pub(crate) image: ModuleImageId,
@@ -1409,7 +1428,7 @@ pub enum DereferenceTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DereferenceReference {
     pub(crate) stop_id: crate::StopId,
-    pub(crate) thread: ThreadId,
+    pub(crate) context: ExecutionContext,
     pub(crate) frame: StackFrameId,
     pub(crate) module: ModuleId,
     pub(crate) image: ModuleImageId,
@@ -1419,10 +1438,10 @@ pub struct DereferenceReference {
 }
 
 impl DereferenceReference {
-    /// Returns the thread whose frame context produced this capability.
+    /// Returns the thread or task whose frame produced this capability.
     #[must_use]
-    pub const fn thread(&self) -> ThreadId {
-        self.thread
+    pub const fn context(&self) -> ExecutionContext {
+        self.context
     }
 }
 
@@ -1432,7 +1451,7 @@ pub enum DereferenceState {
     /// The value is not a pointer or reference.
     NotApplicable,
     /// Dereference is valid at the capability's exact stopped state.
-    Available(DereferenceReference),
+    Available(Box<DereferenceReference>),
     /// The value is an indirection, but dereference is unavailable for a typed reason.
     Unavailable {
         /// The dereferenced expression's type (the pointee), when it resolves.
@@ -1542,6 +1561,8 @@ pub enum TlsUnavailableReason {
     ProviderUnavailable,
     /// The provider could not resolve this thread's address.
     LookupFailed(Arc<str>),
+    /// A parked task runs on no thread, so has no thread's storage.
+    NoThread,
 }
 
 /// Why a requested structural value operation cannot be completed.
@@ -1688,6 +1709,9 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::TlsUnavailable(TlsUnavailableReason::LookupFailed(reason)) => {
                 write!(formatter, "TLS lookup failed: {reason}")
+            }
+            Self::TlsUnavailable(TlsUnavailableReason::NoThread) => {
+                formatter.write_str("a parked task has no thread-local storage")
             }
             Self::ValueAccess(ValueAccessUnavailableReason::UnspecifiedPointee) => {
                 formatter.write_str("the pointer has no concrete pointee type")
@@ -2181,8 +2205,8 @@ pub struct VariableSnapshot {
     pub revision: u64,
     /// The stopped snapshot that authorized the reads.
     pub stop_id: crate::StopId,
-    /// The thread whose selected logical frame was inspected.
-    pub thread: ThreadId,
+    /// The thread or task whose frame was inspected.
+    pub context: ExecutionContext,
     /// The backtrace frame that was inspected.
     pub stack_frame: StackFrameId,
     /// The logical frame whose source scope selected these variables.
@@ -2875,8 +2899,8 @@ impl fmt::Display for UnwindTermination {
 /// A backtrace and the reason its reconstruction ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Backtrace {
-    /// The thread whose stack was inspected.
-    pub thread: ThreadId,
+    /// The thread or task whose stack was inspected.
+    pub context: ExecutionContext,
     /// Frames ordered from the stopped frame outward.
     pub frames: Arc<[StackFrame]>,
     /// The completion or failure reason for the trace.

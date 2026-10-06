@@ -1414,7 +1414,7 @@ pub enum Request {
         reply: Reply<crate::TypeInfo>,
     },
     Dereference {
-        reference: DereferenceReference,
+        reference: Box<DereferenceReference>,
         limits: crate::InspectionLimits,
         reply: Reply<DereferencedValue>,
     },

@@ -33,6 +33,7 @@ use crate::{
 use super::evaluation::{
     StopMachine, StopObject, StopPlace, StopStep, ViewBound, lookup_type_in, plan_in,
 };
+use super::frames::StackRoot;
 use super::native::InspectionOps;
 use super::{Controller, RuntimeModule};
 
@@ -446,11 +447,11 @@ impl<P: InspectionOps> Controller<P> {
     pub(super) fn explain_view(
         &self,
         stop_id: StopId,
-        pid: nix::unistd::Pid,
+        root: &StackRoot,
         frame: crate::StackFrameId,
         expression: &crate::Expression,
     ) -> Result<crate::ViewExplanation> {
-        let value = self.view_subject(stop_id, pid, frame, expression, "explain")?;
+        let value = self.view_subject(stop_id, root, frame, expression, "explain")?;
         let candidates = value.type_info.as_ref().map_or_else(Vec::new, |info| {
             candidates(&self.view_choice(info.reference))
         });
@@ -471,14 +472,14 @@ impl<P: InspectionOps> Controller<P> {
     pub(super) fn record_kernels(
         &self,
         stop_id: StopId,
-        pid: nix::unistd::Pid,
+        root: &StackRoot,
         frame: crate::StackFrameId,
         expression: &crate::Expression,
     ) -> Result<Vec<String>> {
         let recordings = Recordings::default();
         *self.views.recording.borrow_mut() = Some(recordings.clone());
         let presented = (|| -> Result<()> {
-            let value = self.view_subject(stop_id, pid, frame, expression, "record")?;
+            let value = self.view_subject(stop_id, root, frame, expression, "record")?;
             if let VariableState::Available {
                 presentation: Some(presentation),
                 ..
@@ -505,14 +506,14 @@ impl<P: InspectionOps> Controller<P> {
     fn view_subject(
         &self,
         stop_id: StopId,
-        pid: nix::unistd::Pid,
+        root: &StackRoot,
         frame: crate::StackFrameId,
         expression: &crate::Expression,
         verb: &str,
     ) -> Result<InspectedValue> {
         match self.evaluate(
             stop_id,
-            pid,
+            root,
             frame,
             expression,
             crate::EvaluationMode::Read,
@@ -566,9 +567,9 @@ impl<P: InspectionOps> Controller<P> {
         budget: &mut InspectionBudget,
     ) -> Result<ValueChildPage> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let pid = super::debug_pid(reference.thread)?;
-        let frame = self.resolve_frame(inferior, pid, reference.frame)?;
-        let scope = self.frame_for(inferior, reference.stop_id, pid, &frame);
+        let root = self.stack_root(reference.stop_id, reference.context)?;
+        let frame = self.resolve_frame(inferior, &root, reference.frame)?;
+        let scope = self.frame_for(inferior, reference.stop_id, &root, &frame);
         let bound = view
             .bound
             .clone()
@@ -1140,17 +1141,17 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         if bound.is_none()
             && let VariableState::Available {
                 value: crate::VariableValue::Address(_),
-                dereference:
-                    crate::DereferenceState::Available(crate::DereferenceReference {
-                        module,
-                        image,
-                        target_type,
-                        target: crate::model::DereferenceTarget::Address(address),
-                        ..
-                    }),
+                dereference: crate::DereferenceState::Available(reference),
                 text: None,
                 ..
             } = &value.state
+            && let crate::DereferenceReference {
+                module,
+                image,
+                target_type,
+                target: crate::model::DereferenceTarget::Address(address),
+                ..
+            } = &**reference
         {
             // A pointer or reference to text shows the text, as a pointer
             // to characters does, or why its view could not read it. A
@@ -1626,15 +1627,18 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
     ) -> std::result::Result<Option<(String, Option<Lent>)>, Stop> {
         let VariableState::Available {
             value: crate::VariableValue::Address(address),
-            dereference:
-                crate::DereferenceState::Available(crate::DereferenceReference {
-                    module,
-                    target_type,
-                    target: crate::model::DereferenceTarget::Address(target),
-                    ..
-                }),
+            dereference: crate::DereferenceState::Available(reference),
             ..
         } = state
+        else {
+            return Ok(None);
+        };
+        let crate::DereferenceReference {
+            module,
+            target_type,
+            target: crate::model::DereferenceTarget::Address(target),
+            ..
+        } = &**reference
         else {
             return Ok(None);
         };
@@ -1803,7 +1807,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
         let context = self.context(module);
         Some(Arc::new(ValueChildrenReference {
             stop_id: context.stop_id,
-            thread: context.thread,
+            context: context.context,
             frame: context.frame,
             module: context.module,
             image: context.image,

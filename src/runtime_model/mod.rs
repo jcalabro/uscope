@@ -14,6 +14,7 @@ mod go;
 
 use std::sync::Arc;
 
+use crate::unwind::RegisterFile;
 use crate::{
     ImageAddress, IntegerValue, ModuleImage, RecordMemberLayout, TaskStack, TaskState, ThreadId,
     TypeInfo, TypeKind, TypeNode, VirtualAddress,
@@ -124,6 +125,22 @@ pub enum ThreadActivity {
     Unknown(Arc<str>),
 }
 
+/// Where a task's frames begin.
+#[derive(Debug, Clone)]
+pub enum TaskContext {
+    /// The task runs on a thread, whose registers begin its frames.
+    OnThread(ThreadId),
+    /// The task is parked with these registers saved; any other register is
+    /// unknown.
+    Saved {
+        registers: RegisterFile,
+        /// Whether the saved instruction is a return address, which names
+        /// the call before it, as when a task parked by calling into its
+        /// runtime.
+        after_call: bool,
+    },
+}
+
 /// What a language runtime tells the debugger at a stop.
 pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     /// The runtime's tasks from `start`, an index into its own order, at
@@ -131,6 +148,13 @@ pub trait RuntimeModel: Send + Sync + std::fmt::Debug {
     fn tasks(&self, stop: &dyn RuntimeStop, start: u64, limit: usize) -> Partial<TaskPage>;
     /// What a stopped thread is doing for the runtime.
     fn thread_activity(&self, stop: &dyn RuntimeStop, thread: ThreadId) -> ThreadActivity;
+    /// Where the frames of the task numbered `number` begin, or `None` when
+    /// the runtime has no such task.
+    fn task_context(
+        &self,
+        stop: &dyn RuntimeStop,
+        number: u64,
+    ) -> Result<Option<TaskContext>, Arc<str>>;
 }
 
 /// The runtime a module carries, bound against its debug information, or
