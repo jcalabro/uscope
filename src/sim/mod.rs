@@ -18,31 +18,31 @@
 //! - [`report`]: traces, fingerprints, and failures.
 
 mod audit;
-pub mod choices;
+pub(crate) mod choices;
 mod client;
 #[cfg(test)]
 mod conformance;
-pub mod corpus;
-pub mod cpu;
-pub mod facts;
+pub(crate) mod corpus;
+pub(crate) mod cpu;
+pub(crate) mod facts;
 pub mod faults;
 mod hits;
-pub mod kernel;
-pub mod loader;
+pub(crate) mod kernel;
+pub(crate) mod loader;
 mod machine;
-pub mod markers;
-pub mod marks;
-pub mod memory;
+pub(crate) mod markers;
+pub(crate) mod marks;
+pub(crate) mod memory;
 mod oracles;
-pub mod report;
-pub mod schedule;
+pub(crate) mod report;
+pub(crate) mod schedule;
 mod semantics;
-pub mod swarm;
+pub(crate) mod swarm;
 #[cfg(test)]
 mod tests;
 mod views;
 mod watches;
-pub mod world;
+pub(crate) mod world;
 
 use std::fmt::Write as _;
 

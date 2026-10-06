@@ -36,7 +36,6 @@ pub const PARITY: u64 = 1 << 2;
 pub const ADJUST: u64 = 1 << 4;
 pub const ZERO: u64 = 1 << 6;
 pub const SIGN: u64 = 1 << 7;
-pub const TRAP: u64 = 1 << 8;
 pub const DIRECTION: u64 = 1 << 10;
 pub const OVERFLOW: u64 = 1 << 11;
 /// The flags arithmetic instructions compute.
@@ -163,17 +162,12 @@ impl From<MemoryFault> for Stop {
     }
 }
 
-/// Executes the instruction at `registers.rip`.
+/// Executes the instruction at `registers.rip`, saying whether it was a
+/// call or a return and what data it accessed.
 ///
 /// A string instruction with a repeat prefix executes one iteration,
 /// leaving `rip` at itself until its count runs out, as the CPU does when
 /// it traps between iterations.
-pub fn step(registers: &mut Registers, memory: &mut AddressSpace) -> Outcome {
-    execute(registers, memory).outcome
-}
-
-/// Executes the instruction at `registers.rip`, as [`step`] does, and says
-/// whether it was a call or a return and what data it accessed.
 pub fn execute(registers: &mut Registers, memory: &mut AddressSpace) -> Executed {
     let failed = |outcome| Executed {
         outcome,
@@ -304,7 +298,7 @@ mod tests {
             u64::from_le_bytes(code.try_into().expect("8 bytes"))
         ));
         registers.rip = 0x1000;
-        step(registers, &mut memory)
+        execute(registers, &mut memory).outcome
     }
 
     /// A faulting instruction changes nothing, and the fault names the

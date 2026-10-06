@@ -29,6 +29,7 @@ use super::hits::{Baseline, Published};
 use super::kernel::DebugBehavior;
 use super::kernel::Tid;
 use super::loader::Image;
+use super::markers::Marker;
 use super::marks::{Mark, Marks};
 use super::report::Failure;
 use super::watches::Intent;
@@ -62,12 +63,8 @@ pub struct Script {
     pub defined: Vec<String>,
     pub source: PathBuf,
     pub source_lines: u64,
-    /// Lines whose markers state conditions on the variables there.
-    pub marker_lines: Vec<u64>,
-    /// Each marker's condition, by line.
-    pub markers: BTreeMap<u64, String>,
-    /// What markers expect in the debugger's own language, by line.
-    pub expectations: BTreeMap<u64, String>,
+    /// The source's markers, by line.
+    pub markers: BTreeMap<u64, Marker>,
     /// In unoptimized code, the image addresses where a row of a marker's
     /// line starts, with the line: where its condition holds at every hit.
     pub marker_rows: BTreeMap<u64, u64>,
@@ -256,6 +253,13 @@ impl Client {
         self.script
             .attach
             .is_some_and(|process| self.ending(process))
+    }
+
+    async fn snapshot(&self) -> Result<StateSnapshot, Failure> {
+        self.handle
+            .snapshot()
+            .await
+            .map_err(|error| protocol(format!("snapshot failed: {error}")))
     }
 
     /// The debugger's state, or `None` once it detached and exited.
@@ -729,11 +733,7 @@ impl Client {
             Err(Error::NotRunning) if running => self.note("the program ended first"),
             Err(error) => return Err(protocol(format!("kill failed: {error}"))),
         }
-        let snapshot = self
-            .handle
-            .snapshot()
-            .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+        let snapshot = self.snapshot().await?;
         if snapshot.inferior != InferiorState::NotRunning {
             return Err(protocol(format!(
                 "after a kill the inferior is {:?}",
@@ -746,11 +746,7 @@ impl Client {
     /// Continuing from a stop that is no longer current must be refused,
     /// and must change nothing.
     async fn continue_stale(&self, stale: StopId, scope: ResumeScope) -> Result<(), Failure> {
-        let before = self
-            .handle
-            .snapshot()
-            .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+        let before = self.snapshot().await?;
         match self
             .handle
             .continue_execution(stale, scope, ExceptionDisposition::Pass)
@@ -763,11 +759,7 @@ impl Client {
                 )));
             }
         }
-        let after = self
-            .handle
-            .snapshot()
-            .await
-            .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+        let after = self.snapshot().await?;
         if after != before {
             return Err(protocol(format!(
                 "a refused request changed the state from {before:?} to {after:?}"
@@ -801,11 +793,7 @@ impl Client {
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     self.mark(Mark::ClientLagged);
-                    let snapshot = self
-                        .handle
-                        .snapshot()
-                        .await
-                        .map_err(|error| protocol(format!("snapshot failed: {error}")))?;
+                    let snapshot = self.snapshot().await?;
                     if !matches!(
                         snapshot.inferior,
                         InferiorState::Running { execution_id: Some(running), .. }

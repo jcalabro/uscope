@@ -8,6 +8,7 @@ use super::{Client, protocol};
 use crate::sim::choices::Stream;
 use crate::sim::hits::{self, Baseline, Known, Policy};
 use crate::sim::kernel::DebugBehavior;
+use crate::sim::markers::Marker;
 use crate::sim::marks::Mark;
 use crate::sim::report::Failure;
 use crate::sim::watches::Intent;
@@ -171,11 +172,12 @@ impl Client {
         } else {
             // Half the lines aim at markers, where the variables oracle
             // judges what the debugger shows.
-            let line = if !self.script.marker_lines.is_empty() && self.draw(2) == 0 {
+            let marker_lines = self.script.markers.keys().copied().collect::<Vec<_>>();
+            let line = if !marker_lines.is_empty() && self.draw(2) == 0 {
                 *self
                     .choices
                     .borrow_mut()
-                    .pick(Stream::Client, &self.script.marker_lines)
+                    .pick(Stream::Client, &marker_lines)
             } else {
                 self.draw(self.script.source_lines) + 1
             };
@@ -482,7 +484,7 @@ enum ConditionChoice {
 }
 
 impl ConditionChoice {
-    fn parse(self, markers: &BTreeMap<u64, String>, line: Option<u64>) -> Option<Condition> {
+    fn parse(self, markers: &BTreeMap<u64, Marker>, line: Option<u64>) -> Option<Condition> {
         let marker = || {
             line.and_then(|line| markers.get(&line))
                 .expect("marker conditions are chosen at marker lines")
@@ -491,8 +493,8 @@ impl ConditionChoice {
             Self::None => return None,
             Self::True => "true".to_owned(),
             Self::False => "false".to_owned(),
-            Self::Marker => marker().clone(),
-            Self::NotMarker => format!("!({})", marker()),
+            Self::Marker => marker().text.clone(),
+            Self::NotMarker => format!("!({})", marker().text),
         };
         Some(Condition::parse(&text).expect("the client's conditions parse"))
     }

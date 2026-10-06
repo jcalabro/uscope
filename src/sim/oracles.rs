@@ -21,13 +21,6 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
     let Some(process) = truth.inferior.and_then(|tgid| kernel.processes.get(&tgid)) else {
         return Ok(());
     };
-    let code = image.code().collect::<Vec<_>>();
-    let original = |address: u64| {
-        code.iter().find_map(|(start, page)| {
-            let offset = usize::try_from(address.checked_sub(*start)?).ok()?;
-            page.get(offset).copied()
-        })
-    };
     // Every trap the controller installed is in memory, over the byte it
     // remembers.
     for (&address, site) in &truth.sites {
@@ -40,7 +33,7 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
                 byte[0]
             ));
         }
-        if let Some(was) = original(address)
+        if let Some(was) = image.original_byte(address)
             && site.original_byte != was
         {
             return Err(format!(
@@ -52,7 +45,7 @@ pub fn code_integrity(kernel: &Kernel, truth: &Truth, image: &Image) -> Result<(
     }
     // Every other byte of code is the program's own. A page still shared
     // with the image was never written.
-    for &(page_address, original_page) in &code {
+    for (page_address, original_page) in image.code() {
         if process
             .space
             .page(page_address)

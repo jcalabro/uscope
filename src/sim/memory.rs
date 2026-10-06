@@ -260,21 +260,14 @@ impl AddressSpace {
     /// A `PTRACE_PEEKDATA` word, which ignores protections.
     #[must_use]
     pub fn peek(&self, address: u64) -> Option<u64> {
-        let mut word = [0; 8];
-        self.mapped(address, 8).then(|| {
-            self.copy_out(address, &mut word);
-            u64::from_le_bytes(word)
-        })
+        let bytes = self.peek_bytes(address, 8)?;
+        Some(u64::from_le_bytes(bytes.try_into().expect("eight bytes")))
     }
 
     /// A `PTRACE_POKEDATA` word, which ignores protections. Returns whether
     /// the word was mapped.
     pub fn poke(&mut self, address: u64, value: u64) -> bool {
-        let mapped = self.mapped(address, 8);
-        if mapped {
-            self.copy_in(address, &value.to_le_bytes());
-        }
-        mapped
+        self.poke_bytes(address, &value.to_le_bytes())
     }
 
     /// Writes bytes anywhere mapped, ignoring protections, as a debugger

@@ -5,8 +5,12 @@
 use nix::errno::Errno;
 use nix::libc;
 
-use super::{Kernel, Options, SigInfo, State, StopKind, Thread, Tid, Tracing};
+use super::{
+    DebugBehavior, Happening, Kernel, Options, SigInfo, State, StopKind, Thread, Tid, Tracing,
+};
 use crate::sim::cpu::Registers;
+#[cfg(test)]
+use crate::sim::world::Sabotage;
 
 /// A ptrace event's name, as `PTRACE_EVENT_*` without the prefix.
 #[must_use]
@@ -67,12 +71,12 @@ impl Kernel {
     }
 
     /// Registers as the kernel reports them: under
-    /// [`Sabotage::SkewSmallRegisters`](super::super::world::Sabotage),
+    /// [`Sabotage::SkewSmallRegisters`],
     /// general registers other than the stack and frame pointers that hold
     /// small numbers other than zero read one greater.
     #[cfg(test)]
     fn reported(&self, mut registers: Registers) -> Registers {
-        if self.sabotage == Some(super::super::world::Sabotage::SkewSmallRegisters) {
+        if self.sabotage == Some(Sabotage::SkewSmallRegisters) {
             for (index, value) in registers.general.iter_mut().enumerate() {
                 if index != crate::sim::cpu::RSP
                     && index != crate::sim::cpu::RBP
@@ -90,26 +94,26 @@ impl Kernel {
         let thread = self.stopped(tid)?;
         #[cfg(test)]
         if let Some(phantom) = self.phantom_debug.get(&tid) {
-            return phantom.peek(index);
+            return Ok(phantom.peek(index));
         }
         match self.debug_behavior {
-            super::DebugBehavior::Discarding => Ok(0),
-            _ => thread.debug.peek(index),
+            DebugBehavior::Discarding => Ok(0),
+            _ => Ok(thread.debug.peek(index)),
         }
     }
 
     /// `PTRACE_POKEUSER` of a debug register (K-DR-4).
     pub fn poke_debug(&mut self, tid: Tid, index: usize, value: u64) -> Result<(), Errno> {
         let contended = match self.debug_behavior {
-            super::DebugBehavior::Discarding => {
+            DebugBehavior::Discarding => {
                 self.stopped(tid)?;
                 return Ok(());
             }
-            super::DebugBehavior::Faithful => 0,
-            super::DebugBehavior::Contended(others) => others,
+            DebugBehavior::Faithful => 0,
+            DebugBehavior::Contended(others) => others,
         };
         #[cfg(test)]
-        let phantom = self.sabotage == Some(super::super::world::Sabotage::PhantomArming);
+        let phantom = self.sabotage == Some(Sabotage::PhantomArming);
         let thread = self.stopped_mut(tid)?;
         let contended = if thread.tid == thread.tgid {
             0
@@ -131,6 +135,7 @@ impl Kernel {
 
     /// Lets something other than the tracer hold `count` more of a
     /// thread's hardware breakpoints, as perf can.
+    #[cfg(test)]
     pub fn hold_debug_slots(&mut self, tid: Tid, count: usize) {
         if let Some(thread) = self.threads.get_mut(&tid) {
             thread.debug_held += count;
@@ -154,7 +159,7 @@ impl Kernel {
     pub fn poke(&mut self, tid: Tid, address: u64, value: u64) -> Result<(), Errno> {
         let group = self.stopped(tid)?.tgid;
         #[cfg(test)]
-        if self.sabotage == Some(super::super::world::Sabotage::LosePokes) {
+        if self.sabotage == Some(Sabotage::LosePokes) {
             return Ok(());
         }
         let space = &mut self
@@ -264,7 +269,7 @@ impl Kernel {
             return Err(Errno::EPERM);
         }
         if matches!(thread.state, State::Zombie(_)) {
-            self.happenings.push(super::Happening::SeizeRefused { tid });
+            self.happenings.push(Happening::SeizeRefused { tid });
             return Err(Errno::EPERM);
         }
         thread.tracing = Tracing::Seized { interrupted: false };
@@ -284,20 +289,10 @@ impl Kernel {
         if !thread.seized() {
             return Err(Errno::EIO);
         }
-        let exiting = matches!(
-            thread.state,
-            State::Exiting(_)
-                | State::Zombie(_)
-                | State::Stopped {
-                    kind: StopKind::Exit(_),
-                    ..
-                }
-        );
-        if !exiting {
+        if !thread.state.exiting() {
             thread.tracing = Tracing::Seized { interrupted: true };
             if thread.is_stopped() {
-                self.happenings
-                    .push(super::Happening::InterruptWaits { tid });
+                self.happenings.push(Happening::InterruptWaits { tid });
             }
         }
         Ok(())
@@ -323,16 +318,15 @@ impl Kernel {
             }
         );
         let planted = if exiting { None } else { self.planted(group) };
-        self.happenings
-            .push(super::Happening::Released { tid, planted });
+        self.happenings.push(Happening::Released { tid, planted });
         match state {
             State::Stopped {
                 kind: StopKind::Signal(_),
-                info,
+                ..
             } => {
                 self.threads.get_mut(&tid).expect("the thread").state = State::Running;
                 if let Some(signal) = signal {
-                    self.act_by_default(tid, SigInfo { signal, ..info });
+                    self.act_by_default(tid, signal);
                 }
             }
             State::Stopped {
