@@ -707,18 +707,10 @@ impl Session {
         let working_directory = working_directory
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
-        let mut warnings = target
+        let warnings = target
             .console
             .load_view_sources(&working_directory, view_files)
             .await;
-        warnings.extend(
-            target
-                .handle
-                .module_image()
-                .view_errors()
-                .iter()
-                .map(ToString::to_string),
-        );
         for warning in warnings {
             self.client.important(format!("views: {warning}")).await?;
         }
@@ -1335,7 +1327,7 @@ impl Session {
                                 format!(
                                     "the watch on {} ended: {}",
                                     crate::cli::format::watch_subject(&entry.watchpoint),
-                                    super::watch::invalidation_text(entry.reason)
+                                    crate::cli::format::invalidation_text(entry.reason)
                                 )
                             })
                             .collect::<Vec<_>>()

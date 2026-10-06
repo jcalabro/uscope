@@ -1111,14 +1111,7 @@ impl Session {
         let mut candidates = Vec::new();
         match completing {
             Completing::Name { first: false } if command == "info" => {
-                for subcommand in [
-                    "breakpoints",
-                    "watchpoints",
-                    "signals",
-                    "core",
-                    "symbol",
-                    "view",
-                ] {
+                for subcommand in crate::cli::commands::INFO_SUBCOMMANDS {
                     candidates.push((subcommand.to_owned(), "value"));
                 }
             }

@@ -344,7 +344,7 @@ impl Session {
                     .console(format!(
                         "data breakpoint {id} on {} was removed: {}",
                         crate::cli::format::watch_subject(&entry.watchpoint),
-                        invalidation_text(entry.reason)
+                        crate::cli::format::invalidation_text(entry.reason)
                     ))
                     .await?;
             }
@@ -398,14 +398,6 @@ impl Session {
             })
             .collect::<Vec<_>>()
             .join("; ")
-    }
-}
-
-pub const fn invalidation_text(reason: uscope::WatchpointInvalidation) -> &'static str {
-    match reason {
-        uscope::WatchpointInvalidation::ScopeExited => "its frame or block is no longer active",
-        uscope::WatchpointInvalidation::OwnerThreadExited => "the thread owning it exited",
-        uscope::WatchpointInvalidation::ModuleUnloaded => "the module owning it was unloaded",
     }
 }
 

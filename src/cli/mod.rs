@@ -160,7 +160,8 @@ impl Cli {
 
     /// Loads the project's and the user's view files, under
     /// `working_directory`, and the session files at `paths`, and returns
-    /// a warning for each file or part of one it could not use.
+    /// a warning for each file or view it could not use, the program's own
+    /// included.
     pub async fn load_view_sources(
         &self,
         working_directory: &std::path::Path,
@@ -180,14 +181,6 @@ impl Cli {
             views.session = session;
         }
         warnings.extend(self.reload_views().await);
-        warnings
-    }
-
-    /// Loads view files as [`Self::load_view_sources`] does and warns about
-    /// each file or view that cannot be used, the program's own included.
-    /// Returns whether every one could be used.
-    pub async fn load_views(&self, working_directory: &std::path::Path, paths: &[PathBuf]) -> bool {
-        let mut warnings = self.load_view_sources(working_directory, paths).await;
         warnings.extend(
             self.debugger
                 .module_image()
@@ -195,6 +188,13 @@ impl Cli {
                 .iter()
                 .map(ToString::to_string),
         );
+        warnings
+    }
+
+    /// Loads view files as [`Self::load_view_sources`] does and warns about
+    /// each one that cannot be used. Returns whether every one could be used.
+    pub async fn load_views(&self, working_directory: &std::path::Path, paths: &[PathBuf]) -> bool {
+        let warnings = self.load_view_sources(working_directory, paths).await;
         for warning in &warnings {
             self.warn(&format!("views: {warning}"));
         }

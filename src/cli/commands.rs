@@ -126,6 +126,16 @@ macro_rules! command {
     (@repeatable repeatable) => { true };
 }
 
+/// The subcommands `info` accepts, by their primary names.
+pub const INFO_SUBCOMMANDS: [&str; 6] = [
+    "breakpoints",
+    "watchpoints",
+    "signals",
+    "core",
+    "symbol",
+    "view",
+];
+
 pub const COMMANDS: &[CommandSpec] = &[
     command!(
         Break,
