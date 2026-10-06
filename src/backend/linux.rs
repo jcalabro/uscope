@@ -57,6 +57,7 @@ use native::{InspectionOps, LinuxPtrace, LinuxTraceOps, is_vanished_tracee};
 use registers::Fxsave;
 
 mod breakpoints;
+mod callers;
 mod classify;
 mod core_dump;
 mod core_files;

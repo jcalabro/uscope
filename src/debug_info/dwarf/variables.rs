@@ -10,6 +10,9 @@
 //! - [`shape`]: how a type's bytes decode; [`codec`]: the byte-level decoding.
 //! - [`evaluate`]: DWARF expression evaluation; [`inspect`]: value paths and
 //!   materializing values, children, and dereferences.
+//! - [`pieces`]: the storage location pieces describe; [`storage`]: reading
+//!   and selecting storage of every form.
+//! - [`call_sites`]: the calls that recover parameters' entry values.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -18,8 +21,8 @@ use std::sync::Arc;
 use gimli::RunTimeEndian;
 
 use crate::debug_info::{
-    Accessed, Located, ObjectKey, ObjectStorage, PlannedStep, Step, VariableContext, VariableInfo,
-    VariableRuntime,
+    Accessed, CallSite, CallSiteId, EntryParameter, Located, ObjectKey, ObjectStorage, PlannedStep,
+    Step, VariableContext, VariableInfo, VariableRuntime, VariableRuntimeError,
 };
 use crate::inspection::InspectionBudget;
 use crate::{
@@ -48,6 +51,7 @@ use types::{
     DynamicAggregateLayoutKey, TypeArenaBuilder, TypeEntry, TypeMetadataEntry, TypeResolution,
 };
 
+mod call_sites;
 mod codec;
 mod die;
 mod evaluate;
@@ -55,7 +59,9 @@ mod globals;
 mod identity;
 mod inspect;
 mod location;
+mod pieces;
 mod shape;
+mod storage;
 mod text;
 mod types;
 mod variant;
@@ -149,6 +155,11 @@ struct CatalogFunction {
     objects: Vec<usize>,
 }
 
+/// A `DW_TAG_dwarf_procedure`, which an implicit pointer may point into.
+struct CatalogProcedure {
+    location: Metadata<LocationDescription>,
+}
+
 pub(super) struct DwarfVariableInfo {
     objects: Arc<[CatalogDataObject]>,
     functions: Arc<[CatalogFunction]>,
@@ -158,6 +169,8 @@ pub(super) struct DwarfVariableInfo {
     types: Arc<[TypeNode]>,
     dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
     objects_by_debug_offset: HashMap<u64, usize>,
+    procedures: HashMap<u64, CatalogProcedure>,
+    call_sites: call_sites::CallSiteCatalog,
     target: TargetDescription,
     endian: RunTimeEndian,
 }
@@ -187,6 +200,8 @@ pub(super) fn load_variable_info<'data>(
     let units = catalog.units.as_slice();
     let mut objects = Vec::new();
     let mut functions = Vec::new();
+    let mut calls = call_sites::CallSiteBuilder::default();
+    let mut procedures = HashMap::new();
     let mut vtables = Vec::new();
     let mut order = 0_u64;
     let evaluation_units = load_evaluation_units(units)?;
@@ -236,16 +251,18 @@ pub(super) fn load_variable_info<'data>(
                         ranges: Arc::clone(&ranges),
                         objects: Vec::new(),
                     });
+                    let frame_base = copy_optional_location(
+                        dwarf,
+                        unit_index,
+                        unit,
+                        entry.attr_value(gimli::DW_AT_frame_base),
+                        MetadataAbsence::NoFrameBase,
+                    );
+                    calls.function(dwarf, units, unit_index, entry, &ranges, frame_base.clone());
                     Some(Scope {
                         ranges,
                         lexical_depth: 0,
-                        frame_base: copy_optional_location(
-                            dwarf,
-                            unit_index,
-                            unit,
-                            entry.attr_value(gimli::DW_AT_frame_base),
-                            MetadataAbsence::NoFrameBase,
-                        ),
+                        frame_base,
                         routine: true,
                         function,
                         instance: None,
@@ -333,6 +350,29 @@ pub(super) fn load_variable_info<'data>(
                 scope
             };
 
+            match entry.tag() {
+                gimli::DW_TAG_call_site | gimli::DW_TAG_GNU_call_site => {
+                    if let Some(parent) = parent.as_ref().filter(|parent| parent.defined) {
+                        calls.site(dwarf, units, unit_index, entry, parent.function, depth);
+                    }
+                }
+                gimli::DW_TAG_call_site_parameter | gimli::DW_TAG_GNU_call_site_parameter => {
+                    calls.parameter(dwarf, units, unit_index, entry, depth);
+                }
+                gimli::DW_TAG_dwarf_procedure => {
+                    if let Some(offset) = debug_info_offset(unit, entry) {
+                        let location = copy_optional_location(
+                            dwarf,
+                            unit_index,
+                            unit,
+                            entry.attr_value(gimli::DW_AT_location),
+                            MetadataAbsence::NoLocation,
+                        );
+                        procedures.insert(offset, CatalogProcedure { location });
+                    }
+                }
+                _ => {}
+            }
             if depth == 1
                 && entry.tag() == gimli::DW_TAG_variable
                 && let Some((address, ty)) = rust_vtable(dwarf, unit_index, unit, entry, &mut types)
@@ -499,6 +539,8 @@ pub(super) fn load_variable_info<'data>(
             types: Arc::clone(&finalized_types),
             dynamic_record_layouts: types.dynamic_record_layouts,
             objects_by_debug_offset,
+            procedures,
+            call_sites: calls.finish(),
             target,
             endian: match target.byte_order {
                 ByteOrder::Little => RunTimeEndian::Little,
@@ -686,6 +728,11 @@ impl VariableInfo for DwarfVariableInfo {
                         "an untyped step unexpectedly reached storage".into(),
                     ))));
                 };
+                // A place a composite's piece holds is that piece's.
+                let storage = match self.value_shape(ty) {
+                    Ok(shape) => storage::narrow(storage, shape.byte_size()),
+                    Err(_) => storage,
+                };
                 Ok(Ok(Located { ty, storage }))
             }
             Err(error) => {
@@ -778,6 +825,33 @@ impl VariableInfo for DwarfVariableInfo {
     ) -> Result<ValueChildPage> {
         self.value_child_page(reference, offset, limit, runtime, budget)
     }
+
+    fn call_site(
+        &self,
+        return_address: ImageAddress,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> std::result::Result<Option<CallSite>, VariableRuntimeError> {
+        self.described_call_site(return_address, runtime, budget)
+    }
+
+    fn tail_calls(
+        &self,
+        from: ImageAddress,
+        to: ImageAddress,
+    ) -> std::result::Result<Arc<[CallSiteId]>, VariableRuntimeError> {
+        self.tail_call_path(from, to)
+    }
+
+    fn call_site_value(
+        &self,
+        site: CallSiteId,
+        parameter: EntryParameter,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> std::result::Result<u64, VariableRuntimeError> {
+        self.site_parameter_value(site, parameter, runtime, budget)
+    }
 }
 
 impl TypeMetadataEntry for TypeNode {
@@ -793,7 +867,7 @@ impl TypeMetadataEntry for TypeNode {
 pub(super) fn fuzz_expression(data: &[u8]) {
     use evaluate::{FrameBase, evaluate};
 
-    use crate::debug_info::{VariableRuntime, VariableRuntimeError};
+    use crate::debug_info::{EntryParameter, VariableRuntime, VariableRuntimeError};
     use crate::{ImageAddress, VariableUnavailableReason, VirtualAddress};
 
     struct FuzzRuntime;
@@ -844,6 +918,16 @@ pub(super) fn fuzz_expression(data: &[u8]) {
                 },
             ))
         }
+
+        fn entry_value(
+            &mut self,
+            _parameter: EntryParameter,
+            _budget: &mut InspectionBudget,
+        ) -> std::result::Result<u64, VariableRuntimeError> {
+            Err(VariableRuntimeError::Unavailable(
+                VariableUnavailableReason::EntryValue(crate::EntryValueUnavailableReason::NoCaller),
+            ))
+        }
     }
 
     let expression = Expression {
@@ -855,15 +939,43 @@ pub(super) fn fuzz_expression(data: &[u8]) {
         },
         unit: 0,
         indexed_addresses: Arc::new(HashMap::new()),
+        procedures: Arc::default(),
     };
-    let _ = evaluate(
+    let mut budget = InspectionBudget::default();
+    if let Ok(pieces) = evaluate(
         &expression,
         RunTimeEndian::Little,
+        None,
         &mut FrameBase::Unsupported,
         &[],
         &mut FuzzRuntime,
-        &mut InspectionBudget::default(),
-    );
+        &mut budget,
+    ) {
+        fuzz_storage(&pieces, &mut FuzzRuntime, &mut budget);
+    }
+}
+
+/// Makes fuzzed pieces the storage of a 16-byte object, and reads it whole,
+/// by bits, and in part.
+#[cfg(feature = "fuzzing")]
+fn fuzz_storage(
+    pieces: &[gimli::Piece<Reader<'_>>],
+    runtime: &mut dyn crate::debug_info::VariableRuntime,
+    budget: &mut InspectionBudget,
+) {
+    let target = TargetDescription {
+        architecture: crate::Architecture::X86_64,
+        pointer_width: crate::PointerWidth::Bits64,
+        byte_order: ByteOrder::Little,
+    };
+    let Ok(storage) =
+        pieces::storage_from_pieces(pieces, 16, None, RunTimeEndian::Little, target, runtime)
+    else {
+        return;
+    };
+    let _ = storage::read(&storage, 16, runtime, budget);
+    let _ = storage::read_bits(&storage, 3, 61, ByteOrder::Little, runtime, budget);
+    let _ = storage::offset(storage, 8).map(|storage| storage::narrow(storage, 8));
 }
 
 #[cfg(test)]

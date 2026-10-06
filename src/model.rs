@@ -1058,6 +1058,56 @@ pub enum ValueStorage {
         debug_info_offset: u64,
         byte_offset: i64,
     },
+    /// Part of a value whose pieces lie in several places.
+    Composite(CompositeStorage),
+}
+
+/// A value assembled from pieces, of which a storage selects the bits from
+/// `start` on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeStorage {
+    /// Pieces in order, covering the whole value without gaps.
+    pub pieces: Arc<[StoragePiece]>,
+    /// The first selected bit.
+    pub start: u64,
+}
+
+/// One piece of a composite value: `size` bits from bit `offset` of the
+/// value, held at `location`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoragePiece {
+    pub offset: u64,
+    pub size: u64,
+    pub location: PieceLocation,
+}
+
+/// Where a piece's bits are, resolved once at the stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PieceLocation {
+    /// Memory, from `bit_offset` bits past `address`.
+    Memory {
+        address: VirtualAddress,
+        bit_offset: u64,
+    },
+    /// Bytes captured at the stop, from `bit_offset` bits into `raw`: a
+    /// register's whole contents, least significant byte first, or a value
+    /// the expression computed or holds.
+    Bytes {
+        source: VariableValueSource,
+        raw: Arc<[u8]>,
+        bit_offset: u64,
+    },
+    /// A pointer to an object with no address, as in
+    /// [`ValueStorage::ImplicitPointer`].
+    ImplicitPointer {
+        debug_info_offset: u64,
+        byte_offset: i64,
+    },
+    /// Bits the program did not keep.
+    Undefined,
+    /// Bits this stop cannot provide, such as a register a caller's callee
+    /// did not save.
+    Unavailable(VariableUnavailableReason),
 }
 
 /// Opaque capability for expanding one aggregate at one exact stopped state.
@@ -1198,6 +1248,9 @@ pub enum VariableValueSource {
     Computed,
     /// Optimization retained a referent value but eliminated the pointer's address.
     ImplicitPointer,
+    /// The value is assembled from several places, or from part of a
+    /// register above its least significant bit, so no one place holds it.
+    Composite,
 }
 
 /// Why an otherwise available pointer or reference cannot be dereferenced.
@@ -1314,6 +1367,9 @@ pub enum UnsupportedVariableFeature {
     RuntimeAggregateLocation,
     /// Decoding a valid scalar representation not modeled by uscope.
     ScalarRepresentation,
+    /// Evaluating a DWARF expression operation uscope does not implement,
+    /// such as `DW_OP_GNU_variable_value`.
+    ExpressionOperation,
 }
 
 impl fmt::Display for UnsupportedVariableFeature {
@@ -1331,6 +1387,7 @@ impl fmt::Display for UnsupportedVariableFeature {
             Self::TypedValue => "the requested typed DWARF value",
             Self::AlternativeLocations => "simultaneous alternative DWARF locations",
             Self::TypeRepresentation => "the source type representation",
+            Self::ExpressionOperation => "the DWARF expression operation",
             Self::RuntimeAggregateLocation => "the runtime aggregate location",
             Self::ScalarRepresentation => "the scalar representation",
         })
@@ -1369,6 +1426,54 @@ pub enum CallFrameUnavailableReason {
     NoInstructionContext,
     /// Unwinding terminated without producing a CFA.
     UnwindTerminated(Arc<str>),
+}
+
+/// Why the value a parameter held on entry cannot be recovered from the
+/// call site that passed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum EntryValueUnavailableReason {
+    /// The frame has no caller, or was entered by a signal.
+    NoCaller,
+    /// The caller's debug information describes no call returning to it.
+    NoCallSite,
+    /// The call site calls another function, which jumped to this one.
+    TargetMismatch,
+    /// The call site's target cannot be identified, so another function
+    /// may have jumped to this one.
+    UnknownTarget,
+    /// Chains of tail calls may have entered the function again since the
+    /// call site called it.
+    TailCalls,
+    /// The call site does not describe the value it passed.
+    NoParameter,
+    /// A tail call passed it, computed from state the jump discarded.
+    DiscardedState,
+    /// The caller cannot provide the value its call site passed.
+    Caller(Box<VariableUnavailableReason>),
+}
+
+impl fmt::Display for EntryValueUnavailableReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoCaller => formatter.write_str("the frame has no caller to recover it from"),
+            Self::NoCallSite => {
+                formatter.write_str("the caller's debug information describes no call here")
+            }
+            Self::TargetMismatch => {
+                formatter.write_str("the caller called another function, which jumped here")
+            }
+            Self::UnknownTarget => formatter.write_str("the caller's call target is unknown"),
+            Self::TailCalls => {
+                formatter.write_str("tail calls may have entered the function again since")
+            }
+            Self::NoParameter => formatter.write_str("the call site does not describe it"),
+            Self::DiscardedState => {
+                formatter.write_str("a tail call passed it from state its jump discarded")
+            }
+            Self::Caller(reason) => write!(formatter, "the caller cannot provide it: {reason}"),
+        }
+    }
 }
 
 /// Why thread-local storage cannot be resolved for this value.
@@ -1444,6 +1549,8 @@ pub enum VariableUnavailableReason {
     RegisterNotSaved(Arc<str>),
     /// The selected frame cannot provide its call-frame address.
     CallFrameUnavailable(CallFrameUnavailableReason),
+    /// The value a parameter held on entry cannot be recovered.
+    EntryValue(EntryValueUnavailableReason),
     /// Thread-local storage cannot be resolved for this value.
     TlsUnavailable(TlsUnavailableReason),
     /// A structural value operation cannot be completed.
@@ -1518,6 +1625,9 @@ impl fmt::Display for VariableUnavailableReason {
             }
             Self::CallFrameUnavailable(CallFrameUnavailableReason::UnwindTerminated(reason)) => {
                 write!(formatter, "the call-frame address is unavailable: {reason}")
+            }
+            Self::EntryValue(reason) => {
+                write!(formatter, "the entry value is unavailable: {reason}")
             }
             Self::TlsUnavailable(TlsUnavailableReason::ModuleIdentityUnavailable) => {
                 formatter.write_str("the module has no TLS loader identity")

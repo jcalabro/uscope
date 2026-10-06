@@ -353,7 +353,7 @@ impl<P: InspectionOps> Controller<P> {
 
     /// Computes the canonical frame address of the activation executing
     /// `code` with `registers`.
-    fn frame_cfa(
+    pub(super) fn frame_cfa(
         &self,
         pid: Pid,
         modules: &[UnwindModule<'_>],

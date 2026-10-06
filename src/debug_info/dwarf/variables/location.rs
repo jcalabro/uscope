@@ -12,12 +12,19 @@ use crate::{AddressRange, ImageAddress, VariableUnavailableReason};
 use super::die::{ByteSize, base_type_encoding, byte_size_attribute};
 use super::{ConstantValue, Metadata, MetadataAbsence, ValueDescription};
 
+/// How many procedures one expression may call, directly or not.
+const MAX_PROCEDURES: usize = 64;
+
 #[derive(Clone)]
 pub(super) struct Expression {
     pub(super) bytes: Arc<[u8]>,
     pub(super) encoding: gimli::Encoding,
     pub(super) unit: usize,
     pub(super) indexed_addresses: Arc<HashMap<usize, u64>>,
+    /// The locations of the entries `DW_OP_call2`, `DW_OP_call4`, and
+    /// `DW_OP_call_ref` run, directly or from another such procedure, by
+    /// `.debug_info` offset: `None` for an entry without a location.
+    pub(super) procedures: Arc<HashMap<u64, Option<LocationDescription>>>,
 }
 
 /// Operation families that determine where an object's storage lives.
@@ -33,6 +40,9 @@ pub(super) enum ExpressionUse {
 pub(super) struct EvaluationUnit {
     pub(super) base_types: HashMap<usize, gimli::ValueType>,
     pub(super) language: Option<gimli::DwLang>,
+    /// Where the unit begins in `.debug_info`, which its unit-relative
+    /// references are offsets from.
+    pub(super) offset: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -170,6 +180,24 @@ fn copy_location(
     unit: &gimli::Unit<Reader<'_>>,
     value: gimli::AttributeValue<Reader<'_>>,
 ) -> std::result::Result<LocationDescription, DwarfError> {
+    copy_location_with(dwarf, unit_index, unit, value, copy_expression)
+}
+
+type CopyExpression = fn(
+    &gimli::Dwarf<Reader<'_>>,
+    usize,
+    &gimli::Unit<Reader<'_>>,
+    gimli::Expression<Reader<'_>>,
+    gimli::Encoding,
+) -> std::result::Result<Expression, DwarfError>;
+
+fn copy_location_with(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit_index: usize,
+    unit: &gimli::Unit<Reader<'_>>,
+    value: gimli::AttributeValue<Reader<'_>>,
+    copy_expression: CopyExpression,
+) -> std::result::Result<LocationDescription, DwarfError> {
     let encoding = unit.encoding();
     // DWARF 2 and 3 encode a single expression as a block.
     if let Some(expression) = value.exprloc_value() {
@@ -218,7 +246,54 @@ fn copy_location(
     })
 }
 
+/// Copies an expression with the procedures it calls, which must be in its
+/// own unit.
 pub(super) fn copy_expression(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit_index: usize,
+    unit: &gimli::Unit<Reader<'_>>,
+    expression: gimli::Expression<Reader<'_>>,
+    encoding: gimli::Encoding,
+) -> std::result::Result<Expression, DwarfError> {
+    let endian = expression.0.endian();
+    let mut copied = copy_operations(dwarf, unit_index, unit, expression, encoding)?;
+    let mut pending = calls(unit, &copied, endian)?;
+    if pending.is_empty() {
+        return Ok(copied);
+    }
+    let mut procedures = HashMap::new();
+    while let Some(offset) = pending.pop() {
+        if procedures.contains_key(&offset) {
+            continue;
+        }
+        if procedures.len() == MAX_PROCEDURES {
+            return Err(DwarfError::MalformedVariable(
+                "an expression calls too many procedures".into(),
+            ));
+        }
+        // A procedure elsewhere stays missing, and running it unsupported.
+        let Some(entry_offset) =
+            gimli::DebugInfoOffset(usize::try_from(offset).map_err(|_| DwarfError::InvalidRange)?)
+                .to_unit_offset(&unit.header)
+        else {
+            continue;
+        };
+        let entry = unit.entry(entry_offset)?;
+        let location = entry
+            .attr_value(gimli::DW_AT_location)
+            .map(|value| copy_location_with(dwarf, unit_index, unit, value, copy_operations))
+            .transpose()?;
+        for called in location.iter().flat_map(|location| location.entries.iter()) {
+            pending.extend(calls(unit, &called.expression, endian)?);
+        }
+        procedures.insert(offset, location);
+    }
+    copied.procedures = Arc::new(procedures);
+    Ok(copied)
+}
+
+/// Copies an expression's operations without the procedures it calls.
+fn copy_operations(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     unit_index: usize,
     unit: &gimli::Unit<Reader<'_>>,
@@ -242,7 +317,32 @@ pub(super) fn copy_expression(
         encoding,
         unit: unit_index,
         indexed_addresses: Arc::new(indexed_addresses),
+        procedures: Arc::default(),
     })
+}
+
+/// The `.debug_info` offsets of the entries an expression calls.
+fn calls(
+    unit: &gimli::Unit<Reader<'_>>,
+    expression: &Expression,
+    endian: gimli::RunTimeEndian,
+) -> std::result::Result<Vec<u64>, DwarfError> {
+    let reader = gimli::EndianSlice::new(&expression.bytes, endian);
+    let mut operations = gimli::Expression(reader).operations(expression.encoding);
+    let mut called = Vec::new();
+    while let Some(operation) = operations.next()? {
+        let gimli::Operation::Call { offset } = operation else {
+            continue;
+        };
+        let offset = match offset {
+            gimli::DieReference::UnitRef(offset) => offset.to_debug_info_offset(&unit.header),
+            gimli::DieReference::DebugInfoRef(offset) => Some(offset),
+        };
+        if let Some(offset) = offset {
+            called.push(u64::try_from(offset.0).expect("DWARF offset fits u64"));
+        }
+    }
+    Ok(called)
 }
 
 pub(super) fn load_evaluation_units(
@@ -280,6 +380,10 @@ pub(super) fn load_evaluation_units(
             Ok(EvaluationUnit {
                 base_types,
                 language,
+                offset: unit
+                    .header
+                    .debug_info_offset()
+                    .map(|offset| u64::try_from(offset.0).expect("DWARF offset fits u64")),
             })
         })
         .collect()

@@ -173,6 +173,42 @@ impl From<VariableUnavailableReason> for VariableRuntimeError {
     }
 }
 
+/// What a frame's location asks of the call that entered its function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryParameter {
+    /// The value a register held on entry.
+    Register(u16),
+    /// The value stored, on entry, at the address a register held.
+    Referent(u16),
+    /// The value passed for the parameter whose debug information entry
+    /// is at this offset in the frame's module.
+    Parameter(u64),
+}
+
+/// A described call, which returns to the address that found it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSite {
+    pub id: CallSiteId,
+    pub target: CallTarget,
+}
+
+/// One call site that a module describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CallSiteId(pub(crate) usize);
+
+/// The function a call site calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallTarget {
+    /// Code in the same module.
+    Code(ImageAddress),
+    /// The function a linker symbol of this name defines, in any module.
+    Symbol(Arc<str>),
+    /// An address the call computed.
+    Computed(VirtualAddress),
+    /// The debug information does not say.
+    Unknown,
+}
+
 pub trait VariableRuntime {
     fn register(
         &mut self,
@@ -189,6 +225,13 @@ pub trait VariableRuntime {
         address: VirtualAddress,
         size: usize,
     ) -> std::result::Result<Arc<[u8]>, VariableRuntimeError>;
+    /// The register-sized value `parameter` names on entry to the frame's
+    /// function, which its caller's call site describes.
+    fn entry_value(
+        &mut self,
+        parameter: EntryParameter,
+        budget: &mut InspectionBudget,
+    ) -> std::result::Result<u64, VariableRuntimeError>;
 }
 
 pub trait VariableInfo: Send + Sync {
@@ -298,6 +341,35 @@ pub trait VariableInfo: Send + Sync {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<ValueChildPage>;
+
+    /// The call that returns to `return_address`, when one is described,
+    /// with its target computed in the calling frame `runtime` reads.
+    fn call_site(
+        &self,
+        return_address: ImageAddress,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> std::result::Result<Option<CallSite>, VariableRuntimeError>;
+
+    /// The tail calls by which the function whose code holds `from`, entered
+    /// by a call, became the activation of the function whose code holds
+    /// `to`: none when they are the same function. Fails unless exactly one
+    /// chain of tail calls is possible.
+    fn tail_calls(
+        &self,
+        from: ImageAddress,
+        to: ImageAddress,
+    ) -> std::result::Result<Arc<[CallSiteId]>, VariableRuntimeError>;
+
+    /// The register-sized value a call site passed for `parameter`, in the
+    /// state of the calling frame `runtime` reads.
+    fn call_site_value(
+        &self,
+        site: CallSiteId,
+        parameter: EntryParameter,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> std::result::Result<u64, VariableRuntimeError>;
 }
 
 /// Call-frame information for one module image. Instruction addresses are
