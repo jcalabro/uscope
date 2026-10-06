@@ -823,6 +823,58 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
     }
 }
 
+#[tokio::test]
+async fn tls_of_every_module_resolves_per_thread_on_glibc_and_musl() {
+    // Each build, whether it runs on musl, and whether it is dynamically
+    // linked, with a library and a plugin as separate TLS modules.
+    for (fixture, musl, dynamic) in [
+        ("tls-modules-gcc", false, true),
+        ("tls-modules-musl-gcc-o0", true, true),
+        ("tls-modules-musl-clang-o2-nopie", true, true),
+        ("tls-modules-musl-gcc-static", true, false),
+        ("tls-modules-musl-clang-static-pie", true, false),
+    ] {
+        let mut scenario = Scenario::launch(fixture);
+        let entry = scenario
+            .run_with_to_stop(LaunchOptions {
+                stop_at_entry: true,
+                ..LaunchOptions::default()
+            })
+            .await;
+        assert_eq!(entry, StopReason::Entry, "{fixture}");
+        // Before musl sets the thread pointer up, no thread has TLS.
+        if musl {
+            let early = scenario
+                .operation("TLS at entry", scenario.handle().variable("main_tls"))
+                .await;
+            assert_eq!(
+                early.state,
+                VariableState::Unavailable(VariableUnavailableReason::TlsUnavailable(
+                    uscope::TlsUnavailableReason::LookupFailed(
+                        "the thread has not allocated the module's TLS block".into()
+                    )
+                )),
+                "{fixture}"
+            );
+        }
+        scenario.add_breakpoint("tls_stop").await;
+        assert!(
+            matches!(
+                scenario.resume_to_stop().await,
+                StopReason::Breakpoint { .. }
+            ),
+            "{fixture}"
+        );
+        support::assert_tls_modules(&mut scenario, fixture, dynamic).await;
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0)),
+            "{fixture}"
+        );
+        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
+    }
+}
+
 /// The address and value of a TLS variable in the selected thread.
 fn tls_location(variable: &uscope::Variable) -> (u64, i128) {
     match &variable.state {

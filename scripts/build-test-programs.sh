@@ -188,6 +188,21 @@ build_disassembly_fixture() {
         "${command[@]}"
 }
 
+# Builds a program of the TLS modules fixture from the sources and flags
+# given, so a static build can link the library's source in.
+build_tls_modules_fixture() {
+    local compiler="$1"
+    local output="$2"
+    shift 2
+    local -a command=(
+        "$compiler" -std=c17 -Wall -Wextra -Werror -g3 -gdwarf-5 -pthread "$@" -o "$output"
+    )
+    read_dash_version "$compiler"
+    run_cached_build "$c_fixtures_dir/tls-modules" "$output" \
+        "compiler=${dash_version}"$'\n'"target=x86_64-linux"$'\n'"backend=${compiler}" \
+        "${command[@]}"
+}
+
 # Derives a C library standing in for another machine's build: the version
 # that libthread_db checks and the build-id each differ in one byte, while the
 # code stays the toolchain's own so the fixture runs against its loader.
@@ -459,6 +474,31 @@ require_instruction() {
     record_validation "$stamp" "$signature"
 }
 
+# Fails the build unless a fixture runs on musl: it names musl's loader as
+# its interpreter or, linked statically, contains musl's TLS layout code.
+# Otherwise a toolchain that quietly targeted glibc would pass musl's tests.
+require_musl() {
+    local output="$1"
+    local stamp="${output}.validation-musl"
+    local signature="validator=musl-v1"
+    if validation_is_cached "$output" "$stamp" "$signature"; then
+        return
+    fi
+    local interpreter
+    interpreter=$(readelf -lW "$output" \
+        | sed -n 's/.*Requesting program interpreter: \(.*\)]$/\1/p')
+    if [[ -n "$interpreter" ]]; then
+        if [[ "${interpreter##*/}" != ld-musl-* ]]; then
+            printf 'error: %s runs on %s, not musl\n' "$output" "$interpreter" >&2
+            exit 1
+        fi
+    elif ! nm "$output" | grep -E ' __copy_tls$' >/dev/null; then
+        printf 'error: %s is not statically linked with musl\n' "$output" >&2
+        exit 1
+    fi
+    record_validation "$stamp" "$signature"
+}
+
 # Fails the build when a fixture's DWARF stops exercising the operation a test
 # depends on, instead of letting the test pass without its coverage.
 require_dwarf_operation() {
@@ -567,7 +607,8 @@ generate_core() {
 suite_signature() {
     local -a paths=()
     local tool path
-    for tool in gcc g++ clang clang++ clang++-libc++ rustc go zig objdump gdb setarch; do
+    for tool in gcc g++ clang clang++ clang++-libc++ musl-gcc musl-clang rustc go zig objdump gdb \
+        setarch; do
         if path=$(type -P "$tool"); then
             paths+=("$path")
         fi
@@ -796,6 +837,36 @@ build_fixture gcc "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-gcc" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
 build_fixture clang "$c_fixtures_dir/tls.c" "$output_dir/globals-tls-clang" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie -pthread
+# TLS in an executable, a linked library, and a dlopen'd plugin, on glibc and
+# on musl. Statically linked builds have one module and no plugin.
+readonly tls_modules_dir="$c_fixtures_dir/tls-modules"
+for libc in glibc musl; do
+    compiler=gcc suffix=""
+    if [[ $libc == musl ]]; then
+        compiler=musl-gcc suffix=-musl
+    fi
+    build_shared_fixture "$compiler" "$tls_modules_dir/library.c" \
+        "$output_dir/libtls-modules${suffix}.so" -O0 -g3 -gdwarf-5
+    build_shared_fixture "$compiler" "$tls_modules_dir/plugin.c" \
+        "$output_dir/libtls-plugin${suffix}.so" -O0 -g3 -gdwarf-5
+done
+tls_modules_linked=("-L$output_dir" '-Wl,-rpath,$ORIGIN')
+build_tls_modules_fixture gcc "$output_dir/tls-modules-gcc" -O0 -fPIE -pie \
+    '-DPLUGIN="libtls-plugin.so"' "$tls_modules_dir/main.c" "${tls_modules_linked[@]}" \
+    -ltls-modules
+build_tls_modules_fixture musl-gcc "$output_dir/tls-modules-musl-gcc-o0" -O0 -fPIE -pie \
+    '-DPLUGIN="libtls-plugin-musl.so"' "$tls_modules_dir/main.c" "${tls_modules_linked[@]}" \
+    -ltls-modules-musl
+build_tls_modules_fixture musl-clang "$output_dir/tls-modules-musl-clang-o2-nopie" -O2 -no-pie \
+    '-DPLUGIN="libtls-plugin-musl.so"' "$tls_modules_dir/main.c" "${tls_modules_linked[@]}" \
+    -ltls-modules-musl
+build_tls_modules_fixture musl-gcc "$output_dir/tls-modules-musl-gcc-static" -O0 -static \
+    -DSTATIC_BUILD "$tls_modules_dir/main.c" "$tls_modules_dir/library.c"
+build_tls_modules_fixture musl-clang "$output_dir/tls-modules-musl-clang-static-pie" -O2 \
+    -static-pie -fPIE -DSTATIC_BUILD "$tls_modules_dir/main.c" "$tls_modules_dir/library.c"
+for variant in gcc-o0 clang-o2-nopie gcc-static clang-static-pie; do
+    require_musl "$output_dir/tls-modules-musl-${variant}"
+done
 build_cpp_fixture g++ "$cpp_fixtures_dir/variables.cpp" "$output_dir/variables-cpp-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_cpp_fixture g++ "$cpp_fixtures_dir/overloads.cpp" "$output_dir/overloads-cpp-gcc-o0" \
@@ -1264,6 +1335,12 @@ for variant in gcc-o0 gcc-o2 gcc-o2-nopie clang-o0 clang-o2; do
     program="$output_dir/frames-${variant}"
     generate_core "${program}.core" 11 "$default_core_filter" "$program" "$program" crash
 done
+program="$output_dir/tls-modules-musl-gcc-o0"
+generate_core "${program}.core" 6 "$default_core_filter" \
+    "$program $output_dir/libtls-modules-musl.so $output_dir/libtls-plugin-musl.so" \
+    "$program" abort
+program="$output_dir/tls-modules-musl-clang-static-pie"
+generate_core "${program}.core" 6 "$default_core_filter" "$program" "$program" abort
 # Cores whose executable or shared library was deleted after the crash. The
 # copies are refreshed whenever a core itself must be regenerated.
 generate_core_without() {

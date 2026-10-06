@@ -17,7 +17,7 @@
 ## Languages and platforms
 
 - Go: source stepping, goroutines, split-stack backtraces, and composite values.
-- TLS for libcs other than glibc, such as musl.
+- TLS in statically linked glibc programs.
 - First-class tokio support.
 - Other Linux architectures, then other operating systems.
 

@@ -55,6 +55,7 @@ use memory::MemoryAccessError;
 use modules::{ModuleMapping, loader_link_maps, mapped_module_load_bias, module_mappings};
 use native::{InspectionOps, LinuxPtrace, LinuxTraceOps, is_vanished_tracee};
 use registers::Fxsave;
+use tls::{CLibrary, TlsModule};
 
 mod breakpoints;
 mod classify;
@@ -64,7 +65,6 @@ mod debug_registers;
 mod disassembly;
 mod evaluation;
 mod frames;
-mod glibc_tls;
 mod inspection;
 mod internal_stops;
 mod libraries;
@@ -84,17 +84,17 @@ mod signals;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim_edge;
 mod stepping;
-mod thread_db;
+mod tls;
 mod vdso;
 mod watchpoints;
 mod writes;
 
 pub use post_mortem::{PostMortemSession, open_core};
 
-/// Makes TLS lookups in this process use glibc's layout descriptors instead
-/// of `libthread_db`.
+/// Makes glibc TLS lookups in this process use glibc's layout descriptors
+/// instead of `libthread_db`.
 pub fn force_internal_tls_lookup(forced: bool) {
-    glibc_tls::force(forced);
+    tls::force_glibc_descriptors(forced);
 }
 
 #[cfg(feature = "fuzzing")]
@@ -865,7 +865,8 @@ struct RuntimeModule {
     image: Arc<ModuleImage>,
     unwind: Arc<dyn UnwindInfo>,
     variables: Arc<dyn VariableInfo>,
-    link_map: Option<VirtualAddress>,
+    /// How the C library identifies the module's TLS block, once known.
+    tls: Option<TlsModule>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -937,6 +938,8 @@ struct Controller<P: InspectionOps> {
     executable: Arc<PathBuf>,
     executable_data: Arc<[u8]>,
     executable_identity: FileIdentity,
+    /// The C library the executable runs on, whose structures locate TLS.
+    c_library: CLibrary,
     expected_process_start_time: Option<u64>,
     module_image: Arc<ModuleImage>,
     unwind_info: Arc<dyn UnwindInfo>,
@@ -1039,11 +1042,12 @@ impl<P: InspectionOps> Controller<P> {
             image: Arc::clone(&module_image),
             unwind: Arc::clone(&unwind_info),
             variables: variable_info,
-            link_map: None,
+            tls: None,
         };
         Self {
             _lease: lease,
             executable: executable.display_path,
+            c_library: CLibrary::of_executable(&executable.data),
             executable_data: executable.data,
             executable_identity: executable.identity,
             expected_process_start_time: executable.process_start_time,

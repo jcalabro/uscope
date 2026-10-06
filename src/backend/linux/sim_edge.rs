@@ -25,6 +25,7 @@ use super::native::{
 };
 use super::registers::Fxsave;
 use super::signals::{Signal, WaitEvent};
+use super::tls::TlsModule;
 use super::{Controller, LinuxError, SessionLease, SignalMetadata, Waiter, backend_error};
 use crate::backend::{ControllerChannels, ControllerMessage, ExecutableSource, FileIdentity};
 use crate::debug_info::DebugInfo;
@@ -362,7 +363,7 @@ impl InspectionOps for SimTrace {
     fn tls_address(
         &self,
         _thread: Pid,
-        _link_map: VirtualAddress,
+        _module: TlsModule,
         _offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
         self.gap::<()>("thread-local storage")

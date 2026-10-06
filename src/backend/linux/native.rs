@@ -21,7 +21,7 @@ use nix::sys::signal::{self, Signal as NixSignal};
 use nix::unistd::Pid;
 use tokio::sync::mpsc;
 
-use crate::backend::linux::thread_db;
+use crate::backend::linux::tls::{self, TlsModule};
 use crate::backend::{ControllerMessage, FileIdentity};
 use crate::debug_info::DebugInfo;
 use crate::protocol::{LaunchOptions, StopId};
@@ -59,7 +59,7 @@ pub(super) trait InspectionOps {
     fn tls_address(
         &self,
         _thread: Pid,
-        _link_map: VirtualAddress,
+        _module: TlsModule,
         _offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
         Err("thread-local storage lookup is unsupported by this target".into())
@@ -288,18 +288,18 @@ impl InspectionOps for LinuxPtrace {
     fn tls_address(
         &self,
         thread: Pid,
-        link_map: VirtualAddress,
+        module: TlsModule,
         offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
         self.assert_owner_thread();
         let process = thread_group_id(thread).map_err(|error| Arc::from(error.to_string()))?;
         // The address space is read through the thread, since the leader
         // may have exited before the rest of its process.
-        thread_db::tls_address(
-            &thread_db::LiveProcess { pid: thread },
+        tls::tls_address(
+            &tls::LiveProcess { pid: thread },
             process,
             thread,
-            link_map,
+            module,
             offset,
         )
     }

@@ -1925,6 +1925,20 @@ async fn core_tls_is_located_by_libthread_db_and_by_the_c_librarys_own_descripto
     foreign_scenario.shutdown().await;
 }
 
+/// musl has no thread debugging library, so its own thread structures in the
+/// dump locate each thread's TLS, with or without a dynamic loader.
+#[tokio::test]
+async fn musl_cores_locate_every_threads_tls_in_every_module() {
+    for (name, dynamic) in [
+        ("tls-modules-musl-gcc-o0.core", true),
+        ("tls-modules-musl-clang-static-pie.core", false),
+    ] {
+        let mut scenario = open_core(name);
+        support::assert_tls_modules(&mut scenario, name, dynamic).await;
+        scenario.shutdown().await;
+    }
+}
+
 /// The dump holds the only copy of the vDSO, which no file backs. A dump
 /// that lost its memory, or holds something other than its image there,
 /// lists the vDSO as missing and leaves its frames unnamed rather than

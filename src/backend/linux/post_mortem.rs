@@ -21,7 +21,7 @@ use super::core_dump::{
     image_mappings, is_elf, recorded_build_id, saved_header, verify_image,
 };
 use super::core_files::{ModuleFile, ModuleLocator, hex, open_explicit};
-use super::thread_db::{self, ProcessServices};
+use super::tls::{self, ProcessServices, TlsModule};
 use super::vdso::{AT_SYSINFO_EHDR, VDSO_NAME, read_memory_image};
 use super::{
     Controller, ControllerChannels, ExecutableSource, ExpectedStop, FileIdentity, Fxsave, Inferior,
@@ -167,12 +167,12 @@ impl InspectionOps for CoreTarget {
     fn tls_address(
         &self,
         thread: Pid,
-        link_map: VirtualAddress,
+        module: TlsModule,
         offset: u64,
     ) -> std::result::Result<VirtualAddress, Arc<str>> {
         let process = i32::try_from(self.memory.core().process.pid)
             .map_err(|_| Arc::from("the core dump's process identifier is invalid"))?;
-        thread_db::tls_address(self, Pid::from_raw(process), thread, link_map, offset)
+        tls::tls_address(self, Pid::from_raw(process), thread, module, offset)
     }
 }
 
@@ -814,7 +814,8 @@ impl Controller<CoreTarget> {
             .collect::<Result<Vec<_>>>()?;
         let selected = threads[0];
         // Loader link maps locate each module's TLS block. A dump that lost the
-        // loader's state leaves TLS explicitly unavailable instead of failing.
+        // loader's state leaves the TLS they name explicitly unavailable instead
+        // of failing.
         let link_maps = loader_link_maps(&self.ptrace, selected, &self.executable_data, main)
             .unwrap_or_default();
 
@@ -823,7 +824,6 @@ impl Controller<CoreTarget> {
             .get_mut(&main.id)
             .expect("main module is registered");
         main_module.loaded = main;
-        main_module.link_map = link_maps.get(&main.load_bias).copied();
         for (loaded, debug) in modules {
             self.modules.insert(
                 loaded.id,
@@ -832,10 +832,11 @@ impl Controller<CoreTarget> {
                     image: debug.image,
                     unwind: debug.unwind,
                     variables: debug.variables,
-                    link_map: link_maps.get(&loaded.load_bias).copied(),
+                    tls: None,
                 },
             );
         }
+        self.locate_tls_modules(&link_maps);
         self.next_module_id = u32::try_from(self.modules.len())
             .map_err(|_| backend_error(LinuxError::ModuleIdExhausted))?;
         self.next_image_id = self.next_module_id;

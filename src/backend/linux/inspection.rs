@@ -23,6 +23,7 @@ use super::registers::{
     Fxsave, x86_64_caller_variable_register, x86_64_general_variable_register,
     x86_64_register_snapshot, x86_64_xmm_variable_register,
 };
+use super::tls::TlsModule;
 use super::{
     BreakpointSite, Controller, Inferior, MAX_VALUE_CHILD_PAGE_LIMIT, RuntimeModule, debug_pid,
     debug_thread_id, validate_image_current, validate_public_stop, validate_stopped_thread,
@@ -100,7 +101,7 @@ impl<P: InspectionOps> Controller<P> {
             registers: &frame.registers,
             floating: None,
             cfa: frame.cfa.clone(),
-            link_map: module.link_map,
+            tls: module.tls,
         }
     }
 
@@ -530,7 +531,7 @@ pub(super) struct LinuxVariableRuntime<'a, P> {
     pub(super) registers: &'a FrameRegisters,
     pub(super) floating: Option<std::result::Result<Fxsave, Arc<str>>>,
     pub(super) cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
-    pub(super) link_map: Option<VirtualAddress>,
+    pub(super) tls: Option<TlsModule>,
 }
 
 impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
@@ -577,13 +578,11 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
         &mut self,
         offset: u64,
     ) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
-        let link_map = self
-            .link_map
-            .ok_or(VariableUnavailableReason::TlsUnavailable(
-                TlsUnavailableReason::ModuleIdentityUnavailable,
-            ))?;
+        let module = self.tls.ok_or(VariableUnavailableReason::TlsUnavailable(
+            TlsUnavailableReason::ModuleIdentityUnavailable,
+        ))?;
         self.ptrace
-            .tls_address(self.pid, link_map, offset)
+            .tls_address(self.pid, module, offset)
             .map_err(|reason| {
                 VariableUnavailableReason::TlsUnavailable(TlsUnavailableReason::LookupFailed(
                     reason,

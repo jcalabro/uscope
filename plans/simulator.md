@@ -30,9 +30,9 @@ every step.
 
 Out of scope, and covered by real-kernel scenario tests instead:
 
-- glibc, the dynamic loader, shared libraries, `libthread_db`, and TLS.
-  `thread_db` and `glibc_tls` read `/proc` outside `LinuxTraceOps`; the
-  corpus has no TLS, so sessions never reach them.
+- C libraries, the dynamic loader, shared libraries, `libthread_db`, and
+  TLS. The `tls` lookups read `/proc` and memory outside `LinuxTraceOps`;
+  the corpus has no TLS, so sessions never reach them.
 - The vDSO. The golden runtime never calls it, so the simulated kernel maps
   none, as a kernel booted with `vdso=0` would, and sessions register no
   `[vdso]` module.

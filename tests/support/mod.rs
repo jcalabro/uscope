@@ -823,3 +823,82 @@ pub fn vdso_module(modules: &LoadedModuleSnapshot) -> uscope::LoadedModuleRecord
     assert!(found.next().is_none(), "two vDSO modules in {modules:#?}");
     vdso
 }
+
+/// Checks each thread of a `tls-modules` fixture stopped in `tls_stop`: every
+/// TLS variable holds the value its thread stored, at the address the thread
+/// recorded for it in `tls_addresses`. Statically linked builds have no
+/// `plugin`.
+pub async fn assert_tls_modules(scenario: &mut Scenario, fixture: &str, plugin: bool) {
+    let mut variables = vec![
+        ("main_tls", "main", 100),
+        ("main_zero_tls", "zero", 200),
+        ("library_tls", "library", 300),
+    ];
+    if plugin {
+        variables.push(("plugin_tls", "plugin", 400));
+    }
+    let snapshot = scenario.snapshot().await;
+    let mut indices = Vec::new();
+    for thread in snapshot.threads.iter() {
+        scenario
+            .operation("select thread", scenario.handle().select_thread(thread.id))
+            .await;
+        // Each thread adds its index to every variable's initial value.
+        let index = evaluate_value(scenario, "main_tls").await.signed() - 100;
+        for &(name, field, initial) in &variables {
+            let context = format!("{fixture}: {name} of thread {index}");
+            assert_eq!(
+                evaluate_value(scenario, name).await.signed(),
+                initial + index,
+                "{context}"
+            );
+            assert_eq!(
+                evaluate_value(scenario, &format!("&{name}"))
+                    .await
+                    .address(),
+                evaluate_value(scenario, &format!("tls_addresses[{index}].{field}"))
+                    .await
+                    .address(),
+                "{context}"
+            );
+        }
+        indices.push(index);
+    }
+    indices.sort_unstable();
+    assert_eq!(indices, [0, 1, 2], "{fixture}");
+}
+
+/// The value of an expression in the selected frame.
+pub async fn evaluate_value(scenario: &Scenario, text: &str) -> EvaluatedValue {
+    let expression =
+        uscope::Expression::parse(text).unwrap_or_else(|error| panic!("{text}: {error}"));
+    match scenario
+        .operation(text, scenario.handle().evaluate(&expression))
+        .await
+    {
+        uscope::Evaluation::Value { value, .. } => match value.state {
+            uscope::VariableState::Available { value, .. } => EvaluatedValue(text.into(), value),
+            state => panic!("`{text}` is unavailable: {state:?}"),
+        },
+        other => panic!("`{text}` is not a value: {other:?}"),
+    }
+}
+
+/// An available value and the expression it came from.
+pub struct EvaluatedValue(String, uscope::VariableValue);
+
+impl EvaluatedValue {
+    pub fn signed(&self) -> i128 {
+        match &self.1 {
+            uscope::VariableValue::Scalar(uscope::ScalarValue::Signed(value)) => *value,
+            value => panic!("`{}` is not a signed integer: {value:?}", self.0),
+        }
+    }
+
+    pub fn address(&self) -> u64 {
+        match &self.1 {
+            uscope::VariableValue::Address(address) => address.address.get(),
+            value => panic!("`{}` is not an address: {value:?}", self.0),
+        }
+    }
+}

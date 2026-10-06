@@ -183,10 +183,11 @@ pub fn signal_codes() -> impl Iterator<Item = u64> {
     backend::signal_codes()
 }
 
-/// Makes every TLS lookup in this process compute addresses from glibc's own
-/// layout descriptors instead of asking `libthread_db`, which is otherwise
-/// used whenever it accepts the inferior's C library. Like gdb's `maint set
-/// force-internal-tls-address-lookup`, this exists to test that the two agree.
+/// Makes every glibc TLS lookup in this process compute addresses from
+/// glibc's own layout descriptors instead of asking `libthread_db`, which is
+/// otherwise used whenever it accepts the inferior's C library. Like gdb's
+/// `maint set force-internal-tls-address-lookup`, this exists to test that
+/// the two agree.
 #[doc(hidden)]
 pub fn force_internal_tls_lookup(forced: bool) {
     backend::force_internal_tls_lookup(forced);
