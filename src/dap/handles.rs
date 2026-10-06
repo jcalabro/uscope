@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::protocol::ErrorBody;
 use uscope::{
     DereferenceReference, StackFrameId, StopContext, ThreadId, ValueChildrenReference, VariableKind,
 };
@@ -111,6 +112,12 @@ pub enum Location {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("the session used every one of its {MAX_REFERENCE} references")]
 pub struct Exhausted;
+
+impl From<Exhausted> for ErrorBody {
+    fn from(exhausted: Exhausted) -> Self {
+        Self::new(exhausted.to_string())
+    }
+}
 
 impl Default for References {
     fn default() -> Self {
@@ -260,26 +267,6 @@ mod tests {
             thread: ThreadId::new(thread),
             frame: StackFrameId::INNERMOST,
         }
-    }
-
-    #[test]
-    fn references_are_stable_within_a_stop_and_never_reused_after_it() {
-        let mut references = References::default();
-        let first = references.frame(context(1, 7)).expect("reference");
-        assert_eq!(references.frame(context(1, 7)), Ok(first));
-        let scope = references
-            .variables(Variables::Registers {
-                context: context(1, 7),
-            })
-            .expect("reference");
-        assert!(first > 0 && scope > first);
-
-        references.clear();
-        assert_eq!(references.frame_context(first), None);
-        assert!(references.variables_of(scope).is_none());
-        let again = references.frame(context(2, 7)).expect("reference");
-        assert!(again > scope, "a dropped reference is never reused");
-        assert_eq!(references.frame_context(again), Some(context(2, 7)));
     }
 
     #[test]

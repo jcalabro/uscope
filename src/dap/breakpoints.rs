@@ -48,6 +48,22 @@ pub struct Want {
 }
 
 impl Want {
+    /// A breakpoint with conditions, where blank ones count as none.
+    pub fn new(
+        key: Key,
+        condition: Option<String>,
+        hit_condition: Option<String>,
+        log_message: Option<String>,
+    ) -> Self {
+        let given = |text: Option<String>| text.filter(|text| !text.trim().is_empty());
+        Self {
+            key,
+            condition: given(condition),
+            hit_condition: given(hit_condition),
+            log_message,
+        }
+    }
+
     pub const fn at(key: Key) -> Self {
         Self {
             key,
@@ -178,11 +194,10 @@ impl Breakpoints {
                     release.push(entry);
                     Slot::Resolve { id, want }
                 }
-                None => {
-                    let id = self.next_id;
-                    self.next_id += 1;
-                    Slot::Resolve { id, want }
-                }
+                None => Slot::Resolve {
+                    id: self.allocate_id(),
+                    want,
+                },
             });
         }
         release.extend(current.into_iter().flatten());
@@ -320,14 +335,13 @@ impl Breakpoints {
                 continue;
             }
             let entry = Entry {
-                id: self.next_id,
+                id: self.allocate_id(),
                 want: Want::at(Key::Console(breakpoint.id)),
                 state: State::Resolved {
                     breakpoint: breakpoint.id,
                     placement: Placement::default(),
                 },
             };
-            self.next_id += 1;
             self.acquire(breakpoint.id);
             self.groups
                 .entry(Group::Console)

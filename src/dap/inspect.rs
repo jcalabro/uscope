@@ -1,23 +1,22 @@
 //! Requests that inspect a stop: threads, stacks, scopes, variables, and
 //! expressions.
 
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use uscope::{
-    InspectionLimits, StackFrame, StackFrameId, StopContext, StopReason, UnwindTermination,
-    ValueChildQuery, VariableKind, VariableState,
+    InspectionLimits, StackFrame, StopContext, StopReason, UnwindTermination, ValueChildQuery,
+    VariableKind, VariableState,
 };
 
 use super::complete::Completing;
-use super::handles::{Exhausted, Location, Variables};
+use super::handles::{Location, Variables};
 use super::protocol::{
     CompletionsArguments, ErrorBody, EvaluateArguments, ExceptionInfoArguments, LocationsArguments,
     ScopesArguments, SetExpressionArguments, SetVariableArguments, StackFrameFormat,
-    StackTraceArguments, VariablesArguments,
+    StackTraceArguments, ValueFormat, VariablesArguments,
 };
-use super::session::{Session, error, parse, signal_text, thread_id};
+use super::session::{Session, Stop, error, parse, signal_text, thread_id};
 use super::values::{self, Item, Options};
 
 /// The most children one `variables` request returns.
@@ -96,7 +95,7 @@ impl Session {
         }
         if abnormal && start + frames.len() < total && frames.len() < levels {
             // A stack cut short says so instead of looking complete.
-            let id = self.references.label().map_err(exhausted)?;
+            let id = self.references.label()?;
             frames.push(json!({
                 "id": id,
                 "name": format!("<backtrace stopped: {}>", trace.termination),
@@ -114,14 +113,11 @@ impl Session {
         thread: uscope::ThreadId,
         frame: &StackFrame,
     ) -> Result<Value, ErrorBody> {
-        let id = self
-            .references
-            .frame(StopContext {
-                stop,
-                thread,
-                frame: frame.id,
-            })
-            .map_err(exhausted)?;
+        let id = self.references.frame(StopContext {
+            stop,
+            thread,
+            frame: frame.id,
+        })?;
         let mut name = if frame.function.is_none() && frame.symbol.is_none() {
             // Code without a name is named by its address and module.
             let module = match frame.module {
@@ -163,10 +159,7 @@ impl Session {
         };
         match source {
             Some((path, location)) => {
-                body["source"] = json!({
-                    "name": path.file_name().map(|name| name.to_string_lossy().into_owned()),
-                    "path": path.display().to_string(),
-                });
+                body["source"] = super::sources::source_json(&path);
                 body["line"] = self.line_to_client(location.line.get()).into();
                 body["column"] = location
                     .column
@@ -256,13 +249,10 @@ impl Session {
                 };
                 let parameters = count(VariableKind::Parameter);
                 if parameters != 0 {
-                    let reference = self
-                        .references
-                        .variables(Variables::Scope {
-                            context,
-                            kind: VariableKind::Parameter,
-                        })
-                        .map_err(exhausted)?;
+                    let reference = self.references.variables(Variables::Scope {
+                        context,
+                        kind: VariableKind::Parameter,
+                    })?;
                     scopes.push(json!({
                         "name": "Arguments",
                         "presentationHint": "arguments",
@@ -271,13 +261,10 @@ impl Session {
                         "expensive": false,
                     }));
                 }
-                let reference = self
-                    .references
-                    .variables(Variables::Scope {
-                        context,
-                        kind: VariableKind::Local,
-                    })
-                    .map_err(exhausted)?;
+                let reference = self.references.variables(Variables::Scope {
+                    context,
+                    kind: VariableKind::Local,
+                })?;
                 scopes.push(json!({
                     "name": "Locals",
                     "presentationHint": "locals",
@@ -293,14 +280,11 @@ impl Session {
             })),
         }
         if let Some((module, file)) = self.frame_file(context).await {
-            let reference = self
-                .references
-                .variables(Variables::Statics {
-                    context,
-                    module,
-                    file,
-                })
-                .map_err(exhausted)?;
+            let reference = self.references.variables(Variables::Statics {
+                context,
+                module,
+                file,
+            })?;
             scopes.push(json!({
                 "name": "Statics",
                 "variablesReference": reference,
@@ -309,8 +293,7 @@ impl Session {
         }
         let reference = self
             .references
-            .variables(Variables::Registers { context })
-            .map_err(exhausted)?;
+            .variables(Variables::Registers { context })?;
         scopes.push(json!({
             "name": "Registers",
             "presentationHint": "registers",
@@ -335,14 +318,6 @@ impl Session {
             .variables_of(arguments.variables_reference)
             .cloned()
             .ok_or_else(|| stale("variables", arguments.variables_reference))?;
-        let options = Options {
-            hex: arguments
-                .format
-                .as_ref()
-                .and_then(|format| format.hex)
-                .unwrap_or(self.display.hex),
-            ..self.value_options()
-        };
         let window = Window {
             start: u64::try_from(arguments.start.unwrap_or(0)).unwrap_or(0),
             count: arguments
@@ -351,7 +326,7 @@ impl Session {
                 .filter(|count| *count != 0)
                 .unwrap_or(u64::MAX)
                 .min(MAX_CHILDREN),
-            options,
+            options: self.value_options(arguments.format.as_ref()),
             filter: match arguments.filter.as_deref() {
                 Some("indexed") => Some(Filter::Indexed),
                 Some("named") => Some(Filter::Named),
@@ -411,7 +386,7 @@ impl Session {
                 row.get("name").and_then(Value::as_str),
                 row.get("evaluateName")
                     .and_then(Value::as_str)
-                    .and_then(super::watch::child_expression),
+                    .and_then(|path| uscope::Expression::parse(path).ok()),
             ) {
                 self.references
                     .record_path(list, name.to_owned(), context, path);
@@ -652,19 +627,9 @@ impl Session {
         let start = usize::try_from(window.start).unwrap_or(usize::MAX);
         let count = usize::try_from(window.count).unwrap_or(usize::MAX);
         for child in page.children.iter().skip(start).take(count) {
-            let name = match &child.relationship {
-                uscope::ValueChildRelationship::ArrayElement { indices, .. } => {
-                    indices.iter().fold(String::new(), |mut name, index| {
-                        let _ = write!(name, "[{index}]");
-                        name
-                    })
-                }
-                uscope::ValueChildRelationship::SliceElement { index } => format!("[{index}]"),
-                _ => "?".to_owned(),
-            };
             rows.push(self.present(
                 Item {
-                    name: &name,
+                    name: &values::child_name(child),
                     path: values::child_path(base.as_ref(), child),
                     raw: false,
                     type_info: Some(&child.type_info),
@@ -747,15 +712,25 @@ impl Session {
         options: Options,
     ) -> Result<Map<String, Value>, ErrorBody> {
         let code = self.code();
-        values::variable(item, context, options, &mut self.references, &code).map_err(exhausted)
+        Ok(values::variable(
+            item,
+            context,
+            options,
+            &mut self.references,
+            &code,
+        )?)
     }
 
-    const fn value_options(&self) -> Options {
+    /// How to show values: as the client accepts them, and in
+    /// hexadecimal when the request's format or the session says so.
+    fn value_options(&self, format: Option<&ValueFormat>) -> Options {
         let support = self.support();
         Options {
             types: support.variable_type,
             memory: support.memory_references,
-            hex: self.display.hex,
+            hex: format
+                .and_then(|format| format.hex)
+                .unwrap_or(self.display.hex),
         }
     }
 
@@ -767,11 +742,7 @@ impl Session {
         let arguments = parse::<EvaluateArguments>(arguments, "evaluate arguments")?;
         let context = match arguments.frame_id {
             Some(frame) => Some(self.frame_context(frame)?),
-            None => self.stop.as_ref().map(|stop| StopContext {
-                stop: stop.id,
-                thread: stop.thread,
-                frame: StackFrameId::INNERMOST,
-            }),
+            None => self.stop.as_ref().map(Stop::innermost),
         };
         let expression = arguments.expression.trim();
         let repl = arguments.context.as_deref() == Some("repl");
@@ -789,14 +760,7 @@ impl Session {
             }
             return Err(ErrorBody::not_stopped());
         };
-        let options = Options {
-            hex: arguments
-                .format
-                .as_ref()
-                .and_then(|format| format.hex)
-                .unwrap_or(self.display.hex),
-            ..self.value_options()
-        };
+        let options = self.value_options(arguments.format.as_ref());
         let handle = self.target_handle()?;
         let mode = if repl {
             uscope::EvaluationMode::Assign
@@ -839,13 +803,10 @@ impl Session {
             )?,
             uscope::Evaluation::Range(page) => {
                 let length = page.children.len();
-                let reference = self
-                    .references
-                    .variables(Variables::Range {
-                        context,
-                        expression: parsed,
-                    })
-                    .map_err(exhausted)?;
+                let reference = self.references.variables(Variables::Range {
+                    context,
+                    expression: parsed,
+                })?;
                 let mut body = Map::new();
                 body.insert("value".to_owned(), format!("[<{length} elements>]").into());
                 body.insert("variablesReference".to_owned(), reference.into());
@@ -1024,11 +985,8 @@ impl Session {
                     arguments.name
                 ))
             })?;
-        let hex = arguments
-            .format
-            .and_then(|format| format.hex)
-            .unwrap_or(self.display.hex);
-        self.assign(context, &arguments.name, path, &arguments.value, hex)
+        let options = self.value_options(arguments.format.as_ref());
+        self.assign(context, &arguments.name, path, &arguments.value, options)
             .await
     }
 
@@ -1037,26 +995,14 @@ impl Session {
         let stop = self.current_stop()?;
         let context = match arguments.frame_id {
             Some(frame) => self.frame_context(frame)?,
-            None => StopContext {
-                stop: stop.id,
-                thread: stop.thread,
-                frame: StackFrameId::INNERMOST,
-            },
+            None => stop.innermost(),
         };
-        let parsed = uscope::Expression::parse(arguments.expression.trim())
+        let expression = arguments.expression.trim();
+        let parsed = uscope::Expression::parse(expression)
             .map_err(|failure| error(uscope::Error::Expression(failure)))?;
-        let hex = arguments
-            .format
-            .and_then(|format| format.hex)
-            .unwrap_or(self.display.hex);
-        self.assign(
-            context,
-            arguments.expression.trim(),
-            parsed,
-            &arguments.value,
-            hex,
-        )
-        .await
+        let options = self.value_options(arguments.format.as_ref());
+        self.assign(context, expression, parsed, &arguments.value, options)
+            .await
     }
 
     /// Assigns a value and presents the result as both requests answer.
@@ -1066,7 +1012,7 @@ impl Session {
         name: &str,
         path: uscope::Expression,
         value: &str,
-        hex: bool,
+        options: Options,
     ) -> Result<Value, ErrorBody> {
         let handle = self.target_handle()?;
         let assignment = uscope::Expression::parse(&format!("{path} = {value}"))
@@ -1087,10 +1033,6 @@ impl Session {
             return Err(ErrorBody::new("the assignment produced no value"));
         };
         self.forget_reads();
-        let options = Options {
-            hex,
-            ..self.value_options()
-        };
         let mut body = self.present(
             Item {
                 name,
@@ -1131,11 +1073,7 @@ impl Session {
             });
         let context = match arguments.frame_id {
             Some(frame) => self.references.frame_context(frame),
-            None => self.stop.as_ref().map(|stop| StopContext {
-                stop: stop.id,
-                thread: stop.thread,
-                frame: StackFrameId::INNERMOST,
-            }),
+            None => self.stop.as_ref().map(Stop::innermost),
         };
         let (completing, partial, start) = super::complete::completing(typed);
         let command = typed.split_whitespace().next().unwrap_or_default();
@@ -1375,8 +1313,4 @@ fn limit_text(exhaustion: uscope::InspectionExhaustion) -> String {
         "inspection stopped at its {:?} limit of {}",
         exhaustion.resource, exhaustion.limit
     )
-}
-
-fn exhausted(exhausted: Exhausted) -> ErrorBody {
-    ErrorBody::new(exhausted.to_string())
 }

@@ -18,7 +18,7 @@ use uscope::{DebuggerHandle, ExecutionId, ProcessId};
 
 use super::config::{Console, Launch};
 use super::protocol::ErrorBody;
-use super::session::{Client, Closed};
+use super::session::Client;
 
 /// How long the launcher may take to start once the client ran it.
 const LAUNCHER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -81,10 +81,7 @@ pub(super) async fn launch(
         "args": args,
         "env": env,
     });
-    let ran = client
-        .request("runInTerminal", arguments)
-        .await
-        .map_err(|Closed| ErrorBody::new("the connection to the client closed"))?;
+    let ran = client.request("runInTerminal", arguments).await?;
     if let Err(message) = ran {
         return Err(failed(&format!(
             "the client could not run it in a terminal: {message}"
