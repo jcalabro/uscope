@@ -497,14 +497,6 @@ fn formatted<M: Machine>(
     Ok(value)
 }
 
-/// A sequence's or map's generators and declared count, in either shape.
-const fn scan_of<St>(shape: &BoundShape<St>) -> Option<&BoundScan<St>> {
-    match shape {
-        BoundShape::Sequence { scan, .. } | BoundShape::Map { scan, .. } => Some(scan),
-        _ => None,
-    }
-}
-
 /// How many elements a sequence or map holds, as far as its declared count
 /// and, for random access, its range say. A random-access range that
 /// disagrees with the declared count is refused; a scan's count is checked
@@ -893,7 +885,7 @@ pub fn children<M: Machine>(
     );
     let mut children = Vec::new();
     if offset < elements
-        && let Some(scan) = scan_of(shape)
+        && let BoundShape::Sequence { scan, .. } | BoundShape::Map { scan, .. } = shape
     {
         let declared = declared_length(scan, &mut machine)?;
         let mut walk = Walk::at(scan, declared, offset, &mut machine, checkpoints)?.ok_or(
