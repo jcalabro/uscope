@@ -439,8 +439,7 @@ fn the_evaluator_stays_pure() {
             pending.extend(entries.map(|entry| entry.expect("a directory entry").path()));
             continue;
         }
-        let test_file = path.file_name().is_some_and(|name| name == "tests.rs")
-            || path.components().any(|part| part.as_os_str() == "tests");
+        let test_file = path.file_name().is_some_and(|name| name == "tests.rs");
         if test_file || path.extension().is_none_or(|extension| extension != "rs") {
             continue;
         }
