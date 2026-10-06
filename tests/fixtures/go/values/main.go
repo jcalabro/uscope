@@ -8,11 +8,13 @@
 // bits in hexadecimal; complex numbers are their parts' bits, real first.
 // Kind `summary` is how uscope writes the value, `absent` says the
 // variable must not be listed, `addressable` that it is in memory, and
-// `result` that it is listed as one of the function's results.
+// `result` that it is listed as one of the function's results, and
+// `hidden` that it is not listed but its name reaches it.
 package main
 
 import (
 	"fmt"
+	"iter"
 	"math"
 	"os"
 	"reflect"
@@ -137,6 +139,34 @@ func visibility(n int) int {
 	return later
 }
 
+func each(values []int) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for _, value := range values {
+			if !yield(value) {
+				return
+			}
+		}
+	}
+}
+
+// temporaries ranges over a function, for which Go makes variables of
+// its own, such as #yield1 and .closureptr, that listings leave out.
+//
+//go:noinline
+func temporaries(values []int) int {
+	total := 0
+	for value := range each(values) {
+		total += value
+		if value == 2 {
+			truth("temporaries", "value", "int", value)
+			truth("temporaries", "total", "int", total)
+			truth("temporaries", ".closureptr", "hidden", "")
+			reached("temporaries")
+		}
+	}
+	return total
+}
+
 // Point is passed in two registers.
 type Point struct{ X, Y int }
 
@@ -161,6 +191,9 @@ func main() {
 	results(21)
 	unnamedResults(1)
 	visibility(9)
+	if temporaries([]int{1, 2, 3}) != 6 {
+		os.Exit(1)
+	}
 	text := "pieces"
 	numbers := []int{4, 5, 6}
 	truth("pieces", "text", "string", fmt.Sprintf("%q", text))
