@@ -462,8 +462,27 @@ pub(super) fn load_variable_info<'data>(
                         Ok(chain) => (chain, None),
                         Err(error) => (Vec::new(), Some(Arc::from(error.to_string()))),
                     };
+                    // Go marks its results as variable parameters.
+                    let kind = if kind == VariableKind::Parameter
+                        && evaluation_units[unit_index].language == Some(gimli::DW_LANG_Go)
+                        && entry
+                            .attr_value(gimli::DW_AT_variable_parameter)
+                            .or_else(|| {
+                                chain.iter().find_map(|(_, origin)| {
+                                    origin.attr_value(gimli::DW_AT_variable_parameter)
+                                })
+                            })
+                            .is_some_and(|value| {
+                                matches!(value, gimli::AttributeValue::Flag(true))
+                                    || value.udata_value() == Some(1)
+                            }) {
+                        VariableKind::Result
+                    } else {
+                        kind
+                    };
                     let object_name = match kind {
                         VariableKind::Parameter => "parameter",
+                        VariableKind::Result => "result",
                         VariableKind::Local => "variable",
                         VariableKind::Global => "global",
                     };

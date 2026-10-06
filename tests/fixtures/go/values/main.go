@@ -7,7 +7,8 @@
 // A path names a variable, or a child of one after a dot. Floats are their
 // bits in hexadecimal; complex numbers are their parts' bits, real first.
 // Kind `summary` is how uscope writes the value, `absent` says the
-// variable must not be listed, and `addressable` that it is in memory.
+// variable must not be listed, `addressable` that it is in memory, and
+// `result` that it is listed as one of the function's results.
 package main
 
 import (
@@ -104,6 +105,25 @@ func escapes(start int) *int {
 	return pointer
 }
 
+//go:noinline
+func results(value int) (sum int, err error) {
+	sum = value * 2
+	truth("results", "sum", "result", "")
+	truth("results", "sum", "int", sum)
+	truth("results", "err", "result", "")
+	truth("results", "value", "int", value)
+	reached("results")
+	return sum, nil
+}
+
+//go:noinline
+func unnamedResults(value int) (int, string) {
+	truth("unnamed-results", "~r0", "result", "")
+	truth("unnamed-results", "~r1", "result", "")
+	reached("unnamed-results")
+	return value + 1, "go"
+}
+
 // Point is passed in two registers.
 type Point struct{ X, Y int }
 
@@ -125,6 +145,8 @@ func main() {
 	if *escapes(40) != 42 {
 		os.Exit(1)
 	}
+	results(21)
+	unnamedResults(1)
 	text := "pieces"
 	numbers := []int{4, 5, 6}
 	truth("pieces", "text", "string", fmt.Sprintf("%q", text))

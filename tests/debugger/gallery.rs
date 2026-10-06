@@ -9,7 +9,7 @@ use std::process::Stdio;
 
 use uscope::{
     FloatValue, IntegerValue, LaunchOptions, StackFrameId, TypeInfo, ValueChildRelationship,
-    Variable, VariableValue, VariableValueSource,
+    Variable, VariableKind, VariableValue, VariableValueSource,
 };
 
 use super::*;
@@ -160,6 +160,13 @@ async fn check_truth(
         return variable.map_or(Ok(()), |variable| Err(format!("is listed: {variable:?}")));
     }
     let variable = variable.ok_or_else(|| "is not listed".to_owned())?;
+    if truth.kind == "result" {
+        return if variable.kind == VariableKind::Result {
+            Ok(())
+        } else {
+            Err(format!("is listed as a {:?}", variable.kind))
+        };
+    }
     let mut type_info = variable.type_info.clone();
     let mut type_name = variable.type_info.as_ref().map(|info| info.name.clone());
     let mut state = variable.state.clone();
@@ -344,7 +351,14 @@ async fn go_values_agree_with_their_program() {
         check_gallery(&Gallery {
             fixture,
             breakpoints: &["main.reached", "main.pieces"],
-            checkpoints: &["complex", "funcs", "escape", "pieces"],
+            checkpoints: &[
+                "complex",
+                "funcs",
+                "escape",
+                "results",
+                "unnamed-results",
+                "pieces",
+            ],
             optimized,
             required,
             go: true,

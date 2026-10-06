@@ -29,7 +29,7 @@ pub(super) const fn check_data_object_capacity(
 pub(super) fn variable_order_key(
     object: &CatalogDataObject,
 ) -> (u8, u8, SourceFileId, u64, u64, u64) {
-    if object.kind == VariableKind::Parameter {
+    if matches!(object.kind, VariableKind::Parameter | VariableKind::Result) {
         return (0, 0, SourceFileId::new(0), 0, 0, object.order);
     }
     object.declaration.as_ref().map_or(
