@@ -3,8 +3,9 @@
 use std::collections::BTreeSet;
 
 use uscope::{
-    Backtrace, ExecutionContext, InferiorState, StackFrameId, StackSegment, StopContext,
-    TaskSnapshot, TaskState, ThreadActivity, ThreadId, VariableState,
+    Backtrace, BreakpointOptions, BreakpointSpec, Condition, Evaluation, ExecutionContext,
+    Expression, InferiorState, ScalarValue, StackFrameId, StackSegment, StopContext, StopReason,
+    TaskSnapshot, TaskState, ThreadActivity, ThreadId, VariableState, VariableValue,
 };
 
 use crate::truth::GoSession;
@@ -214,6 +215,222 @@ async fn parked_goroutines_show_the_frames_the_runtime_dumps() {
             assert_eq!(workers, 4, "{fixture}");
         }
         session.scenario.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn a_parked_goroutine_can_be_selected() {
+    let fixture = "workers-go-o0";
+    let mut session = GoSession::launch(fixture).await;
+    let truth = session.checkpoint("parked");
+    let (tasks, _) = session.tasks(64).await;
+    let worker = tasks
+        .iter()
+        .find(|task| {
+            task.thread.is_none()
+                && truth.tasks.get(&task.id.number).is_some_and(|dumped| {
+                    dumped.frames.iter().any(|frame| frame.0 == "main.worker")
+                })
+        })
+        .expect("a parked worker")
+        .id;
+    let handle = session.scenario.handle().clone();
+    let stopped = session.scenario.snapshot().await;
+    let thread = stopped.selected.expect("a selected thread");
+
+    session
+        .scenario
+        .operation("select task", handle.select_context(worker))
+        .await;
+    let snapshot = session.scenario.snapshot().await;
+    assert_eq!(snapshot.selected, Some(ExecutionContext::Task(worker)));
+    assert_eq!(snapshot.selected_frame, Some(StackFrameId::INNERMOST));
+    assert_eq!(snapshot.presentation, None, "a parked task has no stop");
+
+    // Implicit inspection follows the selected task.
+    let trace = session
+        .scenario
+        .operation("backtrace", handle.backtrace())
+        .await;
+    assert_eq!(trace.context, ExecutionContext::Task(worker));
+    let id = trace
+        .frames
+        .iter()
+        .find(|frame| {
+            frame
+                .function
+                .as_ref()
+                .is_some_and(|function| function.name.as_ref() == "main.worker")
+        })
+        .expect("the worker's frame")
+        .id;
+    let selected = session
+        .scenario
+        .operation("select frame", handle.select_frame(id))
+        .await;
+    assert_eq!(selected.id, id);
+    assert_eq!(session.scenario.snapshot().await.selected_frame, Some(id));
+    let location = session
+        .scenario
+        .operation("location", handle.current_location())
+        .await;
+    assert_eq!(
+        location
+            .image
+            .function
+            .map(|function| function.name.to_string()),
+        Some("main.worker".to_owned())
+    );
+    let jobs = session
+        .scenario
+        .operation("variable", handle.variable("jobs"))
+        .await;
+    assert!(
+        matches!(jobs.state, VariableState::Available { .. }),
+        "{jobs:#?}"
+    );
+    // Registers are the selected frame's, and memory is the process's
+    // whichever context is selected.
+    let registers = session
+        .scenario
+        .operation("registers", handle.registers())
+        .await;
+    assert_eq!(registers.context, ExecutionContext::Task(worker));
+    let stack = registers
+        .registers
+        .iter()
+        .find(|register| register.register.name.as_ref() == "rsp")
+        .and_then(|register| register.bytes.as_deref())
+        .map(|bytes| u64::from_le_bytes(bytes.try_into().expect("a word")))
+        .expect("the frame's stack pointer");
+    session
+        .scenario
+        .operation(
+            "memory",
+            handle.read_word(uscope::VirtualAddress::new(stack)),
+        )
+        .await;
+
+    // Each context keeps its own frame.
+    session
+        .scenario
+        .operation("select thread", handle.select_context(thread))
+        .await;
+    let snapshot = session.scenario.snapshot().await;
+    assert_eq!(snapshot.selected, Some(thread));
+    assert_eq!(snapshot.selected_frame, Some(StackFrameId::INNERMOST));
+    assert!(snapshot.presentation.is_some());
+    session
+        .scenario
+        .operation("reselect task", handle.select_context(worker))
+        .await;
+    assert_eq!(session.scenario.snapshot().await.selected_frame, Some(id));
+    session.scenario.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_condition_on_the_task_stops_only_in_that_goroutine() {
+    let fixture = "workers-go-o0";
+    let mut session = GoSession::launch(fixture).await;
+    let truth = session.checkpoint("parked");
+    let (tasks, _) = session.tasks(64).await;
+    let handle = session.scenario.handle().clone();
+    // The stopped thread runs main.
+    let main = truth.main.0;
+    assert_eq!(
+        evaluate(&session, &format!("$task == {main}")).await,
+        Some(true)
+    );
+
+    // A selected task is its own, and a thread between tasks has none.
+    let worker = tasks
+        .iter()
+        .find(|task| {
+            task.thread.is_none()
+                && truth.tasks.get(&task.id.number).is_some_and(|dumped| {
+                    dumped.frames.iter().any(|frame| frame.0 == "main.worker")
+                })
+        })
+        .expect("a parked worker")
+        .id;
+    session
+        .scenario
+        .operation("select task", handle.select_context(worker))
+        .await;
+    let condition = format!("$task == {}", worker.number);
+    assert_eq!(evaluate(&session, &condition).await, Some(true));
+    let idle = session
+        .scenario
+        .snapshot()
+        .await
+        .threads
+        .iter()
+        .find(|thread| thread.activity == Some(ThreadActivity::Idle))
+        .expect("an idle thread")
+        .id;
+    session
+        .scenario
+        .operation("select idle", handle.select_context(idle))
+        .await;
+    assert_eq!(evaluate(&session, "$task").await, None);
+
+    // Every worker calls Done as it finishes; only the chosen one stops.
+    session
+        .scenario
+        .operation(
+            "conditional breakpoint",
+            handle.add_breakpoint_with(
+                BreakpointSpec::Function("sync.(*WaitGroup).Done".into()),
+                BreakpointOptions {
+                    condition: Some(Condition::parse(&condition).expect("a condition")),
+                    ..BreakpointOptions::default()
+                },
+            ),
+        )
+        .await;
+    let reason = session.scenario.resume_to_stop().await;
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{fixture}: {reason:?}"
+    );
+    assert_eq!(evaluate(&session, &condition).await, Some(true));
+    let InferiorState::Stopped { thread_id, .. } = session.scenario.snapshot().await.inferior
+    else {
+        panic!("{fixture}: not stopped");
+    };
+    let activity = session
+        .scenario
+        .snapshot()
+        .await
+        .threads
+        .iter()
+        .find(|thread| thread.id == thread_id)
+        .and_then(|thread| thread.activity.clone());
+    assert!(
+        matches!(activity, Some(ThreadActivity::Task { task, .. }) if task == worker),
+        "{fixture}: {activity:?}"
+    );
+    session.scenario.shutdown().await;
+}
+
+/// A boolean or integer expression's value in the selected frame, or
+/// `None` where it is unavailable.
+async fn evaluate(session: &GoSession, text: &str) -> Option<bool> {
+    let expression = Expression::parse(text).expect("an expression");
+    let Evaluation::Value { value, .. } = session
+        .scenario
+        .operation(text, session.scenario.handle().evaluate(&expression))
+        .await
+    else {
+        panic!("{text}: not a value");
+    };
+    match value.state {
+        VariableState::Available {
+            value: VariableValue::Scalar(ScalarValue::Boolean(holds)),
+            ..
+        } => Some(holds),
+        VariableState::Unavailable(_) => None,
+        other => panic!("{text}: {other:?}"),
     }
 }
 

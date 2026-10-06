@@ -1313,15 +1313,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         inferior.terminating = inferior
             .terminating
             .filter(|terminating| !terminating.delivered);
-        inferior.public_stop = Some(PublicStop {
-            id: stop_id,
+        inferior.public_stop = Some(PublicStop::new(
+            stop_id,
             triggering_thread,
-            reason: reason.clone(),
-            presentations: BTreeMap::from([(triggering_thread, presentation)]),
-            selected_frames: BTreeMap::new(),
-            activities: std::cell::RefCell::default(),
-        });
-        inferior.selected_thread = Some(triggering_thread);
+            reason.clone(),
+            BTreeMap::from([(triggering_thread, presentation)]),
+        ));
         let execution = inferior.active.take().map(|active| active.id);
         let process_id = process_id(inferior.tgid);
         self.bump_revision();

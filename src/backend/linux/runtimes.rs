@@ -126,20 +126,21 @@ impl<P: InspectionOps> Controller<P> {
             .clone()
     }
 
-    /// Runs `read` against one runtime at the current stop.
+    /// Runs `read` against one runtime while the process is stopped,
+    /// reading memory through the stopped thread `reader`.
     pub(super) fn with_runtime_stop<T>(
         &self,
         inferior: &Inferior,
         runtime: &BoundRuntime,
+        reader: Pid,
         read: impl FnOnce(&dyn RuntimeStop) -> T,
-    ) -> Result<T> {
-        let stop = inferior.public_stop.as_ref().ok_or(Error::NotStopped)?;
-        Ok(read(&ProcessStop {
+    ) -> T {
+        read(&ProcessStop {
             ptrace: &self.ptrace,
-            reader: stop.triggering_thread,
+            reader,
             breakpoints: &inferior.breakpoints,
             bias: runtime.module.load_bias,
-        }))
+        })
     }
 
     /// One page of the tasks of every runtime at a stop.
@@ -151,6 +152,11 @@ impl<P: InspectionOps> Controller<P> {
     ) -> Result<TaskPage> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         validate_public_stop(inferior, Some(stop_id))?;
+        let reader = inferior
+            .public_stop
+            .as_ref()
+            .ok_or(Error::NotStopped)?
+            .triggering_thread;
         let limit = limit.clamp(1, MAX_TASK_PAGE);
         let runtimes = self.runtimes(inferior);
         let mut cursor = from.unwrap_or(TaskCursor {
@@ -160,11 +166,11 @@ impl<P: InspectionOps> Controller<P> {
         let mut tasks = Vec::new();
         let mut gaps = Vec::new();
         while let Some(runtime) = runtimes.get(cursor.runtime) {
-            let page = self.with_runtime_stop(inferior, runtime, |stop| {
+            let page = self.with_runtime_stop(inferior, runtime, reader, |stop| {
                 runtime
                     .model
                     .tasks(stop, cursor.position, limit - tasks.len())
-            })?;
+            });
             gaps.extend(page.gaps);
             tasks.extend(
                 page.value
@@ -264,8 +270,12 @@ impl<P: InspectionOps> Controller<P> {
 impl<P: InspectionOps> Controller<P> {
     /// What a stopped thread runs for the process's runtimes: the first
     /// task one names, or why one could not tell; `None` without a runtime.
+    /// A published stop remembers each thread's; run control, which asks
+    /// at a breakpoint's hit before any stop is published, reads afresh.
     pub(super) fn thread_activity(&self, inferior: &Inferior, pid: Pid) -> Option<ThreadActivity> {
-        let stop = inferior.public_stop.as_ref()?;
+        let Some(stop) = inferior.public_stop.as_ref() else {
+            return self.read_thread_activity(inferior, pid);
+        };
         if let Some(known) = stop.activities.borrow().get(&pid) {
             return known.clone();
         }
@@ -278,11 +288,9 @@ impl<P: InspectionOps> Controller<P> {
         let runtimes = self.runtimes(inferior);
         let mut found = (!runtimes.is_empty()).then_some(ThreadActivity::Idle);
         for runtime in &runtimes {
-            let activity = self
-                .with_runtime_stop(inferior, runtime, |stop| {
-                    runtime.model.thread_activity(stop, debug_thread_id(pid))
-                })
-                .ok()?;
+            let activity = self.with_runtime_stop(inferior, runtime, pid, |stop| {
+                runtime.model.thread_activity(stop, debug_thread_id(pid))
+            });
             match activity {
                 runtime_model::ThreadActivity::Task { number, stack } => {
                     return Some(ThreadActivity::Task {
@@ -345,9 +353,9 @@ impl<P: InspectionOps> Controller<P> {
             .into_iter()
             .find(|runtime| runtime.id == task.runtime)
             .ok_or(Error::UnknownTask(task))?;
-        let found = self.with_runtime_stop(inferior, &runtime, |stop| {
+        let found = self.with_runtime_stop(inferior, &runtime, reader, |stop| {
             runtime.model.task_context(stop, task.number)
-        })?;
+        });
         let origin = match found {
             Ok(Some(TaskContext::OnThread(thread))) => RootOrigin::Thread(debug_pid(thread)?),
             Ok(Some(TaskContext::Saved {

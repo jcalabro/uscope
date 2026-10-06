@@ -14,7 +14,6 @@ use crate::protocol::{
 };
 use crate::{BreakpointLocation, Error, LineNumber, Result, VirtualAddress};
 
-use super::frames::StackRoot;
 use super::memory::MemoryAccessError;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{BREAKPOINT_OPCODE, BreakpointOwner, Controller, Inferior, LinuxError, backend_error};
@@ -162,13 +161,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     fn location_in_stopped_package(&self, location: &str) -> Option<String> {
         let inferior = self.inferior.as_ref()?;
         let stop = inferior.public_stop.as_ref()?;
-        let pid = inferior.selected_thread.unwrap_or(stop.triggering_thread);
+        let root = self.stack_root(stop.id, stop.selected).ok()?;
         let frame = self
-            .resolve_frame(
-                inferior,
-                &StackRoot::of_thread(pid),
-                super::selected_frame(inferior, stop),
-            )
+            .resolve_frame(inferior, &root, super::selected_frame(stop))
             .ok()?
             .frame?;
         let (function, module) = (frame.function?, frame.module?);

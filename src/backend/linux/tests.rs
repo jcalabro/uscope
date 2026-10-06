@@ -1454,11 +1454,11 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
         ..TraceThread::starting(ExpectedStop::None)
     };
     let mut inferior = Inferior {
-        public_stop: Some(PublicStop {
-            id: StopId::new(1),
-            triggering_thread: pid,
-            reason: StopReason::Pause,
-            presentations: BTreeMap::from([(
+        public_stop: Some(PublicStop::new(
+            StopId::new(1),
+            pid,
+            StopReason::Pause,
+            BTreeMap::from([(
                 pid,
                 FramePresentation {
                     instruction: VirtualAddress::new(0x10),
@@ -1466,10 +1466,7 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
                     hidden_inline_frames: 2,
                 },
             )]),
-            selected_frames: BTreeMap::new(),
-            activities: std::cell::RefCell::default(),
-        }),
-        selected_thread: Some(pid),
+        )),
         next_execution: 1,
         ..Inferior::new(
             InferiorOrigin::Launched,

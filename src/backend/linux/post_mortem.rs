@@ -852,15 +852,12 @@ impl Controller<CoreTarget> {
             })
             .collect();
         self.inferior = Some(Inferior {
-            public_stop: Some(PublicStop {
-                id: allocate_stop_id(),
-                triggering_thread: selected,
-                reason: reason.clone(),
-                presentations: BTreeMap::new(),
-                selected_frames: BTreeMap::new(),
-                activities: std::cell::RefCell::default(),
-            }),
-            selected_thread: Some(selected),
+            public_stop: Some(PublicStop::new(
+                allocate_stop_id(),
+                selected,
+                reason.clone(),
+                BTreeMap::new(),
+            )),
             ..Inferior::new(InferiorOrigin::PostMortem, tgid, main, trace_threads, None)
         });
         let presentation = self.presentation_for_thread(selected, Some(reason))?;

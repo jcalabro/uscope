@@ -33,9 +33,9 @@ knows is taken first.
 `$pc`, `$sp`, and `$fp` name the program counter, stack pointer, and frame
 pointer.
 
-`$task` is the id of the task the selected thread runs, an exact integer: in
-Go, its goroutine's, so a breakpoint's condition `$task == 7` stops only in
-goroutine 7. Where the program has no tasks, or uscope cannot tell which one
+`$task` is the id of the selected task, or of the task the selected thread
+runs, an exact integer: in Go, a goroutine's, so a breakpoint's condition
+`$task == 7` stops only in goroutine 7. Where the program has no tasks, or uscope cannot tell which one
 a thread runs, `$task` is refused; a thread between tasks, such as one idle
 in Go's scheduler, has none, and `$task` is unavailable there.
 

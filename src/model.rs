@@ -347,7 +347,7 @@ pub struct TaskPage {
 /// Where a request inspects or controls execution: an operating-system
 /// thread, or a language runtime's task, which runs on some thread or is
 /// parked with its registers saved in memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExecutionContext {
     /// An operating-system thread.
     Thread(ThreadId),
@@ -1672,6 +1672,9 @@ pub enum VariableUnavailableReason {
     ValueAccess(ValueAccessUnavailableReason),
     /// The expression exceeded the debugger's bounded work limits.
     EvaluationLimit,
+    /// The thread runs no task of its runtime, such as a thread idle in the
+    /// runtime's scheduler.
+    NoTask,
     /// A typed live-inspection resource was exhausted.
     InspectionLimit(InspectionExhaustion),
     /// A runtime-sized array or slice index is outside its current bounds.
@@ -1795,6 +1798,7 @@ impl fmt::Display for VariableUnavailableReason {
             Self::EvaluationLimit => {
                 formatter.write_str("DWARF expression evaluation limit exceeded")
             }
+            Self::NoTask => formatter.write_str("the thread runs no task"),
             Self::InspectionLimit(exhaustion) => write!(
                 formatter,
                 "{:?} limit {} exhausted after {} while requesting {}",
