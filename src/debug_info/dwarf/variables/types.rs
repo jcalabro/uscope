@@ -999,6 +999,45 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         self.type_reference(unit_index, entry.attr_value(gimli::DW_AT_type))
     }
 
+    /// Every integer constant a unit declares at its top level, such as a
+    /// Go package's `const`s, by name. Constants of other types are left
+    /// out; values come from each constant's own type, read before typed Go
+    /// constants turn their types into enumerations.
+    pub(super) fn named_constants(&mut self) -> BTreeMap<Arc<str>, IntegerValue> {
+        let mut constants = BTreeMap::new();
+        for (unit_index, unit) in self.units.iter().enumerate() {
+            let mut entries = unit.entries();
+            while let Ok(Some(entry)) = entries.next_dfs() {
+                if entry.depth() != 1 || entry.tag() != gimli::DW_TAG_constant {
+                    continue;
+                }
+                let (Ok(Some(name)), Some(value)) = (
+                    copy_name(self.dwarf, unit, entry),
+                    entry.attr_value(gimli::DW_AT_const_value),
+                ) else {
+                    continue;
+                };
+                let Ok(Some(target)) = self.target(entry, unit_index) else {
+                    continue;
+                };
+                let Some(TypeEntry::Resolved(TypeInfo {
+                    kind: TypeKind::Base(base),
+                    ..
+                })) = self.entries.get(target.id.index())
+                else {
+                    continue;
+                };
+                if matches!(base.encoding, BaseTypeEncoding::Floating) {
+                    continue;
+                }
+                if let Ok(value) = enumeration_constant(value, base, self.byte_order) {
+                    constants.insert(name, value);
+                }
+            }
+        }
+        constants
+    }
+
     pub(super) fn populate_go_named_constants(&mut self) {
         let mut constants = BTreeMap::<TypeId, NamedConstantCollection>::new();
         for (unit_index, unit) in self.units.iter().enumerate() {

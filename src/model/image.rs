@@ -32,6 +32,12 @@ pub struct ModuleMetadata {
     /// Rust trait objects' vtables, by address, with the concrete type each
     /// is for.
     pub vtables: Vec<(ImageAddress, TypeReference)>,
+    /// Integer constants the debug information declares by name, such as a
+    /// Go package's `const`s.
+    pub constants: BTreeMap<Arc<str>, crate::IntegerValue>,
+    /// The distinct compilers and versions that produced the debug
+    /// information, as each unit names its producer.
+    pub producers: Vec<Arc<str>>,
 }
 
 #[derive(Debug)]
@@ -303,6 +309,8 @@ pub struct ModuleImage {
     type_index: crate::type_identity::TypeIndex,
     /// Rust trait objects' vtables, with the concrete type each is for.
     vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
+    constants: BTreeMap<Arc<str>, crate::IntegerValue>,
+    producers: Arc<[Arc<str>]>,
     /// The views the image carries for its own types, in its
     /// `.debug_uscope_views` section.
     views: Arc<crate::view::ViewSet>,
@@ -439,6 +447,8 @@ impl ModuleImage {
             instruction_starts,
             type_index,
             vtables: metadata.vtables.iter().copied().collect(),
+            constants: std::mem::take(&mut metadata.constants),
+            producers: std::mem::take(&mut metadata.producers).into(),
             views: crate::view::ViewSet::empty(),
         }
     }
@@ -728,6 +738,20 @@ impl ModuleImage {
     ) -> Vec<TypeReference> {
         self.type_index
             .instances(language, path, base, &self.types.as_ref())
+    }
+
+    /// The value of the integer constant the debug information declares as
+    /// `name`, such as `runtime._Grunning`.
+    #[must_use]
+    pub fn constant(&self, name: &str) -> Option<crate::IntegerValue> {
+        self.constants.get(name).copied()
+    }
+
+    /// The distinct producers of the image's debug information, such as
+    /// `Go cmd/compile go1.27.1; regabi`.
+    #[must_use]
+    pub fn producers(&self) -> &[Arc<str>] {
+        &self.producers
     }
 
     /// The concrete type a Rust trait object's vtable at `address` is for.

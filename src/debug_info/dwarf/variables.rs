@@ -170,6 +170,8 @@ pub(super) struct LoadedVariables {
     /// Rust trait objects' vtables, by address, with the concrete type each
     /// is for.
     pub vtables: Vec<(ImageAddress, TypeReference)>,
+    /// Integer constants the units declare at their top level, by name.
+    pub constants: BTreeMap<Arc<str>, crate::IntegerValue>,
 }
 
 #[expect(
@@ -455,6 +457,7 @@ pub(super) fn load_variable_info<'data>(
         .enumerate()
         .filter_map(|(index, object)| object.debug_info_offset.map(|offset| (offset, index)))
         .collect();
+    let constants = types.named_constants();
     types.populate_go_named_constants();
     types.populate_record_member_declarations(source_files, source_file_ids);
     types.finalize_type_graph();
@@ -508,6 +511,7 @@ pub(super) fn load_variable_info<'data>(
         }),
         globals,
         types: finalized_types,
+        constants,
         vtables: vtables
             .into_iter()
             .map(|(address, id)| {

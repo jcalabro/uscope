@@ -632,6 +632,8 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
             lines: Vec::new(),
             sections: Vec::new(),
             vtables: Vec::new(),
+            constants: std::collections::BTreeMap::new(),
+            producers: Vec::new(),
         },
     ))
 }
