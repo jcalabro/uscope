@@ -33,11 +33,10 @@ pub(super) const FXSAVE_SIZE: usize = 512;
 pub(super) const GENERAL_REGISTER_COUNT: usize = 27;
 const AUXV_ENTRY_SIZE: usize = 16;
 const FILE_ENTRY_SIZE: usize = 24;
-/// Notes describe threads and mappings, not memory; a larger note segment is
-/// rejected rather than buffered.
-/// The most note bytes read from all `PT_NOTE` segments together. The cap is
-/// cumulative: zeroed bytes parse as a stream of ignored notes, so many
-/// headers naming the same region would otherwise each be read in full.
+/// The most note bytes read from all `PT_NOTE` segments together. Notes
+/// describe threads and mappings, not memory, so more is rejected rather
+/// than buffered. The cap is cumulative: zeroed bytes parse as a stream of
+/// ignored notes, so many headers naming one region would each be read.
 const MAX_NOTE_BYTES: u64 = 256 * 1024 * 1024;
 const PAGE_SIZE: u64 = 4096;
 const ELF_MAGIC: [u8; 4] = *b"\x7fELF";

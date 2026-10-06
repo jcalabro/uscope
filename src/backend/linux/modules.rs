@@ -190,14 +190,12 @@ impl<P: LinuxTraceOps> Controller<P> {
                 },
             });
         }
-        self.modules
+        let main = self
+            .modules
             .get_mut(&main_loaded.id)
-            .expect("main module is registered")
-            .loaded = main_loaded;
-        self.modules
-            .get_mut(&main_loaded.id)
-            .expect("main module is registered")
-            .link_map = link_maps.get(&main_loaded.load_bias).copied();
+            .expect("main module is registered");
+        main.loaded = main_loaded;
+        main.link_map = link_maps.get(&main_loaded.load_bias).copied();
         Ok(())
     }
 }
@@ -273,6 +271,8 @@ pub(super) fn identify_mapped_module(mapping: &ModuleMapping) -> Option<(PathBuf
     Some((path, bias))
 }
 
+/// Each module's loader `link_map`, by load bias, found through the
+/// executable's `DT_DEBUG` rendezvous. A program without one has none.
 pub(super) fn loader_link_maps(
     ptrace: &impl InspectionOps,
     pid: Pid,
@@ -330,12 +330,7 @@ pub(super) fn loader_link_maps(
     Ok(result)
 }
 
-pub(super) fn read_word_offset(
-    ptrace: &impl InspectionOps,
-    pid: Pid,
-    base: u64,
-    offset: u64,
-) -> Result<u64> {
+fn read_word_offset(ptrace: &impl InspectionOps, pid: Pid, base: u64, offset: u64) -> Result<u64> {
     ptrace.read_word(pid, base.checked_add(offset).ok_or(Error::AddressOverflow)?)
 }
 

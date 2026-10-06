@@ -330,9 +330,7 @@ fn lookup_symbol(pid: Pid, requested_object: &str, requested_symbol: &str) -> Op
             continue;
         };
         let file_name = file_name.to_string_lossy();
-        let preferred = requested_object.is_empty()
-            || file_name == requested_object
-            || file_name.starts_with(requested_object);
+        let preferred = file_name.starts_with(requested_object);
         let Ok(bias) = mapped_module_load_bias(&mapping) else {
             continue;
         };
