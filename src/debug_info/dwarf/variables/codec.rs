@@ -494,6 +494,30 @@ pub(super) fn unsigned_value(
     })
 }
 
+/// Whether a 16-byte float is x87 extended precision, padded, rather than
+/// the IEEE binary128 of `__float128` and `f128`; only the name tells them
+/// apart.
+fn is_x87_extended(type_info: &BaseType, target: TargetDescription) -> bool {
+    type_info.byte_size == 16
+        && type_info.encoding == BaseTypeEncoding::Floating
+        && target.architecture == Architecture::X86_64
+        && target.byte_order == ByteOrder::Little
+        && matches!(
+            type_info.base_name.as_ref(),
+            "long double" | "__float80" | "_Float64x" | "f80" | "c_longdouble"
+        )
+}
+
+/// How many leading bytes of a scalar's storage hold its value: all of
+/// them, but for x87 extended precision, whose last six are padding.
+pub(super) fn significant_bytes(type_info: &BaseType, target: TargetDescription) -> u64 {
+    if is_x87_extended(type_info, target) {
+        10
+    } else {
+        type_info.byte_size
+    }
+}
+
 fn decode_float(
     type_info: &BaseType,
     bytes: &[u8],
@@ -512,21 +536,10 @@ fn decode_float(
             )
             .expect("eight bytes fit u64"),
         )),
-        // x87 extended precision is padded to 16 bytes, the same size as the
-        // IEEE binary128 of `__float128` and `f128`; only the name tells them
-        // apart.
-        16 if target.architecture == Architecture::X86_64
-            && target.byte_order == ByteOrder::Little
-            && matches!(
-                type_info.base_name.as_ref(),
-                "long double" | "__float80" | "_Float64x" | "f80" | "c_longdouble"
-            ) =>
-        {
-            Ok(FloatValue::X87Extended {
-                significand: u64::from_le_bytes(bytes[..8].try_into().expect("eight-byte slice")),
-                sign_exponent: u16::from_le_bytes(bytes[8..10].try_into().expect("two-byte slice")),
-            })
-        }
+        16 if is_x87_extended(type_info, target) => Ok(FloatValue::X87Extended {
+            significand: u64::from_le_bytes(bytes[..8].try_into().expect("eight-byte slice")),
+            sign_exponent: u16::from_le_bytes(bytes[8..10].try_into().expect("two-byte slice")),
+        }),
         _ => Err(ScalarDecodeError::Unavailable(
             crate::UnsupportedVariableFeature::ScalarRepresentation.into(),
         )),

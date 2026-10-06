@@ -55,6 +55,7 @@ mod globals;
 mod identity;
 mod inspect;
 mod location;
+mod pieces;
 mod shape;
 mod text;
 mod types;

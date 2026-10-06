@@ -1052,12 +1052,23 @@ pub enum ValueStorage {
         start: usize,
         end: usize,
         address: Option<VirtualAddress>,
+        /// The bits of `raw` the program does not hold, such as the missing
+        /// pieces of a value assembled from pieces, which no read may use.
+        unavailable: Arc<[UnavailableBits]>,
     },
     /// A DWARF implicit pointer that must be resolved at the originating frame.
     ImplicitPointer {
         debug_info_offset: u64,
         byte_offset: i64,
     },
+}
+
+/// Bits of captured bytes that hold nothing of the value, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableBits {
+    /// Where, counted from the first bit of the captured bytes.
+    pub range: ValueBitRange,
+    pub reason: VariableUnavailableReason,
 }
 
 /// Opaque capability for expanding one aggregate at one exact stopped state.
@@ -1198,6 +1209,9 @@ pub enum VariableValueSource {
     Computed,
     /// Optimization retained a referent value but eliminated the pointer's address.
     ImplicitPointer,
+    /// Pieces in registers, memory, or debug information, which together
+    /// have no one address.
+    Pieces,
 }
 
 /// Why an otherwise available pointer or reference cannot be dereferenced.

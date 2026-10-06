@@ -2,7 +2,7 @@
 
 ## Debugger
 
-- Composite DWARF locations and the rest of the DWARF expression language.
+- The rest of the DWARF expression language: entry values, parameter references, and implicit pointers in pieces.
 - Register the vDSO as a memory-backed module, so backtraces unwind through it and name its frames.
 - Unwind through signal trampolines: evaluate CFI expression rules and present the signal frame.
 - Synthesize `name@plt` symbols for PLT stubs.

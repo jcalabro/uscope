@@ -1072,10 +1072,20 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
             }
             assert_register_source(&snapshot.variables[12], "xmm0", fixture);
             assert_register_source(&snapshot.variables[13], "xmm1", fixture);
-            assert_unsupported(
-                &snapshot.variables[14],
-                uscope::UnsupportedVariableFeature::CompositeLocation,
-                fixture,
+            // Its one piece holds the 80 bits x87 precision uses, not the
+            // padding after them.
+            assert_variable_value(&snapshot.variables[14], expected[14].clone());
+            assert!(
+                matches!(
+                    &snapshot.variables[14].state,
+                    VariableState::Available {
+                        source: uscope::VariableValueSource::Pieces,
+                        raw: Some(raw),
+                        ..
+                    } if raw.len() == 10
+                ),
+                "{fixture}: {:?}",
+                snapshot.variables[14]
             );
         }
         _ => panic!("unexpected optimized parameter fixture {fixture}"),

@@ -539,7 +539,14 @@ async fn check_containers_but(
         } else {
             evaluate(&scenario, &marker.expression).await
         };
-        if optimized && matches!(value.state, VariableState::Unavailable(_)) {
+        // Nor need it keep everything a view reads, such as the parts of a
+        // value it holds in pieces.
+        let view_unavailable = matches!(
+            &value.state,
+            VariableState::Available { presentation: Some(presentation), .. }
+                if matches!(presentation.problem, Some(uscope::ViewProblem::Unavailable(_)))
+        );
+        if optimized && (matches!(value.state, VariableState::Unavailable(_)) || view_unavailable) {
             continue;
         }
         check_marker(&scenario, marker, &value, &mut seen, &mut failures).await;
