@@ -25,9 +25,13 @@
 ## Client interfaces
 
 - [x] Add a debugger protocol server, starting with DAP support.
+- [x] Serve the expression language through DAP: console expressions and assignments, hovers, completions, value and declaration locations, and session-wide hexadecimal.
+- [x] Give the VS Code extension hovers, inline values, hexadecimal display, offered programs, and a user acceptance test of happy and sad paths.
 - [ ] Write registers, for assigning `$rax` and for DAP's `goto` (VS Code's Jump to Cursor).
 - [ ] Step into a chosen call on a line (DAP `stepInTargets`), and show a function's return value after stepping out of it.
 - [ ] Model function types, so function pointers show their signature instead of `DwTag(21) *`.
+- [ ] Accept C base type names in casts, such as `(unsigned char)x`, when the program's debug information has no such type.
+- [ ] Follow fork children, and offer them to DAP clients as child sessions (`startDebugging`).
 - [ ] Add a richer interactive or TUI client.
 - [ ] Keep the public request/event model suitable for multiple clients.
 
