@@ -39,7 +39,7 @@ use die::{
 use evaluate::FrameBaseCache;
 use globals::{load_globals, public_global_type};
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
-use inspect::{evaluate_error_state, inspected_value, unavailable};
+use inspect::{data_object, evaluate_error_state, inspected_value};
 use location::{
     EvaluationUnit, Expression, LocationDescription, copy_data_object_value,
     copy_optional_location, load_evaluation_units,
@@ -751,7 +751,11 @@ impl VariableInfo for DwarfVariableInfo {
             .ok_or_else(|| Error::VariableNotFound(id.to_string()))?;
         let object = &self.objects[object_index];
         if let Err(exhaustion) = budget.consume_variable_value() {
-            return Ok(unavailable(object, None, exhaustion.into()));
+            return Ok(data_object(
+                object,
+                None,
+                VariableState::Unavailable(exhaustion.into()),
+            ));
         }
         let mut frame_base = FrameBaseCache::Empty;
         self.inspect_data_object(object, address, context, runtime, &mut frame_base, budget)
