@@ -7,7 +7,7 @@ use gimli::write::{
 use gimli::{Encoding, Format, LittleEndian};
 use gimli::{Location, Value};
 
-use crate::debug_info::VariableRuntimeError;
+use crate::debug_info::{EntryParameter, VariableRuntimeError};
 use crate::{
     Accessibility, Architecture, ArrayDimension, BaseType, BaseTypeEncoding, FloatValue,
     IntegerValue, NamedTypeRelationship, RecordKind, RecordMember, RecordMemberLayout, ScalarValue,
@@ -22,7 +22,7 @@ use super::codec::{
 use super::die::checked_reference_chain;
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, dwarf_value_bytes, evaluate,
-    incomplete_piece_reason, materialize_constant, materialize_pieces,
+    materialize_constant,
 };
 use super::globals::{DefinitionIndex, DefinitionResolution};
 use super::inspect::{
@@ -30,6 +30,7 @@ use super::inspect::{
     static_member_layout_is_valid,
 };
 use super::location::{EvaluationUnit, Expression, LocationDescription, LocationEntry};
+use super::pieces::storage_from_pieces;
 use super::shape::{ValueShape, ValueShapeError, value_shape_from};
 use super::types::{
     TypeArenaBuilder, TypeEntry, TypeResolution, inline_storage_cycle_nodes,
@@ -40,6 +41,7 @@ use super::variant::{
     validate_variant_selections,
 };
 use super::*;
+use crate::model::ValueStorage;
 
 #[test]
 fn array_indices_honor_lower_bounds_and_reject_overflow() {
@@ -280,6 +282,8 @@ struct Runtime {
     cfa: std::result::Result<VirtualAddress, VariableUnavailableReason>,
     memory: Option<Arc<[u8]>>,
     memory_reads: u32,
+    /// What the frame's caller passed, by what an entry value asks for.
+    entry_values: Vec<(EntryParameter, u64)>,
 }
 
 impl VariableRuntime for Runtime {
@@ -329,6 +333,19 @@ impl VariableRuntime for Runtime {
             .map(|memory| Arc::from(&memory[..size]))
             .ok_or_else(|| VariableRuntimeError::Fatal("unexpected memory read".into()))
     }
+
+    fn entry_value(
+        &mut self,
+        parameter: EntryParameter,
+        _budget: &mut InspectionBudget,
+    ) -> std::result::Result<u64, VariableRuntimeError> {
+        self.entry_values
+            .iter()
+            .find_map(|(passed, value)| (*passed == parameter).then_some(*value))
+            .ok_or(VariableRuntimeError::Unavailable(
+                VariableUnavailableReason::EntryValue(crate::EntryValueUnavailableReason::NoCaller),
+            ))
+    }
 }
 
 impl Runtime {
@@ -338,6 +355,7 @@ impl Runtime {
             cfa: Ok(VirtualAddress::new(0x3000)),
             memory: None,
             memory_reads: 0,
+            entry_values: Vec::new(),
         }
     }
 }
@@ -351,6 +369,7 @@ fn run<'a>(
     evaluate(
         expression,
         RunTimeEndian::Little,
+        None,
         &mut FrameBase::Unsupported,
         units,
         runtime,
@@ -409,6 +428,7 @@ fn expression(bytes: &[u8]) -> Expression {
         },
         unit: 0,
         indexed_addresses: Arc::new(HashMap::new()),
+        procedures: Arc::default(),
     }
 }
 
@@ -434,6 +454,7 @@ fn units(base_types: impl IntoIterator<Item = (usize, gimli::ValueType)>) -> Vec
     vec![EvaluationUnit {
         base_types: base_types.into_iter().collect(),
         language: None,
+        offset: Some(0x100),
     }]
 }
 
@@ -446,6 +467,7 @@ fn malformed_backward_branch_expression_fails_instead_of_hanging() {
     let result = evaluate(
         &looping,
         RunTimeEndian::Little,
+        None,
         &mut FrameBase::Unsupported,
         &units([]),
         &mut runtime,
@@ -492,16 +514,17 @@ fn implicit_and_computed_values_materialize_with_source_provenance() {
     let mut runtime = Runtime::new([]);
     let implicit = expression(&[gimli::DW_OP_implicit_value.0, 4, 0xd6, 0xff, 0xff, 0xff]);
     let pieces = run(&implicit, &units([]), &mut runtime).expect("implicit scalar expression");
-    let materialized = materialize_pieces(
+    let stored = storage_from_pieces(
         &pieces,
         4,
         Some(&scalar_type(BaseTypeEncoding::Signed, 4)),
         RunTimeEndian::Little,
         target(ByteOrder::Little),
         &mut runtime,
-        &mut InspectionBudget::default(),
     )
-    .expect("implicit scalar value");
+    .expect("implicit scalar storage");
+    let materialized = storage::read(&stored, 4, &mut runtime, &mut InspectionBudget::default())
+        .expect("implicit scalar value");
     assert_eq!(materialized.0, VariableValueSource::Constant);
     assert_eq!(materialized.1.as_ref(), &[0xd6, 0xff, 0xff, 0xff]);
 
@@ -514,75 +537,486 @@ fn implicit_and_computed_values_materialize_with_source_provenance() {
     assert_eq!(computed.as_ref(), &[0]);
 }
 
+/// One piece of `size` bits at `location`.
+fn piece(location: Location<Reader<'static>>, size: u64) -> gimli::Piece<Reader<'static>> {
+    gimli::Piece {
+        size_in_bits: Some(size),
+        bit_offset: None,
+        location,
+    }
+}
+
+/// The storage `pieces` describe for an object of `size` bytes.
+fn composite(
+    pieces: &[gimli::Piece<Reader<'_>>],
+    size: u64,
+    runtime: &mut Runtime,
+) -> std::result::Result<ValueStorage, EvaluateError> {
+    storage_from_pieces(
+        pieces,
+        size,
+        None,
+        RunTimeEndian::Little,
+        target(ByteOrder::Little),
+        runtime,
+    )
+}
+
+/// Reads `size` bytes at `offset` within `storage`.
+fn read_at(
+    storage: &ValueStorage,
+    offset: i64,
+    size: usize,
+    runtime: &mut Runtime,
+) -> std::result::Result<Vec<u8>, EvaluateError> {
+    let selected = storage::offset(storage.clone(), offset)?;
+    storage::read(&selected, size, runtime, &mut InspectionBudget::default())
+        .map(|(_, raw)| raw.to_vec())
+}
+
 #[test]
-fn undefined_location_pieces_report_exact_destination_ranges() {
+fn undefined_location_pieces_leave_the_rest_of_a_value_readable() {
+    let mut runtime = Runtime::new([]);
     let pieces = [
-        gimli::Piece::<Reader<'_>> {
-            location: Location::Value {
+        piece(
+            Location::Value {
                 value: Value::Generic(0x12),
             },
-            size_in_bits: Some(8),
-            bit_offset: None,
-        },
-        gimli::Piece::<Reader<'_>> {
-            location: Location::Empty,
-            size_in_bits: Some(16),
-            bit_offset: None,
-        },
-        gimli::Piece::<Reader<'_>> {
-            location: Location::Value {
+            8,
+        ),
+        piece(Location::Empty, 16),
+        piece(
+            Location::Value {
                 value: Value::Generic(0x34),
             },
-            size_in_bits: Some(8),
-            bit_offset: None,
-        },
+            8,
+        ),
     ];
-
+    let storage = composite(&pieces, 4, &mut runtime).expect("composite");
     assert_eq!(
-        incomplete_piece_reason(&pieces, 32),
-        Ok(Some(VariableUnavailableReason::OptimizedOut(
-            crate::OptimizedOutReason::UndefinedPieces {
+        read_at(&storage, 0, 4, &mut runtime),
+        Err(
+            VariableUnavailableReason::OptimizedOut(crate::OptimizedOutReason::UndefinedPieces {
                 ranges: Arc::from([crate::ValueBitRange {
                     offset: 8,
-                    size: 16,
+                    size: 16
                 }]),
-            },
-        )))
+            })
+            .into()
+        )
     );
+    assert_eq!(read_at(&storage, 0, 1, &mut runtime), Ok(vec![0x12]));
+    assert_eq!(read_at(&storage, 3, 1, &mut runtime), Ok(vec![0x34]));
+    assert_eq!(
+        read_at(&storage, 1, 2, &mut runtime),
+        Err(
+            VariableUnavailableReason::OptimizedOut(crate::OptimizedOutReason::EmptyLocation)
+                .into()
+        )
+    );
+    // Pieces describing more than the object are malformed.
     assert!(matches!(
-        incomplete_piece_reason(&pieces, 24),
+        composite(&pieces, 3, &mut runtime),
         Err(EvaluateError::Malformed(_))
     ));
 }
 
 #[test]
 fn an_empty_location_expression_describes_an_optimized_out_value() {
+    let mut runtime = Runtime::new([]);
     let empty = expression(&[]);
-    let pieces =
-        run(&empty, &units([]), &mut Runtime::new([])).expect("an empty expression is valid");
+    let pieces = run(&empty, &units([]), &mut runtime).expect("an empty expression is valid");
 
     assert_eq!(
-        incomplete_piece_reason(&pieces, 64),
-        Ok(Some(VariableUnavailableReason::OptimizedOut(
-            crate::OptimizedOutReason::EmptyLocation
-        )))
+        composite(&pieces, 8, &mut runtime).map(drop),
+        Err(
+            VariableUnavailableReason::OptimizedOut(crate::OptimizedOutReason::EmptyLocation)
+                .into()
+        )
     );
 }
 
 #[test]
-fn deferred_operations_and_missing_types_have_stable_typed_reasons() {
+fn register_and_value_pieces_take_their_low_order_bits() {
+    let mut runtime = Runtime::new([(0, 0x1122_3344_5566_7788), (1, 0xaabb)]);
+    // The upper half of r0 by bit offset, then r1's low byte, then the low
+    // twelve bits of a computed value and four bits beyond it: a
+    // generic value with its sign bit clear extends with zeros.
+    let pieces = [
+        gimli::Piece {
+            size_in_bits: Some(32),
+            bit_offset: Some(32),
+            location: Location::Register {
+                register: gimli::Register(0),
+            },
+        },
+        piece(
+            Location::Register {
+                register: gimli::Register(1),
+            },
+            8,
+        ),
+        piece(
+            Location::Value {
+                value: Value::Generic(0xfff),
+            },
+            16,
+        ),
+    ];
+    let storage = composite(&pieces, 7, &mut runtime).expect("composite");
+    assert_eq!(
+        read_at(&storage, 0, 7, &mut runtime),
+        Ok(vec![0x44, 0x33, 0x22, 0x11, 0xbb, 0xff, 0x0f])
+    );
+    // Part of a register above its least significant bit is not the
+    // register's value, though it is all one piece's.
+    let upper = storage::narrow(storage::offset(storage.clone(), 0).expect("offset"), 4);
+    assert_eq!(storage::source(&upper), VariableValueSource::Composite);
+    let low = storage::narrow(storage::offset(storage, 4).expect("offset"), 1);
+    assert!(matches!(
+        storage::source(&low),
+        VariableValueSource::Register(_)
+    ));
+
+    // A typed value extends by its signedness; a generic one with its sign
+    // bit set cannot be told from a narrower negative value.
+    let signed = [piece(
+        Location::Value {
+            value: Value::I8(-2),
+        },
+        16,
+    )];
+    let storage = composite(&signed, 4, &mut runtime).expect("composite");
+    assert_eq!(read_at(&storage, 0, 2, &mut runtime), Ok(vec![0xfe, 0xff]));
+    let generic = [piece(
+        Location::Value {
+            value: Value::Generic(u64::MAX),
+        },
+        128,
+    )];
+    assert!(matches!(
+        composite(&generic, 16, &mut runtime),
+        Err(EvaluateError::Malformed(_))
+    ));
+}
+
+#[test]
+fn malformed_pieces_are_refused() {
     let mut runtime = Runtime::new([(0, 1)]);
-    let entry = expression(&[
+    let past_register = [piece(
+        Location::Register {
+            register: gimli::Register(0),
+        },
+        72,
+    )];
+    let short_implicit = [piece(
+        Location::Bytes {
+            value: gimli::EndianSlice::new(&[1, 2], RunTimeEndian::Little),
+        },
+        24,
+    )];
+    let offset_pointer = [gimli::Piece {
+        size_in_bits: Some(64),
+        bit_offset: Some(8),
+        location: Location::ImplicitPointer {
+            value: gimli::DebugInfoOffset(0x40),
+            byte_offset: 0,
+        },
+    }];
+    let unsized_piece = [
+        gimli::Piece {
+            size_in_bits: None,
+            bit_offset: None,
+            location: Location::Empty,
+        },
+        piece(Location::Empty, 8),
+    ];
+    for pieces in [
+        &past_register[..],
+        &short_implicit[..],
+        &offset_pointer[..],
+        &unsized_piece[..],
+    ] {
+        assert!(
+            matches!(
+                composite(pieces, 16, &mut runtime),
+                Err(EvaluateError::Malformed(_))
+            ),
+            "{:?}",
+            pieces
+                .iter()
+                .map(|piece| piece.size_in_bits)
+                .collect::<Vec<_>>()
+        );
+    }
+    // Big-endian pieces are numbered differently; uscope does not model them.
+    let halves = [
+        piece(
+            Location::Register {
+                register: gimli::Register(0),
+            },
+            32,
+        ),
+        piece(
+            Location::Register {
+                register: gimli::Register(0),
+            },
+            32,
+        ),
+    ];
+    assert_eq!(
+        storage_from_pieces(
+            &halves,
+            8,
+            None,
+            RunTimeEndian::Big,
+            target(ByteOrder::Big),
+            &mut runtime,
+        )
+        .map(drop),
+        Err(crate::UnsupportedVariableFeature::CompositeLocation.into())
+    );
+}
+
+#[test]
+fn a_piece_in_an_unsaved_register_leaves_the_others_readable() {
+    // r1 is not in the frame's registers.
+    let mut runtime = Runtime::new([(0, 7)]);
+    let pieces = [
+        piece(
+            Location::Register {
+                register: gimli::Register(0),
+            },
+            64,
+        ),
+        piece(
+            Location::Register {
+                register: gimli::Register(1),
+            },
+            64,
+        ),
+    ];
+    let storage = composite(&pieces, 16, &mut runtime).expect("composite");
+    assert_eq!(
+        read_at(&storage, 0, 8, &mut runtime),
+        Ok(7_u64.to_le_bytes().to_vec())
+    );
+    assert_eq!(
+        read_at(&storage, 8, 8, &mut runtime),
+        Err(VariableUnavailableReason::RegisterUnavailable("1".into()).into())
+    );
+}
+
+#[test]
+fn consecutive_memory_pieces_are_one_place_in_memory() {
+    let mut runtime = Runtime::new([]);
+    let at = |address| Location::Address { address };
+    let joined = composite(
+        &[piece(at(0x1000), 64), piece(at(0x1008), 64)],
+        16,
+        &mut runtime,
+    );
+    assert!(matches!(joined, Ok(ValueStorage::Memory(address)) if address.get() == 0x1000));
+    let apart = composite(
+        &[piece(at(0x1000), 64), piece(at(0x2000), 64)],
+        16,
+        &mut runtime,
+    )
+    .expect("composite");
+    assert!(matches!(apart, ValueStorage::Composite(_)));
+    let second = storage::narrow(storage::offset(apart, 8).expect("offset"), 8);
+    assert!(matches!(second, ValueStorage::Memory(address) if address.get() == 0x2000));
+}
+
+#[test]
+fn a_bit_field_reads_only_its_own_bits() {
+    let mut runtime = Runtime::new([]);
+    // Bits 0..4 are undefined; a field in bits 4..12 is not.
+    let pieces = [
+        piece(Location::Empty, 4),
+        gimli::Piece {
+            size_in_bits: Some(12),
+            bit_offset: Some(4),
+            location: Location::Value {
+                value: Value::Generic(0xabc0),
+            },
+        },
+    ];
+    let storage = composite(&pieces, 2, &mut runtime).expect("composite");
+    let field = storage::read_bits(
+        &storage,
+        4,
+        8,
+        ByteOrder::Little,
+        &mut runtime,
+        &mut InspectionBudget::default(),
+    );
+    assert_eq!(field, Ok(0xbc));
+    assert!(read_at(&storage, 0, 1, &mut runtime).is_err());
+}
+
+#[test]
+fn entry_value_operands_ask_the_caller_for_what_they_name() {
+    let mut runtime = Runtime::new([]);
+    runtime.entry_values = vec![
+        (EntryParameter::Register(5), 41),
+        (EntryParameter::Referent(4), 0x20),
+        (EntryParameter::Parameter(0x100 + 0x2a), 7),
+    ];
+    let value = |pieces: Vec<gimli::Piece<Reader<'_>>>| match pieces.as_slice() {
+        [
+            gimli::Piece {
+                location: Location::Value { value },
+                ..
+            },
+        ] => *value,
+        pieces => panic!("{pieces:?}"),
+    };
+    // DW_OP_entry_value(DW_OP_reg5) DW_OP_plus_uconst 1 DW_OP_stack_value.
+    let register = expression(&[
+        gimli::DW_OP_entry_value.0,
+        1,
+        gimli::DW_OP_reg5.0,
+        gimli::DW_OP_plus_uconst.0,
+        1,
+        gimli::DW_OP_stack_value.0,
+    ]);
+    assert_eq!(
+        run(&register, &units([]), &mut runtime).map(value),
+        Ok(Value::Generic(42))
+    );
+    // A typed register keeps its type.
+    let typed = expression(&[
+        gimli::DW_OP_entry_value.0,
+        3,
+        gimli::DW_OP_regval_type.0,
+        5,
+        0x10,
+        gimli::DW_OP_stack_value.0,
+    ]);
+    assert_eq!(
+        run(
+            &typed,
+            &units([(0x10, gimli::ValueType::I32)]),
+            &mut runtime
+        )
+        .map(value),
+        Ok(Value::I32(41))
+    );
+    // DW_OP_bregN 0; DW_OP_deref asks for what the register pointed at.
+    let referent = expression(&[
+        gimli::DW_OP_entry_value.0,
+        3,
+        gimli::DW_OP_breg4.0,
+        0,
+        gimli::DW_OP_deref.0,
+        gimli::DW_OP_stack_value.0,
+    ]);
+    assert_eq!(
+        run(&referent, &units([]), &mut runtime).map(value),
+        Ok(Value::Generic(0x20))
+    );
+    // A parameter reference names its entry by its unit's offset.
+    let parameter = expression(&[
+        gimli::DW_OP_GNU_parameter_ref.0,
+        0x2a,
+        0,
+        0,
+        0,
+        gimli::DW_OP_stack_value.0,
+    ]);
+    assert_eq!(
+        run(&parameter, &units([]), &mut runtime).map(value),
+        Ok(Value::Generic(7))
+    );
+    // What the caller cannot say, the value cannot be.
+    let missing = expression(&[
         gimli::DW_OP_entry_value.0,
         1,
         gimli::DW_OP_reg0.0,
         gimli::DW_OP_stack_value.0,
     ]);
     assert_eq!(
-        run(&entry, &units([]), &mut runtime),
+        run(&missing, &units([]), &mut runtime),
+        Err(
+            VariableUnavailableReason::EntryValue(crate::EntryValueUnavailableReason::NoCaller)
+                .into()
+        )
+    );
+    // Any other operand is a valid expression uscope does not evaluate.
+    let other = expression(&[
+        gimli::DW_OP_entry_value.0,
+        2,
+        gimli::DW_OP_breg5.0,
+        8,
+        gimli::DW_OP_stack_value.0,
+    ]);
+    assert_eq!(
+        run(&other, &units([]), &mut runtime),
         Err(crate::UnsupportedVariableFeature::EntryValue.into())
     );
+}
 
+#[test]
+fn called_procedures_run_on_the_same_stack() {
+    let mut runtime = Runtime::new([]);
+    let procedure = |bytes: &[u8]| {
+        Some(LocationDescription {
+            entries: vec![LocationEntry {
+                range: None,
+                expression: expression(bytes),
+            }]
+            .into(),
+        })
+    };
+    let mut caller = expression(&[
+        gimli::DW_OP_lit2.0,
+        gimli::DW_OP_call2.0,
+        0x20,
+        0,
+        gimli::DW_OP_call4.0,
+        0x30,
+        0,
+        0,
+        0,
+        gimli::DW_OP_stack_value.0,
+    ]);
+    // The unit begins at 0x100, so the calls name 0x120 and 0x130.
+    caller.procedures = Arc::new(HashMap::from([
+        (0x120, procedure(&[gimli::DW_OP_lit3.0, gimli::DW_OP_mul.0])),
+        // An entry without a location has no effect.
+        (0x130, None),
+    ]));
+    assert!(matches!(
+        run(&caller, &units([]), &mut runtime).as_deref(),
+        Ok([gimli::Piece {
+            location: Location::Value {
+                value: Value::Generic(6)
+            },
+            ..
+        }])
+    ));
+    // A procedure the expression did not bring is elsewhere.
+    caller.procedures = Arc::default();
+    assert_eq!(
+        run(&caller, &units([]), &mut runtime),
+        Err(crate::UnsupportedVariableFeature::CrossDieEvaluation.into())
+    );
+}
+
+#[test]
+fn unimplemented_operations_are_unsupported() {
+    let mut runtime = Runtime::new([]);
+    let uninitialized = expression(&[gimli::DW_OP_lit0.0, gimli::DW_OP_GNU_uninit.0]);
+    assert_eq!(
+        run(&uninitialized, &units([]), &mut runtime),
+        Err(crate::UnsupportedVariableFeature::ExpressionOperation.into())
+    );
+}
+
+#[test]
+fn missing_base_types_have_a_stable_typed_reason() {
+    let mut runtime = Runtime::new([(0, 1)]);
     let missing_type = expression(&[
         gimli::DW_OP_regval_type.0,
         0,
@@ -613,6 +1047,7 @@ fn expression_memory_reads_are_strictly_bounded() {
         evaluate(
             &expression,
             RunTimeEndian::Little,
+            None,
             &mut FrameBase::Unsupported,
             &units([]),
             &mut runtime,
@@ -711,6 +1146,7 @@ fn unexecuted_fbreg_branches_do_not_require_a_frame_base() {
     let pieces = evaluate(
         &branching,
         RunTimeEndian::Little,
+        None,
         &mut FrameBase::Lazy(FrameBaseContext {
             location: &location,
             address: Some(ImageAddress::new(0)),
@@ -741,6 +1177,7 @@ fn unexecuted_fbreg_branches_do_not_require_a_frame_base() {
     let result = evaluate(
         &taken,
         RunTimeEndian::Little,
+        None,
         &mut FrameBase::Lazy(FrameBaseContext {
             location: &location,
             address: Some(ImageAddress::new(0)),
@@ -1319,4 +1756,262 @@ fn a_global_of_a_malformed_type_reports_a_malformed_type_graph() {
             "pointer type has a zero byte size"
         )
     );
+}
+
+/// Memory at one base address, for reading composites' memory pieces.
+struct Memory {
+    base: u64,
+    bytes: Vec<u8>,
+}
+
+impl VariableRuntime for Memory {
+    fn register(
+        &mut self,
+        _register: u16,
+    ) -> std::result::Result<crate::debug_info::VariableRegister, VariableRuntimeError> {
+        Err(VariableRuntimeError::Fatal(
+            "pieces hold registers' bytes".into(),
+        ))
+    }
+
+    fn call_frame_cfa(&self) -> std::result::Result<VirtualAddress, VariableRuntimeError> {
+        Err(VariableRuntimeError::Fatal("no frame".into()))
+    }
+
+    fn tls_address(
+        &mut self,
+        _offset: u64,
+    ) -> std::result::Result<VirtualAddress, VariableUnavailableReason> {
+        Err(crate::UnsupportedVariableFeature::Tls.into())
+    }
+
+    fn relocate(&self, address: ImageAddress) -> std::result::Result<VirtualAddress, Arc<str>> {
+        Ok(VirtualAddress::new(address.get()))
+    }
+
+    fn read_memory(
+        &mut self,
+        address: VirtualAddress,
+        size: usize,
+    ) -> std::result::Result<Arc<[u8]>, VariableRuntimeError> {
+        let start = usize::try_from(address.get() - self.base).expect("small offset");
+        Ok(Arc::from(&self.bytes[start..start + size]))
+    }
+
+    fn entry_value(
+        &mut self,
+        _parameter: EntryParameter,
+        _budget: &mut InspectionBudget,
+    ) -> std::result::Result<u64, VariableRuntimeError> {
+        Err(VariableRuntimeError::Fatal("no caller".into()))
+    }
+}
+
+/// What a composite holds in one bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bit {
+    Known(bool),
+    Undefined,
+    Unavailable,
+}
+
+#[derive(Debug, Clone)]
+enum PieceKind {
+    Memory { byte: u64, bit_offset: u64 },
+    Bytes { raw: Vec<u8>, bit_offset: u64 },
+    Undefined,
+    Unavailable,
+    ImplicitPointer,
+}
+
+fn piece_kind() -> impl proptest::strategy::Strategy<Value = PieceKind> {
+    use proptest::prelude::*;
+    prop_oneof![
+        (0_u64..32, 0_u64..8).prop_map(|(byte, bit_offset)| PieceKind::Memory { byte, bit_offset }),
+        (proptest::collection::vec(any::<u8>(), 8), 0_u64..8)
+            .prop_map(|(raw, bit_offset)| PieceKind::Bytes { raw, bit_offset }),
+        Just(PieceKind::Undefined),
+        Just(PieceKind::Unavailable),
+        Just(PieceKind::ImplicitPointer),
+    ]
+}
+
+/// The composite `kinds` describe, and each of its bits.
+fn composite_and_bits(
+    kinds: &[(u64, PieceKind)],
+    memory: &Memory,
+) -> (crate::model::CompositeStorage, Vec<Bit>) {
+    use crate::model::{CompositeStorage, PieceLocation, StoragePiece};
+    let bit = |bytes: &[u8], index: u64| {
+        Bit::Known((bytes[usize::try_from(index / 8).expect("small")] >> (index % 8)) & 1 == 1)
+    };
+    let mut pieces = Vec::new();
+    let mut bits = Vec::new();
+    let mut offset = 0;
+    for (size, kind) in kinds {
+        let (location, piece_bits): (PieceLocation, Vec<Bit>) = match kind {
+            PieceKind::Memory { byte, bit_offset } => (
+                PieceLocation::Memory {
+                    address: VirtualAddress::new(memory.base + byte),
+                    bit_offset: *bit_offset,
+                },
+                (0..*size)
+                    .map(|index| bit(&memory.bytes, byte * 8 + bit_offset + index))
+                    .collect(),
+            ),
+            PieceKind::Bytes { raw, bit_offset } => (
+                PieceLocation::Bytes {
+                    source: VariableValueSource::Computed,
+                    raw: Arc::from(raw.as_slice()),
+                    bit_offset: *bit_offset,
+                },
+                (0..*size)
+                    .map(|index| bit(raw, bit_offset + index))
+                    .collect(),
+            ),
+            PieceKind::Undefined => (PieceLocation::Undefined, vec![Bit::Undefined; index(*size)]),
+            PieceKind::Unavailable => (
+                PieceLocation::Unavailable(VariableUnavailableReason::RegisterNotSaved(
+                    "r1".into(),
+                )),
+                vec![Bit::Unavailable; index(*size)],
+            ),
+            PieceKind::ImplicitPointer => (
+                PieceLocation::ImplicitPointer {
+                    debug_info_offset: 0x40,
+                    byte_offset: 0,
+                },
+                vec![Bit::Undefined; index(*size)],
+            ),
+        };
+        pieces.push(StoragePiece {
+            offset,
+            size: *size,
+            location,
+        });
+        bits.extend(piece_bits);
+        offset += size;
+    }
+    // Whole bytes, as an object has.
+    let tail = offset.next_multiple_of(8) - offset;
+    if tail != 0 {
+        pieces.push(StoragePiece {
+            offset,
+            size: tail,
+            location: PieceLocation::Undefined,
+        });
+        bits.extend(std::iter::repeat_n(Bit::Undefined, index(tail)));
+    }
+    (
+        CompositeStorage {
+            pieces: pieces.into(),
+            start: 0,
+        },
+        bits,
+    )
+}
+
+/// What reading `bits` must produce: their bytes, least significant first,
+/// or the undefined ranges or unavailable place among them.
+/// A test's bit or byte count as an index.
+fn index(count: u64) -> usize {
+    usize::try_from(count).expect("test sizes fit usize")
+}
+
+fn expected_read(bits: &[Bit]) -> std::result::Result<Vec<u8>, EvaluateError> {
+    let mut ranges: Vec<crate::ValueBitRange> = Vec::new();
+    for (index, bit) in bits.iter().enumerate() {
+        if *bit != Bit::Undefined {
+            continue;
+        }
+        let index = index as u64;
+        match ranges.last_mut() {
+            Some(last) if last.offset + last.size == index => last.size += 1,
+            _ => ranges.push(crate::ValueBitRange {
+                offset: index,
+                size: 1,
+            }),
+        }
+    }
+    match ranges.as_slice() {
+        [] => {}
+        [only] if only.size == bits.len() as u64 => {
+            return Err(VariableUnavailableReason::OptimizedOut(
+                crate::OptimizedOutReason::EmptyLocation,
+            )
+            .into());
+        }
+        _ => {
+            return Err(VariableUnavailableReason::OptimizedOut(
+                crate::OptimizedOutReason::UndefinedPieces {
+                    ranges: ranges.into(),
+                },
+            )
+            .into());
+        }
+    }
+    if bits.contains(&Bit::Unavailable) {
+        return Err(VariableUnavailableReason::RegisterNotSaved("r1".into()).into());
+    }
+    let mut bytes = vec![0_u8; bits.len().div_ceil(8)];
+    for (index, bit) in bits.iter().enumerate() {
+        if *bit == Bit::Known(true) {
+            bytes[index / 8] |= 1 << (index % 8);
+        }
+    }
+    Ok(bytes)
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+    /// Composite reads assemble exactly the bits they cover, and selecting
+    /// part of a composite reads what the composite holds there.
+    #[test]
+    fn composite_reads_match_their_pieces_bit_for_bit(
+        kinds in proptest::collection::vec((1_u64..=20, piece_kind()), 1..8),
+        memory in proptest::collection::vec(proptest::prelude::any::<u8>(), 64),
+        read in (0_u64..32, 0_u64..32),
+        field in (0_u64..256, 1_u64..=64),
+    ) {
+        let mut memory = Memory { base: 0x1000, bytes: memory };
+        let (composite, bits) = composite_and_bits(&kinds, &memory);
+        let storage = ValueStorage::Composite(composite);
+        let total = bits.len() as u64 / 8;
+        let mut budget = InspectionBudget::default();
+
+        let offset = read.0 % (total + 1);
+        let size = read.1 % (total - offset + 1);
+        let selected = storage::offset(storage.clone(), i64::try_from(offset).unwrap()).unwrap();
+        let expected = expected_read(&bits[index(offset * 8)..index((offset + size) * 8)]);
+        let read_bytes = storage::read(&selected, index(size), &mut memory, &mut budget)
+            .map(|(_, raw)| raw.to_vec());
+        if size != 0 {
+            proptest::prop_assert_eq!(&read_bytes, &expected);
+        }
+        if let Ok(bytes) = &read_bytes {
+            let narrowed = storage::narrow(selected, size);
+            let again = storage::read(&narrowed, index(size), &mut memory, &mut budget)
+                .map(|(_, raw)| raw.to_vec());
+            proptest::prop_assert_eq!(again.as_ref(), Ok(bytes));
+        }
+
+        let bit_offset = field.0 % (bits.len() as u64);
+        let bit_size = field.1.min(bits.len() as u64 - bit_offset);
+        let bits_read = storage::read_bits(
+            &storage,
+            bit_offset,
+            bit_size,
+            ByteOrder::Little,
+            &mut memory,
+            &mut budget,
+        );
+        let expected = expected_read(&bits[index(bit_offset)..index(bit_offset + bit_size)])
+            .map(|bytes| {
+                let mut wide = [0; 16];
+                wide[..bytes.len()].copy_from_slice(&bytes);
+                u128::from_le_bytes(wide)
+            });
+        proptest::prop_assert_eq!(bits_read, expected);
+    }
 }

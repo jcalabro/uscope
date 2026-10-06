@@ -58,6 +58,7 @@ use registers::Fxsave;
 use tls::{CLibrary, TlsModule};
 
 mod breakpoints;
+mod callers;
 mod classify;
 mod core_dump;
 mod core_files;

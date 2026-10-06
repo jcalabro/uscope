@@ -11,6 +11,7 @@ readonly rust_fixtures_dir="${fixtures_dir}/rust"
 readonly zig_fixtures_dir="${fixtures_dir}/zig"
 readonly suite_stamp="${output_dir}/.suite.stamp"
 readonly suite_outputs="${output_dir}/.suite.outputs"
+readonly frame_oracle_script=scripts/frame-variables-oracle.py
 
 declare -A dash_version_by_tool=()
 declare -A rebuilt_outputs=()
@@ -665,8 +666,8 @@ suite_is_current() {
     local signature="$1"
     [[ -f "$suite_stamp" && -f "$suite_outputs" ]] || return 1
     [[ "$(<"$suite_stamp")" == "$signature" ]] || return 1
-    [[ -z "$(find "$fixtures_dir" sdk views/kernels "${BASH_SOURCE[0]}" -newer "$suite_stamp" \
-        -print -quit)" ]] \
+    [[ -z "$(find "$fixtures_dir" sdk views/kernels "${BASH_SOURCE[0]}" "$frame_oracle_script" \
+        -newer "$suite_stamp" -print -quit)" ]] \
         || return 1
     local output
     while IFS= read -r output; do
@@ -1254,6 +1255,23 @@ build_fixture clang "$c_fixtures_dir/frames.c" "$output_dir/frames-clang-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/frames.c" "$output_dir/frames-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+# Values split across registers and memory, recovered from callers' call
+# sites, also in another module, and pointing at objects with no address.
+build_shared_fixture gcc "$c_fixtures_dir/locations/library.c" "$output_dir/liblocations.so" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer
+locations_library=("-L$output_dir" -llocations '-Wl,-rpath,$ORIGIN')
+build_fixture gcc "$c_fixtures_dir/locations/main.c" "$output_dir/locations-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie "${locations_library[@]}"
+require_dwarf_operation "$output_dir/locations-gcc-o2" 'DW_OP_piece'
+require_dwarf_operation "$output_dir/locations-gcc-o2" 'DW_OP_entry_value'
+require_dwarf_operation "$output_dir/locations-gcc-o2" 'DW_OP_GNU_parameter_ref'
+require_dwarf_operation "$output_dir/locations-gcc-o2" 'DW_OP_implicit_pointer'
+build_fixture gcc "$c_fixtures_dir/locations/main.c" "$output_dir/locations-gcc-o2-nopie" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -no-pie "${locations_library[@]}"
+build_fixture clang "$c_fixtures_dir/locations/main.c" "$output_dir/locations-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie "${locations_library[@]}"
+require_dwarf_operation "$output_dir/locations-clang-o2" 'DW_OP_piece'
+require_dwarf_operation "$output_dir/locations-clang-o2" 'DW_AT_call_tail_call'
 build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o1" \
     -O1 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/inline.c" "$output_dir/inline-gcc-o2" \
@@ -1399,6 +1417,11 @@ for variant in musl-clang-static-pie gcc-static single-thread-clang-static; do
     program="$output_dir/tls-modules-${variant}"
     generate_core "${program}.core" 6 "$default_core_filter" "$program" "$program" abort
 done
+for variant in gcc-o2 gcc-o2-nopie clang-o2; do
+    program="$output_dir/locations-${variant}"
+    generate_core "${program}.core" 6 "$default_core_filter" \
+        "$program $output_dir/liblocations.so" "$program" abort
+done
 # Cores whose executable or shared library was deleted after the crash. The
 # copies are refreshed whenever a core itself must be regenerated.
 generate_core_without() {
@@ -1518,7 +1541,6 @@ generate_backtrace_oracle() {
 }
 
 # Records gdb's variables for every frame of every thread in a core.
-readonly frame_oracle_script=scripts/frame-variables-oracle.py
 generate_frame_oracle() {
     local program="$1"
     local core="$2"
@@ -1544,6 +1566,10 @@ generate_frame_oracle() {
 
 for variant in gcc-o0 gcc-o2 gcc-o2-nopie clang-o0 clang-o2; do
     generate_frame_oracle "$output_dir/frames-${variant}" "$output_dir/frames-${variant}.core"
+done
+for variant in gcc-o2 gcc-o2-nopie clang-o2; do
+    generate_frame_oracle "$output_dir/locations-${variant}" \
+        "$output_dir/locations-${variant}.core"
 done
 for variant in gcc-o0 clang-o2 gcc-o2-nopie; do
     for kind in segv abort; do

@@ -899,7 +899,7 @@ impl Kernel {
             thread.retired += 1;
             thread
                 .shadow
-                .follow(flow, thread.registers.rip, &mut self.next_activation);
+                .follow(flow, &thread.registers, &mut self.next_activation);
         }
         if outcome != Outcome::Syscall {
             // Instructions and exceptions enter the kernel, if at all, outside

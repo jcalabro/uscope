@@ -3,8 +3,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
-use gimli::Location;
-
 use crate::debug_info::dwarf::DwarfError;
 use crate::debug_info::{
     ObjectStorage, PlannedStep, Step, StorageClass, VariableContext, VariableRuntime,
@@ -21,26 +19,24 @@ use crate::{
     VirtualAddress,
 };
 
-use super::codec::{
-    decode_address, decode_integer_value, decode_scalar, extract_bit_field, unsigned_value,
-};
+use super::codec::{decode_address, decode_integer_value, decode_scalar, unsigned_value};
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, evaluate,
-    evaluate_dynamic_aggregate_address, incomplete_piece_reason, materialize_constant,
-    materialize_pieces,
+    evaluate_dynamic_aggregate_address, materialize_constant,
 };
 use super::location::{Expression, ExpressionUse, LocationSelectionError};
+use super::pieces::storage_from_pieces;
 use super::shape::{
     ValueShape, ValueShapeError, indirection_byte_size, transparent_type_from, value_shape_from,
 };
+use super::storage;
 use super::types::{
     DynamicAggregateChild, DynamicAggregateLayoutKey, TypeResolution, type_info_from,
 };
 use super::variant::{is_single_default_variant, selected_variant_index};
 use super::{
     CatalogDataObject, CatalogFunction, DwarfVariableInfo, MAX_AGGREGATE_DEPTH,
-    MAX_EVALUATION_MEMORY_BYTES, MAX_LOCATION_PIECES, Metadata, MetadataAbsence, ValueDescription,
-    malformed_reason,
+    MAX_EVALUATION_MEMORY_BYTES, Metadata, MetadataAbsence, ValueDescription, malformed_reason,
 };
 
 /// One transition between storages, planned from types alone. Index steps
@@ -408,17 +404,20 @@ impl DwarfVariableInfo {
     }
 
     pub(super) fn function_at(&self, address: ImageAddress) -> Option<&CatalogFunction> {
+        self.function_index_at(address)
+            .map(|index| &self.functions[index])
+    }
+
+    pub(super) fn function_index_at(&self, address: ImageAddress) -> Option<usize> {
         self.address_index
             .range(..=address)
             .rev()
             .flat_map(|(_, functions)| functions.iter().copied())
-            .find_map(|index| {
-                let function = &self.functions[index];
-                function
+            .find(|index| {
+                self.functions[*index]
                     .ranges
                     .iter()
                     .any(|range| range.contains(address))
-                    .then_some(function)
             })
     }
 
@@ -878,10 +877,6 @@ impl DwarfVariableInfo {
         Ok(*index)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "location selection preserves each DWARF storage form and its typed failure"
-    )]
     pub(super) fn located_data_object(
         &self,
         variable: &CatalogDataObject,
@@ -952,152 +947,20 @@ impl DwarfVariableInfo {
         let pieces = evaluate(
             expression,
             self.endian,
+            address,
             &mut frame_base,
             &self.evaluation_units,
             runtime,
             budget,
         )?;
-        if pieces.len() > MAX_LOCATION_PIECES {
-            return Err(VariableUnavailableReason::EvaluationLimit.into());
-        }
-        let expected_bits = shape
-            .byte_size()
-            .checked_mul(8)
-            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
-        if let Some(reason) = incomplete_piece_reason(&pieces, expected_bits)? {
-            return Err(reason.into());
-        }
-        let [piece] = pieces.as_slice() else {
-            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
-        };
-        if piece.size_in_bits.is_some_and(|size| size != expected_bits)
-            || piece.bit_offset.is_some()
-        {
-            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
-        }
-        match piece.location {
-            Location::Address { address } => Ok(ValueStorage::Memory(VirtualAddress::new(address))),
-            Location::ImplicitPointer { value, byte_offset } => Ok(ValueStorage::ImplicitPointer {
-                debug_info_offset: u64::try_from(value.0)
-                    .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
-                byte_offset,
-            }),
-            _ => {
-                let (source, raw) = materialize_pieces(
-                    &pieces,
-                    shape.byte_size(),
-                    shape.scalar(),
-                    self.endian,
-                    self.target,
-                    runtime,
-                    budget,
-                )?;
-                let end = raw.len();
-                Ok(ValueStorage::Bytes {
-                    source,
-                    raw,
-                    start: 0,
-                    end,
-                    address: None,
-                })
-            }
-        }
-    }
-
-    fn storage_with_offset(
-        storage: ValueStorage,
-        offset: i64,
-    ) -> std::result::Result<ValueStorage, EvaluateError> {
-        match storage {
-            ValueStorage::Memory(address) => {
-                let value = if offset >= 0 {
-                    address.get().checked_add(offset.unsigned_abs())
-                } else {
-                    address.get().checked_sub(offset.unsigned_abs())
-                }
-                .ok_or({
-                    EvaluateError::Unavailable(VariableUnavailableReason::ValueAccess(
-                        crate::ValueAccessUnavailableReason::AddressOverflow,
-                    ))
-                })?;
-                Ok(ValueStorage::Memory(VirtualAddress::new(value)))
-            }
-            ValueStorage::Bytes {
-                source,
-                raw,
-                start,
-                end,
-                address,
-            } => {
-                let adjusted = if offset >= 0 {
-                    start.checked_add(
-                        usize::try_from(offset.unsigned_abs())
-                            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
-                    )
-                } else {
-                    start.checked_sub(
-                        usize::try_from(offset.unsigned_abs())
-                            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
-                    )
-                }
-                .filter(|adjusted| *adjusted <= end)
-                .ok_or_else(|| {
-                    EvaluateError::Malformed("member offset is outside its containing value".into())
-                })?;
-                let address = address.and_then(|address| {
-                    if offset >= 0 {
-                        address.get().checked_add(offset.unsigned_abs())
-                    } else {
-                        address.get().checked_sub(offset.unsigned_abs())
-                    }
-                    .map(VirtualAddress::new)
-                });
-                Ok(ValueStorage::Bytes {
-                    source,
-                    raw,
-                    start: adjusted,
-                    end,
-                    address,
-                })
-            }
-            ValueStorage::ImplicitPointer { .. } => Err(EvaluateError::Malformed(
-                "an unresolved implicit pointer cannot be offset".into(),
-            )),
-        }
-    }
-
-    fn read_storage(
-        storage: &ValueStorage,
-        size: usize,
-        runtime: &mut dyn VariableRuntime,
-        budget: &mut InspectionBudget,
-    ) -> std::result::Result<(VariableValueSource, Arc<[u8]>), EvaluateError> {
-        match storage {
-            ValueStorage::Memory(address) => {
-                budget.consume_memory(size)?;
-                let raw = runtime.read_memory(*address, size)?;
-                Ok((VariableValueSource::Memory(*address), raw))
-            }
-            ValueStorage::Bytes {
-                raw, start, end, ..
-            } => {
-                let selected_end = start
-                    .checked_add(size)
-                    .filter(|selected_end| *selected_end <= *end)
-                    .ok_or_else(|| {
-                        EvaluateError::Malformed(
-                            "selected value extends beyond its containing storage".into(),
-                        )
-                    })?;
-                Ok((
-                    Self::storage_source(storage),
-                    Arc::from(&raw[*start..selected_end]),
-                ))
-            }
-            ValueStorage::ImplicitPointer { .. } => Err(EvaluateError::Malformed(
-                "an unresolved implicit pointer cannot be read".into(),
-            )),
-        }
+        storage_from_pieces(
+            &pieces,
+            shape.byte_size(),
+            shape.scalar(),
+            self.endian,
+            self.target,
+            runtime,
+        )
     }
 
     fn decode_slice(
@@ -1118,7 +981,7 @@ impl DwarfVariableInfo {
                 "slice descriptor size does not match its target layout".into(),
             ));
         }
-        let (source, raw) = Self::read_storage(storage, size, runtime, budget)?;
+        let (source, raw) = storage::read(storage, size, runtime, budget)?;
         let word = |index: usize| {
             unsigned_value(
                 &raw[index * pointer_bytes..(index + 1) * pointer_bytes],
@@ -1159,26 +1022,6 @@ impl DwarfVariableInfo {
         })
     }
 
-    const fn concrete_storage_address(storage: &ValueStorage) -> Option<VirtualAddress> {
-        match storage {
-            ValueStorage::Memory(address) => Some(*address),
-            ValueStorage::Bytes { address, .. } => *address,
-            ValueStorage::ImplicitPointer { .. } => None,
-        }
-    }
-
-    /// Describes where a storage's bytes came from. Bytes read once for a
-    /// whole page of elements still report each element's own address.
-    fn storage_source(storage: &ValueStorage) -> VariableValueSource {
-        match storage {
-            ValueStorage::Memory(address) => VariableValueSource::Memory(*address),
-            ValueStorage::Bytes {
-                source, address, ..
-            } => address.map_or_else(|| source.clone(), VariableValueSource::Memory),
-            ValueStorage::ImplicitPointer { .. } => VariableValueSource::ImplicitPointer,
-        }
-    }
-
     fn child_reference(
         storage: &ValueStorage,
         context: VariableContext,
@@ -1203,7 +1046,7 @@ impl DwarfVariableInfo {
 
     fn bit_field_storage(
         &self,
-        storage: ValueStorage,
+        storage: &ValueStorage,
         type_id: TypeId,
         bit_offset: u64,
         bit_size: u64,
@@ -1231,27 +1074,14 @@ impl DwarfVariableInfo {
                 "bit-field width exceeds its declared scalar storage".into(),
             ));
         }
-        let first_byte = bit_offset / 8;
-        let last_bit = bit_offset
-            .checked_add(bit_size)
-            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
-        let last_byte = last_bit
-            .checked_add(7)
-            .ok_or(VariableUnavailableReason::EvaluationLimit)?
-            / 8;
-        let span = last_byte
-            .checked_sub(first_byte)
-            .and_then(|size| usize::try_from(size).ok())
-            .ok_or(VariableUnavailableReason::EvaluationLimit)?;
-        let selected = Self::storage_with_offset(
+        let mut value = storage::read_bits(
             storage,
-            i64::try_from(first_byte).map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+            bit_offset,
+            bit_size,
+            self.target.byte_order,
+            runtime,
+            budget,
         )?;
-        let (_, bytes) = Self::read_storage(&selected, span, runtime, budget)?;
-        let relative_offset = bit_offset % 8;
-        let mut value =
-            extract_bit_field(&bytes, relative_offset, bit_size, self.target.byte_order)
-                .map_err(EvaluateError::Malformed)?;
         if matches!(
             base.encoding,
             BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter
@@ -1286,7 +1116,7 @@ impl DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<ValueStorage, EvaluateError> {
-        let object_address = Self::concrete_storage_address(storage).ok_or({
+        let object_address = storage::concrete_address(storage).ok_or({
             EvaluateError::Unavailable(VariableUnavailableReason::ValueAccess(
                 crate::ValueAccessUnavailableReason::NoConcreteObjectAddress,
             ))
@@ -1367,7 +1197,7 @@ impl DwarfVariableInfo {
         )?;
         let size = usize::try_from(representation.byte_size)
             .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
-        let (_, raw) = Self::read_storage(&selected, size, runtime, budget)?;
+        let (_, raw) = storage::read(&selected, size, runtime, budget)?;
         let value = decode_integer_value(representation, &raw, self.target.byte_order)
             .map_err(EvaluateError::Malformed)?;
         let active = selected_variant_index(variants, value).map_err(EvaluateError::Malformed)?;
@@ -1388,15 +1218,20 @@ impl DwarfVariableInfo {
         frame_base_cache: &mut FrameBaseCache,
         budget: &mut InspectionBudget,
     ) -> std::result::Result<ValueStorage, EvaluateError> {
-        let object_index = self
+        let Some(object_index) = self
             .objects_by_debug_offset
             .get(&debug_info_offset)
             .copied()
-            .ok_or_else(|| {
-                EvaluateError::Unavailable(
-                    crate::UnsupportedVariableFeature::CrossDieEvaluation.into(),
-                )
-            })?;
+        else {
+            return self.procedure_referent(
+                debug_info_offset,
+                byte_offset,
+                target,
+                address,
+                runtime,
+                budget,
+            );
+        };
         let object = &self.objects[object_index];
         let referenced_type = match &object.type_info {
             TypeResolution::Resolved(id) => *id,
@@ -1415,7 +1250,82 @@ impl DwarfVariableInfo {
                 crate::UnsupportedVariableFeature::CrossDieEvaluation.into(),
             ));
         }
-        Self::storage_with_offset(referenced, byte_offset)
+        storage::offset(referenced, byte_offset)
+    }
+
+    /// The bytes an implicit pointer points at in a `DW_TAG_dwarf_procedure`,
+    /// such as a string literal GCC keeps as an implicit value, which bounds
+    /// it.
+    fn procedure_referent(
+        &self,
+        debug_info_offset: u64,
+        byte_offset: i64,
+        target: TypeId,
+        address: Option<ImageAddress>,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> std::result::Result<ValueStorage, EvaluateError> {
+        let procedure = self.procedures.get(&debug_info_offset).ok_or_else(|| {
+            EvaluateError::Unavailable(crate::UnsupportedVariableFeature::CrossDieEvaluation.into())
+        })?;
+        let location = match &procedure.location {
+            Metadata::Value(location) => location,
+            Metadata::Absent(_) => {
+                return Err(VariableUnavailableReason::OptimizedOut(
+                    crate::OptimizedOutReason::NoLocation,
+                )
+                .into());
+            }
+            Metadata::Malformed(description) => {
+                return Err(EvaluateError::Malformed(Arc::clone(description)));
+            }
+        };
+        let expression = location
+            .expression(address)
+            .map_err(|error| match error {
+                LocationSelectionError::Unavailable(reason) => EvaluateError::Unavailable(reason),
+                LocationSelectionError::Malformed(description) => {
+                    EvaluateError::Malformed(description)
+                }
+            })?
+            .ok_or(EvaluateError::Unavailable(
+                VariableUnavailableReason::UnavailableAtInstruction,
+            ))?;
+        // A procedure belongs to no function, so it has no frame base.
+        let pieces = evaluate(
+            expression,
+            self.endian,
+            address,
+            &mut FrameBase::Unsupported,
+            &self.evaluation_units,
+            runtime,
+            budget,
+        )?;
+        let [
+            gimli::Piece {
+                size_in_bits: None,
+                bit_offset: None,
+                location: gimli::Location::Bytes { value },
+            },
+        ] = pieces.as_slice()
+        else {
+            return Err(crate::UnsupportedVariableFeature::ImplicitPointer.into());
+        };
+        let raw: Arc<[u8]> = Arc::from(value.slice());
+        let target_size = self.value_shape(target)?.byte_size();
+        let (start, _) = implicit_pointer_range(byte_offset, target_size, raw.len() as u64)
+            .map_err(EvaluateError::Unavailable)?;
+        // What follows the referent, such as the rest of a string, is the
+        // procedure's too.
+        let end = raw.len();
+        Ok(ValueStorage::Bytes {
+            source: VariableValueSource::Constant,
+            raw,
+            start: usize::try_from(start)
+                .map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
+            end,
+            address: None,
+        })
     }
 
     /// Applies planned steps to storage, with `indices` as the values of
@@ -1455,6 +1365,7 @@ impl DwarfVariableInfo {
                     byte_size,
                     address_class,
                 } => {
+                    storage = storage::narrow(storage, *byte_size);
                     if let ValueStorage::ImplicitPointer {
                         debug_info_offset,
                         byte_offset,
@@ -1483,8 +1394,7 @@ impl DwarfVariableInfo {
                             attempt!(usize::try_from(*byte_size).map_err(|_| {
                                 VariableUnavailableReason::EvaluationLimit.into()
                             }));
-                        let (_, raw) =
-                            attempt!(Self::read_storage(&storage, size, runtime, budget));
+                        let (_, raw) = attempt!(storage::read(&storage, size, runtime, budget));
                         let pointer = attempt!(decode_address(&raw, *byte_size, self.target));
                         if pointer.get() == 0 {
                             return Ok(Err(EvaluateError::Unavailable(
@@ -1498,7 +1408,7 @@ impl DwarfVariableInfo {
                 }
                 PathStep::ArrayIndex { .. } => {
                     let byte_offset = array_byte_offset(step, indices)?.unwrap_or_default();
-                    attempt!(Self::storage_with_offset(storage, byte_offset))
+                    attempt!(storage::offset(storage, byte_offset))
                 }
                 PathStep::SliceIndex {
                     element_size,
@@ -1539,7 +1449,7 @@ impl DwarfVariableInfo {
                             .and_then(|offset| i64::try_from(offset).ok())
                             .ok_or_else(|| VariableUnavailableReason::EvaluationLimit.into())
                     );
-                    attempt!(Self::storage_with_offset(
+                    attempt!(storage::offset(
                         ValueStorage::Memory(decoded.address),
                         byte_offset,
                     ))
@@ -1668,6 +1578,7 @@ impl DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<VariableState> {
+        let storage = &storage::narrow(storage.clone(), shape.byte_size());
         let leaf = |source, raw, value, dereference| VariableState::Available {
             source,
             raw: Some(raw),
@@ -1678,7 +1589,7 @@ impl DwarfVariableInfo {
             presentation: None,
         };
         let with_children = |value, total, active| VariableState::Available {
-            source: Self::storage_source(storage),
+            source: storage::source(storage),
             raw: None,
             value,
             dereference: DereferenceState::NotApplicable,
@@ -1695,7 +1606,7 @@ impl DwarfVariableInfo {
              -> std::result::Result<(VariableValueSource, Arc<[u8]>), EvaluateError> {
                 let size = usize::try_from(size)
                     .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
-                Self::read_storage(storage, size, runtime, budget)
+                storage::read(storage, size, runtime, budget)
             };
         Ok(match shape {
             ValueShape::Scalar(base) => match read(base.byte_size, runtime, budget) {
@@ -1955,21 +1866,14 @@ impl DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> std::result::Result<ValueStorage, EvaluateError> {
         match layout {
-            RecordMemberLayout::ByteOffset(offset) => Self::storage_with_offset(
+            RecordMemberLayout::ByteOffset(offset) => storage::offset(
                 storage.clone(),
                 i64::try_from(offset).map_err(|_| VariableUnavailableReason::EvaluationLimit)?,
             ),
             RecordMemberLayout::BitRange {
                 bit_offset,
                 bit_size,
-            } => self.bit_field_storage(
-                storage.clone(),
-                type_id,
-                bit_offset,
-                bit_size,
-                runtime,
-                budget,
-            ),
+            } => self.bit_field_storage(storage, type_id, bit_offset, bit_size, runtime, budget),
             RecordMemberLayout::Runtime => {
                 self.runtime_member_storage(storage, aggregate, child, runtime, budget)
             }
@@ -2142,9 +2046,7 @@ impl DwarfVariableInfo {
                             let first = offset
                                 .checked_mul(stride)
                                 .and_then(|offset| i64::try_from(offset).ok())
-                                .and_then(|offset| {
-                                    Self::storage_with_offset(storage.clone(), offset).ok()
-                                });
+                                .and_then(|offset| storage::offset(storage.clone(), offset).ok());
                             match (first, span) {
                                 (Some(first), Some(span))
                                     if span <= MAX_EVALUATION_MEMORY_BYTES
@@ -2153,7 +2055,7 @@ impl DwarfVariableInfo {
                                             span <= budget.remaining_memory_bytes()
                                         }) =>
                                 {
-                                    Self::read_storage(&first, span, runtime, budget).ok().map(
+                                    storage::read(&first, span, runtime, budget).ok().map(
                                         |(source, raw)| {
                                             let end = raw.len();
                                             ValueStorage::Bytes {
@@ -2161,7 +2063,7 @@ impl DwarfVariableInfo {
                                                 raw,
                                                 start: 0,
                                                 end,
-                                                address: Self::concrete_storage_address(&first),
+                                                address: storage::concrete_address(&first),
                                             }
                                         },
                                     )
@@ -2262,7 +2164,7 @@ impl DwarfVariableInfo {
                         .and_then(|offset| i64::try_from(offset).ok())
                         .ok_or_else(|| VariableUnavailableReason::EvaluationLimit.into())
                         .and_then(|offset| {
-                            Self::storage_with_offset(
+                            storage::offset(
                                 linear_storage.clone().unwrap_or_else(|| storage.clone()),
                                 offset,
                             )

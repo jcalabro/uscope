@@ -61,8 +61,8 @@ fn rendered(kind: &str, value: &VariableValue) -> Option<String> {
 }
 
 /// Runs a fixture to `barrier`, selects its caller, and checks every
-/// expectation. In optimized builds a row may be explicitly unavailable;
-/// a different value always fails.
+/// expectation. In optimized builds a row may be explicitly unavailable, or
+/// refused for want of an address; a different value always fails.
 async fn check_fixture(fixture: &str, barrier: &str, optimized: bool) {
     let scratch = ScratchDir::new("expressions");
     let output_path = scratch.path().join("stdout");
@@ -127,6 +127,12 @@ async fn check_fixture(fixture: &str, barrier: &str, optimized: bool) {
                 VariableState::Unavailable(_) if optimized && cause.is_some() => continue,
                 state => format!("{state:?} at {cause:?}"),
             },
+            // An optimized value may be kept where it has no address.
+            Err(Error::Expression(error))
+                if optimized && error.kind == uscope::ExpressionErrorKind::NotAnLvalue =>
+            {
+                continue;
+            }
             other => format!("{other:?}"),
         };
         failures.push(format!("`{}`: {message}", expectation.expression));

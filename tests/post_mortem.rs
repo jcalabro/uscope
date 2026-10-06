@@ -272,13 +272,13 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
             )
             .await;
         if variant == "gcc-o2-nopie" {
-            // GCC describes the dead pointer only by its caller-side entry
-            // value, which is reported rather than guessed.
+            // GCC describes the dead pointer only by the value its caller
+            // passed, and the call describes none.
             assert!(
                 matches!(
                     &record.state,
-                    VariableState::Unavailable(VariableUnavailableReason::Unsupported(
-                        uscope::UnsupportedVariableFeature::ParameterReference
+                    VariableState::Unavailable(VariableUnavailableReason::EntryValue(
+                        uscope::EntryValueUnavailableReason::NoParameter
                     ))
                 ),
                 "{variant}: {record:?}"

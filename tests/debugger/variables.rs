@@ -1058,11 +1058,16 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
                 "{fixture}: {:?}",
                 snapshot.variables[0]
             );
+            // Their values on entry are all Clang keeps, and `main`'s call
+            // does not say what it passed.
             for index in 1..4 {
-                assert_unsupported(
-                    &snapshot.variables[index],
-                    uscope::UnsupportedVariableFeature::EntryValue,
-                    fixture,
+                assert_eq!(
+                    snapshot.variables[index].state,
+                    VariableState::Unavailable(VariableUnavailableReason::EntryValue(
+                        uscope::EntryValueUnavailableReason::NoParameter
+                    )),
+                    "{fixture}: {:?}",
+                    snapshot.variables[index]
                 );
             }
             assert_register_source(&snapshot.variables[4], "r8", fixture);
@@ -1072,10 +1077,19 @@ fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixtur
             }
             assert_register_source(&snapshot.variables[12], "xmm0", fixture);
             assert_register_source(&snapshot.variables[13], "xmm1", fixture);
-            assert_unsupported(
-                &snapshot.variables[14],
-                uscope::UnsupportedVariableFeature::CompositeLocation,
-                fixture,
+            // Clang describes the x87 value's 80 bits but not its padding.
+            assert_eq!(
+                snapshot.variables[14].state,
+                VariableState::Unavailable(VariableUnavailableReason::OptimizedOut(
+                    uscope::OptimizedOutReason::UndefinedPieces {
+                        ranges: Arc::from([uscope::ValueBitRange {
+                            offset: 80,
+                            size: 48
+                        }]),
+                    }
+                )),
+                "{fixture}: {:?}",
+                snapshot.variables[14]
             );
         }
         _ => panic!("unexpected optimized parameter fixture {fixture}"),
@@ -1110,18 +1124,6 @@ fn assert_memory_source(variable: &uscope::Variable, fixture: &str) {
         source: uscope::VariableValueSource::Memory(address),
         ..
     } if address.get() != 0),
-        "{fixture}: {variable:?}"
-    );
-}
-
-fn assert_unsupported(
-    variable: &uscope::Variable,
-    feature: uscope::UnsupportedVariableFeature,
-    fixture: &str,
-) {
-    assert_eq!(
-        variable.state,
-        VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(feature)),
         "{fixture}: {variable:?}"
     );
 }
@@ -1166,10 +1168,13 @@ fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, 
         assert_variable_value(&snapshot.variables[index], expected[index].clone());
     }
     if fixture == "variables-cpp-clang-o2" {
-        assert_unsupported(
-            &snapshot.variables[1],
-            uscope::UnsupportedVariableFeature::EntryValue,
-            fixture,
+        assert_eq!(
+            snapshot.variables[1].state,
+            VariableState::Unavailable(VariableUnavailableReason::EntryValue(
+                uscope::EntryValueUnavailableReason::NoParameter
+            )),
+            "{fixture}: {:?}",
+            snapshot.variables[1]
         );
     }
     if fixture != "variables-cpp-gcc-o2" {

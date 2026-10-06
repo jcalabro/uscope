@@ -286,14 +286,17 @@ s && true                          => error type at `s`
 ## Pointers, arrays, and members
 
 `*p` dereferences, `&x` takes an address, `p[i]` is `*(p + i)`, and `p + n`
-moves by `n` elements. `p - q` counts the elements between two pointers,
-which must be a whole number of elements apart. Elements of a zero-sized
-type, such as Rust's `()`, all share one address, so a pointer to one moves
-nowhere and two such pointers have no count between them. Pointers compare
-with pointers, `null`, and `0`; to compare an address with another number,
-cast the pointer. Arrays index by each of their dimensions, and decay to a
-pointer to their first element in arithmetic. A slice's index is checked
-against its length when the expression runs.
+moves by `n` elements. Only a value in memory has an address: one optimized
+code keeps in a register, computes, or splits across several places has
+none, though a member of it that lies in memory does. `p - q` counts the
+elements between two pointers, which must be a whole number of elements
+apart. Elements of a zero-sized type, such as Rust's `()`, all share one
+address, so a pointer to one moves nowhere and two such pointers have no
+count between them. Pointers compare with pointers, `null`, and `0`; to
+compare an address with another number, cast the pointer. Arrays index by
+each of their dimensions, and decay to a pointer to their first element in
+arithmetic. A slice's index is checked against its length when the
+expression runs.
 
 ```uscope-example
 world: memory

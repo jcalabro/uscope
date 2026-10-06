@@ -9,7 +9,7 @@
 //! passed.
 
 use super::Tid;
-use crate::sim::cpu::Flow;
+use crate::sim::cpu::{Flow, Registers};
 
 /// A call a thread made and has not returned from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +20,10 @@ pub struct Call {
     pub slot: u64,
     /// The activation the call began.
     pub activation: u64,
+    /// Where the call went.
+    pub target: u64,
+    /// The general registers the callee was entered with.
+    pub entry: [u64; 16],
 }
 
 /// A thread's calls, as the CPU executed them.
@@ -47,9 +51,11 @@ impl Shadow {
         self.calls.len()
     }
 
-    /// Follows an instruction that completed, leaving `rip` as it left it.
-    /// A new activation takes `next_activation`, which is then advanced.
-    pub(super) fn follow(&mut self, flow: Flow, rip: u64, next_activation: &mut u64) {
+    /// Follows an instruction that completed, leaving `registers` as it
+    /// left them. A new activation takes `next_activation`, which is then
+    /// advanced.
+    pub(super) fn follow(&mut self, flow: Flow, registers: &Registers, next_activation: &mut u64) {
+        let rip = registers.rip;
         match flow {
             Flow::Call {
                 return_address,
@@ -59,6 +65,8 @@ impl Shadow {
                     return_address,
                     slot,
                     activation: *next_activation,
+                    target: rip,
+                    entry: registers.general,
                 });
                 *next_activation += 1;
             }

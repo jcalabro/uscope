@@ -377,8 +377,9 @@ scheduling, or transparency would fail sessions for nothing.
 
 **Facts.** `facts.json` holds, for every variant, its functions from `nm`,
 its line table rows from `readelf --debug-dump=decodedline`, the addresses
-`--debug-dump=rawline` marks `epilogue_begin`, whether it was optimized,
-and how many inlined calls its DWARF describes. Coming from GNU binutils
+`--debug-dump=rawline` marks `epilogue_begin`, the address ranges where
+`--debug-dump=loc` says a variable is exactly a register's entry value,
+whether it was optimized, and how many inlined calls its DWARF describes. Coming from GNU binutils
 rather than uscope, they let the stepping oracle check uscope against
 another implementation. Rows at one address collapse as gdb collapses them,
 and a row never describes code past the start of another function (GCC's
@@ -583,6 +584,13 @@ judged once its stop is over or its process is ending.
   says it read them; `&x` is where the view says `x` lives; sums,
   differences, and products of integer variables are exact; casts keep the
   low bits; and an ill-typed expression is refused.
+- *Entry values:* where binutils say a variable of the innermost frame is
+  exactly what a register held when its function was entered
+  (`DW_OP_entry_value(DW_OP_regN); DW_OP_stack_value`), a value the
+  debugger shows for it is what that register held when the call that
+  began the activation entered the function; the shadow call stack
+  records each call's target and registers. An activation a jump entered
+  is not judged, nor a name two variables in view share.
 - *Views* (`views.rs`): a container's presentation is what its view makes
   of memory, walked exactly as `containers.views` says from the program's
   C layout, never from uscope's reading of the debug information: its

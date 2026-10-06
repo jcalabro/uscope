@@ -158,12 +158,57 @@ manifest() {
     printf '\n  ]\n}\n'
 }
 
+# Prints, as [name, start, end, register], the addresses where BINARY's
+# location lists say a variable's value is exactly what a register held
+# when its function was entered (DW_OP_entry_value), which only the
+# caller's call site recovers. A concrete instance names its variable through its abstract
+# origin. Location list offsets are the section's own in readelf's output.
+entry_values() {
+    awk 'FNR == NR {
+            if (/<End of list>/) { list = ""; next }
+            if (/location view pair/) next
+            if (list == "" && match($0, /^ +([0-9a-f]{8}) /, found)) list = strtonum("0x" found[1])
+            if (match($0, /([0-9a-f]{16}) ([0-9a-f]{16}) \(DW_OP_(GNU_)?entry_value: \(DW_OP_reg[0-9]+ \(([a-z0-9]+)\)\); DW_OP_stack_value\)$/, found)) {
+                ranges[list] = ranges[list] " " strtonum("0x" found[1]) ":" strtonum("0x" found[2]) ":" found[4]
+            }
+            next
+         }
+         function flush() {
+            if (die != "" && location != "") lists[die] = location
+            if (die != "" && name != "") names[die] = name
+            if (die != "" && origin != "") origins[die] = origin
+            die = name = origin = location = ""
+         }
+         match($0, /^ *<[0-9]+><([0-9a-f]+)>: Abbrev Number/, found) { flush(); die = strtonum("0x" found[1]); next }
+         /DW_AT_name / { name = $NF }
+         match($0, /DW_AT_abstract_origin: \([a-z_0-9]+\) <0x([0-9a-f]+)>/, found) { origin = strtonum("0x" found[1]) }
+         match($0, /DW_AT_location *:.* (0x[0-9a-f]+) \(location list\)/, found) { location = strtonum(found[1]) }
+         END {
+            flush()
+            PROCINFO["sorted_in"] = "@ind_num_asc"
+            for (die in lists) {
+                variable = die
+                for (hops = 0; !(variable in names) && (variable in origins) && hops < 8; hops++) {
+                    variable = origins[variable]
+                }
+                if (!(variable in names) || !(lists[die] in ranges)) continue
+                count = split(substr(ranges[lists[die]], 2), pairs, " ")
+                for (entry = 1; entry <= count; entry++) {
+                    split(pairs[entry], bounds, ":")
+                    printf "%s        [\"%s\", %d, %d, \"%s\"]", separator, names[variable], bounds[1], bounds[2], bounds[3]
+                    separator = ",\n"
+                }
+            }
+            printf "\n"
+         }' <(readelf -W --debug-dump=loc "$1") <(readelf -W --debug-dump=info "$1")
+}
+
 # Prints what GNU binutils, not uscope, say about each variant of program
 # NAME: its functions from the symbol table, its line table rows in program
-# order, and how many inlined calls its debug information describes. The
-# simulator's semantic oracles judge the debugger by these. A row is
-# [address, file, line, statement]; line 0 names no source, and -1 ends a
-# sequence.
+# order, how many inlined calls its debug information describes, and where
+# variables are computed from entry values. The simulator's semantic
+# oracles judge the debugger by these. A row is [address, file, line,
+# statement]; line 0 names no source, and -1 ends a sequence.
 facts() {
     local name="$1"
     local separator="" variant
@@ -209,7 +254,9 @@ facts() {
                     separator = ", "
                     pending = 0
                  }'
-        printf ']\n    }'
+        printf '],\n      "entry_values": [\n'
+        entry_values "$binary"
+        printf '      ]\n    }'
         separator=$',\n'
     done
     printf '\n  ]\n}\n'
