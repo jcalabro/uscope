@@ -101,8 +101,10 @@ func main() {
 		queue:   make(chan int, 4),
 	}
 	// Enough entries for several groups; a key is found by searching
-	// them, as far as an inspection's memory reads allow.
-	for index := 1; index <= 100; index++ {
+	// them. The hash seed differs on every run, and with it where each
+	// key lies, so the map is small enough that two searches of every
+	// group fit an inspection's memory reads whatever the order.
+	for index := 1; index <= 40; index++ {
 		f.squares[index] = index * index
 	}
 	f.queue <- 1
@@ -165,7 +167,7 @@ func main() {
 		expect(`f.ages["zed"]`, "error", "missing-key")
 	}
 	expect("f.squares[3]", "int", f.squares[3])
-	expect("f.squares[99] + f.squares[1]", "int", f.squares[99]+f.squares[1])
+	expect("f.squares[40] + f.squares[1]", "int", f.squares[40]+f.squares[1])
 	expect("f.squares[2.0]", "int", f.squares[int(2.0)])
 	expect(`f.squares["3"]`, "error", "type")
 	if _, held := f.squares[0]; !held {
