@@ -725,8 +725,13 @@ are:
   of a sequence or map is `len(v)`, in any expression: `break f if
   len(queue) > 100`. A Go channel is indexed this way too, though it is
   stored as a pointer, because Go never indexes one as a pointer. An
-  element in memory can be assigned and its address taken. A map is
-  indexed neither by position nor by key.
+  element in memory can be assigned and its address taken.
+- A value presented as a map is indexed by key, `m["k"]` or `m[3]`, never
+  by position: its entries are searched in order for the key `==` would
+  call equal, and a key it does not hold is an error. The values must be
+  places, as an entry's value in memory is.
+- A view's field named `capacity` is what `cap(v)` gives, as the built-in
+  views of vectors, strings, and channels name theirs.
 - A debug adapter client sees a presented value's elements or entries as
   indexed variables, in pages, and its fields and `[raw]` as named ones. An
   entry is named by its key, and evaluates as the place its value is in,
