@@ -333,7 +333,6 @@ impl std::str::FromStr for HitCondition {
 /// An immutable logical breakpoint and all locations resolved for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Breakpoint {
-    /// The breakpoint's session-scoped identifier.
     pub id: BreakpointId,
     /// The user intent that created the breakpoint.
     pub spec: BreakpointSpec,
@@ -519,12 +518,6 @@ pub struct WatchTarget {
 }
 
 impl WatchTarget {
-    /// Returns the stopped snapshot that resolved this target.
-    #[must_use]
-    pub const fn stop_id(&self) -> StopId {
-        self.stop_id
-    }
-
     /// Returns the expression that named the object.
     #[must_use]
     pub const fn expression(&self) -> &crate::Expression {
@@ -541,12 +534,6 @@ impl WatchTarget {
     #[must_use]
     pub const fn byte_size(&self) -> u64 {
         self.byte_size
-    }
-
-    /// Returns the object's resolved type.
-    #[must_use]
-    pub const fn type_info(&self) -> Option<&crate::TypeInfo> {
-        self.type_info.as_ref()
     }
 
     /// Returns the lifetime that bounds the object's storage.
@@ -573,7 +560,6 @@ pub enum WatchpointSpec {
 /// An armed hardware watchpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watchpoint {
-    /// The watchpoint's session-scoped identifier.
     pub id: WatchpointId,
     /// The accesses it reports.
     pub access: WatchAccess,
@@ -1297,19 +1283,6 @@ pub enum Request {
         bytes: Arc<[u8]>,
         reply: Reply<u64>,
     },
-    ReadWord {
-        process_id: ProcessId,
-        stop_id: StopId,
-        address: VirtualAddress,
-        reply: Reply<u64>,
-    },
-    WriteWord {
-        process_id: ProcessId,
-        stop_id: StopId,
-        address: VirtualAddress,
-        value: u64,
-        reply: Reply<()>,
-    },
     LoadedModule {
         reply: Reply<LoadedModule>,
     },
@@ -1507,12 +1480,6 @@ impl Request {
                 bytes,
                 ..
             } => format!("write {} bytes at {address} {stop_id:?}", bytes.len()),
-            Self::WriteWord {
-                stop_id,
-                address,
-                value,
-                ..
-            } => format!("write word {value:#x} at {address} {stop_id:?}"),
             Self::SetSignalPolicy { signal, policy, .. } => {
                 format!("set signal policy {signal} {policy:?}")
             }
@@ -1520,7 +1487,6 @@ impl Request {
             Self::ResolveWatchTarget { .. } => "resolve watch target".to_owned(),
             Self::RemoveAllWatchpoints { .. } => "remove all watchpoints".to_owned(),
             Self::ReadMemory { .. } => "read memory".to_owned(),
-            Self::ReadWord { .. } => "read word".to_owned(),
             Self::LoadedModule { .. } => "loaded module".to_owned(),
             Self::LoadedModules { .. } => "loaded modules".to_owned(),
             Self::ModuleImage { .. } => "module image".to_owned(),

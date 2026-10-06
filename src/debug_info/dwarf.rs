@@ -1282,7 +1282,6 @@ fn load_lines(
             }
             let flags = StatementFlags::empty()
                 .with_statement(row.is_stmt())
-                .with_basic_block(row.basic_block())
                 .with_prologue_end(row.prologue_end())
                 .with_epilogue_begin(row.epilogue_begin());
             let row_ordinal = ordinal;
