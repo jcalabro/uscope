@@ -781,22 +781,37 @@ impl SimController {
     /// The controller's beliefs about the inferior.
     #[must_use]
     pub fn truth(&self) -> Truth {
-        let Some(inferior) = self.controller.inferior.as_ref() else {
-            return Truth {
-                breakpoints: self
-                    .controller
-                    .breakpoints
+        let inferior = self.controller.inferior.as_ref();
+        let breakpoints = self
+            .controller
+            .breakpoints
+            .iter()
+            .map(|breakpoint| {
+                let addresses = inferior
                     .iter()
-                    .map(|breakpoint| {
-                        (
-                            breakpoint.id.get(),
-                            UserBreakpoint {
-                                addresses: BTreeSet::new(),
-                                hit_count: breakpoint.hit_count,
-                            },
-                        )
+                    .flat_map(|inferior| {
+                        breakpoint.locations.iter().filter_map(|resolved| {
+                            super::breakpoints::runtime_breakpoint_address(
+                                inferior,
+                                resolved.location,
+                            )
+                            .ok()
+                        })
                     })
-                    .collect(),
+                    .map(VirtualAddress::get)
+                    .collect();
+                (
+                    breakpoint.id.get(),
+                    UserBreakpoint {
+                        addresses,
+                        hit_count: breakpoint.hit_count,
+                    },
+                )
+            })
+            .collect();
+        let Some(inferior) = inferior else {
+            return Truth {
+                breakpoints,
                 ..Truth::default()
             };
         };
@@ -849,32 +864,7 @@ impl SimController {
                 .iter()
                 .filter_map(|(pid, thread)| Some((pid.as_raw(), thread.reason.clone()?)))
                 .collect(),
-            breakpoints: self
-                .controller
-                .breakpoints
-                .iter()
-                .map(|breakpoint| {
-                    let addresses = breakpoint
-                        .locations
-                        .iter()
-                        .filter_map(|resolved| {
-                            super::breakpoints::runtime_breakpoint_address(
-                                inferior,
-                                resolved.location,
-                            )
-                            .ok()
-                        })
-                        .map(VirtualAddress::get)
-                        .collect();
-                    (
-                        breakpoint.id.get(),
-                        UserBreakpoint {
-                            addresses,
-                            hit_count: breakpoint.hit_count,
-                        },
-                    )
-                })
-                .collect(),
+            breakpoints,
         }
     }
 }

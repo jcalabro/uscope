@@ -113,11 +113,6 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.reply_execution(result, scope, reply);
     }
 
-    pub(super) fn pause(&mut self, process_id: ProcessId, reply: Reply<ExecutionId>) {
-        let result = self.begin_pause(process_id);
-        let _ = reply.send(result);
-    }
-
     pub(super) fn begin_execution(
         &mut self,
         requested_process: ProcessId,
@@ -548,25 +543,23 @@ impl<P: LinuxTraceOps> Controller<P> {
         match stop {
             ClassifiedStop::ThreadStart => self.handle_thread_start(pid),
             ClassifiedStop::DebuggerRequested => {
-                let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-                let thread = inferior.thread_mut(pid)?;
+                let thread = self
+                    .inferior
+                    .as_mut()
+                    .ok_or(Error::NotRunning)?
+                    .thread_mut(pid)?;
                 thread.reason = None;
                 thread.debugger_stop_pending = false;
-                if inferior.barrier.is_some() {
-                    self.finish_barrier_if_ready()
-                } else {
-                    self.restart_after_internal(pid)
-                }
+                self.restart_after_internal(pid)
             }
             ClassifiedStop::RemovedTrap => {
                 record!("{pid} executed a trap before its site was removed");
-                let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-                inferior.thread_mut(pid)?.reason = None;
-                if inferior.barrier.is_some() {
-                    self.finish_barrier_if_ready()
-                } else {
-                    self.restart_after_internal(pid)
-                }
+                self.inferior
+                    .as_mut()
+                    .ok_or(Error::NotRunning)?
+                    .thread_mut(pid)?
+                    .reason = None;
+                self.restart_after_internal(pid)
             }
             ClassifiedStop::Breakpoint(address) => self.handle_breakpoint_stop(pid, address),
             ClassifiedStop::Watch(owners) => self.handle_watch_stop(pid, owners),
@@ -762,24 +755,15 @@ impl<P: LinuxTraceOps> Controller<P> {
                     .ok_or(Error::NotRunning)?
                     .thread_mut(pid)?
                     .expected = expected;
-                if self.barrier_active() {
-                    self.finish_barrier_if_ready()
-                } else {
-                    self.restart_after_internal(pid)
-                }
+                self.restart_after_internal(pid)
             }
         }
     }
 
-    /// Publishes a watchpoint stop for an instruction that accessed watched
-    /// memory. When the instruction was a breakpoint repair step it has
-    /// already executed, so its repair is complete; the site is reinstalled
-    /// when the stop is published. A thread awaiting its breakpoint after
-    /// signal delivery still re-traps there once resumed.
-    ///
-    /// The stop becomes internal if, once every thread is stopped, no hit
-    /// remains to report, so a stepping thread's instruction counts toward
-    /// its step.
+    /// Stops for an instruction that accessed watched memory. A repair step's
+    /// instruction has executed, which completes the repair. The stop turns
+    /// internal if no hit remains to report once every thread is stopped, and
+    /// a stepping thread's instruction then counts toward its step.
     pub(super) fn finish_watched_instruction(
         &mut self,
         pid: Pid,
@@ -997,20 +981,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             address: VirtualAddress::new(registers.rip),
             stack: registers.rsp,
         };
-        let execution = self
-            .inferior
-            .as_ref()
-            .and_then(|inferior| inferior.active.as_ref())
-            .map(|active| active.id)
-            .ok_or(Error::NotRunning)?;
+        let execution = self.active_execution()?;
         self.install_additional_plan_breakpoints(execution, &BTreeSet::from([guard.address]))?;
-        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        if let Some(ActiveKind::Step { start, .. }) =
-            inferior.active.as_mut().map(|active| &mut active.kind)
-        {
+        if let Some(start) = self.active_step_mut() {
             start.signal_guard = Some(guard);
         }
-        let thread = inferior.thread_mut(pid)?;
+        let thread = self
+            .inferior
+            .as_mut()
+            .ok_or(Error::NotRunning)?
+            .thread_mut(pid)?;
         thread.pending_signal = Some(pending);
         thread.expected = ExpectedStop::None;
         if barrier {
@@ -1059,12 +1039,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             self.repair_when_alone(pid, address)?;
             return Ok(true);
         }
-        if let Some(ActiveKind::Step { start, .. }) = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .map(|active| &mut active.kind)
-        {
+        if let Some(start) = self.active_step_mut() {
             start.signal_guard = None;
         }
         if planned {
@@ -1254,8 +1229,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let edits = self
             .inferior
             .as_mut()
-            .and_then(|inferior| inferior.barrier.as_mut())
-            .map(|barrier| std::mem::take(&mut barrier.edits))
+            .map(Inferior::take_pending_edits)
             .unwrap_or_default();
         for edit in edits {
             self.apply_edit(edit);
@@ -1277,11 +1251,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         {
             self.cleanup_plan_breakpoints(execution)?;
         }
-        // Once the inferior has replaced its image via exec(2), the loaded
-        // modules and loader rendezvous no longer correspond to `self.executable`.
-        // Refreshing against the stale executable would read the new address
-        // space through the old image and can fail the whole stop, killing the
-        // inferior instead of surfacing the exec stop.
+        // An image exec(2) replaced has no loader rendezvous to follow.
         let exec_replaced = self
             .inferior
             .as_ref()
@@ -1351,7 +1321,12 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
+    /// Resumes a thread whose stop publishes nothing as it was going, or
+    /// leaves it stopped for the barrier in progress.
     pub(super) fn restart_after_internal(&mut self, pid: Pid) -> Result<()> {
+        if self.barrier_active() {
+            return self.finish_barrier_if_ready();
+        }
         let expected = self
             .inferior
             .as_ref()

@@ -35,6 +35,22 @@ use super::{
 };
 
 impl<P: LinuxTraceOps> Controller<P> {
+    pub(super) fn active_execution(&self) -> Result<ExecutionId> {
+        self.inferior
+            .as_ref()
+            .and_then(|inferior| inferior.active.as_ref())
+            .map(|active| active.id)
+            .ok_or(Error::NotRunning)
+    }
+
+    /// The state of the active step, if one is active.
+    pub(super) fn active_step_mut(&mut self) -> Option<&mut StepStart> {
+        match &mut self.inferior.as_mut()?.active.as_mut()?.kind {
+            ActiveKind::Step { start, .. } => Some(start),
+            _ => None,
+        }
+    }
+
     /// Steps into an inline frame hidden at the current instruction without
     /// running the inferior. On success returns the execution and the stop
     /// event to publish once the step is acknowledged.
@@ -138,25 +154,19 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.resume_native(pid, Resume::Step, true, ExpectedStop::UserStep { kind })
     }
 
-    /// Reports whether the thread is stopped at an instruction that no DWARF
-    /// code instance describes (PLT stubs, library code, assembly thunks).
+    /// Whether the thread is stopped in code without debug information.
     pub(super) fn stopped_outside_described_code(&self, pid: Pid) -> Result<bool> {
         let registers = self.ptrace.registers(pid)?;
         Ok(self
             .image_location(VirtualAddress::new(registers.rip))
-            .is_none_or(|location| {
-                location.physical_instance.is_none() && location.source.is_none()
-            }))
+            .is_none_or(|location| undescribed(&location)))
     }
 
-    /// Runs to the caller instead of instruction-stepping through code without
-    /// debug information. The return address comes from call-frame information
-    /// when it covers the stopped address (PLT stubs), otherwise from the top
-    /// of the stack, which holds the return address immediately after the call
-    /// that entered the undescribed code. Either candidate is trusted only
-    /// when it resolves to a described instruction. Returns false when no
-    /// trustworthy return address exists and the caller should fall back to
-    /// instruction stepping.
+    /// Runs to the caller instead of single-stepping through code without
+    /// debug information. The return address comes from call-frame
+    /// information, as a PLT stub's does, or else from the top of the stack,
+    /// and is trusted only where debug information describes it. Returns
+    /// false, to single-step instead, when no return address is trusted.
     pub(super) fn escape_undescribed_code(&mut self, pid: Pid) -> Result<bool> {
         let registers = self.ptrace.registers(pid)?;
         let candidate = match self.caller_address(pid, &registers) {
@@ -172,12 +182,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if !described {
             return Ok(false);
         }
-        let execution = self
-            .inferior
-            .as_ref()
-            .and_then(|inferior| inferior.active.as_ref())
-            .map(|active| active.id)
-            .ok_or(Error::NotRunning)?;
+        let execution = self.active_execution()?;
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         install_plan_breakpoint(&self.ptrace, inferior, candidate, execution)?;
         self.continue_thread(pid)?;
@@ -311,12 +316,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         let guard = BTreeSet::from([return_address]);
         self.install_additional_plan_breakpoints(execution, &guard)?;
-        if let Some(ActiveKind::Step { start, .. }) = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .map(|active| &mut active.kind)
-        {
+        if let Some(start) = self.active_step_mut() {
             start.plan_addresses.extend(guard);
         }
         Ok(())
@@ -376,12 +376,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let Ok(caller) = self.top_activation(pid, &registers) else {
             return Ok(());
         };
-        if let Some(ActiveKind::Step { start, .. }) = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .map(|active| &mut active.kind)
-        {
+        if let Some(start) = self.active_step_mut() {
             start.returned_to = Some(caller);
         }
         Ok(())
@@ -414,12 +409,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(());
         }
         self.cleanup_plan_breakpoints(execution)?;
-        if let Some(ActiveKind::Step { start, .. }) = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .map(|active| &mut active.kind)
-        {
+        if let Some(start) = self.active_step_mut() {
             start.plan_addresses.clear();
         }
         Ok(())
@@ -429,19 +419,9 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// its plan is removed, and no stop of its thread completes it, so only
     /// a stop the user sees, such as a breakpoint's, ends it.
     pub(super) fn let_step_run_on(&mut self) -> Result<()> {
-        let execution = self
-            .inferior
-            .as_ref()
-            .and_then(|inferior| inferior.active.as_ref())
-            .map(|active| active.id)
-            .ok_or(Error::NotRunning)?;
+        let execution = self.active_execution()?;
         self.cleanup_plan_breakpoints(execution)?;
-        if let Some(ActiveKind::Step { start, .. }) = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .map(|active| &mut active.kind)
-        {
+        if let Some(start) = self.active_step_mut() {
             start.running_on = true;
             start.plan_addresses.clear();
         }
@@ -478,23 +458,16 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(x86_64_activation_has_returned(registers.rsp, activation)
             && self
                 .image_location(VirtualAddress::new(registers.rip))
-                .is_none_or(|location| {
-                    location.physical_instance.is_none() && location.source.is_none()
-                }))
+                .is_none_or(|location| undescribed(&location)))
     }
 
-    /// Turns an exact DWARF `epilogue_begin` row into an internal control site.
+    /// At a DWARF `epilogue_begin` row, guards the caller's return address and
+    /// next statements, unwinding before the frame's teardown begins: a
+    /// partly torn-down frame cannot be unwound reliably.
     ///
-    /// The unwind is performed before the first teardown instruction executes.
-    /// Once teardown has begun, the controller relies only on the captured
-    /// caller address and caller-side statement breakpoints; it does not make
-    /// a convincing but unsafe attempt to unwind a partially destroyed frame.
-    ///
-    /// Only source steps cross an epilogue to the caller's next statement. A
-    /// step out ends where its frame returns, which its plan already guards.
-    /// So does only the stepping frame's epilogue, or a caller's it returned
-    /// to: a callee's, which a step over reaches by skipping a hit inside the
-    /// call, returns to a frame the step has not finished.
+    /// Only source steps cross an epilogue, and only the stepping frame's or
+    /// one it returned to: a callee's, which a step over reaches by skipping
+    /// a hit inside the call, returns to a frame the step has not finished.
     pub(super) fn begin_epilogue_traversal(&mut self, pid: Pid) -> Result<bool> {
         let (execution, already_traversing, start_source, kind, activation) = self
             .inferior
@@ -566,13 +539,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         self.install_additional_plan_breakpoints(execution, &plan_addresses)?;
 
         let start = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .and_then(|active| match &mut active.kind {
-                ActiveKind::Step { start, .. } => Some(start),
-                _ => None,
-            })
+            .active_step_mut()
             .expect("source step remained active while installing its epilogue plan");
         start.plan_addresses.extend(plan_addresses);
         start.epilogue_traversal = Some(EpilogueTraversal {
@@ -621,14 +588,11 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(statements)
     }
 
-    /// Runs through a frame that should not become a source-step destination.
-    ///
-    /// This covers both a sibling call that replaces the starting physical
-    /// frame at the same CFA and a regular callee entered while stepping an
-    /// inline frame. A return address is safe to use as an internal breakpoint
-    /// only when DWARF CFI and the x86-64 System V ABI's `[CFA - 8]` return slot
-    /// agree. Failure or disagreement leaves the source operation on its
-    /// instruction-stepping path.
+    /// Runs through a frame that must not become a source-step destination:
+    /// a tail call that replaced the starting frame at the same CFA, or a
+    /// callee entered while stepping an inline frame. Its return address is
+    /// guarded only when call-frame information and the `[CFA - 8]` return
+    /// slot agree; otherwise the step goes on by single steps.
     pub(super) fn begin_return_traversal(&mut self, pid: Pid) -> Result<bool> {
         let (execution, already_traversing, activation, start_instance, start_physical) = self
             .inferior
@@ -699,13 +663,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let plan_addresses = BTreeSet::from([cfi_return]);
         self.install_additional_plan_breakpoints(execution, &plan_addresses)?;
         let start = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .and_then(|active| match &mut active.kind {
-                ActiveKind::Step { start, .. } => Some(start),
-                _ => None,
-            })
+            .active_step_mut()
             .expect("source step remained active while installing its return plan");
         start.plan_addresses.extend(plan_addresses);
         start.return_traversal = Some(ReturnTraversal {
@@ -743,13 +701,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         if kind == StepKind::IntoSource {
             self.cleanup_plan_breakpoints(execution)?;
             let start = self
-                .inferior
-                .as_mut()
-                .and_then(|inferior| inferior.active.as_mut())
-                .and_then(|active| match &mut active.kind {
-                    ActiveKind::Step { start, .. } => Some(start),
-                    _ => None,
-                })
+                .active_step_mut()
                 .expect("source step remained active while retiring its return guard");
             start.plan_addresses.clear();
             start.epilogue_traversal = None;
@@ -757,13 +709,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         self.remove_breakpoint_owner(address, BreakpointOwner::Plan(execution))?;
         let start = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .and_then(|active| match &mut active.kind {
-                ActiveKind::Step { start, .. } => Some(start),
-                _ => None,
-            })
+            .active_step_mut()
             .expect("source step remained active while retiring its return guard");
         start.plan_addresses.remove(&address);
         start.epilogue_traversal = None;
@@ -792,13 +738,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         self.remove_breakpoint_owner(address, BreakpointOwner::Plan(execution))?;
         let start = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .and_then(|active| match &mut active.kind {
-                ActiveKind::Step { start, .. } => Some(start),
-                _ => None,
-            })
+            .active_step_mut()
             .expect("source step remained active while retiring its return guard");
         start.plan_addresses.remove(&address);
         start.return_traversal = None;
@@ -806,15 +746,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     pub(super) fn mark_epilogue_return_for_retirement(&mut self, address: VirtualAddress) {
-        let Some(start) = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .and_then(|active| match &mut active.kind {
-                ActiveKind::Step { start, .. } => Some(start),
-                _ => None,
-            })
-        else {
+        let Some(start) = self.active_step_mut() else {
             return;
         };
         if let Some(traversal) = start.epilogue_traversal.as_mut()
@@ -831,15 +763,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         address: VirtualAddress,
     ) -> Result<()> {
         let registers = self.ptrace.registers(pid)?;
-        let Some(start) = self
-            .inferior
-            .as_mut()
-            .and_then(|inferior| inferior.active.as_mut())
-            .and_then(|active| match &mut active.kind {
-                ActiveKind::Step { start, .. } => Some(start),
-                _ => None,
-            })
-        else {
+        let Some(start) = self.active_step_mut() else {
             return Ok(());
         };
         if let Some(traversal) = start.return_traversal.as_mut()
@@ -1029,11 +953,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         start: &StepStart,
     ) -> Result<bool> {
         let location = self.image_location(VirtualAddress::new(registers.rip));
-        // PLT stubs, library code, and other undescribed instructions are not
-        // source-step destinations.
-        if location.as_ref().is_none_or(|location| {
-            location.physical_instance.is_none() && location.source.is_none()
-        }) {
+        // Undescribed instructions are not source-step destinations.
+        if location.as_ref().is_none_or(undescribed) {
             return Ok(false);
         }
         let presentation = self.presentation_for_thread(
@@ -1203,13 +1124,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 .and_then(|location| location.physical_instance),
             activation,
             stack_pointer: registers.rsp,
-            returned_to: None,
-            running_on: false,
             plan_addresses,
-            epilogue_traversal: None,
-            return_traversal: None,
-            signal_guard: None,
             call_return,
+            ..StepStart::default()
         })
     }
 
@@ -1315,13 +1232,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             physical_instance: location.physical_instance,
             activation: Some(activation),
             stack_pointer: registers.rsp,
-            returned_to: None,
-            running_on: false,
             plan_addresses,
-            epilogue_traversal: None,
-            return_traversal: None,
-            signal_guard: None,
-            call_return: None,
+            ..StepStart::default()
         })
     }
 
@@ -1331,23 +1243,8 @@ impl<P: LinuxTraceOps> Controller<P> {
         native: &libc::user_regs_struct,
     ) -> Result<VirtualAddress> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let current = FrameContext {
-            instruction: VirtualAddress::new(native.rip),
-            cfa: None,
-            signal_frame: false,
-        };
-        let mut provider = DwarfCallerProvider {
-            modules: vec![self.main_unwind_module(inferior)],
-            registers: x86_64_registers(native),
-            memory: PtraceMemory {
-                ptrace: &self.ptrace,
-                pid,
-            },
-            first: true,
-        };
-
-        provider
-            .frame_cfa(&current)
+        self.main_image_unwinder(inferior, pid, native)
+            .frame_cfa(&innermost_frame(native))
             .map_err(|reason| backend_error(LinuxError::CallerUnavailable(reason)))
     }
 
@@ -1365,20 +1262,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             return Ok(None);
         }
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let mut context = FrameContext {
-            instruction: VirtualAddress::new(native.rip),
-            cfa: None,
-            signal_frame: false,
-        };
-        let mut provider = DwarfCallerProvider {
-            modules: vec![self.main_unwind_module(inferior)],
-            registers: x86_64_registers(native),
-            memory: PtraceMemory {
-                ptrace: &self.ptrace,
-                pid,
-            },
-            first: true,
-        };
+        let mut context = innermost_frame(native);
+        let mut provider = self.main_image_unwinder(inferior, pid, native);
 
         for level in 0..DEFAULT_MAX_FRAMES {
             // Each frame is known by its own CFA, so the starting activation
@@ -1423,22 +1308,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         native: &libc::user_regs_struct,
     ) -> Result<VirtualAddress> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
-        let current = FrameContext {
-            instruction: VirtualAddress::new(native.rip),
-            cfa: None,
-            signal_frame: false,
-        };
-        let mut provider = DwarfCallerProvider {
-            modules: vec![self.main_unwind_module(inferior)],
-            registers: x86_64_registers(native),
-            memory: PtraceMemory {
-                ptrace: &self.ptrace,
-                pid,
-            },
-            first: true,
-        };
-
-        match provider.caller(&current) {
+        match self
+            .main_image_unwinder(inferior, pid, native)
+            .caller(&innermost_frame(native))
+        {
             CallerResult::Caller(caller) => self.executable_return_address(pid, caller.instruction),
             CallerResult::Finished(reason) => {
                 Err(backend_error(LinuxError::CallerUnavailable(reason)))
@@ -1464,11 +1337,44 @@ impl<P: LinuxTraceOps> Controller<P> {
         )))
     }
 
+    /// Unwinds `pid`'s stack from `native` through the main image's
+    /// call-frame information alone.
+    fn main_image_unwinder<'a>(
+        &'a self,
+        inferior: &Inferior,
+        pid: Pid,
+        native: &libc::user_regs_struct,
+    ) -> DwarfCallerProvider<'a> {
+        DwarfCallerProvider {
+            modules: vec![self.main_unwind_module(inferior)],
+            registers: x86_64_registers(native),
+            memory: PtraceMemory {
+                ptrace: &self.ptrace,
+                pid,
+            },
+            first: true,
+        }
+    }
+
     pub(super) fn image_location(&self, address: VirtualAddress) -> Option<ImageLocation> {
         let inferior = self.inferior.as_ref()?;
         let image = inferior.loaded_module.image_address(address).ok()?;
         Some(self.module_image.locate(image))
     }
+}
+
+const fn innermost_frame(native: &libc::user_regs_struct) -> FrameContext {
+    FrameContext {
+        instruction: VirtualAddress::new(native.rip),
+        cfa: None,
+        signal_frame: false,
+    }
+}
+
+/// Whether code without debug information, such as a PLT stub or a
+/// library, holds `location`.
+const fn undescribed(location: &ImageLocation) -> bool {
+    location.physical_instance.is_none() && location.source.is_none()
 }
 
 pub(super) const fn x86_64_activation_has_returned(

@@ -21,22 +21,15 @@ impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn classify_stop(&self, pid: Pid, signal: Signal) -> ClassifiedStop {
         let status = format!("Stopped({pid}, {signal})");
         let siginfo = self.ptrace.signal_metadata(pid);
-        let expected = self
+        let thread = self
             .inferior
             .as_ref()
-            .and_then(|inferior| inferior.threads.get(&pid))
-            .map_or(ExpectedStop::None, |thread| thread.expected.clone());
-        let starting = self
-            .inferior
-            .as_ref()
-            .and_then(|inferior| inferior.threads.get(&pid))
-            .is_some_and(|thread| matches!(thread.state, NativeThreadState::Starting));
+            .and_then(|inferior| inferior.threads.get(&pid));
+        let expected = thread.map_or(ExpectedStop::None, |thread| thread.expected.clone());
+        let starting =
+            thread.is_some_and(|thread| matches!(thread.state, NativeThreadState::Starting));
         let debugger_requested = signal == Signal::SIGSTOP
-            && self
-                .inferior
-                .as_ref()
-                .and_then(|inferior| inferior.threads.get(&pid))
-                .is_some_and(|thread| thread.debugger_stop_pending)
+            && thread.is_some_and(|thread| thread.debugger_stop_pending)
             && siginfo.as_ref().is_ok_and(|metadata| {
                 metadata.code == libc::SI_TKILL
                     && metadata.sender == Some(self.ptrace.tracer_process())
@@ -82,12 +75,9 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
-    /// Reads and consumes DR6 for stops raised by a debug exception.
-    ///
-    /// The kernel resets its virtual DR6 only on the next debug exception, so
-    /// at an int3, signal, or syscall-step stop it still describes an earlier
-    /// hit. Only hardware-breakpoint traps and single steps are consulted, and
-    /// the status is cleared once read.
+    /// Reads and clears DR6 at a stop a debug exception raised. The kernel
+    /// resets its virtual DR6 only at the next debug exception, so at an
+    /// int3, signal, or syscall-step stop it still describes an earlier hit.
     pub(super) fn watch_status(&self, pid: Pid, code: Option<i32>) -> WatchStatus {
         let Some(inferior) = self.inferior.as_ref() else {
             return WatchStatus::Absent;
@@ -159,12 +149,10 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 }
 
-/// Chooses the one primary reason published for coincident all-stop events.
-///
-/// Lower-priority reasons remain attached to their native threads, including
-/// pending signals. Control completions must outrank exceptions so resuming an
-/// unrelated signal stop cannot silently repair and consume a user breakpoint
-/// or completed step. Unsafe state transitions outrank ordinary control stops.
+/// Ranks coincident stop reasons; the highest is published, and the rest
+/// stay with their threads. Control completions outrank exceptions, so that
+/// resuming from a signal never silently consumes a breakpoint hit or a
+/// completed step.
 pub(super) const fn visible_stop_priority(reason: &StopReason) -> u8 {
     match reason {
         StopReason::Attach | StopReason::Entry | StopReason::Pause => 0,
