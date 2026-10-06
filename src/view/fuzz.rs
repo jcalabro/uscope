@@ -1,7 +1,7 @@
-//! The hostile view harness (`plans/views.md` §3.14): every built-in view,
-//! and views made of arbitrary text, run over arbitrary memory. Whatever
-//! the bytes, a presentation ends in a value or a typed problem within its
-//! budget, never panics, and allocates only what its limits allow.
+//! The hostile view harness: every built-in view, and views made of
+//! arbitrary text, run over arbitrary memory. Whatever the bytes, a
+//! presentation ends in a value or a typed problem within its budget, never
+//! panics, and allocates only what its limits allow.
 
 use super::run::{Child, Failure, children, element_place, length, present};
 use super::scan::Checkpoints;

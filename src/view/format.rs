@@ -107,11 +107,15 @@ fn integer(value: &VariableValue) -> Option<i128> {
     match value {
         VariableValue::Scalar(ScalarValue::Signed(value)) => Some(*value),
         VariableValue::Scalar(ScalarValue::Unsigned(value)) => i128::try_from(*value).ok(),
-        VariableValue::Enumeration { value, .. } => match value {
-            IntegerValue::Signed(value) => Some(*value),
-            IntegerValue::Unsigned(value) => i128::try_from(*value).ok(),
-        },
+        VariableValue::Enumeration { value, .. } => signed(*value),
         _ => None,
+    }
+}
+
+fn signed(value: IntegerValue) -> Option<i128> {
+    match value {
+        IntegerValue::Signed(value) => Some(value),
+        IntegerValue::Unsigned(value) => i128::try_from(value).ok(),
     }
 }
 
@@ -156,13 +160,7 @@ fn enumerators<M: Machine>(
     };
     enumerators
         .iter()
-        .filter_map(|enumerator| {
-            let value = match enumerator.value {
-                IntegerValue::Signed(value) => value,
-                IntegerValue::Unsigned(value) => i128::try_from(value).ok()?,
-            };
-            Some((Arc::clone(&enumerator.name), value))
-        })
+        .filter_map(|enumerator| Some((Arc::clone(&enumerator.name), signed(enumerator.value)?)))
         .collect()
 }
 
