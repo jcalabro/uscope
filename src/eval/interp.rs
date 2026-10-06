@@ -398,9 +398,20 @@ impl<M: Machine> Interpreter<'_, M> {
                 let bytes = left
                     .sub(right)
                     .map_err(|error| Self::arithmetic(span, error))?;
+                let scale = Exact::from(u128::from(*scale));
+                let apart = bytes
+                    .rem(scale)
+                    .map_err(|error| Self::arithmetic(span, error))?;
+                if !apart.is_zero() {
+                    return Err(Self::error(
+                        span,
+                        ErrorKind::Arithmetic,
+                        "the pointers are not a whole number of elements apart",
+                    ));
+                }
                 Value::Int(Integer::Exact(
                     bytes
-                        .div(Exact::from(u128::from(*scale)))
+                        .div(scale)
                         .map_err(|error| Self::arithmetic(span, error))?,
                 ))
             }

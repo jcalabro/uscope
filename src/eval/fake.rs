@@ -1101,9 +1101,9 @@ pub fn scalars() -> World {
     world
 }
 
-/// Records, pointers, arrays, a slice, text, enumerations, a typedef, a
-/// constant, a reference, values in a register or optimized out, and names
-/// that need qualifying.
+/// Records, one of them zero-sized, pointers, arrays, a slice, text,
+/// enumerations, a typedef, a constant, a reference, values in a register or
+/// optimized out, and names that need qualifying.
 pub fn memory() -> World {
     use BaseTypeEncoding as E;
     let mut world = World::new();
@@ -1124,6 +1124,8 @@ pub fn memory() -> World {
     world.enumeration("Small", uchar, &[("ONE", 1), ("TWO", 2), ("HIGH", 0x80)]);
     let void_pointer = world.pointer(None);
     let slice = world.slice(int);
+    let empty = world.record("Empty", 0, &[]);
+    let empty_pointer = world.pointer(Some(empty));
 
     let mut s = 5_i32.to_le_bytes().to_vec();
     s.extend_from_slice(&[0; 4]);
@@ -1145,6 +1147,7 @@ pub fn memory() -> World {
     world.variable("color", color, &2_u32.to_le_bytes());
     world.variable("sign", sign, &(-1_i32).to_le_bytes());
     world.variable("vp", void_pointer, &s_address.to_le_bytes());
+    world.variable("ep", empty_pointer, &s_address.to_le_bytes());
     let items: Vec<u8> = [10_i32, 20, 30]
         .iter()
         .flat_map(|value| value.to_le_bytes())

@@ -289,6 +289,9 @@ Their files are in `views/`, one per library.
   views.
 - `info view EXPR` says which view presents a value, from which file and
   line, and why each view tried before it did not bind.
+- A pointer to a value presented as text shows the text after its address,
+  as a pointer to characters does, or why the view could not read it. A
+  null pointer shows only its address.
 - An element of a value presented as a sequence is `v[i]`, and its count is
   `len(v)`, in any expression: `break f if len(queue) > 100`. An element
   in memory can be assigned and its address taken.

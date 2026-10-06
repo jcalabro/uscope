@@ -55,10 +55,15 @@ int main() {
     Corrupt<std::vector<int>> dangling;           // VIEW: dangling.value => len=2 [<unavailable>, …]
     std::uintptr_t garbage[3] = {0x10, 0x18, 0x18};
     std::memcpy(static_cast<void *>(&dangling.value), garbage, sizeof garbage);
+    // A vector whose end is not a whole element past its start.
+    Corrupt<std::vector<int>> ragged;             // VIEW: ragged.value => problem: whole number of elements
+    char *bytes = reinterpret_cast<char *>(storage);
+    char *ragged_ends[3] = {bytes, bytes + 6, bytes + 16};
+    std::memcpy(static_cast<void *>(&ragged.value), ragged_ends, sizeof ragged_ends);
 
     keep(text), keep(empty_text), keep(long_text), keep(with_nul), keep(view);
     keep(ints), keep(no_ints), keep(words), keep(many), keep(four), keep(none);
-    keep(dynamic_span), keep(fixed_span), keep(past_capacity), keep(dangling);
+    keep(dynamic_span), keep(fixed_span), keep(past_capacity), keep(dangling), keep(ragged);
     barrier(&text);
     return static_cast<int>(ints.size() + many.size()) == 303 ? 0 : 1;
 }

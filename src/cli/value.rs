@@ -333,10 +333,17 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
             discriminant,
             active,
         } => {
-            let active = active
-                .as_ref()
-                .and_then(|variant| variant.name.as_deref())
-                .unwrap_or("<no matching variant>");
+            let active = active.as_ref().map_or("<no matching variant>", |variant| {
+                // Rust names a variant by its one member instead.
+                variant
+                    .name
+                    .as_deref()
+                    .or_else(|| match variant.members.as_ref() {
+                        [member] => member.name.as_deref(),
+                        _ => None,
+                    })
+                    .unwrap_or("<unnamed variant>")
+            });
             discriminant.map_or_else(
                 || format!("{{<{active}; {total} fields>}}"),
                 |value| format!("{{<{active} = {}; {total} fields>}}", integer(value)),

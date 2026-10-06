@@ -764,10 +764,21 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     identity: None,
                 });
             }
-            // A zero-width scalar is defective regardless of its encoding; reject
-            // it before the encoding branch so an unsupported encoding cannot
-            // mask the malformed size.
-            return TypeEntry::Malformed("base type has a zero byte size".into());
+            // Any other zero-byte base type, such as Rust's unit type `()`,
+            // has no bits to decode, whatever its encoding: it holds nothing,
+            // as an empty structure does, so normalize it to one.
+            return TypeEntry::Resolved(TypeInfo {
+                reference,
+                name,
+                byte_size: Some(0),
+                kind: TypeKind::Record {
+                    kind: RecordKind::Struct,
+                    members: Arc::from([]),
+                    bases: Arc::from([]),
+                    incomplete: false,
+                },
+                identity: None,
+            });
         }
         let raw_encoding = match base_type_encoding(entry) {
             Ok(raw_encoding) => raw_encoding,

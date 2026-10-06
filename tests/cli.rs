@@ -1202,6 +1202,10 @@ fn print_renders_symbolic_enums_variants_and_raw_unions() {
             "print *fieldless",
             "--eval",
             "print *wide",
+            "--eval",
+            "frame 1",
+            "--eval",
+            "print",
         ])
         .arg(rust)
         .output()
@@ -1216,6 +1220,14 @@ fn print_renders_symbolic_enums_variants_and_raw_unions() {
         stdout.contains("*wide = Huge (1267650600228229401496703205385)"),
         "{stdout}"
     );
+    // A Rust variant is named by its one member.
+    for summary in [
+        "value = {<Integer = 1; 1 fields>}",
+        "done = {<Ok = 0; 1 fields>}",
+        "failed = {<Err = 1; 1 fields>}",
+    ] {
+        assert!(stdout.contains(summary), "{summary}: {stdout}");
+    }
 
     let c = fixture("build/test-programs/enums-c-gcc-o0");
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
