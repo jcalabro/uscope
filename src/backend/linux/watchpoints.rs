@@ -182,7 +182,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// resume. Rolling a thread back therefore only rewrites slots the plan
     /// it previously carried already reserved, so rollback needs no new
     /// kernel capacity.
-    pub(super) fn arm_all_threads(&mut self, plan: DebugRegisterPlan) -> Result<()> {
+    fn arm_all_threads(&mut self, plan: DebugRegisterPlan) -> Result<()> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         let previous = inferior.watch.plan.clone();
         let generation = inferior.watch.generation;
@@ -442,7 +442,7 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Disarms and publishes watchpoints whose storage's lifetime ended.
-    pub(super) fn remove_invalidated_watchpoints(
+    fn remove_invalidated_watchpoints(
         &mut self,
         invalidated: Vec<InvalidatedWatchpoint>,
     ) -> Result<()> {
@@ -491,7 +491,7 @@ impl<P: InspectionOps> Controller<P> {
     /// is memory no stopped thread can reach because each was killed out of
     /// its ptrace-stop, as a sibling's `exit_group` does. Any other failure
     /// is an error, never a value.
-    pub(super) fn read_watched_bytes(
+    fn read_watched_bytes(
         &self,
         address: VirtualAddress,
         byte_size: u64,
@@ -552,7 +552,7 @@ impl<P: InspectionOps> Controller<P> {
         Ok(owners)
     }
 
-    pub(super) fn watch_invalidation(
+    fn watch_invalidation(
         &self,
         inferior: &Inferior,
         record: &WatchRecord,
@@ -583,13 +583,11 @@ impl<P: InspectionOps> Controller<P> {
     /// Whether the owner thread still executes the activation that declared
     /// a frame-scoped object, inside the object's lexical scope.
     ///
-    /// The activation is found by unwinding the owner's stack to the frame
-    /// whose canonical frame address matches. A frame at that address running
-    /// a different function means a tail call replaced the activation; a
-    /// frame outside the object's scope ranges means its block ended. When
-    /// unwinding fails before reaching the activation, the stack pointer
-    /// still proves a return on x86-64's downward-growing stack.
-    pub(super) fn frame_scope_is_live(
+    /// The activation is the frame whose canonical frame address matches. A
+    /// frame there running another function means a tail call replaced it,
+    /// and one outside the object's scope ranges means its block ended. When
+    /// unwinding fails first, the stack pointer still proves a return.
+    fn frame_scope_is_live(
         &self,
         inferior: &Inferior,
         pid: Pid,
@@ -774,7 +772,7 @@ pub(super) fn watchable_storage(value: &InspectedValue) -> Result<(VirtualAddres
     Ok((address, byte_size))
 }
 
-pub(super) fn watch_range_error(
+fn watch_range_error(
     address: VirtualAddress,
     byte_size: u64,
     error: debug_registers::RangeError,
@@ -802,7 +800,7 @@ pub(super) fn watch_range_error(
 
 /// Why one thread's debug registers could not be programmed.
 #[derive(Debug)]
-pub(super) enum ArmFailure {
+enum ArmFailure {
     /// The thread is exiting.
     ThreadGone,
     /// Other hardware-breakpoint users hold the thread's slots.
@@ -813,7 +811,7 @@ pub(super) enum ArmFailure {
     System(Errno),
 }
 
-pub(super) fn arm_failure(error: Errno) -> ArmFailure {
+fn arm_failure(error: Errno) -> ArmFailure {
     match error {
         Errno::ESRCH => ArmFailure::ThreadGone,
         Errno::ENOSPC => ArmFailure::Busy,
@@ -824,7 +822,7 @@ pub(super) fn arm_failure(error: Errno) -> ArmFailure {
     }
 }
 
-pub(super) fn arm_error(pid: Pid, failure: &ArmFailure) -> Error {
+fn arm_error(pid: Pid, failure: &ArmFailure) -> Error {
     match failure {
         ArmFailure::ThreadGone => Error::NotRunning,
         ArmFailure::Busy => Error::WatchpointHardwareBusy {
@@ -839,7 +837,7 @@ pub(super) fn arm_error(pid: Pid, failure: &ArmFailure) -> Error {
 
 /// Installs `plan` in one stopped thread's debug registers and reads it
 /// back. A readback mismatch means the target silently ignored the writes.
-pub(super) fn program_debug_registers(
+fn program_debug_registers(
     ptrace: &dyn LinuxTraceOps,
     pid: Pid,
     plan: &DebugRegisterPlan,

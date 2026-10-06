@@ -148,7 +148,6 @@ impl ControllerMessage {
                     | Request::Backtrace { .. }
                     | Request::Registers { .. }
                     | Request::ReadMemory { .. }
-                    | Request::ReadWord { .. }
                     | Request::Disassemble { .. }
                     | Request::DescribeAddress { .. }
                     | Request::StoppedLocation { .. }

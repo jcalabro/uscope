@@ -132,11 +132,7 @@ impl<P: LinuxTraceOps> Controller<P> {
 
         self.next_breakpoint_id = next_id;
         self.breakpoints.push(breakpoint.clone());
-        self.bump_revision();
-        let _ = self.events.send(DebuggerEvent::BreakpointsChanged {
-            revision: self.revision,
-        });
-
+        self.publish_breakpoints_changed();
         Ok(breakpoint)
     }
 
@@ -310,36 +306,34 @@ impl<P: LinuxTraceOps> Controller<P> {
     }
 
     /// Replaces a breakpoint's hit condition, keeping the hits it counted.
-    /// The condition is controller state only, so no stop is required.
     pub(super) fn set_breakpoint_hit_condition(
         &mut self,
         id: BreakpointId,
         hit_condition: Option<HitCondition>,
     ) -> Result<Breakpoint> {
-        let breakpoint = self
-            .breakpoints
-            .iter_mut()
-            .find(|breakpoint| breakpoint.id == id)
-            .ok_or(Error::BreakpointNotFound(id.get()))?;
-        breakpoint.hit_condition = hit_condition;
-        let breakpoint = breakpoint.clone();
-        self.publish_breakpoints_changed();
-        Ok(breakpoint)
+        self.edit_breakpoint(id, |breakpoint| breakpoint.hit_condition = hit_condition)
     }
 
-    /// Replaces a breakpoint's condition. Like its hit condition, this is
-    /// controller state only, so no stop is required.
     pub(super) fn set_breakpoint_condition(
         &mut self,
         id: BreakpointId,
         condition: Option<crate::Condition>,
+    ) -> Result<Breakpoint> {
+        self.edit_breakpoint(id, |breakpoint| breakpoint.condition = condition)
+    }
+
+    /// Changes controller state only, so no stop is required.
+    fn edit_breakpoint(
+        &mut self,
+        id: BreakpointId,
+        edit: impl FnOnce(&mut Breakpoint),
     ) -> Result<Breakpoint> {
         let breakpoint = self
             .breakpoints
             .iter_mut()
             .find(|breakpoint| breakpoint.id == id)
             .ok_or(Error::BreakpointNotFound(id.get()))?;
-        breakpoint.condition = condition;
+        edit(breakpoint);
         let breakpoint = breakpoint.clone();
         self.publish_breakpoints_changed();
         Ok(breakpoint)
@@ -521,9 +515,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             revision: self.revision,
         });
     }
-}
 
-impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn remove_breakpoint_owner(
         &mut self,
         address: VirtualAddress,
@@ -560,9 +552,7 @@ impl<P: LinuxTraceOps> Controller<P> {
             .remove(&execution);
         Ok(())
     }
-}
 
-impl<P: LinuxTraceOps> Controller<P> {
     pub(super) fn install_additional_plan_breakpoints(
         &mut self,
         execution: ExecutionId,
@@ -902,10 +892,9 @@ pub(super) fn forget_removed_site(
         .former_sites
         .entry(address)
         .or_insert(original_byte);
+    // With the original instruction restored, no thread needs a repair step.
     for thread in inferior.threads.values_mut() {
         if thread.stopped_at_breakpoint == Some(address) {
-            // Breakpoint PCs are normalized when the trap is classified. With the
-            // original instruction restored there is no repair step left to run.
             thread.stopped_at_breakpoint = None;
         }
     }

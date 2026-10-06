@@ -124,7 +124,7 @@ async fn record_page(
             offset: 0,
             total: 0,
             children: Arc::from([]),
-            completion: uscope::ValuePageCompletion::Complete,
+            completion: uscope::InspectionCompletion::Complete,
             usage: uscope::InspectionUsage::default(),
         };
     }

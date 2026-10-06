@@ -81,11 +81,10 @@ pub use model::{
     ThreadId, TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind,
     TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
     ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
-    ValueChildRelationship, ValueChildren, ValueChildrenReference, ValuePageCompletion, Variable,
-    VariableInvalidReason, VariableKind, VariableMalformedKind, VariableMalformedReason,
-    VariableSnapshot, VariableState, VariableUnavailableReason, VariableValue, VariableValueSource,
-    Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind, ViewName,
-    ViewProblem, VirtualAddress,
+    ValueChildRelationship, ValueChildren, ValueChildrenReference, Variable, VariableInvalidReason,
+    VariableKind, VariableMalformedKind, VariableMalformedReason, VariableSnapshot, VariableState,
+    VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
+    VariantSelection, VariantSelector, VariantStorageKind, ViewName, ViewProblem, VirtualAddress,
 };
 pub use protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CoreDumpInfo,
@@ -223,8 +222,7 @@ pub fn fuzz_disassembly(data: &[u8]) {
 }
 
 /// Runs every built-in view, and a view file made of the input's tail,
-/// over memory made of its bytes, for the hostile fuzz harness
-/// (`plans/views.md` §3.14).
+/// over memory made of its bytes, for the fuzz harness.
 #[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub fn fuzz_views(data: &[u8]) {
@@ -772,16 +770,6 @@ impl DebuggerHandle {
     /// Stepping out leaves the selected frame; every other step begins at
     /// the innermost frame, whichever frame is selected.
     pub async fn step(&self, kind: StepKind) -> Result<StopReason> {
-        self.step_with_exception(kind, ExceptionDisposition::Pass)
-            .await
-    }
-
-    /// Steps the selected thread with an explicit pending-exception disposition.
-    pub async fn step_with_exception(
-        &self,
-        kind: StepKind,
-        exception: ExceptionDisposition,
-    ) -> Result<StopReason> {
         let selection = self.stopped_selection().await?;
         let frame = if kind == StepKind::Out {
             selection.frame
@@ -796,7 +784,7 @@ impl DebuggerHandle {
                 frame,
                 kind,
                 ResumeScope::Process(selection.process),
-                exception,
+                ExceptionDisposition::Pass,
             )
             .await?;
 
@@ -849,31 +837,32 @@ impl DebuggerHandle {
         .await
     }
 
-    /// Reads one native 64-bit word from a stopped inferior.
+    /// Reads one little-endian 64-bit word from a stopped inferior.
     pub async fn read_word(&self, address: VirtualAddress) -> Result<u64> {
-        let selection = self.stopped_selection().await?;
-
-        self.request(|reply| Request::ReadWord {
-            process_id: selection.process,
-            stop_id: selection.stop,
-            address,
-            reply,
-        })
-        .await
+        let read = self.read_memory(address, 8).await?;
+        match read.completion {
+            MemoryReadCompletion::Complete => Ok(u64::from_le_bytes(
+                read.bytes
+                    .as_ref()
+                    .try_into()
+                    .expect("a complete read has 8 bytes"),
+            )),
+            MemoryReadCompletion::Incomplete { next_address, .. } => {
+                Err(Error::MemoryNotReadable(next_address))
+            }
+        }
     }
 
-    /// Writes one native 64-bit word while preserving installed debugger breakpoints.
+    /// Writes one little-endian 64-bit word into a stopped inferior; see
+    /// [`Self::write_memory`].
     pub async fn write_word(&self, address: VirtualAddress, value: u64) -> Result<()> {
-        let selection = self.stopped_selection().await?;
-
-        self.request(|reply| Request::WriteWord {
-            process_id: selection.process,
-            stop_id: selection.stop,
-            address,
-            value,
-            reply,
-        })
-        .await
+        let written = self.write_memory(address, &value.to_le_bytes()).await?;
+        if written < 8 {
+            return Err(Error::MemoryNotWritable(VirtualAddress::new(
+                address.get() + written,
+            )));
+        }
+        Ok(())
     }
 
     /// Writes bytes into a stopped inferior and returns how many were
@@ -1052,24 +1041,19 @@ impl DebuggerHandle {
         &self,
         limits: InspectionLimits,
     ) -> Result<VariableSnapshot> {
-        self.variable_query(VariableQuery::All, limits).await
+        self.selected().await?.variables_with_limits(limits).await
     }
 
     /// Inspects the innermost visible data object with the supplied name.
     pub async fn variable(&self, name: impl Into<String>) -> Result<Variable> {
-        self.variable_with_limits(name, InspectionLimits::default())
-            .await
-    }
-
-    /// Inspects one named data object under explicit bounded resource limits.
-    pub async fn variable_with_limits(
-        &self,
-        name: impl Into<String>,
-        limits: InspectionLimits,
-    ) -> Result<Variable> {
         let name = name.into();
         let snapshot = self
-            .variable_query(VariableQuery::Name(name.clone()), limits)
+            .selected()
+            .await?
+            .variable_query(
+                VariableQuery::Name(name.clone()),
+                InspectionLimits::default(),
+            )
             .await?;
         snapshot
             .variables
@@ -1166,8 +1150,8 @@ impl DebuggerHandle {
             .await
     }
 
-    /// Evaluates an expression in the selected frame of the selected stopped
-    /// thread and returns its value; see [`StopView::inspect`].
+    /// Evaluates an expression in the selected frame for its value, reading
+    /// only. A range has no single value; evaluate it for its elements.
     pub async fn inspect(&self, expression: &Expression) -> Result<InspectedValue> {
         self.inspect_with_limits(expression, InspectionLimits::default())
             .await
@@ -1185,56 +1169,26 @@ impl DebuggerHandle {
             .await
     }
 
-    /// Inspects one exact global catalog entry owned by the main executable
-    /// image in the selected stopped thread.
-    ///
-    /// A [`GlobalVariableId`] is only unique within its owning [`ModuleImage`],
-    /// so this convenience method is restricted to the main image. To inspect a
-    /// global belonging to a shared library, resolve its owning module and pass
-    /// the full [`GlobalVariableReference`] to [`Self::loaded_global`].
+    /// Inspects one global of the main executable image as the selected
+    /// thread sees it. A [`GlobalVariableId`] is unique only within its
+    /// image; use [`Self::loaded_global`] for a shared library's.
     pub async fn main_global(&self, id: GlobalVariableId) -> Result<Variable> {
-        self.main_global_with_limits(id, InspectionLimits::default())
-            .await
-    }
-
-    /// Inspects one main-image global under explicit bounded resource limits.
-    pub async fn main_global_with_limits(
-        &self,
-        id: GlobalVariableId,
-        limits: InspectionLimits,
-    ) -> Result<Variable> {
         let module = self.loaded_module().await?;
-        self.loaded_global_with_limits(
-            GlobalVariableReference {
-                module: module.id,
-                image: module.image,
-                variable: id,
-            },
-            limits,
-        )
+        self.loaded_global(GlobalVariableReference {
+            module: module.id,
+            image: module.image,
+            variable: id,
+        })
         .await
     }
 
-    /// Inspects one exact global in a specific loaded module.
+    /// Inspects one exact global in a specific loaded module as the selected
+    /// thread sees it.
     pub async fn loaded_global(&self, global: GlobalVariableReference) -> Result<Variable> {
-        self.loaded_global_with_limits(global, InspectionLimits::default())
+        self.selected()
+            .await?
+            .global_with_limits(global, InspectionLimits::default())
             .await
-    }
-
-    /// Inspects one exact loaded global under explicit bounded resource limits.
-    pub async fn loaded_global_with_limits(
-        &self,
-        global: GlobalVariableReference,
-        limits: InspectionLimits,
-    ) -> Result<Variable> {
-        let snapshot = self
-            .variable_query(VariableQuery::Global(global), limits)
-            .await?;
-        snapshot
-            .variables
-            .first()
-            .cloned()
-            .ok_or_else(|| Error::VariableNotFound(global.variable.to_string()))
     }
 
     /// Explicitly dereferences a pointer or reference value produced at the
@@ -1300,14 +1254,6 @@ impl DebuggerHandle {
     pub async fn loaded_module_image(&self, module: ModuleId) -> Result<Arc<ModuleImage>> {
         self.request(|reply| Request::ModuleImage { module, reply })
             .await
-    }
-
-    async fn variable_query(
-        &self,
-        query: VariableQuery,
-        limits: InspectionLimits,
-    ) -> Result<VariableSnapshot> {
-        self.selected().await?.variable_query(query, limits).await
     }
 
     /// Selects a frame of the selected thread, numbered as
@@ -1451,12 +1397,6 @@ pub struct StopView<'a> {
 }
 
 impl StopView<'_> {
-    /// Returns the frame this view inspects.
-    #[must_use]
-    pub const fn context(&self) -> StopContext {
-        self.context
-    }
-
     /// Reconstructs the thread's stack frames; the view's frame does not
     /// limit them.
     pub async fn backtrace(&self) -> Result<Backtrace> {
@@ -1628,13 +1568,6 @@ impl StopView<'_> {
                 frame: context.frame,
                 reply,
             })
-            .await
-    }
-
-    /// Evaluates an expression in the frame for its value, reading only. A
-    /// range has no single value; evaluate it for its page of elements.
-    pub async fn inspect(&self, expression: &Expression) -> Result<InspectedValue> {
-        self.inspect_with_limits(expression, InspectionLimits::default())
             .await
     }
 
