@@ -631,6 +631,7 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
             lines: Vec::new(),
             sections: Vec::new(),
             vtables: Vec::new(),
+            packages: Vec::new(),
         },
     ))
 }

@@ -19,6 +19,13 @@ pub enum Error {
     FunctionNotFound(String),
     #[error("multiple functions named '{0}' were found")]
     DuplicateFunction(String),
+    /// A location that names several functions where it must name one,
+    /// with a location for each that names it alone.
+    #[error("'{name}' names more than one function: {}", candidates.join(", "))]
+    AmbiguousFunction {
+        name: String,
+        candidates: Vec<String>,
+    },
     #[error("no source file matching '{0}' was found")]
     SourceFileNotFound(PathBuf),
     #[error("source path '{path}' is ambiguous; matches: {matches:?}")]

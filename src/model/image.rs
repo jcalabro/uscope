@@ -7,6 +7,10 @@ use std::sync::Arc;
 
 use crate::{Error, Result};
 
+mod locations;
+
+pub use locations::PackageInfo;
+
 use super::{
     AddressRange, BreakpointEntry, CodeInstanceId, CodeInstanceInfo, CodeInstanceKind, CodeRole,
     EntryProvenance, FunctionId, FunctionInfo, GlobalVariableId, GlobalVariableInfo, ImageAddress,
@@ -32,6 +36,8 @@ pub struct ModuleMetadata {
     /// Rust trait objects' vtables, by address, with the concrete type each
     /// is for.
     pub vtables: Vec<(ImageAddress, TypeReference)>,
+    /// The packages whose units the image has.
+    pub packages: Vec<PackageInfo>,
 }
 
 #[derive(Debug)]
@@ -285,6 +291,8 @@ pub struct ModuleImage {
     statements: Arc<[StatementRow]>,
     lines: Arc<[LineEntry]>,
     functions_by_name: BTreeMap<Arc<str>, Arc<[FunctionId]>>,
+    /// Functions by their names within the packages defining them.
+    function_names: locations::FunctionNames,
     symbols_by_name: BTreeMap<Arc<str>, Arc<[SymbolId]>>,
     globals_by_selector: BTreeMap<Arc<str>, Arc<[GlobalVariableId]>>,
     instances_by_function: BTreeMap<FunctionId, Arc<[CodeInstanceId]>>,
@@ -383,6 +391,7 @@ impl ModuleImage {
                     .iter()
                     .map(|function| (Arc::clone(&function.name), function.id)),
             ),
+            function_names: locations::FunctionNames::new(&metadata.functions, &metadata.packages),
             symbols_by_name: grouped_index(
                 metadata
                     .symbols
