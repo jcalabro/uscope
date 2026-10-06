@@ -1524,129 +1524,7 @@ async fn assert_record_members(scenario: &Scenario, signed_member: &str, fixture
 }
 
 #[tokio::test]
-async fn rust_payload_enum_is_never_published_as_an_empty_record() {
-    let fixture = "enums-rust-o0";
-    let mut scenario = Scenario::launch(fixture);
-    scenario.add_breakpoint("inspect_enum").await;
-    assert!(matches!(
-        scenario.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-
-    let value = dereference_named(&scenario, "value", 1).await;
-    let uscope::VariableValue::Variant {
-        discriminant,
-        active: Some(active),
-    } = available_value(&value.state)
-    else {
-        panic!("payload enum did not decode as an active variant: {value:?}");
-    };
-    assert_eq!(
-        *discriminant,
-        Some(uscope::IntegerValue::Unsigned(1)),
-        "{value:?}"
-    );
-    assert_eq!(active.members.len(), 1, "{value:?}");
-    assert_eq!(
-        active.members[0].name.as_deref(),
-        Some("Integer"),
-        "{value:?}"
-    );
-    let variant_page = record_page(&scenario, &value.state, 1, fixture).await;
-    let integer = named_child(&variant_page, "Integer");
-    let payload_page = record_page(&scenario, &integer.state, 1, fixture).await;
-    let payload = named_child(&payload_page, "__0");
-    assert!(
-        matches!(
-            available_value(&payload.state),
-            uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
-        ),
-        "{value:?}"
-    );
-
-    let selected_payload = scenario
-        .operation(
-            "select active Rust enum payload",
-            scenario
-                .handle()
-                .inspect(&value_expression(&["value", "Integer", "__0"])),
-        )
-        .await;
-    assert!(
-        matches!(
-            available_value(&selected_payload.state),
-            uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
-        ),
-        "{selected_payload:?}"
-    );
-    let inactive_payload = scenario
-        .operation(
-            "reject inactive Rust enum payload",
-            scenario
-                .handle()
-                .inspect(&value_expression(&["value", "Unit"])),
-        )
-        .await;
-    assert!(
-        matches!(
-            inactive_payload.state,
-            VariableState::Unavailable(uscope::VariableUnavailableReason::ValueAccess(
-                uscope::ValueAccessUnavailableReason::InactiveVariant(Some(_))
-            ))
-        ),
-        "{inactive_payload:?}"
-    );
-
-    assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Exited(ExitStatus::Code(0))
-    );
-    scenario.shutdown().await;
-}
-
-/// Rust's unit type, `()`, is a base type of no bytes. It holds nothing, as
-/// an empty structure does, so the values that hold it decode.
-#[tokio::test]
-async fn rust_values_holding_unit_decode() {
-    for fixture in ["enums-rust-o0", "enums-rust-o2"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("inspect_enum").await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-        for (name, variant) in [("done", "Ok"), ("failed", "Err")] {
-            let value = dereference_named(&scenario, name, 1).await;
-            let page = record_page(&scenario, &value.state, 1, fixture).await;
-            let active = named_child(&page, variant);
-            let payload_page = record_page(&scenario, &active.state, 1, fixture).await;
-            let payload = named_child(&payload_page, "__0");
-            let decoded = match (name, available_value(&payload.state)) {
-                ("done", uscope::VariableValue::Record) => {
-                    record_page(&scenario, &payload.state, 0, fixture)
-                        .await
-                        .children
-                        .is_empty()
-                }
-                ("failed", uscope::VariableValue::Scalar(ScalarValue::Unsigned(5))) => true,
-                _ => false,
-            };
-            assert!(decoded, "{fixture} {name}: {payload:?}");
-        }
-        assert_eq!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        );
-        scenario.shutdown().await;
-    }
-}
-
-#[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one matrix keeps identical symbolic-value assertions aligned across C and Rust producers"
-)]
-async fn c_and_rust_fieldless_enums_preserve_values_names_aliases_and_unknowns() {
+async fn c_enums_and_raw_unions_preserve_values_names_aliases_and_interpretations() {
     for fixture in [
         "enums-c-gcc-o0",
         "enums-c-clang-o0",
@@ -1695,13 +1573,51 @@ async fn c_and_rust_fieldless_enums_preserve_values_names_aliases_and_unknowns()
             );
         }
 
+        let raw = dereference_named(&scenario, "raw", 1).await;
+        let uscope::VariableValue::Union = available_value(&raw.state) else {
+            panic!("{fixture}: raw value was not a union: {raw:?}");
+        };
+        let page = record_page(&scenario, &raw.state, 2, fixture).await;
+        assert_eq!(
+            page.children
+                .iter()
+                .filter_map(|child| match &child.relationship {
+                    uscope::ValueChildRelationship::Member(member) => member.name.as_deref(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["integer", "floating"],
+            "{fixture}: {raw:?}"
+        );
+        assert_signed(&named_child(&page, "integer").state, 42, fixture);
+
+        let integer = scenario
+            .operation(
+                "inspect a union interpretation",
+                scenario
+                    .handle()
+                    .inspect(&value_expression(&["raw", "integer"])),
+            )
+            .await;
+        assert_signed(&integer.state, 42, fixture);
+
         assert_eq!(
             scenario.resume_to_stop().await,
             StopReason::Exited(ExitStatus::Code(0))
         );
         scenario.shutdown().await;
     }
+}
 
+/// Rust's enums decode as enumerations or as variants with an active
+/// member, never as empty records, and the unit type, a base type of no
+/// bytes, decodes as an empty structure does.
+#[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one stop per build checks every kind of Rust enum the fixture holds"
+)]
+async fn rust_enums_decode_their_variants_and_unit_payloads() {
     for fixture in ["enums-rust-o0", "enums-rust-o2"] {
         let mut scenario = Scenario::launch(fixture);
         scenario.add_breakpoint("inspect_enum").await;
@@ -1720,17 +1636,17 @@ async fn c_and_rust_fieldless_enums_preserve_values_names_aliases_and_unknowns()
             ),
             "{fieldless:?}"
         );
-        let payload = dereference_named(&scenario, "value", 1).await;
+        let value = dereference_named(&scenario, "value", 1).await;
         assert!(
             matches!(
-                available_value(&payload.state),
+                available_value(&value.state),
                 uscope::VariableValue::Variant {
                     active: Some(active),
                     ..
                 } if active.members.first().and_then(|member| member.name.as_deref())
                     == Some("Integer")
             ),
-            "{fixture}: {payload:?}"
+            "{fixture}: {value:?}"
         );
         let wide = dereference_named(&scenario, "wide", 1).await;
         assert!(
@@ -1769,6 +1685,88 @@ async fn c_and_rust_fieldless_enums_preserve_values_names_aliases_and_unknowns()
             ),
             "{fixture}: {empty:?}"
         );
+        for (name, variant) in [("done", "Ok"), ("failed", "Err")] {
+            let value = dereference_named(&scenario, name, 1).await;
+            let page = record_page(&scenario, &value.state, 1, fixture).await;
+            let active = named_child(&page, variant);
+            let payload_page = record_page(&scenario, &active.state, 1, fixture).await;
+            let payload = named_child(&payload_page, "__0");
+            let decoded = match (name, available_value(&payload.state)) {
+                ("done", uscope::VariableValue::Record) => {
+                    record_page(&scenario, &payload.state, 0, fixture)
+                        .await
+                        .children
+                        .is_empty()
+                }
+                ("failed", uscope::VariableValue::Scalar(ScalarValue::Unsigned(5))) => true,
+                _ => false,
+            };
+            assert!(decoded, "{fixture} {name}: {payload:?}");
+        }
+        if fixture == "enums-rust-o0" {
+            let uscope::VariableValue::Variant {
+                discriminant,
+                active: Some(active),
+            } = available_value(&value.state)
+            else {
+                panic!("payload enum did not decode as an active variant: {value:?}");
+            };
+            assert_eq!(
+                *discriminant,
+                Some(uscope::IntegerValue::Unsigned(1)),
+                "{value:?}"
+            );
+            assert_eq!(active.members.len(), 1, "{value:?}");
+            assert_eq!(
+                active.members[0].name.as_deref(),
+                Some("Integer"),
+                "{value:?}"
+            );
+            let variant_page = record_page(&scenario, &value.state, 1, fixture).await;
+            let integer = named_child(&variant_page, "Integer");
+            let payload_page = record_page(&scenario, &integer.state, 1, fixture).await;
+            let payload = named_child(&payload_page, "__0");
+            assert!(
+                matches!(
+                    available_value(&payload.state),
+                    uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+                ),
+                "{value:?}"
+            );
+
+            let selected_payload = scenario
+                .operation(
+                    "select active Rust enum payload",
+                    scenario
+                        .handle()
+                        .inspect(&value_expression(&["value", "Integer", "__0"])),
+                )
+                .await;
+            assert!(
+                matches!(
+                    available_value(&selected_payload.state),
+                    uscope::VariableValue::Scalar(ScalarValue::Unsigned(42))
+                ),
+                "{selected_payload:?}"
+            );
+            let inactive_payload = scenario
+                .operation(
+                    "reject inactive Rust enum payload",
+                    scenario
+                        .handle()
+                        .inspect(&value_expression(&["value", "Unit"])),
+                )
+                .await;
+            assert!(
+                matches!(
+                    inactive_payload.state,
+                    VariableState::Unavailable(uscope::VariableUnavailableReason::ValueAccess(
+                        uscope::ValueAccessUnavailableReason::InactiveVariant(Some(_))
+                    ))
+                ),
+                "{inactive_payload:?}"
+            );
+        }
         assert_eq!(
             scenario.resume_to_stop().await,
             StopReason::Exited(ExitStatus::Code(0))
@@ -1816,57 +1814,6 @@ async fn go_named_integer_constants_reconstruct_symbolic_values() {
 
         resume_go_to_exit(&mut scenario, fixture).await;
         assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
-    }
-}
-
-#[tokio::test]
-async fn c_raw_unions_expose_overlapping_interpretations_without_claiming_an_active_member() {
-    for fixture in [
-        "enums-c-gcc-o0",
-        "enums-c-clang-o0",
-        "enums-c-gcc-o2",
-        "enums-c-clang-o2",
-    ] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("inspect_enums").await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-
-        let raw = dereference_named(&scenario, "raw", 1).await;
-        let uscope::VariableValue::Union = available_value(&raw.state) else {
-            panic!("{fixture}: raw value was not a union: {raw:?}");
-        };
-        let page = record_page(&scenario, &raw.state, 2, fixture).await;
-        assert_eq!(
-            page.children
-                .iter()
-                .filter_map(|child| match &child.relationship {
-                    uscope::ValueChildRelationship::Member(member) => member.name.as_deref(),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            ["integer", "floating"],
-            "{fixture}: {raw:?}"
-        );
-        assert_signed(&named_child(&page, "integer").state, 42, fixture);
-
-        let integer = scenario
-            .operation(
-                "inspect a union interpretation",
-                scenario
-                    .handle()
-                    .inspect(&value_expression(&["raw", "integer"])),
-            )
-            .await;
-        assert_signed(&integer.state, 42, fixture);
-
-        assert_eq!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        );
-        scenario.shutdown().await;
     }
 }
 
