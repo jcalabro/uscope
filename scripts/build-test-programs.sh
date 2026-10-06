@@ -696,6 +696,11 @@ run_cached_build "$embedded_views_dir" "$output_dir/embedded-views" \
     gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c \
     "$embedded_views_dir/main.c" -o "$output_dir/embedded-views" \
     "-L$output_dir" -lembedded-views '-Wl,-rpath,$ORIGIN'
+# The program docs/writing-views.md writes views for, which carries them.
+run_cached_build "$c_fixtures_dir/tutorial" "$output_dir/tutorial" \
+    "$embedded_views_metadata" \
+    gcc -std=c17 -Wall -Wextra -Werror -O0 -g3 -gdwarf-5 -fPIE -pie -Isdk/c \
+    "$c_fixtures_dir/tutorial/tutorial.c" -o "$output_dir/tutorial"
 build_shared_fixture gcc "$c_fixtures_dir/module-frames/library.c" "$output_dir/libmodule-frames.so" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer
 build_fixture gcc "$c_fixtures_dir/module-frames/main.c" "$output_dir/module-frames-gcc-o0" \

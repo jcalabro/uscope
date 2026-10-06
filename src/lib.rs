@@ -97,10 +97,10 @@ pub use protocol::{
     ExceptionInfo, ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, HitComparison,
     HitCondition, InferiorState, InvalidatedWatchpoint, LaunchOptions, LogPart, ModuleIdentity,
     PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope, SignalPolicy,
-    StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState, ValueChildQuery,
-    VariableQuery, ViewCandidate, ViewExplanation, WatchAccess, WatchScope, WatchTarget,
-    Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation,
-    WatchpointSpec,
+    StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState, TypeViews,
+    ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck, ViewExplanation, WatchAccess,
+    WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit, WatchpointId,
+    WatchpointInvalidation, WatchpointSpec,
 };
 pub use source_map::SourcePathMap;
 pub use view::summary::{
@@ -117,6 +117,16 @@ pub fn built_in_views() -> Vec<Arc<ViewName>> {
         .iter()
         .map(|view| view::name_of(view))
         .collect()
+}
+
+/// Whether a view is one uscope builds in, rather than one loaded for the
+/// session or carried by a module.
+#[must_use]
+pub fn is_built_in_view(name: &ViewName) -> bool {
+    view::ViewSet::built_in()
+        .views()
+        .iter()
+        .any(|view| view.source == name.source && view.line == name.line)
 }
 
 /// Finds a signal's exception code by name, with or without its `SIG`
@@ -1075,6 +1085,21 @@ impl DebuggerHandle {
         self.request(|reply| Request::SetViews { views, reply })
             .await?;
         Ok(errors)
+    }
+
+    /// The views whose patterns name the types `name` means in each loaded
+    /// module, and why each did not bind, with no process needed.
+    pub async fn explain_type(&self, name: &str) -> Result<Vec<TypeViews>> {
+        let name = name.to_owned();
+        self.request(|reply| Request::ExplainType { name, reply })
+            .await
+    }
+
+    /// How every loaded module's types are presented: each type a view's
+    /// pattern names, with the views tried, and the loaded and embedded
+    /// views that present no type. Needs no process.
+    pub async fn check_views(&self) -> Result<ViewCheck> {
+        self.request(|reply| Request::CheckViews { reply }).await
     }
 
     /// Turns presenting values with views on or off.

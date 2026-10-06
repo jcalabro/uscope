@@ -1,0 +1,23 @@
+uscope-views 1
+
+# A vector of integers: `n` of them at `data`, with room for `cap`.
+view c intvec {
+    check n <= cap
+    show sequence(n) for i in range(n) => data[i]
+    field capacity = cap
+}
+
+# A tagged union: what it holds depends on its kind.
+view c value {
+    show match kind {
+        VAL_INT => value(u.i)
+        VAL_STR => text(u.s.ptr, u.s.len)
+        VAL_NIL => empty("nil")
+    }
+}
+
+# A run queue: its tasks, each found from the node that links it.
+view c run_queue {
+    show sequence(nr) for n in list(&tasks, p => p->next) if n != &tasks
+        => container_of(n, task, run_node)->pid
+}

@@ -552,6 +552,86 @@ fn view_files_come_from_the_session_the_project_and_the_user() {
     );
 }
 
+/// `uscope views check` says which view presents each of a program's types
+/// that a pattern names, with no process, and fails when a view it was
+/// given presents nothing or binds nothing it names; `views explain` says
+/// why for one type.
+#[test]
+fn views_check_and_explain_a_programs_types_without_a_process() {
+    let directory = support::ScratchDir::new("cli-views-check");
+    let views = directory.path().join("app.views");
+    fs::write(
+        &views,
+        "uscope-views 1\nview c point {\n    show value(z)\n}\nview c widget {\n    show empty(\"w\")\n}\n",
+    )
+    .expect("write the views to check");
+    let program = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/build/test-programs/embedded-views"
+    );
+    let run = |arguments: &[&std::ffi::OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .current_dir(directory.path())
+            .env("XDG_CONFIG_HOME", directory.path().join("config"))
+            .arg("views")
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope views")
+    };
+    let clean = run(&["check".as_ref(), program.as_ref()]);
+    assert_in_order(
+        &assert_success(clean),
+        &[
+            "presented:",
+            "intvec by embedded-views.views[0]:4 `c intvec`",
+        ],
+    );
+    let failed = run(&[
+        "check".as_ref(),
+        program.as_ref(),
+        "--views".as_ref(),
+        views.as_os_str(),
+    ]);
+    assert!(!failed.status.success(), "{failed:?}");
+    let report = String::from_utf8_lossy(&failed.stdout).into_owned();
+    assert_in_order(
+        &report,
+        &[
+            "not presented, though views name them:",
+            "point",
+            "app.views:2 `c point`: line 3: `z`: `z` is neither a member",
+            "views that present no type:",
+            "app.views:5 `c widget`",
+        ],
+    );
+    // A view file that cannot be used fails an explanation too.
+    let broken = directory.path().join("broken.views");
+    fs::write(
+        &broken,
+        "uscope-views 1\nview c intvec {\n    show nothing\n}\n",
+    )
+    .expect("write a broken view file");
+    let refused = run(&[
+        "explain".as_ref(),
+        program.as_ref(),
+        "intvec".as_ref(),
+        "--views".as_ref(),
+        broken.as_os_str(),
+    ]);
+    assert!(!refused.status.success(), "{refused:?}");
+    let explained = run(&["explain".as_ref(), program.as_ref(), "intvec".as_ref()]);
+    assert_in_order(
+        &assert_success(explained),
+        &[
+            "intvec in ",
+            "presented by embedded-views.views[0]:4 `c intvec`",
+            "views tried, in order:",
+            "embedded-views.views[0]:4 `c intvec`: binds",
+        ],
+    );
+}
+
 /// `print` shows a map's entries as `key: value` and a linked structure's
 /// elements, and says why a broken one shows as stored.
 #[test]

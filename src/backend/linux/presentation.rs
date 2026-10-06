@@ -298,6 +298,114 @@ impl<P: InspectionOps> Controller<P> {
         choice
     }
 
+    /// The views whose patterns name the types `name` means in each module,
+    /// and why each did not bind.
+    pub(super) fn explain_type(&self, name: &str) -> Vec<crate::TypeViews> {
+        let mut found = Vec::new();
+        for module in self.modules.values() {
+            let mut seen = Vec::<TypeReference>::new();
+            for reference in module.image.types_named(name) {
+                if seen
+                    .iter()
+                    .any(|other| module.image.same_type(*other, reference))
+                {
+                    continue;
+                }
+                seen.push(reference);
+                found.extend(self.type_views(module, reference));
+            }
+        }
+        found
+    }
+
+    /// How every module's types are presented: each type a view's pattern
+    /// names, once however many units define it, and the session's and
+    /// modules' own views that present no type.
+    pub(super) fn check_views(&self) -> crate::ViewCheck {
+        let built_in = ViewSet::built_in();
+        let mut types = Vec::new();
+        let mut used = std::collections::BTreeSet::new();
+        for module in self.modules.values() {
+            let sets = [&*self.views.set, &**module.image.views(), &*built_in];
+            let mut seen = std::collections::BTreeSet::new();
+            for node in module.image.types() {
+                let crate::model::TypeNode::Resolved(info) = node else {
+                    continue;
+                };
+                let Some(identity) = info.identity.as_deref() else {
+                    continue;
+                };
+                if !sets.iter().any(|set| set.names(identity))
+                    || module
+                        .image
+                        .type_key(info.reference)
+                        .is_some_and(|key| !seen.insert(Arc::clone(key)))
+                {
+                    continue;
+                }
+                let Some(views) = self.type_views(module, info.reference) else {
+                    continue;
+                };
+                if views.candidates.is_empty() {
+                    continue;
+                }
+                used.extend(
+                    views
+                        .candidates
+                        .iter()
+                        .filter(|candidate| candidate.rejection.is_none())
+                        .map(|candidate| (Arc::clone(&candidate.view.source), candidate.view.line)),
+                );
+                types.push(views);
+            }
+        }
+        types.sort_by(|left, right| {
+            (&left.type_info.name, &left.module).cmp(&(&right.type_info.name, &right.module))
+        });
+        let unused = self
+            .views
+            .set
+            .views()
+            .iter()
+            .chain(
+                self.modules
+                    .values()
+                    .flat_map(|module| module.image.views().views().iter()),
+            )
+            .filter(|view| !used.contains(&(Arc::clone(&view.source), view.line)))
+            .map(|view| crate::view::name_of(view))
+            .collect();
+        crate::ViewCheck {
+            types: types.into(),
+            unused,
+        }
+    }
+
+    /// The views whose patterns name one type, as its choice tried them.
+    fn type_views(
+        &self,
+        module: &RuntimeModule,
+        reference: TypeReference,
+    ) -> Option<crate::TypeViews> {
+        let type_info = module.image.type_info(reference)?.clone();
+        let choice = self.view_choice(reference);
+        Some(crate::TypeViews {
+            type_info,
+            module: Arc::from(module.image.path()),
+            candidates: choice
+                .candidates
+                .iter()
+                .map(|candidate| crate::ViewCandidate {
+                    view: Arc::clone(&candidate.name),
+                    rejection: candidate
+                        .rejection
+                        .as_ref()
+                        .map(|rejection| rejection.to_string().into()),
+                })
+                .collect(),
+        })
+    }
+
     /// Why an expression's value is presented as it is.
     pub(super) fn explain_view(
         &self,
@@ -1309,6 +1417,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 source: "uscope".into(),
                 line: 0,
                 header: "dynamic types".into(),
+                extend: false,
             }),
             shape,
             count: None,
@@ -1494,6 +1603,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 source: "uscope".into(),
                 line: 0,
                 header: "sum types".into(),
+                extend: false,
             }),
             shape: if sum.payload.is_some() {
                 PresentedShape::Value
