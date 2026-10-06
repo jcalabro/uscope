@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use nix::libc;
 use object::elf;
-use object::read::elf::{ElfFile64, FileHeader as _, NoteIterator, ProgramHeader as _};
+use object::read::elf::{ElfFile64, FileHeader as _, Note, NoteIterator, ProgramHeader as _};
 use object::{LittleEndian, ReadCache, ReadRef};
 
 const PRSTATUS_SIZE: usize = 336;
@@ -728,6 +728,12 @@ pub(super) fn is_elf(data: &[u8]) -> bool {
 /// The GNU build-id of a 64-bit little-endian ELF image. Only the header,
 /// program headers, and note segments are read, so a large file costs a few
 /// small reads.
+///
+/// A segment's notes are read at its alignment. One that does not read
+/// whole at that alignment is read again at 4 bytes, the alignment of
+/// ordinary note sections, and used only if it reads whole: the kernel
+/// links its vDSO with 4- and 8-byte aligned notes in one segment aligned
+/// to 8.
 pub(super) fn elf_build_id<'data, R: ReadRef<'data>>(data: R) -> Option<&'data [u8]> {
     let header = elf::FileHeader64::<LittleEndian>::parse(data).ok()?;
     let endian = header.endian().ok()?;
@@ -735,19 +741,38 @@ pub(super) fn elf_build_id<'data, R: ReadRef<'data>>(data: R) -> Option<&'data [
         if segment.p_type(endian) != elf::PT_NOTE || segment.p_filesz(endian) > MAX_BUILD_ID_NOTES {
             continue;
         }
-        let Ok(Some(mut notes)) = segment.notes(endian, data) else {
+        let Ok(notes) = segment.data(endian, data) else {
             continue;
         };
-        while let Ok(Some(note)) = notes.next() {
-            if note.name() == elf::ELF_NOTE_GNU
+        let Some(notes) = whole_notes(endian, segment.p_align(endian), notes)
+            .or_else(|| whole_notes(endian, 4, notes))
+        else {
+            continue;
+        };
+        let build_id = notes.into_iter().find(|note| {
+            note.name() == elf::ELF_NOTE_GNU
                 && note.n_type(endian) == elf::NT_GNU_BUILD_ID
                 && !note.desc().is_empty()
-            {
-                return Some(note.desc());
-            }
+        });
+        if let Some(build_id) = build_id {
+            return Some(build_id.desc());
         }
     }
     None
+}
+
+/// Every note in `data` read at `align`, or `None` unless all of it reads.
+fn whole_notes(
+    endian: LittleEndian,
+    align: u64,
+    data: &[u8],
+) -> Option<Vec<Note<'_, elf::FileHeader64<LittleEndian>>>> {
+    let mut notes = NoteIterator::new(endian, align, data).ok()?;
+    let mut whole = Vec::new();
+    while let Some(note) = notes.next().ok()? {
+        whole.push(note);
+    }
+    Some(whole)
 }
 
 /// The build-id the dump saved in an image's header pages, which names the
@@ -1189,6 +1214,16 @@ pub(super) fn fuzz(data: &[u8]) {
         })
         .chain(core.files.iter().map(|file| file.start))
         .collect::<Vec<_>>();
+    // An image no file backs, as the vDSO, is read from saved memory alone.
+    for start in addresses
+        .iter()
+        .copied()
+        .chain(core.auxv_value(super::vdso::AT_SYSINFO_EHDR))
+    {
+        let _ = super::vdso::read_memory_image(start, u64::MAX, |address, buffer| {
+            core.read_saved(address, buffer).is_ok()
+        });
+    }
     let memory = CoreMemory::new(Arc::new(core), backings);
     for address in addresses {
         let mut buffer = [0; 64];

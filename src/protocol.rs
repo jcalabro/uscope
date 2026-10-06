@@ -761,7 +761,7 @@ impl CoreDumpOptions {
     }
 }
 
-/// How a module file was matched to an image recorded in a core dump.
+/// How a module's image was matched to one recorded in a core dump.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleIdentity {
     /// The dumped GNU build-id note equals the file's.
@@ -780,13 +780,19 @@ pub enum ModuleIdentity {
     /// The dump saved nothing that could confirm the file; it was loaded only
     /// because module mismatches were explicitly allowed.
     Unverified,
+    /// No file backs the image, as none backs the vDSO, so the image was read
+    /// from the memory the dump saved.
+    DumpedMemory,
 }
 
 impl ModuleIdentity {
-    /// Whether the file is proven to be the dumped image.
+    /// Whether the module is proven to be the dumped image.
     #[must_use]
     pub const fn is_verified(&self) -> bool {
-        matches!(self, Self::BuildId | Self::SavedContent { .. })
+        matches!(
+            self,
+            Self::BuildId | Self::SavedContent { .. } | Self::DumpedMemory
+        )
     }
 }
 
@@ -808,7 +814,8 @@ pub enum CoreModuleState {
 /// One executable or shared-library image recorded in a core dump.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreModule {
-    /// The image path recorded by the dump.
+    /// The image path recorded by the dump, or `[vdso]` for the vDSO, which
+    /// no file backs.
     pub recorded_path: Arc<PathBuf>,
     /// The image's lowest mapped address at dump time.
     pub start: VirtualAddress,
@@ -832,7 +839,8 @@ pub struct CoreDumpInfo {
     pub arguments: Arc<str>,
     /// The signal that terminated the process, when recorded.
     pub exception: Option<ExceptionInfo>,
-    /// Recorded images, beginning with the main executable.
+    /// Recorded images, beginning with the main executable, and the vDSO
+    /// when the dump records one.
     pub modules: Arc<[CoreModule]>,
 }
 

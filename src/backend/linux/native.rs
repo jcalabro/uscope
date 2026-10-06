@@ -29,7 +29,8 @@ use crate::{Error, Result, VirtualAddress};
 
 use super::memory::MemoryAccessError;
 use super::modules::{
-    ModuleMapping, identify_mapped_module, load_bias, module_mappings, read_maps,
+    ModuleMapping, ProcessMappings, identify_mapped_module, load_bias, process_mappings_in,
+    read_maps,
 };
 use super::registers::{Fxsave, native_fxsave};
 use super::signals::{Signal, WaitEvent};
@@ -111,8 +112,8 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         executable_data: &[u8],
         identity: FileIdentity,
     ) -> Result<u64>;
-    fn module_mappings(&self, _pid: Pid) -> Result<Vec<ModuleMapping>> {
-        Ok(Vec::new())
+    fn module_mappings(&self, _pid: Pid) -> Result<ProcessMappings> {
+        Ok(ProcessMappings::default())
     }
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()>;
     fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()>;
@@ -435,9 +436,9 @@ impl LinuxTraceOps for LinuxPtrace {
         load_bias(pid, executable, executable_data, identity)
     }
 
-    fn module_mappings(&self, pid: Pid) -> Result<Vec<ModuleMapping>> {
+    fn module_mappings(&self, pid: Pid) -> Result<ProcessMappings> {
         self.assert_owner_thread();
-        module_mappings(pid)
+        process_mappings_in(&read_maps(pid)?)
     }
 
     fn spawn(&self, executable: &Path, options: LaunchOptions) -> Result<Pid> {

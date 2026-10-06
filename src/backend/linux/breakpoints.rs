@@ -15,8 +15,9 @@ use crate::protocol::{
 use crate::{BreakpointLocation, Error, LineNumber, Result, VirtualAddress};
 
 use super::frames::StackRoot;
+use super::memory::MemoryAccessError;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
-use super::{BreakpointOwner, Controller, Inferior, LinuxError, backend_error};
+use super::{BREAKPOINT_OPCODE, BreakpointOwner, Controller, Inferior, LinuxError, backend_error};
 
 /// The logical breakpoints clients requested, in creation order, counted by
 /// spec so that adding one need not compare it with every other. A spec
@@ -695,6 +696,115 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
         inferior.repairs.clear();
         Ok(())
+    }
+
+    /// Forgets every site whose memory no longer holds its trap, after the
+    /// process may have changed its mappings. Code that moved, as the vDSO
+    /// does under mremap(2), carries its traps along, so each is taken out
+    /// where it went; a function breakpoint is installed there again when
+    /// it is resolved. A site whose memory went away, or now holds
+    /// something else, is never written. Each owner loses the site: a
+    /// breakpoint its location, a plan its site, and the loader its hook.
+    /// Returns whether any breakpoint lost a location.
+    pub(super) fn reconcile_sites(&mut self, moved: &[MovedCode]) -> Result<bool> {
+        let Some(inferior) = self.inferior.as_mut() else {
+            return Ok(false);
+        };
+        let pid = inferior.memory_thread();
+        let mut lost = Vec::new();
+        // Traps come out of moved code first, since one may have landed on
+        // another site's address.
+        for (&address, site) in &inferior.breakpoints {
+            let Some(code) = moved
+                .iter()
+                .find(|code| site.installed && code.from.contains(&address.get()))
+            else {
+                continue;
+            };
+            let destination = code.to + (address.get() - code.from.start);
+            if site.original_byte != BREAKPOINT_OPCODE
+                && memory_byte(&self.ptrace, pid, destination)? == Some(BREAKPOINT_OPCODE)
+            {
+                let word = self.ptrace.read_word(pid, destination)?;
+                self.ptrace.write_word(
+                    pid,
+                    destination,
+                    (word & !0xff) | u64::from(site.original_byte),
+                )?;
+            }
+            lost.push(address);
+        }
+        for (&address, site) in &inferior.breakpoints {
+            if !site.installed || lost.contains(&address) {
+                continue;
+            }
+            let byte = memory_byte(&self.ptrace, pid, address.get())?;
+            // A trap over a trap cannot tell whether the memory changed.
+            if byte != Some(BREAKPOINT_OPCODE)
+                && (byte.is_none() || site.original_byte != BREAKPOINT_OPCODE)
+            {
+                lost.push(address);
+            }
+        }
+
+        let mut lost_locations = Vec::new();
+        for address in lost {
+            let site = inferior
+                .breakpoints
+                .remove(&address)
+                .expect("lost site existed");
+            forget_removed_site(inferior, address, site.original_byte);
+            for owner in site.owners {
+                match owner {
+                    BreakpointOwner::User(id) => lost_locations.push((id, address)),
+                    BreakpointOwner::Plan(execution) => {
+                        if let Some(sites) = inferior.plan_sites.get_mut(&execution) {
+                            sites.remove(&address);
+                        }
+                    }
+                    BreakpointOwner::Loader => inferior.loader_site = None,
+                }
+            }
+        }
+        for &(id, address) in &lost_locations {
+            let Some(breakpoint) = self
+                .breakpoints
+                .iter_mut()
+                .find(|breakpoint| breakpoint.id == id)
+            else {
+                continue;
+            };
+            breakpoint.locations = breakpoint
+                .locations
+                .iter()
+                .filter(|location| {
+                    runtime_breakpoint_address(inferior, location.location).ok() != Some(address)
+                })
+                .cloned()
+                .collect();
+        }
+        Ok(!lost_locations.is_empty())
+    }
+}
+
+/// Module code that moved since the last stop: the bytes at `from` are now
+/// at `to` onwards, the debugger's traps among them.
+#[derive(Debug)]
+pub(super) struct MovedCode {
+    pub(super) from: std::ops::Range<u64>,
+    pub(super) to: u64,
+}
+
+/// The byte at `address`, or `None` where no memory is mapped.
+fn memory_byte(ptrace: &impl LinuxTraceOps, pid: Pid, address: u64) -> Result<Option<u8>> {
+    match ptrace.read_memory_word(pid, address) {
+        Ok(word)
+        | Err(MemoryAccessError::Partial {
+            word,
+            readable: 1..,
+        }) => Ok(Some(word.to_ne_bytes()[0])),
+        Err(MemoryAccessError::Inaccessible | MemoryAccessError::Partial { .. }) => Ok(None),
+        Err(MemoryAccessError::Fatal(error)) => Err(error),
     }
 }
 

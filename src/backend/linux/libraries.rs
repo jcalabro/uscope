@@ -90,17 +90,17 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Brings the module registry, the loader's breakpoint, and every
     /// breakpoint's locations up to date while every thread is stopped.
     pub(super) fn refresh_libraries(&mut self) -> Result<()> {
-        self.refresh_modules()?;
+        let lost_locations = self.refresh_modules()?;
         self.ensure_loader_breakpoint()?;
-        self.reresolve_breakpoints()
+        self.reresolve_breakpoints(lost_locations)
     }
 
     /// Re-resolves function and source breakpoints across the loaded
     /// images: a library that loaded may add locations, and one that
     /// unloaded takes its locations with it, which leaves a breakpoint with
-    /// none pending until a module with code for it loads.
-    pub(super) fn reresolve_breakpoints(&mut self) -> Result<()> {
-        let mut changed = false;
+    /// none pending until a module with code for it loads. Publishes the
+    /// change, or one already `changed`.
+    fn reresolve_breakpoints(&mut self, mut changed: bool) -> Result<()> {
         for index in 0..self.breakpoints.len() {
             let breakpoint = &self.breakpoints[index];
             if matches!(breakpoint.spec, BreakpointSpec::Address(_)) {

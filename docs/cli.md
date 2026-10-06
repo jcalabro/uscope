@@ -110,6 +110,14 @@ generates, such as ABI wrappers, are never chosen. A Go `file:line` with no
 statement is refused with the nearest lines that have one; in other
 languages, as in gdb, it moves to the next line with code in its function.
 
+A breakpoint is a trap byte written into the program's code, so it moves
+wherever that code moves. When a library's code or the vDSO moves, as under a
+checkpoint restore, a function breakpoint follows it, even when the program
+runs the moved code at once. A location whose memory was unmapped or
+overwritten is dropped, so an address breakpoint there lists 0 locations.
+Nothing reports a move or copy of code no file backs, such as a JIT's, so a
+trap carried with that code stops the program as a `SIGTRAP`.
+
 A hit condition is an operator and a count: `==3` stops at the third hit only,
 `>=5` at the fifth and later, `%10` at every tenth, and `!=`, `<`, `<=`, and `>`
 work likewise. A bare count is refused, because debuggers disagree about what
@@ -181,7 +189,9 @@ Backtraces unwind through every loaded module using its own call-frame
 information. Frames without debug information are named `symbol+offset` from
 the module's ELF symbol tables, including MiniDebugInfo; code no symbol covers
 is `<unknown>` rather than borrowing a neighbor's name. Rust and C++ symbols
-are demangled.
+are demangled. The vDSO, the code the kernel maps into every process for
+calls such as `clock_gettime`, is the module `[vdso]`; no file backs it, so
+it is read from the process's memory.
 
 The selected frame applies to `print`, `watch`, `where`, `list`,
 `disassemble`, `registers`, and `finish`. Each stop selects the innermost
@@ -259,7 +269,8 @@ read-only segments. Memory the dump did not save, such as code, is read only
 from a matching file. A file that does not match is an error unless
 `--allow-module-mismatch` is given, and even then it is used only for debug
 information. A missing file is reported with its build-id, and its frames
-and unsaved memory are unavailable.
+and unsaved memory are unavailable. The vDSO is read from the dump itself,
+and is reported missing if the dump did not save it.
 
 For a dump from another machine or a container, `--sysroot DIR` resolves
 every recorded path inside `DIR` as if it were `/`, and `--module-path DIR`

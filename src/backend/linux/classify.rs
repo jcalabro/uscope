@@ -52,6 +52,7 @@ impl<P: LinuxTraceOps> Controller<P> {
         let trap = signal == Signal::SIGTRAP && !expected_trace && code == Some(libc::SI_KERNEL);
         let breakpoint = trap.then(|| self.normalize_breakpoint_pc(pid)).flatten();
         let removed = trap && breakpoint.is_none() && self.rewind_removed_trap(pid);
+        let carried = trap && breakpoint.is_none() && !removed && self.rewind_carried_trap(pid);
 
         match classify_stop_evidence(
             signal,
@@ -61,9 +62,10 @@ impl<P: LinuxTraceOps> Controller<P> {
             starting,
             debugger_requested,
             breakpoint,
-            removed,
+            removed || carried,
             watch,
         ) {
+            ClassifiedStop::RemovedTrap if carried => ClassifiedStop::CarriedTrap,
             // SIGKILL may have taken the thread out of its stop while the
             // evidence was read, which then could not all be read.
             ClassifiedStop::Unclassifiable(_)
@@ -143,6 +145,39 @@ impl<P: LinuxTraceOps> Controller<P> {
                 return None;
             }
             registers.rip = address.get();
+            self.ptrace.set_registers(pid, registers).ok()
+        };
+        rewind().is_some()
+    }
+
+    /// Rewinds a thread over a trap that code carried when it moved, as the
+    /// vDSO does under mremap(2), where an installed site's trap lands; the
+    /// module refresh that follows takes the trap out before the thread
+    /// runs the code's own instruction there. Returns whether the thread
+    /// was rewound.
+    pub(super) fn rewind_carried_trap(&self, pid: Pid) -> bool {
+        let rewind = || {
+            let inferior = self.inferior.as_ref()?;
+            let mut registers = self.ptrace.registers(pid).ok()?;
+            let address = registers.rip.checked_sub(1)?;
+            let moved = self.moved_code_now(inferior.memory_thread()).ok()?;
+            let carried = moved.iter().any(|code| {
+                let Some(source) = address
+                    .checked_sub(code.to)
+                    .and_then(|offset| code.from.start.checked_add(offset))
+                    .filter(|source| code.from.contains(source))
+                else {
+                    return false;
+                };
+                inferior
+                    .breakpoints
+                    .get(&VirtualAddress::new(source))
+                    .is_some_and(|site| site.installed && site.original_byte != BREAKPOINT_OPCODE)
+            });
+            if !carried {
+                return None;
+            }
+            registers.rip = address;
             self.ptrace.set_registers(pid, registers).ok()
         };
         rewind().is_some()
