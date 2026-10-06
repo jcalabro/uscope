@@ -31,8 +31,8 @@ use std::thread::{self, JoinHandle};
 use nix::errno::Errno;
 use nix::libc;
 use nix::unistd::Pid;
-pub use signals::{Signal, WaitEvent};
 use signals::SignalPolicies;
+pub use signals::{Signal, WaitEvent};
 use tokio::sync::mpsc;
 
 use crate::debug_info::{DebugInfo, UnwindInfo, VariableInfo};
