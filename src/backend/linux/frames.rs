@@ -19,7 +19,6 @@ use crate::{
 };
 
 use super::breakpoints::runtime_breakpoint_address;
-use super::inspection::variable_cfa_error;
 use super::memory::PtraceMemory;
 use super::native::InspectionOps;
 use super::registers::x86_64_registers;
@@ -483,6 +482,22 @@ impl<P: InspectionOps> Controller<P> {
         inferior.selected_thread = Some(pid);
         self.bump_revision();
         Ok(())
+    }
+}
+
+fn variable_cfa_error(termination: &UnwindTermination) -> VariableRuntimeError {
+    match termination {
+        // Defective unwind metadata makes a value malformed; anything else
+        // only leaves the call-frame address unavailable.
+        UnwindTermination::CorruptUnwindInfo { .. }
+        | UnwindTermination::InvalidCaller { .. }
+        | UnwindTermination::CycleDetected => {
+            VariableRuntimeError::Malformed(termination.to_string().into())
+        }
+        _ => VariableUnavailableReason::CallFrameUnavailable(
+            CallFrameUnavailableReason::UnwindTerminated(termination.to_string().into()),
+        )
+        .into(),
     }
 }
 
