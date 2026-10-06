@@ -2348,10 +2348,7 @@ impl DwarfVariableInfo {
                     }
                 }
             }
-            Err(ValueShapeError::Malformed(description)) => invalid(description),
-            Err(ValueShapeError::Unsupported(_)) => VariableState::Unavailable(
-                crate::UnsupportedVariableFeature::TypeRepresentation.into(),
-            ),
+            Err(error) => shape_error_state(error),
         };
         Ok(data_object(variable, Some(type_info), state))
     }
