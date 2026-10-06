@@ -774,6 +774,7 @@ impl Controller<CoreTarget> {
                 reason: reason.clone(),
                 presentations: BTreeMap::new(),
                 selected_frames: BTreeMap::new(),
+                activities: std::cell::RefCell::default(),
             }),
             selected_thread: Some(selected),
             ..Inferior::new(InferiorOrigin::PostMortem, tgid, main, trace_threads, None)

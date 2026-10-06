@@ -1225,6 +1225,11 @@ build_rust_fixture "$rust_fixtures_dir/crash.rs" "$output_dir/crash-rust-nodebug
     -C opt-level=0 -C debuginfo=0 -C strip=debuginfo
 build_go_fixture "$go_fixtures_dir/preempt" "$output_dir/preempt-go" \
     -buildmode=pie
+# Tasks are read through the TLS sequence and load bias, which differ
+# between a PIE and `go build`'s default executable.
+build_go_fixture "$go_fixtures_dir/workers" "$output_dir/workers-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/workers" "$output_dir/workers-go-o2"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-nodwarf" \

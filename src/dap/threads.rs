@@ -91,7 +91,7 @@ mod tests {
         assert_eq!(handles.id(thread), Ok(4321));
         assert_eq!(handles.context(4321), Ok(thread));
 
-        // A goroutine id wider than DAP's ids still gets one, the same each
+        // A task number wider than DAP's ids still gets one, the same each
         // time, and never one a thread could have.
         let wide = handles.id(task(u64::MAX)).expect("an id");
         assert!(wide >= ALLOCATED);

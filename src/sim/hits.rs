@@ -263,6 +263,7 @@ mod tests {
                     }),
                 },
                 name: None,
+                activity: None,
             }]),
             presentation: None,
             breakpoints: Arc::from([Breakpoint {

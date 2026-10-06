@@ -82,6 +82,7 @@ mod presentation;
 mod recorded;
 mod registers;
 mod run_control;
+mod runtimes;
 mod signals;
 #[cfg(any(test, feature = "sim"))]
 pub mod sim_edge;
@@ -563,6 +564,8 @@ struct PublicStop {
     /// Frames selected by clients; an absent thread has its innermost
     /// frame selected.
     selected_frames: BTreeMap<Pid, StackFrameId>,
+    /// What each thread runs for a language runtime, read once asked for.
+    activities: RefCell<BTreeMap<Pid, Option<crate::ThreadActivity>>>,
 }
 
 /// Stop identifiers are unique across every session in the process: a
@@ -987,6 +990,8 @@ struct Controller<P: InspectionOps> {
     /// A launch or attach waiting for those children to be released.
     deferred_start: Option<Start>,
     signals: SignalPolicies,
+    /// The language runtime each image carries, bound on first need.
+    runtime_models: runtimes::RuntimeCache,
     revision: u64,
 }
 
@@ -1085,6 +1090,7 @@ impl<P: InspectionOps> Controller<P> {
             orphans: None,
             deferred_start: None,
             signals: SignalPolicies::default(),
+            runtime_models: RefCell::default(),
             revision: 0,
         }
     }
@@ -1339,6 +1345,14 @@ impl<P: InspectionOps> Controller<P> {
                 reply,
             } => {
                 let _ = reply.send(self.read_memory(process_id, stop_id, address, byte_count));
+            }
+            Request::Tasks {
+                stop_id,
+                from,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(self.tasks(stop_id, from, limit));
             }
             Request::LoadedModule { reply } => {
                 let _ = reply.send(self.loaded_module());
@@ -1866,6 +1880,9 @@ impl<P: InspectionOps> Controller<P> {
             .map(|(&pid, thread)| ThreadSnapshot {
                 id: debug_thread_id(pid),
                 name: thread.name.clone(),
+                activity: matches!(thread.state, NativeThreadState::Stopped)
+                    .then(|| self.thread_activity(inferior, pid))
+                    .flatten(),
                 state: if matches!(thread.state, NativeThreadState::Stopped) {
                     ObservableThreadState::Stopped {
                         reason: thread.reason.clone(),

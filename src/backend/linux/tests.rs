@@ -1457,6 +1457,7 @@ fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness
                 },
             )]),
             selected_frames: BTreeMap::new(),
+            activities: std::cell::RefCell::default(),
         }),
         selected_thread: Some(pid),
         next_execution: 1,

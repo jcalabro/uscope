@@ -1032,6 +1032,10 @@ pub struct ThreadSnapshot {
     /// `pthread_setname_np`, as of its start or the last stop. Core dumps
     /// record no thread names.
     pub name: Option<Arc<str>>,
+    /// What a stopped thread runs for a language runtime, such as Go's
+    /// goroutine; `None` for a running thread, or a program with no runtime
+    /// a model knows.
+    pub activity: Option<crate::ThreadActivity>,
 }
 
 /// The externally observable state of the inferior.
@@ -1362,6 +1366,13 @@ pub enum Request {
     Snapshot {
         reply: Reply<StateSnapshot>,
     },
+    /// One page of the tasks of every language runtime at a stop.
+    Tasks {
+        stop_id: StopId,
+        from: Option<crate::TaskCursor>,
+        limit: usize,
+        reply: Reply<crate::TaskPage>,
+    },
     /// The stop, thread, and frame that implicit inspection uses, without
     /// copying the rest of a snapshot.
     StoppedSelection {
@@ -1545,6 +1556,7 @@ impl Request {
             Self::DescribeAddress { .. } => "describe address".to_owned(),
             Self::StoppedLocation { .. } => "stopped location".to_owned(),
             Self::Snapshot { .. } => "snapshot".to_owned(),
+            Self::Tasks { stop_id, from, .. } => format!("tasks {stop_id:?} from {from:?}"),
             Self::StoppedSelection { .. } => "stopped selection".to_owned(),
             Self::Backtrace { .. } => "backtrace".to_owned(),
             Self::Registers { .. } => "registers".to_owned(),
