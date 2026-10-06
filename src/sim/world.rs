@@ -634,7 +634,7 @@ impl<'a> World<'a> {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or_default();
-                    let reached = semantics::evaluations(
+                    let mut reached = semantics::evaluations(
                         &self.machine.kernel.borrow(),
                         &variables,
                         &backtrace,
@@ -644,6 +644,15 @@ impl<'a> World<'a> {
                         &evaluations,
                     )
                     .map_err(|message| Failure::debugger("expressions", message))?;
+                    reached.extend(
+                        semantics::entry_values(
+                            &self.machine.kernel.borrow(),
+                            &variables,
+                            &backtrace,
+                            self.variant,
+                        )
+                        .map_err(|message| Failure::debugger("entry values", message))?,
+                    );
                     let mut marks = self.machine.marks.borrow_mut();
                     for mark in reached {
                         marks.hit(mark);

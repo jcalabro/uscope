@@ -773,6 +773,68 @@ fn stored(
     Ok(Some(mark))
 }
 
+/// Entry values: where binutils say a variable of the innermost frame is
+/// exactly what a register held when its function was entered, the value
+/// the debugger shows for it is what the call that began the activation
+/// left in that register. An activation a jump entered is not judged: no
+/// call says what it began with.
+pub fn entry_values(
+    kernel: &Kernel,
+    snapshot: &VariableSnapshot,
+    backtrace: &Backtrace,
+    variant: &Variant,
+) -> Result<Vec<Mark>, String> {
+    let innermost = backtrace
+        .frames
+        .iter()
+        .find(|frame| frame.id == snapshot.stack_frame)
+        .is_some_and(|frame| frame.level == 0);
+    let Some(thread) = stopped(kernel, snapshot.thread).filter(|_| innermost) else {
+        return Ok(Vec::new());
+    };
+    let bias = variant.image.bias();
+    let Some(address) = thread.registers.rip.checked_sub(bias) else {
+        return Ok(Vec::new());
+    };
+    let Some(call) = thread.shadow.calls.last().filter(|call| {
+        variant
+            .facts
+            .function(address)
+            .is_some_and(|function| function.start + bias == call.target)
+    }) else {
+        return Ok(Vec::new());
+    };
+    let mut marks = Vec::new();
+    for variable in snapshot.variables.iter() {
+        let VariableState::Available { raw: Some(raw), .. } = &variable.state else {
+            continue;
+        };
+        let Some(register) = variant.facts.entry_register(&variable.name, address) else {
+            continue;
+        };
+        let Some(index) = GENERAL_REGISTERS.iter().position(|name| *name == register) else {
+            continue;
+        };
+        // Variables of one name in nested scopes may be different things.
+        let named = snapshot
+            .variables
+            .iter()
+            .filter(|other| other.name == variable.name);
+        if named.count() > 1 {
+            continue;
+        }
+        let entered = call.entry[index].to_le_bytes();
+        if entered.get(..raw.len()) != Some(&raw[..]) {
+            return Err(format!(
+                "`{}` showed bytes {raw:?}, but its function was entered with {register} = {:#x}",
+                variable.name, call.entry[index]
+            ));
+        }
+        marks.push(Mark::EntryValueTrue);
+    }
+    Ok(marks)
+}
+
 /// The simulated CPU's general registers, in its order.
 const GENERAL_REGISTERS: [&str; 16] = [
     "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13",
@@ -853,6 +915,8 @@ mod tests {
                 return_address,
                 slot,
                 activation: 10 + index as u64,
+                target: 0,
+                entry: [0; 16],
             });
         }
         (kernel, tid)
