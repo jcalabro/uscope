@@ -1,6 +1,7 @@
 //! Stack unwinding and the logical frames presented for inline code.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use nix::libc;
 use nix::unistd::Pid;
@@ -8,15 +9,16 @@ use nix::unistd::Pid;
 use crate::debug_info::{UnwindInfo, VariableRuntimeError};
 use crate::model::FrameMetadata;
 use crate::protocol::{FramePresentation, PresentedFrame, StepKind, StopId, StopReason};
+use crate::runtime_model::Crossing;
 use crate::unwind::{
     CallerProvider, CallerResult, DEFAULT_MAX_FRAMES, FrameContext, RegisterFile, collect_frames,
 };
 use crate::{
     AddressDescription, Backtrace, CallFrameUnavailableReason, CodeInstanceId, CodeInstanceInfo,
-    CodeInstanceKind, Error, ExecutionContext, ExecutionLocation, FrameKind, ImageAddress,
-    ImageLocation, InlineFrameLookup, LoadedModule, ModuleAddress, ModuleId, ModuleImage, Result,
-    SourceLocation, StackFrame, StackFrameId, UnwindTermination, VariableUnavailableReason,
-    VirtualAddress,
+    CodeInstanceKind, CodeRole, Error, ExecutionContext, ExecutionLocation, FrameKind,
+    ImageAddress, ImageLocation, InlineFrameLookup, LoadedModule, ModuleAddress, ModuleId,
+    ModuleImage, Result, SourceLocation, StackFrame, StackFrameId, StackSegment, ThreadActivity,
+    UnwindTermination, VariableUnavailableReason, VirtualAddress,
 };
 
 use super::activation::{StackPosition, StackView};
@@ -244,16 +246,20 @@ impl<P: InspectionOps> Controller<P> {
         root: &StackRoot,
         max_frames: usize,
     ) -> Result<PhysicalStack> {
-        let (native, registers, after_call) = match &root.origin {
+        let (native, registers, after_call, segment) = match &root.origin {
             RootOrigin::Thread(pid) => {
                 let native = self.ptrace.registers(*pid)?;
-                (Some(native), x86_64_registers(&native), false)
+                let segment = match self.thread_activity(inferior, *pid) {
+                    Some(ThreadActivity::Task { stack, .. }) => stack,
+                    _ => StackSegment::Thread,
+                };
+                (Some(native), x86_64_registers(&native), false, segment)
             }
             RootOrigin::Saved {
                 registers,
                 after_call,
                 ..
-            } => (None, registers.clone(), *after_call),
+            } => (None, registers.clone(), *after_call, StackSegment::Task),
         };
         let instruction = registers
             .get(X86_64_RIP)
@@ -263,21 +269,42 @@ impl<P: InspectionOps> Controller<P> {
             cfa: None,
             signal_frame: false,
         };
-        let mut provider = DwarfCallerProvider {
-            modules: self.unwind_modules(inferior),
-            registers,
-            memory: PtraceMemory {
-                ptrace: &self.ptrace,
-                pid: root.reader(),
+        let runtimes = self.runtimes(inferior);
+        let mut cross = |module: ModuleId, registers: &RegisterFile| {
+            let runtime = runtimes
+                .iter()
+                .find(|runtime| runtime.module.id == module)?;
+            // A parked task's frames are all on its own stack.
+            let Some(pid) = root.thread() else {
+                return Some(Ok(Crossing::Stay));
+            };
+            Some(
+                self.with_runtime_stop(inferior, runtime, |stop| {
+                    runtime.model.cross(stop, debug_thread_id(pid), registers)
+                })
+                .unwrap_or_else(|error| Err(error.to_string().into())),
+            )
+        };
+        let mut provider = RoleCallerProvider {
+            dwarf: DwarfCallerProvider {
+                modules: self.unwind_modules(inferior),
+                registers,
+                memory: PtraceMemory {
+                    ptrace: &self.ptrace,
+                    pid: root.reader(),
+                },
+                first: !after_call,
             },
-            first: !after_call,
+            segment,
+            cross: &mut cross,
         };
         let (frames, termination) = collect_frames(
             initial,
             &mut provider,
             |_, context, provider| PhysicalFrame {
                 context: context.clone(),
-                registers: provider.registers.clone(),
+                registers: provider.dwarf.registers.clone(),
+                segment: provider.segment,
             },
             max_frames,
         );
@@ -776,87 +803,11 @@ fn expand_inline_backtrace(
     let mut frames = Vec::new();
 
     for (activation, physical) in stack.frames.iter().enumerate() {
-        let activation = u32::try_from(activation).expect("frame count fits u32");
-        let context = &physical.context;
-        let kind = if context.signal_frame {
-            FrameKind::Signal
-        } else {
-            FrameKind::Physical
-        };
-        let lookup = stack.lookup_address(usize::try_from(activation).expect("u32 fits usize"));
-        let located = lookup.and_then(|address| unwind_module_for(modules, address));
-        let (Some(lookup), Some((frame_module, image_address))) = (lookup, located) else {
-            let level = u32::try_from(frames.len()).expect("frame count fits in u32");
-            frames.push(StackFrame::new(level, kind, None, context.instruction));
-            continue;
-        };
-        let module_image = frame_module.image;
-        let location = module_image.locate(image_address);
-        let module = Some(frame_module.loaded.id);
-        let physical_source = if let InlineFrameLookup::Unique(chain) = &location.inline_frames {
-            // The stop presentation describes the main image only; innermost
-            // frames in other modules show their complete inline chain.
-            let visible = match presentation {
-                Some(presentation)
-                    if activation == 0 && frame_module.loaded.id == modules[0].loaded.id =>
-                {
-                    presentation_visible_count(&location, presentation)?
-                }
-                _ => chain.instances.len(),
-            };
-            let mut source = visible_source(module_image, &location, &chain.instances, visible);
-
-            for &instance_id in chain.instances[..visible].iter().rev() {
-                let instance = module_image
-                    .code_instance(instance_id)
-                    .expect("inline chain references a known instance");
-                let function = module_image.function(instance.function).cloned();
-                let level = u32::try_from(frames.len()).expect("frame count fits in u32");
-
-                frames.push(StackFrame::from_parts(
-                    level,
-                    FrameKind::Inline,
-                    module,
-                    context.instruction,
-                    FrameMetadata {
-                        code_instance: Some(instance.id),
-                        function,
-                        source,
-                        symbol: None,
-                    },
-                ));
-                source = call_site(instance);
-            }
-            source
-        } else {
-            location.source.clone()
-        };
-
-        let physical_instance = location
-            .physical_instance
-            .and_then(|instance| module_image.code_instance(instance));
-        let function = physical_instance
-            .and_then(|instance| module_image.function(instance.function))
-            .cloned();
-        let level = u32::try_from(frames.len()).expect("frame count fits in u32");
-
-        frames.push(StackFrame::from_parts(
-            level,
-            kind,
-            module,
-            context.instruction,
-            FrameMetadata {
-                code_instance: physical_instance.map(|instance| instance.id),
-                function,
-                source: physical_source,
-                // A caller is looked up just before its return address, but
-                // its offset describes the frame's own instruction.
-                symbol: location.symbol.clone().map(|mut symbol| {
-                    symbol.offset += context.instruction.get() - lookup.get();
-                    symbol
-                }),
-            },
-        ));
+        let first = frames.len();
+        expand_activation(stack, activation, modules, presentation, &mut frames)?;
+        for frame in &mut frames[first..] {
+            frame.segment = physical.segment;
+        }
     }
 
     Ok(Backtrace {
@@ -864,6 +815,98 @@ fn expand_inline_backtrace(
         frames: frames.into(),
         termination: stack.termination.clone(),
     })
+}
+
+/// One activation's logical frames: its inline frames, innermost first,
+/// then the activation itself.
+fn expand_activation(
+    stack: &PhysicalStack,
+    activation: usize,
+    modules: &[UnwindModule<'_>],
+    presentation: Option<&FramePresentation>,
+    frames: &mut Vec<StackFrame>,
+) -> Result<()> {
+    let context = &stack.frames[activation].context;
+    let kind = if context.signal_frame {
+        FrameKind::Signal
+    } else {
+        FrameKind::Physical
+    };
+    let lookup = stack.lookup_address(activation);
+    let located = lookup.and_then(|address| unwind_module_for(modules, address));
+    let (Some(lookup), Some((frame_module, image_address))) = (lookup, located) else {
+        let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+        frames.push(StackFrame::new(level, kind, None, context.instruction));
+        return Ok(());
+    };
+    let module_image = frame_module.image;
+    let location = module_image.locate(image_address);
+    let module = Some(frame_module.loaded.id);
+    let physical_source = if let InlineFrameLookup::Unique(chain) = &location.inline_frames {
+        // The stop presentation describes the main image only; innermost
+        // frames in other modules show their complete inline chain.
+        let visible = match presentation {
+            Some(presentation)
+                if activation == 0 && frame_module.loaded.id == modules[0].loaded.id =>
+            {
+                presentation_visible_count(&location, presentation)?
+            }
+            _ => chain.instances.len(),
+        };
+        let mut source = visible_source(module_image, &location, &chain.instances, visible);
+
+        for &instance_id in chain.instances[..visible].iter().rev() {
+            let instance = module_image
+                .code_instance(instance_id)
+                .expect("inline chain references a known instance");
+            let function = module_image.function(instance.function).cloned();
+            let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+
+            frames.push(StackFrame::from_parts(
+                level,
+                FrameKind::Inline,
+                module,
+                context.instruction,
+                FrameMetadata {
+                    code_instance: Some(instance.id),
+                    function,
+                    source,
+                    symbol: None,
+                },
+            ));
+            source = call_site(instance);
+        }
+        source
+    } else {
+        location.source.clone()
+    };
+
+    let physical_instance = location
+        .physical_instance
+        .and_then(|instance| module_image.code_instance(instance));
+    let function = physical_instance
+        .and_then(|instance| module_image.function(instance.function))
+        .cloned();
+    let level = u32::try_from(frames.len()).expect("frame count fits in u32");
+
+    frames.push(StackFrame::from_parts(
+        level,
+        kind,
+        module,
+        context.instruction,
+        FrameMetadata {
+            code_instance: physical_instance.map(|instance| instance.id),
+            function,
+            source: physical_source,
+            // A caller is looked up just before its return address, but
+            // its offset describes the frame's own instruction.
+            symbol: location.symbol.map(|mut symbol| {
+                symbol.offset += context.instruction.get() - lookup.get();
+                symbol
+            }),
+        },
+    ));
+    Ok(())
 }
 
 /// One loaded module's address mapping, metadata, and call-frame information.
@@ -879,6 +922,8 @@ pub(super) struct UnwindModule<'a> {
 pub(super) struct PhysicalFrame {
     pub(super) context: FrameContext,
     pub(super) registers: RegisterFile,
+    /// Whose stack the activation is on.
+    pub(super) segment: StackSegment,
 }
 
 /// A stack's physical activations, innermost first.
@@ -1033,6 +1078,66 @@ pub(super) fn describe_address(
             path: module.image.path_arc(),
             image: module.image.describe(image_address),
         }),
+    }
+}
+
+/// Unwinds by the roles code plays: outermost code ends a stack, and the
+/// runtime that switched stacks says where a stack switch goes. Everything
+/// else is unwound by its call-frame information.
+pub(super) struct RoleCallerProvider<'a, 'c> {
+    pub(super) dwarf: DwarfCallerProvider<'a>,
+    /// Whose stack the current frame is on.
+    pub(super) segment: StackSegment,
+    pub(super) cross: &'c mut CrossStacks<'c>,
+}
+
+/// Asks the runtime whose module holds a frame's code where the frame,
+/// with these registers, goes on past the stack switch it makes; `None`
+/// when no runtime model reads the module's runtime.
+pub(super) type CrossStacks<'c> =
+    dyn FnMut(ModuleId, &RegisterFile) -> Option<std::result::Result<Crossing, Arc<str>>> + 'c;
+
+impl CallerProvider for RoleCallerProvider<'_, '_> {
+    fn caller(&mut self, current: &FrameContext) -> CallerResult {
+        let role = self.dwarf.lookup_address(current).and_then(|lookup| {
+            unwind_module_for(&self.dwarf.modules, lookup)
+                .map(|(module, address)| (module.loaded.id, module.image.code_role(address)))
+        });
+        let unresolved = |reason: Arc<str>| {
+            CallerResult::Finished(UnwindTermination::UnresolvedStackSwitch { reason })
+        };
+        match role {
+            Some((_, CodeRole::Outermost)) => CallerResult::Finished(UnwindTermination::Complete),
+            Some((module, CodeRole::StackSwitch)) => {
+                match (self.cross)(module, &self.dwarf.registers) {
+                    None => unresolved("no runtime model reads the module's runtime".into()),
+                    Some(Err(reason)) => unresolved(reason),
+                    Some(Ok(Crossing::Stay)) => self.dwarf.caller(current),
+                    Some(Ok(Crossing::Outermost)) => {
+                        CallerResult::Finished(UnwindTermination::Complete)
+                    }
+                    Some(Ok(Crossing::Resume { registers, segment })) => {
+                        self.dwarf.registers = registers;
+                        self.segment = segment.unwrap_or(self.segment);
+                        self.dwarf.caller(current)
+                    }
+                    Some(Ok(Crossing::Continue(registers))) => {
+                        let Some(instruction) = registers.get(X86_64_RIP) else {
+                            return unresolved("the task saved no instruction".into());
+                        };
+                        self.dwarf.first = false;
+                        self.dwarf.registers = registers;
+                        self.segment = StackSegment::Task;
+                        CallerResult::Caller(FrameContext {
+                            instruction: VirtualAddress::new(instruction),
+                            cfa: None,
+                            signal_frame: false,
+                        })
+                    }
+                }
+            }
+            _ => self.dwarf.caller(current),
+        }
     }
 }
 

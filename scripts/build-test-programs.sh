@@ -1246,6 +1246,9 @@ build_go_fixture "$go_fixtures_dir/preempt" "$output_dir/preempt-go" \
 build_go_fixture "$go_fixtures_dir/workers" "$output_dir/workers-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/workers" "$output_dir/workers-go-o2"
+build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/stacks" "$output_dir/stacks-go-o2"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/crash" "$output_dir/crash-go-nodwarf" \

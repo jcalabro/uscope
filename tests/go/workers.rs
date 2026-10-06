@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use uscope::{
-    Backtrace, ExecutionContext, InferiorState, StackFrameId, StopContext, TaskSnapshot, TaskStack,
-    TaskState, ThreadActivity, ThreadId, VariableState,
+    Backtrace, ExecutionContext, InferiorState, StackFrameId, StackSegment, StopContext,
+    TaskSnapshot, TaskState, ThreadActivity, ThreadId, VariableState,
 };
 
 use crate::truth::GoSession;
@@ -117,7 +117,7 @@ async fn check_threads(session: &mut GoSession, tasks: &[TaskSnapshot], main: u6
             match thread.activity.as_ref().expect(&context) {
                 ThreadActivity::Task { task, stack } => {
                     if task.number == main {
-                        assert_eq!(*stack, TaskStack::Own, "{context}");
+                        assert_eq!(*stack, StackSegment::Task, "{context}");
                     }
                     let listed = tasks.iter().find(|listed| listed.id == *task);
                     assert_eq!(
