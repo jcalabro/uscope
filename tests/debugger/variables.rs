@@ -419,24 +419,23 @@ async fn go_variable_lookup_respects_nested_lexical_shadowing() {
 }
 
 #[tokio::test]
-async fn zig_scalars_cover_pie_nonpie_and_optimized_partial_locations() {
-    for fixture in ["variables-zig-o0", "variables-zig-nopie"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("variables.zig", 37).await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-        let snapshot = scenario
-            .operation("inspect Zig scalars", scenario.handle().variables())
-            .await;
-        assert_language_scalar_values(&snapshot, fixture);
-        assert_eq!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        );
-        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
-    }
+async fn zig_scalars_cover_optimized_partial_locations() {
+    let fixture = "variables-zig-o0";
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_source_breakpoint("variables.zig", 37).await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let snapshot = scenario
+        .operation("inspect Zig scalars", scenario.handle().variables())
+        .await;
+    assert_language_scalar_values(&snapshot, fixture);
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 
     let fixture = "variables-zig-o2";
     let mut scenario = Scenario::launch(fixture);

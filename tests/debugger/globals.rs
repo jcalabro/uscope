@@ -36,26 +36,18 @@ async fn structural_inspection_preserves_dots_in_global_roots_before_selecting_m
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }
 
+const CPP_GLOBALS: &[&str] = &[
+    "fixture::alpha::duplicate",
+    "fixture::Holder::member",
+    "fixture::Holder::constexpr_member",
+];
+
 #[tokio::test]
-async fn global_catalog_normalizes_compiler_qualification_and_optimized_storage() {
+async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_in_pages() {
     for (fixture, expected) in [
         ("globals-c-gcc-o0", &["external_value", "duplicate"][..]),
-        (
-            "globals-cpp-gcc-o0",
-            &[
-                "fixture::alpha::duplicate",
-                "fixture::Holder::member",
-                "fixture::Holder::constexpr_member",
-            ][..],
-        ),
-        (
-            "globals-cpp-clang-o0",
-            &[
-                "fixture::alpha::duplicate",
-                "fixture::Holder::member",
-                "fixture::Holder::constexpr_member",
-            ][..],
-        ),
+        ("globals-cpp-gcc-o0", CPP_GLOBALS),
+        ("globals-cpp-clang-o0", CPP_GLOBALS),
         (
             "globals-rust-o0",
             &[
@@ -93,6 +85,32 @@ async fn global_catalog_normalizes_compiler_qualification_and_optimized_storage(
                 );
             }
         }
+        // Listing is filtered, paged, and ordered by name.
+        if fixture == "globals-go-o0" {
+            let page = |offset, limit| {
+                handle.globals(uscope::GlobalVariableQuery {
+                    filter: Some("main.package".to_owned()),
+                    offset,
+                    limit,
+                })
+            };
+            let first = page(0, 1).await.expect("first global page");
+            let second = page(1, 1).await.expect("second global page");
+            assert_eq!(
+                (first.offset, first.total, first.variables.len()),
+                (0, 7, 1)
+            );
+            assert_eq!((second.total, second.variables.len()), (7, 1));
+            assert!(first.variables[0].module.is_none());
+            assert!(
+                first.variables[0].variable.qualified_name
+                    < second.variables[0].variable.qualified_name
+            );
+            assert!(matches!(
+                page(0, 0).await,
+                Err(Error::InvalidGlobalPageLimit(0))
+            ));
+        }
         debugger
             .shutdown()
             .await
@@ -117,52 +135,6 @@ async fn global_catalog_normalizes_compiler_qualification_and_optimized_storage(
             .await
             .expect("shut down catalog debugger");
     }
-}
-
-#[tokio::test]
-async fn global_catalog_listing_is_filtered_bounded_and_deterministic() {
-    let debugger = Debugger::new(Scenario::fixture("globals-go-o0")).expect("load Go catalog");
-    let handle = debugger.handle();
-    let first = handle
-        .globals(uscope::GlobalVariableQuery {
-            filter: Some("main.package".to_owned()),
-            offset: 0,
-            limit: 1,
-        })
-        .await
-        .expect("first global page");
-    assert_eq!(first.offset, 0);
-    assert_eq!(first.total, 7);
-    assert_eq!(first.variables.len(), 1);
-    assert!(first.variables[0].module.is_none());
-    let second = handle
-        .globals(uscope::GlobalVariableQuery {
-            filter: Some("main.package".to_owned()),
-            offset: 1,
-            limit: 1,
-        })
-        .await
-        .expect("second global page");
-    assert_eq!(second.total, first.total);
-    assert_eq!(second.variables.len(), 1);
-    assert!(
-        first.variables[0].variable.qualified_name < second.variables[0].variable.qualified_name
-    );
-    assert!(matches!(
-        handle
-            .globals(uscope::GlobalVariableQuery {
-                filter: None,
-                offset: 0,
-                limit: 0,
-            })
-            .await,
-        Err(Error::InvalidGlobalPageLimit(0))
-    ));
-    drop(handle);
-    debugger
-        .shutdown()
-        .await
-        .expect("shut down catalog debugger");
 }
 
 #[tokio::test]
