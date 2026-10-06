@@ -19,8 +19,8 @@ use crate::{
 use super::codec::enumeration_constant;
 use super::die::{
     ByteSize, UnsignedConstant, array_bound, base_type_encoding, byte_size_attribute,
-    constant_member_offset, copy_name, copy_name_with_origins, declaration_with_origins,
-    index_type_is_signed, origin_chain, strict_flag, unsigned_constant,
+    constant_member_offset, copy_name, declaration_with_origins, index_type_is_signed,
+    origin_chain, strict_flag, string_with_origins, unsigned_constant,
 };
 use super::identity::{
     IdentityParts, ScopePath, ScopeSegment, inline_namespace_path, scope_segment, source_language,
@@ -487,11 +487,17 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             Ok(origins) => origins,
             Err(error) => return TypeEntry::Malformed(error.to_string().into()),
         };
-        let explicit_name =
-            match copy_name_with_origins(self.dwarf, self.units, unit, &entry, &origins) {
-                Ok(name) => name,
-                Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-            };
+        let explicit_name = match string_with_origins(
+            self.dwarf,
+            self.units,
+            unit,
+            &entry,
+            &origins,
+            gimli::DW_AT_name,
+        ) {
+            Ok(name) => name,
+            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+        };
         // Self-hosted Zig names a type declared in another by its own name,
         // and says which one it is in.
         let explicit_name = match explicit_name {
@@ -2090,8 +2096,15 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         let target = self
             .target_with_origins(child, unit_index, &chain)?
             .ok_or_else(|| Arc::from("variant component has no type"))?;
-        let name = copy_name_with_origins(self.dwarf, self.units, unit, child, &chain)
-            .map_err(|error| Arc::from(error.to_string()))?;
+        let name = string_with_origins(
+            self.dwarf,
+            self.units,
+            unit,
+            child,
+            &chain,
+            gimli::DW_AT_name,
+        )
+        .map_err(|error| Arc::from(error.to_string()))?;
         let layout = self.record_member_layout(child, target, absent_byte_offset)?;
         if layout == RecordMemberLayout::Runtime
             && let Some(expression) = self
@@ -2576,11 +2589,17 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         }
                         Err(reason) => return TypeEntry::Malformed(reason),
                     };
-                    let name =
-                        match copy_name_with_origins(self.dwarf, self.units, unit, child, &chain) {
-                            Ok(name) => name,
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        };
+                    let name = match string_with_origins(
+                        self.dwarf,
+                        self.units,
+                        unit,
+                        child,
+                        &chain,
+                        gimli::DW_AT_name,
+                    ) {
+                        Ok(name) => name,
+                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                    };
                     let layout = match self.record_member_layout(child, target, None) {
                         Ok(layout) => layout,
                         Err(reason) => return TypeEntry::Malformed(reason),
@@ -2911,11 +2930,17 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                         Ok(None) => return TypeEntry::Malformed("union member has no type".into()),
                         Err(reason) => return TypeEntry::Malformed(reason),
                     };
-                    let member_name =
-                        match copy_name_with_origins(self.dwarf, self.units, unit, child, &chain) {
-                            Ok(name) => name,
-                            Err(error) => return TypeEntry::Malformed(error.to_string().into()),
-                        };
+                    let member_name = match string_with_origins(
+                        self.dwarf,
+                        self.units,
+                        unit,
+                        child,
+                        &chain,
+                        gimli::DW_AT_name,
+                    ) {
+                        Ok(name) => name,
+                        Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                    };
                     let layout = match self.record_member_layout(child, target, Some(0)) {
                         Ok(layout) => layout,
                         Err(reason) => return TypeEntry::Malformed(reason),

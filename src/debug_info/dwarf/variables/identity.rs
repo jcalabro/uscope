@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::debug_info::dwarf::{DieKey, Reader, die_reference_with_signatures};
+use crate::debug_info::dwarf::{DieKey, Reader, die_reference_with_signatures, string_attribute};
 use crate::type_identity::{
     ANONYMOUS_NAMESPACE, NameSyntax, TypeIndex, TypeLookup, TypeName, parse_integer,
 };
@@ -26,7 +26,7 @@ use super::types::{TypeArenaBuilder, TypeEntry};
 const DW_AT_GO_KIND: gimli::DwAt = gimli::DwAt(0x2900);
 const DW_AT_GO_KEY: gimli::DwAt = gimli::DwAt(0x2901);
 const DW_AT_GO_ELEM: gimli::DwAt = gimli::DwAt(0x2902);
-pub(super) const DW_AT_GO_RUNTIME_TYPE: gimli::DwAt = gimli::DwAt(0x2904);
+const DW_AT_GO_RUNTIME_TYPE: gimli::DwAt = gimli::DwAt(0x2904);
 
 /// The inline namespaces of C++ standard libraries, for units older than
 /// DWARF 5's `DW_AT_export_symbols`. libstdc++'s `__cxx1998` is not one: it
@@ -83,6 +83,16 @@ pub(super) enum ScopeSegment {
     Transparent,
 }
 
+/// The offset of a Go type's runtime type descriptor. Go gives the types it
+/// synthesizes for its runtime none.
+pub(super) fn go_runtime_type(entry: &gimli::DebuggingInformationEntry<Reader<'_>>) -> Option<u64> {
+    match entry.attr_value(DW_AT_GO_RUNTIME_TYPE)? {
+        gimli::AttributeValue::Addr(offset) => Some(offset),
+        value => value.udata_value(),
+    }
+    .filter(|offset| *offset != 0)
+}
+
 pub(super) const fn source_language(language: Option<gimli::DwLang>, zig: bool) -> SourceLanguage {
     if zig {
         // Zig's LLVM backend says its units are C99.
@@ -120,10 +130,9 @@ pub(super) fn scope_segment(
     cpp: bool,
 ) -> Option<ScopeSegment> {
     let name = || {
-        entry
-            .attr_value(gimli::DW_AT_name)
-            .and_then(|value| dwarf.attr_string(unit, value).ok())
-            .map(|name| Arc::<str>::from(name.to_string_lossy().as_ref()))
+        string_attribute(dwarf, unit, entry, gimli::DW_AT_name)
+            .ok()
+            .flatten()
     };
     match entry.tag() {
         gimli::DW_TAG_namespace => {
@@ -186,9 +195,8 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         for _ in 0..4 {
             let unit = self.units.get(current.unit)?;
             let entry = unit.entry(gimli::UnitOffset(current.offset)).ok()?;
-            if let Some(value) = entry.attr_value(gimli::DW_AT_name) {
-                let name = self.dwarf.attr_string(unit, value).ok()?;
-                return Some(Arc::from(name.to_string_lossy().as_ref()));
+            if entry.attr_value(gimli::DW_AT_name).is_some() {
+                return string_attribute(self.dwarf, unit, &entry, gimli::DW_AT_name).ok()?;
             }
             let reference = entry
                 .attr_value(gimli::DW_AT_specification)
@@ -353,9 +361,9 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
             gimli::DW_TAG_template_value_parameter => self.template_value(entry, unit_index),
             gimli::DW_TAG_GNU_template_template_param => {
                 let name = self.units.get(unit_index).and_then(|unit| {
-                    let value = entry.attr_value(gimli::DW_AT_GNU_template_name)?;
-                    let name = self.dwarf.attr_string(unit, value).ok()?;
-                    Some(Arc::<str>::from(name.to_string_lossy().as_ref()))
+                    string_attribute(self.dwarf, unit, entry, gimli::DW_AT_GNU_template_name)
+                        .ok()
+                        .flatten()
                 });
                 name.map_or_else(
                     || self.unknown_argument(entry, unit_index),
@@ -392,9 +400,9 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         unit_index: usize,
     ) -> TypeArgument {
         let name = self.units.get(unit_index).and_then(|unit| {
-            let value = entry.attr_value(gimli::DW_AT_name)?;
-            let name = self.dwarf.attr_string(unit, value).ok()?;
-            Some(Arc::<str>::from(name.to_string_lossy().as_ref()))
+            string_attribute(self.dwarf, unit, entry, gimli::DW_AT_name)
+                .ok()
+                .flatten()
         });
         TypeArgument::Unknown(name.unwrap_or_else(|| Arc::from("?")))
     }
@@ -406,11 +414,6 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         unit_index: usize,
     ) -> Option<GoParts> {
         let kind = Self::go_kind(entry)?;
-        let runtime_type = match entry.attr_value(DW_AT_GO_RUNTIME_TYPE) {
-            Some(gimli::AttributeValue::Addr(offset)) => Some(offset),
-            Some(value) => value.udata_value(),
-            None => None,
-        };
         let mut reference = |attribute| {
             let key = die_reference_with_signatures(
                 entry.attr_value(attribute),
@@ -434,8 +437,7 @@ impl<'data> TypeArenaBuilder<'_, 'data> {
         Some(GoParts {
             attributes: GoTypeAttributes {
                 kind,
-                // Go gives the types it synthesizes for its runtime none.
-                runtime_type: runtime_type.filter(|offset| *offset != 0),
+                runtime_type: go_runtime_type(entry),
             },
             key,
             element,
