@@ -51,6 +51,7 @@ use types::{
 mod codec;
 mod die;
 mod evaluate;
+mod generic;
 mod globals;
 mod identity;
 mod inspect;
@@ -196,6 +197,11 @@ pub(super) struct DwarfVariableInfo {
     go_function_entries: HashMap<ImageAddress, usize>,
     /// The float type of complex numbers' parts, by the part's name and size.
     complex_parts: HashMap<(Arc<str>, u64), TypeId>,
+    /// Go's type parameters: the dictionary entry each shape typedef names.
+    go_dict_indices: HashMap<TypeId, u64>,
+    /// The first type, in identifier order, each Go runtime type descriptor
+    /// offset describes.
+    go_runtime_types: HashMap<u64, TypeId>,
     objects_by_debug_offset: HashMap<u64, usize>,
     target: TargetDescription,
     endian: RunTimeEndian,
@@ -799,6 +805,18 @@ pub(super) fn load_variable_info<'data>(
             }
         })
         .collect::<Arc<[_]>>();
+    let mut go_runtime_types = HashMap::new();
+    for node in finalized_types.iter() {
+        if let TypeNode::Resolved(info) = node
+            && let Some(offset) = info
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.go)
+                .and_then(|go| go.runtime_type)
+        {
+            go_runtime_types.entry(offset).or_insert(info.reference.id);
+        }
+    }
     Ok(LoadedVariables {
         info: Arc::new(DwarfVariableInfo {
             objects: objects.into(),
@@ -813,6 +831,8 @@ pub(super) fn load_variable_info<'data>(
             dynamic_record_layouts: types.dynamic_record_layouts,
             go_function_entries,
             complex_parts: types.complex_parts,
+            go_dict_indices: types.go_dict_indices,
+            go_runtime_types,
             objects_by_debug_offset,
             target,
             endian: match target.byte_order {
@@ -966,6 +986,12 @@ impl VariableInfo for DwarfVariableInfo {
                     Arc::clone(description),
                 ))));
             }
+        };
+        // A generic value has its type argument, laid out as its shape.
+        let ty = match self.generic_type(ty, variable.instance, address, runtime, budget)? {
+            generic::Generic::Resolved(argument) => argument,
+            generic::Generic::Unresolved(shape, _) => shape,
+            generic::Generic::Plain => ty,
         };
         match self.located_data_object(variable, address, runtime, &mut frame_base, budget) {
             Ok(storage) => Ok(Ok(Located { ty, storage })),

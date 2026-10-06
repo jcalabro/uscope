@@ -77,6 +77,9 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     /// The float type each complex type's parts have, by the part's name
     /// and size.
     pub(super) complex_parts: HashMap<(Arc<str>, u64), TypeId>,
+    /// Go's generic type parameters: each typedef of a shape that names
+    /// its type argument's entry in the function's dictionary.
+    pub(super) go_dict_indices: HashMap<TypeId, u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -267,6 +270,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             definition_declarations,
             identity_parts: HashMap::new(),
             complex_parts: HashMap::new(),
+            go_dict_indices: HashMap::new(),
         };
         let mut paths = HashMap::<*const ScopeSegment, ScopePath>::new();
         for (key, segments) in scoped_types {
@@ -1506,6 +1510,12 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 )
             });
             let relationship = named_type_relationship(entry.tag(), self.language(unit_index));
+            if let Some(index) = entry
+                .attr_value(DW_AT_GO_DICT_INDEX)
+                .and_then(|value| value.udata_value())
+            {
+                self.go_dict_indices.insert(reference.id, index);
+            }
             return Ok(resolved(
                 reference,
                 name,
@@ -3037,6 +3047,10 @@ fn opaque(
         },
     )
 }
+
+/// Go's `DW_AT_go_dict_index`: which entry of a generic function's
+/// dictionary holds a type parameter's argument.
+const DW_AT_GO_DICT_INDEX: gimli::DwAt = gimli::DwAt(0x2906);
 
 /// Whether an encoding is a float or a pair of them.
 const fn is_floating(encoding: BaseTypeEncoding) -> bool {
