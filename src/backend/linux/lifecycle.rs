@@ -17,10 +17,10 @@ use crate::{Error, LoadedModule, Result, VirtualAddress};
 use super::breakpoints::install_logical_breakpoint;
 use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{
-    ActiveExecution, ActiveKind, BREAKPOINT_OPCODE, ClassifiedStop, Controller, Start,
-    ExpectedStop, Inferior, InferiorOrigin, LinuxError, MemoryAccessError, NativeThreadState,
-    Orphans, StopBarrier, Terminating, TraceThread, Waiter, backend_error, debug_thread_id,
-    exception_info, is_superseded, process_id,
+    ActiveExecution, ActiveKind, BREAKPOINT_OPCODE, ClassifiedStop, Controller, ExpectedStop,
+    Inferior, InferiorOrigin, LinuxError, MemoryAccessError, NativeThreadState, Orphans, Start,
+    StopBarrier, Terminating, TraceThread, Waiter, backend_error, debug_thread_id, exception_info,
+    is_superseded, process_id,
 };
 
 /// How many times an attach may find threads it has not traced before it
@@ -54,15 +54,18 @@ impl<P: LinuxTraceOps> Controller<P> {
 
     fn launch(&mut self, options: LaunchOptions, reply: Reply<ExecutionId>) {
         let stop_at_entry = options.stop_at_entry;
-        let started = self.ptrace.spawn(&self.executable, options).and_then(|pid| {
-            self.ptrace
-                .spawn_waiter(self.message_sender.clone())
-                .map(|waiter| (pid, waiter))
-                .inspect_err(|_| {
-                    let _ = self.ptrace.kill(pid, Signal::SIGKILL);
-                    let _ = self.ptrace.reap(pid);
-                })
-        });
+        let started = self
+            .ptrace
+            .spawn(&self.executable, options)
+            .and_then(|pid| {
+                self.ptrace
+                    .spawn_waiter(self.message_sender.clone())
+                    .map(|waiter| (pid, waiter))
+                    .inspect_err(|_| {
+                        let _ = self.ptrace.kill(pid, Signal::SIGKILL);
+                        let _ = self.ptrace.reap(pid);
+                    })
+            });
         match started {
             Ok((pid, waiter)) => {
                 self.begin_launch(InferiorOrigin::Launched, pid, stop_at_entry, waiter, reply);
@@ -892,16 +895,14 @@ impl<P: LinuxTraceOps> Controller<P> {
 }
 
 impl<P: LinuxTraceOps> Controller<P> {
-    /// Collects SIGTRAPs an attached thread queued before it was interrupted.
+    /// Collects SIGTRAPs seized threads queued before they were interrupted,
+    /// and returns whether any thread was resumed for one.
     ///
-    /// `PTRACE_INTERRUPT` stops a thread before it dequeues signals, so a
-    /// watchpoint or breakpoint trap raised just before the interrupt is still
-    /// queued at the stop. Publishing that stop would report the trap only
-    /// after a later resume, possibly after its watchpoint was removed, and
-    /// detaching would deliver it to an untraced process. Resuming such a
-    /// thread without a signal makes it dequeue the trap into an ordinary
-    /// signal-delivery stop before running any instruction. Returns whether
-    /// any thread was resumed.
+    /// `PTRACE_INTERRUPT` stops a thread before it dequeues signals, so a trap
+    /// raised just before it is still queued: publishing the stop would report
+    /// the trap only after a later resume, and detaching would deliver it to
+    /// an untraced process. Resumed without a signal, the thread dequeues the
+    /// trap into a signal-delivery stop before running any instruction.
     pub(super) fn drain_queued_traps(&mut self) -> Result<bool> {
         let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
         if !inferior.origin.seized() {

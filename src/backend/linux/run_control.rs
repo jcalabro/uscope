@@ -760,15 +760,10 @@ impl<P: LinuxTraceOps> Controller<P> {
         }
     }
 
-    /// Publishes a watchpoint stop for an instruction that accessed watched
-    /// memory. When the instruction was a breakpoint repair step it has
-    /// already executed, so its repair is complete; the site is reinstalled
-    /// when the stop is published. A thread awaiting its breakpoint after
-    /// signal delivery still re-traps there once resumed.
-    ///
-    /// The stop becomes internal if, once every thread is stopped, no hit
-    /// remains to report, so a stepping thread's instruction counts toward
-    /// its step.
+    /// Stops for an instruction that accessed watched memory. A repair step's
+    /// instruction has executed, which completes the repair. The stop turns
+    /// internal if no hit remains to report once every thread is stopped, and
+    /// a stepping thread's instruction then counts toward its step.
     pub(super) fn finish_watched_instruction(
         &mut self,
         pid: Pid,

@@ -213,18 +213,13 @@ impl<P: LinuxTraceOps> Controller<P> {
         Ok(())
     }
 
-    /// Reconciles the reasons threads stopped for with the edits the
-    /// barrier just applied and with the watched bytes every thread now
-    /// sees.
+    /// Reconciles the threads' stop reasons with the edits the barrier just
+    /// applied and the watched bytes as they now are.
     ///
-    /// A breakpoint or watchpoint removed while its trap was being reported
-    /// no longer reports it: like gdb's moribund locations, a hit left with
-    /// no breakpoint or watchpoint is dropped instead of published, and the
-    /// thread resumes normally. So is a change watchpoint's hit when its
-    /// bytes are back to those last observed: another thread undid the
-    /// change before every thread stopped. The barrier then publishes the
-    /// next most important reason any thread of the execution recorded, or
-    /// becomes internal when none did.
+    /// As with gdb's moribund locations, a hit whose breakpoint or watchpoint
+    /// was removed while it was reported is dropped, and so is a change
+    /// watchpoint's hit once another thread restored the bytes. The barrier
+    /// then publishes the next most important reason, or turns internal.
     pub(super) fn settle_edited_reasons(&mut self) -> Result<()> {
         let unchanged = self.unchanged_watchpoints(
             self.inferior
