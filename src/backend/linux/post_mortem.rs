@@ -17,8 +17,8 @@ use object::Object as _;
 
 use super::core_dump::{
     AT_ENTRY, AT_PHDR, CoreDump, CoreError, CoreMemory, CoreMemoryError, CoreSignal, CoreThread,
-    FileBacking, ImageEvidence, ImageMappings, ImageVerification, SavedHeader, image_mappings,
-    is_elf, recorded_build_id, saved_header, verify_image,
+    FileBacking, ImageEvidence, ImageMappings, ImageVerification, SavedHeader, elf_build_id,
+    image_mappings, is_elf, recorded_build_id, saved_header, verify_image,
 };
 use super::core_files::{ModuleFile, ModuleLocator, hex, open_explicit};
 use super::thread_db::{self, ProcessServices};
@@ -658,11 +658,7 @@ fn resolve_vdso(
     let Ok(image) = read else {
         return Ok(Some((recorded(None, CoreModuleState::Missing), None)));
     };
-    // The vDSO's one note segment mixes 8- and 4-byte aligned notes, which
-    // only its note sections describe.
-    let build_id = object::File::parse(image.data.as_slice())
-        .ok()
-        .and_then(|object| object.build_id().ok().flatten());
+    let build_id = elf_build_id(image.data.as_slice());
     let image_id = ModuleImageId::new(number);
     let Ok(debug) =
         crate::debug_info::load_module_bytes(Path::new(VDSO_NAME), &image.data, image_id)
