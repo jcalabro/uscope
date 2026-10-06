@@ -251,6 +251,9 @@ struct TraceThread {
     state: NativeThreadState,
     expected: ExpectedStop,
     pending_signal: Option<PendingSignal>,
+    /// A signal its runtime tolerates arriving late, held while the thread
+    /// stepped or ran without its siblings, until it continues with them.
+    held_signal: Option<PendingSignal>,
     reason: Option<StopReason>,
     stopped_at_breakpoint: Option<VirtualAddress>,
     /// The site whose trap the thread reported, until it steps over the
@@ -275,6 +278,7 @@ impl TraceThread {
             state: NativeThreadState::Starting,
             expected,
             pending_signal: None,
+            held_signal: None,
             reason: None,
             stopped_at_breakpoint: None,
             trapped_at: None,
@@ -692,6 +696,23 @@ impl Inferior {
     /// exited leader.
     fn settled(&self, pid: Pid, thread: &TraceThread) -> bool {
         matches!(thread.state, NativeThreadState::Stopped) || self.exited_leader(pid, thread)
+    }
+
+    /// Whether a thread that resumes expecting `expected` holds the signals
+    /// its runtime tolerates arriving late: while it steps over a
+    /// breakpoint or returns to one, while it steps, and while it runs
+    /// without the threads the debugger keeps stopped. A handler run then
+    /// could wait for those threads, as Go's preemption does.
+    fn holds_signals(&self, expected: &ExpectedStop) -> bool {
+        matches!(
+            expected,
+            ExpectedStop::BreakpointRepair { .. }
+                | ExpectedStop::AwaitBreakpoint { .. }
+                | ExpectedStop::UserStep { .. }
+        ) || self.active.as_ref().is_some_and(|active| {
+            matches!(active.kind, ActiveKind::Step { .. })
+                || matches!(active.scope, ResumeScope::Thread(_))
+        })
     }
 
     /// A stopped thread through which to read and write the shared address
