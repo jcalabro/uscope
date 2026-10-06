@@ -36,15 +36,7 @@ fn options(core_name: &str, executable: Option<&str>, allow: bool) -> CoreDumpOp
 }
 
 fn crash_source_line(needle: &str) -> u64 {
-    let source = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/crash/main.c"),
-    )
-    .expect("read crash fixture source");
-    let index = source
-        .lines()
-        .position(|line| line.contains(needle))
-        .unwrap_or_else(|| panic!("crash fixture has no line containing {needle:?}"));
-    u64::try_from(index + 1).expect("line fits u64")
+    support::source_line("tests/fixtures/c/crash/main.c", needle)
 }
 
 fn available(variable: &Variable) -> &VariableValue {
