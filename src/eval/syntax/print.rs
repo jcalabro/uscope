@@ -177,6 +177,18 @@ impl Printer<'_> {
                 self.child(*end, ASSIGN);
                 self.out.push(']');
             }
+            NodeKind::Slice { base, start, end } => {
+                self.child(*base, POSTFIX);
+                self.out.push('[');
+                if let Some(start) = start {
+                    self.child(*start, ASSIGN);
+                }
+                self.out.push(':');
+                if let Some(end) = end {
+                    self.child(*end, ASSIGN);
+                }
+                self.out.push(']');
+            }
             NodeKind::SizeOf(SizeOf::Type(ty)) => {
                 self.out.push_str("sizeof(");
                 // A bare name alone would be measured as a value if it
@@ -219,6 +231,11 @@ impl Printer<'_> {
             }
             NodeKind::Len(operand) => {
                 self.out.push_str("len(");
+                self.child(*operand, ASSIGN);
+                self.out.push(')');
+            }
+            NodeKind::Cap(operand) => {
+                self.out.push_str("cap(");
                 self.child(*operand, ASSIGN);
                 self.out.push(')');
             }

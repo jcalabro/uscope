@@ -84,6 +84,9 @@ struct MemberHop {
     /// Whether the hop enters a virtual base, which every path through it
     /// shares.
     virtual_base: bool,
+    /// The dereference that follows the member, when it is an embedded
+    /// pointer whose members Go promotes.
+    then: Option<PathStep>,
 }
 
 /// How many aggregates one member lookup may examine.
@@ -192,6 +195,7 @@ fn base_hop(aggregate: TypeId, index: usize, base: &crate::BaseClass) -> MemberH
             declaration: None,
         },
         virtual_base: base.virtuality == crate::BaseClassVirtuality::Virtual,
+        then: None,
     }
 }
 
@@ -446,13 +450,17 @@ impl DwarfVariableInfo {
     /// Every path to a member named `name` of the record or union
     /// `aggregate`, found as C and C++ find names: among its own members,
     /// counting the members of its anonymous members as its own, and only
-    /// then in its base classes, whose names it hides.
+    /// then in its base classes, whose names it hides. Go's embedded fields
+    /// promote their members as Go does: the shallowest win, and an
+    /// embedded pointer is followed. `enclosing` holds the records the
+    /// search is inside, which an embedded pointer may lead back to.
     fn member_paths(
         &self,
         aggregate: TypeId,
         name: &str,
         work: &mut usize,
         depth: usize,
+        enclosing: &mut Vec<TypeId>,
     ) -> Result<Vec<Vec<MemberHop>>> {
         *work += 1;
         if *work > MAX_MEMBER_SEARCH || depth > MAX_AGGREGATE_DEPTH {
@@ -473,6 +481,7 @@ impl DwarfVariableInfo {
             child: DynamicAggregateChild::Member(index),
             member: member.clone(),
             virtual_base: false,
+            then: None,
         };
         let mut found = members
             .iter()
@@ -487,7 +496,7 @@ impl DwarfVariableInfo {
             let Ok((inner, _)) = self.transparent_type(member.type_ref.id) else {
                 continue;
             };
-            for path in self.member_paths(inner, name, work, depth + 1)? {
+            for path in self.member_paths(inner, name, work, depth + 1, enclosing)? {
                 let mut whole = vec![hop(index, member)];
                 whole.extend(path);
                 found.push(whole);
@@ -496,15 +505,88 @@ impl DwarfVariableInfo {
         if !found.is_empty() {
             return Ok(found);
         }
+        enclosing.push(aggregate);
+        let promoted = self.promoted_paths(aggregate, members, name, work, depth, enclosing);
+        enclosing.pop();
+        let promoted = promoted?;
+        if !promoted.is_empty() {
+            return Ok(promoted);
+        }
         for (index, base) in bases.iter().enumerate() {
             let Ok((inner, _)) = self.transparent_type(base.type_ref.id) else {
                 continue;
             };
-            for path in self.member_paths(inner, name, work, depth + 1)? {
+            for path in self.member_paths(inner, name, work, depth + 1, enclosing)? {
                 let mut whole = vec![base_hop(aggregate, index, base)];
                 whole.extend(path);
                 found.push(whole);
             }
+        }
+        Ok(found)
+    }
+
+    /// The shallowest paths to a member named `name` through the embedded
+    /// fields among `members`, which Go promotes: each embedded field's
+    /// own search finds its shallowest, and the shallowest of those win.
+    fn promoted_paths(
+        &self,
+        aggregate: TypeId,
+        members: &[RecordMember],
+        name: &str,
+        work: &mut usize,
+        depth: usize,
+        enclosing: &mut Vec<TypeId>,
+    ) -> Result<Vec<Vec<MemberHop>>> {
+        let mut found: Vec<Vec<MemberHop>> = Vec::new();
+        for (index, member) in members.iter().enumerate() {
+            if !member.embedded || member.artificial {
+                continue;
+            }
+            let Ok((inner, info)) = self.transparent_type(member.type_ref.id) else {
+                continue;
+            };
+            let (record, then) = match &info.kind {
+                TypeKind::Pointer {
+                    target: Some(target),
+                    address_class,
+                } => {
+                    let Ok((record, _)) = self.transparent_type(target.id) else {
+                        continue;
+                    };
+                    let Some(byte_size) = supported_shape(indirection_byte_size(
+                        info.byte_size,
+                        *address_class,
+                        "pointer",
+                    ))?
+                    else {
+                        continue;
+                    };
+                    let step = PathStep::Dereference {
+                        target: target.id,
+                        byte_size,
+                        address_class: *address_class,
+                    };
+                    (record, Some(step))
+                }
+                _ => (inner, None),
+            };
+            if enclosing.contains(&record) {
+                continue;
+            }
+            for path in self.member_paths(record, name, work, depth + 1, enclosing)? {
+                let mut whole = vec![MemberHop {
+                    aggregate,
+                    child: DynamicAggregateChild::Member(index),
+                    member: member.clone(),
+                    virtual_base: false,
+                    then: then.clone(),
+                }];
+                whole.extend(path);
+                found.push(whole);
+            }
+        }
+        if let Some(shallowest) = found.iter().map(Vec::len).min() {
+            found.retain(|path| path.len() == shallowest);
         }
         Ok(found)
     }
@@ -766,7 +848,11 @@ impl DwarfVariableInfo {
                     if found == 0 {
                         Error::MemberNotFound { member, type_name }
                     } else {
-                        Error::AmbiguousMember { member, type_name }
+                        Error::AmbiguousMember {
+                            member,
+                            type_name,
+                            candidates: Vec::new(),
+                        }
                     }
                 };
                 let AggregateMembers::Variant {
@@ -775,8 +861,19 @@ impl DwarfVariableInfo {
                     variants,
                 } = aggregate_members
                 else {
-                    let paths = self.member_paths(aggregate, member_name, &mut 0, 0)?;
+                    let paths =
+                        self.member_paths(aggregate, member_name, &mut 0, 0, &mut Vec::new())?;
                     let Some(path) = one_subobject(&paths) else {
+                        if paths.len() > 1 {
+                            return Err(Error::AmbiguousMember {
+                                member: member_name.to_owned(),
+                                type_name: self
+                                    .type_info(aggregate)
+                                    .map(|info| Arc::clone(&info.name))
+                                    .map_err(malformed)?,
+                                candidates: paths.iter().map(|path| self.path_text(path)).collect(),
+                            });
+                        }
                         return Err(lookup_failure(paths.len()));
                     };
                     let result = self.plan_hops(path, &mut steps)?;
@@ -840,8 +937,25 @@ impl DwarfVariableInfo {
                 member: hop.member.clone(),
                 required_variant: None,
             })));
+            steps.extend(hop.then.clone());
         }
         Ok(path.last().map(|hop| hop.member.type_ref.id))
+    }
+
+    /// A lookup path as the selections that write it: each member's name,
+    /// and each base class's type name.
+    fn path_text(&self, path: &[MemberHop]) -> String {
+        path.iter()
+            .filter_map(|hop| match (&hop.member.name, hop.child) {
+                (Some(name), _) => Some(name.to_string()),
+                (None, DynamicAggregateChild::Base(_)) => self
+                    .type_info(hop.member.type_ref.id)
+                    .ok()
+                    .map(|info| info.name.to_string()),
+                (None, _) => None,
+            })
+            .collect::<Vec<_>>()
+            .join(".")
     }
 
     /// The index of the data object `name` names in the selected logical

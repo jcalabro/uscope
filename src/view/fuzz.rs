@@ -523,7 +523,13 @@ fn linked_containers(world: &mut World, variables: &mut Vec<(String, TypeReferen
         "map[int]int",
         vec![TypeArgument::Type(size), TypeArgument::Type(size)],
     );
-    world.go_kind(go_map, crate::GoKind::Map);
+    world.edit_identity(go_map, |identity| {
+        identity.go = Some(crate::GoTypeAttributes {
+            kind: crate::GoKind::Map,
+            runtime_type: None,
+        });
+    });
+    world.container(go_map);
     variables.push(("Go map".to_owned(), go_map));
 
     // Zig HashMapUnmanaged(u32, u32, …): metadata, with its header before it.
@@ -661,7 +667,13 @@ fn sums_and_tuples(world: &mut World, variables: &mut Vec<(String, TypeReference
         "chan int",
         vec![TypeArgument::Type(size)],
     );
-    world.go_kind(channel, crate::GoKind::Chan);
+    world.edit_identity(channel, |identity| {
+        identity.go = Some(crate::GoTypeAttributes {
+            kind: crate::GoKind::Chan,
+            runtime_type: None,
+        });
+    });
+    world.container(channel);
     variables.push(("Go channel".to_owned(), channel));
 }
 

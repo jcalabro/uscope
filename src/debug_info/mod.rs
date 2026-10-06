@@ -155,6 +155,16 @@ impl PlannedStep {
     }
 }
 
+/// Where a string's bytes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextLocation {
+    /// The first byte's address.
+    pub address: VirtualAddress,
+    /// How many bytes there are, when the string records it rather than
+    /// ending at a NUL.
+    pub length: Option<u64>,
+}
+
 pub struct DebugInfo {
     pub image: Arc<ModuleImage>,
     pub unwind: Arc<dyn UnwindInfo>,
@@ -255,6 +265,20 @@ pub trait VariableInfo: Send + Sync {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<std::result::Result<crate::VariableValue, VariableState>>;
+
+    /// Where the bytes of the text stored at `at` are, when it is a string:
+    /// the first byte's address, and how many there are when the string
+    /// records it rather than ending at a NUL.
+    fn text_span(
+        &self,
+        at: &Located,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<std::result::Result<Option<TextLocation>, VariableState>> {
+        let _ = (at, context, runtime, budget);
+        Ok(Ok(None))
+    }
 
     /// Decodes the value stored at `at`, with its children and dereference
     /// capabilities.

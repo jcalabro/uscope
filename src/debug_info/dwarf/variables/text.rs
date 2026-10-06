@@ -14,12 +14,14 @@ use crate::inspection::InspectionBudget;
 use crate::model::{TextCompletion, TextSummary, ValueStorage};
 use crate::{
     BaseTypeEncoding, GoKind, InspectionExhaustion, RecordMember, RecordMemberLayout,
-    SourceLanguage, TypeId, TypeKind, VariableValue, VirtualAddress,
+    SourceLanguage, TypeId, TypeKind, ValueAccessUnavailableReason, VariableUnavailableReason,
+    VariableValue, VirtualAddress,
 };
 
 use super::codec::{decode_address, unsigned_value};
 use super::shape::ValueShape;
 use super::{DwarfVariableInfo, VariableRuntime};
+use crate::debug_info::TextLocation;
 
 const PAGE_SIZE: u64 = 4096;
 /// How deep a string type's pointer to its bytes may be nested.
@@ -255,6 +257,73 @@ impl DwarfVariableInfo {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Where the bytes of a string are, for slicing it: the first byte's
+    /// address, and how many there are when the string records it. A
+    /// pointer to characters ends at a NUL, so its length is unknown here.
+    pub(super) fn text_location(
+        &self,
+        type_id: TypeId,
+        shape: &ValueShape,
+        value: &VariableValue,
+        storage: &ValueStorage,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> std::result::Result<Option<TextLocation>, VariableUnavailableReason> {
+        let mut reader = TextReader { runtime, budget };
+        let found = match (shape, value) {
+            (
+                ValueShape::Indirection {
+                    target: Some(target),
+                    ..
+                },
+                VariableValue::Address(address),
+            ) if self.is_character(*target) || self.is_sentinel_text(type_id) => {
+                if address.address.get() == 0 {
+                    return Err(VariableUnavailableReason::ValueAccess(
+                        ValueAccessUnavailableReason::NullPointer,
+                    ));
+                }
+                Some(Ok((address.address, None)))
+            }
+            (ValueShape::Slice { text: true, .. }, VariableValue::Slice { length, .. }) => self
+                .read_pointer(storage, 0, &mut reader)
+                .map(|address| address.map(|address| (address, Some(*length)))),
+            (
+                ValueShape::Record {
+                    record, members, ..
+                },
+                _,
+            ) => self
+                .string_parts(*record, members)
+                .and_then(|(pointer, length)| {
+                    let address = match self.read_pointer(storage, pointer, &mut reader)? {
+                        Ok(address) => address,
+                        Err(stopped) => return Some(Err(stopped)),
+                    };
+                    Some(
+                        self.read_word(storage, length, &mut reader)?
+                            .map(|length| (address, Some(length))),
+                    )
+                }),
+            _ => None,
+        };
+        match found {
+            None => Ok(None),
+            Some(Ok((address, length))) => Ok(Some(TextLocation { address, length })),
+            Some(Err(Stopped::Unreadable(address))) => {
+                Err(VariableUnavailableReason::MemoryInaccessible {
+                    address,
+                    requested: 1,
+                    completed: 0,
+                    next_address: address,
+                })
+            }
+            Some(Err(Stopped::Limited(exhaustion))) => {
+                Err(VariableUnavailableReason::InspectionLimit(exhaustion))
+            }
         }
     }
 

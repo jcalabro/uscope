@@ -18,8 +18,8 @@ use std::sync::Arc;
 use gimli::RunTimeEndian;
 
 use crate::debug_info::{
-    Accessed, Located, ObjectKey, ObjectStorage, PlannedStep, Step, VariableContext, VariableInfo,
-    VariableRuntime,
+    Accessed, Located, ObjectKey, ObjectStorage, PlannedStep, Step, TextLocation, VariableContext,
+    VariableInfo, VariableRuntime,
 };
 use crate::inspection::InspectionBudget;
 use crate::{
@@ -710,6 +710,25 @@ impl VariableInfo for DwarfVariableInfo {
             VariableState::Available { value, .. } => Ok(Ok(value)),
             state => Ok(Err(state)),
         }
+    }
+
+    fn text_span(
+        &self,
+        at: &Located,
+        context: VariableContext,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<std::result::Result<Option<TextLocation>, VariableState>> {
+        let state = self.decode_state(at.ty, &at.storage, context, runtime, budget)?;
+        let VariableState::Available { value, .. } = state else {
+            return Ok(Err(state));
+        };
+        let Ok(shape) = self.value_shape(at.ty) else {
+            return Ok(Ok(None));
+        };
+        Ok(self
+            .text_location(at.ty, &shape, &value, &at.storage, runtime, budget)
+            .map_err(VariableState::Unavailable))
     }
 
     fn materialize(

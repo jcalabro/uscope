@@ -366,6 +366,12 @@ pub enum NodeKind {
         start: NodeId,
         end: NodeId,
     },
+    /// `base[start:end]`, either bound of which may be left out.
+    Slice {
+        base: NodeId,
+        start: Option<NodeId>,
+        end: Option<NodeId>,
+    },
     SizeOf(SizeOf),
     /// `offsetof(TYPE, member)`, a view's: where a member is in its record.
     OffsetOf {
@@ -383,6 +389,7 @@ pub enum NodeKind {
     /// presents.
     Global(String),
     Len(NodeId),
+    Cap(NodeId),
     /// A call of a view's built-in function on one operand.
     Call {
         function: Builtin,
@@ -409,6 +416,7 @@ impl NodeKind {
             | Self::Cast { operand, .. }
             | Self::SizeOf(SizeOf::Operand(operand))
             | Self::Len(operand)
+            | Self::Cap(operand)
             | Self::Call { operand, .. }
             | Self::ContainerOf {
                 pointer: operand, ..
@@ -423,6 +431,9 @@ impl NodeKind {
                 otherwise,
             } => vec![*condition, *then, *otherwise],
             Self::Range { base, start, end } => vec![*base, *start, *end],
+            Self::Slice { base, start, end } => {
+                std::iter::once(*base).chain(*start).chain(*end).collect()
+            }
         }
     }
 
@@ -448,7 +459,16 @@ impl NodeKind {
             | (Self::Conditional { .. }, Self::Conditional { .. })
             | (Self::Range { .. }, Self::Range { .. })
             | (Self::Len(_), Self::Len(_))
+            | (Self::Cap(_), Self::Cap(_))
             | (Self::SizeOf(SizeOf::Operand(_)), Self::SizeOf(SizeOf::Operand(_))) => true,
+            (
+                Self::Slice { start, end, .. },
+                Self::Slice {
+                    start: other_start,
+                    end: other_end,
+                    ..
+                },
+            ) => start.is_some() == other_start.is_some() && end.is_some() == other_end.is_some(),
             (Self::Unary { op, .. }, Self::Unary { op: other, .. }) => op == other,
             (
                 Self::Call { function, .. },

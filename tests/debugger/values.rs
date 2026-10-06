@@ -933,13 +933,10 @@ async fn structural_inspection_reads_a_small_field_without_materializing_a_large
         )
         .await;
         let expected = match expression {
-            "huge_array[1048576..1048578]" => matches!(
+            // A range is checked against the array's bounds as it runs.
+            "huge_array[7..3]" | "huge_array[1048576..1048578]" => matches!(
                 &result,
-                Err(Error::ValueIndexOutOfBounds {
-                    index: 1_048_577,
-                    count: 1_048_577,
-                    ..
-                })
+                Err(Error::Expression(error)) if error.kind == uscope::ExpressionErrorKind::Bounds
             ),
             "global_record[0..1]" => matches!(
                 &result,

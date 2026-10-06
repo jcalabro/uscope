@@ -463,6 +463,10 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
         self.base.types_with_base(base)
     }
 
+    fn stands_for_container(&self, ty: TypeReference) -> bool {
+        self.base.stands_for_container(ty)
+    }
+
     fn global(&self, name: &str) -> Result<Lookup<Self::Object>, Refusal> {
         Ok(match self.base.global_step(name)? {
             Some((step, ty)) => Lookup::Object {
