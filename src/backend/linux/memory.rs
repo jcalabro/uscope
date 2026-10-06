@@ -10,38 +10,13 @@ use crate::{
     Error, MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason, Result, VirtualAddress,
 };
 
-use super::native::{InspectionOps, LinuxTraceOps};
+use super::native::InspectionOps;
 use super::{
-    BREAKPOINT_OPCODE, BreakpointSite, Controller, LinuxError, MAX_LOGICAL_MEMORY_READ,
-    MAX_PUBLIC_MEMORY_READ, backend_error, validate_process, validate_public_stop,
+    BreakpointSite, Controller, LinuxError, MAX_LOGICAL_MEMORY_READ, MAX_PUBLIC_MEMORY_READ,
+    backend_error, validate_process, validate_public_stop,
 };
 
 impl<P: InspectionOps> Controller<P> {
-    pub(super) fn read_word(
-        &self,
-        requested_process: ProcessId,
-        stop_id: StopId,
-        address: VirtualAddress,
-    ) -> Result<u64> {
-        let read = self.read_memory(
-            requested_process,
-            stop_id,
-            address,
-            u64::try_from(std::mem::size_of::<u64>()).expect("native word size fits u64"),
-        )?;
-        if let MemoryReadCompletion::Incomplete { next_address, .. } = read.completion {
-            return Err(backend_error(LinuxError::MemoryInaccessible {
-                address: next_address,
-            }));
-        }
-        Ok(u64::from_le_bytes(
-            read.bytes
-                .as_ref()
-                .try_into()
-                .expect("one complete native word was requested"),
-        ))
-    }
-
     pub(super) fn read_memory(
         &self,
         requested_process: ProcessId,
@@ -74,44 +49,6 @@ impl<P: InspectionOps> Controller<P> {
             bytes: read.bytes.into(),
             completion: read.completion,
         })
-    }
-}
-
-impl<P: LinuxTraceOps> Controller<P> {
-    pub(super) fn write_word(
-        &mut self,
-        requested_process: ProcessId,
-        stop_id: StopId,
-        address: VirtualAddress,
-        value: u64,
-    ) -> Result<()> {
-        let inferior = self.inferior.as_mut().ok_or(Error::NotRunning)?;
-        validate_process(inferior, requested_process)?;
-        validate_public_stop(inferior, Some(stop_id))?;
-        let pid = inferior.selected_thread.ok_or(Error::NotStopped)?;
-        let user_bytes = value.to_ne_bytes();
-        let end = VirtualAddress::new(address.get().saturating_add(user_bytes.len() as u64));
-
-        // Installed traps stay in memory; the user's bytes become the bytes
-        // they hide, recorded only once the write succeeds.
-        let mut physical_bytes = user_bytes;
-        let mut hidden = Vec::new();
-        for (&site_address, site) in inferior.breakpoints.range(address..end) {
-            if site.installed {
-                let offset = usize::try_from(site_address.get() - address.get())
-                    .expect("word offset fits usize");
-                hidden.push((site_address, user_bytes[offset]));
-                physical_bytes[offset] = BREAKPOINT_OPCODE;
-            }
-        }
-        self.ptrace
-            .write_word(pid, address.get(), u64::from_ne_bytes(physical_bytes))?;
-        for (site_address, byte) in hidden {
-            if let Some(site) = inferior.breakpoints.get_mut(&site_address) {
-                site.original_byte = byte;
-            }
-        }
-        Ok(())
     }
 }
 
