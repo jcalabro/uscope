@@ -701,7 +701,7 @@ fn controller_lifecycle_is_driven_through_the_linux_effect_boundary() {
     } = launch_controller();
     let (launch_reply, launch_result) = tokio::sync::oneshot::channel();
 
-    controller.launch(LaunchOptions::default(), launch_reply);
+    controller.start(Start::Launch(LaunchOptions::default(), launch_reply));
     controller
         .process_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
         .expect("process initial stop");
@@ -744,7 +744,7 @@ fn pause_during_launch_completes_at_the_initial_exec_stop() {
         pid,
     } = launch_controller();
     let (launch_reply, launch_result) = tokio::sync::oneshot::channel();
-    controller.launch(LaunchOptions::default(), launch_reply);
+    controller.start(Start::Launch(LaunchOptions::default(), launch_reply));
 
     assert_eq!(
         controller
@@ -3138,7 +3138,7 @@ fn a_launch_while_fork_children_are_released_waits_for_them() {
     harness.trace().take_actions();
 
     let (reply, mut launched) = tokio::sync::oneshot::channel();
-    harness.controller.launch(LaunchOptions::default(), reply);
+    harness.controller.start(Start::Launch(LaunchOptions::default(), reply));
     assert!(
         launched.try_recv().is_err(),
         "the launch waits for the child"

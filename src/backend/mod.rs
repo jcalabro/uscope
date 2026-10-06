@@ -107,14 +107,13 @@ pub fn process_start_time(process: i32) -> Option<u64> {
 
 pub enum ControllerMessage {
     Request(Request),
-    Wait(linux::NativeWait),
+    Wait(linux::WaitEvent),
 }
 
 impl ControllerMessage {
     /// Whether the controller serves the message before inspection queued
-    /// ahead of it: run control, and the process events run control
-    /// classifies (§3.11 of `plans/views.md`). A burst of inspection never
-    /// delays a step.
+    /// ahead of it: run control, and the process events it classifies. A
+    /// burst of inspection never delays a step.
     pub(crate) const fn preempts_inspection(&self) -> bool {
         matches!(
             self,
@@ -130,9 +129,8 @@ impl ControllerMessage {
         )
     }
 
-    /// Whether the message only reads one stop, which it names, so it may
-    /// wait behind run control that arrives after it, and then fails as a
-    /// request for an old stop does.
+    /// Whether the message only reads the stop it names, so it may wait
+    /// behind later run control and then fail as a stale request does.
     pub(crate) const fn reads_one_stop(&self) -> bool {
         matches!(
             self,
