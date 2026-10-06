@@ -256,7 +256,7 @@ pub(super) fn copy_expression(
     encoding: gimli::Encoding,
 ) -> std::result::Result<Expression, DwarfError> {
     let endian = expression.0.endian();
-    let mut copied = copy_operations(dwarf, unit_index, unit, expression, encoding)?;
+    let copied = copy_operations(dwarf, unit_index, unit, expression, encoding)?;
     let mut pending = calls(unit, &copied, endian)?;
     if pending.is_empty() {
         return Ok(copied);
@@ -288,8 +288,31 @@ pub(super) fn copy_expression(
         }
         procedures.insert(offset, location);
     }
-    copied.procedures = Arc::new(procedures);
-    Ok(copied)
+    Ok(with_procedures(copied, procedures))
+}
+
+/// Gives `expression` the procedures it calls. They run on its evaluation,
+/// which resolves their indexed addresses from its table; all are in one
+/// unit, whose table they share.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "one unit maps each index to one address, so any order fills the table alike"
+)]
+pub(super) fn with_procedures(
+    mut expression: Expression,
+    procedures: HashMap<u64, Option<LocationDescription>>,
+) -> Expression {
+    let mut indexed_addresses = (*expression.indexed_addresses).clone();
+    for called in procedures
+        .values()
+        .flatten()
+        .flat_map(|location| location.entries.iter())
+    {
+        indexed_addresses.extend(called.expression.indexed_addresses.iter());
+    }
+    expression.indexed_addresses = Arc::new(indexed_addresses);
+    expression.procedures = Arc::new(procedures);
+    expression
 }
 
 /// Copies an expression's operations without the procedures it calls.

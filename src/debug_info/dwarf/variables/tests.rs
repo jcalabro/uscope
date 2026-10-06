@@ -29,7 +29,9 @@ use super::inspect::{
     PathStep, ScalarDecodeError, array_byte_offset, evaluate_error_state, implicit_pointer_range,
     static_member_layout_is_valid,
 };
-use super::location::{EvaluationUnit, Expression, LocationDescription, LocationEntry};
+use super::location::{
+    EvaluationUnit, Expression, LocationDescription, LocationEntry, with_procedures,
+};
 use super::pieces::storage_from_pieces;
 use super::shape::{ValueShape, ValueShapeError, value_shape_from};
 use super::types::{
@@ -973,38 +975,50 @@ fn entry_value_operands_ask_the_caller_for_what_they_name() {
 #[test]
 fn called_procedures_run_on_the_same_stack() {
     let mut runtime = Runtime::new([]);
-    let procedure = |bytes: &[u8]| {
+    let procedure = |expression: Expression| {
         Some(LocationDescription {
             entries: vec![LocationEntry {
                 range: None,
-                expression: expression(bytes),
+                expression,
             }]
             .into(),
         })
     };
-    let mut caller = expression(&[
-        gimli::DW_OP_lit2.0,
-        gimli::DW_OP_call2.0,
-        0x20,
-        0,
-        gimli::DW_OP_call4.0,
-        0x30,
-        0,
-        0,
-        0,
-        gimli::DW_OP_stack_value.0,
-    ]);
-    // The unit begins at 0x100, so the calls name 0x120 and 0x130.
-    caller.procedures = Arc::new(HashMap::from([
-        (0x120, procedure(&[gimli::DW_OP_lit3.0, gimli::DW_OP_mul.0])),
-        // An entry without a location has no effect.
-        (0x130, None),
-    ]));
+    // A procedure resolves an indexed address from its own unit's table.
+    let mut indexed = expression(&[gimli::DW_OP_addrx.0, 0, gimli::DW_OP_plus.0]);
+    indexed.indexed_addresses = Arc::new(HashMap::from([(0, 0x1000)]));
+    let mut caller = with_procedures(
+        expression(&[
+            gimli::DW_OP_lit2.0,
+            gimli::DW_OP_call2.0,
+            0x20,
+            0,
+            gimli::DW_OP_call4.0,
+            0x30,
+            0,
+            0,
+            0,
+            gimli::DW_OP_call2.0,
+            0x40,
+            0,
+            gimli::DW_OP_stack_value.0,
+        ]),
+        // The unit begins at 0x100, so the calls name 0x120, 0x130, and 0x140.
+        HashMap::from([
+            (
+                0x120,
+                procedure(expression(&[gimli::DW_OP_lit3.0, gimli::DW_OP_mul.0])),
+            ),
+            // An entry without a location has no effect.
+            (0x130, None),
+            (0x140, procedure(indexed)),
+        ]),
+    );
     assert!(matches!(
         run(&caller, &units([]), &mut runtime).as_deref(),
         Ok([gimli::Piece {
             location: Location::Value {
-                value: Value::Generic(6)
+                value: Value::Generic(0x1006)
             },
             ..
         }])
