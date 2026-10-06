@@ -1,7 +1,7 @@
 uscope-views 1
 
 # Zig's standard library. Verified against zig 0.16.0 with the LLVM
-# backend, by tests/fixtures/zig/containers.zig.
+# backend and Zig's own, by tests/fixtures/zig/containers.zig.
 
 # std.ArrayList (array_list.Aligned) and the managed list keep the elements
 # in use in `items`.

@@ -74,9 +74,19 @@ constexpr std::size_t next_link = 1;
 constexpr std::size_t next_link = 0;
 #endif
 
-// The words of an object, to corrupt it.
+// The ordinary container under a debug-mode one, whose words the
+// corruptions below write.
+template <typename T> static auto &plain(T &value) {
+#ifdef _GLIBCXX_DEBUG
+    return value._M_base();
+#else
+    return value;
+#endif
+}
+
+// The words of a container, to corrupt it.
 template <typename T> static void **object_words(T &value) {
-    return reinterpret_cast<void **>(&value);
+    return reinterpret_cast<void **>(&plain(value));
 }
 
 int main() {
@@ -101,16 +111,16 @@ int main() {
     int storage[16] = {10, 11, 12, 13};
     Corrupt<std::vector<int>> past_capacity;      // VIEW: past_capacity.value => problem: check
     int *past[3] = {storage, storage + 9, storage + 4};
-    std::memcpy(static_cast<void *>(&past_capacity.value), past, sizeof past);
+    std::memcpy(static_cast<void *>(&plain(past_capacity.value)), past, sizeof past);
     // A vector whose elements are in no mapped memory.
     Corrupt<std::vector<int>> dangling;           // VIEW: dangling.value => len=2 [<unavailable>, …]
     std::uintptr_t garbage[3] = {0x10, 0x18, 0x18};
-    std::memcpy(static_cast<void *>(&dangling.value), garbage, sizeof garbage);
+    std::memcpy(static_cast<void *>(&plain(dangling.value)), garbage, sizeof garbage);
     // A vector whose end is not a whole element past its start.
     Corrupt<std::vector<int>> ragged;             // VIEW: ragged.value => problem: whole number of elements
     char *bytes = reinterpret_cast<char *>(storage);
     char *ragged_ends[3] = {bytes, bytes + 6, bytes + 16};
-    std::memcpy(static_cast<void *>(&ragged.value), ragged_ends, sizeof ragged_ends);
+    std::memcpy(static_cast<void *>(&plain(ragged.value)), ragged_ends, sizeof ragged_ends);
 
 
     std::map<int, int> ordered = {{3, 30}, {1, 10}, {2, 20}}; // VIEW: ordered => len=3 {1: 10, 2: 20, 3: 30}

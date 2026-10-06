@@ -119,6 +119,56 @@ pub(super) fn copy_name(
         .map(|value| value.map(|value| Arc::from(value.to_string_lossy().into_owned())))
 }
 
+/// Zig's attribute for the type or namespace a declaration is in, which its
+/// self-hosted backend writes instead of nesting the declaration's DIE.
+pub(super) const DW_AT_ZIG_PARENT: gimli::DwAt = gimli::DwAt(0x2ccd);
+
+/// How many parents a Zig name is qualified through.
+const MAX_ZIG_PARENTS: usize = 16;
+
+/// A self-hosted Zig type's name after the names of the parents its
+/// `DW_AT_ZIG_parent` chain leads through, as `hash_map.HashMap(…).Header`,
+/// the way the LLVM backend spells it. A parent whose own name is
+/// qualified, or has no parent, ends the chain.
+pub(super) fn zig_qualified_name(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    units: &[gimli::Unit<Reader<'_>>],
+    unit_index: usize,
+    entry: &gimli::DebuggingInformationEntry<Reader<'_>>,
+    name: Arc<str>,
+) -> std::result::Result<Arc<str>, DwarfError> {
+    let mut parts = vec![name];
+    let mut visited = HashSet::new();
+    let mut current = die_reference(entry.attr_value(DW_AT_ZIG_PARENT), unit_index, units)?;
+    // A cycle, or a chain longer than any Zig nests, names nothing; a
+    // partial name would be a wrong one.
+    while let Some(key) = current {
+        if !visited.insert(key) {
+            return Err(DwarfError::ReferenceCycle);
+        }
+        if parts.len() > MAX_ZIG_PARENTS {
+            return Err(DwarfError::MalformedVariable(
+                "a Zig type's parents nest past their limit".into(),
+            ));
+        }
+        let unit = units
+            .get(key.unit)
+            .ok_or(DwarfError::ReferenceOutsideUnits(key.offset))?;
+        let parent = unit.entry(gimli::UnitOffset(key.offset))?;
+        let Some(parent_name) = copy_name(dwarf, unit, &parent)? else {
+            break;
+        };
+        let qualified = parent_name.contains(['.', '(']);
+        parts.push(parent_name);
+        if qualified {
+            break;
+        }
+        current = die_reference(parent.attr_value(DW_AT_ZIG_PARENT), key.unit, units)?;
+    }
+    parts.reverse();
+    Ok(parts.join(".").into())
+}
+
 pub(super) fn copy_string_attribute_with_origins(
     dwarf: &gimli::Dwarf<Reader<'_>>,
     units: &[gimli::Unit<Reader<'_>>],

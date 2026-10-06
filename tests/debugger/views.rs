@@ -587,6 +587,9 @@ async fn cpp_containers_present_as_their_views_say_across_the_library_matrix() {
             &["shared_too", "weak", "expired"],
         ),
         ("containers-cpp-libcxx-standalone", false, &[]),
+        ("containers-cpp-gcc-debug", false, &[]),
+        ("containers-cpp-gcc-static", false, &[]),
+        ("containers-cpp-clang-simple", false, &[]),
     ] {
         seen.extend(
             check_containers_but(fixture, "cpp/containers.cpp", "barrier", optimized, skipped)
@@ -616,6 +619,13 @@ async fn zig_containers_present_as_their_views_say() {
         (
             "containers-zig-o2",
             true,
+            &["ordered", "strings", "no_ordered"],
+        ),
+        // Zig's own backend emits no entry type for an array hash map
+        // either.
+        (
+            "containers-zig-self-hosted",
+            false,
             &["ordered", "strings", "no_ordered"],
         ),
     ] {
