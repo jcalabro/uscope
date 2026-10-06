@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer, MapAccess, SeqAccess, Visitor};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use uscope::{AssemblySyntax, CoreDumpOptions, ProcessId, SignalPolicy, SourcePathMap};
 
 /// How the session obtains its target.
@@ -21,6 +21,9 @@ pub enum Start {
     Attach {
         process: ProcessId,
         executable: Option<PathBuf>,
+        /// The start time of a process another session held for this one,
+        /// which the attach ends the hold of.
+        held: Option<u64>,
     },
     Core(CoreDumpOptions),
 }
@@ -64,7 +67,25 @@ pub struct Configuration {
     /// user's, and where the project's are: in `.uscope/views` under it.
     pub view_files: Vec<PathBuf>,
     pub working_directory: Option<PathBuf>,
+    /// Whether processes the program forks are debugged in child sessions.
+    pub follow_forks: bool,
+    /// The settings a child session's configuration carries over.
+    pub inherited: Map<String, Value>,
 }
+
+/// The keys of a configuration that a child session's carries over: how
+/// the session presents and handles a program, which a fork does not
+/// change, and the adapter's `type`, by which a client such as nvim-dap
+/// finds the adapter to start for the child.
+const INHERITED: [&str; 7] = [
+    "type",
+    "followForks",
+    "sourceMap",
+    "viewFiles",
+    "disassemblySyntax",
+    "signals",
+    "cwd",
+];
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +114,17 @@ struct Arguments {
     allow_module_mismatch: bool,
     #[serde(default)]
     view_files: Vec<PathBuf>,
+    #[serde(default)]
+    follow_forks: bool,
+    held: Option<Held>,
+}
+
+/// A process another session held for this one, which only that session
+/// names.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Held {
+    start_time: u64,
 }
 
 #[derive(Deserialize)]
@@ -120,10 +152,11 @@ enum Actions {
 
 /// Parses a `launch` request's configuration.
 pub fn launch(arguments: Value) -> Result<Configuration, String> {
+    let inherited = inherited(&arguments, false);
     let parsed = parse::<Arguments>(arguments, "launch configuration")?;
-    if parsed.pid.is_some() || parsed.core_file.is_some() {
+    if parsed.pid.is_some() || parsed.core_file.is_some() || parsed.held.is_some() {
         return Err(
-            "invalid launch configuration: `pid` and `coreFile` belong to attach \
+            "invalid launch configuration: `pid`, `held`, and `coreFile` belong to attach \
                     configurations"
                 .to_owned(),
         );
@@ -143,11 +176,17 @@ pub fn launch(arguments: Value) -> Result<Configuration, String> {
         working_directory: parsed.cwd.clone(),
         console: parsed.console,
     };
-    common(parsed, Start::Launch(launch), "launch configuration")
+    common(
+        parsed,
+        Start::Launch(launch),
+        inherited,
+        "launch configuration",
+    )
 }
 
 /// Parses an `attach` request's configuration: a process or a core dump.
 pub fn attach(arguments: Value) -> Result<Configuration, String> {
+    let inherited = inherited(&arguments, true);
     let parsed = parse::<Arguments>(arguments, "attach configuration")?;
     let start = match (&parsed.pid, &parsed.core_file) {
         (Some(_), Some(_)) => {
@@ -171,7 +210,11 @@ pub fn attach(arguments: Value) -> Result<Configuration, String> {
             Start::Attach {
                 process: ProcessId::new(number),
                 executable: parsed.program.clone(),
+                held: parsed.held.as_ref().map(|held| held.start_time),
             }
+        }
+        (None, Some(_)) if parsed.held.is_some() => {
+            return Err("invalid attach configuration: `held` needs `pid`".to_owned());
         }
         (None, Some(core)) => Start::Core(CoreDumpOptions {
             core: core.clone(),
@@ -181,10 +224,26 @@ pub fn attach(arguments: Value) -> Result<Configuration, String> {
             allow_module_mismatch: parsed.allow_module_mismatch,
         }),
     };
-    common(parsed, start, "attach configuration")
+    common(parsed, start, inherited, "attach configuration")
 }
 
-fn common(parsed: Arguments, start: Start, what: &str) -> Result<Configuration, String> {
+/// The settings of `arguments` a child session carries over. An attach
+/// configuration's `program` names the executable of its children too.
+fn inherited(arguments: &Value, attach: bool) -> Map<String, Value> {
+    let program = attach.then_some("program");
+    INHERITED
+        .into_iter()
+        .chain(program)
+        .filter_map(|key| Some((key.to_owned(), arguments.get(key)?.clone())))
+        .collect()
+}
+
+fn common(
+    parsed: Arguments,
+    start: Start,
+    inherited: Map<String, Value>,
+    what: &str,
+) -> Result<Configuration, String> {
     let mut source_paths = SourcePathMap::new();
     for [from, to] in parsed.source_map {
         source_paths
@@ -215,6 +274,8 @@ fn common(parsed: Arguments, start: Start, what: &str) -> Result<Configuration, 
         stop_on_entry: parsed.stop_on_entry,
         view_files: parsed.view_files,
         working_directory: parsed.cwd,
+        follow_forks: parsed.follow_forks,
+        inherited,
         source_paths,
         syntax: match parsed.disassembly_syntax {
             None | Some(Syntax::Intel) => AssemblySyntax::Intel,
@@ -362,10 +423,45 @@ mod tests {
         ] {
             assert_eq!(attach(arguments).map(|_| ()), Err(expected.to_owned()));
         }
+        assert_eq!(
+            attach(json!({"coreFile": "c", "held": {"startTime": 1}})).map(|_| ()),
+            Err("invalid attach configuration: `held` needs `pid`".to_owned())
+        );
         let configuration = attach(json!({"pid": "42"})).expect("string pid");
         assert!(matches!(
             configuration.start,
-            Start::Attach { process, executable: None } if process == ProcessId::new(42)
+            Start::Attach { process, executable: None, held: None } if process == ProcessId::new(42)
+        ));
+    }
+
+    #[test]
+    fn a_child_session_carries_over_what_presents_and_handles_the_program() {
+        let shared = json!({
+            "type": "uscope", "followForks": true, "sourceMap": [["/a", "/b"]], "viewFiles": ["v.toml"],
+            "disassemblySyntax": "att", "signals": {"SIGUSR1": "nostop"}, "cwd": "/w",
+        });
+        let mut parent = shared.clone();
+        parent["program"] = json!("/bin/p");
+        parent["stopOnEntry"] = json!(true);
+        parent["args"] = json!(["x"]);
+        let launched = launch(parent.clone()).expect("launch");
+        assert!(launched.follow_forks);
+        assert_eq!(Value::Object(launched.inherited), shared);
+
+        parent["pid"] = json!(7);
+        parent.as_object_mut().expect("object").remove("args");
+        let attached = attach(parent).expect("attach");
+        let mut expected = shared;
+        expected["program"] = json!("/bin/p");
+        assert_eq!(Value::Object(attached.inherited.clone()), expected);
+
+        let mut child = Value::Object(attached.inherited);
+        child["pid"] = json!(8);
+        child["held"] = json!({"startTime": 99});
+        let child = attach(child).expect("a child's configuration is valid");
+        assert!(matches!(
+            child.start,
+            Start::Attach { process, held: Some(99), .. } if process == ProcessId::new(8)
         ));
     }
 

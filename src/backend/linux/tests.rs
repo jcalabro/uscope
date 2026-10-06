@@ -1,7 +1,8 @@
 use crate::debug_info::{VariableContext, VariableRuntime};
 use crate::inspection::InspectionBudget;
 use crate::protocol::{
-    BreakpointHit, BreakpointSpec, ResolvedBreakpointLocation, ResumeScope, SignalPolicy,
+    BreakpointHit, BreakpointSpec, HeldProcess, ResolvedBreakpointLocation, ResumeScope,
+    SignalPolicy,
 };
 use crate::unwind::{FrameContext, MemoryReader, RegisterFile};
 use crate::{
@@ -16,7 +17,9 @@ use super::classify::{WatchStatus, classify_stop_evidence};
 use super::frames::{default_inline_visible_count, frame_lookup_address};
 use super::memory::{MemoryAccessError, read_logical_memory_with};
 use super::modules::{ModuleMapping, parse_maps};
-use super::native::{InspectionOps, LinuxTraceOps, interrupt_outcome, queued_trap_in_status};
+use super::native::{
+    InspectionOps, LinuxTraceOps, SignalQueue, held_in_status, interrupt_outcome, queued_in_status,
+};
 use super::*;
 
 #[test]
@@ -694,30 +697,62 @@ fn frame_symbolization_adjusts_only_ordinary_caller_resume_addresses() {
 }
 
 #[test]
-fn queued_traps_are_read_from_the_threads_own_unblocked_pending_set() {
+fn queued_signals_are_read_from_the_named_unblocked_pending_set() {
     let status = |pending: &str, blocked: &str| {
         format!(
-            "Name:\tworker\nShdPnd:\t0000000000000010\nSigPnd:\t{pending}\nSigBlk:\t{blocked}\n"
+            "Name:\tworker\nShdPnd:\t0000000000020010\nSigPnd:\t{pending}\nSigBlk:\t{blocked}\n"
         )
     };
-    assert!(queued_trap_in_status(&status(
-        "0000000000000010",
-        "0000000000000000"
-    )));
-    assert!(queued_trap_in_status(&status(
-        "0000000000010110",
-        "0000000000000100"
-    )));
+    let trap = |status: &str| queued_in_status(status, Signal::SIGTRAP, SignalQueue::Thread);
+    assert!(trap(&status("0000000000000010", "0000000000000000")));
+    assert!(trap(&status("0000000000010110", "0000000000000100")));
     assert!(
-        !queued_trap_in_status(&status("0000000000000010", "0000000000000010")),
+        !trap(&status("0000000000000010", "0000000000000010")),
         "a blocked trap cannot be dequeued by resuming"
     );
     assert!(
-        !queued_trap_in_status(&status("0000000000000000", "0000000000000000")),
+        !trap(&status("0000000000000000", "0000000000000000")),
         "a process-wide trap is not the thread's own"
     );
-    assert!(!queued_trap_in_status("SigPnd:\tnot-hex\n"));
-    assert!(!queued_trap_in_status(""));
+    let shared = |status: &str| queued_in_status(status, Signal::SIGCONT, SignalQueue::Process);
+    assert!(shared(&status("0000000000000000", "0000000000000000")));
+    assert!(!shared(&status("0000000000000000", "0000000000020000")));
+    assert!(!trap("SigPnd:\tnot-hex\n"));
+    assert!(!trap(""));
+}
+
+#[test]
+fn a_process_is_held_while_untraced_and_stopped_or_about_to_stop() {
+    let status = |state: &str, tracer: &str, pending: &str| {
+        format!(
+            "Name:\tchild\nState:\t{state}\nTracerPid:\t{tracer}\nSigPnd:\t{pending}\n\
+             ShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\n"
+        )
+    };
+    let stat = |state: &str| format!("4242 (child) {state} 4241 4242 4241 0 -1");
+    let none = "0000000000000000";
+    let stop = "0000000000040000";
+    assert!(held_in_status(
+        &status("T (stopped)", "0", none),
+        &stat("T")
+    ));
+    assert!(
+        held_in_status(&status("R (running)", "0", stop), &stat("R")),
+        "detached, it has yet to take the SIGSTOP"
+    );
+    assert!(
+        held_in_status(&status("R (running)", "0", none), &stat("T")),
+        "it took the SIGSTOP between the state and the signals the status shows"
+    );
+    assert!(
+        !held_in_status(&status("t (tracing stop)", "4242", none), &stat("t")),
+        "a session attached to it"
+    );
+    assert!(
+        !held_in_status(&status("S (sleeping)", "0", none), &stat("S")),
+        "something let it run"
+    );
+    assert!(!held_in_status("", ""));
 }
 
 #[test]
@@ -841,6 +876,8 @@ struct FakeTrace {
     program_counters: RefCell<BTreeMap<Pid, u64>>,
     /// Threads holding a SIGTRAP queued behind an interrupt stop.
     queued_traps: RefCell<BTreeSet<Pid>>,
+    /// Threads that would take a SIGCONT queued for their process.
+    queued_continue: RefCell<BTreeSet<Pid>>,
     /// Threads a sibling's `exit_group` killed out of their ptrace-stop.
     vanished: RefCell<BTreeSet<Pid>>,
     /// A thread SIGKILL takes out of its stop, leaving it at its exit event,
@@ -866,6 +903,10 @@ struct FakeTrace {
     unreadable: RefCell<BTreeSet<u64>>,
     /// Fails every memory read operationally, unlike unmapped memory.
     read_failure: RefCell<Option<Errno>>,
+    /// Threads' blocked signals; others block none.
+    signal_masks: RefCell<BTreeMap<Pid, u64>>,
+    /// Processes' start times; others' are unreadable.
+    start_times: RefCell<BTreeMap<Pid, u64>>,
 }
 
 impl FakeTrace {
@@ -1061,8 +1102,8 @@ impl LinuxTraceOps for FakeTrace {
     fn wait_status(&self, _pid: Pid) -> std::result::Result<WaitEvent, Errno> {
         panic!("unexpected wait")
     }
-    fn process_start_time(&self, _process: Pid) -> Option<u64> {
-        None
+    fn process_start_time(&self, process: Pid) -> Option<u64> {
+        self.start_times.borrow().get(&process).copied()
     }
     fn tracer_process(&self) -> i32 {
         i32::try_from(std::process::id()).expect("pid fits")
@@ -1135,6 +1176,17 @@ impl LinuxTraceOps for FakeTrace {
             .copied()
             .ok_or(Errno::EINVAL)
     }
+    fn held_release(&self) -> Option<fn(&HeldProcess) -> Result<bool>> {
+        None
+    }
+    fn signal_mask(&self, pid: Pid) -> Result<u64> {
+        Ok(self.signal_masks.borrow().get(&pid).copied().unwrap_or(0))
+    }
+    fn set_signal_mask(&self, pid: Pid, mask: u64) -> Result<()> {
+        self.record(format!("set_signal_mask {pid} {mask:#x}"));
+        self.signal_masks.borrow_mut().insert(pid, mask);
+        Ok(())
+    }
     fn request_stop(&self, _process: Pid, thread: Pid) -> Result<()> {
         self.record(format!("request_stop {thread}"));
         if self.vanished.borrow().contains(&thread) {
@@ -1142,8 +1194,15 @@ impl LinuxTraceOps for FakeTrace {
         }
         Ok(())
     }
-    fn queued_trap(&self, pid: Pid) -> Result<bool> {
-        Ok(self.queued_traps.borrow().contains(&pid))
+    fn queued_signal(&self, pid: Pid, signal: Signal, queue: SignalQueue) -> Result<bool> {
+        Ok(match (signal, queue) {
+            (Signal::SIGTRAP, SignalQueue::Thread) => self.queued_traps.borrow().contains(&pid),
+            (Signal::SIGCONT, SignalQueue::Process) => {
+                let blocked = self.signal_mask(pid)? & (1 << (libc::SIGCONT - 1)) != 0;
+                self.queued_continue.borrow().contains(&pid) && !blocked
+            }
+            _ => false,
+        })
     }
     fn executable(&self, _pid: Pid, _address: VirtualAddress) -> Result<bool> {
         Ok(true)
@@ -2713,6 +2772,320 @@ fn a_fork_event_whose_thread_is_killed_as_its_message_is_read_is_superseded() {
         inferior.fork_children.keys().collect::<Vec<_>>()
     );
     assert_eq!(harness.thread(parent).state, NativeThreadState::Running);
+}
+
+impl WatchHarness {
+    /// Makes the session hold the children its process forks, the next of
+    /// which is `child`, started at `start_time`, and returns their receiver.
+    fn hold_forks(&mut self, child: Pid, start_time: u64) -> crate::HeldChildren {
+        let (children, held) = tokio::sync::mpsc::unbounded_channel();
+        self.controller.held_children = Some(children);
+        self.trace().clone.replace(Some((child, child)));
+        self.trace()
+            .start_times
+            .borrow_mut()
+            .insert(child, start_time);
+        held
+    }
+}
+
+/// The children received, by the process that forked them.
+fn received(held: &mut crate::HeldChildren) -> Vec<(ProcessId, HeldProcess)> {
+    std::iter::from_fn(|| held.try_recv().ok())
+        .map(|child| (child.parent(), child.hand_over()))
+        .collect()
+}
+
+#[test]
+fn a_held_fork_child_is_scrubbed_then_stopped_untraced_whichever_stop_comes_first() {
+    for child_first in [false, true] {
+        let mut harness = hit_harness(1, ">=1");
+        let parent = harness.threads[0];
+        let child = Pid::from_raw(6000);
+        let mut held = harness.hold_forks(child, 77);
+        let fork = WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_FORK);
+        let first_stop = WaitEvent::Stopped(child, Signal::SIGSTOP);
+        let order = if child_first {
+            [first_stop, fork]
+        } else {
+            [fork, first_stop]
+        };
+        for status in order {
+            assert!(harness.controller.handle_wait(status));
+        }
+        let actions = harness.trace().take_actions();
+        let settled = actions
+            .iter()
+            .position(|action| action.starts_with(&format!("write_word {child}")))
+            .expect("the child is scrubbed");
+        assert_eq!(
+            actions[settled..settled + 3],
+            [
+                format!("write_word {child} {HIT_SITE:#x} 0x90"),
+                format!("request_stop {child}"),
+                format!("detach {child} None"),
+            ],
+            "child first: {child_first}"
+        );
+        assert_eq!(
+            received(&mut held),
+            [(
+                process_id(parent),
+                HeldProcess {
+                    process_id: process_id(child),
+                    start_time: 77,
+                }
+            )]
+        );
+    }
+}
+
+#[test]
+fn a_fork_child_first_stopping_after_its_parent_exited_is_held_for_that_parent() {
+    let mut harness = hit_harness(1, ">=1");
+    let parent = harness.threads[0];
+    let child = Pid::from_raw(6000);
+    let mut held = harness.hold_forks(child, 77);
+    for status in [
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_FORK),
+        WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+        WaitEvent::Exited(parent, 0),
+    ] {
+        assert!(harness.controller.handle_wait(status));
+    }
+    assert!(harness.controller.inferior.is_none());
+    harness.trace().take_actions();
+    harness.published();
+
+    assert!(
+        harness
+            .controller
+            .handle_wait(WaitEvent::Stopped(child, Signal::SIGSTOP))
+    );
+    assert!(harness.trace().take_actions().ends_with(&[
+        format!("request_stop {child}"),
+        format!("detach {child} None"),
+    ]));
+    assert_eq!(
+        received(&mut held),
+        [(
+            process_id(parent),
+            HeldProcess {
+                process_id: process_id(child),
+                start_time: 77,
+            }
+        )]
+    );
+    assert!(harness.controller.orphans.is_none());
+}
+
+/// A child no session could take runs on: one first stopping during a
+/// shutdown, which leaves no client; one whose identity is unreadable,
+/// which no session could prove it attached to; and one no receiver is
+/// left to take.
+#[test]
+fn a_fork_child_no_session_could_take_is_released_rather_than_held() {
+    for reason in ["shutdown", "identity", "receiver"] {
+        let mut harness = hit_harness(1, ">=1");
+        let parent = harness.threads[0];
+        let child = Pid::from_raw(6000);
+        let mut held = harness.hold_forks(child, 77);
+        match reason {
+            "identity" => harness.trace().start_times.borrow_mut().clear(),
+            "receiver" => held.close(),
+            _ => {}
+        }
+        for status in [
+            WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_FORK),
+            WaitEvent::PtraceEvent(parent, Signal::SIGTRAP, libc::PTRACE_EVENT_EXIT),
+            WaitEvent::Exited(parent, 0),
+        ] {
+            assert!(harness.controller.handle_wait(status));
+        }
+        if reason == "shutdown" {
+            harness.controller.begin_shutdown(None);
+        }
+        harness.trace().take_actions();
+
+        harness
+            .controller
+            .handle_wait(WaitEvent::Stopped(child, Signal::SIGSTOP));
+        let actions = harness.trace().take_actions();
+        assert!(
+            actions.ends_with(&[
+                format!("write_word {child} {HIT_SITE:#x} 0x90"),
+                format!("detach {child} None"),
+            ]),
+            "{reason}: {actions:?}"
+        );
+        assert_eq!(received(&mut held), [], "{reason}");
+    }
+}
+
+#[test]
+fn a_held_process_attached_is_continued_and_the_program_never_sees_why() {
+    let mut harness = watch_harness(1);
+    let leader = harness.threads[0];
+    let mut attached = harness.begin_attach();
+    harness.inferior().held = Some(HeldStop::Stopped);
+
+    // Seizing a process in a job-control stop reports that stop.
+    harness
+        .controller
+        .process_wait(WaitEvent::PtraceEvent(
+            leader,
+            Signal::SIGSTOP,
+            libc::PTRACE_EVENT_STOP,
+        ))
+        .expect("attach stop");
+    attached
+        .try_recv()
+        .expect("attach replied")
+        .expect("attached");
+    assert!(
+        harness
+            .trace()
+            .take_actions()
+            .contains(&format!("kill {leader} SIGCONT")),
+        "the attach ends the job-control stop"
+    );
+
+    harness.resume().expect("continue");
+    harness.trace().take_actions();
+    while harness.events.try_recv().is_ok() {}
+    // The interrupt the attach sent waited for the resume.
+    harness.interrupted(leader).expect("kept interrupt");
+    harness.trace().take_actions();
+    let tracer = harness.trace().tracer_process();
+    harness
+        .trace()
+        .set_siginfo(leader, libc::SI_USER, Some(tracer));
+    harness
+        .controller
+        .process_wait(WaitEvent::Stopped(leader, Signal::SIGCONT))
+        .expect("SIGCONT delivery");
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("continue {leader} None")]
+    );
+    assert_eq!(harness.published_stops(), 0);
+
+    // Any later SIGCONT is the program's, and stops it as its policy says.
+    harness
+        .trace()
+        .set_siginfo(leader, libc::SI_USER, Some(tracer));
+    harness
+        .controller
+        .process_wait(WaitEvent::Stopped(leader, Signal::SIGCONT))
+        .expect("SIGCONT delivery");
+    assert!(matches!(
+        harness.public_reason(),
+        Some(StopReason::Exception(ExceptionInfo { code: 18, .. }))
+    ));
+}
+
+/// A held process detached before it ever ran still holds the `SIGCONT`
+/// that ended its stop, which it would take untraced. The detach takes it
+/// first, unblocking it for the while in a fork child still inside `fork`,
+/// which blocks nearly every signal.
+#[test]
+fn detaching_a_held_process_takes_the_sigcont_it_has_not_yet_received() {
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    harness.attached();
+    harness.inferior().held = Some(HeldStop::Continued);
+    harness.trace().queued_continue.borrow_mut().insert(pid);
+    let in_fork = 0xffff_ffff_fffb_feff;
+    harness
+        .trace()
+        .signal_masks
+        .borrow_mut()
+        .insert(pid, in_fork);
+    harness.trace().take_actions();
+
+    let (reply, mut result) = tokio::sync::oneshot::channel();
+    harness.controller.begin_shutdown(Some(reply));
+    assert_eq!(
+        harness.trace().take_actions(),
+        [
+            format!("set_signal_mask {pid} {:#x}", in_fork & !(1 << 17)),
+            format!("continue {pid} None"),
+        ]
+    );
+    // With a thread running again, the stop is no longer one.
+    assert!(harness.inferior().public_stop.is_none());
+    // The attach's interrupt waited for that resume.
+    assert!(
+        harness
+            .controller
+            .handle_detach_wait(WaitEvent::PtraceEvent(
+                pid,
+                Signal::SIGTRAP,
+                libc::PTRACE_EVENT_STOP,
+            ))
+    );
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("continue {pid} None")]
+    );
+    harness.trace().queued_continue.borrow_mut().clear();
+    let tracer = harness.trace().tracer_process();
+    harness
+        .trace()
+        .set_siginfo(pid, libc::SI_USER, Some(tracer));
+    assert!(
+        !harness
+            .controller
+            .handle_detach_wait(WaitEvent::Stopped(pid, Signal::SIGCONT))
+    );
+    let actions = harness.trace().take_actions();
+    let restored = actions
+        .iter()
+        .position(|action| *action == format!("set_signal_mask {pid} {in_fork:#x}"))
+        .expect("the mask is restored");
+    assert_eq!(
+        actions
+            .iter()
+            .position(|action| *action == format!("detach {pid} None")),
+        Some(actions.len() - 1),
+        "the SIGCONT is not delivered: {actions:?}"
+    );
+    assert!(restored < actions.len() - 1);
+    result
+        .try_recv()
+        .expect("shutdown reply")
+        .expect("detached");
+}
+
+/// A signal the program takes before the `SIGCONT` the detach drains still
+/// reaches it, as the detach would have passed it on.
+#[test]
+fn draining_the_held_sigcont_passes_on_a_signal_taken_first() {
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    harness.attached();
+    harness.inferior().held = Some(HeldStop::Continued);
+    harness.trace().queued_continue.borrow_mut().insert(pid);
+    let blocks_continue = 1 << 17;
+    harness
+        .trace()
+        .signal_masks
+        .borrow_mut()
+        .insert(pid, blocks_continue);
+    let (reply, _result) = tokio::sync::oneshot::channel();
+    harness.controller.begin_shutdown(Some(reply));
+    harness.trace().take_actions();
+
+    harness.trace().set_siginfo(pid, libc::SI_USER, Some(4242));
+    assert!(
+        harness
+            .controller
+            .handle_detach_wait(WaitEvent::Stopped(pid, Signal::SIGUSR1))
+    );
+    assert_eq!(
+        harness.trace().take_actions(),
+        [format!("continue {pid} Some(SIGUSR1)")]
+    );
 }
 
 #[test]

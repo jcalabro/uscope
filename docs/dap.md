@@ -25,6 +25,7 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
   - Conditions and hit counts on data breakpoints, as on breakpoints. A condition is evaluated in the accessing thread's frame after the access, and every reported access is a hit. A data breakpoint re-sent with new conditions keeps its id and its count; one whose conditions do not parse is unverified and no longer watches.
   - Breakpoints can be edited while the program runs. Breakpoints the debug console makes or deletes are reported to the client, as are the client's data breakpoints it deletes.
 - **Execution.** Continue, pause, step over, into, and out, by line or by instruction. The debugger is all-stop: every thread stops and resumes together, unless a request names a single thread (`singleThread`). A program that executes itself again is followed with its breakpoints.
+- **Fork children.** With `followForks`, each process the program forks is debugged in a session of its own, which the adapter asks the client to start with `startDebugging`. See [Following forks](#following-forks).
 - **Inspection.**
   - Threads with names, and stack traces through libraries and inlined calls, with the frames' parameters, lines, and modules when a client asks.
   - Arguments, locals, statics, and registers, with the text of strings. Each row's `evaluateName` reaches exactly that variable: a static that a local shadows is named from the outermost scope, such as `::count`, or with its file, such as `` ::`main.c::count` ``, and a variable an inner block hides has none. A register's row is named `$rax` and is read-only.
@@ -47,7 +48,7 @@ The adapter does not advertise these:
 - Jumping to a line (`gotoTargets`, VS Code's *Jump to Cursor*) and assigning registers, which need writable registers.
 - Stepping into a chosen call on a line (`stepInTargets`), restarting a frame (`restartFrame`), and stepping backwards.
 - Showing the value a function returned after stepping out of it.
-- Following the children of `fork`: they are released and run on their own.
+- Following children made by `vfork` or `posix_spawn`, which share their parent's memory until they execute another program: they run on their own.
 - Terminating single threads, and leaving a process suspended when detaching from it.
 - Sending source contents: every source has a path, and the client reads it.
 
@@ -69,7 +70,8 @@ A launch configuration:
   "sourceMap": [["/build/src", "${workspaceFolder}/src"]],  // earlier rules first; {"from": "to"} also works
   "viewFiles": ["${workspaceFolder}/app.views"],  // ahead of .uscope/views, the user's, the program's, the built-in
   "disassemblySyntax": "intel",  // or "att"
-  "signals": { "SIGUSR1": "nostop", "SIGPIPE": ["stop", "print"] }
+  "signals": { "SIGUSR1": "nostop", "SIGPIPE": ["stop", "print"] },
+  "followForks": false           // debug forked processes in sessions of their own
 }
 ```
 
@@ -90,6 +92,17 @@ Attaching to a process, or opening a core dump:
 - Signal actions are `stop`, `nostop`, `print`, `noprint`, `pass`, and `nopass`.
 - Invalid configurations are refused with the path of the offending key, such as ``invalid launch configuration at env.PATH: invalid type: integer `1`, expected a string``.
 - Keys clients add, such as `name` or `__sessionId`, are ignored.
+
+### Following forks
+
+`"followForks": true`, in a launch or attach configuration, debugs every process the program forks in a session of its own. The child runs no instruction before its session has attached to it and set its breakpoints, so a breakpoint on the line after `fork()` stops in the child too.
+
+- **How.** The debugger removes the parent's breakpoints from the child, stops it, and releases it untraced. The adapter then asks the client to start a child session with `startDebugging`, as an attach configuration naming the child (`"name": "app (fork 1234)"`, `"pid"`), the parent's `type`, `followForks`, `sourceMap`, `viewFiles`, `disassemblySyntax`, `signals`, and `cwd`, an attach's `program`, and `"held": {"startTime": …}`, which tells the child's session to end the stop the child waits in. The child session continues the child once it is configured, unless `stopOnEntry` is set.
+- **Clients.** It needs a client that starts child sessions (`supportsStartDebuggingRequest`), such as VS Code and nvim-dap. With any other, the adapter says so once and the children run on their own. Each child session runs its own adapter, and ends independently of the parent's.
+- **Children no session takes run on their own.** The adapter releases a child the client refuses to debug or does not answer for within 60 seconds, and one no session has attached to 60 seconds after the client answered, and says so. A child session that fails to attach releases its child at once. A child forked while the parent's session ends is released too. A released child receives the SIGCONT that ends its stop, as after a shell's `fg`.
+- **Yama.** A child session attaches to a process that is not its adapter's descendant, which Yama refuses while `kernel.yama.ptrace_scope` is 1, Ubuntu's default, or more. Set it to 0 (`sudo sysctl kernel.yama.ptrace_scope=0`), or, at 1 or 2, give `uscope` the `cap_sys_ptrace` capability. A child session that cannot attach releases the child, which runs on its own.
+- **Output.** A launched program's children share its output pipes, which the parent's adapter reads into its debug console until the parent's session ends. A child still writing after that writes to a closed pipe, which raises SIGPIPE; programs whose children outlive them should run in a terminal (`"console": "integratedTerminal"`).
+- **Not followed.** Children made by `vfork` or `posix_spawn` share their parent's memory until they execute another program, and run on their own.
 
 ## Clients
 
@@ -222,4 +235,5 @@ The VS Code run takes about ten seconds and uses VS Code's own commands wherever
 - Inline values appear at the ends of lines, and a function pointer's value links to its function.
 - *Copy Value* copies what the Variables view shows.
 - A core dump opens with its module warnings in the debug console.
+- With `followForks`, a forked child's session appears under its parent's in the Call Stack view, and stopping either leaves the other as it was.
 - Console commands complete with Tab and print the same output as the CLI.

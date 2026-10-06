@@ -124,9 +124,17 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn event_message(&self, pid: Pid) -> Result<libc::c_long>;
     fn signal_metadata(&self, pid: Pid) -> std::result::Result<SignalMetadata, Errno>;
     fn request_stop(&self, process: Pid, thread: Pid) -> Result<()>;
-    /// Whether a stopped thread's private pending set holds a deliverable
-    /// SIGTRAP that has not been reported yet.
-    fn queued_trap(&self, _pid: Pid) -> Result<bool> {
+    /// The signals a stopped thread blocks, bit `n - 1` for signal `n`.
+    fn signal_mask(&self, pid: Pid) -> Result<u64>;
+    /// Replaces the signals a stopped thread blocks.
+    fn set_signal_mask(&self, pid: Pid, mask: u64) -> Result<()>;
+    /// What lets a child this edge held run, for the [`crate::HeldChild`]
+    /// that owns it, or none where processes are not the host's.
+    fn held_release(&self) -> Option<fn(&crate::HeldProcess) -> Result<bool>>;
+    /// Whether resuming a stopped thread would have it dequeue `signal`
+    /// before running an instruction: the signal is pending in `queue`, and
+    /// the thread does not block it.
+    fn queued_signal(&self, _pid: Pid, _signal: Signal, _queue: SignalQueue) -> Result<bool> {
         Ok(false)
     }
     /// Whether `address` lies in memory the process may execute, where a
@@ -531,14 +539,31 @@ impl LinuxTraceOps for LinuxPtrace {
         Ok(())
     }
 
-    fn queued_trap(&self, pid: Pid) -> Result<bool> {
+    fn held_release(&self) -> Option<fn(&crate::HeldProcess) -> Result<bool>> {
+        Some(super::release_held)
+    }
+
+    fn signal_mask(&self, pid: Pid) -> Result<u64> {
+        self.assert_owner_thread();
+        let mut mask = 0_u64;
+        signal_mask_request(libc::PTRACE_GETSIGMASK, pid, &raw mut mask)?;
+        Ok(mask)
+    }
+
+    fn set_signal_mask(&self, pid: Pid, mask: u64) -> Result<()> {
+        self.assert_owner_thread();
+        let mut mask = mask;
+        signal_mask_request(libc::PTRACE_SETSIGMASK, pid, &raw mut mask)
+    }
+
+    fn queued_signal(&self, pid: Pid, signal: Signal, queue: SignalQueue) -> Result<bool> {
         self.assert_owner_thread();
         let status = match fs::read_to_string(format!("/proc/{pid}/status")) {
             Ok(status) => status,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error.into()),
         };
-        Ok(queued_trap_in_status(&status))
+        Ok(queued_in_status(&status, signal, queue))
     }
 
     fn executable(&self, pid: Pid, address: VirtualAddress) -> Result<bool> {
@@ -596,9 +621,18 @@ pub(super) fn maps_executable(maps: &str, address: VirtualAddress) -> bool {
     })
 }
 
-/// Whether `/proc/<tid>/status` shows SIGTRAP pending for the thread itself
-/// and not blocked. A malformed mask is treated as nothing queued.
-pub(super) fn queued_trap_in_status(status: &str) -> bool {
+/// The pending set a signal waits in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SignalQueue {
+    /// The thread's own, as for a signal its instruction raised.
+    Thread,
+    /// Its process's, as for a signal sent with `kill`.
+    Process,
+}
+
+/// Whether `/proc/<tid>/status` shows `signal` pending in `queue` and not
+/// blocked by the thread. A malformed mask is treated as nothing queued.
+pub(super) fn queued_in_status(status: &str, signal: Signal, queue: SignalQueue) -> bool {
     let mask = |field: &str| {
         status
             .lines()
@@ -606,8 +640,12 @@ pub(super) fn queued_trap_in_status(status: &str) -> bool {
             .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
             .unwrap_or(0)
     };
-    let trap = 1 << (Signal::SIGTRAP.number() - 1);
-    mask("SigPnd:") & trap != 0 && mask("SigBlk:") & trap == 0
+    let bit = 1 << (signal.number() - 1);
+    let pending = match queue {
+        SignalQueue::Thread => mask("SigPnd:"),
+        SignalQueue::Process => mask("ShdPnd:"),
+    };
+    pending & bit != 0 && mask("SigBlk:") & bit == 0
 }
 
 /// The `struct user` offset of one debug register, as `PTRACE_PEEKUSER` and
@@ -704,6 +742,26 @@ pub(super) fn disable_address_randomization() {
 
 #[allow(
     unsafe_code,
+    reason = "nix does not wrap the ptrace requests for a thread's signal mask"
+)]
+fn signal_mask_request(request: libc::c_uint, pid: Pid, mask: *mut u64) -> Result<()> {
+    // SAFETY: the kernel's signal set is the eight bytes `mask` points to,
+    // which stay valid and exclusively borrowed throughout the call.
+    let result = unsafe {
+        libc::ptrace(
+            request,
+            pid.as_raw(),
+            std::mem::size_of::<u64>(),
+            mask.cast::<libc::c_void>(),
+        )
+    };
+    Errno::result(result)
+        .map(drop)
+        .map_err(|error| backend_error(LinuxError::System(error)))
+}
+
+#[allow(
+    unsafe_code,
     reason = "Linux exposes thread-directed signals through tgkill"
 )]
 fn tgkill(process: Pid, thread: Pid, signal: Signal) -> Result<()> {
@@ -720,6 +778,106 @@ fn tgkill(process: Pid, thread: Pid, signal: Signal) -> Result<()> {
         return Err(backend_error(LinuxError::System(Errno::last())));
     }
     Ok(())
+}
+
+/// Whether `process`, if it started at `start_time`, is still held: no
+/// tracer has it, and it is stopped by job control or has the `SIGSTOP`
+/// that stops it still pending.
+pub(super) fn process_held(process: Pid, start_time: u64) -> Result<bool> {
+    let read = |file: &str| match fs::read_to_string(format!("/proc/{process}/{file}")) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::from(error)),
+    };
+    let Some(status) = read("status")? else {
+        return Ok(false);
+    };
+    let Some(stat) = read("stat")? else {
+        return Ok(false);
+    };
+    // Read after both, the start time proves that they described the
+    // process that was held.
+    let same = crate::backend::process_start_time(process.as_raw()) == Some(start_time);
+    Ok(same && held_in_status(&status, &stat))
+}
+
+/// Ends the job-control stop of `process` with `SIGCONT` if it is still
+/// held, and returns whether it did. The process file descriptor, opened
+/// first, names the process `process` named then, so the signal can never
+/// reach a later process given its identifier. A `SIGCONT` also discards a
+/// `SIGSTOP` still pending, so a child released before it stopped runs on.
+pub(super) fn continue_held(process: Pid, start_time: u64) -> Result<bool> {
+    let handle = match pidfd_open(process) {
+        Ok(handle) => handle,
+        Err(Errno::ESRCH) => return Ok(false),
+        Err(error) => return Err(backend_error(LinuxError::System(error))),
+    };
+    if !process_held(process, start_time)? {
+        return Ok(false);
+    }
+    match pidfd_send_signal(&handle, Signal::SIGCONT) {
+        Ok(()) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(error) => Err(backend_error(LinuxError::System(error))),
+    }
+}
+
+/// Whether `/proc/<pid>/status`, and `/proc/<pid>/stat` read after it,
+/// show a held process: untraced, and with `SIGSTOP` pending or stopped by
+/// job control. The status shows the state before the pending signals, so
+/// a thread that takes `SIGSTOP` in between, which stops it at once, shows
+/// neither there; the state the later stat shows is current.
+pub(super) fn held_in_status(status: &str, stat: &str) -> bool {
+    let untraced = status
+        .lines()
+        .find_map(|line| line.strip_prefix("TracerPid:"))
+        .map(str::trim)
+        == Some("0");
+    let stopping = [SignalQueue::Thread, SignalQueue::Process]
+        .into_iter()
+        .any(|queue| queued_in_status(status, Signal::SIGSTOP, queue));
+    let stopped = stat
+        .rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().next())
+        == Some("T");
+    untraced && (stopping || stopped)
+}
+
+#[allow(
+    unsafe_code,
+    reason = "Linux exposes process file descriptors only through system calls"
+)]
+fn pidfd_open(process: Pid) -> std::result::Result<std::os::fd::OwnedFd, Errno> {
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: pidfd_open takes a process ID and flags, and reads no memory.
+    let result = unsafe { libc::syscall(libc::SYS_pidfd_open, process.as_raw(), 0) };
+    let descriptor = Errno::result(result)?;
+    let descriptor = i32::try_from(descriptor).map_err(|_| Errno::EBADF)?;
+    // SAFETY: the kernel returned a new descriptor that nothing else owns.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) })
+}
+
+#[allow(
+    unsafe_code,
+    reason = "Linux exposes process file descriptors only through system calls"
+)]
+fn pidfd_send_signal(
+    handle: &std::os::fd::OwnedFd,
+    signal: Signal,
+) -> std::result::Result<(), Errno> {
+    use std::os::fd::AsRawFd as _;
+    // SAFETY: a null siginfo asks for the one kill(2) would send, so the
+    // call reads no memory; the descriptor stays open throughout.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            handle.as_raw_fd(),
+            signal.number(),
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    Errno::result(result).map(drop)
 }
 
 #[allow(

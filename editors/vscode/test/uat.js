@@ -34,8 +34,11 @@ vscode.debug.registerDebugAdapterTrackerFactory('uscope', {
     createDebugAdapterTracker(session) {
         const lines = [];
         // A restart that starts another adapter for the session keeps both
-        // transcripts.
-        let name = session.configuration.name;
+        // transcripts. A child session is named after its parent, since its
+        // own name holds a process id.
+        let name = session.parentSession === undefined
+            ? session.configuration.name
+            : `${session.parentSession.configuration.name}.child`;
         while (transcripts.has(name)) {
             name = `${name}.restarted`;
         }
@@ -891,6 +894,55 @@ async function pickAProcess() {
     }
 }
 
+/**
+ * With followForks, VS Code starts a child session for a forked process at
+ * the adapter's request. The child stops at the breakpoint after its fork,
+ * having run nothing untraced, and each session ends as its process does.
+ */
+async function followAForkedChild() {
+    const breakpoint = new vscode.FunctionBreakpoint('shared_work');
+    vscode.debug.addBreakpoints([breakpoint]);
+    const stopIn = (child) => message(`the ${child ? 'child' : 'parent'} to stop`, (session, sent) =>
+        sent.type === 'event' && sent.event === 'stopped' && sent.body.reason === 'function breakpoint'
+            && (session.parentSession !== undefined) === child);
+    const parentStopped = stopIn(false);
+    const childStopped = stopIn(true);
+    const asked = message('the adapter to ask for a child session', (_, sent) =>
+        sent.type === 'request' && sent.command === 'startDebugging');
+    // VS Code answers once the child session has attached.
+    const started = message('VS Code to answer startDebugging', (_, sent) =>
+        sent.type === 'response' && sent.command === 'startDebugging' && sent.success, 'client');
+    assert.ok(await vscode.debug.startDebugging(undefined, {
+        type: 'uscope', request: 'launch', name: 'vscode-fork', program: fixture('fork'), cwd: root,
+        followForks: true,
+    }));
+    const asking = (await asked).message.arguments;
+    assert.strictEqual(asking.request, 'attach');
+    const { session: parent, message: parentStop } = await parentStopped;
+    const { session: child, message: childStop } = await childStopped;
+    await started;
+    assert.strictEqual(child.parentSession.id, parent.id);
+    assert.strictEqual(child.configuration.pid, asking.configuration.pid);
+    assert.strictEqual(child.configuration.followForks, true);
+    assert.strictEqual(child.name, asking.configuration.name);
+    for (const [session, stop] of [[parent, parentStop], [child, childStop]]) {
+        assert.strictEqual((await topFrame(session, stop.body.threadId)).name, 'shared_work', session.name);
+    }
+    await remove(breakpoint);
+
+    // The child runs to its end, and then its parent, which waited for it.
+    for (const [session, stop] of [[child, childStop], [parent, parentStop]]) {
+        const exited = message(`${session.name} to exit`, (from, sent) =>
+            from.id === session.id && sent.type === 'event' && sent.event === 'exited');
+        const ended = terminated(session.name);
+        await vscode.commands.executeCommand('workbench.action.debug.continue', undefined, {
+            sessionId: session.id, threadId: stop.body.threadId,
+        });
+        assert.strictEqual((await exited).message.body.exitCode, 0, session.name);
+        await ended;
+    }
+}
+
 async function openACoreDump() {
     const stopped = event('stopped', (body) => body.reason === 'exception');
     const capabilities = event('capabilities');
@@ -974,7 +1026,7 @@ exports.run = async function run() {
             consoleWatchHoverHexadecimalAndInlineValues, completionsAndLocations, dataBreakpointsAndTheirModes,
             dataBreakpointConditions, crashAtASignal,
             pauseAndThreads, librariesAndTheirSources, runInTheIntegratedTerminal, attachToAProcess,
-            pickAProcess, openACoreDump, refuseBadConfigurationsAndOfferPrograms,
+            pickAProcess, followAForkedChild, openACoreDump, refuseBadConfigurationsAndOfferPrograms,
         ]) {
             console.log(`uat: ${scenario.name}`);
             await scenario();

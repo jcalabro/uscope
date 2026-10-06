@@ -703,6 +703,8 @@ build_fixture gcc "$c_fixtures_dir/attach-restart.c" "$output_dir/attach-restart
     -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/attach-leader-exits.c" "$output_dir/attach-leader-exits" \
     -O0 -g3 -fPIE -pie -pthread
+build_fixture gcc "$c_fixtures_dir/attach-fork.c" "$output_dir/attach-fork" \
+    -O0 -g3 -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/exited-leader.c" "$output_dir/exited-leader" \
     -O0 -g3 -fPIE -pie -pthread
 build_c_fixture_directory gcc "$c_fixtures_dir/pointer-memory" \

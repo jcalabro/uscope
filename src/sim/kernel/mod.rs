@@ -56,6 +56,9 @@ pub enum WaitStatus {
     Stopped(Tid, i32),
     /// A `PTRACE_EVENT_*` stop.
     Event(Tid, i32),
+    /// A seized thread's group-stop: `PTRACE_EVENT_STOP` with the signal
+    /// that stopped its process (K-STOP-2).
+    GroupStop(Tid, i32),
 }
 
 impl WaitStatus {
@@ -65,7 +68,8 @@ impl WaitStatus {
             Self::Exited(tid, _)
             | Self::Signaled(tid, _, _)
             | Self::Stopped(tid, _)
-            | Self::Event(tid, _) => tid,
+            | Self::Event(tid, _)
+            | Self::GroupStop(tid, _) => tid,
         }
     }
 }
@@ -85,6 +89,9 @@ impl fmt::Display for WaitStatus {
             }
             Self::Event(tid, event) => {
                 write!(formatter, "{tid} event {}", ptrace::event_name(event))
+            }
+            Self::GroupStop(tid, signal) => {
+                write!(formatter, "{tid} group-stop {}", signals::name(signal))
             }
         }
     }
@@ -113,6 +120,16 @@ impl SigInfo {
             pid: tid,
             // `si_pid` and `si_uid` overlay `si_addr`.
             address: (UID as u64) << 32 | tid.cast_unsigned() as u64,
+        }
+    }
+
+    /// The siginfo of `tid`'s group-stop for `signal`: the stop's event in
+    /// the code's second byte, as for an event stop, with that signal.
+    const fn group_stop(tid: Tid, signal: i32) -> Self {
+        Self {
+            signal,
+            code: signal | (libc::PTRACE_EVENT_STOP << 8),
+            ..Self::event(tid, libc::PTRACE_EVENT_STOP)
         }
     }
 }
@@ -155,6 +172,9 @@ pub enum StopKind {
     Event(i32, u64),
     /// The `PTRACE_EVENT_EXIT` stop of a thread ending this way.
     Exit(ExitStatus),
+    /// A seized thread's group-stop, for the signal that stopped its
+    /// process (K-STOP-2).
+    Group(i32),
 }
 
 /// Where a thread is in its life.
@@ -164,6 +184,9 @@ pub enum State {
     Running,
     /// In a ptrace-stop, answering the tracer's requests.
     Stopped { kind: StopKind, info: SigInfo },
+    /// Untraced, in its process's job-control stop, until SIGCONT ends it
+    /// or a tracer seizes it (K-STOP-1 to K-STOP-3).
+    JobStopped,
     /// On its way out, which takes it to its exit event the next time it
     /// runs, or straight to a zombie when exits are not traced.
     Exiting(ExitStatus),
@@ -204,19 +227,20 @@ pub struct Options {
 /// address, the byte, and the program's.
 pub type Planted = (u64, u8, u8);
 
-/// How the tracer traces a thread.
+/// Whether, and how, a tracer traces a thread. Only the tracer named
+/// reaches the thread with its requests, and only its waits report it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tracing {
     /// Not at all: the thread runs as if no debugger were there, as one the
     /// tracer detached does (K-FORK-2).
     Untraced,
     /// Attached, as a launched program and the threads it creates are.
-    Attached,
+    Attached { tracer: i32 },
     /// Seized, or created by a seized thread: interrupts reach it, the
     /// threads and processes it creates first stop for one, and one may
     /// wait to stop it, which any stop takes the place of (K-SEIZE-1,
     /// K-INT-1).
-    Seized { interrupted: bool },
+    Seized { tracer: i32, interrupted: bool },
 }
 
 pub struct Thread {
@@ -259,13 +283,22 @@ impl Thread {
         matches!(self.state, State::Stopped { .. })
     }
 
-    /// Whether the tracer traces the thread.
+    /// Whether a tracer traces the thread.
     #[must_use]
     pub const fn traced(&self) -> bool {
         !matches!(self.tracing, Tracing::Untraced)
     }
 
-    /// Whether the tracer seized the thread, or traces it as one a seized
+    /// The tracer that traces the thread, if one does.
+    #[must_use]
+    pub const fn tracer(&self) -> Option<i32> {
+        match self.tracing {
+            Tracing::Untraced => None,
+            Tracing::Attached { tracer } | Tracing::Seized { tracer, .. } => Some(tracer),
+        }
+    }
+
+    /// Whether its tracer seized the thread, or traces it as one a seized
     /// thread created.
     #[must_use]
     pub const fn seized(&self) -> bool {
@@ -287,7 +320,7 @@ impl Thread {
     pub(super) const fn enter_stop(&mut self, kind: StopKind, info: SigInfo, report: WaitStatus) {
         self.state = State::Stopped { kind, info };
         self.report = Some(report);
-        if let Tracing::Seized { interrupted } = &mut self.tracing {
+        if let Tracing::Seized { interrupted, .. } = &mut self.tracing {
             *interrupted = false;
         }
     }
@@ -322,12 +355,13 @@ impl Thread {
         Self {
             tid: id,
             tgid: group,
-            tracing: if seized {
-                Tracing::Seized { interrupted: true }
-            } else if traced {
-                Tracing::Attached
-            } else {
-                Tracing::Untraced
+            tracing: match creator.tracer() {
+                Some(debugger) if seized => Tracing::Seized {
+                    tracer: debugger,
+                    interrupted: true,
+                },
+                Some(debugger) if traced => Tracing::Attached { tracer: debugger },
+                _ => Tracing::Untraced,
             },
             registers,
             orig_rax: call,
@@ -380,6 +414,15 @@ pub struct Process {
     pub group_exit: Option<ExitStatus>,
     /// Whether something outside the session killed the process.
     pub killed_externally: bool,
+    /// The signal that stopped the process, while it is job-control
+    /// stopped (K-STOP-1).
+    pub stopped: Option<i32>,
+    /// Whether SIGCONT ended the process's stop, which its parent hears of
+    /// once one of its threads next runs (K-STOP-3).
+    pub continued: bool,
+    /// When the process started, as `/proc/<pid>/stat` counts it: no two
+    /// processes share one.
+    pub start_time: u64,
 }
 
 /// Who reaps a process once it ends.
@@ -448,10 +491,14 @@ pub enum Happening {
     Yielded { tid: Tid },
     /// A thread forked a process.
     Forked { parent: Tid, child: Tid },
-    /// The tracer detached a thread, leaving the first byte of its code
-    /// that differs from the program's, as its address, the byte, and the
+    /// `tracer` detached a thread, leaving the first byte of its code that
+    /// differs from the program's, as its address, the byte, and the
     /// program's.
-    Released { tid: Tid, planted: Option<Planted> },
+    Released {
+        tid: Tid,
+        tracer: i32,
+        planted: Option<Planted>,
+    },
     /// A process reaped a child it forked.
     ReapedChild { parent: Tid, child: Tid },
     /// Init reaped a process whose parent was gone.
@@ -461,6 +508,16 @@ pub enum Happening {
     /// An interrupt reached a thread already stopped, which it stops again
     /// as soon as it resumes.
     InterruptWaits { tid: Tid },
+    /// An untraced thread entered its process's job-control stop.
+    JobStopped { tid: Tid },
+    /// SIGCONT ended a process's job-control stop.
+    Continued { tgid: Tid },
+    /// The tracer resumed a thread from a signal-delivery-stop without
+    /// its signal.
+    Suppressed { tid: Tid, signal: i32 },
+    /// A signal reached the program, untraced or passed on by its tracer,
+    /// and the thread took its default action.
+    Delivered { tid: Tid, signal: i32 },
 }
 
 /// A thread that executed the program's own instruction at an address
@@ -473,9 +530,13 @@ pub struct UnseenHit {
 }
 
 pub struct Kernel {
-    /// The process identifier of the simulated debugger, which sends the
-    /// signals it asks for.
+    /// The process identifier of the simulated debugger that launches
+    /// programs, as their parent.
     tracer: i32,
+    /// The tracer whose request the kernel serves, as `current` names the
+    /// calling task in Linux: its requests reach only the threads it
+    /// traces, and the signals it sends name it.
+    caller: std::cell::Cell<i32>,
     next_tid: Tid,
     pub processes: BTreeMap<Tid, Process>,
     pub threads: BTreeMap<Tid, Thread>,
@@ -512,6 +573,8 @@ pub struct Kernel {
     pub debug_behavior: DebugBehavior,
     /// The identifier the next activation takes.
     next_activation: u64,
+    /// The start time the next process takes.
+    next_start_time: u64,
     /// A deliberate defect, so tests can check that the oracles notice.
     #[cfg(test)]
     pub sabotage: Option<Sabotage>,
@@ -561,6 +624,7 @@ impl Kernel {
     pub const fn new(tracer: i32) -> Self {
         Self {
             tracer,
+            caller: std::cell::Cell::new(tracer),
             next_tid: FIRST_TID,
             processes: BTreeMap::new(),
             threads: BTreeMap::new(),
@@ -578,6 +642,7 @@ impl Kernel {
             watching: Watching::new(),
             debug_behavior: DebugBehavior::Faithful,
             next_activation: 1,
+            next_start_time: 1,
             #[cfg(test)]
             sabotage: None,
             #[cfg(test)]
@@ -591,15 +656,27 @@ impl Kernel {
         }
     }
 
+    /// Serves `tracer`'s requests from now on.
+    pub fn serve(&self, tracer: i32) {
+        self.caller.set(tracer);
+    }
+
+    /// The tracer whose requests the kernel serves.
     #[must_use]
-    pub const fn tracer(&self) -> i32 {
-        self.tracer
+    pub const fn caller(&self) -> i32 {
+        self.caller.get()
     }
 
     /// Records that the run reached something the simulation does not
     /// model. The first gap is the one reported.
     pub fn gap(&mut self, description: impl Into<String>) {
         self.gap.get_or_insert_with(|| ModelGap(description.into()));
+    }
+
+    const fn allocate_start_time(&mut self) -> u64 {
+        let start_time = self.next_start_time;
+        self.next_start_time += 1;
+        start_time
     }
 
     const fn allocate_tid(&mut self) -> Tid {
@@ -656,6 +733,7 @@ impl Kernel {
         let (space, registers) = image.load(arguments, random);
         let comm = name.rsplit('/').next().unwrap_or(name);
         let comm = &comm[..comm.len().min(15)];
+        let start_time = self.allocate_start_time();
         self.processes.insert(
             tid,
             Process {
@@ -673,6 +751,9 @@ impl Kernel {
                 shared: Pending::default(),
                 group_exit: None,
                 killed_externally: false,
+                stopped: None,
+                continued: false,
+                start_time,
             },
         );
         self.outputs.insert(tid, Vec::new());
@@ -688,7 +769,9 @@ impl Kernel {
                 tid,
                 tgid: tid,
                 tracing: if traced {
-                    Tracing::Attached
+                    Tracing::Attached {
+                        tracer: self.tracer,
+                    }
                 } else {
                     Tracing::Untraced
                 },
@@ -727,12 +810,15 @@ impl Kernel {
             .map(|thread| thread.tid)
     }
 
-    /// Threads with a status a wait would report now. A group leader's
-    /// exit waits until every other thread of its group is reaped (K-WAIT-2).
-    pub fn reportable(&self) -> impl Iterator<Item = Tid> + '_ {
+    /// Threads with a status `tracer`'s wait would report now. A group
+    /// leader's exit waits until every other thread of its group is reaped
+    /// (K-WAIT-2).
+    pub fn reportable(&self, tracer: i32) -> impl Iterator<Item = Tid> + '_ {
         self.threads
             .values()
-            .filter(|thread| thread.report.is_some() && !self.delayed(thread))
+            .filter(move |thread| {
+                thread.tracer() == Some(tracer) && thread.report.is_some() && !self.delayed(thread)
+            })
             .map(|thread| thread.tid)
     }
 
@@ -790,7 +876,7 @@ impl Kernel {
                     break;
                 }
                 State::Running => {}
-                State::Stopped { .. } | State::Zombie(_) => break,
+                State::Stopped { .. } | State::JobStopped | State::Zombie(_) => break,
             }
             if let Some(result) = thread.returning.take() {
                 // The system call the thread stopped inside returns.
@@ -801,6 +887,7 @@ impl Kernel {
                     break;
                 }
             }
+            self.report_continued(tid);
             if self.stop_for_interrupt(tid) || self.deliver_pending(tid) {
                 break;
             }
@@ -1117,7 +1204,13 @@ impl Kernel {
     /// Returns whether it stopped.
     fn stop_for_interrupt(&mut self, tid: Tid) -> bool {
         let thread = self.threads.get_mut(&tid).expect("running thread exists");
-        if thread.tracing != (Tracing::Seized { interrupted: true }) {
+        if !matches!(
+            thread.tracing,
+            Tracing::Seized {
+                interrupted: true,
+                ..
+            }
+        ) {
             return false;
         }
         thread.enter_stop(

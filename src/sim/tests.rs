@@ -267,14 +267,16 @@ fn missed_watch_traps_fail_watch_accounting() {
 
 /// A CPU that raises a watched access's debug exception again after the
 /// next instruction makes the debugger count a hit no access made, which
-/// watch accounting catches even when a condition declines both hits.
+/// watch accounting catches even when a condition declines both hits. A
+/// repeated exception naming a slot whose watchpoint was removed meanwhile
+/// is a stop the debugger cannot classify, which the client reports.
 #[test]
 fn repeated_watch_traps_fail_watch_accounting() {
     some_failure_saying(
         Sabotage::RepeatWatchTraps,
         "watch accounting",
         "accesses to it",
-        &["watch accounting"],
+        &["watch accounting", "protocol"],
     );
 }
 
@@ -286,5 +288,39 @@ fn skipped_linked_nodes_fail_the_views_oracle() {
         Sabotage::SkipLinkedNodes,
         "views",
         &["views", "variables", "expressions", "breakpoint conditions"],
+    );
+}
+
+/// A kernel whose detach forgets the SIGSTOP queued before it lets a held
+/// fork child run before any session takes it, which the holding oracle
+/// catches.
+#[test]
+fn forgotten_stop_requests_fail_the_holding_oracle() {
+    assert_eq!(first_failure_with(Sabotage::ForgetStopRequests), "holding");
+}
+
+/// A kernel that hides a pending SIGCONT makes a session detaching from a
+/// held child leave the SIGCONT that ended its stop for the program, which
+/// transparency catches.
+/// A kernel that misattributes SIGCONT makes a session take the one it sent
+/// to end a held child's stop for the program's own, and pass it on, which
+/// transparency catches.
+#[test]
+fn misattributed_continues_fail_transparency() {
+    some_failure_saying(
+        Sabotage::MisattributeContinues,
+        "transparency",
+        "received SIGCONT",
+        &["transparency"],
+    );
+}
+
+#[test]
+fn hidden_continues_fail_transparency() {
+    some_failure_saying(
+        Sabotage::HideQueuedContinue,
+        "transparency",
+        "received SIGCONT",
+        &["transparency"],
     );
 }

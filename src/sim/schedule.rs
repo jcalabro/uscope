@@ -1,7 +1,8 @@
 //! Which action the world takes next.
 //!
-//! Every action belongs to an actor: a program thread, the waiter, the
-//! controller, or the client. A seed's swarm picks one of two policies:
+//! Every action belongs to an actor: a program thread, or a session's
+//! waiter, controller, or client, or the follower that hands the children a
+//! session holds to others. A seed's swarm picks one of two policies:
 //!
 //! - A random walk: an action kind by the swarm's weights, then an action
 //!   of that kind uniformly.
@@ -21,35 +22,56 @@ use super::choices::{Choices, Stream};
 use super::kernel::Tid;
 use super::swarm::Weights;
 
+/// A session, by the order it started in: the first is the one the client
+/// drives, and each later one adopts a child the first held.
+pub type SessionId = usize;
+
 /// One thing the world can do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// A running thread executes a burst of instructions.
     Run(Tid),
-    /// The waiter reaps a status and queues it for the controller.
-    Collect,
-    /// The controller handles the message at the front of its queue.
-    Deliver,
-    /// The client task runs until it waits again.
-    Poll,
+    /// A session's waiter reaps a status and queues it for its controller.
+    Collect(SessionId),
+    /// A session's controller handles the message at the front of its
+    /// queue.
+    Deliver(SessionId),
+    /// A session's client task runs until it waits again.
+    Poll(SessionId),
+    /// The next child the first session held is adopted by a session of
+    /// its own, or released.
+    Follow,
 }
 
 /// Who performs an action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Actor {
     Thread(Tid),
-    Waiter,
-    Controller,
-    Client,
+    Waiter(SessionId),
+    Controller(SessionId),
+    Client(SessionId),
+    Follower,
 }
 
 impl Action {
     const fn actor(self) -> Actor {
         match self {
             Self::Run(tid) => Actor::Thread(tid),
-            Self::Collect => Actor::Waiter,
-            Self::Deliver => Actor::Controller,
-            Self::Poll => Actor::Client,
+            Self::Collect(session) => Actor::Waiter(session),
+            Self::Deliver(session) => Actor::Controller(session),
+            Self::Poll(session) => Actor::Client(session),
+            Self::Follow => Actor::Follower,
+        }
+    }
+
+    /// The action's kind, which a random walk weighs: running, collecting,
+    /// delivering, or acting for the user.
+    const fn kind(self) -> usize {
+        match self {
+            Self::Run(_) => 0,
+            Self::Collect(_) => 1,
+            Self::Deliver(_) => 2,
+            Self::Poll(_) | Self::Follow => 3,
         }
     }
 }
@@ -153,30 +175,23 @@ impl Scheduler {
 
 /// A random walk: an action kind by weight, then one action of that kind.
 fn walk(weights: Weights, enabled: &[Action], choices: &mut Choices) -> Action {
-    let kinds = [
-        (
-            weights.run,
-            enabled
-                .iter()
-                .any(|action| matches!(action, Action::Run(_))),
-        ),
-        (weights.collect, enabled.contains(&Action::Collect)),
-        (weights.deliver, enabled.contains(&Action::Deliver)),
-        (weights.poll, enabled.contains(&Action::Poll)),
-    ]
-    .map(|(weight, enabled)| if enabled { weight } else { 0 });
-    match choices.weighted(Stream::Schedule, &kinds) {
-        0 => {
-            let threads = enabled
-                .iter()
-                .filter(|action| matches!(action, Action::Run(_)))
-                .copied()
-                .collect::<Vec<_>>();
-            *choices.pick(Stream::Schedule, &threads)
+    let weights = [weights.run, weights.collect, weights.deliver, weights.poll];
+    let kinds = std::array::from_fn::<_, 4, _>(|kind| {
+        if enabled.iter().any(|action| action.kind() == kind) {
+            weights[kind]
+        } else {
+            0
         }
-        1 => Action::Collect,
-        2 => Action::Deliver,
-        _ => Action::Poll,
+    });
+    let kind = choices.weighted(Stream::Schedule, &kinds);
+    let of_kind = enabled
+        .iter()
+        .filter(|action| action.kind() == kind)
+        .copied()
+        .collect::<Vec<_>>();
+    match of_kind.as_slice() {
+        [only] => *only,
+        _ => *choices.pick(Stream::Schedule, &of_kind),
     }
 }
 

@@ -150,6 +150,11 @@ impl NativeTracee {
                 WaitStatus::Signaled(pid.as_raw(), signal.number(), core)
             }
             WaitEvent::Stopped(pid, signal) => WaitStatus::Stopped(pid.as_raw(), signal.number()),
+            WaitEvent::PtraceEvent(pid, signal, libc::PTRACE_EVENT_STOP)
+                if signal != Signal::SIGTRAP =>
+            {
+                WaitStatus::GroupStop(pid.as_raw(), signal.number())
+            }
             WaitEvent::PtraceEvent(pid, _, event) => WaitStatus::Event(pid.as_raw(), event),
             other => panic!("unexpected status {other:?}"),
         }
@@ -256,6 +261,28 @@ impl NativeTracee {
         nix::sys::ptrace::seize(Pid::from_raw(thread), super::native::trace_options(false))
     }
 
+    /// A register read and a seize of `thread` from a thread that traces
+    /// nothing, as another tracer makes them.
+    pub fn as_another_tracer(
+        &self,
+        thread: Tid,
+    ) -> (
+        std::result::Result<(), Errno>,
+        std::result::Result<(), Errno>,
+    ) {
+        let pid = Pid::from_raw(thread);
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let read = nix::sys::ptrace::getregs(pid).map(drop);
+                    let seize = nix::sys::ptrace::seize(pid, super::native::trace_options(false));
+                    (read, seize)
+                })
+                .join()
+                .expect("the other tracer's thread finishes")
+        })
+    }
+
     /// `PTRACE_INTERRUPT`.
     pub fn interrupt(&self, thread: Tid) -> std::result::Result<(), Errno> {
         nix::sys::ptrace::interrupt(Pid::from_raw(thread))
@@ -303,14 +330,40 @@ impl NativeTracee {
 
     /// `kill(2)` of the whole process.
     pub fn kill(&self, signal: i32) -> std::result::Result<(), Errno> {
-        nix::sys::signal::kill(self.pid, nix::sys::signal::Signal::try_from(signal)?)
+        self.signal_process(self.pid(), signal)
     }
 
-    /// The tracer's `tgkill(SIGSTOP)` of one thread.
+    /// `kill(process, signal)`.
+    pub fn signal_process(&self, process: Tid, signal: i32) -> std::result::Result<(), Errno> {
+        nix::sys::signal::kill(
+            Pid::from_raw(process),
+            nix::sys::signal::Signal::try_from(signal)?,
+        )
+    }
+
+    /// The tracer's `tgkill(SIGSTOP)` of one thread of the process.
     pub fn request_stop(&self, thread: Tid) -> std::result::Result<(), Errno> {
+        self.request_stop_of(self.pid(), thread)
+    }
+
+    /// The tracer's `tgkill(SIGSTOP)` of one thread of `process`.
+    pub fn request_stop_of(&self, process: Tid, thread: Tid) -> std::result::Result<(), Errno> {
         self.ptrace
-            .request_stop(self.pid, Pid::from_raw(thread))
+            .request_stop(Pid::from_raw(process), Pid::from_raw(thread))
             .map_err(errno_of)
+    }
+
+    /// Whether `thread` is in a job-control stop, untraced: `/proc` shows
+    /// `T`, where a ptrace-stop shows `t`.
+    #[must_use]
+    pub fn job_stopped(&self, thread: Tid) -> bool {
+        std::fs::read_to_string(format!("/proc/{thread}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let (_, fields) = stat.rsplit_once(')')?;
+                fields.split_whitespace().next().map(|state| state == "T")
+            })
+            .unwrap_or(false)
     }
 
     pub fn peek(&self, thread: Tid, address: u64) -> std::result::Result<u64, Errno> {

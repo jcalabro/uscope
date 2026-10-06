@@ -86,6 +86,7 @@ impl Profile {
             "supportsVariableType": true,
             "supportsVariablePaging": self == Self::VsCode,
             "supportsRunInTerminalRequest": self != Self::Helix,
+            "supportsStartDebuggingRequest": matches!(self, Self::VsCode | Self::Neovim),
             "supportsMemoryReferences": self == Self::VsCode,
             "supportsProgressReporting": self == Self::VsCode,
             "supportsInvalidatedEvent": self == Self::VsCode,
@@ -162,6 +163,29 @@ pub struct Dap {
     held_terminals: Option<Vec<Value>>,
     /// Where the adapter streams its flight recording.
     recording: Option<PathBuf>,
+    /// How `startDebugging` is answered.
+    children: Children,
+}
+
+/// How a session answers `startDebugging`.
+enum Children {
+    /// It is not expected: the scenario fails.
+    Unexpected,
+    /// With an error, as a client that cannot start the session does.
+    Refused(String),
+    /// With success, starting no session, as nvim-dap answers for a
+    /// session it started that never attaches.
+    Abandoned,
+    /// By starting each child session with a program that does not exist,
+    /// so that its attach fails, and answering with that failure, as VS
+    /// Code does. The failures are kept, in order.
+    Unattachable(Vec<String>),
+    /// By starting each child session as VS Code does, configured so, and
+    /// answering once it has attached.
+    Followed {
+        configuration: Configuration,
+        started: Vec<Dap>,
+    },
 }
 
 /// Ordering rules checked on every message.
@@ -270,7 +294,117 @@ impl Dap {
             reference: false,
             held_terminals: None,
             recording: None,
+            children: Children::Unexpected,
         }
+    }
+
+    /// Answers `startDebugging` as VS Code does: starts another adapter,
+    /// initializes it, attaches it with the requested configuration, sets
+    /// `configuration`'s breakpoints, and answers once it has attached.
+    pub fn follow_children(&mut self, configuration: Configuration) {
+        self.children = Children::Followed {
+            configuration,
+            started: Vec::new(),
+        };
+    }
+
+    /// Answers `startDebugging` with an error.
+    pub fn refuse_children(&mut self, message: &str) {
+        self.children = Children::Refused(message.to_owned());
+    }
+
+    /// Answers `startDebugging` with success, but starts no session.
+    pub fn abandon_children(&mut self) {
+        self.children = Children::Abandoned;
+    }
+
+    /// Starts child sessions whose attach fails, and answers
+    /// `startDebugging` with the failure.
+    pub fn fail_children(&mut self) {
+        self.children = Children::Unattachable(Vec::new());
+    }
+
+    /// Waits for the next child session to fail, and returns its failure.
+    pub fn child_failure(&mut self) -> String {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        loop {
+            if let Children::Unattachable(failures) = &mut self.children
+                && !failures.is_empty()
+            {
+                return failures.remove(0);
+            }
+            self.receive(deadline, "a startDebugging request");
+        }
+    }
+
+    /// Waits for the next child session started, and returns it with the
+    /// mark its events follow.
+    pub fn child(&mut self) -> (Self, Mark) {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        loop {
+            if let Children::Followed { started, .. } = &mut self.children
+                && !started.is_empty()
+            {
+                let child = started.remove(0);
+                return (child, Mark::START);
+            }
+            self.receive(deadline, "a startDebugging request");
+        }
+    }
+
+    /// Starts a child session for a `startDebugging` request, and answers
+    /// it.
+    fn start_debugging(&mut self, request: &Value) {
+        let arguments = &request["arguments"];
+        let result = match &mut self.children {
+            Children::Unexpected => None,
+            Children::Refused(message) => Some(Err(message.clone())),
+            Children::Abandoned => Some(Ok(())),
+            Children::Unattachable(failures) => {
+                let name = arguments["configuration"]["name"]
+                    .as_str()
+                    .expect("child name");
+                let mut child = Self::start(format!("{} › {name}", self.name));
+                let mut start = arguments["configuration"].clone();
+                start["program"] = "/nonexistent/program".into();
+                child.initialize(Profile::VsCode);
+                let attach = child.send("attach", start);
+                let failure = child.failure(attach);
+                child.finish();
+                failures.push(failure.clone());
+                Some(Err(failure))
+            }
+            Children::Followed {
+                configuration,
+                started,
+            } => {
+                let request = arguments["request"].as_str().expect("request");
+                let child_configuration = &arguments["configuration"];
+                let name = child_configuration["name"].as_str().expect("child name");
+                let mut child = Self::start(format!("{} › {name}", self.name));
+                let mut start = child_configuration.clone();
+                start["type"] = "uscope".into();
+                start["request"] = request.into();
+                child.begin(Profile::VsCode, (request, start), configuration);
+                started.push(child);
+                Some(Ok(()))
+            }
+        };
+        let Some(result) = result else {
+            self.fail("an unexpected startDebugging request");
+        };
+        self.seq += 1;
+        let mut response = json!({
+            "seq": self.seq,
+            "type": "response",
+            "request_seq": request["seq"],
+            "command": "startDebugging",
+            "success": result.is_ok(),
+        });
+        if let Err(message) = result {
+            response["message"] = message.into();
+        }
+        self.write(&response.to_string());
     }
 
     /// Answers `runInTerminal` with an error, as a client whose terminal
@@ -644,11 +778,17 @@ impl Dap {
                 "protocol violation: {problem}\nmessage: {message}"
             ));
         }
-        if message["type"] == "request" {
+        if message["type"] == "request" && message["command"] == "startDebugging" {
+            self.start_debugging(&message);
+        } else if message["type"] == "request" {
             match &mut self.held_terminals {
                 Some(held) => held.push(message.clone()),
                 None => self.run_in_terminal(&message),
             }
+        }
+        // An attached program that exits is gone, not left running.
+        if message["event"] == "exited" && self.process.is_some_and(|(_, attached)| attached) {
+            self.process = None;
         }
         if message["event"] == "process" {
             let attached = message["body"]["startMethod"] == "attach";
@@ -675,7 +815,11 @@ impl Dap {
             return Err("every response and event needs a body object".to_owned());
         }
         match message["type"].as_str() {
-            Some("request") if message["command"] == "runInTerminal" => {}
+            Some("request")
+                if matches!(
+                    message["command"].as_str(),
+                    Some("runInTerminal" | "startDebugging")
+                ) => {}
             Some("response") => {
                 let request_seq = message["request_seq"]
                     .as_u64()

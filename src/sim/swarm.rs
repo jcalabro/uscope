@@ -56,6 +56,9 @@ pub struct Swarm {
     /// before it launches anything, and how many instructions the program
     /// runs before the client acts.
     pub attach: Option<u64>,
+    /// Whether the session holds the children the program forks, for
+    /// sessions of their own.
+    pub follow: bool,
 }
 
 impl Swarm {
@@ -115,6 +118,7 @@ impl Swarm {
             },
             watching: pick(&[0, 1]) == 1,
             attach: (pick(&[0, 0, 1]) == 1).then(|| choices.below(Stream::Swarm, 1000)),
+            follow: forks && choices.below(Stream::Swarm, 2) == 1,
         }
     }
 }
@@ -124,7 +128,7 @@ impl fmt::Display for Swarm {
         write!(
             formatter,
             "{} preempt={} fault={} burst={} queue={} events={} entry={} requests={} \
-             launches={} early-breakpoints={} debug={:?} watching={} attach={}",
+             launches={} early-breakpoints={} debug={:?} watching={} attach={} follow={}",
             self.policy,
             self.preempt,
             self.fault
@@ -140,6 +144,7 @@ impl fmt::Display for Swarm {
             self.watching,
             self.attach
                 .map_or_else(|| "none".to_owned(), |after| format!("after({after})")),
+            self.follow,
         )
     }
 }

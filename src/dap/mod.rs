@@ -7,6 +7,7 @@
 mod breakpoints;
 mod complete;
 mod config;
+mod forks;
 mod handles;
 mod inspect;
 pub mod launcher;

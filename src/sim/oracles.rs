@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::corpus::Run;
-use super::kernel::{ExitStatus, Kernel, Parent, State, Tid};
+use super::kernel::{ExitStatus, Kernel, Parent, State, Tid, signals};
 use super::loader::Image;
 use crate::backend::sim_edge::Truth;
 
@@ -302,6 +302,39 @@ pub fn output_so_far(kernel: &Kernel, run: &Run) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Holding: a fork child held for another session is untraced, stopped,
+/// or about to stop for the SIGSTOP the debugger queued before it released
+/// it, holds no byte the debugger planted, and has run no instruction, until
+/// a session seizes it. Returns whether it is still held.
+pub fn held(kernel: &Kernel, tgid: Tid) -> Result<bool, String> {
+    let Some(thread) = kernel.threads.get(&tgid) else {
+        return Err(format!("held child {tgid} is gone"));
+    };
+    if thread.traced() {
+        return Ok(false);
+    }
+    let stopping = thread.state == State::JobStopped
+        || (thread.state == State::Running && thread.pending.contains(signals::SIGSTOP));
+    if !stopping {
+        return Err(format!(
+            "held child {tgid} is {:?}, with {:?} pending",
+            thread.state, thread.pending
+        ));
+    }
+    if thread.retired != 0 {
+        return Err(format!(
+            "held child {tgid} ran {} instructions before a session took it",
+            thread.retired
+        ));
+    }
+    if let Some((address, now, was)) = kernel.planted(tgid) {
+        return Err(format!(
+            "held child {tgid} has {now:#04x} at {address:#x}, where the program has {was:#04x}"
+        ));
+    }
+    Ok(true)
 }
 
 /// Clean exit: when the session is over, no simulated process remains,

@@ -12,7 +12,6 @@
 - Show the frames of tail calls in backtraces, as the chains entry values follow find them.
 - Model function types, so function pointers show their signature.
 - Accept C base type names in casts, such as `(unsigned char)x`, when the program's debug information lacks them.
-- Follow fork children, and offer them to DAP clients as child sessions (`startDebugging`).
 
 ## Languages and platforms
 

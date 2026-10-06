@@ -49,7 +49,13 @@ pub(super) trait Tracee {
     fn set_options(&mut self, thread: Tid) -> Result<(), Errno>;
     fn resume(&mut self, thread: Tid, signal: Option<i32>, single_step: bool) -> Result<(), Errno>;
     fn kill(&mut self) -> Result<(), Errno>;
+    /// `kill(process, signal)`, from the tracer.
+    fn signal_process(&mut self, process: Tid, signal: i32) -> Result<(), Errno>;
     fn request_stop(&mut self, thread: Tid) -> Result<(), Errno>;
+    /// The tracer's `tgkill(SIGSTOP)` of `thread` of `process`.
+    fn request_stop_of(&mut self, process: Tid, thread: Tid) -> Result<(), Errno>;
+    /// Whether `thread` is in a job-control stop, untraced.
+    fn job_stopped(&self, thread: Tid) -> bool;
     fn peek(&self, thread: Tid, address: u64) -> Result<u64, Errno>;
     fn poke(&mut self, thread: Tid, address: u64, value: u64) -> Result<(), Errno>;
     fn name(&self, thread: Tid) -> String;
@@ -69,6 +75,8 @@ pub(super) trait Tracee {
     /// `PTRACE_SEIZE` of an untraced thread, with the controller's options.
     fn seize(&mut self, thread: Tid) -> Result<(), Errno>;
     fn interrupt(&mut self, thread: Tid) -> Result<(), Errno>;
+    /// A register read and a seize of `thread` by another tracer.
+    fn as_another_tracer(&mut self, thread: Tid) -> (Result<(), Errno>, Result<(), Errno>);
     /// The children `thread` forked that are not reaped.
     fn children(&self, thread: Tid) -> Vec<Tid>;
 }
@@ -122,8 +130,17 @@ impl Tracee for NativeTracee {
     fn kill(&mut self) -> Result<(), Errno> {
         Self::kill(self, libc::SIGKILL)
     }
+    fn signal_process(&mut self, process: Tid, signal: i32) -> Result<(), Errno> {
+        Self::signal_process(self, process, signal)
+    }
     fn request_stop(&mut self, thread: Tid) -> Result<(), Errno> {
         Self::request_stop(self, thread)
+    }
+    fn request_stop_of(&mut self, process: Tid, thread: Tid) -> Result<(), Errno> {
+        Self::request_stop_of(self, process, thread)
+    }
+    fn job_stopped(&self, thread: Tid) -> bool {
+        Self::job_stopped(self, thread)
     }
     fn peek(&self, thread: Tid, address: u64) -> Result<u64, Errno> {
         Self::peek(self, thread, address)
@@ -164,6 +181,9 @@ impl Tracee for NativeTracee {
     fn interrupt(&mut self, thread: Tid) -> Result<(), Errno> {
         Self::interrupt(self, thread)
     }
+    fn as_another_tracer(&mut self, thread: Tid) -> (Result<(), Errno>, Result<(), Errno>) {
+        Self::as_another_tracer(self, thread)
+    }
     fn children(&self, thread: Tid) -> Vec<Tid> {
         Self::children(self, thread)
     }
@@ -198,7 +218,7 @@ impl SimTracee {
     /// The tracer exits; runs every thread until the program ends, and
     /// returns how it ended.
     fn end(&mut self) -> String {
-        self.kernel.forget_tracer();
+        self.kernel.forget_tracer(TRACER);
         let mut steps = 0;
         loop {
             if let Some(ended) = self.kernel.ended.get(&self.pid) {
@@ -248,7 +268,7 @@ impl Tracee for SimTracee {
         }
     }
     fn has_report(&mut self, thread: Tid) -> bool {
-        self.kernel.reportable().any(|tid| tid == thread)
+        self.kernel.reportable(TRACER).any(|tid| tid == thread)
     }
     fn pass_time(&mut self) {
         let runnable = self.kernel.runnable().collect::<Vec<_>>();
@@ -292,8 +312,20 @@ impl Tracee for SimTracee {
     fn kill(&mut self) -> Result<(), Errno> {
         self.kernel.kill(self.pid, libc::SIGKILL)
     }
+    fn signal_process(&mut self, process: Tid, signal: i32) -> Result<(), Errno> {
+        self.kernel.kill(process, signal)
+    }
     fn request_stop(&mut self, thread: Tid) -> Result<(), Errno> {
         self.kernel.tgkill(self.pid, thread, libc::SIGSTOP)
+    }
+    fn request_stop_of(&mut self, process: Tid, thread: Tid) -> Result<(), Errno> {
+        self.kernel.tgkill(process, thread, libc::SIGSTOP)
+    }
+    fn job_stopped(&self, thread: Tid) -> bool {
+        self.kernel
+            .threads
+            .get(&thread)
+            .is_some_and(|thread| thread.state == crate::sim::kernel::State::JobStopped)
     }
     fn peek(&self, thread: Tid, address: u64) -> Result<u64, Errno> {
         self.kernel.peek(thread, address)
@@ -340,6 +372,13 @@ impl Tracee for SimTracee {
     }
     fn interrupt(&mut self, thread: Tid) -> Result<(), Errno> {
         self.kernel.interrupt(thread)
+    }
+    fn as_another_tracer(&mut self, thread: Tid) -> (Result<(), Errno>, Result<(), Errno>) {
+        self.kernel.serve(TRACER + 1);
+        let read = self.kernel.get_registers_and_call(thread).map(drop);
+        let seize = self.seize(thread);
+        self.kernel.serve(TRACER);
+        (read, seize)
     }
     fn children(&self, thread: Tid) -> Vec<Tid> {
         self.kernel.children(thread)
@@ -591,6 +630,42 @@ impl Record<'_> {
         let result = self.tracee.interrupt(thread);
         let name = self.name_of(thread);
         self.result(&format!("interrupt {name}"), result);
+    }
+
+    /// Another tracer's register read and seize of `thread`.
+    pub(super) fn as_another_tracer(&mut self, thread: Tid) {
+        let (read, seize) = self.tracee.as_another_tracer(thread);
+        let name = self.name_of(thread);
+        self.result(&format!("another tracer reads {name}'s registers"), read);
+        self.result(&format!("another tracer seizes {name}"), seize);
+    }
+
+    /// The tracer's `tgkill(SIGSTOP)` of `process`'s thread `thread`.
+    pub(super) fn request_stop_of(&mut self, process: Tid, thread: Tid) {
+        let result = self.tracee.request_stop_of(process, thread);
+        let name = self.name_of(thread);
+        self.result(&format!("tgkill SIGSTOP to {name}"), result);
+    }
+
+    /// `kill(process, SIGCONT)` from the tracer.
+    pub(super) fn continue_process(&mut self, process: Tid) {
+        let result = self.tracee.signal_process(process, libc::SIGCONT);
+        let name = self.name_of(process);
+        self.result(&format!("SIGCONT to {name}"), result);
+    }
+
+    /// Waits until `thread` is in a job-control stop, untraced.
+    pub(super) fn job_stopped(&mut self, thread: Tid) {
+        let started = std::time::Instant::now();
+        while !self.tracee.job_stopped(thread) {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "{thread} never stopped"
+            );
+            self.tracee.pass_time();
+        }
+        let name = self.name_of(thread);
+        self.note(format!("{name} is in a job-control stop"));
     }
 
     pub(super) fn result(&mut self, operation: &str, result: Result<(), Errno>) {

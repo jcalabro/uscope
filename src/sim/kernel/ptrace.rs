@@ -7,6 +7,7 @@ use nix::libc;
 
 use super::{
     DebugBehavior, Happening, Kernel, Options, SigInfo, State, StopKind, Thread, Tid, Tracing,
+    WaitStatus,
 };
 use crate::sim::cpu::Registers;
 #[cfg(test)]
@@ -27,18 +28,21 @@ pub fn event_name(event: i32) -> String {
 }
 
 impl Kernel {
-    /// The thread a request addresses, which must be in a ptrace-stop.
+    /// The thread a request addresses, which the caller must trace, in a
+    /// ptrace-stop.
     fn stopped(&self, tid: Tid) -> Result<&Thread, Errno> {
+        let caller = self.caller();
         self.threads
             .get(&tid)
-            .filter(|thread| thread.is_stopped())
+            .filter(|thread| thread.tracer() == Some(caller) && thread.is_stopped())
             .ok_or(Errno::ESRCH)
     }
 
     fn stopped_mut(&mut self, tid: Tid) -> Result<&mut Thread, Errno> {
+        let caller = self.caller();
         self.threads
             .get_mut(&tid)
-            .filter(|thread| thread.is_stopped())
+            .filter(|thread| thread.tracer() == Some(caller) && thread.is_stopped())
             .ok_or(Errno::ESRCH)
     }
 
@@ -182,6 +186,23 @@ impl Kernel {
         }
     }
 
+    /// `PTRACE_GETSIGMASK`. No simulated program blocks a signal.
+    pub fn signal_mask(&self, tid: Tid) -> Result<u64, Errno> {
+        self.stopped(tid)?;
+        Ok(0)
+    }
+
+    /// `PTRACE_SETSIGMASK`, which can only leave every signal unblocked:
+    /// blocking is not modeled.
+    pub fn set_signal_mask(&mut self, tid: Tid, mask: u64) -> Result<(), Errno> {
+        self.stopped(tid)?;
+        if mask != 0 {
+            self.gap(format!("blocking signals {mask:#x}"));
+            return Err(Errno::ENOSYS);
+        }
+        Ok(())
+    }
+
     /// `PTRACE_GETREGS`, with `orig_rax`.
     pub fn get_registers_and_call(&self, tid: Tid) -> Result<(Registers, u64), Errno> {
         let thread = self.stopped(tid)?;
@@ -230,7 +251,8 @@ impl Kernel {
     /// `PTRACE_CONT` with `signal`, delivered only from a
     /// signal-delivery-stop. A thread at an event stop returns from the
     /// system call it stopped in when it next runs; one at its exit event
-    /// goes on to exit.
+    /// goes on to exit. Resuming a thread from a group-stop while its
+    /// process is still stopped is not modeled.
     pub fn resume(
         &mut self,
         tid: Tid,
@@ -252,6 +274,19 @@ impl Kernel {
                 thread.report = None;
             }
             State::Stopped {
+                kind: StopKind::Group(_),
+                ..
+            } => {
+                let group = thread.tgid;
+                if self.processes[&group].stopped.is_some() {
+                    self.gap("resuming a thread of a stopped process");
+                    return Err(Errno::ENOSYS);
+                }
+                let thread = self.threads.get_mut(&tid).expect("the thread");
+                thread.state = State::Running;
+                thread.report = None;
+            }
+            State::Stopped {
                 kind: StopKind::Exit(exit),
                 ..
             } => self.become_zombie(tid, exit),
@@ -260,10 +295,12 @@ impl Kernel {
         Ok(())
     }
 
-    /// `PTRACE_SEIZE` with `options`: the tracer traces the thread, which
-    /// runs on (K-SEIZE-1). A thread already traced, or one that has
-    /// finished exiting, cannot be seized (K-EXIT-5).
+    /// `PTRACE_SEIZE` with `options`: the caller traces the thread, which
+    /// runs on (K-SEIZE-1), or, in a job-control stop, reports a group-stop
+    /// (K-STOP-2). A thread already traced, or one that has finished
+    /// exiting, cannot be seized (K-EXIT-5).
     pub fn seize(&mut self, tid: Tid, options: Options) -> Result<(), Errno> {
+        let tracer = self.caller();
         let thread = self.threads.get_mut(&tid).ok_or(Errno::ESRCH)?;
         if thread.traced() {
             return Err(Errno::EPERM);
@@ -272,8 +309,21 @@ impl Kernel {
             self.happenings.push(Happening::SeizeRefused { tid });
             return Err(Errno::EPERM);
         }
-        thread.tracing = Tracing::Seized { interrupted: false };
+        thread.tracing = Tracing::Seized {
+            tracer,
+            interrupted: false,
+        };
         thread.options = options;
+        if thread.state == State::JobStopped {
+            let signal = self.processes[&thread.tgid]
+                .stopped
+                .expect("a stopped thread's process is stopped");
+            thread.enter_stop(
+                StopKind::Group(signal),
+                SigInfo::group_stop(tid, signal),
+                WaitStatus::GroupStop(tid, signal),
+            );
+        }
         Ok(())
     }
 
@@ -281,16 +331,20 @@ impl Kernel {
     /// before it runs on, and a stopped one as soon as it resumes. One
     /// exiting, at its exit event or a zombie, stays as it is.
     pub fn interrupt(&mut self, tid: Tid) -> Result<(), Errno> {
+        let caller = self.caller();
         let thread = self
             .threads
             .get_mut(&tid)
-            .filter(|thread| thread.traced())
+            .filter(|thread| thread.tracer() == Some(caller))
             .ok_or(Errno::ESRCH)?;
         if !thread.seized() {
             return Err(Errno::EIO);
         }
         if !thread.state.exiting() {
-            thread.tracing = Tracing::Seized { interrupted: true };
+            thread.tracing = Tracing::Seized {
+                tracer: caller,
+                interrupted: true,
+            };
             if thread.is_stopped() {
                 self.happenings.push(Happening::InterruptWaits { tid });
             }
@@ -300,9 +354,17 @@ impl Kernel {
 
     /// `PTRACE_DETACH` with `signal`, delivered only from a
     /// signal-delivery-stop. The thread runs on untraced from where it
-    /// stopped, its debug registers as they were (K-FORK-2, K-DR-3).
+    /// stopped, its debug registers as they were (K-FORK-2, K-DR-3), or,
+    /// its process stopped, stops again (K-STOP-2).
     pub fn detach(&mut self, tid: Tid, signal: Option<i32>) -> Result<(), Errno> {
+        let tracer = self.caller();
+        #[cfg(test)]
+        let forget = self.sabotage == Some(Sabotage::ForgetStopRequests);
         let thread = self.stopped_mut(tid)?;
+        #[cfg(test)]
+        if forget {
+            thread.pending.remove(super::signals::SIGSTOP);
+        }
         thread.tracing = Tracing::Untraced;
         thread.single_step = false;
         thread.options = Options::default();
@@ -318,7 +380,11 @@ impl Kernel {
             }
         );
         let planted = if exiting { None } else { self.planted(group) };
-        self.happenings.push(Happening::Released { tid, planted });
+        self.happenings.push(Happening::Released {
+            tid,
+            tracer,
+            planted,
+        });
         match state {
             State::Stopped {
                 kind: StopKind::Signal(_),
@@ -330,7 +396,7 @@ impl Kernel {
                 }
             }
             State::Stopped {
-                kind: StopKind::Event(..),
+                kind: StopKind::Event(..) | StopKind::Group(_),
                 ..
             } => self.threads.get_mut(&tid).expect("the thread").state = State::Running,
             State::Stopped {
@@ -339,14 +405,36 @@ impl Kernel {
             } => self.become_zombie(tid, exit),
             _ => unreachable!("a detached thread was stopped"),
         }
+        let stopped = self
+            .processes
+            .get(&group)
+            .is_some_and(|process| process.stopped.is_some());
+        if let Some(thread) = self.threads.get_mut(&tid)
+            && thread.state == State::Running
+            && stopped
+        {
+            thread.state = State::JobStopped;
+        }
         Ok(())
     }
 
-    /// Whether a stopped thread's own pending set holds `SIGTRAP`.
+    /// Whether `signal` is pending for a stopped thread: in its own set,
+    /// or in its process's when `process_wide`.
     #[must_use]
-    pub fn trap_queued(&self, tid: Tid) -> bool {
-        self.threads
-            .get(&tid)
-            .is_some_and(|thread| thread.pending.contains(super::signals::SIGTRAP))
+    pub fn signal_queued(&self, tid: Tid, signal: i32, process_wide: bool) -> bool {
+        #[cfg(test)]
+        if self.sabotage == Some(Sabotage::HideQueuedContinue) && signal == libc::SIGCONT {
+            return false;
+        }
+        let Some(thread) = self.threads.get(&tid) else {
+            return false;
+        };
+        if process_wide {
+            self.processes
+                .get(&thread.tgid)
+                .is_some_and(|process| process.shared.contains(signal))
+        } else {
+            thread.pending.contains(signal)
+        }
     }
 }

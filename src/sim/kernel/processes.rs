@@ -66,6 +66,7 @@ impl Kernel {
             traced,
             shadow,
         );
+        let start_time = self.allocate_start_time();
         let parent = &self.processes[&group];
         let process = Process {
             tgid: child,
@@ -78,6 +79,9 @@ impl Kernel {
             shared: Pending::default(),
             group_exit: None,
             killed_externally: false,
+            stopped: None,
+            continued: false,
+            start_time,
         };
         self.processes.insert(child, process);
         self.threads.insert(child, thread);
@@ -273,20 +277,20 @@ impl Kernel {
         self.happenings.push(Happening::ReapedOrphan { tgid });
     }
 
-    /// The tracer exits, releasing every thread it still traces (K-WAIT-3).
+    /// `tracer` exits, releasing every thread it still traces (K-WAIT-3).
     /// A running or exiting one runs on untraced, one at its exit event
     /// finishes exiting, and a zombie, which no request reaches, joins its
     /// process's end as though never traced. A thread held in another
     /// ptrace-stop, or `PTRACE_O_EXITKILL` ending live threads, is not
     /// modeled.
-    pub fn forget_tracer(&mut self) {
-        let traced = self
+    pub fn forget_tracer(&mut self, tracer: i32) {
+        let tracees = self
             .threads
             .values()
-            .filter(|thread| thread.traced())
+            .filter(|thread| thread.tracer() == Some(tracer))
             .map(|thread| thread.tid)
             .collect::<Vec<_>>();
-        for tid in traced {
+        for tid in tracees {
             let thread = &self.threads[&tid];
             let group = thread.tgid;
             let live = self
@@ -300,7 +304,11 @@ impl Kernel {
             let planted = matches!(thread.state, State::Running)
                 .then(|| self.planted(group))
                 .flatten();
-            self.happenings.push(Happening::Released { tid, planted });
+            self.happenings.push(Happening::Released {
+                tid,
+                tracer,
+                planted,
+            });
             let thread = self.threads.get_mut(&tid).expect("a traced thread");
             thread.tracing = Tracing::Untraced;
             thread.single_step = false;
