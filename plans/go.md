@@ -1111,60 +1111,330 @@ the 1.21–1.27 release branches.
 
 ## Testing
 
-Few tests, each with high leverage, as elsewhere.
+The suite must prove that real Go programs, compiled by the real
+toolchain, debug correctly from start to finish, on happy and unhappy
+paths alike. It should do that with as few tests as possible, each
+worth its runtime.
 
-- **The program is its own oracle.** At each synchronization point, a Go
-  fixture prints the runtime's own view of itself and then reaches a
-  breakpoint. That view is `runtime.Stack(buf, true)` (every goroutine:
-  id, state, wait reason, frames, creation site).
-  - The test compares uscope's task list and every task's backtrace
-    against it.
-  - This needs no external debugger, and covers every release in the
-    window by construction.
-  - The frame-pointer chain is a second oracle for backtraces.
-  - gdb is not an oracle for Go: it unwinds into garbage at every
-    stack switch.
-- **The steps that failed become deterministic tests.**
-  - **Another goroutine runs the stepping goroutine's lines on its
-    thread.** Build with `GOMAXPROCS(1)`: the stepping goroutine blocks on
-    a channel mid-step, and a sibling runs the same function on the same
-    thread. Fails today.
-  - **The goroutine resumes on another thread.** A sibling holding
-    `LockOSThread` occupies the original M, so the goroutine must resume
-    elsewhere; the fixture prints the thread ids it observes.
-  - **Stack growth.** A recursion grows its stack at a depth the fixture
-    controls. The test covers `next` over that call, `finish` from a frame
-    whose stack moves, `step` into a prologue that calls `morestack`, and
-    a function breakpoint that hits once, not twice.
-  - **Preemption.** A goroutine spins long enough to be preempted during a
-    single step.
-  
-  Each test is written first and seen to fail.
-- **Panics and runtime breakpoints.** Unrecovered panic, recovered nil
-  dereference (no stop), nested panics, `throw` via a deadlock and via a
-  concurrent map write, and `runtime.Breakpoint()` resumed. Plus the same
-  crash as a core.
-- **Fixtures across the matrix.**
-  - The pinned Go; `-N -l` and default; PIE and non-PIE.
-  - cgo built by gcc and clang; `-s -w`; `-trimpath`.
-  - The existing value fixtures gain complex, func, closure, escape,
-    shape, result, and range-over-func markers. Their `VIEW:` markers
-    cover the new views.
-- **Scenarios** through `tests/support::Scenario`, including DAP traffic
-  with goroutines as threads, and `just stress` on every run-control test.
-  Async preemption and thread churn are what stress exposes.
-- **Unit tests only where the logic is intricate.**
-  - The runtime model on fake memory, with the stack-switch table and TLS
-    offsets.
-  - The `pclntab` reader against `debug/gosym`'s output, recorded when
-    the fixtures are built.
-  - The fuzz target for `pclntab`.
-- **The simulator does not model Go's runtime** *(settled)*. It has no
-  goroutines, no moving stacks, and no Go golden programs. Go support is
-  tested on the real kernel only, with real Go programs. Generic run-control
-  changes that the plan makes are still swept as they are today: task
-  identity, stack-relative activations, and holding signals during single
-  steps. Changes made for Go must not weaken any existing oracle.
+A test earns its place when all of these hold:
+
+1. **It drives real compiler output through the public request path.** It
+   uses `tests/support::Scenario` or the DAP harness, not internal
+   functions.
+2. **It checks against an oracle uscope did not compute.** Comparing
+   uscope with itself proves nothing.
+3. **It fails for a bug a user would see.**
+4. **It is deterministic,** waiting only for what it can observe
+   (AGENTS.md).
+
+One stop that checks many properties beats many tests that each check
+one.
+
+### Oracles
+
+Truth comes from outside uscope, in this order of preference:
+
+- **The program reports its own state.**
+  - Fixtures print tab-separated `TRUTH` lines, the generalization of the
+    `EXPECT` lines the expression fixtures print today.
+  - Each line records one of:
+    - a value, as bits for floats;
+    - the goroutine's id, parsed from the `goroutine N [...]` header of
+      `runtime.Stack`;
+    - `syscall.Gettid()`;
+    - `runtime.NumGoroutine()`;
+    - the current goroutine's exact frames, from `runtime.Callers` and
+      `runtime.CallersFrames`, inline frames included;
+    - every goroutine's stack, from `runtime.Stack(buf, true)` under
+      `debug.SetTraceback("system")`.
+  - All of this is computed by the runtime the debugger is inspecting, so
+    it stays correct when the pin moves.
+- **The program's state at a stop.**
+  - Variables a fixture keeps for the test's sake: `me`, the goroutine's
+    own id, and sink counters that prove which callees ran, as
+    `stepping-boundaries` does for C.
+  - These carry identity across a step without trusting uscope's task
+    model. A step that ends with `me` changed has ended in the wrong
+    goroutine, whatever uscope believes.
+- **The native run.**
+  - At build time every fixture also runs without a debugger, and its
+    exit status and standard error are recorded beside it, as the gdb
+    files are today.
+  - A debugged run must end the same way: same exit status, same panic
+    text, same goroutine in the traceback.
+  - A fixture that misbehaves on its own fails the build, not a debugger
+    test.
+- **The same stop as a core.**
+  - At build time, gdb's `gcore` saves a core at each fixture's main
+    checkpoint, with a filter that skips Go's reserved heap.
+  - Every live checkpoint assertion runs again on that core.
+  - The runtime model sees a core and a live process alike, so this
+    doubles the coverage of tasks, stacks, and values at no cost in
+    fixtures.
+- **Expected line walks written in the source.**
+  - Stepping expectations are `// WALK:` markers on the lines a `next`
+    sequence must visit, reviewed with the fixture. Tests find lines by
+    marker (`source_line`), never by number.
+- **The frame-pointer chain.**
+  - Test support walks rbp through memory on a goroutine stack, reading
+    nothing uscope computed.
+  - It is an independent check of physical frames below a stack switch,
+    and it catches errors from the `pcsp` table.
+
+Two oracles are rejected:
+
+- **gdb.** It unwinds into garbage at every Go stack switch.
+- **Delve.** Agreeing with it would import its known bugs (one goroutine
+  per stop, the stale `asmcgocall` offset, zero-filled pieces), and it
+  would add a debugger to the toolchain the tests depend on.
+
+### Invariants at every stop
+
+Each Go scenario calls one shared `check_go_stop` after every stop. Most
+bugs surface here, in whichever test happens to reach them, without a test
+written for them.
+
+- **Never wrong.** Every value uscope shows as available equals the truth
+  the program reported. A value it cannot show is unavailable with a
+  typed reason. In optimized builds unavailable is allowed; wrong never
+  is.
+- **Tasks agree with the runtime.** At a quiescent checkpoint:
+  - the task ids are exactly those in the program's `runtime.Stack`
+    dump;
+  - the count equals `runtime.NumGoroutine()`;
+  - each task's state and wait reason match the dump;
+  - each task's frames match the dump's frames, function, file, and line,
+    with runtime frames included under `system` tracebacks.
+- **Every thread is accounted for.** It runs a task, runs runtime code for
+  one, or is idle; never unknown without a reason.
+- **Every backtrace ends properly.**
+  - It ends `Complete` at an outermost frame (`goexit`, `mstart`,
+    `rt0_go`), or with a typed termination that says why.
+  - It contains no `<unknown>` frame inside the Go image, and no repeated
+    frame.
+  - Segments change only at a `StackSwitch` frame.
+- **Steps keep their identity.**
+  - A completed `next`, `step`, or `finish` ends on the goroutine whose
+    `me` it started with.
+  - It ends at a statement line.
+  - For `next` and `finish`, it ends in the same frame or its caller, as
+    the program's own frames show.
+
+### Fixture rules
+
+- **Real programs, the standard library only.** The build is offline and
+  pinned, so no modules are fetched.
+- **Quiescent checkpoints.**
+  - Before a checkpoint, every other goroutine is parked in a state the
+    fixture can name: a channel receive, a mutex, `select`, `sync.Cond`,
+    a long `time.Sleep`, or a read on a pipe.
+  - Handshakes get each goroutine there; nothing waits by sleeping.
+  - `checkpoint(name)` prints its `TRUTH` lines, then calls
+    `//go:noinline func reached(name string)`, where tests break.
+  - Goroutines left running are only those a test needs. Assertions about
+    them do not depend on scheduling.
+- **Forcing instead of hoping.**
+  - `runtime.GOMAXPROCS(1)` makes a sibling run on the stepping thread.
+  - A sibling holding `LockOSThread` makes a goroutine resume on another
+    thread. The fixture prints the thread ids it saw, as evidence the
+    situation arose.
+  - A function with a 64 KiB local array always grows a fresh goroutine's
+    8 KiB stack.
+  - `runtime.GC()` after deep recursion returns shrinks stacks.
+  - A goroutine sending SIGURG to the stepping thread in a loop, with
+    `tgkill`, guarantees preemption signals during single steps.
+- **One package directory per program**, as today. Fixtures may share a
+  small `truth.go` copied into each by the build script, so that every
+  fixture prints `TRUTH` the same way.
+
+### Build matrix
+
+Each axis is tested only where it changes behavior. Axes are not
+multiplied into a Cartesian product.
+
+| Axis | Why it matters | Fixtures |
+|---|---|---|
+| `-N -l` against default | Inlining, register locations, open-coded defers, inlined range-over-func | Every one |
+| PIE against `go build`'s default executable | Load bias, the TLS sequence | Tasks, frames, crash |
+| cgo, external linking, gcc and clang | `runtime.tlsg`, C `.eh_frame`, mixed stacks | cgo |
+| `c-shared`, hosted by a C program | TLS through the GOT, runtime in a library | c-shared |
+| `-ldflags=-s -w` | `.gopclntab` alone | Frames, crash |
+| `-trimpath` | Source paths | One server program |
+
+### End-to-end scenarios
+
+These are the core of the suite: a `tests/go` binary, one file per
+program, each driving whole sessions. Every scenario runs `check_go_stop`
+at every stop.
+
+#### Working programs
+
+1. **Worker pool.** Channels, a `WaitGroup`, and `context`
+   cancellation.
+   - The checkpoint invariants hold.
+   - Selecting a parked worker shows its frames and locals.
+   - `next` walks a worker's loop while siblings run the same function,
+     at `GOMAXPROCS(1)` and at the default.
+   - `finish` returns into the closure that started the worker.
+   - A breakpoint condition selects one goroutine (`$task == …`).
+2. **HTTP server and client in one process.** `net/http` on
+   `127.0.0.1:0`.
+   - A breakpoint in a handler; its backtrace passes through `net/http`
+     to `goexit`.
+   - A handler panic, which the server recovers: no stop by default, and
+     the client sees the error response.
+   - DAP's every-panic filter stops on it.
+   - With `-trimpath` the same breakpoints bind through a source map.
+3. **Recursion that grows and shrinks its stack.**
+   - `next` over the growing call, `finish` from a frame whose stack
+     moves, and `step` into a prologue that calls `morestack`.
+   - A function breakpoint is hit once per call, not twice.
+   - A watchpoint on a local follows the copy, and ends when its frame
+     returns.
+4. **Generics, iterators, closures, and defers.**
+   - `break main.Sum` binds every instantiation.
+   - Values show their concrete types.
+   - `next` and `finish` inside a range-over-func body stay in the loop.
+   - Closure captures and method values are readable.
+   - `step` at a `return` enters the deferred function; `next` does not.
+   - A panic during defers stops `next` in the deferred function.
+5. **Values gallery.** The existing value fixtures, extended with:
+   - complex numbers, `func` values and closures, and escaped variables;
+   - results after `finish`;
+   - `time.Time` and `time.Duration`, `sync` types, and error chains;
+   - maps (small, large, mid-growth), channels, and interfaces stored
+     directly and indirectly;
+   - promoted fields and shape-typed generics.
+   
+   Each is marked with `VIEW:` or `TRUTH`, and checked in both builds by
+   the never-wrong invariant.
+6. **cgo.**
+   - Go calls C, which calls back into Go.
+   - A backtrace from C reaches the Go frames above `asmcgocall`, and
+     one from the callback shows the C frames between.
+   - `step` from Go into C and back.
+7. **Attach to a running server.** The server is an `ExternalProcess`.
+   - Its goroutines are listed, and a breakpoint is hit by a request.
+   - Detaching leaves it serving: a second request succeeds.
+8. **Scale.** 100,000 parked goroutines.
+   - Paging returns every id exactly once, matching the dump.
+   - Filters apply before paging.
+   - The work per page is bounded, measured as counted memory reads from
+     the inspection usage, not as time.
+   - DAP's thread list is cut with a final "N more" entry.
+9. **A large real program.**
+   - `cmd/gofmt`, built from the pinned GOROOT with and without `-N -l`,
+     which needs no network.
+   - Thousands of functions across many packages: breakpoints by package
+     name, backtraces, a `next` walk through `go/printer`, and AST values
+     (interfaces, maps, slices) under the never-wrong invariant.
+   - The cost of loading it, in counted work, is recorded as a
+     regression bound.
+
+#### Failing programs
+
+For each program below, the session ends the way the native run did.
+Where a stop is expected, it reports the runtime's own message, selects
+the right goroutine and frame, and leaves the backtrace intact.
+
+| Program | Expected stop | After continuing |
+|---|---|---|
+| Write to a nil map | Unrecovered panic, at the write | Exit 2, standard error as natively |
+| Nil dereference, recovered | None | Output as natively |
+| Nil dereference, not recovered | Unrecovered panic, faulting frame selected below `sigpanic` | Exit 2 |
+| Index out of range; `panic(err)` with a wrapped error; `panic` of a `Stringer` | Unrecovered panic, with the runtime's text | Exit 2 |
+| Panic in a goroutine other than `main` | Unrecovered panic, on that goroutine; the others listed | Exit 2 |
+| Panic in a deferred call during a panic; re-panic after `recover` | One stop, with the chain of panics | Exit 2 |
+| Every goroutine asleep | Fatal error; every goroutine with its wait reason | Exit 2 |
+| `runtime.Goexit` from `main` | Fatal error "no goroutines" | Exit 2 |
+| Unlock of an unlocked `sync.Mutex` | Fatal error, from `throw` | Exit 2 |
+| Stack overflow, with `debug.SetMaxStack(1 << 20)` | Fatal error; the backtrace ends at its typed depth limit | Exit 2 |
+| `runtime.Breakpoint()` | Program breakpoint | Runs on and exits 0 |
+| `os.Exit(3)` with pending defers | None | Exit 3; defers not run |
+| SIGSEGV in C, called through cgo | Fatal error at the C frame | Exit 2 |
+| `GOTRACEBACK=crash` panic | Unrecovered panic, then SIGABRT | Its core shows the panic and every goroutine |
+| Corrupted runtime state: a parked `g` with a garbage `sched.pc` and stack bounds, written with `unsafe` | Checkpoint | The goroutine is listed as unreadable, with its reason; every other goroutine is unaffected |
+
+### Run-control stress
+
+- Every run-control scenario in `tests/go` runs under `just stress`, and
+  `just stress N -E 'binary(go)'` targets the suite.
+- One torture scenario runs many goroutines through the same function,
+  with:
+  - conditional breakpoints;
+  - repeated `next` and `finish`;
+  - a SIGURG sender;
+  - `runtime.GC()` churn.
+
+  It checks that every step ends on its own goroutine, that no stop is
+  lost, and that the program exits normally. Every wait has a deadline,
+  and the iteration count is bounded.
+
+### Narrow tests, only where logic is intricate
+
+- **The runtime model on cores and fake memory.**
+  - The stack-switch table, the TLS formulas per build mode, `_Gscan`
+    masking, and partial results.
+  - Checkpoint cores are the preferred input, since they are real memory.
+- **The `pclntab` reader against `debug/gosym`.**
+  - Its function names, entries, and sampled lines must match what Go's
+    own reader says.
+  - That reference output is recorded at build time for a normal and a
+    stripped binary.
+  - The reader also gets a fuzz target.
+- **`Activation`'s predicates** across a moved stack.
+- **A sabotage test for each new oracle.**
+  - The `TRUTH` comparator and `check_go_stop` must fail on a dropped
+    frame, a missing goroutine, a wrong value, and a step that changed
+    `me`, as AGENTS.md requires of oracles.
+- **The contract, sabotaged.** A runtime image missing a field makes the
+  feature that needs it unavailable, with the field's name in the reason.
+- **Following a task across threads with a fake runtime model on
+  `FakeTrace`,** so the generic run-control code is tested without Go.
+- **The two boundary tests.**
+
+### DAP
+
+- One VS Code session against the worker-pool program is recorded with
+  `just uat-vscode` and replayed as traffic. It covers:
+  - goroutines as threads;
+  - a step in a goroutine;
+  - the panic exception filters and `exceptionInfo`;
+  - segment labels in a stack trace.
+- The replay inherits the suite's schema and ordering checks.
+- The DAP harness then runs the panic and scale scenarios through the
+  adapter.
+
+### Written first
+
+Each failure found in the experiments becomes a test that fails before
+its fix, and is seen to fail:
+
+- `next` ends in another goroutine;
+- stack growth makes `next` run away;
+- an unrecovered panic exits without stopping;
+- a recovered nil dereference stops;
+- `runtime.Breakpoint()` cannot be resumed;
+- backtraces stop at `systemstack`, `mcall`, `morestack`, and cgo;
+- parked goroutines are invisible;
+- `step` enters `mapassign`;
+- `next` leaves a range-over-func body for its iterator;
+- `break main.Sum` binds nothing;
+- `func` and complex values are unsupported;
+- `&x` is shown instead of `x`;
+- undeclared locals show garbage;
+- promoted fields are not found.
+
+### Not written
+
+- Unit tests of individual field decodings that the end-to-end
+  checkpoints already cover.
+- Snapshot tests of whole CLI transcripts. One CLI test covers rendered
+  goroutine lists and segment markers.
+- Assertions on time, or that something did not happen within a window.
+- Tests per Go release, since the toolchain is pinned.
+- Comparisons with gdb or Delve.
+- Go in the simulator.
 
 ## Known limits
 
