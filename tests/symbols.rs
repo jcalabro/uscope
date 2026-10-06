@@ -412,10 +412,19 @@ fn open_core(executable: &str) -> Scenario {
     )
 }
 
+/// A live process names its code without debug information, and its data,
+/// by ELF symbols, as readelf's tables do.
 #[tokio::test]
-async fn frames_in_code_without_debug_info_are_named_by_elf_symbols() {
-    for (executable, library) in VARIANTS {
+async fn live_processes_name_code_and_data_by_elf_symbols() {
+    for (index, (executable, library)) in VARIANTS.into_iter().enumerate() {
         let mut scenario = Scenario::launch(executable);
+        assert!(matches!(
+            scenario
+                .handle()
+                .describe_address(VirtualAddress::new(8))
+                .await,
+            Err(Error::NotRunning)
+        ));
         let site = scenario.add_breakpoint("chain_nested_site").await;
 
         // asm_nested_outer calls back before, within, and after its nested
@@ -436,6 +445,11 @@ async fn frames_in_code_without_debug_info_are_named_by_elf_symbols() {
             let caller = frame_symbol(&trace.frames[1], executable);
             assert_eq!(caller.name.as_ref(), expected, "{executable}: {trace:#?}");
             assert_eq!(caller.provenance, SymbolExtentProvenance::Declared);
+            if expected == "asm_nested_outer" {
+                let context = format!("{executable} (live)");
+                assert_descriptions(&scenario, &modules, executable, library, index, &context)
+                    .await;
+            }
         }
 
         scenario.remove_breakpoint(site.id).await;
@@ -512,10 +526,11 @@ fn gdb_backtrace(executable: &str) -> Vec<GdbFrame> {
 /// A core names frames without debug info as the live process does, and
 /// gdb's backtrace of the same core is an independent oracle for both the
 /// unwound frames and their names. Names may differ only by choosing another
-/// symbol at the same address.
+/// symbol at the same address. Its symbol catalogs and address descriptions
+/// match readelf.
 #[tokio::test]
-async fn core_backtraces_agree_with_gdb() {
-    for (executable, library) in VARIANTS {
+async fn cores_agree_with_gdb_and_readelf() {
+    for (index, (executable, library)) in VARIANTS.into_iter().enumerate() {
         let scenario = open_core(executable);
         let modules = Modules::load(&scenario).await;
         let trace = scenario
@@ -559,6 +574,9 @@ async fn core_backtraces_agree_with_gdb() {
                 chosen.name
             );
         }
+        assert_catalogs_match_oracles(&modules, executable, library);
+        let context = format!("{executable} (core)");
+        assert_descriptions(&scenario, &modules, executable, library, index, &context).await;
         scenario.shutdown().await;
     }
 }
@@ -1010,42 +1028,37 @@ fn assert_code_extents_match_oracle(
     );
 }
 
-#[tokio::test]
-async fn symbol_catalogs_match_binutils_for_every_fixture_module() {
-    for (executable, library) in VARIANTS {
-        let scenario = open_core(executable);
-        let modules = Modules::load(&scenario).await;
-        let mut compared = BTreeSet::new();
-        for record in modules.snapshot.modules.iter() {
-            let file_name = record
-                .path
-                .file_name()
-                .expect("module file")
-                .to_string_lossy()
-                .into_owned();
-            let embedded = format!("{file_name}.embedded");
-            let oracles = if file_name == "libelf-symbols-minidebug.so" {
-                vec![file_name.as_str(), embedded.as_str()]
-            } else {
-                vec![file_name.as_str()]
-            };
-            if !Scenario::fixture(&format!("symbol-oracles/{file_name}.readelf")).exists() {
-                continue;
-            }
-            assert_catalog_matches_oracle(
-                &modules.images[&record.module.id],
-                &Oracle::read(&oracles),
-                &format!("{executable}: {file_name}"),
-            );
-            compared.insert(file_name);
+/// Compares the symbol catalog of every module with a readelf oracle.
+fn assert_catalogs_match_oracles(modules: &Modules, executable: &str, library: &str) {
+    let mut compared = BTreeSet::new();
+    for record in modules.snapshot.modules.iter() {
+        let file_name = record
+            .path
+            .file_name()
+            .expect("module file")
+            .to_string_lossy()
+            .into_owned();
+        let embedded = format!("{file_name}.embedded");
+        let oracles = if file_name == "libelf-symbols-minidebug.so" {
+            vec![file_name.as_str(), embedded.as_str()]
+        } else {
+            vec![file_name.as_str()]
+        };
+        if !Scenario::fixture(&format!("symbol-oracles/{file_name}.readelf")).exists() {
+            continue;
         }
-        for required in [executable, library, "libc.so.6", "ld-linux-x86-64.so.2"] {
-            assert!(
-                compared.contains(required),
-                "{executable}: {required} was not compared: {compared:?}"
-            );
-        }
-        scenario.shutdown().await;
+        assert_catalog_matches_oracle(
+            &modules.images[&record.module.id],
+            &Oracle::read(&oracles),
+            &format!("{executable}: {file_name}"),
+        );
+        compared.insert(file_name);
+    }
+    for required in [executable, library, "libc.so.6", "ld-linux-x86-64.so.2"] {
+        assert!(
+            compared.contains(required),
+            "{executable}: {required} was not compared: {compared:?}"
+        );
     }
 }
 
@@ -1445,48 +1458,38 @@ async fn assert_data_object_descriptions(
     assert_eq!(description.module, None, "{executable}");
 }
 
-#[tokio::test]
-async fn addresses_are_described_by_module_section_and_symbol_like_readelf() {
-    for (index, (executable, library)) in VARIANTS.into_iter().enumerate() {
-        let mut live = Scenario::launch(executable);
-        assert!(matches!(
-            live.handle().describe_address(VirtualAddress::new(8)).await,
-            Err(Error::NotRunning)
-        ));
-        live.add_breakpoint("chain_nested_site").await;
-        live.run_to_stop().await;
-        let core = open_core(executable);
-
-        for (scenario, kind) in [(&live, "live"), (&core, "core")] {
-            let context = format!("{executable} ({kind})");
-            let modules = Modules::load(scenario).await;
-            assert_data_object_descriptions(scenario, &modules, executable, library).await;
-
-            let mut checked = vec![(executable, vec![executable])];
-            let embedded = format!("{library}.embedded");
-            checked.push(if library == "libelf-symbols-minidebug.so" {
-                (library, vec![library, embedded.as_str()])
-            } else {
-                (library, vec![library])
-            });
-            // The shared C library and loader are checked once.
-            if index == 0 {
-                checked.push(("libc.so.6", vec!["libc.so.6"]));
-                checked.push(("ld-linux-x86-64.so.2", vec!["ld-linux-x86-64.so.2"]));
-            }
-            for (file_name, oracles) in checked {
-                let described = assert_module_descriptions(
-                    scenario,
-                    &modules,
-                    file_name,
-                    &Oracle::read(&oracles),
-                    &context,
-                )
-                .await;
-                assert!(described > 16, "{context}: {file_name}: {described}");
-            }
-        }
-        core.shutdown().await;
-        live.shutdown().await;
+/// Checks the descriptions of the variant's data objects and of every
+/// boundary address of its modules. The shared C library and loader are
+/// checked only for the first variant.
+async fn assert_descriptions(
+    scenario: &Scenario,
+    modules: &Modules,
+    executable: &str,
+    library: &str,
+    variant: usize,
+    context: &str,
+) {
+    assert_data_object_descriptions(scenario, modules, executable, library).await;
+    let mut checked = vec![(executable, vec![executable])];
+    let embedded = format!("{library}.embedded");
+    checked.push(if library == "libelf-symbols-minidebug.so" {
+        (library, vec![library, embedded.as_str()])
+    } else {
+        (library, vec![library])
+    });
+    if variant == 0 {
+        checked.push(("libc.so.6", vec!["libc.so.6"]));
+        checked.push(("ld-linux-x86-64.so.2", vec!["ld-linux-x86-64.so.2"]));
+    }
+    for (file_name, oracles) in checked {
+        let described = assert_module_descriptions(
+            scenario,
+            modules,
+            file_name,
+            &Oracle::read(&oracles),
+            context,
+        )
+        .await;
+        assert!(described > 16, "{context}: {file_name}: {described}");
     }
 }

@@ -67,7 +67,7 @@ fuzz_target!(|data: &[u8]| {
             let _ = protocol::MessageError::request_seq(data);
         }
     }
-    if let Some(text) = std::str::from_utf8(data).ok() {
+    if let Ok(text) = std::str::from_utf8(data) {
         let _ = protocol::address(text);
         // What a completion completes is always the end of the text.
         let (_, partial, start) = complete::completing(text);
