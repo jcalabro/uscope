@@ -31,8 +31,8 @@ use std::thread::{self, JoinHandle};
 use nix::errno::Errno;
 use nix::libc;
 use nix::unistd::Pid;
-pub use signals::Signal;
-use signals::{SignalPolicies, WaitEvent};
+pub use signals::{Signal, WaitEvent};
+use signals::SignalPolicies;
 use tokio::sync::mpsc;
 
 use crate::debug_info::{DebugInfo, UnwindInfo, VariableInfo};
@@ -129,9 +129,6 @@ const MAX_PUBLIC_MEMORY_READ: u64 = 64 * 1024;
 const MAX_VALUE_CHILD_PAGE_LIMIT: u32 = 256;
 
 static LINUX_SESSION_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// A decoded `waitpid` status the waiter thread reports to the controller.
-pub type NativeWait = WaitEvent;
 
 fn backend_error(error: LinuxError) -> Error {
     Error::backend(error)
@@ -376,7 +373,7 @@ enum ClassifiedStop {
     Unclassifiable(RawStopRecord),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct StepStart {
     source: Option<SourceLocation>,
     code_instance: Option<CodeInstanceId>,
@@ -548,19 +545,13 @@ struct PublicStop {
     selected_frames: BTreeMap<Pid, StackFrameId>,
 }
 
-/// Allocates stop identifiers that are unique for the whole process lifetime.
-///
-/// A `DereferenceReference` (or any stopped-state capability) is a public value
-/// that can outlive the `Controller` that minted it. A per-controller counter
-/// would restart at the same value in a sequentially-created controller, so a
-/// stale capability whose thread and module identities happened to recur could
-/// authenticate against a newer inferior. Allocating process-wide guarantees no
-/// two stops ever share an id, closing that ABA reuse gap at its source.
+/// Stop identifiers are unique across every session in the process: a
+/// stopped-state reference can outlive its controller, and must never
+/// authenticate against a later session's stop.
 static NEXT_STOP_ID: AtomicU64 = AtomicU64::new(1);
 
 fn allocate_stop_id() -> StopId {
-    // `fetch_update` leaves the counter unchanged when the closure returns
-    // `None`, so exhaustion cannot wrap the atomic to zero and reissue low ids.
+    // On exhaustion the counter stays put rather than wrap and reissue ids.
     #[allow(
         deprecated,
         reason = "try_update is not yet stable on the pinned toolchain"
@@ -974,7 +965,7 @@ struct Controller<P: InspectionOps> {
     /// Fork children still traced after the inferior ended.
     orphans: Option<Orphans>,
     /// A launch or attach waiting for those children to be released.
-    deferred_start: Option<DeferredStart>,
+    deferred_start: Option<Start>,
     signals: SignalPolicies,
     revision: u64,
 }
@@ -991,10 +982,8 @@ struct Orphans {
     waiter: Option<Waiter>,
 }
 
-/// A launch or attach requested while the controller still releases the
-/// children the last program forked. It starts once they are released,
-/// since their waiter must finish before another waits.
-enum DeferredStart {
+/// A requested launch or attach.
+enum Start {
     Launch(crate::LaunchOptions, Reply<ExecutionId>),
     Attach(ProcessId, Reply<StopId>),
     LaunchByExec {
@@ -1219,14 +1208,19 @@ impl<P: LinuxTraceOps> Controller<P> {
             Request::RemoveAllWatchpoints { reply } => {
                 self.edit(Edit::RemoveAllWatchpoints { reply });
             }
-            Request::Launch { options, reply } => self.launch(*options, reply),
-            Request::Attach { process_id, reply } => self.attach(process_id, reply),
+            Request::Launch { options, reply } => self.start(Start::Launch(*options, reply)),
+            Request::Attach { process_id, reply } => self.start(Start::Attach(process_id, reply)),
             Request::LaunchByExec {
                 process_id,
                 stop_at_entry,
                 release,
                 reply,
-            } => self.launch_by_exec(process_id, stop_at_entry, release, reply),
+            } => self.start(Start::LaunchByExec {
+                requested: process_id,
+                stop_at_entry,
+                release,
+                reply,
+            }),
             Request::Continue {
                 process_id,
                 stop_id,
@@ -1251,7 +1245,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                     let _ = reply.send(Err(error));
                 }
             },
-            Request::Pause { process_id, reply } => self.pause(process_id, reply),
+            Request::Pause { process_id, reply } => {
+                let _ = reply.send(self.begin_pause(process_id));
+            }
             Request::WriteWord {
                 process_id,
                 stop_id,

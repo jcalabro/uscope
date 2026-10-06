@@ -75,8 +75,6 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     fn traced_children(&self, process: Pid, thread: Pid) -> Vec<Pid>;
     /// Reads the name a thread gave itself, if it is still readable.
     fn thread_name(&self, _process: Pid, _thread: Pid) -> Option<Arc<str>> {
-        // Deterministic effect fakes have no names. The production edge
-        // overrides this method.
         None
     }
     /// Seizes a thread, killing it with the tracer when `exit_kill` is set.
@@ -114,8 +112,6 @@ pub(super) trait LinuxTraceOps: InspectionOps {
         identity: FileIdentity,
     ) -> Result<u64>;
     fn module_mappings(&self, _pid: Pid) -> Result<Vec<ModuleMapping>> {
-        // Deterministic effect fakes opt out of host /proc inspection. The
-        // production ptrace edge overrides this method.
         Ok(Vec::new())
     }
     fn write_word(&self, pid: Pid, address: u64, value: u64) -> Result<()>;
@@ -130,8 +126,6 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     /// Whether a stopped thread's private pending set holds a deliverable
     /// SIGTRAP that has not been reported yet.
     fn queued_trap(&self, _pid: Pid) -> Result<bool> {
-        // Deterministic effect fakes report nothing queued. The production
-        // ptrace edge overrides this method.
         Ok(false)
     }
     /// Whether `address` lies in memory the process may execute, where a
@@ -218,9 +212,10 @@ pub(super) trait LinuxTraceOps: InspectionOps {
     }
 }
 
+/// The live ptrace edge, usable only from the thread that created it.
 pub(super) struct LinuxPtrace {
-    pub(super) affinity: ThreadAffinity,
-    pub(super) not_send_or_sync: PhantomData<Rc<()>>,
+    owner: ThreadId,
+    not_send: PhantomData<Rc<()>>,
     /// The current inferior's waiter, woken by every request that makes a
     /// tracee report a new wait status.
     waiter: RefCell<Option<Thread>>,
@@ -229,14 +224,18 @@ pub(super) struct LinuxPtrace {
 impl LinuxPtrace {
     pub(super) fn new() -> Self {
         Self {
-            affinity: ThreadAffinity::new(),
-            not_send_or_sync: PhantomData,
+            owner: thread::current().id(),
+            not_send: PhantomData,
             waiter: RefCell::new(None),
         }
     }
 
-    pub(super) fn assert_owner_thread(&self) {
-        self.affinity.assert_owner();
+    fn assert_owner_thread(&self) {
+        assert_eq!(
+            self.owner,
+            thread::current().id(),
+            "ptrace called from non-controller thread"
+        );
     }
 
     /// Makes the waiter poll promptly for the status a request just caused,
@@ -612,31 +611,10 @@ pub(super) fn queued_trap_in_status(status: &str) -> bool {
 
 /// The `struct user` offset of one debug register, as `PTRACE_PEEKUSER` and
 /// `PTRACE_POKEUSER` address it.
-pub(super) fn debug_register_offset(index: usize) -> ptrace::AddressType {
+fn debug_register_offset(index: usize) -> ptrace::AddressType {
     assert!(index < 8, "x86-64 has eight debug registers");
     (std::mem::offset_of!(libc::user, u_debugreg) + index * std::mem::size_of::<u64>())
         as ptrace::AddressType
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct ThreadAffinity {
-    pub(super) owner: ThreadId,
-}
-
-impl ThreadAffinity {
-    pub(super) fn new() -> Self {
-        Self {
-            owner: thread::current().id(),
-        }
-    }
-
-    pub(super) fn assert_owner(self) {
-        assert_eq!(
-            self.owner,
-            thread::current().id(),
-            "ptrace called from non-controller thread"
-        );
-    }
 }
 
 /// The first poll interval after a wake or a status. Single steps and
@@ -652,7 +630,7 @@ const WAITER_MAX_POLL: Duration = Duration::from_millis(5);
 /// the debugger's process keep running. The interval doubles while nothing
 /// happens and drops to the minimum after each status and each wake from
 /// the controller, which wakes it whenever a request will cause a status.
-pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
+fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let handle = thread::Builder::new()
@@ -695,7 +673,7 @@ pub(super) fn spawn_waiter(messages: mpsc::Sender<ControllerMessage>) -> Result<
     unsafe_code,
     reason = "pre_exec is the only way to establish child-side ptrace and parent-death behavior"
 )]
-pub(super) fn trace_child(command: &mut ProcessCommand) {
+fn trace_child(command: &mut ProcessCommand) {
     let expected_parent = std::process::id();
 
     // SAFETY: after fork, this closure invokes only async-signal-safe syscalls and
@@ -727,7 +705,7 @@ pub(super) fn disable_address_randomization() {
     unsafe_code,
     reason = "Linux exposes thread-directed signals through tgkill"
 )]
-pub(super) fn tgkill(process: Pid, thread: Pid, signal: Signal) -> Result<()> {
+fn tgkill(process: Pid, thread: Pid, signal: Signal) -> Result<()> {
     // SAFETY: tgkill takes three integer values and does not dereference user memory.
     let result = unsafe {
         libc::syscall(
