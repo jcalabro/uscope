@@ -135,7 +135,8 @@ pub enum BreakpointSpec {
     Function(String),
     /// Break at every statement address of a source line. A line without
     /// statements moves to the next one with statements in the function
-    /// containing it; see [`crate::ModuleImage::breakpoint_line`].
+    /// containing it, except in Go, where it is refused; see
+    /// [`crate::ModuleImage::breakpoint_line`].
     Source { path: PathBuf, line: LineNumber },
     /// Break at every concrete instance of the functions a location names
     /// that are declared in one source file.

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use uscope::{BreakpointId, BreakpointSpec, Error, ExitStatus, StopReason};
+use uscope::{BreakpointId, BreakpointSpec, Error, ExitStatus, LineNumber, StopReason};
 
 use crate::support::{Scenario, source_line};
 
@@ -207,6 +207,30 @@ async fn go_locations_that_name_too_much_or_nothing_say_why() {
             .add_breakpoint_spec(file_function("sum.go", function))
             .await;
         assert_eq!(breakpoint.locations.len(), 2, "sum.go:{function}");
+    }
+
+    // A line without a statement is refused with its neighbours that have
+    // one, never moved to either.
+    let line = source_line(MAIN, "names: no statement");
+    match scenario
+        .handle()
+        .add_breakpoint(BreakpointSpec::Source {
+            path: "main.go".into(),
+            line: LineNumber::new(line).expect("line"),
+        })
+        .await
+    {
+        Err(Error::SourceLineWithoutStatement {
+            line: refused,
+            before,
+            after,
+            ..
+        }) => {
+            assert_eq!(refused, line);
+            assert_eq!(before, Some(source_line(MAIN, "names: before blank")));
+            assert_eq!(after, Some(source_line(MAIN, "names: after blank")));
+        }
+        other => panic!("a line without a statement was not refused: {other:?}"),
     }
 
     // At a stop, a bare name is first looked up in the stopped frame's

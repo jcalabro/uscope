@@ -12,7 +12,7 @@ use crate::protocol::{
     Breakpoint, BreakpointHit, BreakpointId, BreakpointSpec, ConditionOwner, DebuggerEvent,
     ExecutionId, HitCondition, ResolvedBreakpointLocation, StopReason,
 };
-use crate::{BreakpointLocation, Error, Result, VirtualAddress};
+use crate::{BreakpointLocation, Error, LineNumber, Result, VirtualAddress};
 
 use super::native::{LinuxTraceOps, is_vanished_tracee};
 use super::{BreakpointOwner, Controller, Inferior, LinuxError, backend_error};
@@ -722,9 +722,20 @@ fn resolve_in_image(
                 path: path.clone(),
                 line: line.get(),
             };
-            let line = image
-                .breakpoint_line(source.id, *line)
-                .ok_or_else(unavailable)?;
+            let Some(line) = image.breakpoint_line(source.id, *line) else {
+                if image.statement_addresses(source.id, *line).next().is_none()
+                    && image.keeps_line_breakpoints(source.id)
+                {
+                    let (before, after) = image.nearest_statement_lines(source.id, *line);
+                    return Err(Error::SourceLineWithoutStatement {
+                        path: path.clone(),
+                        line: line.get(),
+                        before: before.map(LineNumber::get),
+                        after: after.map(LineNumber::get),
+                    });
+                }
+                return Err(unavailable());
+            };
             let mut addresses = image
                 .statement_addresses(source.id, line)
                 .collect::<Vec<_>>();
