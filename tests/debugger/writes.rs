@@ -74,7 +74,7 @@ async fn frame_view(scenario: &mut Scenario, level: u32) -> uscope::StopContext 
         .await;
     uscope::StopContext {
         stop: stop_id,
-        thread: thread_id,
+        execution: thread_id.into(),
         frame: trace.frames[usize::try_from(level).expect("level")].id,
     }
 }

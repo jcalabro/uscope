@@ -8,9 +8,9 @@ use crate::sim::choices::Stream;
 use crate::sim::marks::Mark;
 use crate::sim::report::Failure;
 use crate::{
-    Backtrace, Error, Expression, FrameKind, PresentedFrame, ScalarValue, StackFrameId,
-    StateSnapshot, StepKind, StopContext, StopId, ThreadState, UnwindTermination, VariableSnapshot,
-    VariableState, VariableValue, VariableValueSource, VirtualAddress,
+    Backtrace, Error, ExecutionContext, Expression, FrameKind, PresentedFrame, ScalarValue,
+    StackFrameId, StateSnapshot, StepKind, StopContext, StopId, ThreadState, UnwindTermination,
+    VariableSnapshot, VariableState, VariableValue, VariableValueSource, VirtualAddress,
 };
 
 impl Client {
@@ -69,7 +69,7 @@ impl Client {
             Caller::Trusted
         };
         self.note(format!("step {kind:?}"));
-        if let Some(thread) = before.selected_thread {
+        if let Some(ExecutionContext::Thread(thread)) = before.selected {
             self.observe(Observation::StepBegins {
                 thread,
                 kind,
@@ -188,14 +188,14 @@ impl Client {
         // Every other stopped thread's stack, without changing which is
         // selected.
         for thread in snapshot.threads.iter() {
-            if Some(thread.id) == snapshot.selected_thread
+            if snapshot.selected == Some(ExecutionContext::Thread(thread.id))
                 || !matches!(thread.state, ThreadState::Stopped { .. })
             {
                 continue;
             }
             let context = StopContext {
                 stop,
-                thread: thread.id,
+                execution: ExecutionContext::Thread(thread.id),
                 frame: StackFrameId::new(0),
             };
             match self.handle.at(context).backtrace().await {

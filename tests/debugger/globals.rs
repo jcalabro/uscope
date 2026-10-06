@@ -738,7 +738,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
             scenario
                 .operation(
                     "select TLS thread",
-                    scenario.handle().select_thread(thread.id),
+                    scenario.handle().select_context(thread.id),
                 )
                 .await;
             let variable = scenario
@@ -787,7 +787,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
         scenario
             .operation(
                 "change selection before reusing TLS capabilities",
-                scenario.handle().select_thread(selected),
+                scenario.handle().select_context(selected),
             )
             .await;
         for (origin, value, reference) in thread_references {

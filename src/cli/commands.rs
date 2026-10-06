@@ -738,7 +738,7 @@ impl Cli {
         let id = argument
             .parse()
             .map_err(|_| anyhow!("invalid thread ID: {argument}"))?;
-        self.debugger.select_thread(ThreadId::new(id)).await?;
+        self.debugger.select_context(ThreadId::new(id)).await?;
         let renderer = self.renderers.stdout;
         Ok(format!(
             "{} thread {}",

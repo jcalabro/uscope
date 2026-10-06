@@ -674,7 +674,7 @@ async fn inspection_sent_beside_run_control_is_whole_or_stale() {
         };
         let context = uscope::StopContext {
             stop: stop_id,
-            thread: thread_id,
+            execution: thread_id.into(),
             frame: caller,
         };
         let handle = scenario.handle().clone();
@@ -767,7 +767,7 @@ view rust alloc::vec::Vec<T, _> {{
     let handle = scenario.handle().clone();
     let frame = handle.at(uscope::StopContext {
         stop: stop_id,
-        thread: thread_id,
+        execution: thread_id.into(),
         frame: caller,
     });
     let assignment = Expression::parse("ints[0] = 7").expect("an expression");

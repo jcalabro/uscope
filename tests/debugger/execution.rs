@@ -611,7 +611,7 @@ async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
         scenario
             .operation(
                 "select stopped thread",
-                scenario.handle().select_thread(thread.id),
+                scenario.handle().select_context(thread.id),
             )
             .await;
         let registers = scenario
@@ -627,14 +627,14 @@ async fn pthread_breakpoint_establishes_a_coherent_all_stop_snapshot() {
     scenario
         .operation(
             "restore selected worker",
-            scenario.handle().select_thread(selected),
+            scenario.handle().select_context(selected),
         )
         .await;
 
     // Unknown and unrepresentable thread IDs fail without disturbing the stop.
     for unknown in [0, 1 << 40, u64::MAX].map(uscope::ThreadId::new) {
         assert!(matches!(
-            scenario.handle().select_thread(unknown).await,
+            scenario.handle().select_context(unknown).await,
             Err(Error::UnknownThread(thread)) if thread == unknown
         ));
         assert!(matches!(

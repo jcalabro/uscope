@@ -301,7 +301,7 @@ impl Session {
 
     async fn program_counter(&mut self, context: StopContext) -> Option<VirtualAddress> {
         let stop = self.current_stop().ok()?;
-        let trace = self.backtrace(&stop, context.thread).await.ok()?;
+        let trace = self.backtrace(&stop, context.execution).await.ok()?;
         trace.frames.first().map(|frame| frame.instruction)
     }
 }

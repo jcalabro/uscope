@@ -383,7 +383,9 @@ impl Scenario {
             let snapshot = handle.snapshot().await?;
             let (Some(stop), Some(thread), Some(frame)) = (
                 snapshot.stop_id,
-                snapshot.selected_thread,
+                snapshot
+                    .selected
+                    .and_then(uscope::ExecutionContext::as_thread),
                 snapshot.selected_frame,
             ) else {
                 return Err(uscope::Error::NotStopped);
