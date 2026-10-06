@@ -266,6 +266,9 @@ pub struct Session {
     restarting: bool,
     /// How values show when a request does not say.
     pub(super) display: super::values::Display,
+    /// The source files the client was told are loaded, and the modules
+    /// that have each, once it asked.
+    pub(super) loaded_sources: Option<BTreeMap<PathBuf, BTreeSet<ModuleId>>>,
     /// Requests read ahead of the one being handled.
     queue: std::collections::VecDeque<Inbound>,
     /// The `seq` of each request the client cancelled, as text.
@@ -296,6 +299,7 @@ impl Session {
             resumed: None,
             restarting: false,
             display: super::values::Display::default(),
+            loaded_sources: None,
             queue: std::collections::VecDeque::new(),
             ended: false,
         }
@@ -1405,7 +1409,8 @@ impl Session {
                 "module",
                 json!({"reason": "removed", "module": super::sources::module_json(&record, None)}),
             )
-            .await
+            .await?;
+        self.remove_loaded_sources(id).await
     }
 
     /// Catches up after missing events: announces threads and modules, and

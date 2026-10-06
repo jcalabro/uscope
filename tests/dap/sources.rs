@@ -324,3 +324,105 @@ fn completions_inside_expressions_offer_members_registers_and_globals() {
     assert_eq!(names, ["shadowed"]);
     dap.finish();
 }
+
+#[test]
+fn library_sources_come_and_go_with_their_library() {
+    let library = source("c/shared/library.c");
+    let line = line_of(&library, "return *dso_pointer");
+    let mut dap = Dap::start("library sources");
+    let started = dap.launch(
+        Profile::VsCode,
+        &fixture("globals-shared"),
+        json!({"stopOnEntry": true}),
+        &Configuration {
+            sources: vec![(library.clone(), vec![line])],
+            functions: vec!["after_unload".to_owned()],
+            ..Configuration::default()
+        },
+    );
+    // The library is not loaded yet, so its line waits for it.
+    assert_eq!(started.source_breakpoints[0][0]["reason"], "pending");
+    let is_library = |body: &Value| {
+        body["source"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("shared/library.c"))
+    };
+    // Asking for the loaded sources has the client told as they change.
+    let entry = dap.stopped(started.mark);
+    let sources = dap.request("loadedSources", Value::Null);
+    let listed = sources["sources"].as_array().expect("sources");
+    assert!(
+        listed.iter().any(|source| source["name"] == "main.c"),
+        "{sources}"
+    );
+    assert!(
+        !listed.iter().any(|source| source["path"] == json!(library)),
+        "{sources}"
+    );
+    let resumed = dap.send("continue", json!({"threadId": entry.thread}));
+    dap.success(resumed);
+    let started = crate::dap::Started {
+        mark: resumed.mark,
+        ..started
+    };
+    let lines = |dap: &mut Dap| {
+        dap.request(
+            "breakpointLocations",
+            json!({"source": {"path": library}, "line": line}),
+        )["breakpoints"]
+            .clone()
+    };
+    let mut mark = started.mark;
+    for round in 0..2 {
+        let stop = dap.stopped(mark);
+        assert_eq!(stop.reason, "breakpoint", "round {round}");
+        let new = dap.event(mark, "loadedSource", |body| {
+            body["reason"] == "new" && is_library(body)
+        });
+        assert_eq!(new["source"]["name"], "library.c");
+        let module = dap.event(mark, "module", |body| {
+            body["module"]["name"] == "libglobals.so"
+        });
+        assert!(
+            module["module"]["addressRange"]
+                .as_str()
+                .is_some_and(|range| range.starts_with("0x") && range.contains('-')),
+            "{module}"
+        );
+        assert_eq!(module["module"]["symbolFilePath"], module["module"]["path"]);
+        let frame =
+            dap.request("stackTrace", json!({"threadId": stop.thread, "levels": 1}))["stackFrames"]
+                [0]
+            .clone();
+        assert!(is_library(&frame), "{frame}");
+        assert_eq!(lines(&mut dap), json!([{"line": line}]));
+        let sources = dap.request("loadedSources", Value::Null);
+        assert!(
+            sources["sources"]
+                .as_array()
+                .expect("sources")
+                .iter()
+                .any(|source| source["path"] == json!(library)),
+            "{sources}"
+        );
+        let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+        dap.success(resumed);
+        if round == 0 {
+            let stop = dap.stopped(resumed.mark);
+            assert_eq!(stop.reason, "function breakpoint");
+            dap.event(resumed.mark, "loadedSource", |body| {
+                body["reason"] == "removed" && is_library(body)
+            });
+            assert_eq!(lines(&mut dap), json!([]));
+            let resumed = dap.send("continue", json!({"threadId": stop.thread}));
+            dap.success(resumed);
+            mark = resumed.mark;
+        } else {
+            assert_eq!(
+                dap.event(resumed.mark, "exited", |_| true),
+                json!({"exitCode": 0})
+            );
+        }
+    }
+    dap.finish();
+}

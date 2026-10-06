@@ -1,10 +1,11 @@
 //! Modules, source files, and the lines breakpoints can use.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
-use uscope::{LineNumber, LoadedModuleRecord, ModuleImage};
+use uscope::{LineNumber, LoadedModuleRecord, ModuleId, ModuleImage};
 
 use super::protocol::{BreakpointLocationsArguments, ErrorBody, ModulesArguments};
 use super::session::{Closed, Session, error, parse};
@@ -76,28 +77,96 @@ impl Session {
                 "module",
                 json!({"reason": "new", "module": module_json(record, image.as_deref())}),
             )
+            .await?;
+        self.add_loaded_sources(record.module.id, image.as_deref())
             .await
     }
 
+    /// Lists the source files of every loaded module. From then on,
+    /// `loadedSource` events keep the client's list current as modules
+    /// load and unload; a client that never asks is spared an event for
+    /// every file of every module.
     pub(super) async fn loaded_sources(&mut self) -> Result<Value, ErrorBody> {
         let handle = self.target_handle()?;
-        let mut images = vec![std::sync::Arc::clone(handle.module_image())];
-        if let Ok(snapshot) = handle.loaded_modules().await {
-            for record in snapshot.modules.iter() {
-                if let Some(image) = self.image(record.module.id).await
-                    && image.id() != handle.module_image().id()
-                {
-                    images.push(image);
+        let mut sources = BTreeMap::<PathBuf, BTreeSet<ModuleId>>::new();
+        // Before the program runs, its own image is what is loaded.
+        if self.modules.is_empty() {
+            for file in handle.module_image().source_files() {
+                sources.entry(self.local_path(&file.path)).or_default();
+            }
+        }
+        let records = self.modules.values().cloned().collect::<Vec<_>>();
+        for record in records {
+            if let Some(image) = self.image(record.module.id).await {
+                for file in image.source_files() {
+                    sources
+                        .entry(self.local_path(&file.path))
+                        .or_default()
+                        .insert(record.module.id);
                 }
             }
         }
-        let mut paths = BTreeSet::new();
-        for image in &images {
-            for file in image.source_files() {
-                paths.insert(self.local_path(&file.path));
+        let body =
+            json!({"sources": sources.keys().map(|path| source_json(path)).collect::<Vec<_>>()});
+        self.loaded_sources = Some(sources);
+        Ok(body)
+    }
+
+    /// Tells a client keeping a list of loaded sources about a module's
+    /// files it did not list yet.
+    async fn add_loaded_sources(
+        &mut self,
+        module: ModuleId,
+        image: Option<&ModuleImage>,
+    ) -> Result<(), Closed> {
+        let (Some(image), true) = (image, self.loaded_sources.is_some()) else {
+            return Ok(());
+        };
+        let paths = image
+            .source_files()
+            .iter()
+            .map(|file| self.local_path(&file.path))
+            .collect::<BTreeSet<_>>();
+        for path in paths {
+            let sources = self.loaded_sources.as_mut().expect("checked above");
+            let modules = sources.entry(path.clone()).or_default();
+            let new = modules.is_empty();
+            modules.insert(module);
+            if new {
+                self.client
+                    .event(
+                        "loadedSource",
+                        json!({"reason": "new", "source": source_json(&path)}),
+                    )
+                    .await?;
             }
         }
-        Ok(json!({"sources": paths.iter().map(|path| source_json(path)).collect::<Vec<_>>()}))
+        Ok(())
+    }
+
+    /// Tells a client keeping a list of loaded sources about the files no
+    /// loaded module has once a module is gone.
+    pub(super) async fn remove_loaded_sources(&mut self, module: ModuleId) -> Result<(), Closed> {
+        let Some(sources) = self.loaded_sources.as_mut() else {
+            return Ok(());
+        };
+        let mut gone = Vec::new();
+        sources.retain(|path, modules| {
+            if modules.remove(&module) && modules.is_empty() {
+                gone.push(path.clone());
+                return false;
+            }
+            true
+        });
+        for path in gone {
+            self.client
+                .event(
+                    "loadedSource",
+                    json!({"reason": "removed", "source": source_json(&path)}),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     pub(super) fn breakpoint_locations(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
@@ -109,10 +178,6 @@ impl Session {
             .path
             .ok_or_else(|| ErrorBody::new("the source has no path"))?;
         let recorded = self.recorded_path(std::path::Path::new(&path));
-        let image = handle.module_image();
-        let Ok(file) = image.source_file_matching(&recorded) else {
-            return Ok(json!({"breakpoints": []}));
-        };
         let line = |line: i64| self.line_from_client(line).and_then(LineNumber::new);
         let (Some(first), Some(last)) = (
             line(arguments.line),
@@ -120,8 +185,22 @@ impl Session {
         ) else {
             return Ok(json!({"breakpoints": []}));
         };
-        let lines = image
-            .breakpoint_lines(file.id, first..=last)
+        // The program's lines, and those of the libraries loaded now.
+        let mut images = vec![Arc::clone(handle.module_image())];
+        images.extend(
+            self.code()
+                .modules()
+                .iter()
+                .map(|(_, image)| Arc::clone(image)),
+        );
+        let mut lines = BTreeSet::new();
+        for image in &images {
+            if let Ok(file) = image.source_file_matching(&recorded) {
+                lines.extend(image.breakpoint_lines(file.id, first..=last));
+            }
+        }
+        let lines = lines
+            .into_iter()
             .map(|line| json!({"line": self.line_to_client(line.get())}))
             .collect::<Vec<_>>();
         Ok(json!({"breakpoints": lines}))
@@ -138,13 +217,25 @@ pub(super) fn module_json(record: &LoadedModuleRecord, image: Option<&ModuleImag
         "path": record.path.display().to_string(),
     });
     if let Some(image) = image {
-        module["symbolStatus"] = if !image.functions().is_empty() {
+        let debug_information = !image.functions().is_empty();
+        module["symbolStatus"] = if debug_information {
             "debug information loaded"
         } else if !image.symbols().is_empty() {
             "symbols only, no debug information"
         } else {
             "no symbols"
         }
+        .into();
+        if debug_information {
+            module["symbolFilePath"] = image.path().display().to_string().into();
+        }
+        let range = image.address_range();
+        let bias = record.module.load_bias;
+        module["addressRange"] = format!(
+            "{:#x}-{:#x}",
+            range.start.get().wrapping_add(bias),
+            range.end.get().wrapping_add(bias)
+        )
         .into();
     }
     module
