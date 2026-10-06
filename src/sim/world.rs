@@ -108,6 +108,9 @@ pub enum Sabotage {
     /// Threads other than a process's first take no debug exception for
     /// an access their slots cover.
     MissWatchTraps,
+    /// A thread's debug exception for an access its slots cover is raised
+    /// again after its next instruction, which accessed nothing.
+    RepeatWatchTraps,
     /// Ptrace reads of a word that points eight bytes past itself, as a
     /// linked node's next link does when its successor follows it in
     /// memory, report the node after that successor, so a list walk skips
@@ -252,6 +255,8 @@ struct World<'a> {
     /// the last stop.
     watches: Vec<Intent>,
     baselines: BTreeMap<u64, Vec<u8>>,
+    /// The hits each watchpoint had counted at the last stop judged.
+    watch_counts: BTreeMap<u64, u64>,
     /// The last stop watch accounting judged.
     judged_stop: Option<u64>,
     trace: Trace,
@@ -362,6 +367,7 @@ impl<'a> World<'a> {
             stepping: None,
             watches: Vec::new(),
             baselines: BTreeMap::new(),
+            watch_counts: BTreeMap::new(),
             judged_stop: None,
             trace,
             #[cfg(debug_assertions)]
@@ -776,7 +782,7 @@ impl<'a> World<'a> {
                     watch.access,
                     crate::WatchAccess::ReadWrite | crate::WatchAccess::Read
                 ),
-                every: watch.access != crate::WatchAccess::Change,
+                every: watch.reports_every_access(),
             })
             .collect();
         drop(kernel);
@@ -800,24 +806,27 @@ impl<'a> World<'a> {
             .get(&tgid)
             .is_none_or(|process| process.group_exit.is_some());
         if !ending {
-            let found = watches::judge(
-                &kernel,
+            let reached = watches::judge(&watches::Stop {
+                kernel: &kernel,
                 tgid,
-                &truth.reasons,
-                &self.watches,
-                &self.baselines,
-            )
+                reasons: &truth.reasons,
+                intents: &self.watches,
+                baselines: &self.baselines,
+                last_counts: &self.watch_counts,
+                counts: &truth.watchpoints,
+            })
             .map_err(|message| Failure::debugger("watch accounting", message))?;
             let mut marks = self.machine.marks.borrow_mut();
-            if found.hit {
-                marks.hit(Mark::WatchHit);
+            for mark in reached {
+                marks.hit(mark);
             }
-            if found.other_thread {
-                marks.hit(Mark::WatchHitOnAnotherThread);
-            }
-            if found.unchanged {
-                marks.hit(Mark::UnchangedStore);
-            }
+        }
+        self.watch_counts.clone_from(&truth.watchpoints);
+        // What a watch was asked before this stop no longer applies.
+        for intent in self.shared.watches.borrow_mut().values_mut() {
+            intent
+                .policies
+                .drain(..intent.policies.len().saturating_sub(1));
         }
         kernel.watching.restart();
         for watch in &self.watches {

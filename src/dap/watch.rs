@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 use uscope::{
-    VirtualAddress, WatchAccess, WatchScope, WatchpointHit, WatchpointId, WatchpointSpec,
+    VirtualAddress, WatchAccess, WatchScope, WatchpointHit, WatchpointId, WatchpointOptions,
+    WatchpointSpec,
 };
 
 use super::protocol::{self, DataBreakpointInfoArguments, ErrorBody, SetDataBreakpointsArguments};
@@ -16,7 +17,45 @@ pub struct DataEntry {
     pub id: i64,
     data_id: String,
     access: WatchAccess,
+    /// The condition and hit condition as the client wrote them, blank ones
+    /// as none.
+    conditions: Conditions,
     pub watchpoint: Result<WatchpointId, String>,
+}
+
+/// A data breakpoint's condition and hit condition as the client wrote
+/// them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Conditions {
+    condition: Option<String>,
+    hit_condition: Option<String>,
+}
+
+impl Conditions {
+    fn of(breakpoint: &protocol::DataBreakpoint) -> Self {
+        let given = |text: &Option<String>| {
+            text.as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        Self {
+            condition: given(&breakpoint.condition),
+            hit_condition: given(&breakpoint.hit_condition),
+        }
+    }
+
+    /// The debugger's options for them, or why they have none.
+    fn options(&self) -> uscope::Result<WatchpointOptions> {
+        Ok(WatchpointOptions {
+            hit_condition: self.hit_condition.as_deref().map(str::parse).transpose()?,
+            condition: self
+                .condition
+                .as_deref()
+                .map(uscope::Condition::parse)
+                .transpose()?,
+        })
+    }
 }
 
 /// The data breakpoints of a session.
@@ -238,13 +277,14 @@ impl Session {
             let entry = match access {
                 Ok(access) => {
                     if let Some(entry) = kept.remove(&(breakpoint.data_id.clone(), access)) {
-                        entry
+                        self.amend_data(entry, Conditions::of(breakpoint)).await
                     } else {
                         let watchpoint = self.install_data(breakpoint, access).await;
                         DataEntry {
                             id: self.breakpoints.allocate_id(),
                             data_id: breakpoint.data_id.clone(),
                             access,
+                            conditions: Conditions::of(breakpoint),
                             watchpoint,
                         }
                     }
@@ -253,6 +293,7 @@ impl Session {
                     id: self.breakpoints.allocate_id(),
                     data_id: breakpoint.data_id.clone(),
                     access: WatchAccess::Change,
+                    conditions: Conditions::of(breakpoint),
                     watchpoint: Err(message),
                 },
             };
@@ -263,25 +304,49 @@ impl Session {
         Ok(json!({"breakpoints": body}))
     }
 
+    /// Applies the conditions a kept data breakpoint was sent with to its
+    /// watchpoint, which keeps its hits. Conditions that do not parse
+    /// release the watchpoint, as they leave a new one unarmed.
+    async fn amend_data(&self, mut entry: DataEntry, conditions: Conditions) -> DataEntry {
+        if entry.conditions == conditions {
+            return entry;
+        }
+        let (Ok(watchpoint), Ok(handle)) = (entry.watchpoint.clone(), self.target_handle()) else {
+            return entry;
+        };
+        let amended = match conditions.options() {
+            Ok(options) => {
+                match handle
+                    .set_watchpoint_condition(watchpoint, options.condition)
+                    .await
+                {
+                    Ok(_) => handle
+                        .set_watchpoint_hit_condition(watchpoint, options.hit_condition)
+                        .await
+                        .map(drop),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => {
+                let _ = handle.remove_watchpoint(watchpoint).await;
+                Err(error)
+            }
+        };
+        entry.conditions = conditions;
+        if let Err(error) = amended {
+            entry.watchpoint = Err(error.to_string());
+        }
+        entry
+    }
+
     async fn install_data(
         &self,
         breakpoint: &protocol::DataBreakpoint,
         access: WatchAccess,
     ) -> Result<WatchpointId, String> {
-        if breakpoint
-            .condition
-            .as_deref()
-            .is_some_and(|text| !text.trim().is_empty())
-        {
-            return Err("conditions on data breakpoints are not supported".to_owned());
-        }
-        if breakpoint
-            .hit_condition
-            .as_deref()
-            .is_some_and(|text| !text.trim().is_empty())
-        {
-            return Err("hit conditions on data breakpoints are not supported".to_owned());
-        }
+        let options = Conditions::of(breakpoint)
+            .options()
+            .map_err(|error| error.to_string())?;
         let spec = self.data.targets.get(&breakpoint.data_id).ok_or_else(|| {
             format!(
                 "unknown data id '{}'; ask for it with dataBreakpointInfo",
@@ -290,7 +355,7 @@ impl Session {
         })?;
         let handle = self.target_handle().map_err(|error| error.format)?;
         handle
-            .add_watchpoint(spec.clone(), access)
+            .add_watchpoint_with(spec.clone(), access, options)
             .await
             .map(|watchpoint| watchpoint.id)
             .map_err(|error| error.to_string())

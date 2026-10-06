@@ -7,7 +7,7 @@ use crate::unwind::{FrameContext, MemoryReader, RegisterFile};
 use crate::{
     AddressRange, CodeInstanceKind, ExceptionDisposition, ImageAddress, InlineFrameLookup,
     LaunchOptions, MemoryReadCompletion, MemoryReadUnavailableReason, Path, PresentedFrame,
-    VariableQuery, WatchpointHit, WatchpointSpec,
+    VariableQuery, WatchpointHit, WatchpointOptions, WatchpointSpec,
 };
 use std::cell::RefCell;
 use tokio::sync::broadcast;
@@ -1255,12 +1255,23 @@ impl WatchHarness {
         byte_size: u64,
         access: WatchAccess,
     ) -> Result<Watchpoint> {
+        self.add_watching_with(address, byte_size, access, WatchpointOptions::default())
+    }
+
+    fn add_watching_with(
+        &mut self,
+        address: u64,
+        byte_size: u64,
+        access: WatchAccess,
+        options: WatchpointOptions,
+    ) -> Result<Watchpoint> {
         self.controller.add_watchpoint(
             WatchpointSpec::Location {
                 address: VirtualAddress::new(address),
                 byte_size,
             },
             access,
+            options,
         )
     }
 
@@ -3832,9 +3843,13 @@ fn a_hit_on_a_watchpoint_removed_while_running_is_dropped() {
         .expect("watch trap");
     harness.settle_requested_stops();
 
+    // The hit counted before the edit applied, but it stops nothing.
     assert_eq!(
         removed.try_recv().expect("reply").expect("removed"),
-        watchpoint
+        Watchpoint {
+            hit_count: 1,
+            ..watchpoint
+        }
     );
     let published = harness.published();
     assert!(
@@ -3912,11 +3927,164 @@ fn a_store_that_changes_nothing_resumes_only_its_own_thread() {
             hits: Arc::from([WatchpointHit {
                 watchpoint: watchpoint.id,
                 thread: debug_thread_id(second),
+                hit_count: 1,
                 previous: Some(word(7)),
                 current: Some(word(9)),
             }]),
         })
     );
+}
+
+#[test]
+fn declined_watch_hits_are_counted_and_resume_only_their_thread() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    let watchpoint = harness
+        .add_watching_with(
+            0x1_c000,
+            8,
+            WatchAccess::Write,
+            WatchpointOptions {
+                hit_condition: Some("==3".parse().expect("hit condition")),
+                ..WatchpointOptions::default()
+            },
+        )
+        .expect("arm");
+    harness.start_continue();
+    harness.published();
+    harness.trace().take_actions();
+
+    for (value, pid) in [(1, first), (2, second)] {
+        harness.store(0x1_c000, value);
+        harness.watch_trap(pid, 0b1).expect("declined store");
+        let actions = harness.trace().take_actions();
+        assert_eq!(
+            actions.last(),
+            Some(&format!("continue {pid} None")),
+            "{actions:?}"
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action.starts_with("request_stop")),
+            "a declined hit stops no sibling: {actions:?}"
+        );
+        assert_eq!(harness.published(), []);
+    }
+
+    // The third hit stops, reporting from the bytes the second left.
+    harness.store(0x1_c000, 3);
+    harness.watch_trap(first, 0b1).expect("stopping store");
+    harness.settle_requested_stops();
+    assert_eq!(
+        harness.public_reason(),
+        Some(StopReason::Watchpoint {
+            hits: Arc::from([WatchpointHit {
+                watchpoint: watchpoint.id,
+                thread: debug_thread_id(first),
+                hit_count: 3,
+                previous: Some(word(2)),
+                current: Some(word(3)),
+            }]),
+        })
+    );
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    assert_eq!(
+        inferior.watch.watchpoints[&watchpoint.id]
+            .watchpoint
+            .hit_count,
+        3
+    );
+}
+
+/// SIGKILL from outside can take a thread out of its stop while its
+/// condition is evaluated. The condition did not fail: the thread is gone,
+/// and its exit, not a condition failure, is what clients hear of.
+#[test]
+fn a_thread_killed_while_its_condition_is_evaluated_reports_no_condition_failure() {
+    for killed_at in 0..4 {
+        let mut harness = watch_harness(1);
+        let pid = harness.threads[0];
+        let watchpoint = harness
+            .add_watching_with(
+                0x1_d000,
+                8,
+                WatchAccess::Write,
+                WatchpointOptions {
+                    condition: Some(crate::Condition::parse("1 == 0").expect("condition")),
+                    ..WatchpointOptions::default()
+                },
+            )
+            .expect("arm");
+        harness.start_continue();
+        harness.published();
+        *harness.trace().kill_point.borrow_mut() = Some((pid, "registers", killed_at));
+        let _ = harness.watch_trap(pid, 0b1);
+        let killed = harness.trace().kill_point.borrow().is_none();
+        let published = harness.published();
+        assert!(
+            !published
+                .iter()
+                .any(|event| matches!(event, DebuggerEvent::ConditionFailed { .. })),
+            "killed at registers request {killed_at}: {published:?}"
+        );
+        let counted = harness
+            .controller
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.watch.watchpoints.get(&watchpoint.id))
+            .is_some_and(|record| record.watchpoint.hit_count == 1);
+        assert!(counted || killed, "the hit was judged at {killed_at}");
+    }
+}
+
+#[test]
+fn a_declined_change_keeps_the_bytes_a_siblings_pending_hit_reports_from() {
+    let mut harness = watch_harness(2);
+    let [first, second] = harness.threads[..] else {
+        unreachable!("two threads");
+    };
+    harness.store(0x1_b000, 7);
+    let watchpoint = harness
+        .add_watching_with(
+            0x1_b000,
+            8,
+            WatchAccess::Change,
+            WatchpointOptions {
+                hit_condition: Some("==1".parse().expect("hit condition")),
+                ..WatchpointOptions::default()
+            },
+        )
+        .expect("arm");
+    harness.start_continue();
+    harness.published();
+
+    // The first change stops; while the sibling is being stopped, it makes
+    // a second change, which its hit condition declines. Taking that as the
+    // last observed value would make the first change look undone.
+    harness.store(0x1_b000, 9);
+    harness.watch_trap(first, 0b1).expect("stopping change");
+    harness.store(0x1_b000, 10);
+    harness.watch_trap(second, 0b1).expect("declined change");
+    harness.settle_requested_stops();
+    assert_eq!(
+        harness.public_reason(),
+        Some(StopReason::Watchpoint {
+            hits: Arc::from([WatchpointHit {
+                watchpoint: watchpoint.id,
+                thread: debug_thread_id(first),
+                hit_count: 1,
+                previous: Some(word(7)),
+                current: Some(word(10)),
+            }]),
+        })
+    );
+    let inferior = harness.controller.inferior.as_ref().expect("inferior");
+    let record = &inferior.watch.watchpoints[&watchpoint.id];
+    assert_eq!(record.watchpoint.hit_count, 2);
+    assert_eq!(record.observed, Some(word(10)));
 }
 
 #[test]
@@ -4084,7 +4252,8 @@ fn watched_bytes_becoming_unreadable_or_readable_are_changes() {
     let watchpoint = harness
         .add_watching(0x1_8000, 8, WatchAccess::Change)
         .expect("arm");
-    for (readable, previous, current) in [(false, Some(word(7)), None), (true, None, Some(word(7)))]
+    for (hit_count, (readable, previous, current)) in
+        (1..).zip([(false, Some(word(7)), None), (true, None, Some(word(7)))])
     {
         harness.start_continue();
         if readable {
@@ -4099,6 +4268,7 @@ fn watched_bytes_becoming_unreadable_or_readable_are_changes() {
                 hits: Arc::from([WatchpointHit {
                     watchpoint: watchpoint.id,
                     thread: debug_thread_id(pid),
+                    hit_count,
                     previous,
                     current,
                 }]),

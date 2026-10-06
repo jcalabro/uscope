@@ -87,15 +87,16 @@ pub use model::{
     VariantSelection, VariantSelector, VariantStorageKind, ViewName, ViewProblem, VirtualAddress,
 };
 pub use protocol::{
-    Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, CoreDumpInfo,
-    CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent, ExceptionDisposition,
-    ExceptionInfo, ExecutionId, ExitStatus, FramePresentation, GlobalVariableQuery, HitComparison,
-    HitCondition, InferiorState, InvalidatedWatchpoint, KernelSource, LaunchOptions, LogPart,
-    ModuleIdentity, PresentedFrame, ProcessId, ResolvedBreakpointLocation, ResumeScope,
-    SignalPolicy, StateSnapshot, StepKind, StopId, StopReason, ThreadSnapshot, ThreadState,
-    TypeViews, ValueChildQuery, VariableQuery, ViewCandidate, ViewCheck, ViewExplanation,
-    WatchAccess, WatchScope, WatchTarget, Watchpoint, WatchpointCapabilities, WatchpointHit,
-    WatchpointId, WatchpointInvalidation, WatchpointSpec,
+    Breakpoint, BreakpointHit, BreakpointId, BreakpointOptions, BreakpointSpec, ConditionOwner,
+    CoreDumpInfo, CoreDumpOptions, CoreModule, CoreModuleState, DebuggerEvent,
+    ExceptionDisposition, ExceptionInfo, ExecutionId, ExitStatus, FramePresentation,
+    GlobalVariableQuery, HitComparison, HitCondition, InferiorState, InvalidatedWatchpoint,
+    KernelSource, LaunchOptions, LogPart, ModuleIdentity, PresentedFrame, ProcessId,
+    ResolvedBreakpointLocation, ResumeScope, SignalPolicy, StateSnapshot, StepKind, StopId,
+    StopReason, ThreadSnapshot, ThreadState, TypeViews, ValueChildQuery, VariableQuery,
+    ViewCandidate, ViewCheck, ViewExplanation, WatchAccess, WatchScope, WatchTarget, Watchpoint,
+    WatchpointCapabilities, WatchpointHit, WatchpointId, WatchpointInvalidation, WatchpointOptions,
+    WatchpointSpec,
 };
 pub use source_map::SourcePathMap;
 pub use view::summary::{
@@ -553,7 +554,8 @@ impl DebuggerHandle {
             .await
     }
 
-    /// Arms a hardware watchpoint on every thread of the stopped process.
+    /// Arms a hardware watchpoint that stops at every hit on every thread
+    /// of the stopped process.
     ///
     /// Arming is atomic: on failure no thread is left armed and no event is
     /// published.
@@ -562,9 +564,21 @@ impl DebuggerHandle {
         spec: WatchpointSpec,
         access: WatchAccess,
     ) -> Result<Watchpoint> {
+        self.add_watchpoint_with(spec, access, WatchpointOptions::default())
+            .await
+    }
+
+    /// Arms a hardware watchpoint that stops at the hits `options` select.
+    pub async fn add_watchpoint_with(
+        &self,
+        spec: WatchpointSpec,
+        access: WatchAccess,
+        options: WatchpointOptions,
+    ) -> Result<Watchpoint> {
         self.request(|reply| Request::AddWatchpoint {
             spec,
             access,
+            options,
             reply,
         })
         .await
@@ -572,9 +586,52 @@ impl DebuggerHandle {
 
     /// Resolves an expression at the current stop and watches its memory.
     pub async fn watch(&self, expression: &Expression, access: WatchAccess) -> Result<Watchpoint> {
-        let target = self.resolve_watch_target(expression).await?;
-        self.add_watchpoint(WatchpointSpec::Target(Box::new(target)), access)
+        self.watch_with(expression, access, WatchpointOptions::default())
             .await
+    }
+
+    /// Resolves an expression at the current stop and watches its memory,
+    /// stopping at the hits `options` select.
+    pub async fn watch_with(
+        &self,
+        expression: &Expression,
+        access: WatchAccess,
+        options: WatchpointOptions,
+    ) -> Result<Watchpoint> {
+        let target = self.resolve_watch_target(expression).await?;
+        self.add_watchpoint_with(WatchpointSpec::Target(Box::new(target)), access, options)
+            .await
+    }
+
+    /// Replaces which hits of a watchpoint stop execution; `None` stops at
+    /// every hit. As for breakpoints, the hits already counted are kept, and
+    /// this needs no stop: it applies from the next hit.
+    pub async fn set_watchpoint_hit_condition(
+        &self,
+        id: WatchpointId,
+        hit_condition: Option<HitCondition>,
+    ) -> Result<Watchpoint> {
+        self.request(|reply| Request::SetWatchpointHitCondition {
+            id,
+            hit_condition,
+            reply,
+        })
+        .await
+    }
+
+    /// Replaces a watchpoint's condition; `None` removes it. This needs no
+    /// stop and applies from the next hit.
+    pub async fn set_watchpoint_condition(
+        &self,
+        id: WatchpointId,
+        condition: Option<Condition>,
+    ) -> Result<Watchpoint> {
+        self.request(|reply| Request::SetWatchpointCondition {
+            id,
+            condition,
+            reply,
+        })
+        .await
     }
 
     /// Disarms one watchpoint and returns its prior definition.

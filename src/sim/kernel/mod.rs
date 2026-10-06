@@ -519,6 +519,10 @@ pub struct Kernel {
     /// [`Sabotage::LateSingleSteps`].
     #[cfg(test)]
     late_step: Option<Tid>,
+    /// The slots each thread's next instruction reports hit again, under
+    /// [`Sabotage::RepeatWatchTraps`].
+    #[cfg(test)]
+    repeat_watch: BTreeMap<Tid, u64>,
     /// How many small stack words ptrace has read, under
     /// [`Sabotage::FlickeringStackWords`].
     #[cfg(test)]
@@ -580,6 +584,8 @@ impl Kernel {
             phantom_debug: BTreeMap::new(),
             #[cfg(test)]
             late_step: None,
+            #[cfg(test)]
+            repeat_watch: BTreeMap::new(),
             #[cfg(test)]
             flickers: std::cell::Cell::new(0),
         }
@@ -865,6 +871,13 @@ impl Kernel {
         #[cfg(test)]
         let watch_hits = if self.sabotage == Some(Sabotage::MissWatchTraps) && tid != thread.tgid {
             0
+        } else if self.sabotage == Some(Sabotage::RepeatWatchTraps) && outcome == Outcome::Completed
+        {
+            let repeated = self.repeat_watch.remove(&tid).unwrap_or(0);
+            if watch_hits != 0 {
+                self.repeat_watch.insert(tid, watch_hits);
+            }
+            watch_hits | repeated
         } else {
             watch_hits
         };
