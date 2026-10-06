@@ -161,8 +161,10 @@ manifest() {
 # Prints, as [name, start, end, register], the addresses where BINARY's
 # location lists say a variable's value is exactly what a register held
 # when its function was entered (DW_OP_entry_value), which only the
-# caller's call site recovers. A concrete instance names its variable through its abstract
-# origin. Location list offsets are the section's own in readelf's output.
+# caller's call site recovers. A concrete instance names its variable
+# through its abstract origin. Variables of inlined code are left out: an
+# inline frame's variables may share names with its function's. Location
+# list offsets are the section's own in readelf's output.
 entry_values() {
     awk 'FNR == NR {
             if (/<End of list>/) { list = ""; next }
@@ -174,12 +176,18 @@ entry_values() {
             next
          }
          function flush() {
-            if (die != "" && location != "") lists[die] = location
+            if (die != "" && location != "" && !inlined[depth]) lists[die] = location
             if (die != "" && name != "") names[die] = name
             if (die != "" && origin != "") origins[die] = origin
             die = name = origin = location = ""
          }
-         match($0, /^ *<[0-9]+><([0-9a-f]+)>: Abbrev Number/, found) { flush(); die = strtonum("0x" found[1]); next }
+         match($0, /^ *<([0-9]+)><([0-9a-f]+)>: Abbrev Number/, found) {
+            flush()
+            depth = found[1] + 0
+            inlined[depth] = (depth > 0 && inlined[depth - 1]) || index($0, "(DW_TAG_inlined_subroutine)") > 0
+            die = strtonum("0x" found[2])
+            next
+         }
          /DW_AT_name / { name = $NF }
          match($0, /DW_AT_abstract_origin: \([a-z_0-9]+\) <0x([0-9a-f]+)>/, found) { origin = strtonum("0x" found[1]) }
          match($0, /DW_AT_location *:.* (0x[0-9a-f]+) \(location list\)/, found) { location = strtonum(found[1]) }
