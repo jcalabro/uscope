@@ -29,7 +29,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result};
-use clap::Parser;
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncWrite, BufReader};
 use tokio::net::TcpListener;
@@ -40,8 +39,7 @@ use protocol::{Incoming, MessageError, Outgoing};
 use session::{Client, Inbound, Session};
 
 /// Serves the Debug Adapter Protocol for one client at a time.
-#[derive(Parser)]
-#[command(name = "uscope dap", bin_name = "uscope dap", version)]
+#[derive(clap::Args)]
 pub struct DapArgs {
     /// Listen on 127.0.0.1:PORT instead of using stdin and stdout.
     #[arg(long, value_name = "PORT", conflicts_with = "listen")]
@@ -73,7 +71,7 @@ impl Log {
 
 /// Runs the adapter until its client disconnects, or with `--port` and
 /// `--listen` until it is interrupted.
-pub async fn run(args: DapArgs) -> Result<()> {
+pub async fn run(args: &DapArgs) -> Result<()> {
     let log = match &args.log {
         Some(path) => Log(Some(Arc::new(Mutex::new(
             File::options()

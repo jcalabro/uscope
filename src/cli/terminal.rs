@@ -16,6 +16,16 @@ pub enum ColorChoice {
     Never,
 }
 
+impl From<ColorChoice> for clap::ColorChoice {
+    fn from(choice: ColorChoice) -> Self {
+        match choice {
+            ColorChoice::Auto => Self::Auto,
+            ColorChoice::Always => Self::Always,
+            ColorChoice::Never => Self::Never,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ColorEnvironment {
     term: Option<OsString>,
