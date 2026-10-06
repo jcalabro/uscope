@@ -1970,3 +1970,241 @@ async fn nested_inline_breakpoints_hit_together_present_the_innermost() {
     );
     scenario.shutdown().await;
 }
+
+async fn launch_boundary_scenario(
+    name: String,
+    fixture: &str,
+) -> (Scenario, uscope::ExecutionLocation) {
+    let mut scenario = Scenario::new(name, Scenario::fixture(fixture));
+    scenario.add_breakpoint("main").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let main = scenario
+        .operation("main activation", scenario.handle().current_location())
+        .await;
+    (scenario, main)
+}
+
+async fn boundary_source_step(
+    scenario: &mut Scenario,
+    kind: StepKind,
+    operation: &str,
+) -> uscope::ExecutionLocation {
+    assert_eq!(
+        scenario.step_to_stop(kind).await,
+        StopReason::Step { kind },
+        "{operation}"
+    );
+    scenario
+        .operation(operation, scenario.handle().current_location())
+        .await
+}
+
+fn fixture_symbol_address(
+    scenario: &Scenario,
+    location: &uscope::ExecutionLocation,
+    symbol: &str,
+) -> VirtualAddress {
+    let address = scenario
+        .handle()
+        .module_image()
+        .symbol_named(symbol)
+        .unwrap_or_else(|error| panic!("missing fixture symbol {symbol}: {error}"))
+        .address;
+    relocate_image_address(address, location)
+}
+
+async fn boundary_sink_value(scenario: &Scenario, sink: VirtualAddress) -> u64 {
+    scenario
+        .operation("boundary sink", scenario.handle().read_word(sink))
+        .await
+        & u64::from(u32::MAX)
+}
+
+async fn advance_boundary_to_line(
+    scenario: &mut Scenario,
+    fixture: &str,
+    target: u64,
+) -> uscope::ExecutionLocation {
+    for _ in 0..4 {
+        let location = scenario
+            .operation(
+                "advance boundary call site",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(location_function(&location), Some("main"));
+        let line = location_line(&location).expect("main call site has source");
+        if line == target {
+            return location;
+        }
+        assert!(
+            line < target,
+            "{fixture} skipped target line {target} and stopped at {line}"
+        );
+        boundary_source_step(scenario, StepKind::OverSource, "advance boundary call site").await;
+    }
+    panic!("{fixture} did not reach main line {target} within the step budget");
+}
+
+async fn finish_boundary_physical_call(
+    scenario: &mut Scenario,
+    fixture: &str,
+    main_physical: Option<uscope::CodeInstanceId>,
+    sink: VirtualAddress,
+    case: (u64, &str, u64, u64),
+) {
+    let (call_line, callee, expected_sink, last_caller_line) = case;
+    advance_boundary_to_line(scenario, fixture, call_line).await;
+    let entered =
+        boundary_source_step(scenario, StepKind::IntoSource, "entered physical callee").await;
+    assert_eq!(location_function(&entered), Some(callee));
+    assert_ne!(entered.image.physical_instance, main_physical);
+
+    let returned =
+        boundary_source_step(scenario, StepKind::Out, "caller after physical finish").await;
+    assert_eq!(location_function(&returned), Some("main"));
+    assert_eq!(returned.image.physical_instance, main_physical);
+    let line = location_line(&returned).expect("physical finish has caller source");
+    assert!(
+        (call_line..=last_caller_line).contains(&line),
+        "{fixture} finished {callee} at unexpected line {line}"
+    );
+    assert_eq!(
+        boundary_sink_value(scenario, sink).await,
+        expected_sink,
+        "{fixture} finished the wrong path through {callee}"
+    );
+}
+
+/// Steps into a fixture function until the selected frame is the named
+/// inline instance stopped at the requested source line.
+async fn enter_inline_frame(scenario: &mut Scenario, fixture: &str, function: &str, line: u64) {
+    for _ in 0..8 {
+        let location = scenario
+            .operation(
+                "inline frame location",
+                scenario.handle().current_location(),
+            )
+            .await;
+        if location_function(&location) == Some(function) && location_line(&location) == Some(line)
+        {
+            return;
+        }
+        boundary_source_step(scenario, StepKind::IntoSource, "enter inline frame").await;
+    }
+    panic!("{fixture} did not reach {function}:{line} within the step budget");
+}
+
+async fn advance_to_boundary_inline_call(
+    scenario: &mut Scenario,
+    fixture: &str,
+) -> uscope::ExecutionLocation {
+    for _ in 0..2 {
+        let location = scenario
+            .operation("boundary inline call", scenario.handle().current_location())
+            .await;
+        let is_main_call = location
+            .image
+            .function
+            .as_ref()
+            .is_some_and(|function| function.name.as_ref() == "main")
+            && location
+                .image
+                .source
+                .as_ref()
+                .is_some_and(|source| source.line.get() == 30);
+        if is_main_call {
+            return location;
+        }
+        assert_eq!(
+            scenario.step_to_stop(StepKind::OverSource).await,
+            StopReason::Step {
+                kind: StepKind::OverSource
+            },
+            "{fixture}"
+        );
+    }
+    panic!("{fixture} did not reach the inline_adjust call in main");
+}
+
+fn epilogue_markers(scenario: &Scenario, function: &str) -> BTreeSet<uscope::ImageAddress> {
+    let image = scenario.handle().module_image();
+    let function = image.function_named(function).expect("marked function");
+    let instance = image
+        .instances_for_function(function.id)
+        .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        .expect("physical marked function");
+    image
+        .statement_rows()
+        .iter()
+        .filter(|row| row.flags.epilogue_begin() && instance.contains(row.address))
+        .map(|row| row.address)
+        .collect()
+}
+
+fn assert_inline_location(
+    fixture: &str,
+    location: &uscope::ExecutionLocation,
+    function: &str,
+    line: u64,
+    address: VirtualAddress,
+) {
+    assert_eq!(location.address, address, "{fixture}");
+    assert_eq!(location_function(location), Some(function), "{fixture}");
+    assert_eq!(location_line(location), Some(line), "{fixture}");
+}
+
+fn assert_no_continued_event(
+    fixture: &str,
+    events: &mut tokio::sync::broadcast::Receiver<uscope::DebuggerEvent>,
+) {
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .all(|event| !matches!(event, uscope::DebuggerEvent::InferiorContinued { .. })),
+        "{fixture} virtual step emitted InferiorContinued"
+    );
+}
+
+fn assert_inline_backtrace(fixture: &str, trace: &uscope::Backtrace) {
+    let frames: Vec<_> = trace
+        .frames
+        .iter()
+        .filter_map(|frame| {
+            frame
+                .function
+                .as_ref()
+                .map(|function| (frame, function.name.as_ref()))
+        })
+        .collect();
+
+    assert_eq!(
+        frames
+            .iter()
+            .take(4)
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>(),
+        ["leaf", "middle", "caller", "main"],
+        "unexpected {fixture} frames: {trace:?}"
+    );
+    assert!(frames[..2].iter().all(|(frame, _)| {
+        frame.kind == uscope::FrameKind::Inline && frame.code_instance.is_some()
+    }));
+    assert_eq!(frames[2].0.kind, uscope::FrameKind::Physical);
+    assert_eq!(
+        frames[..3]
+            .iter()
+            .map(|(frame, _)| frame.instruction)
+            .collect::<Vec<_>>(),
+        vec![frames[0].0.instruction; 3]
+    );
+    assert_eq!(
+        frames[..3]
+            .iter()
+            .map(|(frame, _)| frame.source.as_ref().map(|source| source.line.get()))
+            .collect::<Vec<_>>(),
+        [Some(7), Some(14), Some(28)]
+    );
+}

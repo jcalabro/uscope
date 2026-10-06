@@ -2624,3 +2624,42 @@ async fn a_variable_whose_location_wraps_the_address_space_is_unavailable() {
     );
     scenario.shutdown().await;
 }
+
+async fn assert_array_values(
+    scenario: &Scenario,
+    value: &uscope::DereferencedValue,
+    fixture: &str,
+) {
+    let uscope::VariableValue::Array { .. } = available_value(&value.state) else {
+        panic!("{fixture}: expected decoded array, got {value:?}");
+    };
+    let page = child_page(scenario, &value.state, 0, 2).await;
+    let values: Vec<i128> = page
+        .children
+        .iter()
+        .map(|child| match available_value(&child.state) {
+            uscope::VariableValue::Scalar(uscope::ScalarValue::Signed(value)) => *value,
+            other => panic!("{fixture}: expected scalar array element, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(values, [20, 22], "{fixture}");
+}
+
+/// The page of elements a range expression selects.
+async fn evaluate_range(
+    handle: &uscope::DebuggerHandle,
+    text: &str,
+    limits: uscope::InspectionLimits,
+) -> uscope::Result<uscope::ValueChildPage> {
+    match handle
+        .evaluate_with(
+            &parsed_value_expression(text),
+            uscope::EvaluationMode::Read,
+            limits,
+        )
+        .await?
+    {
+        uscope::Evaluation::Range(page) => Ok(page),
+        other => panic!("`{text}` is not a range: {other:?}"),
+    }
+}

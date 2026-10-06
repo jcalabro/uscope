@@ -387,3 +387,153 @@ async fn hand_written_assembly_after_a_function_has_no_source_line() {
     let before = uscope::ImageAddress::new(extent.start.get() - 1);
     assert!(image.locate(before).source.is_some());
 }
+
+fn type_edges(kind: &uscope::TypeKind) -> Vec<uscope::TypeReference> {
+    let mut edges = Vec::new();
+    match kind {
+        uscope::TypeKind::Enumeration { underlying, .. } => {
+            edges.extend(underlying.iter().copied());
+        }
+        uscope::TypeKind::Pointer { target, .. } | uscope::TypeKind::Named { target, .. } => {
+            edges.extend(target.iter().copied());
+        }
+        uscope::TypeKind::Reference { target, .. } | uscope::TypeKind::Modified { target, .. } => {
+            edges.push(*target);
+        }
+        uscope::TypeKind::Array { element, .. } | uscope::TypeKind::Slice { element, .. } => {
+            edges.push(*element);
+        }
+        uscope::TypeKind::Record { members, bases, .. } => {
+            edges.extend(members.iter().map(|member| member.type_ref));
+            edges.extend(bases.iter().map(|base| base.type_ref));
+        }
+        uscope::TypeKind::Union { members, .. } => {
+            edges.extend(members.iter().map(|member| member.type_ref));
+        }
+        uscope::TypeKind::Variant {
+            common_members,
+            bases,
+            discriminant,
+            variants,
+            ..
+        } => {
+            edges.extend(common_members.iter().map(|member| member.type_ref));
+            edges.extend(bases.iter().map(|base| base.type_ref));
+            match discriminant.as_ref() {
+                uscope::VariantDiscriminant::Stored(member) => edges.push(member.type_ref),
+                uscope::VariantDiscriminant::TagType(reference) => edges.push(*reference),
+                _ => {}
+            }
+            edges.extend(
+                variants
+                    .iter()
+                    .flat_map(|variant| variant.members.iter())
+                    .map(|member| member.type_ref),
+            );
+        }
+        _ => {}
+    }
+    edges
+}
+
+fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
+    let leaf = image.function_named("leaf").expect("leaf definition");
+    let leaf_instances: Vec<_> = image
+        .instances_for_function(leaf.id)
+        .filter(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }))
+        .collect();
+
+    assert_eq!(
+        leaf_instances.len(),
+        6,
+        "unexpected {fixture} leaf instances"
+    );
+    assert_eq!(
+        image
+            .code_instances()
+            .iter()
+            .filter(|instance| matches!(instance.kind, CodeInstanceKind::Inline { .. }))
+            .count(),
+        9,
+        "unexpected {fixture} inline instance count"
+    );
+    assert!(
+        image.code_instances().iter().any(|instance| {
+            matches!(instance.kind, CodeInstanceKind::Inline { .. }) && instance.ranges.len() > 1
+        }),
+        "{fixture} lost discontiguous ranges"
+    );
+
+    let mut columns_by_line = BTreeMap::<u64, BTreeSet<u64>>::new();
+    for instance in &leaf_instances {
+        let CodeInstanceKind::Inline {
+            call_site: Some(call_site),
+        } = &instance.kind
+        else {
+            panic!("{fixture} leaf instance has no call site")
+        };
+
+        if let Some(column) = call_site.column {
+            columns_by_line
+                .entry(call_site.line.get())
+                .or_default()
+                .insert(column.get());
+        }
+    }
+    assert!(
+        columns_by_line.values().any(|columns| columns.len() >= 2),
+        "{fixture} did not preserve same-line call columns"
+    );
+
+    let nested_leaf = leaf_instances
+        .iter()
+        .find(|instance| {
+            instance
+                .parent
+                .and_then(|parent| image.code_instance(parent))
+                .and_then(|parent| image.function(parent.function))
+                .is_some_and(|function| function.name.as_ref() == "middle")
+        })
+        .expect("nested leaf instance");
+    let location = image.locate(nested_leaf.ranges[0].start);
+    let InlineFrameLookup::Unique(chain) = location.inline_frames else {
+        panic!("{fixture} did not resolve one inline chain: {location:?}")
+    };
+    let chain_names: Vec<_> = chain
+        .instances
+        .iter()
+        .map(|instance| {
+            let instance = image.code_instance(*instance).expect("known instance");
+            image
+                .function(instance.function)
+                .expect("known function")
+                .name
+                .as_ref()
+        })
+        .collect();
+    assert_eq!(
+        chain_names,
+        ["middle", "leaf"],
+        "unexpected {fixture} chain"
+    );
+
+    assert!(!image.statement_rows().is_empty());
+    if fixture.starts_with("inline-gcc") {
+        assert!(
+            image.statement_rows().windows(2).any(|rows| {
+                rows[0].sequence == rows[1].sequence && rows[0].address == rows[1].address
+            }),
+            "{fixture} lost equal-address line rows"
+        );
+    }
+    let expected_provenance = if fixture.starts_with("inline-gcc") {
+        EntryProvenance::Explicit
+    } else {
+        EntryProvenance::RangeStart
+    };
+    assert!(leaf_instances.iter().all(|instance| {
+        instance
+            .breakpoint_entry
+            .is_some_and(|entry| entry.provenance == expected_provenance)
+    }));
+}
