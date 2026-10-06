@@ -273,16 +273,68 @@ impl Drop for Uscope {
     }
 }
 
-/// `--help` names the subcommands, which are dispatched before the main
-/// parser, and each answers its own `--help`.
 #[test]
-fn help_lists_the_subcommands() {
-    let help = assert_success(uscope(&["--help"]));
+fn help_is_task_oriented_and_progressive() {
+    let short = assert_success(uscope(&["-h"]));
+    assert_in_order(
+        &short,
+        &[
+            "Debug Linux x86-64 programs, processes, and core dumps",
+            "Usage:",
+            "Tools:",
+            "Target:",
+            "Startup:",
+            "Common forms:",
+        ],
+    );
+    for invocation in [
+        "uscope EXECUTABLE [-- ARGS...]",
+        "uscope --attach PID [EXECUTABLE]",
+        "uscope --core CORE [EXECUTABLE]",
+    ] {
+        assert!(short.contains(invocation), "{short}");
+    }
+    for advanced in ["--sysroot", "--module-path", "--source-map"] {
+        assert!(!short.contains(advanced), "{short}");
+    }
+
+    let long = assert_success(uscope(&["--help"]));
+    assert_in_order(
+        &long,
+        &[
+            "Tools:",
+            "Target:",
+            "Startup:",
+            "Core dump files:",
+            "Debug information:",
+            "Launch environment:",
+            "Display:",
+        ],
+    );
+    for advanced in ["--sysroot", "--module-path", "--source-map"] {
+        assert!(long.contains(advanced), "{long}");
+    }
+    assert!(!long.contains("uscope dap ["), "{long}");
+
     for subcommand in ["dap", "views"] {
-        assert!(help.contains(&format!("uscope {subcommand} ")), "{help}");
+        assert!(short.contains(subcommand), "{short}");
         let own = assert_success(uscope(&[subcommand, "--help"]));
         assert!(own.contains(&format!("uscope {subcommand}")), "{own}");
     }
+}
+
+#[test]
+fn an_empty_command_prints_short_help() {
+    let empty = uscope(&[]);
+    let short_help = uscope(&["-h"]);
+
+    assert!(
+        empty.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    assert_eq!(empty.stdout, short_help.stdout);
+    assert_eq!(empty.stderr, short_help.stderr);
 }
 
 #[test]
@@ -362,6 +414,15 @@ fn color_follows_the_choice_and_the_environment_on_both_streams() {
     // Redirected output is plain unless color is forced, and `never` wins
     // over the environment.
     assert_no_sgr(&batch(&[BASIC], &["help"]));
+    let colored_help = assert_success(uscope(&["--color", "always", "-h"]));
+    assert!(colored_help.contains("\x1b["), "{colored_help:?}");
+    let plain_help = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .env("CLICOLOR_FORCE", "1")
+        .args(["--color", "never", "-h"])
+        .output()
+        .expect("run uscope help with color disabled");
+    assert_no_sgr(&assert_success(plain_help));
+
     let never = Command::new(env!("CARGO_BIN_EXE_uscope"))
         .env("CLICOLOR_FORCE", "1")
         .args(["--batch", "--color", "never", "--eval", "help"])
