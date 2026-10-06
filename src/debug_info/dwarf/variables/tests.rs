@@ -26,7 +26,7 @@ use super::evaluate::{
 };
 use super::globals::{DefinitionIndex, DefinitionResolution};
 use super::inspect::{
-    ArrayIndexCalculationError, ScalarDecodeError, implicit_pointer_range, path_error_state,
+    ArrayIndexCalculationError, ScalarDecodeError, evaluate_error_state, implicit_pointer_range,
     row_major_array_index, static_member_layout_is_valid,
 };
 use super::location::{EvaluationUnit, Expression, LocationDescription, LocationEntry};
@@ -788,7 +788,10 @@ fn operational_memory_failures_escape_the_per_variable_result_lane() {
         Err(EvaluateError::Fatal("unexpected memory read".into()))
     );
     assert!(matches!(
-        path_error_state(EvaluateError::Fatal("ptrace failed".into())),
+        evaluate_error_state(
+            EvaluateError::Fatal("ptrace failed".into()),
+            VariableMalformedKind::InvalidExpression
+        ),
         Err(Error::VariableRuntime(description)) if description.as_ref() == "ptrace failed"
     ));
 }

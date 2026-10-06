@@ -39,7 +39,7 @@ use die::{
 use evaluate::FrameBaseCache;
 use globals::{load_globals, public_global_type};
 pub(in crate::debug_info) use inspect::{PathStep, array_byte_offset};
-use inspect::{inspected_value, path_error_state, unavailable};
+use inspect::{evaluate_error_state, inspected_value, unavailable};
 use location::{
     EvaluationUnit, Expression, LocationDescription, copy_data_object_value,
     copy_optional_location, load_evaluation_units,
@@ -654,11 +654,10 @@ impl VariableInfo for DwarfVariableInfo {
             }
         };
         match self.located_data_object(variable, address, runtime, &mut frame_base, budget) {
-            Ok(storage) => Ok(Ok(Located {
-                ty,
-                storage: Self::retained_storage(&storage),
-            })),
-            Err(error) => path_error_state(error).map(Err),
+            Ok(storage) => Ok(Ok(Located { ty, storage })),
+            Err(error) => {
+                evaluate_error_state(error, VariableMalformedKind::InvalidExpression).map(Err)
+            }
         }
     }
 
@@ -672,7 +671,7 @@ impl VariableInfo for DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> Result<Accessed> {
         let mut frame_base = FrameBaseCache::Empty;
-        let storage = Self::restored_storage(&from.storage);
+        let storage = from.storage.clone();
         match self.apply_steps(
             storage,
             &step.steps,
@@ -689,12 +688,11 @@ impl VariableInfo for DwarfVariableInfo {
                         "an untyped step unexpectedly reached storage".into(),
                     ))));
                 };
-                Ok(Ok(Located {
-                    ty,
-                    storage: Self::retained_storage(&storage),
-                }))
+                Ok(Ok(Located { ty, storage }))
             }
-            Err(error) => path_error_state(error).map(Err),
+            Err(error) => {
+                evaluate_error_state(error, VariableMalformedKind::InvalidExpression).map(Err)
+            }
         }
     }
 
@@ -705,13 +703,7 @@ impl VariableInfo for DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<std::result::Result<crate::VariableValue, VariableState>> {
-        match self.decode_state(
-            at.ty,
-            &Self::restored_storage(&at.storage),
-            context,
-            runtime,
-            budget,
-        )? {
+        match self.decode_state(at.ty, &at.storage, context, runtime, budget)? {
             VariableState::Available { value, .. } => Ok(Ok(value)),
             state => Ok(Err(state)),
         }
@@ -737,14 +729,7 @@ impl VariableInfo for DwarfVariableInfo {
                 ));
             }
         };
-        self.materialize_inspected_value(
-            at.ty,
-            type_info,
-            &Self::restored_storage(&at.storage),
-            context,
-            runtime,
-            budget,
-        )
+        self.materialize_inspected_value(at.ty, type_info, &at.storage, context, runtime, budget)
     }
 
     fn object_storage(&self, object: ObjectKey) -> ObjectStorage {

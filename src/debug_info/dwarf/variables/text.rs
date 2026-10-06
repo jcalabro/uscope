@@ -11,14 +11,13 @@
 use std::sync::Arc;
 
 use crate::inspection::InspectionBudget;
-use crate::model::{TextCompletion, TextSummary};
+use crate::model::{TextCompletion, TextSummary, ValueStorage};
 use crate::{
     BaseTypeEncoding, GoKind, InspectionExhaustion, RecordMember, RecordMemberLayout,
     SourceLanguage, TypeId, TypeKind, VariableValue, VirtualAddress,
 };
 
 use super::codec::{decode_address, unsigned_value};
-use super::inspect::LocatedStorage;
 use super::shape::{ValueShape, ValueShapeKind};
 use super::{DwarfVariableInfo, VariableRuntime};
 
@@ -125,23 +124,23 @@ impl TextReader<'_> {
     /// Reads `size` bytes at `offset` within a value's storage.
     fn storage_bytes(
         &mut self,
-        storage: &LocatedStorage,
+        storage: &ValueStorage,
         offset: u64,
         size: usize,
     ) -> Option<Result<Vec<u8>, Stopped>> {
         match storage {
-            LocatedStorage::Memory(address) => {
+            ValueStorage::Memory(address) => {
                 let address = VirtualAddress::new(address.get().checked_add(offset)?);
                 Some(self.read_exact(address, size))
             }
-            LocatedStorage::Bytes {
+            ValueStorage::Bytes {
                 raw, start, end, ..
             } => {
                 let first = start.checked_add(usize::try_from(offset).ok()?)?;
                 let last = first.checked_add(size)?;
                 (last <= *end).then(|| Ok(raw[first..last].to_vec()))
             }
-            LocatedStorage::ImplicitPointer { .. } => None,
+            ValueStorage::ImplicitPointer { .. } => None,
         }
     }
 }
@@ -170,7 +169,7 @@ impl DwarfVariableInfo {
         type_id: TypeId,
         shape: &ValueShape,
         value: &VariableValue,
-        storage: &LocatedStorage,
+        storage: &ValueStorage,
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Option<TextSummary> {
@@ -232,7 +231,7 @@ impl DwarfVariableInfo {
                 },
                 VariableValue::Address(address),
             ) if address.address.get() != 0 => {
-                let storage = LocatedStorage::Memory(address.address);
+                let storage = ValueStorage::Memory(address.address);
                 match self.value_shape(*target).ok()?.kind {
                     ValueShapeKind::Record {
                         record, members, ..
@@ -264,7 +263,7 @@ impl DwarfVariableInfo {
         &self,
         record: TypeId,
         members: &[RecordMember],
-        storage: &LocatedStorage,
+        storage: &ValueStorage,
         reader: &mut TextReader<'_>,
     ) -> Option<TextSummary> {
         let (pointer, length) = self.string_parts(record, members)?;
@@ -353,7 +352,7 @@ impl DwarfVariableInfo {
 
     fn read_pointer(
         &self,
-        storage: &LocatedStorage,
+        storage: &ValueStorage,
         offset: u64,
         reader: &mut TextReader<'_>,
     ) -> Option<Result<VirtualAddress, Stopped>> {
@@ -366,7 +365,7 @@ impl DwarfVariableInfo {
 
     fn read_word(
         &self,
-        storage: &LocatedStorage,
+        storage: &ValueStorage,
         offset: u64,
         reader: &mut TextReader<'_>,
     ) -> Option<Result<u64, Stopped>> {
