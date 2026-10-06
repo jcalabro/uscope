@@ -5,9 +5,9 @@ text, a `Vec` as its elements, a hand-rolled C vector as the integers it
 holds. The value as it is stored is never lost. It is one step away, as the
 `[raw]` child, `print/r`, or `set views off`.
 
-uscope has views for the C++, Rust, and Zig standard libraries' strings and
-contiguous containers built in, and anyone can write views for their own
-types in the same language. Views run inside the debugger, on the data of a
+uscope has views for the C++, Rust, Go, and Zig standard libraries' strings,
+vectors, lists, trees, and hash tables built in, and anyone can write views
+for their own types in the same language. Views run inside the debugger, on the data of a
 stopped program, and can only read: they cannot write memory, call
 functions, or perform I/O, and every read they make is charged to the
 inspection's budget, so a view can never hang the debugger or show a
@@ -26,11 +26,28 @@ world of C types:
 - the Rust `alloc::boxed::Box<i32>`, a wrapper around a pointer, as `b`
   pointing at 42;
 - the C++ `app::detail::Pair<int, 3>`, `{int first; int items[3]}`, as `p`
-  holding 1, then 2, 3, and 4.
+  holding 1, then 2, 3, and 4;
+- the C++ `app::Handle<int>`, `{void *cell}`, whose `cell` points at an
+  `app::Cell<int>`, `{int value}`, as `handle` holding 5;
+- `list`, a linked list `{node *head; unsigned long count}` of `node {int
+  value; node *next}`, as `three` holding 1, 2, and 3, `circle` holding 4,
+  5, and 6 in a ring, `looped` whose third node leads back to its second,
+  and `short` claiming 5 elements of its 3;
+- `tree`, a binary tree `{tnode *root; unsigned long count}` of `tnode {int
+  key; int value; tnode *left; tnode *right}`, as `balanced` holding the
+  keys 1, 2, and 3 with the values 10, 20, and 30, and `deep`, a chain of
+  200 left children;
+- `table`, an open-addressed table `{slot *slots; unsigned long cap;
+  unsigned long n}` of `slot {int used; int key; int value}`, as `sparse`
+  using two of its four slots, for the keys 5 and 6;
+- `chained`, buckets of lists `{node **buckets; unsigned long nbuckets;
+  unsigned long n}`, as `buckets` holding 1 and 2 in its first bucket and 3
+  in its third.
 
 An example block holds a view file, then `---`, then rows that read
 `value => outcome`. An outcome is the summary the value is presented as;
-`children:` and the children it expands to; `problem:` and why a view that
+`children:` and the children it expands to, a map's entries as `key:
+value`; `problem:` and why a view that
 binds refuses the value; `unbound:` and why no view binds; or `error:` and
 why the file itself is refused.
 
@@ -95,6 +112,10 @@ whatever the compiler called the type: `pair<int const, …>` and
   expressions may name, or a value, which they may use as a number.
 - An integer matches an argument of that value, and a pattern matches a
   type argument.
+- In Go, `map<K, V>`, `chan<T>`, and `interface` name every map, channel,
+  and interface, by the kind Go's debug information gives the type,
+  whatever the type's name: `go map<K, V>` presents `map[string]int` and a
+  `type Counts map[string]int` alike.
 
 ```uscope-view-example
 uscope-views 1
@@ -141,8 +162,11 @@ view rust alloc::**::Box<T> {
 b => 42
 ```
 
-A member named `or`, `for`, `if`, or `else`, which end an expression in a
-view, is written in backticks.
+Views may also write `offsetof(TYPE, member)`, where one of a record's own
+members is, in bytes, as its debug information places it.
+
+A member named `or`, `for`, `if`, `else`, or `let`, which end an expression
+in a view, is written in backticks.
 
 ## Statements
 
@@ -153,8 +177,12 @@ the next line unless that line begins another statement or ends the view.
   the view presents a value. The first alternative that binds is used, so
   one view can describe a layout that changed between versions.
 - `type NAME = TYPE or TYPE …` names a type: a type the program defines, an
-  argument the pattern captured, `typeof(EXPR)`, or `arg(TYPE, N)`, the
-  type's `N`th argument, counted from 0.
+  argument the pattern captured, `typeof(EXPR)`, `arg(TYPE, N)`, the type's
+  `N`th argument, counted from 0, or `TYPE.Name`, a type declared inside
+  another, as Zig's `typeof(self).Header`. A type with arguments, such as
+  `app::Cell<T>`, is the one type whose arguments are those, found by what
+  they are, not by how a compiler spelled them, so the arguments may be
+  types the pattern captured or the view names.
 - `check EXPR` states an invariant. A value that breaks one is not what the
   view describes, so it shows as stored, with the check that failed. A
   check of several conditions joined by `&&` is several checks.
@@ -176,6 +204,18 @@ v => children: [0] = 10, [1] = 20, [2] = 30, room = 1, [raw]
 bad => problem: check `size <= cap` failed: `size` is 9, `cap` is 4
 ```
 
+```uscope-view-example
+uscope-views 1
+view c++ app::Handle<T> {
+    type Cell = app::Cell<T>
+    show value(((Cell*)cell)->value)
+    field offset = offsetof(Cell, value)
+}
+---
+handle => 5
+handle => children: offset = 0, [raw]
+```
+
 ## Shapes
 
 - `text(PTR)` and `text(PTR, LEN)` are text: the characters a pointer to
@@ -185,10 +225,11 @@ bad => problem: check `size <= cap` failed: `size` is 9, `cap` is 4
 - `value(EXPR)` presents the value as another value, as a box presents what
   it holds.
 - `empty("TEXT")` is a value that holds nothing, summarized as `TEXT`.
-- `sequence(COUNT) for I in range(N) => ELEMENT` is a sequence of `N`
-  elements, element `I` being `ELEMENT`. `COUNT` must equal `N`, or be `_`
-  to leave the count to the range. Each element is computed on its own, so
-  reading one costs the same wherever it is.
+- `sequence(COUNT) GENERATORS => ELEMENT` is a sequence of `COUNT`
+  elements, one for each value the generators make (see below). `COUNT`
+  may be `_` to leave the count to the generators.
+- `map(COUNT) GENERATORS => KEY : VALUE` is a map of `COUNT` entries, each
+  a key and a value.
 - `if COND { SHAPE } else { SHAPE }` chooses a shape, and may begin a
   statement of its own.
 
@@ -219,6 +260,87 @@ view c tagged {
 ---
 nothing => tagged 0: 0
 something => tagged 1: 7
+```
+
+## Generators
+
+A sequence's or map's elements come from generators, each `for NAME in
+GENERATOR`, which may nest up to four deep: an inner generator runs once for
+each value of the one around it.
+
+- `range(N)` is 0, 1, …, `N` - 1. A sequence of one `range` reaches each
+  element directly, so reading one costs the same wherever it is.
+- `list(HEAD, P => NEXT)` is a linked list's nodes: `HEAD`, a pointer, then
+  each node's `NEXT`, written with the node as `P`. It ends at a null
+  pointer, or at `HEAD` again, as a ring ends.
+- `inorder(ROOT, P => LEFT, P => RIGHT)` is a binary tree's nodes, each
+  after its left subtree and before its right, a null pointer being an
+  empty tree.
+
+After a generator, `if COND` keeps only the values for which `COND` holds,
+and `let NAME = EXPR` names a value computed once for each value, which the
+rest of the view's generators, filters, and element may use.
+
+```uscope-view-example
+uscope-views 1
+view c list {
+    show sequence(count) for x in list(head, n => n->next) => x->value
+}
+view c tree {
+    show map(count) for x in inorder(root, n => n->left, n => n->right) => x->key : x->value
+}
+---
+three => len=3 [1, 2, 3]
+circle => len=3 [4, 5, 6]
+balanced => len=3 {1: 10, 2: 20, 3: 30}
+balanced => children: 1: 10, 2: 20, 3: 30, [raw]
+```
+
+```uscope-view-example
+uscope-views 1
+view c table {
+    show map(n) for i in range(cap) let slot = slots[i] if slot.used != 0 => slot.key : slot.value
+}
+view c chained {
+    show sequence(n) for b in range(nbuckets) for x in list(buckets[b], p => p->next) => x->value
+}
+---
+sparse => len=2 {5: 50, 6: 60}
+buckets => len=3 [1, 2, 3]
+```
+
+A sequence with a count generates exactly that many elements, and
+generators that end before it are a problem. Without one, the generators are
+counted as far as the inspection's budget allows; a count the budget cut
+short is shown as at least that many, as `len>=40`.
+
+```uscope-view-example
+uscope-views 1
+view c list {
+    show sequence(_) for x in list(head, n => n->next) => x->value
+}
+---
+three => len=3 [1, 2, 3]
+short => len=3 [1, 2, 3]
+```
+
+A linked structure never shows a node twice as if it were two elements. A
+node that leads back to one already visited is a cycle, and a tree deeper
+than 128 levels is none a library builds; either is a problem, as is a
+sequence without a count that passes 16,777,216 elements.
+
+```uscope-view-example
+uscope-views 1
+view c list {
+    show sequence(count) for x in list(head, n => n->next) => x->value
+}
+view c tree {
+    show map(count) for x in inorder(root, n => n->left, n => n->right) => x->key : x->value
+}
+---
+looped => problem: cycle at element 3: it leads back to a node already visited
+short => problem: the view declares 5 elements and generates 3
+deep => problem: the tree is deeper than 128 levels
 ```
 
 ## Choosing a view
@@ -264,20 +386,26 @@ s => problem: the view declares 6 elements and generates 5
 
 A presented value's summary is one line in one style for every language:
 text in quotes, as `"hello, world"`; a sequence's length and its first
-elements, as `len=3 [1, 2, 3]`, up to 16 elements or about 96 characters;
-and other values as they print.
+elements, as `len=3 [1, 2, 3]`, and a map's and its first entries, as
+`len=2 {"one": 1, "two": 2}`, up to 16 or about 96 characters; and other
+values as they print.
 
 ## Where views come from
 
 The views built into uscope cover:
 
-- C++: `std::string` and its other characters in libstdc++, in the C++11
-  and the earlier copy-on-write ABI, and in libc++ short and long;
-  `std::string_view`, `std::vector` (not `std::vector<bool>`),
-  `std::array`, and `std::span`.
-- Rust: `String`, `PathBuf`, `OsString`, `CString`, `Vec`, and `VecDeque`.
-  `&str`, `Box<str>`, and slices are text and elements without a view.
-- Zig: `std.ArrayList` and the managed list.
+- C++, in libstdc++ and libc++: `std::string` and its other characters,
+  in libstdc++'s C++11 and earlier copy-on-write ABIs and in libc++ short
+  and long; `std::string_view`, `std::vector` (not `std::vector<bool>`),
+  `std::array`, `std::span`, `std::deque`, `std::list`, `std::forward_list`,
+  `std::map`, `std::multimap`, `std::set`, `std::multiset`, and the
+  `unordered_` maps and sets.
+- Rust: `String`, `PathBuf`, `OsString`, `CString`, `Vec`, `VecDeque`,
+  `HashMap`, and `HashSet`. `&str`, `Box<str>`, and slices are text and
+  elements without a view.
+- Go: maps, including a nil map, which shows as `nil`.
+- Zig: `std.ArrayList` and the managed list, `std.HashMap`, its unmanaged
+  map, and `std.ArrayHashMapUnmanaged`.
 
 Their files are in `views/`, one per library.
 
@@ -292,17 +420,25 @@ Their files are in `views/`, one per library.
 - A pointer to a value presented as text shows the text after its address,
   as a pointer to characters does, or why the view could not read it. A
   null pointer shows only its address.
-- An element of a value presented as a sequence is `v[i]`, and its count is
-  `len(v)`, in any expression: `break f if len(queue) > 100`. An element
-  in memory can be assigned and its address taken.
-- A debug adapter client sees a presented value's elements as indexed
-  variables, in pages, and its fields and `[raw]` as named ones.
+- An element of a value presented as a sequence is `v[i]`, and the count
+  of a sequence or map is `len(v)`, in any expression: `break f if
+  len(queue) > 100`. An element in memory can be assigned and its address
+  taken. A map is not indexed by position; its entries are found by key in
+  a later version.
+- A debug adapter client sees a presented value's elements or entries as
+  indexed variables, in pages, and its fields and `[raw]` as named ones. An
+  entry is named by its key, and evaluates as the place its value is in,
+  `*(T*)ADDRESS`.
+- Reading a later page of a list, tree, or table resumes where the reads
+  before it were, at most 256 elements back, rather than from the start.
 
 ## Limits
 
 A view file may be at most 256 KiB and hold at most 1024 views, and each of
 its expressions is subject to the expression limits. A presentation's
-summary may use a quarter of what its inspection has left, and running out
-ends the summary early without failing the inspection. Text is read up to
-256 bytes. Views present values inside the values they present at most four
-deep.
+summary may use a quarter of what its inspection has left, which the values
+it presents share, and running out ends the summary early without failing
+the inspection. Text is read up to 256 bytes. Views present values inside
+the values they present at most four deep. Generators nest at most four
+deep, trees are walked at most 128 levels deep, and a sequence without a
+count generates at most 16,777,216 elements.

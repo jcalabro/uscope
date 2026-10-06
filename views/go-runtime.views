@@ -1,0 +1,28 @@
+uscope-views 1
+
+# Go's runtime. Verified against Go 1.26.5, by tests/fixtures/go/containers.
+# A Go map, channel, or interface is matched by its kind, whatever its name.
+
+# A map is a pointer to a swiss table (Go 1.24 and later). A small map's
+# dirPtr is one group of eight slots; a larger map's is a directory of
+# tables, each in as many consecutive entries as its depth leaves it, the
+# first of which its index names. A slot is full when its control byte's
+# top bit is clear.
+view go map<K, V> {
+    type Group = typeof(*(**self.dirPtr).groups.data)
+    show if self == null {
+        empty("nil")
+    } else if self.dirLen == 0 {
+        map(self.used) for s in range(8)
+            let group = (Group*)self.dirPtr
+            if group->ctrl >> (8 * s) & 0x80 == 0
+            => group->slots[s].key : group->slots[s].elem
+    } else {
+        map(self.used)
+            for d in range(self.dirLen) let table = self.dirPtr[d] if table->index == d
+            for g in range(table->groups.lengthMask + 1)
+                let group = &table->groups.data[g] let control = group->ctrl
+            for s in range(8) if control >> (8 * s) & 0x80 == 0
+            => group->slots[s].key : group->slots[s].elem
+    }
+}

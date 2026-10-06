@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::eval::types::c_type_key_of_name;
 use crate::{
     IntegerValue, ModuleImageId, SourceLanguage, TypeArgument, TypeId, TypeInfo, TypeKind,
-    TypeNode, TypeReference,
+    TypeModifier, TypeNode, TypeReference,
 };
 
 /// How a path spells a namespace without a name. Each unit's is its own.
@@ -273,6 +273,12 @@ fn step(
 /// The integer an argument spells, with any C or Rust suffix.
 pub fn parse_integer(text: &str) -> Option<IntegerValue> {
     let text = text.trim();
+    // C++ names spell a truth value argument as a word.
+    match text {
+        "false" => return Some(IntegerValue::Unsigned(0)),
+        "true" => return Some(IntegerValue::Unsigned(1)),
+        _ => {}
+    }
     let (negative, digits) = text
         .strip_prefix('-')
         .map_or((false, text), |rest| (true, rest));
@@ -402,15 +408,39 @@ fn argument_matches(
         }
         TypeArgument::Unknown(spelled) => spelled.as_ref() == text,
         TypeArgument::Type(reference) => types.type_info(*reference).is_some_and(|info| {
-            info.name.as_ref() == text
-                || names_type(
-                    &TypeName::parse(text, syntax),
-                    syntax,
-                    info,
-                    types,
-                    true,
-                    depth,
-                )
+            if info.name.as_ref() == text {
+                return true;
+            }
+            // A qualifier may be spelled before or after what it qualifies.
+            if let TypeKind::Modified { modifier, target } = &info.kind
+                && let Some(word) = match modifier {
+                    TypeModifier::Const => Some("const"),
+                    TypeModifier::Volatile => Some("volatile"),
+                    _ => None,
+                }
+            {
+                let rest = text
+                    .strip_prefix(word)
+                    .filter(|rest| rest.starts_with(' '))
+                    .or_else(|| text.strip_suffix(word).filter(|rest| rest.ends_with(' ')));
+                return rest.is_some_and(|rest| {
+                    argument_matches(
+                        rest.trim(),
+                        &TypeArgument::Type(*target),
+                        syntax,
+                        types,
+                        depth + 1,
+                    )
+                });
+            }
+            names_type(
+                &TypeName::parse(text, syntax),
+                syntax,
+                info,
+                types,
+                true,
+                depth,
+            )
         }),
     }
 }
@@ -510,6 +540,16 @@ impl TypeIndex {
                                 .all(|(have, want)| have.as_ref() == *want)
                     })
             })
+            .collect()
+    }
+
+    /// The types whose identity has this base, in identifier order.
+    pub fn with_base(&self, base: &str) -> Vec<TypeReference> {
+        self.by_base
+            .get(base)
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.reference(*id))
             .collect()
     }
 
@@ -789,6 +829,89 @@ mod tests {
         assert!(!index.same_type(reference(4), reference(5)));
     }
 
+    /// GCC spells a qualified argument `int const` and clang `const int`;
+    /// either names the qualified type, whatever its own name.
+    #[test]
+    fn qualified_arguments_match_in_either_order() {
+        struct Lookup<'a>(&'a [TypeInfo]);
+        impl TypeLookup for Lookup<'_> {
+            fn type_info(&self, reference: TypeReference) -> Option<&TypeInfo> {
+                self.0.get(reference.id.index())
+            }
+        }
+
+        use crate::{ArgumentOrigin, TypeIdentity, TypeModifier};
+
+        let image = ModuleImageId::new(0);
+        let reference = |index| TypeReference {
+            image,
+            id: TypeId::new(index),
+        };
+        let identity = |base: &str, path: &[&str], arguments: Vec<TypeArgument>| {
+            Some(Arc::new(TypeIdentity {
+                language: SourceLanguage::Cpp,
+                path: path.iter().map(|segment| Arc::from(*segment)).collect(),
+                inline_namespaces: Arc::default(),
+                base: base.into(),
+                arguments: arguments.into(),
+                origin: ArgumentOrigin::Dwarf,
+                go: None,
+            }))
+        };
+        let types = [
+            TypeInfo {
+                reference: reference(0),
+                name: "int".into(),
+                byte_size: Some(4),
+                kind: TypeKind::Unspecified,
+                identity: identity("int", &[], Vec::new()),
+            },
+            TypeInfo {
+                reference: reference(1),
+                name: "const int".into(),
+                byte_size: Some(4),
+                kind: TypeKind::Modified {
+                    modifier: TypeModifier::Const,
+                    target: reference(0),
+                },
+                identity: None,
+            },
+            TypeInfo {
+                reference: reference(2),
+                name: "pair<int const, int>".into(),
+                byte_size: Some(8),
+                kind: TypeKind::Unspecified,
+                identity: identity(
+                    "pair",
+                    &["std"],
+                    vec![
+                        TypeArgument::Type(reference(1)),
+                        TypeArgument::Type(reference(0)),
+                    ],
+                ),
+            },
+        ];
+        let index = TypeIndex::build(Some(image), types.len(), |index| types.get(index));
+        let lookup = Lookup(&types);
+        for name in [
+            "std::pair<int const, int>",
+            "std::pair<const int, int>",
+            "pair<const int>",
+        ] {
+            assert_eq!(index.named(name, false, &lookup), [reference(2)], "{name}");
+        }
+        assert!(
+            index
+                .named("std::pair<int, int>", false, &lookup)
+                .is_empty()
+        );
+        assert!(
+            index
+                .named("std::pair<volatile int, int>", false, &lookup)
+                .is_empty()
+        );
+    }
+
     #[test]
     fn integer_arguments_parse_with_their_suffixes_and_compare_by_value() {
         assert_eq!(parse_integer("4UL"), Some(IntegerValue::Unsigned(4)));
@@ -796,6 +919,10 @@ mod tests {
         assert_eq!(parse_integer("0x10usize"), Some(IntegerValue::Unsigned(16)));
         assert_eq!(parse_integer("(char)97"), None);
         assert_eq!(parse_integer("3x"), None);
+        // A truth value argument, as C++ names spell it, is its number, as
+        // its template parameter's DWARF holds it.
+        assert_eq!(parse_integer("false"), Some(IntegerValue::Unsigned(0)));
+        assert_eq!(parse_integer("true"), Some(IntegerValue::Unsigned(1)));
         assert!(same_integer(
             IntegerValue::Signed(3),
             IntegerValue::Unsigned(3)

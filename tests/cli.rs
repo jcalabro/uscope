@@ -471,6 +471,40 @@ fn views_present_values_raw_is_one_step_away_and_info_view_explains() {
     );
 }
 
+/// `print` shows a map's entries as `key: value` and a linked structure's
+/// elements, and says why a broken one shows as stored.
+#[test]
+fn views_print_maps_and_linked_structures() {
+    let stdout = batch(
+        "containers-cpp-gcc-o0",
+        &["--color", "never"],
+        &[
+            "break barrier",
+            "run",
+            "up",
+            "print ordered",
+            "print named",
+            "print linked_words",
+            "print forward[1] * len(forward)",
+            "print looped",
+            "info view overcounted",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            ") ordered = len=3 {1: 10, 2: 20, 3: 30}\n",
+            ") named = len=2 {\"one\": 1, \"two\": 2}\n",
+            ") linked_words = len=2 [\"a\", \"b\"]\n",
+            "(integer) forward[1] * len(forward) = 10\n",
+            ") looped = {",
+            " <view libstdc++.views:",
+            "`c++ std::list<T, _>`: cycle at element 3: it leads back to a node already visited>\n",
+            "binds, but shows the value as stored: the view declares 4 elements and generates 2\n",
+        ],
+    );
+}
+
 /// `ptype` names a type with its path and lists its arguments, whatever
 /// the producer called it.
 #[test]

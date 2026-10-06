@@ -76,10 +76,12 @@ pub enum Punct {
     CloseParen,
     OpenBracket,
     CloseBracket,
+    /// Only `offsetof(TYPE, member)` in a view's expressions takes one.
+    Comma,
 }
 
 impl Punct {
-    const ALL: [Self; 41] = [
+    const ALL: [Self; 42] = [
         Self::ShlEq,
         Self::ShrEq,
         Self::Shl,
@@ -121,6 +123,7 @@ impl Punct {
         Self::CloseParen,
         Self::OpenBracket,
         Self::CloseBracket,
+        Self::Comma,
     ];
 
     pub const fn text(self) -> &'static str {
@@ -166,6 +169,7 @@ impl Punct {
             Self::CloseParen => ")",
             Self::OpenBracket => "[",
             Self::CloseBracket => "]",
+            Self::Comma => ",",
         }
     }
 }

@@ -421,18 +421,28 @@ pub async fn expanded(
         if let Some(presentation) = presentation
             && presentation.shape != PresentedShape::Raw
         {
-            let (PresentedShape::Sequence, ValueChildren::Available(reference), Some(count)) = (
+            let (
+                shape @ (PresentedShape::Sequence | PresentedShape::Map),
+                ValueChildren::Available(reference),
+                Some(count),
+            ) = (
                 presentation.shape,
                 &presentation.children,
                 presentation.count,
-            ) else {
+            )
+            else {
                 output.push_str(&presentation.summary);
                 continue;
             };
-            let PresentedCount::Exact(count) = count else {
-                output.push_str(&presentation.summary);
-                continue;
+            let length = match count {
+                PresentedCount::Exact(count) => format!("len={count}"),
+                PresentedCount::AtLeast(count) => format!("len>={count}"),
+                _ => {
+                    output.push_str(&presentation.summary);
+                    continue;
+                }
             };
+            let count = count.known();
             let requested = count.min(MAX_EXPANDED_CHILDREN).min(remaining.value_nodes);
             let page = if requested == 0 {
                 None
@@ -450,8 +460,13 @@ pub async fn expanded(
                 remaining = remaining.remaining_after(page.usage);
                 Some(page)
             };
-            output.push_str(&format!("len={count} ["));
-            work.push(Work::Text("]".to_owned()));
+            let (opening, closing) = if shape == PresentedShape::Map {
+                ("{", "}")
+            } else {
+                ("[", "]")
+            };
+            output.push_str(&format!("{length} {opening}"));
+            work.push(Work::Text(closing.to_owned()));
             schedule_children(&mut work, count, page.as_ref(), depth + 1, raw);
             continue;
         }
@@ -558,6 +573,9 @@ fn schedule_children(
                 | ValueChildRelationship::SliceElement { .. }
                 | ValueChildRelationship::Element { .. } => String::new(),
                 ValueChildRelationship::Field { name } => format!("{name} = "),
+                ValueChildRelationship::Entry { key, .. } => {
+                    format!("{}: ", state_summary(&key.type_info, &key.state))
+                }
                 ValueChildRelationship::Raw => "[raw] = ".to_owned(),
                 _ => "<child> = ".to_owned(),
             };

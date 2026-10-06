@@ -14,6 +14,7 @@ pub mod bind;
 pub mod fuzz;
 pub mod pattern;
 pub mod run;
+pub mod scan;
 pub mod summary;
 pub mod syntax;
 
@@ -24,14 +25,14 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use crate::eval::target::Scope;
-use crate::eval::types::representation;
-use crate::{TypeReference, ViewName};
+use crate::eval::types::TypeSource;
+use crate::{TypeInfo, TypeReference, ViewName};
 
 use bind::{BoundView, Rejection};
 use syntax::View;
 
 /// The view files built into uscope, in the order they are tried.
-const BUILT_IN: [(&str, &str); 4] = [
+const BUILT_IN: [(&str, &str); 5] = [
     (
         "libstdc++.views",
         include_str!("../../views/libstdc++.views"),
@@ -39,6 +40,10 @@ const BUILT_IN: [(&str, &str); 4] = [
     ("libc++.views", include_str!("../../views/libc++.views")),
     ("rust-std.views", include_str!("../../views/rust-std.views")),
     ("zig-std.views", include_str!("../../views/zig-std.views")),
+    (
+        "go-runtime.views",
+        include_str!("../../views/go-runtime.views"),
+    ),
 ];
 
 /// Every view uscope knows, in the order they are tried: those loaded for
@@ -139,42 +144,80 @@ pub fn name_of(view: &View) -> Arc<ViewName> {
 }
 
 /// Chooses the view for values of `ty`: the first, in the set's order,
-/// whose pattern names the type and which binds against it in `scope`.
+/// whose pattern names the type and which binds against it in `scope`. A
+/// typedef's own identity is tried before what it stands for, as Go's map
+/// types are typedefs of a pointer.
 pub fn choose<S: Scope>(views: &ViewSet, ty: TypeReference, scope: &S) -> Choice<S::Step> {
-    let Ok((ty, info)) = representation(scope, ty) else {
-        return Choice::default();
-    };
-    let Some(identity) = info.identity.as_deref() else {
-        return Choice::default();
-    };
     let mut choice = Choice::default();
-    for &index in views
-        .by_base
-        .get(identity.base.as_ref())
-        .into_iter()
-        .flatten()
-    {
-        let view = &views.views[index];
-        if !pattern::language_matches(view.language, identity.language) {
-            continue;
-        }
-        let Some(captures) = pattern::matches(&view.pattern, identity, scope) else {
+    for (ty, info) in wrappers(scope, ty) {
+        let Some(identity) = info.identity.as_deref() else {
             continue;
         };
-        match bind::bind(view, ty, &captures, scope) {
-            Ok(bound) => {
-                choice.candidates.push(Candidate {
-                    name: name_of(view),
-                    rejection: None,
-                });
-                choice.bound = Some(Arc::new(bound));
-                return choice;
+        // A Go type is also named by its kind, as every map is by `map`.
+        let mut candidates = views
+            .by_base
+            .get(identity.base.as_ref())
+            .into_iter()
+            .flatten()
+            .chain(
+                pattern::go_kind_word(identity)
+                    .and_then(|kind| views.by_base.get(kind))
+                    .into_iter()
+                    .flatten(),
+            )
+            .copied()
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        for index in candidates {
+            let view = &views.views[index];
+            if !pattern::language_matches(view.language, identity.language) {
+                continue;
             }
-            Err(rejection) => choice.candidates.push(Candidate {
-                name: name_of(view),
-                rejection: Some(rejection),
-            }),
+            let Some(captures) = pattern::matches(&view.pattern, identity, scope) else {
+                continue;
+            };
+            match bind::bind(view, ty, &captures, scope) {
+                Ok(bound) => {
+                    choice.candidates.push(Candidate {
+                        name: name_of(view),
+                        rejection: None,
+                    });
+                    choice.bound = Some(Arc::new(bound));
+                    return choice;
+                }
+                Err(rejection) => choice.candidates.push(Candidate {
+                    name: name_of(view),
+                    rejection: Some(rejection),
+                }),
+            }
         }
     }
     choice
+}
+
+/// A type and the types its typedefs and qualifiers stand for, outermost
+/// first, ending at its representation.
+fn wrappers(types: &dyn TypeSource, ty: TypeReference) -> Vec<(TypeReference, TypeInfo)> {
+    let mut chain = Vec::new();
+    let mut current = ty;
+    while chain.len() < 64 {
+        let Some(info) = types.type_info(current) else {
+            break;
+        };
+        let next = match &info.kind {
+            crate::TypeKind::Modified { target, .. }
+            | crate::TypeKind::Named {
+                target: Some(target),
+                ..
+            } => Some(*target),
+            _ => None,
+        };
+        chain.push((current, info));
+        match next {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+    chain
 }

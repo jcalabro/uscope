@@ -371,6 +371,8 @@ SHAPE := text(PTR [, LEN])             # encoding from the element type; NUL-ter
 extend <language> <pattern> { field … / hide … / format … }
 
 GEN    := range(N) | list(HEAD, N => NEXT) | inorder(ROOT, N => LEFT, N => RIGHT) | GEN for J in GEN
+# after a generator, in order: `if COND` filters, and `let NAME = EXPR` names a
+# value computed once for each of the generator's values (P3)
 ```
 
 **Wrappers.** `inner(EXPR)` steps through wrapper records. While the value
@@ -434,11 +436,17 @@ from the shape:
   - the controller caches checkpoints (the generator state every 256
     children) for the current `StopId`, so later pages resume rather than
     restart;
-  - `list` runs Brent's cycle detection on node addresses;
+  - `list` ends at a null pointer or at its head again (a ring), and finds
+    a node seen before exactly among the nodes one request visits, and by
+    Brent's algorithm across the requests that resume from checkpoints;
   - `inorder` bounds its explicit stack at 128 levels.
 
-  A cycle, an overlong stack, or a scan that yields more than its declared
-  `COUNT` ends in a typed partial result (`cycle at element 3`).
+  A scan stops at its declared `COUNT`. A cycle, an overlong stack, or
+  generators that end before the count are typed problems (`cycle at
+  element 3`): found while presenting the summary, the value shows raw with
+  the problem; found while paging, that page fails with it. (P3 settled
+  this; reading past the count to find more elements was dropped, since a
+  sparse hash table would scan every empty slot to prove there are none.)
 
 ### 3.4 Examples
 
@@ -1172,17 +1180,113 @@ What P2 built, and what it learned:
   for 100). Session view files from the CLI and DAP are P5;
   `DebuggerHandle::load_views` exists for them.
 
-**P3 Scans and maps.**
+**P3 Scans and maps.** *Done 2026-10-05.*
 
-- `list`, `inorder`, filters, nested generators, checkpoints, and cycle
+- [x] `list`, `inorder`, filters, nested generators, checkpoints, and cycle
   detection.
-- Map presentation.
-- Built-in views:
-  - C++ `std::map`, `set`, and the multi- forms; `unordered_*`;
+- [x] Map presentation.
+- [x] Built-in views:
+  - [x] C++ `std::map`, `set`, and the multi- forms; `unordered_*`;
     `std::list`, `forward_list`, `deque`;
-  - Rust `HashMap`, `HashSet`;
-  - Go maps;
-  - Zig `HashMap`, `ArrayHashMap`.
+  - [x] Rust `HashMap`, `HashSet`;
+  - [x] Go maps;
+  - [x] Zig `HashMap`, `ArrayHashMap`.
+- [x] §5.4: the `containers` golden program, its views, and the views
+  oracle, with a sabotage and coverage marks.
+- [x] End of phase: `/roast` (two findings, both fixed: the fake world ran
+  out of work as `EvaluationLimit`, which the real controller never reports
+  for a budget, so the runner had treated a provider's evaluation limit as
+  the budget; and the simulated client paged by the size it asked for
+  rather than the children it got), `just` (908 tests), and `just sim 60`
+  (368,884 sessions).
+
+What P3 built, and what it learned:
+
+- **The language.** Generators nest up to four deep; after each come, in
+  order, `if` filters and `let`s computed once per value, which views of
+  nested tables need (the first Go map view re-read
+  `dirPtr[d]->groups.data[g]` for every slot, five reads each, and ran out
+  of 1024 reads by its 118th entry). `map(COUNT) … => KEY : VALUE`.
+  `offsetof(TYPE, member)` reaches a record's layout (Zig's
+  `MultiArrayList` keeps each field's array in the order of the entry
+  type's DWARF members). `type T = typeof(EXPR).Name` is a type declared
+  inside another (Zig's `Header`). A `type` with arguments, such as
+  `std::_Rb_tree_node<Value>`, is constructed through the type index by
+  matching the pattern with the view's captures and types already bound,
+  so it compares identities, never spellings. Go patterns name kinds:
+  `go map<K, V>` presents every map, named or not. `let` now ends an
+  expression, like `or`, `for`, `if`, and `else`.
+- **The engine.** `src/view/scan.rs` holds the scan: a plain-data
+  `Cursor` per value (each clause's generator state and variable, Brent's
+  state, the elements generated), kept every 256 elements in
+  `Checkpoints`, which the controller caches per stop and forgets on a new
+  stop, a write, or a new view set (`presentation::Views`). A random-access
+  sequence, one `range` with no filter, never scans.
+- **The model.** `PresentedShape::Map`, `PresentedCount::AtLeast` (a
+  sequence without a count the budget cut short: `len>=40`),
+  `ValueChildRelationship::Entry { index, key }` with a `MapKey`, and
+  `ViewProblem::{Cycle, TooDeep, TooMany}`. The console prints `len=2
+  {"one": 1, "two": 2}` and expands entries; the DAP names an entry by its
+  key, counts entries as indexed, and gives its value the evaluate name
+  `*(T*)ADDRESS`, which `setVariable` writes through.
+- **Presentation glue.** A value whose own type a view presents need not
+  be an aggregate: a Go map is a typedef of a pointer, and choosing a view
+  now tries each type along a typedef chain, outermost first, and presents
+  pointers too (`len(m)` binds through `Scope::has_view`). A value view of
+  a sequence or map (Zig's managed `HashMap`) takes on that shape and
+  count, so clients page its entries. Only a top-level presentation takes a
+  quarter of the budget; the values inside it share that share.
+- **Library facts the views rely on.** libstdc++'s trees, lists, and hash
+  tables are reached through node types their allocators' arguments name;
+  the old ABI's `std::list` keeps no size. libc++'s deque keeps no block
+  size in the object or its DWARF (the static member has no value): the
+  view states libc++'s rule, 4096 bytes of elements or 16 elements of 256
+  bytes or more, and checks it against the map of blocks. Rust's hashbrown
+  table keeps buckets below its control bytes, a full one's top bit clear.
+  Go 1.26's swiss maps keep a small map's single group in `dirPtr`, and a
+  table's first directory slot in its `index`. Zig 0.16's array hash maps
+  are unmanaged only; ReleaseSafe emits no entry type for them, so they show
+  raw with the reason there.
+- **Found on the way.** `false` and `true` template arguments never matched
+  the bool arguments DWARF gives, and GCC's `int const` never matched a
+  `const int` type, so `allocator<_Hash_node<pair<int const, int>,
+  false>>`'s argument stayed unresolved; both now match. Types only inlined
+  code uses (an abstract instance's return and variable types, such as
+  Zig's `Header` at ReleaseSafe) were never built; they are now, which on
+  an eight-unit `-O2` C++ program added 26% more types and 3% more load
+  time. A page whose budget ran out while a filter looked for its next
+  element threw away the elements it had found, so a sparse hash table's
+  page came back empty; it now keeps them, and a summary shows
+  `<unavailable>` where it stopped.
+- **The simulator.** `tests/golden/containers` holds a vector, a list that
+  every odd round leaves cyclic and overcounted, and an open-addressed
+  table, all globals, with `containers.views` beside them, which the
+  corpus loads and the client loads into its session. At half its
+  inspections the client evaluates each container and reads its elements
+  in one page and in pages of a drawn size. The views oracle
+  (`src/sim/views.rs`) walks memory by the program's own C layouts, never
+  uscope's DWARF, and requires each element's address and bytes, the
+  count, both pagings, and the typed cycle or count problem to match. Its
+  sabotage, `SkipLinkedNodes`, makes ptrace skip a node, and the marks
+  `ViewPresented`, `ViewPaged`, and `ViewCycleRefused` are reached by the
+  gate's seeds.
+- **Tests.** The `containers` fixtures in all four languages, with Go new
+  (`go/containers`), carry `count:` and `(any order)` markers and corrupted
+  lists; the harness pages through children with checkpoints and evaluates
+  each entry's place back. Unit tests cover lists, rings, cycles behind
+  checkpoints, trees too deep, filters, nesting, budgets that end anywhere,
+  construction, `offsetof`, nested types, and the parser; the hostile
+  harness gained a libstdc++ list and map, a Rust `HashMap`, a Go map, and
+  a Zig hash map; `tests/cli.rs` and `tests/dap/variables.rs` cover printing
+  and paging maps.
+- **Left for later.** A cycle that leads back past the checkpoint a page
+  resumed from is found by Brent's algorithm within a few times its length,
+  so pages between may repeat nodes before the page that reports it. Each
+  node link is its own read, so a tree costs about four reads an entry; a
+  read cache waits for a measurement that the budget, not the reads, is
+  what users hit. uscope cannot load a 30-unit `-O2` C++ program at all: it
+  passes the 262,144 data objects the DWARF loader allows, with or without
+  views.
 
 **P4 Pointers, sums, and dynamic types.**
 

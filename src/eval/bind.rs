@@ -17,7 +17,7 @@ use super::target::{Lookup, Refusal, Scope, StepKind, TypeLookup, TypeQuery};
 use super::types::{
     Category, Ty, builtin, c_type_key, category, is_character, representation, size_of, type_name,
 };
-use crate::{TypeKind, TypeReference};
+use crate::{RecordMemberLayout, TypeKind, TypeReference};
 
 /// Whether an expression may assign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,6 +319,10 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let operand = self.bind(operand)?;
                 let operand = self.settle(operand)?;
                 self.size_constant(&operand.ty, span)
+            }
+            NodeKind::OffsetOf { ty, member } => {
+                let ty = self.resolve_type(&ty)?;
+                self.offset_constant(&ty, &member, span)
             }
             NodeKind::Len(operand) => {
                 let operand = self.bind(operand)?;
@@ -649,6 +653,53 @@ impl<'a, S: Scope> Binder<'a, S> {
         self.node(
             Op::Constant(Constant::Integer(Integer::Exact(Exact::from(u128::from(
                 size,
+            ))))),
+            Ty::Exact,
+            span,
+        )
+    }
+
+    /// `offsetof(TYPE, member)`: the byte offset of one of a record's own
+    /// members, as its debug information places it.
+    fn offset_constant(&mut self, ty: &Ty, member: &str, span: Span) -> BindResult<S> {
+        let name = type_name(self.scope, ty);
+        let Ty::Program(reference) = ty else {
+            return Err(Self::error(
+                span,
+                ErrorKind::Type,
+                format!("`{name}` has no members"),
+            ));
+        };
+        let info = representation(self.scope, *reference)
+            .map_err(|reason| Self::error(span, ErrorKind::Type, reason.to_string()))?
+            .1;
+        let TypeKind::Record { members, .. } = &info.kind else {
+            return Err(Self::error(
+                span,
+                ErrorKind::Type,
+                format!("`{name}` has no members"),
+            ));
+        };
+        let found = members
+            .iter()
+            .find(|candidate| candidate.name.as_deref() == Some(member))
+            .ok_or_else(|| {
+                Self::error(
+                    span,
+                    ErrorKind::Type,
+                    format!("`{name}` has no member `{member}` of its own"),
+                )
+            })?;
+        let RecordMemberLayout::ByteOffset(offset) = found.layout else {
+            return Err(Self::error(
+                span,
+                ErrorKind::Type,
+                format!("`{member}` of `{name}` is not at a whole byte"),
+            ));
+        };
+        self.node(
+            Op::Constant(Constant::Integer(Integer::Exact(Exact::from(u128::from(
+                offset,
             ))))),
             Ty::Exact,
             span,
@@ -1849,6 +1900,21 @@ impl<'a, S: Scope> Binder<'a, S> {
             ),
             Category::Pointer(Some(ref pointee))
                 if operand.is_place() && is_character(self.scope, pointee) =>
+            {
+                self.node(
+                    Op::Length {
+                        operand: Box::new(operand),
+                        how: Length::Text,
+                    },
+                    Ty::Exact,
+                    span,
+                )
+            }
+            // A pointer a view presents, such as a Go map, has the view's
+            // length.
+            Category::Pointer(_)
+                if operand.is_place()
+                    && matches!(operand.ty, Ty::Program(ty) if self.scope.has_view(ty)) =>
             {
                 self.node(
                     Op::Length {

@@ -169,6 +169,31 @@ impl World {
         )
     }
 
+    /// Gives a record made without members its members, for a record that
+    /// points to its own type.
+    pub fn set_members(&mut self, record: TypeReference, members: &[(&str, TypeReference, u64)]) {
+        let members: Vec<RecordMember> = members
+            .iter()
+            .map(|(member, ty, offset)| RecordMember {
+                name: Some((*member).into()),
+                type_ref: *ty,
+                layout: RecordMemberLayout::ByteOffset(*offset),
+                accessibility: crate::Accessibility::Public,
+                artificial: false,
+                embedded: false,
+                declaration: None,
+            })
+            .collect();
+        let index = usize::try_from(record.id.get()).expect("small ids");
+        let TypeKind::Record {
+            members: existing, ..
+        } = &mut self.types[index].kind
+        else {
+            panic!("only records have members");
+        };
+        *existing = members.into();
+    }
+
     pub fn pointer(&mut self, target: Option<TypeReference>) -> TypeReference {
         let name = target.map_or_else(
             || "void*".to_owned(),
@@ -299,6 +324,19 @@ impl World {
             arguments: arguments.into(),
             go: None,
         }));
+    }
+
+    /// Gives a type Go's attributes, as Go's DWARF marks its kinds.
+    pub fn go_kind(&mut self, ty: TypeReference, kind: crate::GoKind) {
+        let index = usize::try_from(ty.id.get()).expect("small ids");
+        let identity = self.types[index]
+            .identity
+            .as_mut()
+            .expect("an identified type");
+        Arc::make_mut(identity).go = Some(crate::GoTypeAttributes {
+            kind,
+            runtime_type: None,
+        });
     }
 
     pub fn typedef(&mut self, name: &str, target: TypeReference) -> TypeReference {
@@ -639,6 +677,34 @@ impl TypeSource for World {
     fn byte_order(&self) -> ByteOrder {
         ByteOrder::Little
     }
+
+    /// Types with identities are one type when their identities are, as
+    /// copies of one type in several units are.
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        if left == right {
+            return true;
+        }
+        let (Some(left), Some(right)) = (
+            self.info(left).identity.as_deref(),
+            self.info(right).identity.as_deref(),
+        ) else {
+            return false;
+        };
+        left.language == right.language
+            && left.path == right.path
+            && left.base == right.base
+            && left.arguments.len() == right.arguments.len()
+            && left
+                .arguments
+                .iter()
+                .zip(right.arguments.iter())
+                .all(|pair| match pair {
+                    (crate::TypeArgument::Type(left), crate::TypeArgument::Type(right)) => {
+                        self.same_type(*left, *right)
+                    }
+                    (left, right) => left == right,
+                })
+    }
 }
 
 fn type_error(message: impl Into<String>) -> Refusal {
@@ -810,6 +876,18 @@ impl Scope for World {
             width: 64,
         })
     }
+
+    fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
+        self.types
+            .iter()
+            .filter(|info| {
+                info.identity
+                    .as_deref()
+                    .is_some_and(|identity| identity.base.as_ref() == base)
+            })
+            .map(|info| info.reference)
+            .collect()
+    }
 }
 
 impl Machine for World {
@@ -817,10 +895,16 @@ impl Machine for World {
     type Step = Step;
     type Place = Place;
 
+    /// Runs out of work as an inspection's budget does.
     fn charge(&mut self) -> Result<(), Stop> {
         match &mut self.work {
             Some(0) => Err(Stop::missing(VariableState::Unavailable(
-                VariableUnavailableReason::EvaluationLimit,
+                VariableUnavailableReason::InspectionLimit(crate::InspectionExhaustion {
+                    resource: crate::InspectionLimit::ExpressionWork,
+                    limit: 0,
+                    used: 0,
+                    requested: 1,
+                }),
             ))),
             Some(work) => {
                 *work -= 1;

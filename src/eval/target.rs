@@ -122,6 +122,20 @@ pub trait Scope: TypeSource {
 
     /// The register a name, without its `$`, means.
     fn register(&self, name: &str) -> Option<Register>;
+
+    /// Whether a view presents values of `ty` with a length, as one
+    /// presents a Go map, which is a pointer.
+    fn has_view(&self, ty: TypeReference) -> bool {
+        let _ = ty;
+        false
+    }
+
+    /// The types whose identity has this base, in a stable order, for
+    /// views that construct a type from its arguments.
+    fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
+        let _ = base;
+        Vec::new()
+    }
 }
 
 /// Why running stopped short of a value.

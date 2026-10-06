@@ -4,7 +4,7 @@
 //! for N of the character c, and `problem:` says the view must refuse the
 //! value, and why.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CString, OsString};
 use std::hint::black_box;
 use std::mem::ManuallyDrop;
@@ -38,6 +38,15 @@ fn main() {
     let mut unit_ring: VecDeque<()> = VecDeque::new(); // VIEW: unit_ring => len=2 [{}, {}]
     unit_ring.push_back(());
     unit_ring.push_front(());
+    let mut hashed: HashMap<i32, i32> = HashMap::new(); // VIEW: hashed => len=2 {1: 10, 2: 20} (any order)
+    hashed.insert(1, 10);
+    hashed.insert(2, 20);
+    let mut named: HashMap<String, u64> = HashMap::new(); // VIEW: named => len=1 {"one": 1}
+    named.insert(String::from("one"), 1);
+    let no_hashed: HashMap<i32, i32> = HashMap::new(); // VIEW: no_hashed => len=0 {}
+    let many_hashed: HashMap<u32, u32> = (0..300).map(|key| (key, key * 2)).collect(); // VIEW: many_hashed => count: 300
+    let set: HashSet<u8> = HashSet::from([7, 9]); // VIEW: set => len=2 [7, 9] (any order)
+    let no_set: HashSet<u8> = HashSet::new(); // VIEW: no_set => len=0 []
     // A pointer to a string in no mapped memory, and one to none at all.
     let lost_text = 0x10 as *const String; // VIEW: lost_text => problem: inaccessible
     let no_text: *const String = std::ptr::null(); // VIEW: no_text => stored
@@ -72,6 +81,12 @@ fn main() {
         &ring,
         &units,
         &unit_ring,
+        &hashed,
+        &named,
+        &no_hashed,
+        &many_hashed,
+        &set,
+        &no_set,
         &lost_text,
         &no_text,
         &past_capacity,

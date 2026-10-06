@@ -52,3 +52,28 @@ view rust alloc::**::CString {
     check len(inner) >= 1
     show text(inner, len(inner) - 1)
 }
+
+# hashbrown's table, under std::collections::HashMap and HashSet. A bucket
+# is full when its control byte's top bit is clear, and the buckets lie
+# just below the control bytes, the first nearest.
+view rust std::collections::hash::map::HashMap<K, V, _> {
+    let table = base.table.table
+    type Pair = arg(typeof(base.table), 0)
+    let buckets = table.bucket_mask + 1
+    let control = inner(table.ctrl) as *u8
+    let items = table.items
+    check items <= buckets
+    show map(items) for i in range(buckets) if control[i] & 0x80 == 0
+        => (control as *Pair)[-1 - i].0 : (control as *Pair)[-1 - i].1
+}
+
+view rust std::collections::hash::set::HashSet<T, _> {
+    let table = base.map.table.table
+    type Pair = arg(typeof(base.map.table), 0)
+    let buckets = table.bucket_mask + 1
+    let control = inner(table.ctrl) as *u8
+    let items = table.items
+    check items <= buckets
+    show sequence(items) for i in range(buckets) if control[i] & 0x80 == 0
+        => (control as *Pair)[-1 - i].0
+}

@@ -45,6 +45,7 @@ use super::report::{Failure, Trace};
 use super::schedule::{Action, Scheduler};
 use super::semantics::{self, Begun, Inspected, Judged, Unwound};
 use super::swarm::Swarm;
+use super::views;
 use super::watches::{self, Intent};
 use crate::backend::sim_edge::{
     Preemption, SimController, SimExecutable, SimLaunch, SimParts, SimWaiter,
@@ -107,6 +108,11 @@ pub enum Sabotage {
     /// Threads other than a process's first take no debug exception for
     /// an access their slots cover.
     MissWatchTraps,
+    /// Ptrace reads of a word that points eight bytes past itself, as a
+    /// linked node's next link does when its successor follows it in
+    /// memory, report the node after that successor, so a list walk skips
+    /// a node.
+    SkipLinkedNodes,
 }
 
 impl Default for Settings {
@@ -651,10 +657,87 @@ impl<'a> World<'a> {
                         self.machine.marks.borrow_mut().hit(Mark::MarkerHeld);
                     }
                 }
-                Observation::Backtrace { .. } | Observation::Variables { .. } => {}
+                Observation::Presented {
+                    stop,
+                    name,
+                    value,
+                    whole,
+                    paged,
+                } if self.still_at(stop) => {
+                    let reached = self
+                        .judge_presented(&name, &value, &whole, &paged)
+                        .map_err(|message| {
+                            Failure::debugger("views", format!("`{name}`: {message}"))
+                        })?;
+                    let mut marks = self.machine.marks.borrow_mut();
+                    for mark in reached {
+                        marks.hit(mark);
+                    }
+                }
+                Observation::Backtrace { .. }
+                | Observation::Variables { .. }
+                | Observation::Presented { .. } => {}
             }
         }
         Ok(())
+    }
+
+    /// Judges a container's presentation, and its pages, by the views
+    /// oracle, against the memory of the global the program holds it in.
+    fn judge_presented(
+        &self,
+        name: &str,
+        value: &crate::InspectedValue,
+        whole: &Result<Vec<crate::ValueChildPage>, String>,
+        paged: &Result<Vec<crate::ValueChildPage>, String>,
+    ) -> Result<Vec<Mark>, String> {
+        let Some((_, image_address, _)) = self
+            .variant
+            .globals
+            .iter()
+            .find(|(global, ..)| global == name)
+        else {
+            return Ok(Vec::new());
+        };
+        let address = image_address + self.variant.image.bias();
+        match &value.state {
+            crate::VariableState::Available {
+                source: crate::VariableValueSource::Memory(source),
+                ..
+            } if source.get() == address => {}
+            state => {
+                return Err(format!(
+                    "the program holds it at {address:#x}, but the debugger read {state:?}"
+                ));
+            }
+        }
+        let kernel = self.machine.kernel.borrow();
+        let Some(tgid) = self
+            .controller
+            .as_ref()
+            .and_then(|controller| controller.truth().inferior)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(process) = kernel.processes.get(&tgid) else {
+            return Ok(Vec::new());
+        };
+        let memory = |at: u64, size: u64| process.space.read_user(at, size);
+        let Some(truth) = views::truth(name, address, &memory) else {
+            return Ok(Vec::new());
+        };
+        let items = |fetched: &Result<Vec<crate::ValueChildPage>, String>| match fetched {
+            Ok(fetched) => {
+                for one in fetched {
+                    views::within(one, crate::InspectionLimits::default())?;
+                }
+                views::items(fetched)
+            }
+            Err(error) => Err(format!("reading its elements failed: {error}")),
+        };
+        let shown = views::shown(value, items(whole)?, items(paged)?)
+            .ok_or_else(|| format!("its view presented nothing: {:?}", value.state))?;
+        views::judge(&truth, &shown)
     }
 
     /// Follows the watchpoints the client now knows of: the kernel watches
@@ -1024,6 +1107,7 @@ fn script(
             .collect(),
         marker_rows: marker_rows(program, variant),
         globals: variant.globals.clone(),
+        views: program.views.clone(),
         debug: swarm.debug,
         image: Arc::clone(&variant.image),
         attach,

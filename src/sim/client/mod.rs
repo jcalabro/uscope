@@ -76,6 +76,9 @@ pub struct Script {
     /// Small objects the program defines, which it may watch: name, image
     /// address, and size.
     pub globals: Vec<(String, u64, u64)>,
+    /// The views the program's types are presented with, which the client
+    /// loads into the session.
+    pub views: Option<Arc<str>>,
     /// How the kernel answers debug-register requests.
     pub debug: DebugBehavior,
     /// The program the world started untraced, which the client attaches
@@ -129,6 +132,15 @@ pub enum Observation {
         backtrace: Backtrace,
         /// Expressions evaluated in the same frame at the same stop.
         evaluations: Vec<Evaluated>,
+    },
+    /// A container a view presents, as a global's value, with its elements
+    /// in one page and in pages of a smaller size.
+    Presented {
+        stop: StopId,
+        name: String,
+        value: Box<crate::InspectedValue>,
+        whole: Result<Vec<crate::ValueChildPage>, String>,
+        paged: Result<Vec<crate::ValueChildPage>, String>,
     },
 }
 
@@ -274,6 +286,7 @@ impl Client {
     /// Runs the session to its end: requests, then a shutdown.
     pub async fn run(self) -> Result<(), Failure> {
         let mut events = self.handle.subscribe();
+        self.load_views().await?;
         let mut breakpoints = Vec::new();
         for _ in 0..self.script.early_breakpoints {
             self.add_breakpoint(&mut breakpoints).await?;
@@ -366,6 +379,26 @@ impl Client {
             }
         }
         self.shutdown().await
+    }
+
+    /// Loads the views the program's types are presented with, if it has
+    /// any.
+    async fn load_views(&self) -> Result<(), Failure> {
+        let Some(views) = &self.script.views else {
+            return Ok(());
+        };
+        let errors = self
+            .handle
+            .load_views(&[("program.views", views)])
+            .await
+            .map_err(|error| protocol(format!("loading views failed: {error}")))?;
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(protocol(format!(
+                "the program's views have errors: {errors:?}"
+            )))
+        }
     }
 
     /// Marks what a new stop reports, failing on what no golden program

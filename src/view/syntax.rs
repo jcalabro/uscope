@@ -4,8 +4,8 @@
 //! expression in the view dialect, so the parser here finds where each one
 //! ends and hands its text to the expression parser. An expression ends at
 //! the end of its statement, at a `,` or `)` that closes what holds it, at
-//! a `{` or `}`, or before one of the words `or`, `for`, `if`, `else`, and
-//! the arrow `=>`. A statement ends at a line that begins another statement
+//! a `{` or `}`, or before one of the words `or`, `for`, `if`, `else`,
+//! `let`, and the arrow `=>`. A statement ends at a line that begins another statement
 //! or closes the view, so a long expression may continue on the next line.
 //!
 //! An error in one view skips that view; the views after it are still read.
@@ -33,9 +33,12 @@ const MAX_SHAPE_DEPTH: usize = 16;
 /// How deeply type patterns may nest in arguments.
 const MAX_PATTERN_DEPTH: usize = 16;
 
+/// The most generators one sequence or map may nest.
+pub const MAX_CLAUSES: usize = 4;
+
 /// Words that end an expression, so a member with one of these names must
 /// be written in backticks.
-const STOP_WORDS: [&str; 4] = ["or", "for", "if", "else"];
+const STOP_WORDS: [&str; 5] = ["or", "for", "if", "else", "let"];
 
 /// Words that begin a statement.
 const STATEMENTS: [&str; 8] = [
@@ -134,6 +137,8 @@ pub enum TypeExpr {
     TypeOf(Expr),
     /// One argument of a type, by position.
     Arg { of: Box<Self>, index: u32 },
+    /// A type declared inside another, as Zig's `Self.Header`.
+    Nested { of: Box<Self>, name: String },
 }
 
 /// One `{expression}` or literal piece of a `summary`.
@@ -168,12 +173,49 @@ pub enum Statement {
     Show(Shape),
 }
 
-/// How many elements a sequence declares.
+/// How many elements a sequence or map declares.
 #[derive(Debug, Clone)]
 pub enum Count {
     Known(Expr),
-    /// `_`: the generator decides.
+    /// `_`: the generators decide.
     Unknown,
+}
+
+/// `P => EXPR`: how a generator reaches the node after `P`.
+#[derive(Debug, Clone)]
+pub struct Link {
+    pub parameter: String,
+    pub expression: Expr,
+}
+
+/// The values a clause's variable takes, in order.
+#[derive(Debug, Clone)]
+pub enum Generator {
+    /// `range(N)`: 0, 1, …, N - 1.
+    Range(Expr),
+    /// `list(HEAD, P => NEXT)`: HEAD, then each node's next, until a null
+    /// pointer or HEAD again.
+    List { head: Expr, next: Link },
+    /// `inorder(ROOT, P => LEFT, P => RIGHT)`: a binary tree's nodes, each
+    /// after its left subtree and before its right; a null pointer is an
+    /// empty tree.
+    Inorder { root: Expr, left: Link, right: Link },
+}
+
+/// What follows a clause's generator, in order: a condition each value
+/// must meet, or a name computed once for each value.
+#[derive(Debug, Clone)]
+pub enum Item {
+    Filter(Expr),
+    Let { name: String, value: Expr },
+}
+
+/// `for VAR in GENERATOR [if FILTER | let NAME = EXPR]…`.
+#[derive(Debug, Clone)]
+pub struct Clause {
+    pub variable: String,
+    pub generator: Generator,
+    pub items: Vec<Item>,
 }
 
 /// What a view presents a value as.
@@ -185,12 +227,18 @@ pub enum Shape {
     Value(Expr),
     /// `empty("TEXT")`.
     Empty(String),
-    /// `sequence(COUNT) for VAR in range(N) => ELEMENT`.
+    /// `sequence(COUNT) CLAUSES => ELEMENT`.
     Sequence {
         count: Count,
-        variable: String,
-        length: Expr,
+        clauses: Vec<Clause>,
         element: Expr,
+    },
+    /// `map(COUNT) CLAUSES => KEY : VALUE`.
+    Map {
+        count: Count,
+        clauses: Vec<Clause>,
+        key: Expr,
+        value: Expr,
     },
     /// `if COND { SHAPE } else { SHAPE }`.
     If {
@@ -706,9 +754,9 @@ impl<'a> Parser<'a> {
                 self.close_call("empty")?;
                 Ok(Shape::Empty(text))
             }
-            "sequence" => {
+            "sequence" | "map" => {
                 self.position += word.len();
-                self.open_call("sequence")?;
+                self.open_call(word)?;
                 self.skip_blank();
                 let count = if self.rest().starts_with('_')
                     && !self
@@ -723,34 +771,28 @@ impl<'a> Parser<'a> {
                 } else {
                     Count::Known(self.expression()?)
                 };
-                self.close_call("sequence")?;
+                self.close_call(word)?;
+                let clauses = self.clauses()?;
                 self.skip_blank();
-                self.expect_word("for", "and a generator after the count")?;
-                let variable = self.name("the generator's variable")?;
-                self.skip_inline();
-                self.expect_word("in", "after the generator's variable")?;
-                self.skip_inline();
-                match self.peek_word() {
-                    Some("range") => self.position += "range".len(),
-                    Some(other @ ("list" | "inorder")) => {
-                        return Err(self.error(format!("`{other}` is not supported yet")));
-                    }
-                    _ => return Err(self.unexpected("`range(N)`")),
+                if word == "sequence" {
+                    self.expect("=>", "before the element")?;
+                    let element = self.expression()?;
+                    return Ok(Shape::Sequence {
+                        count,
+                        clauses,
+                        element,
+                    });
                 }
-                self.open_call("range")?;
-                let length = self.expression()?;
-                self.close_call("range")?;
+                self.expect("=>", "before the entry's key")?;
+                let key = self.key()?;
                 self.skip_blank();
-                if self.peek_word() == Some("if") || self.peek_word() == Some("for") {
-                    return Err(self.error("filters and nested generators are not supported yet"));
-                }
-                self.expect("=>", "before the element")?;
-                let element = self.expression()?;
-                Ok(Shape::Sequence {
+                self.expect(":", "between the entry's key and value")?;
+                let value = self.expression()?;
+                Ok(Shape::Map {
                     count,
-                    variable,
-                    length,
-                    element,
+                    clauses,
+                    key,
+                    value,
                 })
             }
             "if" => {
@@ -771,11 +813,111 @@ impl<'a> Parser<'a> {
                     otherwise: Box::new(otherwise),
                 })
             }
-            "map" | "dynamic" | "match" | "record" => {
+            "dynamic" | "match" | "record" => {
                 Err(self.error(format!("the `{word}` shape is not supported yet")))
             }
-            _ => Err(self.unexpected("a shape: `text`, `value`, `empty`, `sequence`, or `if`")),
+            _ => {
+                Err(self
+                    .unexpected("a shape: `text`, `value`, `empty`, `sequence`, `map`, or `if`"))
+            }
         }
+    }
+
+    /// `for VAR in GENERATOR [if FILTER | let NAME = EXPR]…`, one or more,
+    /// nested.
+    fn clauses(&mut self) -> Parsed<Vec<Clause>> {
+        let mut clauses = Vec::new();
+        loop {
+            self.skip_blank();
+            if self.peek_word() != Some("for") {
+                break;
+            }
+            if clauses.len() == MAX_CLAUSES {
+                return Err(self.error(format!("generators may nest at most {MAX_CLAUSES} deep")));
+            }
+            self.position += "for".len();
+            let variable = self.name("the generator's variable")?;
+            self.skip_inline();
+            self.expect_word("in", "after the generator's variable")?;
+            self.skip_inline();
+            let generator = self.generator()?;
+            let mut items = Vec::new();
+            loop {
+                self.skip_blank();
+                if self.eat_word("if") {
+                    items.push(Item::Filter(self.expression()?));
+                } else if self.eat_word("let") {
+                    let name = self.name("a name")?;
+                    self.skip_inline();
+                    self.expect("=", "after the name")?;
+                    items.push(Item::Let {
+                        name,
+                        value: self.expression()?,
+                    });
+                } else {
+                    break;
+                }
+            }
+            clauses.push(Clause {
+                variable,
+                generator,
+                items,
+            });
+        }
+        if clauses.is_empty() {
+            return Err(self.unexpected("`for` and a generator after the count"));
+        }
+        Ok(clauses)
+    }
+
+    /// `range(N)`, `list(HEAD, P => NEXT)`, or `inorder(ROOT, P => LEFT,
+    /// P => RIGHT)`.
+    fn generator(&mut self) -> Parsed<Generator> {
+        let Some(word @ ("range" | "list" | "inorder")) = self.peek_word() else {
+            return Err(self.unexpected("a generator: `range`, `list`, or `inorder`"));
+        };
+        self.position += word.len();
+        self.open_call(word)?;
+        let first = self.expression()?;
+        let generator = match word {
+            "range" => Generator::Range(first),
+            "list" => Generator::List {
+                head: first,
+                next: self.link()?,
+            },
+            _ => Generator::Inorder {
+                root: first,
+                left: self.link()?,
+                right: self.link()?,
+            },
+        };
+        self.close_call(word)?;
+        Ok(generator)
+    }
+
+    /// `, P => EXPR`.
+    fn link(&mut self) -> Parsed<Link> {
+        self.skip_blank();
+        self.expect(",", "before the next argument")?;
+        self.skip_blank();
+        let parameter = self.name("the node's name")?;
+        self.skip_blank();
+        self.expect("=>", "after the node's name")?;
+        let expression = self.expression()?;
+        Ok(Link {
+            parameter,
+            expression,
+        })
+    }
+
+    /// An entry's key, which ends at a `:` of its own.
+    fn key(&mut self) -> Parsed<Expr> {
+        self.skip_inline();
+        let start = self.position;
+        let end = self.scan_expression_until(true);
+        let expression = self.expression_text(start, end)?;
+        self.position = end;
+        Ok(expression)
     }
 
     /// `{ [show] SHAPE }`.
@@ -899,6 +1041,34 @@ impl<'a> Parser<'a> {
             return Err(self.error("the type nests too deeply"));
         }
         self.skip_inline();
+        let mut ty = self.type_operand(depth)?;
+        // `.NAME` or `::NAME` after `typeof(…)` or `arg(…)` names a type
+        // declared inside it.
+        while matches!(
+            ty,
+            TypeExpr::TypeOf(_) | TypeExpr::Arg { .. } | TypeExpr::Nested { .. }
+        ) {
+            let separator = if self.rest().starts_with("::") {
+                2
+            } else if self.rest().starts_with('.') {
+                1
+            } else {
+                break;
+            };
+            self.position += separator;
+            let Some(name) = self.word() else {
+                return Err(self.unexpected("the name of a type declared inside it"));
+            };
+            ty = TypeExpr::Nested {
+                of: Box::new(ty),
+                name: name.to_owned(),
+            };
+        }
+        Ok(ty)
+    }
+
+    /// A type for a `type` statement, without the types declared inside it.
+    fn type_operand(&mut self, depth: usize) -> Parsed<TypeExpr> {
         match self.peek_word() {
             Some("typeof") if self.rest()["typeof".len()..].trim_start().starts_with('(') => {
                 self.position += "typeof".len();
@@ -1004,12 +1174,28 @@ impl<'a> Parser<'a> {
 
     /// Where the expression at the cursor ends.
     fn scan_expression(&self) -> usize {
+        self.scan_expression_until(false)
+    }
+
+    /// Where the expression at the cursor ends; with `colon`, also at a `:`
+    /// that no `?` before it in the expression takes and that does not
+    /// begin `::`.
+    fn scan_expression_until(&self, colon: bool) -> usize {
         let bytes = self.text.as_bytes();
         let mut depth = 0_usize;
+        let mut conditionals = 0_usize;
         let mut index = self.position;
         let mut end = index;
         while let Some(&byte) = bytes.get(index) {
             match byte {
+                b'?' if depth == 0 => conditionals += 1,
+                b':' if depth == 0 && bytes.get(index + 1) == Some(&b':') => {
+                    index += 2;
+                    end = index;
+                    continue;
+                }
+                b':' if depth == 0 && conditionals > 0 => conditionals -= 1,
+                b':' if depth == 0 && colon => return end,
                 b'"' | b'\'' => {
                     index = skip_literal(self.text, index, byte);
                     end = index;
@@ -1138,6 +1324,11 @@ fn blank_comments(text: &str) -> String {
         }
     }
     out
+}
+
+/// Parses a type with arguments, written as a pattern is.
+pub fn type_pattern(text: &str) -> Result<Pattern, String> {
+    parse_pattern(text, 0)
 }
 
 /// Parses a type pattern.

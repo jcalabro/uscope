@@ -925,6 +925,14 @@ pub enum ValueChildRelationship {
         /// The zero-based position in the sequence.
         index: u64,
     },
+    /// One entry of a value a view presents as a map. The child is the
+    /// entry's value.
+    Entry {
+        /// The zero-based position among the entries.
+        index: u64,
+        /// The entry's key.
+        key: Arc<MapKey>,
+    },
     /// One named child a view computes, such as a vector's capacity.
     Field {
         /// The name the view gives it.
@@ -932,6 +940,15 @@ pub enum ValueChildRelationship {
     },
     /// The value as it is stored, without its view.
     Raw,
+}
+
+/// The key of one entry of a value a view presents as a map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapKey {
+    /// Its source-facing normalized type.
+    pub type_info: TypeInfo,
+    /// Its current availability and decoded summary.
+    pub state: VariableState,
 }
 
 /// Which bounded resource prevented complete value materialization.
@@ -1719,16 +1736,31 @@ pub enum PresentedShape {
     Empty,
     /// Elements, which are children.
     Sequence,
+    /// Entries, each a key and a value, which are children.
+    Map,
     /// The view failed, for the reason in `problem`, so the value shows as
     /// it is stored.
     Raw,
 }
 
-/// How many elements a presented sequence holds.
+/// How many elements or entries a presented sequence or map holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PresentedCount {
     Exact(u64),
+    /// At least this many: the view leaves the count to its generators, and
+    /// the inspection's budget ended the count first.
+    AtLeast(u64),
+}
+
+impl PresentedCount {
+    /// How many elements are known to exist.
+    #[must_use]
+    pub const fn known(self) -> u64 {
+        match self {
+            Self::Exact(count) | Self::AtLeast(count) => count,
+        }
+    }
 }
 
 /// Why a view could not present a value, or presented only part of it.
@@ -1748,6 +1780,15 @@ pub enum ViewProblem {
     Refused(Arc<str>),
     /// The view declares one count and generates another.
     CountMismatch { declared: u64, generated: u64 },
+    /// A linked structure leads back to a node already visited, so the
+    /// element at this position would repeat an earlier one.
+    Cycle { at: u64 },
+    /// A tree is deeper than a view walks, so it is no tree a library
+    /// builds.
+    TooDeep { depth: u32 },
+    /// The generators passed the most elements a view generates without a
+    /// count.
+    TooMany { limit: u64 },
     /// The debugger failed presenting the value; a defect in uscope.
     Internal(Arc<str>),
 }
@@ -1772,6 +1813,17 @@ impl fmt::Display for ViewProblem {
                 formatter,
                 "the view declares {declared} elements and generates {generated}"
             ),
+            Self::Cycle { at } => write!(
+                formatter,
+                "cycle at element {at}: it leads back to a node already visited"
+            ),
+            Self::TooDeep { depth } => {
+                write!(formatter, "the tree is deeper than {depth} levels")
+            }
+            Self::TooMany { limit } => write!(
+                formatter,
+                "the view generates more than {limit} elements without a count"
+            ),
         }
     }
 }
@@ -1782,7 +1834,8 @@ impl fmt::Display for ViewProblem {
 pub struct Presentation {
     pub view: Arc<ViewName>,
     pub shape: PresentedShape,
-    /// The elements a sequence holds; `None` for other shapes.
+    /// The elements or entries a sequence or map holds; `None` for other
+    /// shapes.
     pub count: Option<PresentedCount>,
     /// A bounded one-line rendering, in one style for every language.
     pub summary: Arc<str>,
@@ -3501,6 +3554,13 @@ impl ModuleImage {
     ) -> Vec<TypeReference> {
         self.type_index
             .instances(language, path, base, &self.types.as_ref())
+    }
+
+    /// The types whose identity has this base, whatever their language,
+    /// path, and arguments, in identifier order.
+    #[must_use]
+    pub fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
+        self.type_index.with_base(base)
     }
 
     /// The types a name could mean, in identifier order: those named

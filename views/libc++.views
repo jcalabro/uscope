@@ -39,3 +39,87 @@ view c++ std::span<T, E> {
     let size = __size_ or E
     show sequence(size) for i in range(size) => __data_[i]
 }
+
+# The ordered containers are red-black trees whose end node's left child is
+# the root. The node type is the one their allocator allocates.
+view c++ std::map<K, V, _, _> {
+    type Node = arg(typeof(__tree_.__node_alloc_), 0)
+    show map(__tree_.__size_)
+        for x in inorder(__tree_.__end_node_.__left_, n => n->__left_, n => n->__right_)
+        => ((Node*)x)->__value_.first : ((Node*)x)->__value_.second
+}
+
+view c++ std::multimap<K, V, _, _> {
+    type Node = arg(typeof(__tree_.__node_alloc_), 0)
+    show map(__tree_.__size_)
+        for x in inorder(__tree_.__end_node_.__left_, n => n->__left_, n => n->__right_)
+        => ((Node*)x)->__value_.first : ((Node*)x)->__value_.second
+}
+
+view c++ std::set<K, _, _> {
+    type Node = arg(typeof(__tree_.__node_alloc_), 0)
+    show sequence(__tree_.__size_)
+        for x in inorder(__tree_.__end_node_.__left_, n => n->__left_, n => n->__right_)
+        => ((Node*)x)->__value_
+}
+
+view c++ std::multiset<K, _, _> {
+    type Node = arg(typeof(__tree_.__node_alloc_), 0)
+    show sequence(__tree_.__size_)
+        for x in inorder(__tree_.__end_node_.__left_, n => n->__left_, n => n->__right_)
+        => ((Node*)x)->__value_
+}
+
+# The unordered containers keep every node on one list from __first_node_.
+view c++ std::unordered_map<K, V, _, _, _> {
+    type Node = arg(typeof(__table_.__node_alloc_), 0)
+    show map(__table_.__size_) for x in list(__table_.__first_node_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_.first : ((Node*)x)->__value_.second
+}
+
+view c++ std::unordered_multimap<K, V, _, _, _> {
+    type Node = arg(typeof(__table_.__node_alloc_), 0)
+    show map(__table_.__size_) for x in list(__table_.__first_node_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_.first : ((Node*)x)->__value_.second
+}
+
+view c++ std::unordered_set<K, _, _, _> {
+    type Node = arg(typeof(__table_.__node_alloc_), 0)
+    show sequence(__table_.__size_) for x in list(__table_.__first_node_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_
+}
+
+view c++ std::unordered_multiset<K, _, _, _> {
+    type Node = arg(typeof(__table_.__node_alloc_), 0)
+    show sequence(__table_.__size_) for x in list(__table_.__first_node_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_
+}
+
+# A list is a ring through its own __end_, which holds no element.
+view c++ std::list<T, _> {
+    type Node = arg(typeof(__node_alloc_), 0)
+    let sentinel = &__end_
+    show sequence(__size_) for x in list(sentinel, n => n->__next_) if x != sentinel
+        => ((Node*)x)->__value_
+}
+
+# A forward list keeps no count; its last node links to nothing.
+view c++ std::forward_list<T, _> {
+    type Node = arg(typeof(__alloc_), 0)
+    show sequence(_) for x in list(__before_begin_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_
+}
+
+# A deque's elements are in blocks, which __map_ points to, starting
+# __start_ elements into the first. Neither the object nor its debug
+# information holds a block's size: libc++ makes a block 4096 bytes of
+# elements, or 16 elements of 256 bytes or more.
+view c++ std::deque<T, _> {
+    let block = sizeof(T) < 256 ? 4096 / sizeof(T) : 16
+    let map = __map_.__begin_
+    let start = __start_
+    let size = __size_
+    let blocks = __map_.__end_ - map
+    check blocks >= 0 && start + size <= blocks * block
+    show sequence(size) for i in range(size) => map[(start + i) / block][(start + i) % block]
+}

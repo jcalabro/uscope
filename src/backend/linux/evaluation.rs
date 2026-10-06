@@ -457,6 +457,16 @@ impl<P: InspectionOps> Scope for Frame<'_, P> {
         TypeLookup::NotFound
     }
 
+    fn has_view(&self, ty: TypeReference) -> bool {
+        self.controller.views.enabled
+            && self
+                .controller
+                .view_choice(ty)
+                .bound
+                .as_ref()
+                .is_some_and(|bound| bound.shape.has_elements() || bound.shape.has_text())
+    }
+
     fn plan(
         &self,
         from: TypeReference,
@@ -538,7 +548,7 @@ impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
         global_context_address(self.frame.resolved, module)
     }
 
-    fn context(&self, module: &RuntimeModule) -> crate::debug_info::VariableContext {
+    pub(super) fn context(&self, module: &RuntimeModule) -> crate::debug_info::VariableContext {
         variable_context(
             self.frame.stop_id,
             self.frame.pid,
