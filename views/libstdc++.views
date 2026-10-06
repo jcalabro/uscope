@@ -1,7 +1,9 @@
 uscope-views 1
 
 # GCC's libstdc++. Verified against gcc 15.2 and clang 21.1.8 with
-# libstdc++ 15, by tests/fixtures/cpp/containers.cpp.
+# libstdc++ 15, by tests/fixtures/cpp/containers.cpp, in the C++11 and
+# copy-on-write ABIs, in debug mode, linked statically, and with clang's
+# -gsimple-template-names.
 
 # std::string and its other characters, in the C++11 ABI: a pointer and a
 # length, with short strings in the object's own buffer.
@@ -120,9 +122,10 @@ view c++ std::unordered_multiset<K, _, _, _> {
         => *(Value*)&((Node*)x)->_M_storage
 }
 
-# A list is a ring through its own _M_node, which holds no element.
+# A list is a ring through its own _M_node, which holds no element. Under
+# _GLIBCXX_DEBUG, the node types are in std::__cxx1998.
 view c++ std::list<T, _> {
-    type Node = std::_List_node<T>
+    type Node = std::_List_node<T> or std::__cxx1998::_List_node<T>
     let sentinel = &_M_impl._M_node
     show sequence(_M_impl._M_node._M_size)
         for x in list(sentinel, n => n->_M_next) if x != sentinel
@@ -131,7 +134,7 @@ view c++ std::list<T, _> {
 
 # The old ABI's list keeps no count.
 view c++ std::list<T, _> {
-    type Node = std::_List_node<T>
+    type Node = std::_List_node<T> or std::__cxx1998::_List_node<T>
     let sentinel = &_M_impl._M_node
     show sequence(_) for x in list(sentinel, n => n->_M_next) if x != sentinel
         => *(T*)&((Node*)x)->_M_storage
@@ -139,7 +142,7 @@ view c++ std::list<T, _> {
 
 # A forward list keeps no count; its last node links to nothing.
 view c++ std::forward_list<T, _> {
-    type Node = std::_Fwd_list_node<T>
+    type Node = std::_Fwd_list_node<T> or std::__cxx1998::_Fwd_list_node<T>
     show sequence(_) for x in list(_M_impl._M_head._M_next, n => n->_M_next)
         => *(T*)&((Node*)x)->_M_storage
 }

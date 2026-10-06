@@ -632,6 +632,31 @@ fn views_check_and_explain_a_programs_types_without_a_process() {
     );
 }
 
+/// A program built with line tables only describes no variables or types,
+/// so nothing is presented, and uscope says so rather than guessing.
+#[test]
+fn a_program_without_variable_information_presents_nothing() {
+    let output = batch_output(
+        "containers-rust-limited",
+        &["break barrier", "run", "up", "print text"],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no variable is named `text` here"),
+        "{stderr}"
+    );
+    let check = uscope(&[
+        "views",
+        "check",
+        "build/test-programs/containers-rust-limited",
+    ]);
+    assert_in_order(
+        &assert_success(check),
+        &["no view's pattern names any type"],
+    );
+}
+
 /// `print` shows a map's entries as `key: value` and a linked structure's
 /// elements, and says why a broken one shows as stored.
 #[test]

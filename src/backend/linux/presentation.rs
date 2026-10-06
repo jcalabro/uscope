@@ -744,6 +744,11 @@ impl Sum {
         machine: &mut StopMachine<'_, '_, P>,
     ) -> std::result::Result<Self, Stop> {
         let zig = language == Some(crate::SourceLanguage::Zig);
+        // Zig's optionals and error unions stand for what they hold: the
+        // LLVM backend names their variants `null`, `some`, `success`, and
+        // `error`, and the self-hosted one `null`, `?`, `value`, and
+        // `error`, whose errors it names without the `error.` the LLVM
+        // backend gives them.
         match (zig, name, members) {
             (true, "null", []) => {
                 return Ok(Self {
@@ -751,9 +756,33 @@ impl Sum {
                     summary: "null".to_owned(),
                 });
             }
-            (true, "some" | "success" | "error", [member]) => {
+            (true, "null", [member]) if holds_nothing(member) => {
+                return Ok(Self {
+                    payload: None,
+                    summary: "null".to_owned(),
+                });
+            }
+            (true, "some" | "success" | "?" | "value", [member]) => {
                 return Ok(Self {
                     summary: crate::view::summary::value(Some(&member.type_info), &member.state),
+                    payload: Some(member.clone()),
+                });
+            }
+            (true, "error", [member]) => {
+                let summary = crate::view::summary::value(Some(&member.type_info), &member.state);
+                let named = matches!(
+                    &member.state,
+                    VariableState::Available {
+                        value: crate::VariableValue::Enumeration { matches, .. },
+                        ..
+                    } if !matches.is_empty()
+                );
+                return Ok(Self {
+                    summary: if named && !summary.starts_with("error.") {
+                        format!("error.{summary}")
+                    } else {
+                        summary
+                    },
                     payload: Some(member.clone()),
                 });
             }
@@ -762,6 +791,9 @@ impl Sum {
         // One member named as the variant is its payload: a Rust variant's
         // record of fields, or a Zig tagged union's value.
         let fields = match members {
+            // A payload of no size or no type, such as Zig's `void`, holds
+            // nothing.
+            [member] if member_name(member) == Some(name) && holds_nothing(member) => Vec::new(),
             [member] if member_name(member) == Some(name) => match &member.state {
                 VariableState::Available {
                     value: crate::VariableValue::Record,
@@ -817,6 +849,12 @@ impl Sum {
         };
         Ok(Self { payload, summary })
     }
+}
+
+/// Whether a variant's member holds nothing: of no size, or of a type
+/// that is no type, as Zig's `void` and the type of `null` are.
+fn holds_nothing(member: &ValueChild) -> bool {
+    member.type_info.byte_size == Some(0) || matches!(member.type_info.kind, TypeKind::Unspecified)
 }
 
 /// A child's member name.

@@ -492,6 +492,21 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 Ok(name) => name,
                 Err(error) => return TypeEntry::Malformed(error.to_string().into()),
             };
+        // Self-hosted Zig names a type declared in another by its own name,
+        // and says which one it is in.
+        let explicit_name = match explicit_name {
+            Some(name)
+                if self.zig_units.get(key.unit).copied().unwrap_or(false)
+                    && entry.attr_value(super::die::DW_AT_ZIG_PARENT).is_some() =>
+            {
+                match super::die::zig_qualified_name(self.dwarf, self.units, key.unit, &entry, name)
+                {
+                    Ok(name) => Some(name),
+                    Err(error) => return TypeEntry::Malformed(error.to_string().into()),
+                }
+            }
+            name => name,
+        };
         if explicit_name.is_some() {
             self.explicit_names.insert(id);
         }
@@ -2753,6 +2768,62 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         })
     }
 
+    /// A self-hosted Zig optional pointer, `?*T` or `?[*]T`, as the pointer
+    /// it is: a union of a pointer's size whose discriminant is the
+    /// pointer's own bits, `null` when they are 0, and whose other variant
+    /// is the pointer, as the LLVM backend describes it. Any other type is
+    /// itself.
+    fn zig_nullable_pointer(&self, info: TypeInfo) -> TypeInfo {
+        let resolved = |reference: TypeReference| match self.entries.get(reference.id.index()) {
+            Some(TypeEntry::Resolved(info)) => Some(info),
+            _ => None,
+        };
+        let TypeKind::Variant {
+            common_members,
+            bases,
+            discriminant,
+            variants,
+            ..
+        } = &info.kind
+        else {
+            return info;
+        };
+        let VariantDiscriminant::Stored(discriminant) = discriminant.as_ref() else {
+            return info;
+        };
+        let whole = |member: &RecordMember| {
+            member.layout == RecordMemberLayout::ByteOffset(0)
+                && resolved(member.type_ref).and_then(|member| member.byte_size) == info.byte_size
+        };
+        let pointer = match variants.as_ref() {
+            [null, some]
+                if info.name.starts_with('?')
+                    && common_members.is_empty()
+                    && bases.is_empty()
+                    && whole(discriminant)
+                    && null.selection
+                        == VariantSelection::Selectors(Arc::from([VariantSelector::Value(
+                            IntegerValue::Unsigned(0),
+                        )]))
+                    && some.selection == VariantSelection::Default =>
+            {
+                match some.members.as_ref() {
+                    [payload] if whole(payload) => resolved(payload.type_ref)
+                        .filter(|payload| matches!(payload.kind, TypeKind::Pointer { .. })),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        match pointer {
+            Some(pointer) => TypeInfo {
+                kind: pointer.kind.clone(),
+                ..info
+            },
+            None => info,
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "union normalization keeps overlapping storage and scope children explicit"
@@ -2774,7 +2845,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
         }
         match self.has_direct_variant_part(entry, unit_index) {
             Ok(true) => {
-                return self.build_variant_type(
+                let built = self.build_variant_type(
                     entry,
                     unit_index,
                     reference,
@@ -2782,6 +2853,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     explicit_size,
                     VariantStorageKind::Union,
                 );
+                return match built {
+                    TypeEntry::Resolved(info)
+                        if self.zig_units.get(unit_index).copied().unwrap_or(false) =>
+                    {
+                        TypeEntry::Resolved(self.zig_nullable_pointer(info))
+                    }
+                    built => built,
+                };
             }
             Ok(false) => {}
             Err(reason) => return TypeEntry::Malformed(reason),

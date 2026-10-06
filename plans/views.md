@@ -1435,11 +1435,46 @@ What P5 built, and what it learned:
   so a typedef and its target are separate entries. A library's views are
   checked by `views check` only in a session that has loaded it.
 
-**P6 A wider matrix.**
+**P6 A wider matrix.** *Done 2026-10-06.*
 
-- The Zig self-hosted backend.
-- `-gsimple-template-names`, `-fstandalone-debug`, `_GLIBCXX_DEBUG`,
-  `_GLIBCXX_USE_CXX11_ABI=0`, `-static-libstdc++`.
+- [x] The Zig self-hosted backend.
+- [x] `-gsimple-template-names`, `-fstandalone-debug` (in P4),
+  `_GLIBCXX_DEBUG`, `_GLIBCXX_USE_CXX11_ABI=0` (in P2), `-static-libstdc++`.
+- [x] §5.3's Rust `-C debuginfo=limited`.
+- [x] End of phase: `/roast` (one finding, fixed: a cyclic or overlong
+  parent chain gave a fabricated name, and now fails the type), `just`
+  (920 tests), and `just sim 60`.
+
+What P6 found:
+
+- **Zig's own backend** (`containers-zig-self-hosted`) differs from LLVM's
+  in three ways, each now read as what it means:
+  - it names a type declared inside another by its own name and says
+    which in `DW_AT_ZIG_parent` (0x2ccd), so `Header` and even
+    `containers.Shape` lost their qualification; a type with that
+    attribute is named through its parents, as the LLVM backend spells it;
+  - its optionals, error unions, and tagged unions are variant parts whose
+    variants are `null` and `?`, and `value` and `error`, with errors named
+    without `error.` and `void` and `@TypeOf(null)` as unspecified types;
+    the sums of P4 read these too, so both backends show `5`, `null`, `7`,
+    `error.Bad`, and `none`;
+  - `?*T` and `?[*]T` are variant parts whose discriminant is the
+    pointer's own bits; the loader makes them the pointers they are, as
+    the LLVM backend describes them, so the hash maps' views bind.
+
+  It emits no entry type for an array hash map, as ReleaseSafe does not,
+  so those maps show as stored in both.
+- **libstdc++'s debug mode** keeps `list` and `forward_list` nodes in
+  `std::__cxx1998`, which the views now also name; everything else bound
+  unchanged. The fixture corrupts containers through `_M_base()` there,
+  since a debug-mode container begins with its safe-sequence bookkeeping.
+- **`-static-libstdc++` and `-gsimple-template-names`** needed nothing:
+  identities come from template parameter entries, not names.
+- **Limited debug information** describes no variables, so nothing is
+  presented, and uscope says no variable has the name.
+- **Tests.** The C++ matrix has eleven builds and the Zig one three, every
+  marker checked in each; `uscope views check` (P5) found each gap in a
+  third of a second before any process ran.
 
 **P7 Kernels**, when the first built-in view needs one (Rust `BTreeMap` or
 classic Go maps):

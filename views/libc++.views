@@ -1,7 +1,7 @@
 uscope-views 1
 
 # LLVM's libc++. Verified against clang 21.1.8 with libc++ 21, by
-# tests/fixtures/cpp/containers.cpp.
+# tests/fixtures/cpp/containers.cpp, with and without -fstandalone-debug.
 
 # std::string: a short string's characters are in the object, a long
 # string's in its buffer, and one bit tells them apart. A long string's

@@ -375,6 +375,25 @@ build_zig_fixture() {
         "${command[@]}"
 }
 
+# Zig's own backend, which Debug builds use by default, describes optionals,
+# error unions, and tagged unions as variant parts, and a type declared in
+# another by its parent.
+build_zig_self_hosted_fixture() {
+    local source="$1"
+    local output="$2"
+    shift 2
+    local -a command=(
+        zig build-exe "$source" -target x86_64-linux-gnu -fno-llvm -fno-strip "$@"
+        "-femit-bin=${output}"
+    )
+    if [[ -z "$zig_version" ]]; then
+        zig_version=$(zig version)
+    fi
+    run_cached_build "$source" "$output" \
+        "compiler=zig ${zig_version}"$'\n'"target=x86_64-linux-gnu"$'\n'"backend=self-hosted" \
+        "${command[@]}"
+}
+
 validation_is_cached() {
     local output="$1"
     local stamp="$2"
@@ -831,6 +850,16 @@ done
 # libstdc++'s copy-on-write string, from before the C++11 ABI.
 build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-oldabi" \
     -O0 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_USE_CXX11_ABI=0
+# libstdc++'s debug mode, whose containers wrap the ordinary ones.
+build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-debug" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -D_GLIBCXX_DEBUG
+# libstdc++ linked into the program.
+build_cpp_fixture g++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-gcc-static" \
+    -O0 -g3 -gdwarf-5 -fPIE -pie -static-libstdc++
+# Template names without their arguments, which only the arguments'
+# entries give.
+build_cpp_fixture clang++ "$cpp_fixtures_dir/containers.cpp" "$output_dir/containers-cpp-clang-simple" \
+    -O0 -g3 -gdwarf-5 -gsimple-template-names -fPIE -pie
 # Only with -fstandalone-debug does clang describe the libc++ classes the
 # program never defines itself, such as a shared_ptr's control block.
 build_cpp_fixture clang++-libc++ "$cpp_fixtures_dir/containers.cpp" \
@@ -879,6 +908,9 @@ build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-r
     --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=0
 build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-o2" \
     --edition=2024 -D warnings -C debuginfo=2 -C codegen-units=1 -C opt-level=2
+# Line tables only: no variables or types, so nothing to present.
+build_program rustc "$rust_fixtures_dir/containers.rs" "$output_dir/containers-rust-limited" \
+    --edition=2024 -D warnings -C debuginfo=limited -C codegen-units=1 -C opt-level=0
 build_go_fixture "$go_fixtures_dir/expressions" "$output_dir/expressions-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/expressions" "$output_dir/expressions-go-o2" \
@@ -916,6 +948,8 @@ build_zig_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig-o2" \
     -O ReleaseSafe -fPIE -fomit-frame-pointer
+build_zig_self_hosted_fixture "$zig_fixtures_dir/containers.zig" "$output_dir/containers-zig-self-hosted" \
+    -O Debug
 build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/expressions.zig" "$output_dir/expressions-zig-o2" \
