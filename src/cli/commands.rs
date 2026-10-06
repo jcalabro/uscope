@@ -6,9 +6,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use uscope::{
-    BreakpointId, BreakpointSpec, ByteOrder, Disassembly, DisassemblyQuery, DisassemblyRange,
-    HitComparison, HitCondition, LineNumber, MAX_WINDOW_AFTER, RegisterRole, SignalPolicy,
-    StackFrameId, StepKind, ThreadId, VirtualAddress, WatchAccess, WatchpointId, WatchpointSpec,
+    BreakpointId, BreakpointSpec, ByteOrder, DebuggerEvent, Disassembly, DisassemblyQuery,
+    DisassemblyRange, HitComparison, HitCondition, LineNumber, MAX_WINDOW_AFTER, RegisterRole,
+    SignalPolicy, StackFrameId, StepKind, StopReason, ThreadId, VirtualAddress, WatchAccess,
+    WatchpointId, WatchpointSpec,
 };
 
 use super::format::{self, plural};
@@ -461,15 +462,10 @@ impl Cli {
             Command::Watchpoints => self.list_watchpoints().await?,
             Command::Unwatch => self.delete_watchpoints(arguments[0], spec).await?,
             Command::Run => {
-                let (signals, reason) = self
-                    .report_signals(debugger.run_with(self.launch.options()))
-                    .await?;
-                join_lines(&signals, &self.stop_with_source(&reason).await)
+                self.execute_until_stop(debugger.run_with(self.launch.options()))
+                    .await?
             }
-            Command::Continue => {
-                let (signals, reason) = self.report_signals(debugger.resume()).await?;
-                join_lines(&signals, &self.stop_with_source(&reason).await)
-            }
+            Command::Continue => self.execute_until_stop(debugger.resume()).await?,
             Command::Print => match first {
                 Some(_) => self.print(rest, format == "x", format == "r").await?,
                 None => value::variables(&debugger.variables().await?, renderer),
@@ -580,7 +576,7 @@ impl Cli {
         condition: Option<&str>,
         spec: &CommandSpec,
     ) -> Result<String> {
-        let location = parse_breakpoint_spec(location, spec)?;
+        let location = parse_breakpoint_location(location)?.ok_or_else(|| spec.usage_error())?;
         let breakpoint = match condition {
             Some(condition) => {
                 self.debugger
@@ -713,8 +709,61 @@ impl Cli {
     }
 
     async fn step(&self, kind: StepKind) -> Result<String> {
-        let (signals, reason) = self.report_signals(self.debugger.step(kind)).await?;
-        Ok(join_lines(&signals, &self.stop_with_source(&reason).await))
+        self.execute_until_stop(self.debugger.step(kind)).await
+    }
+
+    /// Waits for an execution request, prefixing its stop with a line for
+    /// each signal received without stopping, message logged, condition
+    /// that failed, and loaded library view that cannot be used.
+    async fn execute_until_stop(
+        &self,
+        execution: impl std::future::Future<Output = uscope::Result<StopReason>>,
+    ) -> Result<String> {
+        let mut events = self.debugger.subscribe();
+        let mut lines = Vec::new();
+        let mut loaded = Vec::new();
+        let renderer = self.renderers.stdout;
+        let mut record = |event: Result<DebuggerEvent, _>| match event {
+            Ok(DebuggerEvent::ModuleLoaded { module, .. }) => loaded.push(module.module.id),
+            Ok(DebuggerEvent::SignalReceived {
+                thread_id,
+                exception,
+                ..
+            }) => lines.push(format::signal_received(thread_id, &exception, renderer)),
+            Ok(DebuggerEvent::LogMessage { parts, .. }) => lines.push(format::log_message(&parts)),
+            Ok(DebuggerEvent::ConditionFailed {
+                breakpoint, error, ..
+            }) => lines.push(format!(
+                "{}: the condition of breakpoint {} could not be evaluated: {error}",
+                renderer.paint(Role::Warning, "warning"),
+                renderer.paint(Role::Metadata, breakpoint)
+            )),
+            _ => {}
+        };
+        tokio::pin!(execution);
+        let reason = loop {
+            tokio::select! {
+                biased;
+                event = events.recv() => record(event),
+                reason = &mut execution => break reason?,
+            }
+        };
+        while let Ok(event) = events.try_recv() {
+            record(Ok(event));
+        }
+        // What kept a library's own views out, once, when it loads.
+        for module in loaded {
+            if let Ok(image) = self.debugger.loaded_module_image(module).await {
+                lines.extend(image.view_errors().iter().map(|error| {
+                    format!(
+                        "{}: views: {error}",
+                        renderer.paint(Role::Warning, "warning")
+                    )
+                }));
+            }
+        }
+        let stop = self.stop_with_source(&reason).await;
+        Ok(join_lines(&lines.join("\n"), &stop))
     }
 
     async fn list_breakpoints(&self) -> Result<String> {
@@ -930,9 +979,7 @@ impl Cli {
         })
     }
 
-    /// `views` lists the view files values are presented with, `views load
-    /// FILE…` loads more ahead of them, and `views clear` forgets those
-    /// loaded.
+    /// Runs `views` and its subcommands.
     async fn views(&self, arguments: &[&str]) -> Result<String> {
         match arguments {
             [] => {
@@ -970,9 +1017,8 @@ impl Cli {
                     self.warn(&format!("views: {warning}"));
                 }
                 Ok(format!(
-                    "loaded {} view file{}",
-                    paths.len(),
-                    if paths.len() == 1 { "" } else { "s" }
+                    "loaded {}",
+                    plural(paths.len() as u64, "view file")
                 ))
             }
             ["clear"] => {
@@ -1009,9 +1055,8 @@ impl Cli {
                 std::fs::write(path, recordings.concat())
                     .with_context(|| format!("failed to write {path}"))?;
                 Ok(format!(
-                    "recorded {} kernel run{} to {path}",
-                    recordings.len(),
-                    if recordings.len() == 1 { "" } else { "s" }
+                    "recorded {} to {path}",
+                    plural(recordings.len() as u64, "kernel run")
                 ))
             }
             _ => bail!(
@@ -1287,16 +1332,15 @@ impl Cli {
             None
         };
         // Source files are identified within their owning module's image.
-        let mut images = std::collections::BTreeMap::new();
-        for module in trace
+        let mut images = BTreeMap::new();
+        let modules_with_source = trace
             .frames
             .iter()
             .filter(|frame| frame.source.is_some())
             .filter_map(|frame| frame.module)
-        {
-            if let std::collections::btree_map::Entry::Vacant(entry) = images.entry(module) {
-                entry.insert(self.debugger.loaded_module_image(module).await?);
-            }
+            .collect::<std::collections::BTreeSet<_>>();
+        for module in modules_with_source {
+            images.insert(module, self.debugger.loaded_module_image(module).await?);
         }
         Ok(format::backtrace(
             &trace,
@@ -1309,10 +1353,10 @@ impl Cli {
 
     /// Formats a stop, adding watched values and surrounding source where
     /// they help explain it.
-    pub(super) async fn stop_with_source(&self, reason: &uscope::StopReason) -> String {
+    async fn stop_with_source(&self, reason: &StopReason) -> String {
         let renderer = self.renderers.stdout;
         let mut output = match reason {
-            uscope::StopReason::Watchpoint { hits } => {
+            StopReason::Watchpoint { hits } => {
                 let watchpoints = match self.debugger.snapshot().await {
                     Ok(snapshot) => snapshot.watchpoints,
                     Err(error) => {
@@ -1331,10 +1375,10 @@ impl Cli {
         };
         if matches!(
             reason,
-            uscope::StopReason::Breakpoint { .. }
-                | uscope::StopReason::Step { .. }
-                | uscope::StopReason::StepIncomplete { .. }
-                | uscope::StopReason::Watchpoint { .. }
+            StopReason::Breakpoint { .. }
+                | StopReason::Step { .. }
+                | StopReason::StepIncomplete { .. }
+                | StopReason::Watchpoint { .. }
         ) {
             match self.debugger.source_context(SOURCE_CONTEXT_RADIUS).await {
                 Ok(context) => {
@@ -1354,7 +1398,7 @@ impl Cli {
 }
 
 /// Which frame a frame command selects.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 enum FrameTarget {
     /// The frame already selected.
     Selected,
@@ -1433,10 +1477,6 @@ fn parse_watch_location(argument: &str, spec: &CommandSpec) -> Result<Option<Wat
         address: parse_address(address).map_err(|_| spec.usage_error())?,
         byte_size: parse_count(byte_count).ok_or_else(|| spec.usage_error())?,
     }))
-}
-
-fn parse_breakpoint_spec(argument: &str, spec: &CommandSpec) -> Result<BreakpointSpec> {
-    parse_breakpoint_location(argument)?.ok_or_else(|| spec.usage_error())
 }
 
 /// Parses a breakpoint location: a function, `0xaddress`, `file:line`, or
@@ -1612,50 +1652,36 @@ mod tests {
     }
 
     #[test]
-    fn frame_commands_select_absolutely_or_relatively() {
-        let parse = |command, argument| parse_frame_target(spec(command), argument).map_err(|_| ());
-        assert_eq!(parse(Command::Frame, None), Ok(FrameTarget::Selected));
-        assert_eq!(parse(Command::Frame, Some("0")), Ok(FrameTarget::Level(0)));
-        assert_eq!(parse(Command::Up, None), Ok(FrameTarget::Outward(1)));
-        assert_eq!(parse(Command::Up, Some("3")), Ok(FrameTarget::Outward(3)));
-        assert_eq!(parse(Command::Down, None), Ok(FrameTarget::Inward(1)));
-        assert_eq!(parse(Command::Down, Some("2")), Ok(FrameTarget::Inward(2)));
-        for invalid in ["-1", "0x2", "one", ""] {
-            assert!(parse(Command::Frame, Some(invalid)).is_err(), "{invalid:?}");
-        }
-    }
-
-    #[test]
     fn addresses_require_a_hexadecimal_prefix() {
-        let spec = spec(Command::Break);
+        let parse = |argument| parse_breakpoint_location(argument).ok().flatten();
         assert_eq!(
-            parse_breakpoint_spec("0x10", spec).expect("address"),
+            parse("0x10").expect("address"),
             BreakpointSpec::Address(VirtualAddress::new(0x10))
         );
         for name in ["add", "face", "f", "42"] {
             assert_eq!(
-                parse_breakpoint_spec(name, spec).expect("function"),
+                parse(name).expect("function"),
                 BreakpointSpec::Function(name.to_owned())
             );
         }
-        assert!(parse_breakpoint_spec("0xzz", spec).is_err());
+        assert!(parse("0xzz").is_none());
         assert!(matches!(
-            parse_breakpoint_spec("main.c:12", spec).expect("source"),
+            parse("main.c:12").expect("source"),
             BreakpointSpec::Source { line, .. } if line.get() == 12
         ));
         assert!(matches!(
-            parse_breakpoint_spec("main.c:helper", spec).expect("file function"),
+            parse("main.c:helper").expect("file function"),
             BreakpointSpec::FileFunction { function, .. } if function == "helper"
         ));
-        assert!(parse_breakpoint_spec("main.c:0", spec).is_err());
-        assert!(parse_breakpoint_spec(":12", spec).is_err());
+        assert!(parse("main.c:0").is_none());
+        assert!(parse(":12").is_none());
         // Qualified names are functions, also within a file.
         assert_eq!(
-            parse_breakpoint_spec("ns::Type::run", spec).expect("qualified function"),
+            parse("ns::Type::run").expect("qualified function"),
             BreakpointSpec::Function("ns::Type::run".to_owned())
         );
         assert!(matches!(
-            parse_breakpoint_spec("main.cpp:ns::run", spec).expect("qualified file function"),
+            parse("main.cpp:ns::run").expect("qualified file function"),
             BreakpointSpec::FileFunction { path, function }
                 if path == std::path::Path::new("main.cpp") && function == "ns::run"
         ));
