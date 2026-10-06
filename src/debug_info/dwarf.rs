@@ -410,10 +410,7 @@ fn load_unwind_info(
             ByteOrder::Little => RunTimeEndian::Little,
             ByteOrder::Big => RunTimeEndian::Big,
         },
-        address_size: match target.pointer_width {
-            PointerWidth::Bits32 => 4,
-            PointerWidth::Bits64 => 8,
-        },
+        address_size: target.pointer_width.bytes(),
         bases,
         go_code,
     })
