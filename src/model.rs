@@ -1157,12 +1157,6 @@ impl ValueChildrenReference {
         self.stop_id
     }
 
-    /// Returns the thread whose frame context produced this capability.
-    #[must_use]
-    pub const fn thread(&self) -> ThreadId {
-        self.thread
-    }
-
     /// Returns the deterministic number of children exposed by this capability.
     #[must_use]
     pub const fn total(&self) -> u64 {
@@ -1294,12 +1288,6 @@ pub struct DereferenceReference {
 }
 
 impl DereferenceReference {
-    /// Returns the stopped snapshot that owns this capability.
-    #[must_use]
-    pub const fn stop_id(&self) -> crate::StopId {
-        self.stop_id
-    }
-
     /// Returns the thread whose frame context produced this capability.
     #[must_use]
     pub const fn thread(&self) -> ThreadId {
@@ -2774,9 +2762,8 @@ pub struct StatementFlags(u8);
 
 impl StatementFlags {
     const IS_STATEMENT: u8 = 1 << 0;
-    const BASIC_BLOCK: u8 = 1 << 1;
-    const PROLOGUE_END: u8 = 1 << 2;
-    const EPILOGUE_BEGIN: u8 = 1 << 3;
+    const PROLOGUE_END: u8 = 1 << 1;
+    const EPILOGUE_BEGIN: u8 = 1 << 2;
 
     pub(crate) const fn empty() -> Self {
         Self(0)
@@ -2784,10 +2771,6 @@ impl StatementFlags {
 
     pub(crate) const fn with_statement(self, enabled: bool) -> Self {
         self.with(Self::IS_STATEMENT, enabled)
-    }
-
-    pub(crate) const fn with_basic_block(self, enabled: bool) -> Self {
-        self.with(Self::BASIC_BLOCK, enabled)
     }
 
     pub(crate) const fn with_prologue_end(self, enabled: bool) -> Self {
@@ -2806,12 +2789,6 @@ impl StatementFlags {
     #[must_use]
     pub const fn is_statement(self) -> bool {
         self.0 & Self::IS_STATEMENT != 0
-    }
-
-    /// Returns whether the row begins a basic block.
-    #[must_use]
-    pub const fn basic_block(self) -> bool {
-        self.0 & Self::BASIC_BLOCK != 0
     }
 
     /// Returns whether the row marks the end of a function prologue.

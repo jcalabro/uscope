@@ -519,12 +519,6 @@ pub struct WatchTarget {
 }
 
 impl WatchTarget {
-    /// Returns the stopped snapshot that resolved this target.
-    #[must_use]
-    pub const fn stop_id(&self) -> StopId {
-        self.stop_id
-    }
-
     /// Returns the expression that named the object.
     #[must_use]
     pub const fn expression(&self) -> &crate::Expression {
@@ -541,12 +535,6 @@ impl WatchTarget {
     #[must_use]
     pub const fn byte_size(&self) -> u64 {
         self.byte_size
-    }
-
-    /// Returns the object's resolved type.
-    #[must_use]
-    pub const fn type_info(&self) -> Option<&crate::TypeInfo> {
-        self.type_info.as_ref()
     }
 
     /// Returns the lifetime that bounds the object's storage.
