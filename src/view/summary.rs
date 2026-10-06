@@ -97,15 +97,21 @@ pub fn scalar(value: &ScalarValue, character: bool) -> String {
             with_character(value.to_string(), u8::try_from(*value).ok())
         }
         ScalarValue::Floating(value) => float(*value),
+        ScalarValue::Complex { real, imaginary } => {
+            let imaginary = float(*imaginary);
+            let sign = if imaginary.starts_with('-') { "" } else { "+" };
+            format!("({}{sign}{imaginary}i)", float(*real))
+        }
     }
 }
 
-/// A float, exactly as its format holds it.
+/// A float, exactly as its format holds it: its shortest digits that read
+/// back as it, with an exponent when it is very large or very small.
 #[must_use]
 pub fn float(value: FloatValue) -> String {
     match value {
-        FloatValue::Binary32(bits) => f32::from_bits(bits).to_string(),
-        FloatValue::Binary64(bits) => f64::from_bits(bits).to_string(),
+        FloatValue::Binary32(bits) => shortest(f32::from_bits(bits)),
+        FloatValue::Binary64(bits) => shortest(f64::from_bits(bits)),
         FloatValue::X87Extended {
             significand,
             sign_exponent,
@@ -113,6 +119,20 @@ pub fn float(value: FloatValue) -> String {
             u128::from(significand) | (u128::from(sign_exponent) << 64),
         )
         .to_string(),
+    }
+}
+
+/// A float's shortest round-trip digits, which take an exponent past 1e21
+/// or below 1e-6, as JavaScript writes numbers, rather than hundreds of
+/// zeros.
+fn shortest<F: std::fmt::Display + std::fmt::LowerExp>(value: F) -> String {
+    let scientific = format!("{value:e}");
+    let exponent = scientific
+        .rsplit_once('e')
+        .and_then(|(_, exponent)| exponent.parse::<i32>().ok());
+    match exponent {
+        Some(exponent) if !(-6..21).contains(&exponent) => scientific,
+        _ => value.to_string(),
     }
 }
 

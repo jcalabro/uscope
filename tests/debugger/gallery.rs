@@ -8,8 +8,8 @@
 use std::process::Stdio;
 
 use uscope::{
-    FloatValue, IntegerValue, LaunchOptions, StackFrameId, ValueChildRelationship, Variable,
-    VariableValue,
+    FloatValue, IntegerValue, LaunchOptions, StackFrameId, TypeInfo, ValueChildRelationship,
+    Variable, VariableValue,
 };
 
 use super::*;
@@ -160,6 +160,7 @@ async fn check_truth(
         return variable.map_or(Ok(()), |variable| Err(format!("is listed: {variable:?}")));
     }
     let variable = variable.ok_or_else(|| "is not listed".to_owned())?;
+    let mut type_info = variable.type_info.clone();
     let mut type_name = variable.type_info.as_ref().map(|info| info.name.clone());
     let mut state = variable.state.clone();
     for segment in segments {
@@ -189,9 +190,10 @@ async fn check_truth(
                 )
             })?;
         type_name = Some(child.type_info.name.clone());
+        type_info = Some(child.type_info.clone());
         state = child.state.clone();
     }
-    let VariableState::Available { value, text, .. } = &state else {
+    let VariableState::Available { .. } = &state else {
         return if may_be_unavailable
             && matches!(
                 state,
@@ -202,25 +204,7 @@ async fn check_truth(
             Err(format!("is not available: {state:?}"))
         };
     };
-    let integer = |value: &IntegerValue| match value {
-        IntegerValue::Signed(value) => value.to_string(),
-        IntegerValue::Unsigned(value) => value.to_string(),
-        _ => unreachable!("integers are signed or unsigned"),
-    };
-    let shown = match (truth.kind.as_str(), value) {
-        ("int" | "uint", VariableValue::Scalar(ScalarValue::Signed(value))) => value.to_string(),
-        ("int" | "uint", VariableValue::Scalar(ScalarValue::Unsigned(value))) => value.to_string(),
-        ("int" | "uint", VariableValue::Enumeration { value, .. }) => integer(value),
-        ("f64", VariableValue::Scalar(ScalarValue::Floating(FloatValue::Binary64(bits)))) => {
-            format!("{bits:#x}")
-        }
-        ("len", VariableValue::Slice { length, .. }) => length.to_string(),
-        ("string", _) => text
-            .as_ref()
-            .map_or_else(|| format!("{value:?}"), |text| uscope::quoted_text(text)),
-        ("type", _) => type_name.as_deref().unwrap_or("?").to_owned(),
-        _ => format!("{value:?}"),
-    };
+    let shown = shown(&truth.kind, &state, type_info.as_ref());
     if shown == truth.value {
         Ok(())
     } else {
@@ -233,11 +217,65 @@ async fn check_truth(
     }
 }
 
+/// What uscope shows of an available value, written as a truth of `kind`
+/// writes it.
+fn shown(kind: &str, state: &VariableState, type_info: Option<&TypeInfo>) -> String {
+    let VariableState::Available { value, text, .. } = state else {
+        unreachable!("only available values are shown");
+    };
+    let integer = |value: &IntegerValue| match value {
+        IntegerValue::Signed(value) => value.to_string(),
+        IntegerValue::Unsigned(value) => value.to_string(),
+        _ => unreachable!("integers are signed or unsigned"),
+    };
+    match (kind, value) {
+        ("int" | "uint", VariableValue::Scalar(ScalarValue::Signed(value))) => value.to_string(),
+        ("int" | "uint", VariableValue::Scalar(ScalarValue::Unsigned(value))) => value.to_string(),
+        ("int" | "uint", VariableValue::Enumeration { value, .. }) => integer(value),
+        ("f32", VariableValue::Scalar(ScalarValue::Floating(FloatValue::Binary32(bits)))) => {
+            format!("{bits:#x}")
+        }
+        ("f64", VariableValue::Scalar(ScalarValue::Floating(FloatValue::Binary64(bits)))) => {
+            format!("{bits:#x}")
+        }
+        (
+            "c64",
+            VariableValue::Scalar(ScalarValue::Complex {
+                real: FloatValue::Binary32(real),
+                imaginary: FloatValue::Binary32(imaginary),
+            }),
+        ) => format!("{real:#x}:{imaginary:#x}"),
+        (
+            "c128",
+            VariableValue::Scalar(ScalarValue::Complex {
+                real: FloatValue::Binary64(real),
+                imaginary: FloatValue::Binary64(imaginary),
+            }),
+        ) => format!("{real:#x}:{imaginary:#x}"),
+        ("summary", _) => uscope::value_summary(type_info, state),
+        ("len", VariableValue::Slice { length, .. }) => length.to_string(),
+        ("string", _) => text
+            .as_ref()
+            .map_or_else(|| format!("{value:?}"), |text| uscope::quoted_text(text)),
+        ("type", _) => type_info.map_or("?", |info| &info.name).to_owned(),
+        _ => format!("{value:?}"),
+    }
+}
+
 #[tokio::test]
 async fn c_pieces_agree_with_their_program() {
     for (fixture, optimized, required) in [
         ("pieces-gcc-o0", false, &[][..]),
-        ("pieces-gcc-o2", true, &["split:local.first"][..]),
+        (
+            "pieces-gcc-o2",
+            true,
+            &[
+                "split:local.first",
+                "complex:small",
+                "complex:large",
+                "complex:product",
+            ][..],
+        ),
         (
             "pieces-clang-o2",
             true,
@@ -245,13 +283,15 @@ async fn c_pieces_agree_with_their_program() {
                 "split:local.first",
                 "split:local.second",
                 "split:pair.second",
+                "complex:large",
+                "complex:product",
             ][..],
         ),
     ] {
         check_gallery(&Gallery {
             fixture,
             breakpoints: &["reached"],
-            checkpoints: &["split"],
+            checkpoints: &["split", "complex"],
             optimized,
             required,
             go: false,
@@ -273,13 +313,16 @@ async fn go_values_agree_with_their_program() {
                 "pieces:numbers.1",
                 "pieces:pair.X",
                 "pieces:pair.Y",
+                "pieces:ratio",
+                "complex:small",
+                "complex:large",
             ][..],
         ),
     ] {
         check_gallery(&Gallery {
             fixture,
-            breakpoints: &["main.pieces"],
-            checkpoints: &["pieces"],
+            breakpoints: &["main.reached", "main.pieces"],
+            checkpoints: &["complex", "pieces"],
             optimized,
             required,
             go: true,

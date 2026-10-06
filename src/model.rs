@@ -265,6 +265,9 @@ pub enum BaseTypeEncoding {
     Unsigned,
     UnsignedCharacter,
     Floating,
+    /// A complex number: two floats, each half its size, the real part
+    /// first.
+    ComplexFloating,
 }
 
 /// A resolved scalar type independent of its debug-information encoding.
@@ -825,6 +828,11 @@ pub enum ScalarValue {
     Unsigned(u128),
     /// A binary floating-point value retained as exact target bits.
     Floating(FloatValue),
+    /// A complex number, its parts retained as exact target bits.
+    Complex {
+        real: FloatValue,
+        imaginary: FloatValue,
+    },
 }
 
 /// A decoded thin pointer or reference representation.

@@ -215,6 +215,13 @@ fn base_category(base: &BaseType) -> Category {
                 format!("`{}` is not a float format uscope computes with", base.name).into(),
             ),
         },
+        BaseTypeEncoding::ComplexFloating => Category::Opaque(
+            format!(
+                "`{}` is a complex number, which uscope does not compute with",
+                base.name
+            )
+            .into(),
+        ),
     }
 }
 

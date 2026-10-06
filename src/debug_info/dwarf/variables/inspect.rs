@@ -12,18 +12,18 @@ use crate::debug_info::{
 use crate::inspection::InspectionBudget;
 use crate::model::{ArrayDimension, ValueStorage};
 use crate::{
-    AddressValue, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId, DereferenceReference,
-    DereferenceState, DereferenceUnavailableReason, DereferencedValue, Error, ImageAddress,
-    InspectedValue, IntegerValue, RecordMember, RecordMemberLayout, Result, TypeId, TypeInfo,
-    TypeKind, ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren,
-    ValueChildrenReference, Variable, VariableInvalidReason, VariableMalformedKind, VariableState,
-    VariableUnavailableReason, VariableValue, VariableValueSource, Variant, VariantDiscriminant,
-    VirtualAddress,
+    Accessibility, AddressValue, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId,
+    DereferenceReference, DereferenceState, DereferenceUnavailableReason, DereferencedValue, Error,
+    ImageAddress, InspectedValue, IntegerValue, RecordMember, RecordMemberLayout, Result,
+    ScalarValue, TypeId, TypeInfo, TypeKind, TypeReference, ValueChild, ValueChildPage,
+    ValueChildRelationship, ValueChildren, ValueChildrenReference, Variable, VariableInvalidReason,
+    VariableMalformedKind, VariableState, VariableUnavailableReason, VariableValue,
+    VariableValueSource, Variant, VariantDiscriminant, VirtualAddress,
 };
 
 use super::codec::{
-    decode_address, decode_integer_value, decode_scalar, extract_bit_field, significant_bytes,
-    unsigned_value,
+    complex_part, decode_address, decode_integer_value, decode_scalar, extract_bit_field,
+    significant_bytes, unsigned_value,
 };
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, evaluate,
@@ -39,7 +39,7 @@ use super::types::{
 };
 use super::variant::{is_single_default_variant, selected_variant_index};
 use super::{
-    CatalogDataObject, CatalogFunction, DwarfVariableInfo, MAX_AGGREGATE_DEPTH,
+    CatalogDataObject, CatalogFunction, ConstantValue, DwarfVariableInfo, MAX_AGGREGATE_DEPTH,
     MAX_EVALUATION_MEMORY_BYTES, MAX_LOCATION_PIECES, Metadata, MetadataAbsence, ValueDescription,
     malformed_reason,
 };
@@ -916,6 +916,17 @@ impl DwarfVariableInfo {
             }
         };
         if let ValueDescription::Constant(constant) = description {
+            // An integer form holds at most 64 bits. Clang writes a wider
+            // complex constant's real part alone that way, and the imaginary
+            // part it leaves out is not zero.
+            if matches!(&shape, ValueShape::Scalar(base)
+                if base.encoding == BaseTypeEncoding::ComplexFloating && base.byte_size > 8)
+                && !matches!(constant, ConstantValue::Bytes(_))
+            {
+                return Err(EvaluateError::Malformed(
+                    "a complex constant wider than 64 bits is not a block".into(),
+                ));
+            }
             let raw = materialize_constant(
                 constant,
                 usize::try_from(shape.byte_size())
@@ -1229,6 +1240,17 @@ impl DwarfVariableInfo {
         }
     }
 
+    /// The float type of a complex type's parts, if it is complex.
+    fn complex_part_type(&self, base: &BaseType) -> Option<TypeId> {
+        if base.encoding != BaseTypeEncoding::ComplexFloating {
+            return None;
+        }
+        let part = complex_part(base);
+        self.complex_parts
+            .get(&(part.base_name, part.byte_size))
+            .copied()
+    }
+
     fn child_reference(
         storage: &ValueStorage,
         context: VariableContext,
@@ -1397,7 +1419,12 @@ impl DwarfVariableInfo {
         };
         let shape = self.value_shape(member.type_ref.id)?;
         let representation = match &shape {
-            ValueShape::Scalar(base) if !matches!(base.encoding, BaseTypeEncoding::Floating) => {
+            ValueShape::Scalar(base)
+                if !matches!(
+                    base.encoding,
+                    BaseTypeEncoding::Floating | BaseTypeEncoding::ComplexFloating
+                ) =>
+            {
                 base
             }
             ValueShape::Enumeration { representation, .. } => representation,
@@ -1762,6 +1789,22 @@ impl DwarfVariableInfo {
                         VariableValue::Scalar(value),
                         DereferenceState::NotApplicable,
                     ),
+                    // A complex number's parts are its children.
+                    Ok(value @ ScalarValue::Complex { .. })
+                        if self.complex_part_type(base).is_some() =>
+                    {
+                        VariableState::Available {
+                            source,
+                            raw: Some(raw),
+                            value: VariableValue::Scalar(value),
+                            dereference: DereferenceState::NotApplicable,
+                            children: ValueChildren::Available(Self::child_reference(
+                                storage, context, type_id, 2, None,
+                            )),
+                            text: None,
+                            presentation: None,
+                        }
+                    }
                     Ok(value) => leaf(
                         source,
                         raw,
@@ -2119,6 +2162,9 @@ impl DwarfVariableInfo {
                 u64::try_from(members.len().saturating_add(bases.len())).ok()
             }
             ValueShape::Union { members, .. } => u64::try_from(members.len()).ok(),
+            ValueShape::Scalar(base) if base.encoding == BaseTypeEncoding::ComplexFloating => {
+                Some(2)
+            }
             ValueShape::Variant {
                 common_members,
                 bases,
@@ -2238,6 +2284,26 @@ impl DwarfVariableInfo {
                 _ => None,
             }
         };
+        // A complex number's children are its real and imaginary parts.
+        let complex_parts = match &shape {
+            ValueShape::Scalar(base) => self.complex_part_type(base).map(|part| {
+                let half = base.byte_size / 2;
+                let member = |name: &str, offset| RecordMember {
+                    name: Some(name.into()),
+                    type_ref: TypeReference {
+                        image: reference.image,
+                        id: part,
+                    },
+                    layout: RecordMemberLayout::ByteOffset(offset),
+                    accessibility: Accessibility::Public,
+                    artificial: false,
+                    embedded: false,
+                    declaration: None,
+                };
+                [member("real", 0), member("imag", half)]
+            }),
+            _ => None,
+        };
         // An aggregate's children are its bases, then its members, then the
         // members of its active variant.
         let aggregate = match &shape {
@@ -2262,7 +2328,9 @@ impl DwarfVariableInfo {
                     .active_variant
                     .map(|active| (active, &variants[active].members[..])),
             )),
-            _ => None,
+            _ => complex_parts
+                .as_ref()
+                .map(|parts| (reference.target_type, &[][..], &parts[..], None)),
         };
         for index in offset..requested_end {
             if budget.consume_value_nodes(1).is_err() {
