@@ -275,8 +275,8 @@ fn patterns_capture_arguments_and_anchor_at_the_root() {
             "{header}"
         );
     }
-    // A pattern that reaches a parameter pack spells all of it, so
-    // `Pair<T>` no longer names a pair whose pack holds two arguments.
+    // A pattern that reaches a parameter pack spells all of it, so `Pair<T>`
+    // does not name a pair whose pack holds two arguments.
     world.pack(pair, 0);
     assert_eq!(
         shown(&mut world, "c++ app::detail::Pair<T, N>"),
