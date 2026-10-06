@@ -18,7 +18,7 @@ use crate::{
 };
 
 use super::codec::{decode_address, unsigned_value};
-use super::shape::{ValueShape, ValueShapeKind};
+use super::shape::ValueShape;
 use super::{DwarfVariableInfo, VariableRuntime};
 
 const PAGE_SIZE: u64 = 4096;
@@ -174,9 +174,9 @@ impl DwarfVariableInfo {
         budget: &mut InspectionBudget,
     ) -> Option<TextSummary> {
         let mut reader = TextReader { runtime, budget };
-        match (&shape.kind, value) {
+        match (shape, value) {
             (
-                ValueShapeKind::Indirection {
+                ValueShape::Indirection {
                     target: Some(target),
                     ..
                 },
@@ -187,7 +187,7 @@ impl DwarfVariableInfo {
                 Some(reader.c_string(address.address))
             }
             (
-                ValueShapeKind::Array {
+                ValueShape::Array {
                     element,
                     dimensions,
                     ..
@@ -210,7 +210,7 @@ impl DwarfVariableInfo {
                     },
                 })
             }
-            (ValueShapeKind::Slice { text: true, .. }, VariableValue::Slice { length, .. }) => {
+            (ValueShape::Slice { text: true, .. }, VariableValue::Slice { length, .. }) => {
                 let address = match self.read_pointer(storage, 0, &mut reader)? {
                     Ok(address) => address,
                     Err(stopped) => return Some(stopped.summary(Some(*length))),
@@ -218,25 +218,25 @@ impl DwarfVariableInfo {
                 Some(reader.counted_text(address, *length))
             }
             (
-                ValueShapeKind::Record {
+                ValueShape::Record {
                     record, members, ..
                 },
                 _,
             ) => self.record_text(*record, members, storage, &mut reader),
             // A pointer or reference to a string shows the string's text.
             (
-                ValueShapeKind::Indirection {
+                ValueShape::Indirection {
                     target: Some(target),
                     ..
                 },
                 VariableValue::Address(address),
             ) if address.address.get() != 0 => {
                 let storage = ValueStorage::Memory(address.address);
-                match self.value_shape(*target).ok()?.kind {
-                    ValueShapeKind::Record {
+                match self.value_shape(*target).ok()? {
+                    ValueShape::Record {
                         record, members, ..
                     } => self.record_text(record, &members, &storage, &mut reader),
-                    ValueShapeKind::Slice { text: true, .. } => {
+                    ValueShape::Slice { text: true, .. } => {
                         let length = match self.read_word(
                             &storage,
                             self.pointer_bytes() as u64,
@@ -343,7 +343,7 @@ impl DwarfVariableInfo {
         Some((member(members, "str")?.0, member(members, "len")?.0))
     }
 
-    const fn pointer_bytes(&self) -> usize {
+    pub(super) const fn pointer_bytes(&self) -> usize {
         match self.target.pointer_width {
             crate::PointerWidth::Bits32 => 4,
             crate::PointerWidth::Bits64 => 8,
