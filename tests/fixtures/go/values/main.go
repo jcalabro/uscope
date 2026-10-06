@@ -124,6 +124,19 @@ func unnamedResults(value int) (int, string) {
 	return value + 1, "go"
 }
 
+// visibility declares later after its first checkpoint, where it does
+// not exist yet.
+//
+//go:noinline
+func visibility(n int) int {
+	truth("visibility-before", "later", "absent", "")
+	reached("visibility-before")
+	later := n + 1
+	truth("visibility-after", "later", "int", later)
+	reached("visibility-after")
+	return later
+}
+
 // Point is passed in two registers.
 type Point struct{ X, Y int }
 
@@ -147,6 +160,7 @@ func main() {
 	}
 	results(21)
 	unnamedResults(1)
+	visibility(9)
 	text := "pieces"
 	numbers := []int{4, 5, 6}
 	truth("pieces", "text", "string", fmt.Sprintf("%q", text))
