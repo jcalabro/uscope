@@ -710,45 +710,31 @@ pub fn hexadecimal(
         } => Some(*value),
         _ => None,
     };
-    let Some(integer) = integer else {
-        return assignment(
-            &type_info.name,
-            name,
-            &state_summary(type_info, state),
-            renderer,
-        );
-    };
     // An exact integer has no width: a negative one keeps its sign.
     let width = type_info
         .byte_size
         .map(|size| size.saturating_mul(8).min(128));
-    let text = match (integer, width) {
-        (IntegerValue::Signed(value), None) if value < 0 => format!("-{:#x}", value.unsigned_abs()),
+    let text = integer.and_then(|integer| match (integer, width) {
+        (IntegerValue::Signed(value), None) if value < 0 => {
+            Some(format!("-{:#x}", value.unsigned_abs()))
+        }
         (IntegerValue::Signed(value), Some(width)) => {
             let mask = if width >= 128 {
                 u128::MAX
             } else {
                 (1_u128 << width) - 1
             };
-            format!("{:#x}", value.cast_unsigned() & mask)
+            Some(format!("{:#x}", value.cast_unsigned() & mask))
         }
-        (IntegerValue::Signed(value), None) => format!("{value:#x}"),
-        (IntegerValue::Unsigned(value), _) => format!("{value:#x}"),
-        _ => {
-            return assignment(
-                &type_info.name,
-                name,
-                &state_summary(type_info, state),
-                renderer,
-            );
-        }
-    };
-    assignment(
-        &type_info.name,
-        name,
-        &renderer.paint(Role::Value, text).to_string(),
-        renderer,
-    )
+        (IntegerValue::Signed(value), None) => Some(format!("{value:#x}")),
+        (IntegerValue::Unsigned(value), _) => Some(format!("{value:#x}")),
+        _ => None,
+    });
+    let value = text.map_or_else(
+        || state_summary(type_info, state),
+        |text| renderer.paint(Role::Value, text).to_string(),
+    );
+    assignment(&type_info.name, name, &value, renderer)
 }
 
 /// A type's name with the path its producer's name leaves out, as in

@@ -576,7 +576,7 @@ impl Cli {
         condition: Option<&str>,
         spec: &CommandSpec,
     ) -> Result<String> {
-        let location = parse_breakpoint_spec(location, spec)?;
+        let location = parse_breakpoint_location(location)?.ok_or_else(|| spec.usage_error())?;
         let breakpoint = match condition {
             Some(condition) => {
                 self.debugger
@@ -1479,10 +1479,6 @@ fn parse_watch_location(argument: &str, spec: &CommandSpec) -> Result<Option<Wat
     }))
 }
 
-fn parse_breakpoint_spec(argument: &str, spec: &CommandSpec) -> Result<BreakpointSpec> {
-    parse_breakpoint_location(argument)?.ok_or_else(|| spec.usage_error())
-}
-
 /// Parses a breakpoint location: a function, `0xaddress`, `file:line`, or
 /// `file:function`, or `None` when a file or its location is missing. The
 /// `::` of a qualified name such as `ns::run` never separates a file.
@@ -1657,35 +1653,35 @@ mod tests {
 
     #[test]
     fn addresses_require_a_hexadecimal_prefix() {
-        let spec = spec(Command::Break);
+        let parse = |argument| parse_breakpoint_location(argument).ok().flatten();
         assert_eq!(
-            parse_breakpoint_spec("0x10", spec).expect("address"),
+            parse("0x10").expect("address"),
             BreakpointSpec::Address(VirtualAddress::new(0x10))
         );
         for name in ["add", "face", "f", "42"] {
             assert_eq!(
-                parse_breakpoint_spec(name, spec).expect("function"),
+                parse(name).expect("function"),
                 BreakpointSpec::Function(name.to_owned())
             );
         }
-        assert!(parse_breakpoint_spec("0xzz", spec).is_err());
+        assert!(parse("0xzz").is_none());
         assert!(matches!(
-            parse_breakpoint_spec("main.c:12", spec).expect("source"),
+            parse("main.c:12").expect("source"),
             BreakpointSpec::Source { line, .. } if line.get() == 12
         ));
         assert!(matches!(
-            parse_breakpoint_spec("main.c:helper", spec).expect("file function"),
+            parse("main.c:helper").expect("file function"),
             BreakpointSpec::FileFunction { function, .. } if function == "helper"
         ));
-        assert!(parse_breakpoint_spec("main.c:0", spec).is_err());
-        assert!(parse_breakpoint_spec(":12", spec).is_err());
+        assert!(parse("main.c:0").is_none());
+        assert!(parse(":12").is_none());
         // Qualified names are functions, also within a file.
         assert_eq!(
-            parse_breakpoint_spec("ns::Type::run", spec).expect("qualified function"),
+            parse("ns::Type::run").expect("qualified function"),
             BreakpointSpec::Function("ns::Type::run".to_owned())
         );
         assert!(matches!(
-            parse_breakpoint_spec("main.cpp:ns::run", spec).expect("qualified file function"),
+            parse("main.cpp:ns::run").expect("qualified file function"),
             BreakpointSpec::FileFunction { path, function }
                 if path == std::path::Path::new("main.cpp") && function == "ns::run"
         ));
