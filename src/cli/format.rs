@@ -618,22 +618,71 @@ pub fn task(task: &TaskSnapshot, place: &str, selected: bool, renderer: Renderer
         .thread
         .map(|thread| format!(" (thread {})", renderer.paint(Role::Metadata, thread)))
         .unwrap_or_default();
+    let labels = task_labels(task)
+        .map(|labels| format!(" {}", renderer.paint(Role::Name, labels)))
+        .unwrap_or_default();
     format!(
-        "{marker} {} {place}{detail}{thread}",
+        "{marker} {} {place}{detail}{labels}{thread}",
         renderer.paint(Role::Metadata, format_args!("[{}]", task.id.number))
     )
 }
 
-/// Where a task is: the code the program wrote that it runs, or why that
-/// is unknown.
+/// A task's labels as Go's tracebacks show them, `{job: resize, user: "a
+/// b"}`, quoting a key or value only where it needs it; `None` without
+/// labels.
+pub fn task_labels(task: &TaskSnapshot) -> Option<String> {
+    let quoted = |text: &str| {
+        if !text.is_empty()
+            && text
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+        {
+            text.to_owned()
+        } else {
+            format!("{text:?}")
+        }
+    };
+    (!task.labels.is_empty()).then(|| {
+        let pairs = task
+            .labels
+            .iter()
+            .map(|(key, value)| format!("{}: {}", quoted(key), quoted(value)))
+            .collect::<Vec<_>>();
+        format!("{{{}}}", pairs.join(", "))
+    })
+}
+
+/// The function a task's place names: the innermost the program wrote, or
+/// for a task of only the runtime's code, the one it began in.
+pub fn task_function(task: &TaskSnapshot, trace: &Backtrace) -> Option<String> {
+    trace.user_frame().map_or_else(
+        || {
+            task.entry
+                .as_ref()
+                .and_then(|entry| entry.function.as_deref())
+                .map(str::to_owned)
+        },
+        |frame| Some(code_name(frame.function.as_ref(), frame.symbol.as_ref())),
+    )
+}
+
+/// Where a task is: the code the program wrote that it runs, or the
+/// function a task of only the runtime's code began in, or why its frames
+/// are unknown.
 pub fn task_place(
+    task: &TaskSnapshot,
     trace: &uscope::Result<Backtrace>,
     images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
     renderer: Renderer,
 ) -> String {
     match trace {
         Ok(trace) => trace.user_frame().map_or_else(
-            || renderer.paint(Role::Metadata, "<runtime code>").to_string(),
+            || {
+                task_function(task, trace).map_or_else(
+                    || renderer.paint(Role::Metadata, "<runtime code>").to_string(),
+                    |entry| renderer.paint(Role::Name, entry).to_string(),
+                )
+            },
             |frame| {
                 let name = renderer.paint(
                     Role::Name,

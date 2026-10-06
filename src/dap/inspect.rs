@@ -208,21 +208,20 @@ impl Session {
             .backtrace(stop, ExecutionContext::Task(task.id))
             .await
             .ok()
-            .and_then(|trace| {
-                trace.user_frame().map(|frame| {
-                    crate::cli::format::code_name(frame.function.as_ref(), frame.symbol.as_ref())
-                })
-            })
+            .and_then(|trace| crate::cli::format::task_function(task, &trace))
             .unwrap_or_else(|| "?".to_owned());
         let detail = stopped
             .or_else(|| task.detail.as_deref().map(str::to_owned))
             .map(|detail| format!(" — {detail}"))
             .unwrap_or_default();
+        let labels = crate::cli::format::task_labels(task)
+            .map(|labels| format!(" {labels}"))
+            .unwrap_or_default();
         let thread = task
             .thread
             .map(|thread| format!(" (thread {thread})"))
             .unwrap_or_default();
-        format!("[{}] {place}{detail}{thread}", task.id.number)
+        format!("[{}] {place}{detail}{labels}{thread}", task.id.number)
     }
 
     /// What stopped a thread, in a thread's name.

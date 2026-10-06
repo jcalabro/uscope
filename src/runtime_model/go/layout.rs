@@ -175,11 +175,53 @@ impl Threads {
     }
 }
 
+/// What reading a goroutine's profiler labels needs.
+#[derive(Debug, Clone)]
+pub struct Labels {
+    /// `g.labels`, a pointer to a `label.Set`.
+    pub g_labels: u64,
+    /// How a set is laid out. A program that never sets labels may not
+    /// describe it, and then no goroutine has any.
+    pub set: Result<LabelSet, Missing>,
+}
+
+/// How a `label.Set` holds its labels.
+#[derive(Debug, Clone)]
+pub struct LabelSet {
+    /// `label.Set.List`, a slice of `label.Label`.
+    pub list: u64,
+    /// The size of a `label.Label`, and where its key and value strings
+    /// are.
+    pub stride: u64,
+    pub key: u64,
+    pub value: u64,
+}
+
+impl Labels {
+    fn bind(image: &dyn RuntimeImage) -> Result<Self, Missing> {
+        const SET: &str = "internal/runtime/pprof/label.Set";
+        const LABEL: &str = "internal/runtime/pprof/label.Label";
+        let set = || {
+            Ok(LabelSet {
+                list: offset(image, SET, &["List"], 24)?,
+                stride: member(image, LABEL, &[])?.size,
+                key: offset(image, LABEL, &["Key"], 16)?,
+                value: offset(image, LABEL, &["Value"], 16)?,
+            })
+        };
+        Ok(Self {
+            g_labels: offset(image, "runtime.g", &["labels"], 8)?,
+            set: set(),
+        })
+    }
+}
+
 /// Every part of the contract, each bound or missing on its own.
 #[derive(Debug, Clone)]
 pub struct Layout {
     pub goroutines: Result<Goroutines, Missing>,
     pub threads: Result<Threads, Missing>,
+    pub labels: Result<Labels, Missing>,
 }
 
 impl Layout {
@@ -187,6 +229,7 @@ impl Layout {
         Self {
             goroutines: Goroutines::bind(image),
             threads: Threads::bind(image),
+            labels: Labels::bind(image),
         }
     }
 }

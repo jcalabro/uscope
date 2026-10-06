@@ -102,7 +102,13 @@ pub struct RuntimeTask {
     /// Whether the runtime runs the task for its own work, such as a
     /// garbage collector's worker.
     pub internal: bool,
+    /// The key-value labels the program gave the task, in the runtime's
+    /// order, such as Go's profiler labels.
+    pub labels: TaskLabels,
 }
+
+/// A task's labels: keys and their values.
+pub type TaskLabels = Vec<(Arc<str>, Arc<str>)>;
 
 /// The runtime's tasks in one range of its own order, and where the next
 /// range begins.

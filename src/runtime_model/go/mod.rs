@@ -8,11 +8,11 @@ mod layout;
 
 use std::sync::{Arc, OnceLock};
 
-use layout::{Goroutines, Layout, Missing, Threads};
+use layout::{Goroutines, Labels, Layout, Missing, Threads};
 
 use super::{
     CodeAddress, Crossing, Partial, RuntimeImage, RuntimeModel, RuntimeSignals, RuntimeStop,
-    RuntimeTask, TaskContext, TaskPage, ThreadActivity,
+    RuntimeTask, TaskContext, TaskLabels, TaskPage, ThreadActivity,
 };
 use crate::unwind::RegisterFile;
 use crate::{AddressRange, ImageAddress, StackSegment, TaskState, ThreadId, VirtualAddress};
@@ -36,6 +36,8 @@ const OLDEST: (u64, u64) = (1, 20);
 /// The most goroutines one list reads, so a corrupted `allglen` cannot
 /// make the debugger read without end.
 const MAX_GOROUTINES: u64 = 1 << 24;
+/// The most profiler labels read from one goroutine.
+const MAX_LABELS: u64 = 64;
 
 /// The Go runtime in an image whose units Go compiled.
 pub fn detect(
@@ -259,6 +261,7 @@ impl GoRuntime {
             internal: self
                 .internal
                 .is_internal(self.image.as_ref(), entry.wrapping_sub(stop.load_bias())),
+            labels: Vec::new(),
         }))
     }
 
@@ -281,6 +284,13 @@ impl RuntimeModel for GoRuntime {
             }
         };
         let names = self.names(stop);
+        // Without `g.labels`, every goroutine's labels are unknown, which
+        // the page says once.
+        let labels = self.layout.labels.as_ref();
+        if let Err(reason) = labels {
+            page.gaps
+                .push(format!("profiler labels are not read: {reason}").into());
+        }
         let mut index = start;
         while let Some(&g) = usize::try_from(index)
             .ok()
@@ -292,7 +302,17 @@ impl RuntimeModel for GoRuntime {
             }
             index += 1;
             match self.goroutine(stop, names, g) {
-                Ok(Some(task)) => page.value.tasks.push(task),
+                Ok(Some(mut task)) => {
+                    if let Ok(layout) = labels {
+                        match read_labels(stop, layout, g) {
+                            Ok(read) => task.labels = read,
+                            Err(reason) => page.gaps.push(
+                                format!("goroutine {}'s labels: {reason}", task.number).into(),
+                            ),
+                        }
+                    }
+                    page.value.tasks.push(task);
+                }
                 Ok(None) => {}
                 Err(reason) => page.gaps.push(reason),
             }
@@ -694,6 +714,34 @@ fn read_unsigned(stop: &dyn RuntimeStop, address: VirtualAddress, size: usize) -
 
 fn word(stop: &dyn RuntimeStop, address: VirtualAddress) -> Option<u64> {
     read_unsigned(stop, address, 8)
+}
+
+/// The profiler labels of the goroutine at `g`, in the order the program
+/// gave them.
+fn read_labels(stop: &dyn RuntimeStop, layout: &Labels, g: u64) -> Result<TaskLabels, Arc<str>> {
+    let at = |address: u64| VirtualAddress::new(address);
+    let set = word(stop, at(g.wrapping_add(layout.g_labels))).ok_or("g.labels is unreadable")?;
+    if set == 0 {
+        return Ok(Vec::new());
+    }
+    let layout = layout.set.as_ref().map_err(Arc::clone)?;
+    let list = set.wrapping_add(layout.list);
+    let (array, length) = word(stop, at(list))
+        .zip(word(stop, at(list.wrapping_add(8))))
+        .ok_or("the label set is unreadable")?;
+    if length > MAX_LABELS {
+        return Err(format!("{length} labels are more than {MAX_LABELS}").into());
+    }
+    (0..length)
+        .map(|index| {
+            let label = array.wrapping_add(index.wrapping_mul(layout.stride));
+            let text = |offset: u64| {
+                string(stop, at(label.wrapping_add(offset)))
+                    .ok_or_else(|| Arc::<str>::from(format!("label {index} is unreadable")))
+            };
+            Ok((text(layout.key)?, text(layout.value)?))
+        })
+        .collect()
 }
 
 /// A Go string header's text, when it is short and readable.
