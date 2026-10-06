@@ -1754,6 +1754,8 @@ pub enum PresentedShape {
     /// Members a view names, which are children, as a C++ `std::tuple`'s
     /// elements are.
     Record,
+    /// The value as stored, written another way, such as in hexadecimal.
+    Formatted,
     /// The view failed, for the reason in `problem`, so the value shows as
     /// it is stored.
     Raw,

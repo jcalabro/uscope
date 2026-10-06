@@ -324,6 +324,45 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let ty = self.resolve_type(&ty)?;
                 self.offset_constant(&ty, &member, span)
             }
+            NodeKind::ContainerOf {
+                pointer,
+                ty,
+                member,
+            } => {
+                let pointer = self.bind(pointer)?;
+                let target = self.resolve_type(&ty)?;
+                self.container_of(pointer, target, &member, span)
+            }
+            NodeKind::Global(name) => match self.scope.global(&name) {
+                Ok(Lookup::Object { object, ty: Ok(ty) }) => {
+                    self.node(Op::Object(object), Ty::Program(ty), span)
+                }
+                Ok(Lookup::Object {
+                    ty: Err(reason), ..
+                }) => Err(Self::error(
+                    span,
+                    ErrorKind::Unsupported,
+                    format!("`{name}` has a malformed type: {reason}"),
+                )),
+                Ok(Lookup::Ambiguous(candidates)) => Err(Self::error(
+                    span,
+                    ErrorKind::AmbiguousName,
+                    format!(
+                        "`{name}` is ambiguous; select one of {}",
+                        candidates
+                            .iter()
+                            .map(|candidate| format!("`{candidate}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )),
+                Ok(_) => Err(Self::error(
+                    span,
+                    ErrorKind::UnknownName,
+                    format!("the module defines no global `{name}`"),
+                )),
+                Err(refusal) => Err(Self::refused(span, refusal)),
+            },
             NodeKind::Len(operand) => {
                 let operand = self.bind(operand)?;
                 self.length(operand, span)
@@ -704,6 +743,71 @@ impl<'a, S: Scope> Binder<'a, S> {
             Ty::Exact,
             span,
         )
+    }
+
+    /// `container_of(PTR, TYPE, member)`: the address of the `TYPE` whose
+    /// `member` is at `PTR`, the member's offset before it.
+    fn container_of(
+        &mut self,
+        pointer: Bound<S>,
+        target: Ty,
+        member: &str,
+        span: Span,
+    ) -> BindResult<S> {
+        let pointer = self.value(pointer)?;
+        let category = self.category(&pointer.ty);
+        let Category::Pointer(target_of) = &category else {
+            return Err(self.type_error(&pointer, &category, "is not a pointer"));
+        };
+        // The pointer points to the member's type, or to nothing in
+        // particular, so a mistyped view cannot locate the wrong object.
+        let offset = self.offset_constant(&target, member, span)?;
+        let member_type = match &target {
+            Ty::Program(reference) => {
+                representation(self.scope, *reference)
+                    .ok()
+                    .and_then(|(_, info)| match info.kind {
+                        TypeKind::Record { members, .. } => members
+                            .iter()
+                            .find(|candidate| candidate.name.as_deref() == Some(member))
+                            .map(|candidate| candidate.type_ref),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        };
+        let canonical = |ty: TypeReference| representation(self.scope, ty).ok().map(|(ty, _)| ty);
+        let points_to_member = match (target_of, member_type) {
+            (None | Some(Ty::Void), _) => true,
+            (Some(Ty::Program(points_to)), Some(member_type)) => canonical(*points_to)
+                .zip(canonical(member_type))
+                .is_some_and(|(left, right)| self.scope.same_type(left, right)),
+            _ => false,
+        };
+        if !points_to_member {
+            return Err(Self::error(
+                pointer.span,
+                ErrorKind::Type,
+                format!(
+                    "points to `{}`, not to the type of `{member}`",
+                    target_of
+                        .as_ref()
+                        .map_or_else(|| "void".to_owned(), |ty| type_name(self.scope, ty))
+                ),
+            ));
+        }
+        let ty = pointer.ty.clone();
+        let moved = self.node(
+            Op::Offset {
+                pointer: Box::new(pointer),
+                count: Box::new(offset),
+                scale: 1,
+                backward: true,
+            },
+            ty,
+            span,
+        )?;
+        self.convert(moved, Ty::Pointer(Arc::new(target)), span)
     }
 
     // ---- Places and values ----

@@ -1296,7 +1296,11 @@ What P3 built, and what it learned:
 - [x] §3.6 vtables (C++ and Rust `dyn`); Go interfaces and `error`.
 - [x] Go channels.
 - [x] Zig's LLVM-backend optionals, error unions, and tagged unions.
-- [x] End of phase: `/roast`, `just`, and `just sim 60`.
+- [x] End of phase: two `/roast` passes, one over all 41 files and an
+  interactive one over the engine, found nothing (each refuted one
+  candidate); a review of my own found that resolving a spelled pointer
+  scanned every type once per argument, which now uses an index built once.
+  `just` (909 tests) and `just sim 60` (362,739 sessions) passed.
 
 What P4 built, and what it learned:
 
@@ -1366,13 +1370,14 @@ What P4 built, and what it learned:
 
 **P5 User and embedded views, and the authoring tools.**
 
-- Session, user, and project files, and the DAP `viewFiles` launch
+- [ ] Session, user, and project files, and the DAP `viewFiles` launch
   argument.
-- `.debug_uscope_views`, with its C header and Rust macro, and module
+- [ ] `.debug_uscope_views`, with its C header and Rust macro, and module
   scoping.
-- `extend`, `hide`, `format`, `match`, `record`, `container_of`, `global`.
-- `uscope views check` and `views explain`.
-- `docs/writing-views.md`.
+- [x] `extend`, `hide`, `format`, `match`, `record` (in P4),
+  `container_of`, `global`.
+- [ ] `uscope views check` and `views explain`.
+- [ ] `docs/writing-views.md`.
 
 **P6 A wider matrix.**
 

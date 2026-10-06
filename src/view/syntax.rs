@@ -33,6 +33,9 @@ const MAX_SHAPE_DEPTH: usize = 16;
 /// How many members a `record` may have.
 pub const MAX_RECORD_MEMBERS: usize = 64;
 
+/// How many arms a `match` may have.
+const MAX_ARMS: usize = 64;
+
 /// How deeply type patterns may nest in arguments.
 const MAX_PATTERN_DEPTH: usize = 16;
 
@@ -44,8 +47,9 @@ pub const MAX_CLAUSES: usize = 4;
 const STOP_WORDS: [&str; 5] = ["or", "for", "if", "else", "let"];
 
 /// Words that begin a statement.
-const STATEMENTS: [&str; 8] = [
-    "let", "type", "check", "summary", "field", "show", "if", "view",
+const STATEMENTS: [&str; 12] = [
+    "let", "type", "check", "summary", "field", "show", "if", "match", "hide", "format", "view",
+    "extend",
 ];
 
 /// The languages a view applies to.
@@ -112,6 +116,9 @@ pub struct View {
     pub pattern: Pattern,
     /// The language and pattern as written, to name the view by.
     pub header: Arc<str>,
+    /// Whether it is an `extend`, which adds to the view that presents
+    /// the type rather than presenting it.
+    pub extend: bool,
     pub statements: Vec<Statement>,
 }
 
@@ -174,6 +181,65 @@ pub enum Statement {
     Field { name: String, value: Expr },
     /// `show SHAPE`.
     Show(Shape),
+    /// `hide NAME, …`: members and fields left out of the children.
+    Hide { names: Vec<String>, line: u32 },
+    /// `format NAME, … as FORMAT`: members and fields written another way.
+    Format {
+        names: Vec<String>,
+        format: Format,
+        line: u32,
+    },
+}
+
+/// How `format` writes a value.
+#[derive(Debug, Clone)]
+pub enum Format {
+    /// An integer in hexadecimal, in its type's width.
+    Hex,
+    /// An integer as the character it codes.
+    Char,
+    /// A value's bytes in memory, in hexadecimal.
+    Bytes,
+    /// An array or slice of 16-bit units as UTF-16 text.
+    Utf16,
+    /// An integer as the enumerators of `TYPE` whose bits it sets.
+    Flags(TypeExpr),
+    /// An integer as the enumerator of `TYPE` it equals.
+    Enum(TypeExpr),
+    /// An integer count of a unit of time, as a duration.
+    Duration(TimeUnit),
+}
+
+/// The unit a `duration` format counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeUnit {
+    Nanoseconds,
+    Microseconds,
+    Milliseconds,
+    Seconds,
+}
+
+impl TimeUnit {
+    fn parse(word: &str) -> Option<Self> {
+        Some(match word {
+            "ns" => Self::Nanoseconds,
+            "us" => Self::Microseconds,
+            "ms" => Self::Milliseconds,
+            "s" => Self::Seconds,
+            _ => return None,
+        })
+    }
+
+    /// How many nanoseconds one unit is.
+    #[must_use]
+    pub const fn nanoseconds(self) -> u128 {
+        match self {
+            Self::Nanoseconds => 1,
+            Self::Microseconds => 1_000,
+            Self::Milliseconds => 1_000_000,
+            Self::Seconds => 1_000_000_000,
+        }
+    }
 }
 
 /// How many elements a sequence or map declares.
@@ -255,6 +321,9 @@ pub enum Shape {
     /// `dynamic(PTR, TYPE)`: what a pointer points to, as a type that may
     /// be chosen as the program runs.
     Dynamic { pointer: Expr, ty: DynamicType },
+    /// What a `match` with no `_` arm shows when no arm names its value:
+    /// a problem that says the value.
+    Unmatched(Expr),
 }
 
 /// The type a `dynamic` shape presents its pointer's target as.
@@ -553,13 +622,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Moves past the view the cursor is in, to the next line that begins
-    /// with `view`, and returns whether there is one.
+    /// with `view` or `extend`, and returns whether there is one.
     fn skip_to_next_view(&mut self) -> bool {
         // The view the cursor is at, or in, is skipped first.
         self.position += self.rest().chars().next().map_or(1, char::len_utf8);
         while !self.at_end() {
             let line_start = self.position == 0 || self.text.as_bytes()[self.position - 1] == b'\n';
-            if line_start && self.peek_word() == Some("view") {
+            if line_start && matches!(self.peek_word(), Some("view" | "extend")) {
                 return true;
             }
             self.position += self.rest().chars().next().map_or(1, char::len_utf8);
@@ -582,14 +651,12 @@ impl<'a> Parser<'a> {
     fn view(&mut self) -> Parsed<View> {
         let start = self.position;
         let line = self.location(start).0;
-        match self.peek_word() {
-            Some("view") => {}
-            Some("extend") => {
-                return Err(self.error("`extend` is not supported yet; write a whole `view`"));
-            }
-            _ => return Err(self.unexpected("`view`")),
-        }
-        self.position += "view".len();
+        let extend = match self.peek_word() {
+            Some("view") => false,
+            Some("extend") => true,
+            _ => return Err(self.unexpected("`view` or `extend`")),
+        };
+        self.position += if extend { "extend".len() } else { "view".len() };
         self.skip_inline();
         let language_start = self.position;
         let language_word = self
@@ -635,17 +702,27 @@ impl<'a> Parser<'a> {
             }
             let statement_start = self.position;
             let statement = self.statement()?;
-            if matches!(statement, Statement::Show(_)) {
-                if shown {
+            match statement {
+                Statement::Show(_) if extend => {
+                    return Err(self.error_at(
+                        statement_start,
+                        "an `extend` adds to the view that shows the value; it does not `show`",
+                    ));
+                }
+                Statement::Summary(_) | Statement::Check(_) if extend => {
+                    return Err(self.error_at(
+                        statement_start,
+                        "an `extend` adds fields, `hide`s, and `format`s, not checks or summaries",
+                    ));
+                }
+                Statement::Show(_) if shown => {
                     return Err(self.error_at(statement_start, "a view shows its value once"));
                 }
-                shown = true;
+                Statement::Show(_) => shown = true,
+                _ => {}
             }
             statements.push(statement);
             self.end_of_statement()?;
-        }
-        if !shown {
-            return Err(self.error_at(start, "a view needs a `show` statement"));
         }
         self.end_of_statement()?;
         Ok(View {
@@ -654,6 +731,7 @@ impl<'a> Parser<'a> {
             language,
             pattern,
             header: header.into(),
+            extend,
             statements,
         })
     }
@@ -716,12 +794,83 @@ impl<'a> Parser<'a> {
                 self.position += keyword.len();
                 Ok(Statement::Show(self.shape(0)?))
             }
-            // A statement-level `if` chooses between shapes.
-            "if" => Ok(Statement::Show(self.shape(0)?)),
-            "hide" | "format" => Err(self.error(format!("`{keyword}` is not supported yet"))),
-            _ => Err(self
-                .unexpected("a statement: `let`, `type`, `check`, `summary`, `field`, or `show`")),
+            // A statement-level `if` or `match` chooses between shapes.
+            "if" | "match" => Ok(Statement::Show(self.shape(0)?)),
+            "hide" => {
+                self.position += keyword.len();
+                Ok(Statement::Hide {
+                    names: self.names("a member's or field's name")?,
+                    line,
+                })
+            }
+            "format" => {
+                self.position += keyword.len();
+                let names = self.names("a member's or field's name")?;
+                self.skip_inline();
+                self.expect_word("as", "after the names `format` writes")?;
+                self.skip_inline();
+                Ok(Statement::Format {
+                    names,
+                    format: self.format()?,
+                    line,
+                })
+            }
+            _ => Err(self.unexpected(
+                "a statement: `let`, `type`, `check`, `summary`, `field`, `show`, `hide`, or `format`",
+            )),
         }
+    }
+
+    /// `NAME, …`: one or more names.
+    fn names(&mut self, what: &str) -> Parsed<Vec<String>> {
+        let mut names = vec![self.name(what)?];
+        loop {
+            self.skip_inline();
+            if !self.eat(",") {
+                return Ok(names);
+            }
+            names.push(self.name(what)?);
+        }
+    }
+
+    /// What follows `format NAME as`: `hex`, `char`, `bytes`, `utf16`,
+    /// `flags(TYPE)`, `enum(TYPE)`, or `duration(UNIT)`.
+    fn format(&mut self) -> Parsed<Format> {
+        let Some(word) = self.word().map(str::to_owned) else {
+            return Err(self.unexpected("a format"));
+        };
+        Ok(match word.as_str() {
+            "hex" => Format::Hex,
+            "char" => Format::Char,
+            "bytes" => Format::Bytes,
+            "utf16" => Format::Utf16,
+            "flags" | "enum" => {
+                let flags = word == "flags";
+                self.open_call(if flags { "flags" } else { "enum" })?;
+                let ty = self.type_expr(0)?;
+                self.close_call(if flags { "flags" } else { "enum" })?;
+                if flags {
+                    Format::Flags(ty)
+                } else {
+                    Format::Enum(ty)
+                }
+            }
+            "duration" => {
+                self.open_call("duration")?;
+                self.skip_blank();
+                let unit = self
+                    .word()
+                    .and_then(TimeUnit::parse)
+                    .ok_or_else(|| self.unexpected("a unit of time: `ns`, `us`, `ms`, or `s`"))?;
+                self.close_call("duration")?;
+                Format::Duration(unit)
+            }
+            _ => {
+                return Err(self.error(format!(
+                    "`{word}` is no format: write `hex`, `char`, `bytes`, `utf16`, `flags(TYPE)`, `enum(TYPE)`, or `duration(UNIT)`"
+                )));
+            }
+        })
     }
 
     /// Takes `word` when it is the next word, on this line or a later one.
@@ -860,11 +1009,80 @@ impl<'a> Parser<'a> {
                 self.close_call("dynamic")?;
                 Ok(Shape::Dynamic { pointer, ty })
             }
-            "match" => Err(self.error("the `match` shape is not supported yet")),
+            "match" => {
+                self.position += word.len();
+                self.match_shape(depth)
+            }
             _ => Err(self.unexpected(
                 "a shape: `text`, `value`, `empty`, `sequence`, `map`, `record`, `dynamic`, or `if`",
             )),
         }
+    }
+
+    /// `EXPR { VALUE => SHAPE, … _ => SHAPE }`, after `match`, as the
+    /// chain of `if`s it means: each arm whose value equals the matched
+    /// expression's, in order, then `_`, or a problem naming the value.
+    fn match_shape(&mut self, depth: usize) -> Parsed<Shape> {
+        let scrutinee = self.expression()?;
+        self.skip_blank();
+        self.expect("{", "to open the match's arms")?;
+        let mut arms = Vec::new();
+        let mut default = None;
+        loop {
+            self.skip_blank();
+            if self.eat("}") {
+                break;
+            }
+            if arms.len() == MAX_ARMS {
+                return Err(self.error(format!("a match may have at most {MAX_ARMS} arms")));
+            }
+            let arm_start = self.position;
+            if default.is_some() {
+                return Err(self.error("the `_` arm is a match's last"));
+            }
+            let value = if self.rest().starts_with('_')
+                && !self
+                    .rest()
+                    .as_bytes()
+                    .get(1)
+                    .copied()
+                    .is_some_and(is_word_continue)
+            {
+                self.position += 1;
+                None
+            } else {
+                Some(self.expression()?)
+            };
+            self.skip_blank();
+            self.expect("=>", "after the arm's value")?;
+            self.skip_blank();
+            self.eat_word("show");
+            let shape = self.shape(depth + 1)?;
+            match value {
+                Some(value) => {
+                    let line = value.line;
+                    let text = format!("({}) == ({})", scrutinee.text(), value.text());
+                    let expression = Expression::parse_view(&text)
+                        .map_err(|error| self.error_at(arm_start, error.to_string()))?;
+                    arms.push((Expr { expression, line }, shape));
+                }
+                None => default = Some(shape),
+            }
+            self.skip_blank();
+            self.eat(",");
+        }
+        if arms.is_empty() {
+            return Err(self.error("a match needs an arm with a value"));
+        }
+        let mut shape = default.unwrap_or(Shape::Unmatched(scrutinee));
+        for (condition, then) in arms.into_iter().rev() {
+            shape = Shape::If {
+                condition,
+                then: Box::new(then),
+                otherwise: Box::new(shape),
+            };
+        }
+        Ok(shape)
     }
 
     /// `{ NAME = EXPR, … }`, after `record`: names, or positions from 0,
@@ -898,9 +1116,7 @@ impl<'a> Parser<'a> {
             self.expect("=", "after the member's name")?;
             members.push((name, self.expression()?));
             self.skip_blank();
-            if !self.rest().starts_with('}') {
-                self.expect(",", "between the record's members")?;
-            }
+            self.eat(",");
         }
     }
 

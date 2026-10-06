@@ -138,6 +138,20 @@ pub trait Scope: TypeSource {
         let _ = base;
         Vec::new()
     }
+
+    /// The global `name` of the module a view presents a value of, for a
+    /// view's `global(NAME)`; nothing for any other scope.
+    fn global(&self, name: &str) -> Result<Lookup<Self::Object>, Refusal> {
+        let _ = name;
+        Ok(Lookup::NotFound)
+    }
+
+    /// The global `name` of the module whose types this scope binds views
+    /// against, as a step that reaches it from anywhere, and its type.
+    fn global_step(&self, name: &str) -> Result<Option<(Self::Step, TypeReference)>, Refusal> {
+        let _ = name;
+        Ok(None)
+    }
 }
 
 /// Why running stopped short of a value.

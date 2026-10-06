@@ -20,8 +20,8 @@ use crate::{BaseTypeEncoding, TypeArgument, TypeInfo, TypeKind, TypeReference};
 
 use super::pattern::{Captured, Captures};
 use super::syntax::{
-    ArgumentPattern, Clause, Count, DynamicType, Expr, Generator, Item, Pattern, Piece, Shape,
-    Statement, TypeExpr, View,
+    ArgumentPattern, Clause, Count, DynamicType, Expr, Format, Generator, Item, Pattern, Piece,
+    Shape, Statement, TypeExpr, View,
 };
 
 /// Something a view's expression names, which its machine reaches at a
@@ -36,6 +36,9 @@ pub enum ViewObject<St> {
     Let(usize),
     /// A generator's variable, by nesting depth.
     Variable(usize),
+    /// A global of the value's module, by a step that reaches it from
+    /// anywhere.
+    Global(St),
 }
 
 /// A program bound in a view's scope.
@@ -61,6 +64,18 @@ pub struct BoundCheck<St> {
 pub struct BoundField<St> {
     pub name: Arc<str>,
     pub program: ViewProgram<St>,
+}
+
+/// How a `format` writes a value, with the enumeration it names resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundFormat {
+    Hex,
+    Char,
+    Bytes,
+    Utf16,
+    Flags(TypeReference),
+    Enum(TypeReference),
+    Duration(super::syntax::TimeUnit),
 }
 
 /// A piece of a `summary`.
@@ -175,6 +190,12 @@ pub enum BoundShape<St> {
         pointer: ViewProgram<St>,
         ty: BoundDynamic<St>,
     },
+    /// A `match` whose arms name no value it has: a problem saying the
+    /// value.
+    Unmatched {
+        text: String,
+        program: ViewProgram<St>,
+    },
 }
 
 /// The type a `dynamic` shape presents its pointer's target as.
@@ -223,6 +244,49 @@ pub struct BoundView<St> {
     pub fields: Vec<BoundField<St>>,
     pub summary: Option<Vec<BoundPiece<St>>>,
     pub shape: BoundShape<St>,
+    /// The names of members and fields left out of the children, with
+    /// the lines that hide them.
+    pub hidden: Vec<(Arc<str>, u32)>,
+    /// How members and fields are written, by name, with the lines that
+    /// say so; a later one wins.
+    pub formats: Vec<(Arc<str>, BoundFormat, u32)>,
+    /// The `extend`s that add to this view, each bound in a scope of its
+    /// own, in the order they are tried.
+    pub extensions: Vec<Arc<Self>>,
+}
+
+impl<St> BoundView<St> {
+    /// Every named child the view may show, by name: each record member of
+    /// any branch of its shape, then its fields.
+    pub fn named_programs(&self) -> Vec<(Arc<str>, &ViewProgram<St>)> {
+        fn record_members<'b, St>(
+            shape: &'b BoundShape<St>,
+            out: &mut Vec<(Arc<str>, &'b ViewProgram<St>)>,
+        ) {
+            match shape {
+                BoundShape::Record(members) => out.extend(
+                    members
+                        .iter()
+                        .map(|member| (Arc::clone(&member.name), &member.program)),
+                ),
+                BoundShape::If {
+                    then, otherwise, ..
+                } => {
+                    record_members(then, out);
+                    record_members(otherwise, out);
+                }
+                _ => {}
+            }
+        }
+        let mut named = Vec::new();
+        record_members(&self.shape, &mut named);
+        named.extend(
+            self.fields
+                .iter()
+                .map(|field| (Arc::clone(&field.name), &field.program)),
+        );
+        named
+    }
 }
 
 /// Why a view does not bind: the part that failed, and how.
@@ -404,10 +468,24 @@ impl<S: Scope> Scope for ViewScope<'_, S> {
     fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
         self.base.types_with_base(base)
     }
+
+    fn global(&self, name: &str) -> Result<Lookup<Self::Object>, Refusal> {
+        Ok(match self.base.global_step(name)? {
+            Some((step, ty)) => Lookup::Object {
+                object: ViewObject::Global(step),
+                ty: Ok(ty),
+            },
+            None => Lookup::NotFound,
+        })
+    }
 }
 
 /// Binds `view` against `self_type`, whose identity its pattern matched,
 /// capturing `captures`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "each statement binds in its own arm, in the order the view writes them"
+)]
 pub fn bind<S: Scope>(
     view: &Arc<View>,
     self_type: TypeReference,
@@ -479,6 +557,8 @@ pub fn bind<S: Scope>(
     let mut fields = Vec::new();
     let mut summary = None;
     let mut shape = None;
+    let mut hidden = Vec::new();
+    let mut formats = Vec::new();
     for statement in &view.statements {
         match statement {
             Statement::Check(expr) => {
@@ -501,17 +581,240 @@ pub fn bind<S: Scope>(
                 summary = Some(bound);
             }
             Statement::Show(shown) => shape = Some(bind_shape(shown, &mut scope)?),
+            Statement::Hide { names, line } => {
+                hidden.extend(
+                    names
+                        .iter()
+                        .map(|name| (Arc::<str>::from(name.as_str()), *line)),
+                );
+            }
+            Statement::Format {
+                names,
+                format,
+                line,
+            } => {
+                let format = bind_format(format, *line, &scope)?;
+                formats.extend(
+                    names
+                        .iter()
+                        .map(|name| (Arc::<str>::from(name.as_str()), format, *line)),
+                );
+            }
             Statement::Let { .. } | Statement::Type { .. } => {}
         }
     }
-    Ok(BoundView {
+    // A view that does not `show` presents the value's members, and its
+    // bases as members named by their types.
+    let shape = match shape {
+        Some(shape) => shape,
+        None if view.extend => BoundShape::Record(Vec::new()),
+        None => members(&mut scope, view.line)?,
+    };
+    let bound = BoundView {
         view: Arc::clone(view),
         lets,
         checks,
         fields,
         summary,
-        shape: shape.expect("the parser requires one `show`"),
+        shape,
+        hidden,
+        formats,
+        extensions: Vec::new(),
+    };
+    if !view.extend {
+        check_names(&bound, scope.self_type, &scope)?;
+    }
+    Ok(bound)
+}
+
+/// What a view that does not `show` presents: a record's members, and its
+/// bases as members named by their types, or any other value as itself.
+fn members<S: Scope>(
+    scope: &mut ViewScope<'_, S>,
+    line: u32,
+) -> Result<BoundShape<S::Step>, Rejection> {
+    let record = representation(scope, scope.self_type)
+        .ok()
+        .and_then(|(_, info)| match info.kind {
+            TypeKind::Record { members, bases, .. } => Some((members, bases)),
+            _ => None,
+        });
+    let Some((members, bases)) = record else {
+        return Ok(BoundShape::Value(bind_part(
+            &synthetic("self", line)?,
+            scope,
+            Mode::Read,
+        )?));
+    };
+    let mut fields = Vec::new();
+    for (index, base) in bases.iter().enumerate() {
+        let name = scope
+            .type_info(base.type_ref)
+            .map_or_else(|| format!("<base {index}>"), |info| info.name.to_string());
+        let alias = format!("__base{index}");
+        scope.types.push((alias.clone(), base.type_ref));
+        fields.push(BoundField {
+            name: name.into(),
+            program: bind_part(
+                &synthetic(&format!("({alias})self"), line)?,
+                scope,
+                Mode::Read,
+            )?,
+        });
+    }
+    for member in members.iter().filter(|member| !member.artificial) {
+        let Some(name) = member.name.as_deref() else {
+            continue;
+        };
+        fields.push(BoundField {
+            name: name.into(),
+            program: bind_part(
+                &synthetic(&format!("self.`{name}`"), line)?,
+                scope,
+                Mode::Read,
+            )?,
+        });
+    }
+    Ok(BoundShape::Record(fields))
+}
+
+/// An expression the binder writes for a view.
+fn synthetic(text: &str, line: u32) -> Result<Expr, Rejection> {
+    Expression::parse_view(text)
+        .map(|expression| Expr { expression, line })
+        .map_err(|error| Rejection {
+            line,
+            part: text.to_owned(),
+            reason: error.to_string(),
+        })
+}
+
+/// A `format`, with the enumeration it names resolved.
+fn bind_format<S: Scope>(
+    format: &Format,
+    line: u32,
+    scope: &ViewScope<'_, S>,
+) -> Result<BoundFormat, Rejection> {
+    let enumeration = |ty: &TypeExpr| {
+        let reference = resolve_type(ty, scope).map_err(|reason| Rejection {
+            line,
+            part: "format".to_owned(),
+            reason,
+        })?;
+        match representation(scope, reference) {
+            Ok((_, info)) if matches!(info.kind, TypeKind::Enumeration { .. }) => Ok(reference),
+            _ => Err(Rejection {
+                line,
+                part: "format".to_owned(),
+                reason: "`flags` and `enum` name an enumeration".to_owned(),
+            }),
+        }
+    };
+    Ok(match format {
+        Format::Hex => BoundFormat::Hex,
+        Format::Char => BoundFormat::Char,
+        Format::Bytes => BoundFormat::Bytes,
+        Format::Utf16 => BoundFormat::Utf16,
+        Format::Flags(ty) => BoundFormat::Flags(enumeration(ty)?),
+        Format::Enum(ty) => BoundFormat::Enum(enumeration(ty)?),
+        Format::Duration(unit) => BoundFormat::Duration(*unit),
     })
+}
+
+/// Every name a view hides or formats is one of its members or fields, or
+/// `self`, and every format suits what it writes.
+fn check_names<St>(
+    bound: &BoundView<St>,
+    self_type: TypeReference,
+    types: &dyn TypeSource,
+) -> Result<(), Rejection> {
+    check_against(bound, &bound.named_programs(), self_type, types)
+}
+
+/// Every name an `extend` hides or formats is one of the members or
+/// fields of the view it extends, or one of its own fields, or `self`, and
+/// every format suits what it writes.
+pub fn check_extension<St>(
+    base: &BoundView<St>,
+    extension: &BoundView<St>,
+    self_type: TypeReference,
+    types: &dyn TypeSource,
+) -> Result<(), Rejection> {
+    let mut named = base.named_programs();
+    named.extend(extension.named_programs());
+    check_against(extension, &named, self_type, types)
+}
+
+fn check_against<St>(
+    bound: &BoundView<St>,
+    named: &[(Arc<str>, &ViewProgram<St>)],
+    self_type: TypeReference,
+    types: &dyn TypeSource,
+) -> Result<(), Rejection> {
+    for (name, line) in &bound.hidden {
+        let line = *line;
+        if !named.iter().any(|(candidate, _)| candidate == name) {
+            return Err(Rejection {
+                line,
+                part: format!("hide {name}"),
+                reason: format!("`{name}` is neither a member nor a field the view shows"),
+            });
+        }
+    }
+    for (name, format, line) in &bound.formats {
+        let line = *line;
+        let result = if name.as_ref() == "self" {
+            Some(Ty::Program(self_type))
+        } else {
+            named
+                .iter()
+                .find(|(candidate, _)| candidate == name)
+                .map(|(_, program)| program.result().clone())
+        };
+        let Some(ty) = result else {
+            return Err(Rejection {
+                line,
+                part: format!("format {name}"),
+                reason: format!("`{name}` is neither a member nor a field the view shows"),
+            });
+        };
+        if let Err(reason) = suits(*format, &ty, types) {
+            return Err(Rejection {
+                line,
+                part: format!("format {name}"),
+                reason,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether a format can write a value of `ty`.
+fn suits(format: BoundFormat, ty: &Ty, types: &dyn TypeSource) -> Result<(), String> {
+    let category = category(types, ty);
+    let ok = match format {
+        BoundFormat::Hex
+        | BoundFormat::Char
+        | BoundFormat::Flags(_)
+        | BoundFormat::Enum(_)
+        | BoundFormat::Duration(_) => matches!(category, Category::Integer { .. }),
+        BoundFormat::Bytes => matches!(ty, Ty::Program(_)),
+        BoundFormat::Utf16 => match category {
+            Category::Array { element, .. } => types
+                .type_info(element)
+                .is_some_and(|info| info.byte_size == Some(2)),
+            _ => false,
+        },
+    };
+    if ok {
+        return Ok(());
+    }
+    let what = match format {
+        BoundFormat::Bytes => "a value in memory",
+        BoundFormat::Utf16 => "an array of 16-bit units",
+        _ => "an integer",
+    };
+    Err(format!("the format writes {what}"))
 }
 
 /// An error binding `expr`, said in terms of the view.
@@ -710,6 +1013,11 @@ fn bind_shape<S: Scope>(
         Shape::Dynamic { pointer, ty } => BoundShape::Dynamic {
             pointer: bind_pointer(pointer, scope)?,
             ty: bind_dynamic_type(ty, pointer.line, scope)?,
+        },
+        Shape::Unmatched(expr) => BoundShape::Unmatched {
+            text: expr.text().to_owned(),
+            program: bind_value(&expr.expression, scope)
+                .map_err(|error| rejection(scope, expr, &error))?,
         },
     })
 }

@@ -10,6 +10,7 @@
 //! then run at stops, charging every read to the inspection's budget.
 
 pub mod bind;
+pub mod format;
 #[cfg(any(test, feature = "fuzzing"))]
 pub mod fuzz;
 pub mod pattern;
@@ -117,7 +118,8 @@ pub struct Candidate {
 }
 
 /// Which view presents a type: the first candidate that binds, with why
-/// each candidate before it did not. Candidates after it are not tried.
+/// each candidate before it did not, and the `extend`s that add to it.
+/// Views after it are not tried; `extend`s are.
 #[derive(Debug, Clone)]
 pub struct Choice<St> {
     pub bound: Option<Arc<BoundView<St>>>,
@@ -169,8 +171,14 @@ pub fn choose<S: Scope>(views: &ViewSet, ty: TypeReference, scope: &S) -> Choice
             .collect::<Vec<_>>();
         candidates.sort_unstable();
         candidates.dedup();
+        let mut base = None;
+        let mut extensions = Vec::new();
         for index in candidates {
             let view = &views.views[index];
+            // Views after the one that binds are not tried; `extend`s are.
+            if base.is_some() && !view.extend {
+                continue;
+            }
             if !pattern::language_matches(view.language, identity.language) {
                 continue;
             }
@@ -178,13 +186,13 @@ pub fn choose<S: Scope>(views: &ViewSet, ty: TypeReference, scope: &S) -> Choice
                 continue;
             };
             match bind::bind(view, ty, &captures, scope) {
+                Ok(bound) if view.extend => extensions.push((view, captures, bound)),
                 Ok(bound) => {
                     choice.candidates.push(Candidate {
                         name: name_of(view),
                         rejection: None,
                     });
-                    choice.bound = Some(Arc::new(bound));
-                    return choice;
+                    base = Some(bound);
                 }
                 Err(rejection) => choice.candidates.push(Candidate {
                     name: name_of(view),
@@ -192,6 +200,38 @@ pub fn choose<S: Scope>(views: &ViewSet, ty: TypeReference, scope: &S) -> Choice
                 }),
             }
         }
+        // `extend`s with no view to add to add to the value's members.
+        if base.is_none()
+            && let Some((view, captures, _)) = extensions.first()
+        {
+            let members = Arc::new(View {
+                extend: false,
+                statements: Vec::new(),
+                ..(***view).clone()
+            });
+            match bind::bind(&members, ty, captures, scope) {
+                Ok(bound) => base = Some(bound),
+                Err(rejection) => choice.candidates.push(Candidate {
+                    name: name_of(view),
+                    rejection: Some(rejection),
+                }),
+            }
+        }
+        let Some(mut base) = base else {
+            continue;
+        };
+        for (view, _, extension) in extensions {
+            let rejection = bind::check_extension(&base, &extension, ty, scope).err();
+            if rejection.is_none() {
+                base.extensions.push(Arc::new(extension));
+            }
+            choice.candidates.push(Candidate {
+                name: name_of(view),
+                rejection,
+            });
+        }
+        choice.bound = Some(Arc::new(base));
+        return choice;
     }
     choice
 }

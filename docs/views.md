@@ -170,7 +170,36 @@ b => 42
 ```
 
 Views may also write `offsetof(TYPE, member)`, where one of a record's own
-members is, in bytes, as its debug information places it.
+members is, in bytes, as its debug information places it, and
+`container_of(PTR, TYPE, member)`, a pointer to the `TYPE` whose own
+`member` `PTR` points to, as intrusive lists find their nodes.
+`global(NAME)` is a global of the module whose value the view presents;
+nothing else the program names is visible to a view.
+
+```uscope-view-example
+uscope-views 1
+view c run_queue {
+    show sequence(nr) for n in list(&tasks, p => p->next) if n != &tasks
+        => container_of(n, task, node)->pid
+}
+view c handle_t {
+    show value(global(arena)[index])
+}
+---
+queue => len=2 [10, 20]
+slot => 7
+```
+
+`container_of`'s pointer must point to the member's type, or be a `void *`.
+
+```uscope-view-example
+uscope-views 1
+view c run_queue {
+    show value(container_of(&nr, task, node)->pid)
+}
+---
+queue => unbound: line 3: `container_of(&nr, task, node)->pid`: `&nr`: points to `unsigned long`, not to the type of `node`
+```
 
 A member named `or`, `for`, `if`, `else`, or `let`, which end an expression
 in a view, is written in backticks.
@@ -196,7 +225,18 @@ the next line unless that line begins another statement or ends the view.
 - `field NAME = EXPR` adds a named child.
 - `summary "TEXT {EXPR} TEXT"` overrides the summary; `{EXPR}` is replaced
   by its value's summary, and `\{` and `\}` are braces.
-- `show SHAPE` says what the value is. A view shows exactly once.
+- `show SHAPE` says what the value is. A view shows at most once; one
+  that does not presents a record's members, with its bases as members
+  named by their types, or any other value as itself.
+- `hide NAME, …` leaves members and fields out of the children and the
+  summary; `[raw]` still has them.
+- `format NAME, … as FORMAT` writes members and fields another way:
+  `hex`; `char`; `bytes`, a value's bytes in memory; `utf16`, an array of
+  16-bit units as text; `flags(ENUM)`, the enumerators whose bits an
+  integer sets; `enum(ENUM)`, the enumerator it equals; or `duration(UNIT)`,
+  a count of `ns`, `us`, `ms`, or `s`. `self` is the value a `value` shape
+  presents. A format that does not suit what it names keeps the view from
+  binding.
 
 ```uscope-view-example
 uscope-views 1
@@ -223,6 +263,39 @@ handle => 5
 handle => children: offset = 0, [raw]
 ```
 
+```uscope-view-example
+uscope-views 1
+view c tagged {
+    hide value
+    format kind as hex
+}
+view c entry {
+    format mode as flags(Access)
+    format color as enum(Color)
+    format elapsed as duration(ms)
+    format label as utf16
+    format letter as char
+}
+---
+something => {kind: 0x1}
+something => children: kind = 0x1, [raw]
+item => {mode: READ | WRITE, color: BLUE, elapsed: 1.5s, label: "hi", letter: 'A'}
+```
+
+```uscope-view-example
+uscope-views 1
+view c entry {
+    hide mode, color, elapsed, letter
+    format label as bytes
+}
+view c tagged {
+    format kind as utf16
+}
+---
+item => {label: 68 00 69 00 00 00 00 00}
+something => unbound: line 7: `format kind`: the format writes an array of 16-bit units
+```
+
 ## Shapes
 
 - `text(PTR)` and `text(PTR, LEN)` are text: the characters a pointer to
@@ -246,6 +319,9 @@ handle => children: offset = 0, [raw]
   `std::variant`'s index does; a position that names no type is a problem.
 - `if COND { SHAPE } else { SHAPE }` chooses a shape, and may begin a
   statement of its own.
+- `match EXPR { VALUE => SHAPE, … _ => SHAPE }` chooses the shape of the
+  first arm whose value `EXPR` equals, or of `_`; a value no arm names is a
+  problem. It may begin a statement of its own.
 
 ```uscope-view-example
 uscope-views 1
@@ -274,6 +350,20 @@ view c tagged {
 ---
 nothing => tagged 0: 0
 something => tagged 1: 7
+```
+
+```uscope-view-example
+uscope-views 1
+view c tagged {
+    show match kind {
+        0 => empty("None")
+        1 => value(value)
+    }
+}
+---
+nothing => None
+something => 7
+strange => problem: `kind` is 5, which no arm of the match names
 ```
 
 ```uscope-view-example
@@ -419,6 +509,33 @@ view c str_t {
 ---
 dangling => len=2 [<unavailable>, …]
 s => problem: the view declares 6 elements and generates 5
+```
+
+## Extending views
+
+`extend LANGUAGE PATTERN { … }` adds to whichever view presents a type,
+from any file, without copying it: its fields come after that view's, and
+its `hide`s and `format`s apply to that view's members and fields as to its
+own. An `extend` holds `let`s, `type`s, `field`s, `hide`s, and `format`s,
+never a `show`, and every `extend` whose pattern names a type adds to its
+view. One with no view to add to adds to the value's members.
+
+```uscope-view-example
+uscope-views 1
+view c intvec {
+    show sequence(n) for i in range(n) => data[i]
+    field capacity = cap
+}
+extend c intvec {
+    field room = cap - n
+    hide capacity
+}
+extend c tagged {
+    format kind as hex
+}
+---
+v => children: [0] = 10, [1] = 20, [2] = 30, room = 1, [raw]
+something => {kind: 0x1, value: 7}
 ```
 
 ## Summaries

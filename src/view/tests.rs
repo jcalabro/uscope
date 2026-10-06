@@ -475,16 +475,15 @@ view c first {
 view c second {
     show empty(\"ok\")
 }
-view c third {
-    let x = 1
+extend c third {
+    show empty(\"\")
 }
 view c fourth {
     show text(p)
     show text(p)
 }
 view c fifth {
-    hide x
-    show empty(\"\")
+    format x as octal
 }
 view c sixth {
     show sequence(n) for i in list(head) => i
@@ -509,7 +508,9 @@ view kotlin seventh {
         messages[0]
     );
     assert!(
-        messages[1].starts_with("bad.views:9:1: a view needs a `show`"),
+        messages[1].starts_with(
+            "bad.views:10:5: an `extend` adds to the view that shows the value; it does not `show`"
+        ),
         "{}",
         messages[1]
     );
@@ -519,7 +520,7 @@ view kotlin seventh {
         messages[2]
     );
     assert!(
-        messages[3].contains("`hide` is not supported yet"),
+        messages[3].contains("`octal` is no format"),
         "{}",
         messages[3]
     );
@@ -796,7 +797,80 @@ fn examples() -> World {
     world.variable("number", either, &bytes(&[7, 0]));
     world.variable("pointer", either, &bytes(&[0x9_0000, 1]));
     world.variable("neither", either, &bytes(&[0, 5]));
+    formatted_and_linked(&mut world, int, tagged);
     world
+}
+
+/// The examples' `entry`, whose members formats write, a tagged value of a
+/// kind nothing names, an intrusive run queue, and an arena of handles.
+fn formatted_and_linked(world: &mut World, int: TypeReference, tagged: TypeReference) {
+    world.variable("strange", tagged, &ints([5, 0]));
+
+    let short = world.base("unsigned short", E::Unsigned, 2);
+    let long = world.base("long", E::Signed, 8);
+    world.enumeration(
+        "Access",
+        int,
+        &[("NONE", 0), ("READ", 1), ("WRITE", 2), ("EXEC", 4)],
+    );
+    world.enumeration("Color", int, &[("RED", 0), ("GREEN", 1), ("BLUE", 2)]);
+    let label = world.array(short, &[4]);
+    let entry = world.record(
+        "entry",
+        32,
+        &[
+            ("mode", int, 0),
+            ("color", int, 4),
+            ("elapsed", long, 8),
+            ("label", label, 16),
+            ("letter", int, 24),
+        ],
+    );
+    world.identify(entry, SourceLanguage::C, &[], "entry", Vec::new());
+    let mut item = ints([3, 2]);
+    item.extend(1500_i64.to_le_bytes());
+    item.extend([b'h', 0, b'i', 0, 0, 0, 0, 0]);
+    item.extend(ints([65, 0]));
+    world.variable("item", entry, &item);
+
+    // A run queue whose tasks link through the `node` each embeds, in a
+    // ring through the queue's own `tasks`.
+    let size = world.base("unsigned long", E::Unsigned, 8);
+    let link = world.record("list_head", 16, &[]);
+    let link_pointer = world.pointer(Some(link));
+    world.set_members(
+        link,
+        &[("next", link_pointer, 0), ("prev", link_pointer, 8)],
+    );
+    let task = world.record("task", 24, &[("pid", int, 0), ("node", link, 8)]);
+    world.identify(task, SourceLanguage::C, &[], "task", Vec::new());
+    let queue = world.record("run_queue", 24, &[("tasks", link, 0), ("nr", size, 16)]);
+    world.identify(queue, SourceLanguage::C, &[], "run_queue", Vec::new());
+    let first = world.allocate(&[0; 24]);
+    let second = world.allocate(&[0; 24]);
+    let sentinel = world.variable("queue", queue, &[0; 24]);
+    let mut words = |address, pid: i32, next: u64, prev: u64| {
+        let mut object = i64::from(pid).to_le_bytes().to_vec();
+        object.extend(next.to_le_bytes());
+        object.extend(prev.to_le_bytes());
+        world.write(&Place::Memory { address, ty: task }, &object);
+    };
+    words(first, 10, second + 8, sentinel);
+    words(second, 20, sentinel, first + 8);
+    world.write(
+        &Place::Memory {
+            address: sentinel,
+            ty: queue,
+        },
+        &bytes(&[first + 8, second + 8, 2]),
+    );
+
+    // A handle is an index into the global `arena`.
+    let arena = world.array(int, &[4]);
+    world.variable("arena", arena, &ints([5, 6, 7, 8]));
+    let handle = world.record("handle_t", 4, &[("index", int, 0)]);
+    world.identify(handle, SourceLanguage::C, &[], "handle_t", Vec::new());
+    world.variable("slot", handle, &ints([2]));
 }
 
 /// What a value shows as an example writes it.

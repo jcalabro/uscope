@@ -49,6 +49,17 @@ pub(super) struct StopObject {
     local: bool,
 }
 
+impl StopObject {
+    /// A global of a module.
+    pub(super) const fn global(module: ModuleId, key: ObjectKey) -> Self {
+        Self {
+            module,
+            key,
+            local: false,
+        }
+    }
+}
+
 /// A structural step planned from types alone.
 #[derive(Clone)]
 pub(super) enum StopStep {
@@ -56,6 +67,8 @@ pub(super) enum StopStep {
     Provider { module: ModuleId, step: PlannedStep },
     /// To an element of a value a view presents as a sequence.
     Element(Arc<ViewBound>),
+    /// To a global, from anywhere: a view's `global(NAME)`.
+    Global(StopObject),
 }
 
 /// A view bound against one type, whose steps are a stop's.
@@ -66,6 +79,7 @@ impl fmt::Debug for StopStep {
         match self {
             Self::Provider { module, .. } => write!(formatter, "StopStep({module:?})"),
             Self::Element(bound) => write!(formatter, "StopStep(element of {})", bound.view.header),
+            Self::Global(object) => write!(formatter, "StopStep(global {object:?})"),
         }
     }
 }
@@ -682,7 +696,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             StopStep::Provider { step, .. } => step
                 .check_indices(indices)
                 .map_err(|error| Stop::Refused(refusal(&error))),
-            StopStep::Element(_) => Ok(()),
+            StopStep::Element(_) | StopStep::Global(_) => Ok(()),
         }
     }
 
@@ -703,6 +717,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
                 };
                 return self.view_element(bound, from, *index);
             }
+            StopStep::Global(object) => return self.locate(object),
         };
         let module = self.module(module_id)?;
         let address = self.address(module);
