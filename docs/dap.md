@@ -27,6 +27,8 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
 - **Execution.** Continue, pause, step over, into, and out, by line or by instruction. The debugger is all-stop: every thread stops and resumes together, unless a request names a single thread (`singleThread`). A program that executes itself again is followed with its breakpoints.
 - **Inspection.**
   - Threads with names, and stack traces through libraries and inlined calls, with the frames' parameters, lines, and modules when a client asks.
+  - A Go program's threads are its goroutines, each with its goroutine id as its thread id, named as `[7] main.worker — chan receive (thread 1234)`: the function the program wrote that it is in, past the runtime's machinery, what it waits for or that it stopped at a breakpoint, and the system thread it is on. A stop names the goroutine that stopped. A parked goroutine's stack, variables, and expressions are its own, and `$task` is its id. The list puts the goroutine that stopped first, then goroutines on threads, then the program's other goroutines, leaving out the runtime's own unless `runtimeTasks` is set; it is cut at `maxTasks`, and a last entry says how many more there are. A system thread that stopped running no goroutine is listed too. `"threads": "system"` lists the system threads instead.
+  - A stack that crosses from one stack to another, as Go's runtime does from its own stacks and signal handlers to a goroutine's, has a label heading each run of frames saying whose stack it is on. The runtime's own frames and compiler wrappers are subtle.
   - Arguments, locals, statics, and registers, with the text of strings. Each row's `evaluateName` reaches exactly that variable: a static that a local shadows is named from the outermost scope, such as `::count`, or with its file, such as `` ::`main.c::count` ``, and a variable an inner block hides has none. A register's row is named `$rax` and is read-only. A Go function's results, such as `~r0`, are among its arguments.
   - Containers presented by [views](views.md): a vector's elements as indexed variables, paged by the client's `filter`, `start`, and `count`, and its fields and `[raw]`, the value as stored, as named ones.
   - Hover, watch, clipboard, and debug console evaluation in the [expression language](expressions.md).
@@ -69,7 +71,10 @@ A launch configuration:
   "sourceMap": [["/build/src", "${workspaceFolder}/src"]],  // earlier rules first; {"from": "to"} also works
   "viewFiles": ["${workspaceFolder}/app.views"],  // ahead of .uscope/views, the user's, the program's, the built-in
   "disassemblySyntax": "intel",  // or "att"
-  "signals": { "SIGUSR1": "nostop", "SIGPIPE": ["stop", "print"] }
+  "signals": { "SIGUSR1": "nostop", "SIGPIPE": ["stop", "print"] },
+  "threads": "tasks",     // a runtime's tasks, such as Go's goroutines, as threads; or "system"
+  "runtimeTasks": false,  // list the tasks a runtime runs for its own work too
+  "maxTasks": 1000        // the most tasks listed
 }
 ```
 
