@@ -351,10 +351,9 @@ const fn tag_matches(tag: Option<Tag>, kind: &TypeKind) -> bool {
 /// A provider's refusal of a step, as an expression error.
 fn refusal(error: &Error) -> Refusal {
     let kind = match error {
-        Error::AmbiguousBase { .. } => ErrorKind::AmbiguousName,
+        Error::AmbiguousBase { .. } | Error::AmbiguousMember { .. } => ErrorKind::AmbiguousName,
         Error::MemberNotFound { .. }
         | Error::BaseNotFound { .. }
-        | Error::AmbiguousMember { .. }
         | Error::MemberAccessOnNonRecord { .. }
         | Error::IndexAccessOnNonIndexable { .. }
         | Error::IncompleteArrayIndex { .. }
