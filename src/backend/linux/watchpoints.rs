@@ -880,6 +880,11 @@ pub(super) fn watchable_storage(value: &InspectedValue) -> Result<(VirtualAddres
                 "optimization eliminated the pointer's address".into(),
             ));
         }
+        VariableValueSource::Pieces => {
+            return Err(Error::WatchTargetNotInMemory(
+                "the value is assembled from pieces in several places".into(),
+            ));
+        }
     };
     let byte_size = value
         .type_info

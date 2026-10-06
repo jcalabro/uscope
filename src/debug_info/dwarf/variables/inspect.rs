@@ -12,7 +12,7 @@ use crate::debug_info::{
 use crate::inspection::InspectionBudget;
 use crate::model::{ArrayDimension, ValueStorage};
 use crate::{
-    AddressValue, BaseTypeEncoding, ByteOrder, CodeInstanceId, DereferenceReference,
+    AddressValue, BaseType, BaseTypeEncoding, ByteOrder, CodeInstanceId, DereferenceReference,
     DereferenceState, DereferenceUnavailableReason, DereferencedValue, Error, ImageAddress,
     InspectedValue, IntegerValue, RecordMember, RecordMemberLayout, Result, TypeId, TypeInfo,
     TypeKind, ValueChild, ValueChildPage, ValueChildRelationship, ValueChildren,
@@ -22,14 +22,15 @@ use crate::{
 };
 
 use super::codec::{
-    decode_address, decode_integer_value, decode_scalar, extract_bit_field, unsigned_value,
+    decode_address, decode_integer_value, decode_scalar, extract_bit_field, significant_bytes,
+    unsigned_value,
 };
 use super::evaluate::{
     EvaluateError, FrameBase, FrameBaseCache, FrameBaseContext, evaluate,
-    evaluate_dynamic_aggregate_address, incomplete_piece_reason, materialize_constant,
-    materialize_pieces,
+    evaluate_dynamic_aggregate_address, materialize_constant, materialize_piece,
 };
 use super::location::{Expression, ExpressionUse, LocationSelectionError};
+use super::pieces;
 use super::shape::{
     ValueShape, ValueShapeError, indirection_byte_size, transparent_type_from, value_shape_from,
 };
@@ -928,6 +929,7 @@ impl DwarfVariableInfo {
                 start: 0,
                 end,
                 address: None,
+                unavailable: Arc::from([]),
             });
         }
         let ValueDescription::Location(location) = description else {
@@ -964,17 +966,12 @@ impl DwarfVariableInfo {
             .byte_size()
             .checked_mul(8)
             .ok_or(VariableUnavailableReason::EvaluationLimit)?;
-        if let Some(reason) = incomplete_piece_reason(&pieces, expected_bits)? {
-            return Err(reason.into());
+        if !pieces::is_whole(&pieces, expected_bits) {
+            return pieces::assemble(&pieces, shape.byte_size(), self.endian, runtime, budget);
         }
         let [piece] = pieces.as_slice() else {
-            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
+            unreachable!("a whole location is one piece")
         };
-        if piece.size_in_bits.is_some_and(|size| size != expected_bits)
-            || piece.bit_offset.is_some()
-        {
-            return Err(crate::UnsupportedVariableFeature::CompositeLocation.into());
-        }
         match piece.location {
             Location::Address { address } => Ok(ValueStorage::Memory(VirtualAddress::new(address))),
             Location::ImplicitPointer { value, byte_offset } => Ok(ValueStorage::ImplicitPointer {
@@ -983,8 +980,8 @@ impl DwarfVariableInfo {
                 byte_offset,
             }),
             _ => {
-                let (source, raw) = materialize_pieces(
-                    &pieces,
+                let (source, raw) = materialize_piece(
+                    piece,
                     shape.byte_size(),
                     shape.scalar(),
                     self.endian,
@@ -999,6 +996,7 @@ impl DwarfVariableInfo {
                     start: 0,
                     end,
                     address: None,
+                    unavailable: Arc::from([]),
                 })
             }
         }
@@ -1028,6 +1026,7 @@ impl DwarfVariableInfo {
                 start,
                 end,
                 address,
+                unavailable,
             } => {
                 let adjusted = if offset >= 0 {
                     start.checked_add(
@@ -1058,6 +1057,7 @@ impl DwarfVariableInfo {
                     start: adjusted,
                     end,
                     address,
+                    unavailable,
                 })
             }
             ValueStorage::ImplicitPointer { .. } => Err(EvaluateError::Malformed(
@@ -1079,7 +1079,11 @@ impl DwarfVariableInfo {
                 Ok((VariableValueSource::Memory(*address), raw))
             }
             ValueStorage::Bytes {
-                raw, start, end, ..
+                raw,
+                start,
+                end,
+                unavailable,
+                ..
             } => {
                 let selected_end = start
                     .checked_add(size)
@@ -1089,6 +1093,9 @@ impl DwarfVariableInfo {
                             "selected value extends beyond its containing storage".into(),
                         )
                     })?;
+                if let Some(reason) = pieces::unavailable_within(unavailable, *start, size) {
+                    return Err(reason.into());
+                }
                 Ok((
                     Self::storage_source(storage),
                     Arc::from(&raw[*start..selected_end]),
@@ -1098,6 +1105,49 @@ impl DwarfVariableInfo {
                 "an unresolved implicit pointer cannot be read".into(),
             )),
         }
+    }
+
+    /// Reads a scalar's bytes, which only its significant bytes must hold;
+    /// says whether padding past them is unavailable.
+    fn read_scalar(
+        &self,
+        storage: &ValueStorage,
+        base: &BaseType,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> std::result::Result<(VariableValueSource, Arc<[u8]>, bool), EvaluateError> {
+        let size = usize::try_from(base.byte_size)
+            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let significant = usize::try_from(significant_bytes(base, self.target))
+            .map_err(|_| VariableUnavailableReason::EvaluationLimit)?;
+        let ValueStorage::Bytes {
+            raw,
+            start,
+            end,
+            unavailable,
+            ..
+        } = storage
+        else {
+            return Self::read_storage(storage, size, runtime, budget)
+                .map(|(source, raw)| (source, raw, false));
+        };
+        if significant == size
+            || pieces::unavailable_within(unavailable, *start + significant, size - significant)
+                .is_none()
+        {
+            return Self::read_storage(storage, size, runtime, budget)
+                .map(|(source, raw)| (source, raw, false));
+        }
+        let (source, _) = Self::read_storage(storage, significant, runtime, budget)?;
+        let selected_end = start
+            .checked_add(size)
+            .filter(|selected_end| selected_end <= end)
+            .ok_or_else(|| {
+                EvaluateError::Malformed(
+                    "selected value extends beyond its containing storage".into(),
+                )
+            })?;
+        Ok((source, Arc::from(&raw[*start..selected_end]), true))
     }
 
     fn decode_slice(
@@ -1275,6 +1325,7 @@ impl DwarfVariableInfo {
             start: 0,
             end,
             address: None,
+            unavailable: Arc::from([]),
         })
     }
 
@@ -1698,8 +1749,19 @@ impl DwarfVariableInfo {
                 Self::read_storage(storage, size, runtime, budget)
             };
         Ok(match shape {
-            ValueShape::Scalar(base) => match read(base.byte_size, runtime, budget) {
-                Ok((source, raw)) => match decode_scalar(base, &raw, self.target) {
+            ValueShape::Scalar(base) => match self.read_scalar(storage, base, runtime, budget) {
+                Ok((source, raw, padding)) => match decode_scalar(base, &raw, self.target) {
+                    // Bytes the program does not hold are no part of the
+                    // value it shows.
+                    Ok(value) if padding => leaf(
+                        source,
+                        Arc::from(
+                            &raw[..usize::try_from(significant_bytes(base, self.target))
+                                .expect("a scalar's size fits usize")],
+                        ),
+                        VariableValue::Scalar(value),
+                        DereferenceState::NotApplicable,
+                    ),
                     Ok(value) => leaf(
                         source,
                         raw,
@@ -2162,6 +2224,7 @@ impl DwarfVariableInfo {
                                                 start: 0,
                                                 end,
                                                 address: Self::concrete_storage_address(&first),
+                                                unavailable: Arc::from([]),
                                             }
                                         },
                                     )

@@ -493,18 +493,19 @@ async fn thin_pointers_and_references_dereference_across_the_language_matrix() {
                     "{fixture}: {out_of_bounds:?}"
                 );
             } else {
+                // Optimized code keeps its pointer and length in registers,
+                // which a location in pieces assembles.
                 assert!(
                     matches!(
-                        slice.type_info.as_ref().map(|info| &info.kind),
-                        Some(uscope::TypeKind::Slice { .. })
-                    ) && matches!(
                         slice.state,
-                        VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(
-                            uscope::UnsupportedVariableFeature::CompositeLocation
-                        ))
+                        VariableState::Available {
+                            source: uscope::VariableValueSource::Pieces,
+                            ..
+                        }
                     ),
                     "{fixture}: {slice:?}"
                 );
+                assert_slice_values(&scenario, &slice, None, &[20, 22], fixture).await;
             }
         }
         if source == "variables.zig" {

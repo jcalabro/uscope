@@ -666,6 +666,14 @@ build_fixture gcc "$c_fixtures_dir/variables-parameters.c" "$output_dir/variable
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables-parameters.c" "$output_dir/variables-parameters-clang-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o0" \
+    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o2" \
+    -O2 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+require_dwarf_operation "$output_dir/pieces-gcc-o2" 'DW_OP_piece: 8; DW_OP_piece: 8'
+build_fixture clang "$c_fixtures_dir/pieces.c" "$output_dir/pieces-clang-o2" \
+    -O2 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+require_dwarf_operation "$output_dir/pieces-clang-o2" 'DW_OP_reg14 (r14); DW_OP_piece'
 build_fixture gcc "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fomit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables-static.c" "$output_dir/variables-static-clang-o2" \
@@ -963,6 +971,10 @@ build_go_fixture "$go_fixtures_dir/generics" "$output_dir/generics-go-o2" \
 build_go_fixture "$go_fixtures_dir/containers" "$output_dir/containers-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
 build_go_fixture "$go_fixtures_dir/containers" "$output_dir/containers-go-o2" \
+    -buildmode=pie
+build_go_fixture "$go_fixtures_dir/values" "$output_dir/values-go-o0" \
+    -buildmode=pie "-gcflags=all=-N -l"
+build_go_fixture "$go_fixtures_dir/values" "$output_dir/values-go-o2" \
     -buildmode=pie
 require_dwarf_operation "$output_dir/variables-go-o0" 'DW_AT_language.*Go'
 require_dwarf_operation "$output_dir/variables-go-o0" main.inspectScalars
