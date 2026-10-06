@@ -1638,6 +1638,43 @@ async fn rust_payload_enum_is_never_published_as_an_empty_record() {
     scenario.shutdown().await;
 }
 
+/// Rust's unit type, `()`, is a base type of no bytes. It holds nothing, as
+/// an empty structure does, so the values that hold it decode.
+#[tokio::test]
+async fn rust_values_holding_unit_decode() {
+    for fixture in ["enums-rust-o0", "enums-rust-o2"] {
+        let mut scenario = Scenario::launch(fixture);
+        scenario.add_breakpoint("inspect_enum").await;
+        assert!(matches!(
+            scenario.run_to_stop().await,
+            StopReason::Breakpoint { .. }
+        ));
+        for (name, variant) in [("done", "Ok"), ("failed", "Err")] {
+            let value = dereference_named(&scenario, name, 1).await;
+            let page = record_page(&scenario, &value.state, 1, fixture).await;
+            let active = named_child(&page, variant);
+            let payload_page = record_page(&scenario, &active.state, 1, fixture).await;
+            let payload = named_child(&payload_page, "__0");
+            let decoded = match (name, available_value(&payload.state)) {
+                ("done", uscope::VariableValue::Record) => {
+                    record_page(&scenario, &payload.state, 0, fixture)
+                        .await
+                        .children
+                        .is_empty()
+                }
+                ("failed", uscope::VariableValue::Scalar(ScalarValue::Unsigned(5))) => true,
+                _ => false,
+            };
+            assert!(decoded, "{fixture} {name}: {payload:?}");
+        }
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
+}
+
 #[tokio::test]
 #[expect(
     clippy::too_many_lines,

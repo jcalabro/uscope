@@ -6266,3 +6266,54 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
     // Serving decides only the order; nothing was answered.
     assert!(replies.iter_mut().all(|reply| reply.try_recv().is_err()));
 }
+
+/// A presentation looks for waiting run control after every
+/// [`INTERRUPT_INTERVAL`](super::evaluation::INTERRUPT_INTERVAL) units of
+/// its frame's work, however that work is split among the views that
+/// present values one inside another, each with a machine of its own.
+#[test]
+fn nested_presentations_share_one_interval_between_looks_for_run_control() {
+    use super::evaluation::{INTERRUPT_INTERVAL, StopMachine};
+    use super::frames::{FrameRegisters, FrameScope, ResolvedFrame};
+    use crate::eval::target::Machine as _;
+
+    let harness = watch_harness(1);
+    let controller = &harness.controller;
+    let pid = harness.threads[0];
+    let inferior = controller.inferior.as_ref().expect("inferior");
+    let resolved = ResolvedFrame {
+        id: StackFrameId::INNERMOST,
+        presented: PresentedFrame::Physical,
+        frame: None,
+        code: None,
+        scope: FrameScope::Unavailable,
+        registers: FrameRegisters::Thread(controller.ptrace.registers(pid).expect("registers")),
+        cfa: Err(crate::VariableUnavailableReason::EvaluationLimit.into()),
+        activation: 0,
+    };
+    let frame = controller.frame_for(inferior, StopId::new(1), pid, &resolved);
+    let (pause_reply, _paused) = tokio::sync::oneshot::channel();
+    controller
+        .message_sender
+        .try_send(ControllerMessage::Request(Request::Pause {
+            process_id: process_id(inferior.tgid),
+            reply: pause_reply,
+        }))
+        .unwrap_or_else(|_| panic!("the queue has room"));
+    let mut budget = InspectionBudget::new(crate::InspectionLimits::default());
+    // Two views, each doing just over half an interval's work, as a page of
+    // small presented values does.
+    let mut charges = 0;
+    let interrupted = (0..2).any(|_| {
+        let mut machine = StopMachine::new(&frame, &mut budget, true);
+        (0..=INTERRUPT_INTERVAL / 2).any(|_| {
+            charges += 1;
+            matches!(
+                machine.charge(),
+                Err(crate::eval::target::Stop::Failed(Error::Interrupted))
+            )
+        })
+    });
+    assert!(interrupted, "the work never looked for run control");
+    assert_eq!(charges, INTERRUPT_INTERVAL);
+}

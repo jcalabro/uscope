@@ -399,7 +399,12 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         } = &value.state
         {
             // A pointer or reference to text shows the text, as a pointer
-            // to characters does.
+            // to characters does, or why its view could not read it. A
+            // null pointer, like a null pointer to characters, points at
+            // nothing to read.
+            if address.get() == 0 {
+                return Ok(value);
+            }
             let target = TypeReference {
                 image: *image,
                 id: *target_type,
@@ -411,12 +416,15 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
                     storage: crate::model::ValueStorage::Memory(*address),
                 },
             };
-            if let Some(text) = self.pointee_text(target, place)?
-                && let VariableState::Available {
-                    text: state_text, ..
-                } = &mut value.state
+            let (text, presentation) = self.pointee_text(target, place)?;
+            if let VariableState::Available {
+                text: state_text,
+                presentation: state_presentation,
+                ..
+            } = &mut value.state
             {
-                *state_text = Some(Arc::new(text));
+                *state_text = text.map(Arc::new);
+                *state_presentation = presentation.map(Arc::new);
             }
             return Ok(value);
         }
@@ -496,17 +504,7 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
                     presented.text,
                 )
             }
-            Err(Failure::Problem(problem)) => (
-                Presentation {
-                    view: name,
-                    shape: PresentedShape::Raw,
-                    count: None,
-                    summary: problem.to_string().into(),
-                    children: ValueChildren::NotApplicable,
-                    problem: Some(problem),
-                },
-                None,
-            ),
+            Err(Failure::Problem(problem)) => (failed(name, problem), None),
             Err(Failure::Debugger(error)) => return Err(Stop::Failed(error)),
         };
         if let VariableState::Available {
@@ -524,17 +522,18 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
     }
 
     /// The text a view presents the value at `place` as, when it presents
-    /// values of `ty` as text.
+    /// values of `ty` as text, or the presentation that says why it could
+    /// not.
     fn pointee_text(
         &mut self,
         ty: TypeReference,
         place: StopPlace,
-    ) -> std::result::Result<Option<crate::TextSummary>, Stop> {
+    ) -> std::result::Result<(Option<crate::TextSummary>, Option<Presentation>), Stop> {
         let Some(bound) = self.frame.controller.view_choice(ty).bound.clone() else {
-            return Ok(None);
+            return Ok((None, None));
         };
         if !bound.shape.has_text() {
-            return Ok(None);
+            return Ok((None, None));
         }
         let mut share = self.budget.share();
         let result = {
@@ -544,8 +543,11 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         };
         self.budget.absorb(share.usage());
         match result {
-            Ok(presented) => Ok(presented.text),
-            Err(Failure::Problem(_)) => Ok(None),
+            Ok(presented) => Ok((presented.text, None)),
+            Err(Failure::Problem(problem)) => Ok((
+                None,
+                Some(failed(crate::view::name_of(&bound.view), problem)),
+            )),
             Err(Failure::Debugger(error)) => Err(Stop::Failed(error)),
         }
     }
@@ -612,6 +614,19 @@ impl<P: InspectionOps> StopMachine<'_, '_, P> {
         self.presented(value)
             .map(|value| value.state)
             .map_err(stopped)
+    }
+}
+
+/// The presentation of a value a view failed to present, which shows it as
+/// stored, with the reason.
+fn failed(view: Arc<crate::ViewName>, problem: ViewProblem) -> Presentation {
+    Presentation {
+        view,
+        shape: PresentedShape::Raw,
+        count: None,
+        summary: problem.to_string().into(),
+        children: ValueChildren::NotApplicable,
+        problem: Some(problem),
     }
 }
 

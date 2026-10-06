@@ -9,7 +9,8 @@ use rustc_apfloat::ieee::X87DoubleExtended;
 
 use crate::{
     BaseTypeEncoding, FloatValue, IntegerValue, PresentedShape, ScalarValue, TextCompletion,
-    TextSummary, TypeInfo, TypeKind, VariableState, VariableUnavailableReason, VariableValue,
+    TextSummary, TypeInfo, TypeKind, ValueChildren, VariableState, VariableUnavailableReason,
+    VariableValue,
 };
 
 /// The most elements a summary previews.
@@ -132,6 +133,7 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
         value,
         text,
         presentation,
+        children,
         ..
     } = state
     else {
@@ -152,6 +154,7 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
         return quoted(text);
     }
     let character = type_info.is_some_and(is_character);
+    let partless = matches!(children, ValueChildren::Available(parts) if parts.total() == 0);
     let rendered = match value {
         VariableValue::Scalar(value) => scalar(value, character),
         VariableValue::Enumeration { value, matches } => matches
@@ -160,6 +163,8 @@ pub fn value(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
         VariableValue::Address(address) => format!("{:#x}", address.address.get()),
         VariableValue::ImplicitPointer => "<implicit pointer>".to_owned(),
         VariableValue::Array { .. } | VariableValue::Slice { .. } => "[…]".to_owned(),
+        // A record with no parts, such as Rust's `()`, has nothing to elide.
+        VariableValue::Record if partless => "{}".to_owned(),
         VariableValue::Record | VariableValue::Union | VariableValue::Variant { .. } => {
             "{…}".to_owned()
         }

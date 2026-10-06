@@ -6,10 +6,13 @@ uscope-views 1
 # Since Rust 1.84 a vector's buffer holds an erased pointer, so its element
 # type comes from the pattern. inner() steps through the wrapper layers std
 # adds and removes: RawVec, RawVecInner's Unique and NonNull, and Cap.
+#
+# Zero-sized elements need no room, so std stores no capacity for them and
+# reports the largest, as these views do.
 
 view rust alloc::vec::Vec<T, _> {
     let data = inner(inner(buf).ptr) as *T
-    let capacity = inner(inner(buf).cap)
+    let capacity = sizeof(T) == 0 ? (usize)-1 : inner(inner(buf).cap)
     check len <= capacity
     show sequence(len) for i in range(len) => data[i]
     field capacity = capacity
@@ -18,7 +21,7 @@ view rust alloc::vec::Vec<T, _> {
 # A ring buffer: element i is at (head + i) modulo the capacity.
 view rust alloc::collections::vec_deque::VecDeque<T, _> {
     let data = inner(inner(buf).ptr) as *T
-    let capacity = inner(inner(buf).cap)
+    let capacity = sizeof(T) == 0 ? (usize)-1 : inner(inner(buf).cap)
     let start = inner(head)
     check len <= capacity && (capacity == 0 || start < capacity)
     show sequence(len) for i in range(len) => data[(start + i) % capacity]

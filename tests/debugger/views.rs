@@ -3,9 +3,10 @@
 //! matrix, and every built-in view binds in some build.
 //!
 //! A marker reads `VIEW: <expression> => <summary>`, where `{c*N}` stands
-//! for N of the character c, or `VIEW: <expression> => problem: <words>`
-//! when the view must refuse the value. Each expression is evaluated in
-//! the frame that calls `barrier`.
+//! for N of the character c, `VIEW: <expression> => problem: <words>` when
+//! the view must refuse the value, or `VIEW: <expression> => stored` when no
+//! view presents it. Each expression is evaluated in the frame that calls
+//! `barrier`.
 
 use uscope::{
     Evaluation, Expression, InspectedValue, PresentedCount, PresentedShape, StackFrameId,
@@ -19,6 +20,8 @@ enum Expected {
     Summary(String),
     /// The view refuses the value, saying this.
     Problem(String),
+    /// No view presents the value, and it holds no text.
+    Stored,
 }
 
 struct Marker {
@@ -62,10 +65,13 @@ fn markers(source: &str) -> Vec<Marker> {
             Some(Marker {
                 line: index + 1,
                 expression: expression.trim().to_owned(),
-                expected: expected.trim().strip_prefix("problem: ").map_or_else(
-                    || Expected::Summary(expand(expected.trim())),
-                    |problem| Expected::Problem(problem.to_owned()),
-                ),
+                expected: match expected.trim() {
+                    "stored" => Expected::Stored,
+                    expected => expected.strip_prefix("problem: ").map_or_else(
+                        || Expected::Summary(expand(expected)),
+                        |problem| Expected::Problem(problem.to_owned()),
+                    ),
+                },
             })
         })
         .collect()
@@ -243,6 +249,22 @@ async fn check_containers(
         if optimized && matches!(value.state, VariableState::Unavailable(_)) {
             continue;
         }
+        if matches!(marker.expected, Expected::Stored) {
+            if !matches!(
+                value.state,
+                VariableState::Available {
+                    text: None,
+                    presentation: None,
+                    ..
+                }
+            ) {
+                failures.push(format!(
+                    "line {}: `{}` is presented: {:?}",
+                    marker.line, marker.expression, value.state
+                ));
+            }
+            continue;
+        }
         // Text a language's own types hold, such as Rust's `Box<str>`, needs
         // no view.
         if let (
@@ -284,6 +306,7 @@ async fn check_containers(
                 marker.expression,
                 summary(&value)
             )),
+            (Expected::Stored, _) => unreachable!("checked above"),
             (Expected::Summary(expected), _) => {
                 let actual = summary(&value);
                 if &actual != expected {
@@ -422,6 +445,86 @@ async fn inspection_sent_beside_run_control_is_whole_or_stale() {
         }
         scenario.shutdown().await;
     }
+}
+
+/// An assignment sent before run control is made at its stop and answered
+/// with its target read again, even when reading it again runs a view long
+/// enough to notice the run control waiting: the write cannot be undone or
+/// made again, so nothing interrupts that read.
+#[tokio::test]
+async fn an_assignment_sent_before_run_control_answers_with_its_value() {
+    let mut scenario = Scenario::launch("containers-rust-o0");
+    scenario.add_breakpoint("barrier").await;
+    scenario.run_to_stop().await;
+    let trace = scenario
+        .operation("backtrace", scenario.handle().backtrace())
+        .await;
+    let caller = trace.frames[1].id;
+    // Each check costs more than the work between looks for run control,
+    // and finding an element's place runs them all.
+    let sum = vec!["n"; 16].join(" + ");
+    let checks = format!("    check {sum} >= 0\n").repeat(5);
+    let views = format!(
+        "uscope-views 1
+view rust alloc::vec::Vec<T, _> {{
+    let data = inner(inner(buf).ptr) as *T
+    let n = len
+{checks}    show sequence(len) for i in range(len) => data[i]
+}}
+"
+    );
+    let errors = scenario
+        .operation(
+            "load views",
+            scenario.handle().load_views(&[("costly.views", &views)]),
+        )
+        .await;
+    assert!(errors.is_empty(), "{errors:?}");
+    let snapshot = scenario.snapshot().await;
+    let InferiorState::Stopped {
+        process_id,
+        stop_id,
+        thread_id,
+        ..
+    } = snapshot.inferior
+    else {
+        panic!("not stopped: {:?}", snapshot.inferior);
+    };
+    let handle = scenario.handle().clone();
+    let frame = handle.at(uscope::StopContext {
+        stop: stop_id,
+        thread: thread_id,
+        frame: caller,
+    });
+    let assignment = Expression::parse("ints[0] = 7").expect("an expression");
+    // Polled in order, so the assignment is queued first.
+    let (assigned, resumed) = tokio::join!(
+        frame.evaluate_with(
+            &assignment,
+            uscope::EvaluationMode::Assign,
+            uscope::InspectionLimits::default(),
+        ),
+        handle.continue_execution(
+            stop_id,
+            uscope::ResumeScope::Process(process_id),
+            uscope::ExceptionDisposition::Pass,
+        ),
+    );
+    resumed.expect("continue");
+    match assigned {
+        Ok(Evaluation::Value { value, .. }) => assert!(
+            matches!(
+                value.state,
+                VariableState::Available {
+                    value: uscope::VariableValue::Scalar(ScalarValue::Signed(7)),
+                    ..
+                }
+            ),
+            "{value:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    scenario.shutdown().await;
 }
 
 /// Views loaded for a session come before the built-in ones; a view that

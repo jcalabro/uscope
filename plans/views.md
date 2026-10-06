@@ -1122,12 +1122,13 @@ What P2 built, and what it learned:
   except that one that reads one stop (`reads_one_stop`) waits behind run
   control or a wait event queued after it (`preempts_inspection`), and so
   fails as a request for an old stop does. Expression evaluation and
-  presentation in such a request check every 64 units of work whether run
+  presentation in such a request check every 64 units of a frame's work,
+  counted across the machines of views nested in one another, whether run
   control is waiting; if it is, the request is served again after it
   (`serve_later`). The provider's own reads of a frame's variables, bounded
   by the budget as before P2, are not interrupted. Conditions and log
-  messages, which run control evaluates itself, and assignments are never
-  interrupted. The live, post-mortem, and simulated controllers share
+  messages, which run control evaluates itself, and assignments, including
+  reading the target again after the write, are never interrupted. The live, post-mortem, and simulated controllers share
   `next_message`. The DAP session handles requests one at a time and
   already cancels queued inspection on a resume, so the scheduling serves
   pipelining clients.
@@ -1150,6 +1151,19 @@ What P2 built, and what it learned:
   beside run control. `tests/cli.rs`, `tests/dap/variables.rs`, the
   scheduling unit test, the views' fake-world tests, and the reference's
   examples cover the rest.
+- **After the end-of-phase review** (a second `/roast` of cb735700): an
+  assignment's read of its target after the write could be interrupted
+  and answered with `Interrupted`; the interrupt interval reset in every
+  nested view's machine; a pointer to a value whose text view failed
+  dropped the reason; `p - q` truncated pointers not a whole number of
+  elements apart, so a corrupt `std::vector` showed a plausible length; and
+  `Vec<()>` and `VecDeque<()>` did not bind. That last one led to three
+  older bugs: the loader rejected Rust's `()`, a zero-byte base type, as
+  malformed, so any value holding it, such as `Ok(())`, failed to print;
+  the binder refused to index a pointer to a zero-sized type; and the
+  console's one-line summary called every Rust variant `<no matching
+  variant>`, because Rust names a variant by its one member. `()` is now an
+  empty structure, summarized `{}`.
 - **Deferred.** Text is read up to 256 bytes everywhere, as for C strings;
   §3.9's 4096 bytes when printed needs a per-request text limit. Views do
   not index values through other views inside a view. A page of 256

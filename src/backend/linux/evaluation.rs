@@ -1,7 +1,7 @@
 //! Expressions at a stop: a frame's names for binding, and its state for
 //! running, over the debug-info providers' structural primitives.
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
@@ -88,6 +88,9 @@ pub(super) struct Frame<'a, P: InspectionOps> {
     /// information.
     pub(super) code: Option<(&'a RuntimeModule, ImageAddress, Option<CodeInstanceId>)>,
     registers: OnceCell<Option<RegisterSnapshot>>,
+    /// Units of work every machine running at the frame has done; the
+    /// views presenting values one inside another each have a machine.
+    charges: Cell<u32>,
 }
 
 impl<'a, P: InspectionOps> Frame<'a, P> {
@@ -500,12 +503,11 @@ pub(super) struct StopMachine<'a, 'b, P: InspectionOps> {
     /// Whether a run-control request waiting ends the work, which then
     /// runs again after it; false for work run control itself does.
     pub(super) interruptible: bool,
-    charges: u32,
 }
 
-/// How many units of work a machine does between checks for waiting run
-/// control.
-const INTERRUPT_INTERVAL: u32 = 64;
+/// How many units of work a frame's machines do between checks for waiting
+/// run control.
+pub(super) const INTERRUPT_INTERVAL: u32 = 64;
 
 const fn failed(error: Error) -> Stop {
     Stop::Failed(error)
@@ -522,7 +524,6 @@ impl<'a, 'b, P: InspectionOps> StopMachine<'a, 'b, P> {
             budget,
             depth: 0,
             interruptible,
-            charges: 0,
         }
     }
 
@@ -606,9 +607,10 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
         self.budget
             .consume_expression_work(1)
             .map_err(|exhaustion| Stop::missing(VariableState::Unavailable(exhaustion.into())))?;
-        self.charges = self.charges.wrapping_add(1);
+        let charges = self.frame.charges.get().wrapping_add(1);
+        self.frame.charges.set(charges);
         if self.interruptible
-            && self.charges.is_multiple_of(INTERRUPT_INTERVAL)
+            && charges.is_multiple_of(INTERRUPT_INTERVAL)
             && self.frame.controller.run_control_waiting()
         {
             return Err(failed(Error::Interrupted));
@@ -1003,14 +1005,16 @@ impl<P: LinuxTraceOps> Controller<P> {
             }
         }
         // The value is the target read again, so what the target's own type
-        // makes of the stored bytes shows.
+        // makes of the stored bytes shows. It is read in the assignment's own
+        // mode, which run control waiting cannot interrupt: the write is made,
+        // and serving the request again would make it twice.
         let target = Expression::parse(
             expression
                 .assignment_target()
                 .unwrap_or_else(|| expression.text()),
         )
         .map_err(Error::Expression)?;
-        self.evaluate(stop_id, pid, frame, &target, Mode::Read, limits)
+        self.evaluate(stop_id, pid, frame, &target, Mode::Assign, limits)
     }
 }
 
@@ -1189,6 +1193,7 @@ impl<P: InspectionOps> Controller<P> {
             resolved,
             code: self.frame_scope(resolved),
             registers: OnceCell::new(),
+            charges: Cell::new(0),
         }
     }
 

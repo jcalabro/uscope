@@ -33,6 +33,14 @@ fn main() {
     ring.push_back(4);
     ring.push_front(2);
     ring.push_front(1);
+    // Zero-sized elements, for which std stores no capacity.
+    let units: Vec<()> = vec![(); 3]; // VIEW: units => len=3 [{}, {}, {}]
+    let mut unit_ring: VecDeque<()> = VecDeque::new(); // VIEW: unit_ring => len=2 [{}, {}]
+    unit_ring.push_back(());
+    unit_ring.push_front(());
+    // A pointer to a string in no mapped memory, and one to none at all.
+    let lost_text = 0x10 as *const String; // VIEW: lost_text => problem: inaccessible
+    let no_text: *const String = std::ptr::null(); // VIEW: no_text => stored
 
     // A vector longer than its capacity: its length is the word that holds
     // 4 when its capacity is 8, whatever order Rust gives its fields.
@@ -62,6 +70,10 @@ fn main() {
         &words,
         &many,
         &ring,
+        &units,
+        &unit_ring,
+        &lost_text,
+        &no_text,
         &past_capacity,
         &dangling,
     ));

@@ -1159,6 +1159,13 @@ impl<'a, S: Scope> Binder<'a, S> {
                         "the pointers point at types of different sizes",
                     ));
                 }
+                if scale == 0 {
+                    return Err(Self::error(
+                        span,
+                        ErrorKind::Type,
+                        "the pointers point at a zero-sized type, whose elements share one address",
+                    ));
+                }
                 self.node(
                     Op::Difference {
                         left: Box::new(left),
@@ -1214,7 +1221,8 @@ impl<'a, S: Scope> Binder<'a, S> {
         }
     }
 
-    /// The size of the elements a pointer steps over.
+    /// The size of the elements a pointer steps over, zero for a zero-sized
+    /// type, whose elements share one address.
     fn element_size(
         &self,
         pointer: &Bound<S>,
@@ -1231,18 +1239,16 @@ impl<'a, S: Scope> Binder<'a, S> {
             )
             .with_hint("cast it to `u8*` to count bytes"));
         };
-        size_of(self.scope, target)
-            .filter(|&size| size > 0)
-            .ok_or_else(|| {
-                Self::error(
-                    pointer.span,
-                    ErrorKind::Type,
-                    format!(
-                        "`{}` points at a type without a size",
-                        self.quote(pointer.span)
-                    ),
-                )
-            })
+        size_of(self.scope, target).ok_or_else(|| {
+            Self::error(
+                pointer.span,
+                ErrorKind::Type,
+                format!(
+                    "`{}` points at a type without a size",
+                    self.quote(pointer.span)
+                ),
+            )
+        })
     }
 
     fn float_operand(&mut self, node: Bound<S>, format: FloatFormat) -> BindResult<S> {
