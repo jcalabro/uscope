@@ -212,7 +212,7 @@ impl<P: InspectionOps> Controller<P> {
         let stack = self.physical_stack(inferior, pid, DEFAULT_MAX_FRAMES)?;
         let modules = self.unwind_modules(inferior);
 
-        expand_inline_backtrace(stack.backtrace(pid), &modules, &presentation)
+        expand_inline_backtrace(&stack, pid, &modules, &presentation)
     }
 
     /// Unwinds at most `max_frames` physical activations of a stopped
@@ -302,7 +302,7 @@ impl<P: InspectionOps> Controller<P> {
             });
         }
 
-        let trace = expand_inline_backtrace(stack.backtrace(pid), &modules, &presentation)?;
+        let trace = expand_inline_backtrace(&stack, pid, &modules, &presentation)?;
         let Some(selected) = trace.frames.get(level).cloned() else {
             return Err(Error::FrameNotFound {
                 frame,
@@ -695,29 +695,29 @@ pub(super) fn source_line_changed(
     })
 }
 
-pub(super) fn expand_inline_backtrace(
-    physical: Backtrace,
+/// A stack's logical frames: each activation's inline frames, innermost
+/// first, then the activation itself.
+fn expand_inline_backtrace(
+    stack: &PhysicalStack,
+    pid: Pid,
     modules: &[UnwindModule<'_>],
     presentation: &FramePresentation,
 ) -> Result<Backtrace> {
     let mut frames = Vec::new();
 
-    for physical_frame in physical.frames.iter() {
-        let context = FrameContext {
-            instruction: physical_frame.instruction,
-            cfa: None,
-            signal_frame: physical_frame.kind == FrameKind::Signal,
+    for (activation, physical) in stack.frames.iter().enumerate() {
+        let activation = u32::try_from(activation).expect("frame count fits u32");
+        let context = &physical.context;
+        let kind = if context.signal_frame {
+            FrameKind::Signal
+        } else {
+            FrameKind::Physical
         };
-        let lookup = frame_lookup_address(physical_frame.level, &context);
+        let lookup = frame_lookup_address(activation, context);
         let located = lookup.and_then(|address| unwind_module_for(modules, address));
         let (Some(lookup), Some((frame_module, image_address))) = (lookup, located) else {
             let level = u32::try_from(frames.len()).expect("frame count fits in u32");
-            frames.push(StackFrame::new(
-                level,
-                physical_frame.kind,
-                None,
-                physical_frame.instruction,
-            ));
+            frames.push(StackFrame::new(level, kind, None, context.instruction));
             continue;
         };
         let module_image = frame_module.image;
@@ -726,12 +726,11 @@ pub(super) fn expand_inline_backtrace(
         let physical_source = if let InlineFrameLookup::Unique(chain) = &location.inline_frames {
             // The stop presentation describes the main image only; innermost
             // frames in other modules show their complete inline chain.
-            let visible =
-                if physical_frame.level == 0 && frame_module.loaded.id == modules[0].loaded.id {
-                    presentation_visible_count(&location, presentation)?
-                } else {
-                    chain.instances.len()
-                };
+            let visible = if activation == 0 && frame_module.loaded.id == modules[0].loaded.id {
+                presentation_visible_count(&location, presentation)?
+            } else {
+                chain.instances.len()
+            };
             let mut source = visible_source(module_image, &location, &chain.instances, visible);
 
             for &instance_id in chain.instances[..visible].iter().rev() {
@@ -745,7 +744,7 @@ pub(super) fn expand_inline_backtrace(
                     level,
                     FrameKind::Inline,
                     module,
-                    physical_frame.instruction,
+                    context.instruction,
                     FrameMetadata {
                         code_instance: Some(instance.id),
                         function,
@@ -770,9 +769,9 @@ pub(super) fn expand_inline_backtrace(
 
         frames.push(StackFrame::from_parts(
             level,
-            physical_frame.kind,
+            kind,
             module,
-            physical_frame.instruction,
+            context.instruction,
             FrameMetadata {
                 code_instance: physical_instance.map(|instance| instance.id),
                 function,
@@ -780,7 +779,7 @@ pub(super) fn expand_inline_backtrace(
                 // A caller is looked up just before its return address, but
                 // its offset describes the frame's own instruction.
                 symbol: location.symbol.clone().map(|mut symbol| {
-                    symbol.offset += physical_frame.instruction.get() - lookup.get();
+                    symbol.offset += context.instruction.get() - lookup.get();
                     symbol
                 }),
             },
@@ -788,9 +787,9 @@ pub(super) fn expand_inline_backtrace(
     }
 
     Ok(Backtrace {
-        thread: physical.thread,
+        thread: debug_thread_id(pid),
         frames: frames.into(),
-        termination: physical.termination,
+        termination: stack.termination.clone(),
     })
 }
 
@@ -814,34 +813,6 @@ pub(super) struct PhysicalStack {
     pub(super) native: libc::user_regs_struct,
     pub(super) frames: Vec<PhysicalFrame>,
     pub(super) termination: UnwindTermination,
-}
-
-impl PhysicalStack {
-    /// Describes the activations as physical backtrace frames, whose module
-    /// and symbol metadata the inline expansion resolves.
-    fn backtrace(&self, pid: Pid) -> Backtrace {
-        Backtrace {
-            thread: debug_thread_id(pid),
-            frames: self
-                .frames
-                .iter()
-                .enumerate()
-                .map(|(level, frame)| {
-                    StackFrame::new(
-                        u32::try_from(level).expect("frame count fits u32"),
-                        if frame.context.signal_frame {
-                            FrameKind::Signal
-                        } else {
-                            FrameKind::Physical
-                        },
-                        None,
-                        frame.context.instruction,
-                    )
-                })
-                .collect(),
-            termination: self.termination.clone(),
-        }
-    }
 }
 
 /// The registers a logical frame's values are read from.
