@@ -639,12 +639,12 @@ pub fn watched_bytes(
             }
         }
         (Some(WatchedScalar::Boolean), 1) => (bytes[0] != 0).to_string(),
-        (Some(WatchedScalar::Float), 4) => {
-            f32::from_le_bytes(bytes.try_into().expect("four bytes")).to_string()
-        }
-        (Some(WatchedScalar::Float), 8) => {
-            f64::from_le_bytes(bytes.try_into().expect("eight bytes")).to_string()
-        }
+        (Some(WatchedScalar::Float), 4) => uscope::float_text(uscope::FloatValue::Binary32(
+            u32::from_le_bytes(bytes.try_into().expect("four bytes")),
+        )),
+        (Some(WatchedScalar::Float), 8) => uscope::float_text(uscope::FloatValue::Binary64(
+            u64::from_le_bytes(bytes.try_into().expect("eight bytes")),
+        )),
         (Some(WatchedScalar::Address), 8) => format!("{:#x}", little_endian(bytes)),
         _ => register_bytes(bytes, ByteOrder::Little),
     }
@@ -664,6 +664,7 @@ fn watched_scalar(type_info: &TypeInfo, image: Option<&ModuleImage>) -> Option<W
                 return Some(match base.encoding {
                     BaseTypeEncoding::Boolean => WatchedScalar::Boolean,
                     BaseTypeEncoding::Floating => WatchedScalar::Float,
+                    BaseTypeEncoding::ComplexFloating => return None,
                     BaseTypeEncoding::Signed | BaseTypeEncoding::SignedCharacter => {
                         WatchedScalar::Integer { signed: true }
                     }
@@ -939,6 +940,32 @@ mod tests {
                 sign_exponent: 0x4000,
             }),
             "3.125"
+        );
+        // Shortest round-trip digits, with an exponent where plain digits
+        // would run to hundreds of zeros.
+        let double = |value: f64| float(uscope::FloatValue::Binary64(value.to_bits()));
+        assert_eq!(double(3e300), "3e300");
+        assert_eq!(double(1e21), "1e21");
+        assert_eq!(
+            double(123_456_789_012_345_680_000.0),
+            "123456789012345680000"
+        );
+        assert_eq!(double(0.000_001), "0.000001");
+        assert_eq!(double(-1.5e-7), "-1.5e-7");
+        assert_eq!(double(0.1), "0.1");
+        assert_eq!(
+            float(uscope::FloatValue::Binary32(f32::MAX.to_bits())),
+            "3.4028235e38"
+        );
+        assert_eq!(
+            uscope::scalar_text(
+                &ScalarValue::Complex {
+                    real: uscope::FloatValue::Binary64(1.5_f64.to_bits()),
+                    imaginary: uscope::FloatValue::Binary64((-2.0_f64).to_bits()),
+                },
+                false
+            ),
+            "(1.5-2i)"
         );
     }
 

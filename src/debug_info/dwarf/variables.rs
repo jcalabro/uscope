@@ -158,6 +158,8 @@ pub(super) struct DwarfVariableInfo {
     evaluation_units: Arc<[EvaluationUnit]>,
     types: Arc<[TypeNode]>,
     dynamic_record_layouts: HashMap<DynamicAggregateLayoutKey, Expression>,
+    /// The float type of complex numbers' parts, by the part's name and size.
+    complex_parts: HashMap<(Arc<str>, u64), TypeId>,
     objects_by_debug_offset: HashMap<u64, usize>,
     target: TargetDescription,
     endian: RunTimeEndian,
@@ -499,6 +501,7 @@ pub(super) fn load_variable_info<'data>(
             evaluation_units: evaluation_units.into(),
             types: Arc::clone(&finalized_types),
             dynamic_record_layouts: types.dynamic_record_layouts,
+            complex_parts: types.complex_parts,
             objects_by_debug_offset,
             target,
             endian: match target.byte_order {

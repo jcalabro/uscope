@@ -670,6 +670,7 @@ build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/pieces.c" "$output_dir/pieces-gcc-o2" \
     -O2 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
+require_dwarf_operation "$output_dir/pieces-gcc-o2" 'DW_OP_implicit_value.*DW_OP_piece'
 require_dwarf_operation "$output_dir/pieces-gcc-o2" 'DW_OP_piece: 8; DW_OP_piece: 8'
 build_fixture clang "$c_fixtures_dir/pieces.c" "$output_dir/pieces-clang-o2" \
     -O2 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie

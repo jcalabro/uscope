@@ -14,7 +14,7 @@ use crate::{
     Variant, VariantDiscriminant, VariantSelection, VariantSelector, VariantStorageKind,
 };
 
-use super::codec::enumeration_constant;
+use super::codec::{complex_part, enumeration_constant};
 use super::die::{
     ByteSize, DW_AT_ZIG_PARENT, UnsignedConstant, array_bound, base_type_encoding,
     byte_size_attribute, constant_member_offset, copy_name, declaration_with_origins,
@@ -74,6 +74,9 @@ pub(super) struct TypeArenaBuilder<'a, 'data> {
     pub(super) definition_declarations: HashMap<DieKey, DieKey>,
     /// What each named type's identity is built from.
     pub(super) identity_parts: HashMap<TypeId, IdentityParts>,
+    /// The float type each complex type's parts have, by the part's name
+    /// and size.
+    pub(super) complex_parts: HashMap<(Arc<str>, u64), TypeId>,
 }
 
 #[derive(Clone, Copy)]
@@ -263,6 +266,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             type_scopes: HashMap::new(),
             definition_declarations,
             identity_parts: HashMap::new(),
+            complex_parts: HashMap::new(),
         };
         let mut paths = HashMap::<*const ScopeSegment, ScopePath>::new();
         for (key, segments) in scoped_types {
@@ -778,9 +782,14 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             return Ok(resolved(reference, name, Some(0), kind));
         }
         let raw_encoding = gimli::DwAte(base_type_encoding(entry)?);
-        let Some(encoding) = integer_encoding(raw_encoding).or_else(|| {
-            (raw_encoding == gimli::DW_ATE_float).then_some(BaseTypeEncoding::Floating)
-        }) else {
+        let encoding = match raw_encoding {
+            gimli::DW_ATE_float => Some(BaseTypeEncoding::Floating),
+            gimli::DW_ATE_complex_float if byte_size % 2 == 0 => {
+                Some(BaseTypeEncoding::ComplexFloating)
+            }
+            _ => integer_encoding(raw_encoding),
+        };
+        let Some(encoding) = encoding else {
             return Ok(opaque(
                 reference,
                 name,
@@ -840,7 +849,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 }
             };
             match &info.kind {
-                TypeKind::Base(base) if !matches!(base.encoding, BaseTypeEncoding::Floating) => {
+                TypeKind::Base(base) if !is_floating(base.encoding) => {
                     return Ok(base.clone());
                 }
                 TypeKind::Enumeration { representation, .. } => {
@@ -1020,7 +1029,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 let TypeKind::Base(base) = &info.kind else {
                     continue;
                 };
-                if !info.name.contains('.') || matches!(base.encoding, BaseTypeEncoding::Floating) {
+                if !info.name.contains('.') || is_floating(base.encoding) {
                     continue;
                 }
                 let representation = base.clone();
@@ -1202,6 +1211,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                 );
             }
         }
+        self.add_complex_parts();
 
         propagate_wrapper_sizes(&mut self.entries);
 
@@ -1224,6 +1234,50 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
             }
         }
         self.assign_identities();
+    }
+
+    /// Gives each complex type's real and imaginary parts a float type:
+    /// the program's own float of that name and size, or one made for it.
+    fn add_complex_parts(&mut self) {
+        let mut parts = Vec::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            let TypeEntry::Resolved(TypeInfo {
+                kind: TypeKind::Base(base),
+                ..
+            }) = entry
+            else {
+                continue;
+            };
+            match base.encoding {
+                BaseTypeEncoding::Floating => {
+                    let id =
+                        TypeId::new(u32::try_from(index).expect("bounded type count fits u32"));
+                    self.complex_parts
+                        .entry((Arc::clone(&base.base_name), base.byte_size))
+                        .or_insert(id);
+                }
+                BaseTypeEncoding::ComplexFloating => parts.push(complex_part(base)),
+                _ => {}
+            }
+        }
+        for part in parts {
+            let key = (Arc::clone(&part.base_name), part.byte_size);
+            if self.complex_parts.contains_key(&key) || self.entries.len() >= MAX_TYPES {
+                continue;
+            }
+            let reference = TypeReference {
+                image: self.image,
+                id: self.next_id(),
+            };
+            self.entries.push(resolved(
+                reference,
+                Arc::clone(&part.name),
+                Some(part.byte_size),
+                TypeKind::Base(part),
+            ));
+            self.explicit_names.insert(reference.id);
+            self.complex_parts.insert(key, reference.id);
+        }
     }
 
     fn reject_inline_storage_cycles(&mut self) {
@@ -1720,6 +1774,7 @@ impl<'a, 'data> TypeArenaBuilder<'a, 'data> {
                     BaseTypeEncoding::Signed
                         | BaseTypeEncoding::SignedCharacter
                         | BaseTypeEncoding::Floating
+                        | BaseTypeEncoding::ComplexFloating
                 ) {
                     return None;
                 }
@@ -2952,6 +3007,14 @@ fn opaque(
         TypeKind::Opaque {
             description: description.into(),
         },
+    )
+}
+
+/// Whether an encoding is a float or a pair of them.
+const fn is_floating(encoding: BaseTypeEncoding) -> bool {
+    matches!(
+        encoding,
+        BaseTypeEncoding::Floating | BaseTypeEncoding::ComplexFloating
     )
 }
 
