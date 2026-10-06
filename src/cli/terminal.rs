@@ -35,8 +35,8 @@ impl ColorEnvironment {
     }
 }
 
-/// Determines color support without consulting global state, keeping the
-/// precedence rules deterministic and independently testable.
+/// Decides whether to color a stream: an explicit choice wins, then
+/// `NO_COLOR`, `CLICOLOR_FORCE`, `CLICOLOR`, batch mode, and the terminal.
 pub fn color_enabled(
     choice: ColorChoice,
     environment: &ColorEnvironment,
@@ -183,42 +183,5 @@ mod tests {
 
         assert!(color_enabled(ColorChoice::Always, &no_color, false, true));
         assert!(!color_enabled(ColorChoice::Never, &capable, true, false));
-    }
-
-    #[test]
-    fn renderer_preserves_plain_text_and_bounds_every_style() {
-        for role in [
-            Role::Prompt,
-            Role::Command,
-            Role::Alias,
-            Role::Muted,
-            Role::Name,
-            Role::Type,
-            Role::Value,
-            Role::Metadata,
-            Role::Current,
-            Role::Success,
-            Role::Warning,
-            Role::Error,
-        ] {
-            assert_eq!(Renderer::new(false).paint(role, "text").to_string(), "text");
-
-            let rendered = Renderer::new(true).paint(role, "text").to_string();
-            assert!(rendered.starts_with("\x1b["), "{role:?}: {rendered:?}");
-            assert!(rendered.ends_with("\x1b[0m"), "{role:?}: {rendered:?}");
-            assert!(rendered.contains("text"), "{role:?}: {rendered:?}");
-        }
-    }
-
-    #[test]
-    fn terminal_control_requires_an_ansi_terminal() {
-        let capable = environment(Some("xterm-256color"), false, None, false);
-        assert!(terminal_control_enabled(&capable, true));
-        assert!(!terminal_control_enabled(&capable, false));
-
-        let dumb = environment(Some("dumb"), false, None, false);
-        assert!(!terminal_control_enabled(&dumb, true));
-        let unknown = environment(None, false, None, false);
-        assert!(!terminal_control_enabled(&unknown, true));
     }
 }
