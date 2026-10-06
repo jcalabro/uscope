@@ -2229,6 +2229,37 @@ pub struct FunctionInfo {
     pub linkage_name: Option<Arc<str>>,
     /// The function's declaration location, when known.
     pub declaration: Option<SourceLocation>,
+    /// The language of the unit that defines the function.
+    pub language: SourceLanguage,
+    /// What the function is to unwinding and stepping.
+    pub role: CodeRole,
+}
+
+/// What a function is to unwinding and stepping, whatever its language.
+///
+/// The debug-info provider sets it once, when an image loads; unwinding and
+/// stepping read roles, never names or languages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum CodeRole {
+    /// Code the program's author wrote, or a library they call.
+    #[default]
+    Ordinary,
+    /// Forwards to another function and never shows to a step:
+    /// trampolines, ABI wrappers, and code a compiler generates.
+    Wrapper,
+    /// The language runtime's own machinery: a step passes through it to
+    /// user code it calls, and a backtrace marks it.
+    RuntimeInternal,
+    /// Continues on another stack; only a runtime model can say where.
+    StackSwitch,
+    /// The outermost frame of any stack: unwinding ends here, complete.
+    Outermost,
+    /// Entered by a trap, not a call: its caller's instruction is the one
+    /// that trapped, not a return address.
+    TrapEntry,
+    /// The signal-return trampoline a handler returns to: the interrupted
+    /// registers are in the kernel's signal frame above it.
+    SignalTrampoline,
 }
 
 /// Describes whether a function instance is emitted out of line or inlined.
@@ -2356,6 +2387,9 @@ pub struct SymbolInfo {
     /// it. The range is empty for an unsized symbol, which names only its own
     /// address.
     pub storage: Option<AddressRange<ImageAddress>>,
+    /// What the code the symbol names is to unwinding and stepping, for
+    /// code no debug information describes.
+    pub role: CodeRole,
 }
 
 /// Records which symbol tables a module image provided.

@@ -598,6 +598,8 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
                     name: name.into(),
                     linkage_name: None,
                     declaration: None,
+                    language: crate::SourceLanguage::C,
+                    role: crate::CodeRole::Ordinary,
                 })
                 .collect(),
             code_instances: instances

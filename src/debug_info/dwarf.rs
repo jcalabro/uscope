@@ -18,8 +18,8 @@ use crate::{
     AddressRange, Architecture, BreakpointEntry, ByteOrder, CodeInstanceId, CodeInstanceInfo,
     CodeInstanceKind, ColumnNumber, EntryProvenance, Error, FunctionId, FunctionInfo, ImageAddress,
     LineNumber, LineSequenceId, ModuleImage, PointerWidth, Result, SourceFile, SourceFileId,
-    SourceLocation, StatementFlags, StatementRow, TargetDescription, UnwindTermination,
-    VirtualAddress,
+    SourceLanguage, SourceLocation, StatementFlags, StatementRow, TargetDescription,
+    UnwindTermination, VirtualAddress,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -817,6 +817,8 @@ enum RawFunctionKind {
 
 struct RawFunction {
     key: DieKey,
+    /// The language of the unit holding the DIE.
+    language: SourceLanguage,
     kind: RawFunctionKind,
     parent: Option<DieKey>,
     abstract_origin: Option<DieKey>,
@@ -884,12 +886,15 @@ fn load_function_metadata(
         let id = FunctionId::new(
             u32::try_from(functions.len()).map_err(|_| gimli::Error::UnsupportedOffset)?,
         );
+        let role = super::roles::symbol_role(linkage_name.as_deref().unwrap_or(&name));
 
         functions.push(FunctionInfo {
             id,
             name,
             linkage_name,
             declaration,
+            language: origin.language,
+            role,
         });
         function_ids.insert(definition, id);
     }
@@ -963,6 +968,7 @@ fn collect_function_dies(
         if is_type_unit(unit) {
             continue;
         }
+        let language = unit_language(dwarf, unit)?;
         let mut entries = unit.entries();
         let mut scopes = Vec::<Option<DieKey>>::new();
 
@@ -985,6 +991,7 @@ fn collect_function_dies(
                 let concrete_ranges = die_code_ranges(dwarf, unit, entry, &catalog.code)?;
                 functions.push(RawFunction {
                     key,
+                    language,
                     kind,
                     parent,
                     abstract_origin: die_reference(
@@ -1035,6 +1042,24 @@ fn collect_function_dies(
     }
 
     Ok(functions)
+}
+
+/// The language a unit is written in, by its root DIE.
+fn unit_language(
+    dwarf: &gimli::Dwarf<Reader<'_>>,
+    unit: &gimli::Unit<Reader<'_>>,
+) -> std::result::Result<SourceLanguage, DwarfError> {
+    let mut entries = unit.entries();
+    let Some(root) = entries.next_dfs()? else {
+        return Ok(SourceLanguage::Unknown);
+    };
+    let language = match root.attr_value(gimli::DW_AT_language) {
+        Some(gimli::AttributeValue::Language(language)) => Some(language),
+        _ => None,
+    };
+    let zig = string_attribute(dwarf, unit, root, gimli::DW_AT_producer)?
+        .is_some_and(|producer| producer.starts_with("zig "));
+    Ok(variables::source_language(language, zig))
 }
 
 fn string_attribute(

@@ -242,6 +242,34 @@ async fn normalized_type_graphs_are_closed_and_preserve_language_semantics() {
         }
     }
 
+    // Every function carries the language of the unit defining it.
+    for (fixture, function, language) in [
+        ("variables-gcc-o0", "main", uscope::SourceLanguage::C),
+        (
+            "variables-cpp-clang-o0",
+            "main",
+            uscope::SourceLanguage::Cpp,
+        ),
+        ("variables-rust-o0", "main", uscope::SourceLanguage::Rust),
+        (
+            "variables-zig-o0",
+            "inspectScalars",
+            uscope::SourceLanguage::Zig,
+        ),
+        (
+            "variables-go-o0",
+            "inspectScalars",
+            uscope::SourceLanguage::Go,
+        ),
+    ] {
+        let found = images[fixture]
+            .functions()
+            .iter()
+            .find(|info| info.name.rsplit(['.', ':']).next() == Some(function))
+            .unwrap_or_else(|| panic!("{fixture}: no function {function}"));
+        assert_eq!(found.language, language, "{fixture}: {found:?}");
+    }
+
     let go = &images["variables-go-o0"];
     assert!(
         go.types().iter().any(|node| matches!(

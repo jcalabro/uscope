@@ -372,11 +372,12 @@ fn normalize(
         .map(
             |(index, (address, name, _, symbol, (extent, storage)))| SymbolInfo {
                 id: SymbolId::new(u32::try_from(index).expect("symbol count fits in u32")),
-                name,
                 address: ImageAddress::new(address),
                 kind: symbol.kind,
                 binding: symbol.binding,
                 exported: symbol.exported,
+                role: super::roles::symbol_role(&name),
+                name,
                 extent,
                 storage,
             },
