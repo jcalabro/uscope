@@ -73,14 +73,6 @@ impl fmt::Display for Condition {
     }
 }
 
-impl std::str::FromStr for Condition {
-    type Err = Error;
-
-    fn from_str(text: &str) -> Result<Self> {
-        Self::parse(text)
-    }
-}
-
 /// A logpoint's message: text with values interpolated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogMessage {

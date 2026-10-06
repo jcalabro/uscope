@@ -32,8 +32,6 @@ const MAX_BOUND_NODES: usize = 4096;
 /// The most wrappers `inner` steps through.
 const MAX_INNER_STEPS: usize = 64;
 
-const ELEMENT_UNSUPPORTED: &str = "the element has a type the debugger cannot compute with";
-
 type Bound<S> = Node<<S as Scope>::Object, <S as Scope>::Step>;
 type BindResult<S> = Result<Bound<S>, ExpressionError>;
 
@@ -84,8 +82,8 @@ fn bind_as<S: Scope>(
     finish: Finish,
 ) -> Result<Program<S::Object, S::Step>, ExpressionError> {
     let mut casts = 0;
+    let binder = Binder::new(scope, expression.text(), mode, None);
     for (index, ambiguity) in expression.ambiguities().iter().enumerate() {
-        let binder = Binder::new(scope, expression.text(), mode, None);
         if binder.names_value(&ambiguity.name)? {
             continue;
         }
@@ -361,16 +359,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                 self.container_of(pointer, target, &member, span)
             }
             NodeKind::Global(name) => match self.scope.global(&name) {
-                Ok(Lookup::Object { object, ty: Ok(ty) }) => {
-                    self.node(Op::Object(object), Ty::Program(ty), span)
-                }
-                Ok(Lookup::Object {
-                    ty: Err(reason), ..
-                }) => Err(Self::error(
-                    span,
-                    ErrorKind::Unsupported,
-                    format!("`{name}` has a malformed type: {reason}"),
-                )),
+                Ok(Lookup::Object { object, ty }) => self.object(&name, object, ty, span),
                 Ok(Lookup::Ambiguous(candidates)) => Err(Self::ambiguous(span, &name, &candidates)),
                 Ok(_) => Err(Self::error(
                     span,
@@ -538,19 +527,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     );
                 }
                 Lookup::Bound { object, ty } => self.node(Op::Bound(object), ty, name_span)?,
-                Lookup::Object { object, ty } => {
-                    let ty = match ty {
-                        Ok(ty) => ty,
-                        Err(reason) => {
-                            return Err(Self::error(
-                                name_span,
-                                ErrorKind::Unsupported,
-                                format!("`{name}` has a malformed type: {reason}"),
-                            ));
-                        }
-                    };
-                    self.node(Op::Object(object), Ty::Program(ty), name_span)?
-                }
+                Lookup::Object { object, ty } => self.object(&name, object, ty, name_span)?,
             };
             for segment in &path.segments[count..] {
                 let member_span = path.segments[0].span.to(segment.span);
@@ -570,6 +547,23 @@ impl<'a, S: Scope> Binder<'a, S> {
             ErrorKind::UnknownName,
             format!("no variable is named `{name}` here"),
         ))
+    }
+
+    fn object(
+        &mut self,
+        name: &str,
+        object: S::Object,
+        ty: Result<TypeReference, Arc<str>>,
+        span: Span,
+    ) -> BindResult<S> {
+        let ty = ty.map_err(|reason| {
+            Self::error(
+                span,
+                ErrorKind::Unsupported,
+                format!("`{name}` has a malformed type: {reason}"),
+            )
+        })?;
+        self.node(Op::Object(object), Ty::Program(ty), span)
     }
 
     fn enumerator(&mut self, value: Exact, ty: TypeReference, span: Span) -> BindResult<S> {
@@ -1926,41 +1920,6 @@ impl<'a, S: Scope> Binder<'a, S> {
             node = self.settle(node)?;
             let category = self.category(&node.ty);
             match category {
-                ref category @ (Category::Array { .. } | Category::Slice(_)) if node.is_place() => {
-                    let Ty::Program(from) = node.ty else {
-                        unreachable!("arrays are program types")
-                    };
-                    let planned = self
-                        .scope
-                        .plan(
-                            from,
-                            StepKind::Index {
-                                available: pending.len(),
-                            },
-                        )
-                        .map_err(|refusal| Self::refused(*span, refusal))?;
-                    let consumed = planned.consumed.clamp(1, pending.len());
-                    let (taken, rest) = pending.split_at(consumed);
-                    let mut indices = Vec::new();
-                    for (index, _) in taken {
-                        let index = self.bind(*index)?;
-                        indices.push(self.integer_value(index)?);
-                    }
-                    let span = taken.last().map_or(*span, |(_, span)| *span);
-                    let ty =
-                        Self::reached(planned.result, span, || ELEMENT_UNSUPPORTED.to_owned())?;
-                    node = self.node(
-                        Op::Step {
-                            base: Box::new(node),
-                            step: planned.step,
-                            indices,
-                            follows: matches!(category, Category::Slice(_)),
-                        },
-                        ty,
-                        span,
-                    )?;
-                    pending = rest;
-                }
                 Category::Pointer(target) if !self.represents(&node.ty) => {
                     let pointer = self.value(node)?;
                     let scale = self.element_size(&pointer, target.as_ref())?;
@@ -1981,37 +1940,56 @@ impl<'a, S: Scope> Binder<'a, S> {
                     node = self.deref_value(moved, &target, *span)?;
                     pending = &pending[1..];
                 }
-                ref category @ (Category::Record | Category::Pointer(_)) if node.is_place() => {
-                    // A record has no indexing of its own, nor has a value
-                    // its language represents as a pointer; a view that
-                    // presents it as a sequence may give it some.
+                // A record has no indexing of its own, nor has a value its
+                // language represents as a pointer; a view that presents it
+                // as a sequence may give it some, one index at a time.
+                ref category @ (Category::Array { .. }
+                | Category::Slice(_)
+                | Category::Record
+                | Category::Pointer(_))
+                    if node.is_place() =>
+                {
                     let Ty::Program(from) = node.ty else {
-                        unreachable!("records and pointers are program types")
+                        unreachable!("indexed places are program types")
                     };
+                    let native = matches!(category, Category::Array { .. } | Category::Slice(_));
+                    let available = pending.len();
                     let planned = self
                         .scope
-                        .plan(
-                            from,
-                            StepKind::Index {
-                                available: pending.len(),
-                            },
-                        )
-                        .map_err(|_| self.type_error(&node, category, "cannot be indexed"))?;
-                    let index = self.bind(*first)?;
-                    let index = self.integer_value(index)?;
-                    let ty =
-                        Self::reached(planned.result, *span, || ELEMENT_UNSUPPORTED.to_owned())?;
+                        .plan(from, StepKind::Index { available })
+                        .map_err(|refusal| {
+                            if native {
+                                Self::refused(*span, refusal)
+                            } else {
+                                self.type_error(&node, category, "cannot be indexed")
+                            }
+                        })?;
+                    let consumed = if native {
+                        planned.consumed.clamp(1, available)
+                    } else {
+                        1
+                    };
+                    let (taken, rest) = pending.split_at(consumed);
+                    let mut indices = Vec::new();
+                    for (index, _) in taken {
+                        let index = self.bind(*index)?;
+                        indices.push(self.integer_value(index)?);
+                    }
+                    let span = taken.last().map_or(*span, |(_, span)| *span);
+                    let ty = Self::reached(planned.result, span, || {
+                        "the element has a type the debugger cannot compute with".to_owned()
+                    })?;
                     node = self.node(
                         Op::Step {
                             base: Box::new(node),
                             step: planned.step,
-                            indices: vec![index],
-                            follows: true,
+                            indices,
+                            follows: !matches!(category, Category::Array { .. }),
                         },
                         ty,
-                        *span,
+                        span,
                     )?;
-                    pending = &pending[1..];
+                    pending = rest;
                 }
                 category => return Err(self.type_error(&node, &category, "cannot be indexed")),
             }

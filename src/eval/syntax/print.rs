@@ -78,14 +78,6 @@ pub fn name_text(name: &str) -> String {
     }
 }
 
-const fn suffix_text(suffix: Suffix) -> Option<(char, Option<u8>)> {
-    match suffix {
-        Suffix::Int { width, signed } => Some((if signed { 'i' } else { 'u' }, Some(width))),
-        Suffix::Size { signed } => Some((if signed { 'i' } else { 'u' }, None)),
-        Suffix::F32 | Suffix::F64 => None,
-    }
-}
-
 struct Printer<'tree> {
     tree: &'tree Tree,
     out: String,
@@ -249,14 +241,15 @@ impl Printer<'_> {
             }
             NodeKind::Integer { value, suffix } => {
                 let _ = write!(self.out, "{value}");
-                if let Some((sign, width)) = suffix.and_then(suffix_text) {
-                    self.out.push(sign);
-                    match width {
-                        Some(width) => {
-                            let _ = write!(self.out, "{width}");
-                        }
-                        None => self.out.push_str("size"),
+                let sign = |signed| if signed { 'i' } else { 'u' };
+                match *suffix {
+                    Some(Suffix::Int { width, signed }) => {
+                        let _ = write!(self.out, "{}{width}", sign(signed));
                     }
+                    Some(Suffix::Size { signed }) => {
+                        let _ = write!(self.out, "{}size", sign(signed));
+                    }
+                    Some(Suffix::F32 | Suffix::F64) | None => {}
                 }
             }
             NodeKind::Float(value) => self.float(*value),
