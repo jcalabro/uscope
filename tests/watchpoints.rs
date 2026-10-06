@@ -105,7 +105,8 @@ async fn selected_thread(scenario: &mut Scenario) -> ThreadId {
     scenario
         .snapshot()
         .await
-        .selected_thread
+        .selected
+        .and_then(uscope::ExecutionContext::as_thread)
         .expect("a stopped inferior has a selected thread")
 }
 
@@ -2017,7 +2018,8 @@ async fn attached_processes_arm_threads_they_create_later() {
         .snapshot()
         .await
         .expect("snapshot")
-        .selected_thread
+        .selected
+        .and_then(uscope::ExecutionContext::as_thread)
         .expect("selected thread");
     let watchpoint = handle
         .watch(&expression("attach_watched"), WatchAccess::Write)

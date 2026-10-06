@@ -63,23 +63,24 @@ pub use model::{
     BreakpointEntry, BreakpointLocation, ByteOrder, CallFrameUnavailableReason, CodeInstanceId,
     CodeInstanceInfo, CodeInstanceKind, CodeRole, ColumnNumber, DereferenceReference,
     DereferenceState, DereferenceUnavailableReason, DereferencedValue, EmbeddedSymbolTable,
-    EntryProvenance, EnumerationOrigin, Enumerator, ExecutionLocation, FloatValue, FrameKind,
-    FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId, GlobalVariableInfo,
-    GlobalVariablePage, GlobalVariableReference, GlobalVariableType, GlobalVariableVisibility,
-    GoKind, GoTypeAttributes, ImageAddress, ImageAddressDescription, ImageLocation, InlineChain,
-    InlineFrameLookup, InspectedValue, InspectionCompletion, InspectionExhaustion, InspectionLimit,
-    InspectionLimits, InspectionUsage, IntegerValue, LineNumber, LineSequenceId,
-    LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord, LoadedModuleSnapshot, MapKey,
-    MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason, ModuleAddress, ModuleId,
-    ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason, PointerWidth,
-    Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember, RecordMemberLayout,
-    ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole, RegisterSnapshot, RegisterValue,
-    ScalarValue, SectionId, SectionInfo, SectionLocation, SourceContext, SourceFile, SourceFileId,
-    SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags,
-    StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo,
-    SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TextCompletion, TextSummary,
-    ThreadId, TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind,
-    TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
+    EntryProvenance, EnumerationOrigin, Enumerator, ExecutionContext, ExecutionLocation,
+    FloatValue, FrameKind, FunctionId, FunctionInfo, GlobalVariableCandidate, GlobalVariableId,
+    GlobalVariableInfo, GlobalVariablePage, GlobalVariableReference, GlobalVariableType,
+    GlobalVariableVisibility, GoKind, GoTypeAttributes, ImageAddress, ImageAddressDescription,
+    ImageLocation, InlineChain, InlineFrameLookup, InspectedValue, InspectionCompletion,
+    InspectionExhaustion, InspectionLimit, InspectionLimits, InspectionUsage, IntegerValue,
+    LineNumber, LineSequenceId, LoadedGlobalVariableInfo, LoadedModule, LoadedModuleRecord,
+    LoadedModuleSnapshot, MapKey, MemoryRead, MemoryReadCompletion, MemoryReadUnavailableReason,
+    ModuleAddress, ModuleId, ModuleImage, ModuleImageId, NamedTypeRelationship, OptimizedOutReason,
+    PointerWidth, Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember,
+    RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
+    RegisterSnapshot, RegisterValue, RuntimeId, ScalarValue, SectionId, SectionInfo,
+    SectionLocation, SourceContext, SourceFile, SourceFileId, SourceLanguage, SourceLine,
+    SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolBinding,
+    SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolLocation,
+    SymbolTableSources, TargetDescription, TaskId, TextCompletion, TextSummary, ThreadId,
+    TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier,
+    TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
     ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
     ValueChildRelationship, ValueChildren, ValueChildrenReference, Variable, VariableInvalidReason,
     VariableKind, VariableMalformedKind, VariableMalformedReason, VariableSnapshot, VariableState,
@@ -787,7 +788,7 @@ impl DebuggerHandle {
         self.wait_for_execution(&mut events, execution).await
     }
 
-    /// Starts stepping one thread.
+    /// Starts stepping one thread or task.
     ///
     /// [`StepKind::Out`] runs until `frame` returns to its caller; every
     /// other kind steps from the innermost frame, which `frame` must be.
@@ -800,18 +801,19 @@ impl DebuggerHandle {
     pub async fn start_step(
         &self,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: impl Into<ExecutionContext>,
         frame: StackFrameId,
         kind: StepKind,
         scope: ResumeScope,
         exception: ExceptionDisposition,
     ) -> Result<ExecutionId> {
         let process_id = self.stopped_selection().await?.process;
+        let context = context.into();
 
         self.request(|reply| Request::Step {
             process_id,
             stop_id,
-            thread_id,
+            context,
             frame,
             kind,
             scope,
@@ -837,7 +839,7 @@ impl DebuggerHandle {
         let execution = self
             .start_step(
                 selection.stop,
-                selection.thread,
+                selection.execution,
                 frame,
                 kind,
                 ResumeScope::Process(selection.process),
@@ -1328,20 +1330,22 @@ impl DebuggerHandle {
 
         self.request(|reply| Request::SelectFrame {
             stop_id: selection.stop,
-            thread_id: selection.thread,
+            context: selection.execution,
             frame,
             reply,
         })
         .await
     }
 
-    /// Selects the stopped thread used by implicit inspection commands.
-    pub async fn select_thread(&self, thread_id: ThreadId) -> Result<()> {
+    /// Selects the stopped thread or task used by implicit inspection
+    /// commands.
+    pub async fn select_context(&self, context: impl Into<ExecutionContext>) -> Result<()> {
         let selection = self.stopped_selection().await?;
+        let context = context.into();
 
-        self.request(|reply| Request::SelectThread {
+        self.request(|reply| Request::SelectContext {
             stop_id: selection.stop,
-            thread_id,
+            context,
             reply,
         })
         .await
@@ -1357,7 +1361,7 @@ impl DebuggerHandle {
         let selection = self.stopped_selection().await?;
         Ok(self.at(StopContext {
             stop: selection.stop,
-            thread: selection.thread,
+            execution: selection.execution,
             frame: selection.frame,
         }))
     }
@@ -1431,13 +1435,13 @@ impl DebuggerHandle {
     }
 }
 
-/// Names one frame of one thread at one stop.
+/// Names one frame of one thread or task at one stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StopContext {
     /// The stop the frame belongs to.
     pub stop: StopId,
-    /// The thread whose stack holds the frame.
-    pub thread: ThreadId,
+    /// The thread or task whose stack holds the frame.
+    pub execution: ExecutionContext,
     /// The frame, numbered as [`DebuggerHandle::backtrace`] presents it.
     pub frame: StackFrameId,
 }
@@ -1461,7 +1465,7 @@ impl StopView<'_> {
         self.handle
             .request(|reply| Request::Backtrace {
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 reply,
             })
             .await
@@ -1473,7 +1477,7 @@ impl StopView<'_> {
         self.handle
             .request(|reply| Request::Registers {
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1486,7 +1490,7 @@ impl StopView<'_> {
         self.handle
             .request(|reply| Request::StoppedLocation {
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1542,7 +1546,7 @@ impl StopView<'_> {
                 query,
                 limits,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1575,7 +1579,7 @@ impl StopView<'_> {
                 mode,
                 limits,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1590,7 +1594,7 @@ impl StopView<'_> {
             .request(|reply| Request::ExplainView {
                 expression,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1606,7 +1610,7 @@ impl StopView<'_> {
             .request(|reply| Request::RecordKernels {
                 expression,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1621,7 +1625,7 @@ impl StopView<'_> {
             .request(|reply| Request::ExpressionType {
                 expression,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1654,7 +1658,7 @@ impl StopView<'_> {
             .request(|reply| Request::ResolveWatchTarget {
                 expression,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 frame: context.frame,
                 reply,
             })
@@ -1669,7 +1673,7 @@ impl StopView<'_> {
             .request(|reply| Request::Disassemble {
                 query,
                 stop_id: context.stop,
-                thread_id: context.thread,
+                context: context.execution,
                 reply,
             })
             .await
@@ -1682,6 +1686,6 @@ impl StopView<'_> {
 pub(crate) struct StoppedSelection {
     pub(crate) process: ProcessId,
     pub(crate) stop: StopId,
-    pub(crate) thread: ThreadId,
+    pub(crate) execution: ExecutionContext,
     pub(crate) frame: StackFrameId,
 }

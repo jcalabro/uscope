@@ -5,9 +5,9 @@ use crate::protocol::{
 };
 use crate::unwind::{FrameContext, MemoryReader, RegisterFile};
 use crate::{
-    AddressRange, CodeInstanceKind, ExceptionDisposition, ImageAddress, InlineFrameLookup,
-    LaunchOptions, MemoryReadCompletion, MemoryReadUnavailableReason, Path, PresentedFrame,
-    VariableQuery, WatchpointHit, WatchpointOptions, WatchpointSpec,
+    AddressRange, CodeInstanceKind, ExceptionDisposition, ExecutionContext, ImageAddress,
+    InlineFrameLookup, LaunchOptions, MemoryReadCompletion, MemoryReadUnavailableReason, Path,
+    PresentedFrame, VariableQuery, WatchpointHit, WatchpointOptions, WatchpointSpec,
 };
 use std::cell::RefCell;
 use tokio::sync::broadcast;
@@ -5136,7 +5136,7 @@ fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
             .handle_message(ControllerMessage::Request(Request::Step {
                 process_id: process,
                 stop_id: stop,
-                thread_id: debug_thread_id(pid),
+                context: ExecutionContext::Thread(debug_thread_id(pid)),
                 frame: StackFrameId::INNERMOST,
                 kind,
                 scope: ResumeScope::Process(process),
@@ -5178,7 +5178,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
     let (controller, pid) = (&harness.controller, harness.threads[0]);
     let sender = controller.message_sender.clone();
     let stop_id = StopId::new(7);
-    let thread_id = debug_thread_id(pid);
+    let context = ExecutionContext::Thread(debug_thread_id(pid));
     let frame = StackFrameId::INNERMOST;
     let mut replies = Vec::new();
     let mut evaluate = |text: &str, mode| {
@@ -5189,7 +5189,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
             mode,
             limits: crate::InspectionLimits::default(),
             stop_id,
-            thread_id,
+            context,
             frame,
             reply,
         }
@@ -5211,7 +5211,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
             query: VariableQuery::All,
             limits: crate::InspectionLimits::default(),
             stop_id,
-            thread_id,
+            context,
             frame,
             reply: variables_reply,
         },
@@ -5273,7 +5273,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
             mode: crate::EvaluationMode::Read,
             limits: crate::InspectionLimits::default(),
             stop_id,
-            thread_id,
+            context,
             frame,
             reply,
         }

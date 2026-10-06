@@ -499,7 +499,7 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
         scenario
             .operation(
                 "select Zig thread",
-                scenario.handle().select_thread(thread.id),
+                scenario.handle().select_context(thread.id),
             )
             .await;
         let trace = scenario
@@ -522,7 +522,7 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
                     .handle()
                     .at(uscope::StopContext {
                         stop,
-                        thread: thread.id,
+                        execution: thread.id.into(),
                         frame: frame.id,
                     })
                     .variables(),
@@ -840,7 +840,7 @@ async fn variable_inspection_uses_the_selected_threads_stack() {
         scenario
             .operation(
                 "select stopped thread",
-                scenario.handle().select_thread(thread.id),
+                scenario.handle().select_context(thread.id),
             )
             .await;
         match scenario.handle().variable("thread_value").await {

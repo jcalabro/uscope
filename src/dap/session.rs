@@ -15,9 +15,9 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uscope::{
     Backtrace, BreakpointSpec, Debugger, DebuggerEvent, DebuggerHandle, Error,
-    ExceptionDisposition, ExitStatus, InferiorState, LaunchOptions, LineNumber, ModuleId,
-    ModuleImage, ProcessId, ResumeScope, SignalPolicy, StackFrameId, StepKind, StopContext, StopId,
-    StopReason, ThreadId, VariableSnapshot, VirtualAddress,
+    ExceptionDisposition, ExecutionContext, ExitStatus, InferiorState, LaunchOptions, LineNumber,
+    ModuleId, ModuleImage, ProcessId, ResumeScope, SignalPolicy, StackFrameId, StepKind,
+    StopContext, StopId, StopReason, ThreadId, VariableSnapshot, VirtualAddress,
 };
 
 use super::breakpoints::{Breakpoints, Change, Entry, Group, Key, Placement, Slot, State, Want};
@@ -30,6 +30,7 @@ use super::protocol::{
 };
 use super::signals::Selection;
 use super::sources::source_json;
+use super::threads::ThreadHandles;
 use crate::cli::{Cli, LaunchSettings, Renderers};
 
 /// How long the session waits for a program's output to drain after it
@@ -155,12 +156,9 @@ impl Client {
             .await
     }
 
-    async fn thread(&self, reason: &str, thread: ThreadId) -> Result<(), Closed> {
-        self.event(
-            "thread",
-            json!({"reason": reason, "threadId": thread.get()}),
-        )
-        .await
+    async fn thread(&self, reason: &str, id: i64) -> Result<(), Closed> {
+        self.event("thread", json!({"reason": reason, "threadId": id}))
+            .await
     }
 
     pub(super) async fn console(&self, text: impl Into<String>) -> Result<(), Closed> {
@@ -261,7 +259,7 @@ impl Stop {
     pub const fn innermost(&self) -> StopContext {
         StopContext {
             stop: self.id,
-            thread: self.thread,
+            execution: ExecutionContext::Thread(self.thread),
             frame: StackFrameId::INNERMOST,
         }
     }
@@ -281,9 +279,12 @@ pub struct Session {
     exceptions: Selection,
     pub(super) references: References,
     pub(super) stop: Option<Stop>,
-    backtraces: HashMap<ThreadId, Arc<Backtrace>>,
-    variables: HashMap<(ThreadId, StackFrameId), Arc<VariableSnapshot>>,
-    threads: BTreeSet<ThreadId>,
+    backtraces: HashMap<ExecutionContext, Arc<Backtrace>>,
+    variables: HashMap<(ExecutionContext, StackFrameId), Arc<VariableSnapshot>>,
+    /// The client's ids for threads and tasks.
+    pub(super) thread_ids: ThreadHandles,
+    /// The threads the client was told about, with their client ids.
+    threads: BTreeMap<ThreadId, i64>,
     /// The modules the client was told are loaded.
     pub(super) modules: BTreeMap<ModuleId, uscope::LoadedModuleRecord>,
     /// The execution the client last started, whose resume it already knows.
@@ -321,7 +322,8 @@ impl Session {
             stop: None,
             backtraces: HashMap::new(),
             variables: HashMap::new(),
-            threads: BTreeSet::new(),
+            thread_ids: ThreadHandles::default(),
+            threads: BTreeMap::new(),
             modules: BTreeMap::new(),
             resumed: None,
             restarting: false,
@@ -1106,7 +1108,11 @@ impl Session {
         arguments: &ThreadArguments,
     ) -> Result<ResumeScope, ErrorBody> {
         if single {
-            return Ok(ResumeScope::Thread(thread_id(arguments.thread_id)?));
+            let context = self.thread_ids.context(arguments.thread_id)?;
+            return context
+                .as_thread()
+                .map(ResumeScope::Thread)
+                .ok_or_else(|| ErrorBody::new(format!("{context} cannot run alone")));
         }
         self.target
             .as_ref()
@@ -1123,7 +1129,7 @@ impl Session {
     ) -> Result<Value, ErrorBody> {
         let arguments = parse::<ThreadArguments>(arguments, "step arguments")?;
         let stop = self.current_stop()?;
-        let thread = thread_id(arguments.thread_id)?;
+        let context = self.thread_ids.context(arguments.thread_id)?;
         let single = arguments.single_thread.unwrap_or(false);
         let scope = self.resume_scope(single, &arguments)?;
         let kind = if arguments.granularity.as_deref() == Some("instruction") {
@@ -1135,7 +1141,7 @@ impl Session {
         let execution = handle
             .start_step(
                 stop.id,
-                thread,
+                context,
                 StackFrameId::INNERMOST,
                 kind,
                 scope,
@@ -1208,8 +1214,8 @@ impl Session {
                 self.announce_thread(thread_id).await?;
             }
             DebuggerEvent::ThreadExited { thread_id, .. } => {
-                if self.threads.remove(&thread_id) {
-                    self.client.thread("exited", thread_id).await?;
+                if let Some(id) = self.threads.remove(&thread_id) {
+                    self.client.thread("exited", id).await?;
                 }
             }
             DebuggerEvent::ModuleLoaded { module, .. } => self.announce_module(&module).await?,
@@ -1262,10 +1268,13 @@ impl Session {
             return Ok(());
         };
         self.leave_stop();
+        let Some(&id) = self.threads.get(&stop.thread) else {
+            return Ok(());
+        };
         self.client
             .event(
                 "continued",
-                json!({"threadId": stop.thread.get(), "allThreadsContinued": true}),
+                json!({"threadId": id, "allThreadsContinued": true}),
             )
             .await
     }
@@ -1313,10 +1322,12 @@ impl Session {
         self.leave_stop();
         self.announce_thread(thread).await?;
         let mut body = json!({
-            "threadId": thread.get(),
             "allThreadsStopped": true,
             "preserveFocusHint": false,
         });
+        if let Some(&id) = self.threads.get(&thread) {
+            body["threadId"] = id.into();
+        }
         let (kind, description, text) = match &reason {
             StopReason::Breakpoint { hits, .. } => {
                 let (ids, kind) = self.breakpoints.hit(hits);
@@ -1401,8 +1412,8 @@ impl Session {
         }
         // The program's threads end with it, also for a client that keeps
         // the session for a restart.
-        for thread in std::mem::take(&mut self.threads) {
-            self.client.thread("exited", thread).await?;
+        for id in std::mem::take(&mut self.threads).into_values() {
+            self.client.thread("exited", id).await?;
         }
         if self.restarting {
             return Ok(());
@@ -1411,10 +1422,16 @@ impl Session {
     }
 
     async fn announce_thread(&mut self, thread: ThreadId) -> Result<(), Closed> {
-        if self.threads.insert(thread) {
-            self.client.thread("started", thread).await?;
+        if self.threads.contains_key(&thread) {
+            return Ok(());
         }
-        Ok(())
+        match self.thread_ids.id(ExecutionContext::Thread(thread)) {
+            Ok(id) => {
+                self.threads.insert(thread, id);
+                self.client.thread("started", id).await
+            }
+            Err(error) => self.client.important(error.short).await,
+        }
     }
 
     /// Announces the snapshot's threads not yet announced, and the exit of
@@ -1425,9 +1442,16 @@ impl Session {
             .iter()
             .map(|thread| thread.id)
             .collect::<BTreeSet<_>>();
-        for gone in &self.threads - &live {
-            self.threads.remove(&gone);
-            self.client.thread("exited", gone).await?;
+        let gone = self
+            .threads
+            .keys()
+            .filter(|thread| !live.contains(thread))
+            .copied()
+            .collect::<Vec<_>>();
+        for thread in gone {
+            if let Some(id) = self.threads.remove(&thread) {
+                self.client.thread("exited", id).await?;
+            }
         }
         for thread in live {
             self.announce_thread(thread).await?;
@@ -1970,9 +1994,9 @@ impl Session {
     pub(super) async fn backtrace(
         &mut self,
         stop: &Stop,
-        thread: ThreadId,
+        context: ExecutionContext,
     ) -> Result<Arc<Backtrace>, ErrorBody> {
-        if let Some(trace) = self.backtraces.get(&thread) {
+        if let Some(trace) = self.backtraces.get(&context) {
             return Ok(Arc::clone(trace));
         }
         let handle = self.target_handle()?;
@@ -1980,14 +2004,14 @@ impl Session {
             handle
                 .at(StopContext {
                     stop: stop.id,
-                    thread,
+                    execution: context,
                     frame: StackFrameId::INNERMOST,
                 })
                 .backtrace()
                 .await
                 .map_err(error)?,
         );
-        self.backtraces.insert(thread, Arc::clone(&trace));
+        self.backtraces.insert(context, Arc::clone(&trace));
         Ok(trace)
     }
 
@@ -2029,13 +2053,13 @@ impl Session {
         &mut self,
         context: StopContext,
     ) -> Result<Arc<VariableSnapshot>, ErrorBody> {
-        if let Some(snapshot) = self.variables.get(&(context.thread, context.frame)) {
+        if let Some(snapshot) = self.variables.get(&(context.execution, context.frame)) {
             return Ok(Arc::clone(snapshot));
         }
         let handle = self.target_handle()?;
         let snapshot = Arc::new(handle.at(context).variables().await.map_err(error)?);
         self.variables
-            .insert((context.thread, context.frame), Arc::clone(&snapshot));
+            .insert((context.execution, context.frame), Arc::clone(&snapshot));
         Ok(snapshot)
     }
 
@@ -2189,15 +2213,6 @@ pub(super) fn error(error: Error) -> ErrorBody {
         Error::NotStopped => ErrorBody::not_stopped(),
         error => ErrorBody::new(error.to_string()),
     }
-}
-
-/// A client's thread id as the debugger's.
-pub(super) fn thread_id(id: i64) -> Result<ThreadId, ErrorBody> {
-    u64::try_from(id)
-        .ok()
-        .filter(|id| *id != 0)
-        .map(ThreadId::new)
-        .ok_or_else(|| ErrorBody::new(format!("there is no thread {id}")))
 }
 
 /// The exit code a client is told: the program's own, or, as a shell

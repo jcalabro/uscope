@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use uscope::{
-    InspectionLimits, StackFrame, StopContext, StopReason, UnwindTermination, ValueChildQuery,
-    VariableKind, VariableState,
+    ExecutionContext, InspectionLimits, StackFrame, StopContext, StopReason, UnwindTermination,
+    ValueChildQuery, VariableKind, VariableState,
 };
 
 use super::complete::Completing;
@@ -16,7 +16,7 @@ use super::protocol::{
     ScopesArguments, SetExpressionArguments, SetVariableArguments, StackFrameFormat,
     StackTraceArguments, ValueFormat, VariablesArguments,
 };
-use super::session::{Session, Stop, error, parse, signal_text, thread_id};
+use super::session::{Session, Stop, error, parse, signal_text};
 use super::values::{self, Item, Options};
 
 /// The most children one `variables` request returns.
@@ -27,25 +27,22 @@ const PAGE: u64 = 256;
 const MAX_COMPLETIONS: usize = 1000;
 
 impl Session {
-    pub(super) async fn threads(&self) -> Result<Value, ErrorBody> {
+    pub(super) async fn threads(&mut self) -> Result<Value, ErrorBody> {
         let handle = self.target_handle().ok();
         let snapshot = match &handle {
             Some(handle) => Some(handle.snapshot().await.map_err(error)?),
             None => None,
         };
-        let threads = snapshot
-            .iter()
-            .flat_map(|snapshot| snapshot.threads.iter())
-            .map(|thread| {
-                json!({
-                    "id": thread.id.get(),
-                    "name": thread.name.as_deref().map_or_else(
-                        || format!("Thread {}", thread.id),
-                        |name| format!("{name} ({})", thread.id)
-                    ),
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut threads = Vec::new();
+        for thread in snapshot.iter().flat_map(|snapshot| snapshot.threads.iter()) {
+            threads.push(json!({
+                "id": self.thread_ids.id(ExecutionContext::Thread(thread.id))?,
+                "name": thread.name.as_deref().map_or_else(
+                    || format!("Thread {}", thread.id),
+                    |name| format!("{name} ({})", thread.id)
+                ),
+            }));
+        }
         if !threads.is_empty() {
             return Ok(json!({"threads": threads}));
         }
@@ -66,8 +63,8 @@ impl Session {
     pub(super) async fn stack_trace(&mut self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<StackTraceArguments>(arguments, "stackTrace arguments")?;
         let stop = self.current_stop()?;
-        let thread = thread_id(arguments.thread_id)?;
-        let trace = self.backtrace(&stop, thread).await?;
+        let context = self.thread_ids.context(arguments.thread_id)?;
+        let trace = self.backtrace(&stop, context).await?;
         let abnormal = trace.termination != UnwindTermination::Complete;
         let total = trace.frames.len() + usize::from(abnormal);
         let start = usize::try_from(arguments.start_frame.unwrap_or(0)).unwrap_or(0);
@@ -79,14 +76,14 @@ impl Session {
         let format = arguments.format.unwrap_or_default();
         let mut frames = Vec::new();
         for frame in trace.frames.iter().skip(start).take(levels) {
-            let mut body = self.stack_frame(stop.id, thread, frame).await?;
+            let mut body = self.stack_frame(stop.id, context, frame).await?;
             self.decorate(
                 &mut body,
                 frame,
                 &format,
                 StopContext {
                     stop: stop.id,
-                    thread,
+                    execution: context,
                     frame: frame.id,
                 },
             )
@@ -110,12 +107,12 @@ impl Session {
     async fn stack_frame(
         &mut self,
         stop: uscope::StopId,
-        thread: uscope::ThreadId,
+        execution: ExecutionContext,
         frame: &StackFrame,
     ) -> Result<Value, ErrorBody> {
         let id = self.references.frame(StopContext {
             stop,
-            thread,
+            execution,
             frame: frame.id,
         })?;
         let mut name = if frame.function.is_none() && frame.symbol.is_none() {
@@ -497,7 +494,7 @@ impl Session {
         context: StopContext,
     ) -> Option<(uscope::ModuleId, uscope::SourceFileId)> {
         let stop = self.current_stop().ok()?;
-        let trace = self.backtrace(&stop, context.thread).await.ok()?;
+        let trace = self.backtrace(&stop, context.execution).await.ok()?;
         let frame = trace
             .frames
             .iter()
@@ -837,7 +834,10 @@ impl Session {
         let console = self.console()?;
         if let Some(context) = context {
             let handle = self.target_handle()?;
-            handle.select_thread(context.thread).await.map_err(error)?;
+            handle
+                .select_context(context.execution)
+                .await
+                .map_err(error)?;
             handle.select_frame(context.frame).await.map_err(error)?;
         }
         let output = console
@@ -907,7 +907,7 @@ impl Session {
     pub(super) fn exception_info(&self, arguments: Value) -> Result<Value, ErrorBody> {
         let arguments = parse::<ExceptionInfoArguments>(arguments, "exceptionInfo arguments")?;
         let stop = self.current_stop()?;
-        if thread_id(arguments.thread_id)? != stop.thread {
+        if self.thread_ids.context(arguments.thread_id)? != ExecutionContext::Thread(stop.thread) {
             return Err(ErrorBody::new(format!(
                 "thread {} did not cause the stop",
                 arguments.thread_id

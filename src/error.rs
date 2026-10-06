@@ -130,6 +130,8 @@ pub enum Error {
     UnknownSignal(u64),
     #[error("thread {0} is not a thread of the inferior")]
     UnknownThread(crate::ThreadId),
+    #[error("task {0} is not a task of the inferior")]
+    UnknownTask(crate::TaskId),
     #[error("the requested stopped snapshot is no longer current")]
     StaleStop,
     #[error("an unclassifiable native stop cannot be resumed safely")]

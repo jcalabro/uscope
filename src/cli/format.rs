@@ -548,7 +548,7 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
         .threads
         .iter()
         .map(|thread| {
-            let marker = if snapshot.selected_thread == Some(thread.id) {
+            let marker = if snapshot.selected == Some(uscope::ExecutionContext::Thread(thread.id)) {
                 renderer.paint(Role::Current, "*").to_string()
             } else {
                 " ".to_owned()

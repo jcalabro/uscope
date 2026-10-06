@@ -205,6 +205,73 @@ numeric_id!(
     "Identifies a thread within a debug session by its platform value."
 );
 
+numeric_id!(
+    RuntimeId,
+    "Identifies one language runtime instance within a stopped process."
+);
+
+/// Identifies one task, such as a goroutine, of one language runtime.
+///
+/// The number is the runtime's own, such as a goroutine id. Some runtimes
+/// reuse numbers once a task exits, so an id names a task only within the
+/// process it was read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TaskId {
+    /// The runtime instance that schedules the task.
+    pub runtime: RuntimeId,
+    /// The runtime's number for the task.
+    pub number: u64,
+}
+
+impl std::fmt::Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.number.fmt(f)
+    }
+}
+
+/// Where a request inspects or controls execution: an operating-system
+/// thread, or a language runtime's task, which runs on some thread or is
+/// parked with its registers saved in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExecutionContext {
+    /// An operating-system thread.
+    Thread(ThreadId),
+    /// A language runtime's task.
+    Task(TaskId),
+}
+
+impl ExecutionContext {
+    /// The thread this context names, or `None` for a task.
+    #[must_use]
+    pub const fn as_thread(self) -> Option<ThreadId> {
+        match self {
+            Self::Thread(thread) => Some(thread),
+            Self::Task(_) => None,
+        }
+    }
+}
+
+impl From<ThreadId> for ExecutionContext {
+    fn from(thread: ThreadId) -> Self {
+        Self::Thread(thread)
+    }
+}
+
+impl From<TaskId> for ExecutionContext {
+    fn from(task: TaskId) -> Self {
+        Self::Task(task)
+    }
+}
+
+impl std::fmt::Display for ExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Thread(thread) => write!(f, "thread {thread}"),
+            Self::Task(task) => write!(f, "task {task}"),
+        }
+    }
+}
+
 /// The architecture-independent purpose of a distinguished register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

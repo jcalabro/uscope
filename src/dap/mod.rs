@@ -17,6 +17,7 @@ mod session;
 mod signals;
 mod sources;
 mod terminal;
+mod threads;
 mod transport;
 mod values;
 mod watch;

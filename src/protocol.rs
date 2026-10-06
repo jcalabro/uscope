@@ -6,9 +6,10 @@ use crate::model::numeric_id;
 
 use crate::{
     AddressDescription, Backtrace, BreakpointLocation, CodeInstanceId, DereferenceReference,
-    DereferencedValue, ExecutionLocation, GlobalVariablePage, GlobalVariableReference, LineNumber,
-    LoadedModule, LoadedModuleSnapshot, RegisterSnapshot, Result, StackFrame, StackFrameId,
-    ThreadId, ValueChildPage, ValueChildrenReference, VariableSnapshot, VirtualAddress,
+    DereferencedValue, ExecutionContext, ExecutionLocation, GlobalVariablePage,
+    GlobalVariableReference, LineNumber, LoadedModule, LoadedModuleSnapshot, RegisterSnapshot,
+    Result, StackFrame, StackFrameId, ThreadId, ValueChildPage, ValueChildrenReference,
+    VariableSnapshot, VirtualAddress,
 };
 
 /// Selects data objects to inspect in one frame of a stopped thread.
@@ -1064,8 +1065,8 @@ pub struct StateSnapshot {
     pub inferior: InferiorState,
     /// The current stopped snapshot, when the inferior is stopped.
     pub stop_id: Option<StopId>,
-    /// The thread selected for implicit inspection commands.
-    pub selected_thread: Option<ThreadId>,
+    /// The thread or task selected for implicit inspection commands.
+    pub selected: Option<ExecutionContext>,
     /// The selected thread's frame that implicit inspection commands use:
     /// the innermost frame at each new stop, until a client selects another.
     pub selected_frame: Option<StackFrameId>,
@@ -1248,7 +1249,7 @@ pub enum Request {
     ResolveWatchTarget {
         expression: crate::Expression,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<WatchTarget>,
     },
@@ -1299,7 +1300,7 @@ pub enum Request {
     Step {
         process_id: ProcessId,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         /// The frame whose return ends [`StepKind::Out`]; every other kind
         /// steps the innermost frame and requires it.
         frame: StackFrameId,
@@ -1341,7 +1342,7 @@ pub enum Request {
     Disassemble {
         query: crate::DisassemblyQuery,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         reply: Reply<crate::Disassembly>,
     },
     DescribeAddress {
@@ -1351,7 +1352,7 @@ pub enum Request {
     },
     StoppedLocation {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<ExecutionLocation>,
     },
@@ -1365,12 +1366,12 @@ pub enum Request {
     },
     Backtrace {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         reply: Reply<Backtrace>,
     },
     Registers {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<RegisterSnapshot>,
     },
@@ -1378,7 +1379,7 @@ pub enum Request {
         query: VariableQuery,
         limits: crate::InspectionLimits,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<VariableSnapshot>,
     },
@@ -1387,14 +1388,14 @@ pub enum Request {
         mode: crate::EvaluationMode,
         limits: crate::InspectionLimits,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<crate::Evaluation>,
     },
     ExpressionType {
         expression: crate::Expression,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<crate::TypeInfo>,
     },
@@ -1426,7 +1427,7 @@ pub enum Request {
     ExplainView {
         expression: crate::Expression,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<ViewExplanation>,
     },
@@ -1435,7 +1436,7 @@ pub enum Request {
     RecordKernels {
         expression: crate::Expression,
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<Vec<String>>,
     },
@@ -1449,14 +1450,14 @@ pub enum Request {
     CheckViews {
         reply: Reply<ViewCheck>,
     },
-    SelectThread {
+    SelectContext {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         reply: Reply<()>,
     },
     SelectFrame {
         stop_id: StopId,
-        thread_id: ThreadId,
+        context: ExecutionContext,
         frame: StackFrameId,
         reply: Reply<StackFrame>,
     },
@@ -1501,14 +1502,14 @@ impl Request {
             } => format!("continue {stop_id:?} {scope:?} {exception:?}"),
             Self::Step {
                 stop_id,
-                thread_id,
+                context,
                 frame,
                 kind,
                 scope,
                 exception,
                 ..
             } => {
-                format!("step {kind:?} {stop_id:?} {thread_id:?} {frame:?} {scope:?} {exception:?}")
+                format!("step {kind:?} {stop_id:?} {context:?} {frame:?} {scope:?} {exception:?}")
             }
             Self::Pause { process_id, .. } => format!("pause {process_id}"),
             Self::AddBreakpoint { spec, .. } => format!("add breakpoint {spec:?}"),
@@ -1560,7 +1561,7 @@ impl Request {
             }
             Self::ExplainType { name, .. } => format!("explain the views of `{name}`"),
             Self::CheckViews { .. } => "check views".to_owned(),
-            Self::SelectThread { .. } => "select thread".to_owned(),
+            Self::SelectContext { context, .. } => format!("select {context}"),
             Self::SelectFrame { .. } => "select frame".to_owned(),
             Self::SignalPolicy { .. } => "signal policy".to_owned(),
             Self::Kill { .. } => "kill".to_owned(),

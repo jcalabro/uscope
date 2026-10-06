@@ -160,7 +160,12 @@ async fn segv_cores_present_the_faulting_frame_across_the_compiler_matrix() {
                 .contains("SIGSEGV (SEGV_MAPERR) at 0x0"),
             "{variant}: {exception:?}"
         );
-        assert_eq!(snapshot.selected_thread, Some(stop.thread));
+        assert_eq!(
+            snapshot
+                .selected
+                .and_then(uscope::ExecutionContext::as_thread),
+            Some(stop.thread)
+        );
         assert_eq!(
             snapshot.threads.len(),
             1 + usize::try_from(WORKERS).unwrap()
@@ -389,10 +394,15 @@ async fn every_dumped_thread_keeps_its_own_registers_stack_and_tls() {
         .filter(|thread| thread.id != stop.thread)
     {
         scenario
-            .operation("select", scenario.handle().select_thread(thread.id))
+            .operation("select", scenario.handle().select_context(thread.id))
             .await;
         let selected = scenario.snapshot().await;
-        assert_eq!(selected.selected_thread, Some(thread.id));
+        assert_eq!(
+            selected
+                .selected
+                .and_then(uscope::ExecutionContext::as_thread),
+            Some(thread.id)
+        );
         assert_eq!(
             selected.stop_id,
             Some(stop.stop),
@@ -452,13 +462,13 @@ async fn every_dumped_thread_keeps_its_own_registers_stack_and_tls() {
 
     // Returning to the faulting thread restores its own frame and values.
     scenario
-        .operation("select", scenario.handle().select_thread(stop.thread))
+        .operation("select", scenario.handle().select_context(stop.thread))
         .await;
     assert_eq!(signed(&variable(&scenario, "crash_tls").await), 100);
     assert!(matches!(
         scenario
             .handle()
-            .select_thread(uscope::ThreadId::new(1))
+            .select_context(uscope::ThreadId::new(1))
             .await,
         Err(Error::UnknownThread(thread)) if thread.get() == 1
     ));
@@ -1829,7 +1839,7 @@ async fn thread_tls(scenario: &Scenario) -> Vec<[(i128, u64); 2]> {
     let mut threads = Vec::new();
     for thread in snapshot.threads.iter() {
         scenario
-            .operation("select", scenario.handle().select_thread(thread.id))
+            .operation("select", scenario.handle().select_context(thread.id))
             .await;
         let mut located = [(0, 0); 2];
         for (slot, name) in located.iter_mut().zip(["crash_tls", "crash_library_tls"]) {
