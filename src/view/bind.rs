@@ -66,10 +66,12 @@ pub enum BoundFormat {
     Hex,
     Char,
     Bytes,
+    Utf8,
     Utf16,
     Flags(TypeReference),
     Enum(TypeReference),
     Duration(super::syntax::TimeUnit),
+    Time(super::syntax::TimeUnit),
 }
 
 /// A piece of a `summary`.
@@ -253,6 +255,9 @@ pub struct BoundView<St> {
     /// How members and fields are written, by name, with the lines that
     /// say so; a later one wins.
     pub formats: Vec<(Arc<str>, BoundFormat, u32)>,
+    /// The bytes of `self`, which `format self as utf8` writes as the
+    /// summary of a shape that does not present another value.
+    pub self_text: Option<TextSource<St>>,
     /// The `extend`s that add to this view, each bound in a scope of its
     /// own, in the order they are tried.
     pub extensions: Vec<Arc<Self>>,
@@ -586,6 +591,18 @@ pub fn bind<S: Scope>(
         None if view.extend => BoundShape::Record(Vec::new()),
         None => members(&mut scope, view.line)?,
     };
+    let self_text = match formats
+        .iter()
+        .rev()
+        .find(|(name, ..)| name.as_ref() == "self")
+    {
+        Some((_, BoundFormat::Utf8, line))
+            if suits(BoundFormat::Utf8, &Ty::Program(scope.self_type), &scope).is_ok() =>
+        {
+            Some(bind_text_source(&synthetic("self", *line)?, &scope)?)
+        }
+        _ => None,
+    };
     let bound = BoundView {
         view: Arc::clone(view),
         lets,
@@ -595,6 +612,7 @@ pub fn bind<S: Scope>(
         shape,
         hidden,
         formats,
+        self_text,
         extensions: Vec::new(),
     };
     if !view.extend {
@@ -705,10 +723,12 @@ fn bind_format<S: Scope>(
         Format::Hex => BoundFormat::Hex,
         Format::Char => BoundFormat::Char,
         Format::Bytes => BoundFormat::Bytes,
+        Format::Utf8 => BoundFormat::Utf8,
         Format::Utf16 => BoundFormat::Utf16,
         Format::Flags(ty) => BoundFormat::Flags(enumeration(ty)?),
         Format::Enum(ty) => BoundFormat::Enum(enumeration(ty)?),
         Format::Duration(unit) => BoundFormat::Duration(*unit),
+        Format::Time(unit) => BoundFormat::Time(*unit),
     })
 }
 
@@ -780,8 +800,18 @@ fn suits(format: BoundFormat, ty: &Ty, types: &dyn TypeSource) -> Result<(), Str
         | BoundFormat::Char
         | BoundFormat::Flags(_)
         | BoundFormat::Enum(_)
-        | BoundFormat::Duration(_) => matches!(category, Category::Integer { .. }),
+        | BoundFormat::Duration(_)
+        | BoundFormat::Time(_) => matches!(category, Category::Integer { .. }),
         BoundFormat::Bytes => matches!(ty, Ty::Program(_)),
+        BoundFormat::Utf8 => match category {
+            Category::Array { element, .. } | Category::Slice(element) => {
+                types.type_info(element).is_some_and(|info| {
+                    matches!(info.kind, TypeKind::Base(base) if base.byte_size == 1
+                        && !matches!(base.encoding, BaseTypeEncoding::Boolean | BaseTypeEncoding::Floating))
+                })
+            }
+            _ => false,
+        },
         BoundFormat::Utf16 => match category {
             Category::Array { element, .. } => types
                 .type_info(element)
@@ -794,6 +824,7 @@ fn suits(format: BoundFormat, ty: &Ty, types: &dyn TypeSource) -> Result<(), Str
     }
     let what = match format {
         BoundFormat::Bytes => "a value in memory",
+        BoundFormat::Utf8 => "an array or slice of bytes",
         BoundFormat::Utf16 => "an array of 16-bit units",
         _ => "an integer",
     };

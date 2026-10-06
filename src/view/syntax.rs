@@ -244,6 +244,9 @@ pub enum Format {
     Char,
     /// A value's bytes in memory, in hexadecimal.
     Bytes,
+    /// An array or slice of bytes as text, when they are valid UTF-8
+    /// without control characters.
+    Utf8,
     /// An array or slice of 16-bit units as UTF-16 text.
     Utf16,
     /// An integer as the enumerators of `TYPE` whose bits it sets.
@@ -252,9 +255,12 @@ pub enum Format {
     Enum(TypeExpr),
     /// An integer count of a unit of time, as a duration.
     Duration(TimeUnit),
+    /// An integer count of a unit of time since the Unix epoch, as the UTC
+    /// date and time it is.
+    Time(TimeUnit),
 }
 
-/// The unit a `duration` format counts.
+/// The unit a `duration` or `time` format counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeUnit {
     Nanoseconds,
@@ -885,8 +891,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// What follows `format NAME as`: `hex`, `char`, `bytes`, `utf16`,
-    /// `flags(TYPE)`, `enum(TYPE)`, or `duration(UNIT)`.
+    /// What follows `format NAME as`: `hex`, `char`, `bytes`, `utf8`,
+    /// `utf16`, `flags(TYPE)`, `enum(TYPE)`, `duration(UNIT)`, or
+    /// `time(UNIT)`.
     fn format(&mut self) -> Parsed<Format> {
         let Some(word) = self.word().map(str::to_owned) else {
             return Err(self.unexpected("a format"));
@@ -895,6 +902,7 @@ impl<'a> Parser<'a> {
             "hex" => Format::Hex,
             "char" => Format::Char,
             "bytes" => Format::Bytes,
+            "utf8" => Format::Utf8,
             "utf16" => Format::Utf16,
             "flags" | "enum" => {
                 self.open_call(&word)?;
@@ -906,19 +914,23 @@ impl<'a> Parser<'a> {
                     Format::Enum(ty)
                 }
             }
-            "duration" => {
-                self.open_call("duration")?;
+            "duration" | "time" => {
+                self.open_call(&word)?;
                 self.skip_blank();
                 let unit = self
                     .word()
                     .and_then(TimeUnit::parse)
                     .ok_or_else(|| self.unexpected("a unit of time: `ns`, `us`, `ms`, or `s`"))?;
-                self.close_call("duration")?;
-                Format::Duration(unit)
+                self.close_call(&word)?;
+                if word == "duration" {
+                    Format::Duration(unit)
+                } else {
+                    Format::Time(unit)
+                }
             }
             _ => {
                 return Err(self.error(format!(
-                    "`{word}` is no format: write `hex`, `char`, `bytes`, `utf16`, `flags(TYPE)`, `enum(TYPE)`, or `duration(UNIT)`"
+                    "`{word}` is no format: write `hex`, `char`, `bytes`, `utf8`, `utf16`, `flags(TYPE)`, `enum(TYPE)`, `duration(UNIT)`, or `time(UNIT)`"
                 )));
             }
         })

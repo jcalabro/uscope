@@ -83,7 +83,8 @@ fn unsupported(message: &str) -> Stop {
 #[derive(Debug)]
 pub struct Presented {
     pub shape: PresentedShape,
-    /// How many elements or entries a sequence or map holds.
+    /// How many elements or entries a sequence or map holds, also when it
+    /// presents as text.
     pub count: Option<crate::PresentedCount>,
     pub text: Option<TextSummary>,
     pub summary: String,
@@ -725,6 +726,15 @@ pub fn present<M: Machine>(
         }
     };
     presented.named = named(bound, shape).len() as u64;
+    // Text the view writes `self` as presents the value, which keeps the
+    // children its shape gives it.
+    if !matches!(shape, BoundShape::Value(_) | BoundShape::Text { .. })
+        && let Some(text) = self_text(bound, &mut machine)?
+    {
+        presented.shape = PresentedShape::Text;
+        presented.summary = summary::quoted(&text);
+        presented.text = Some(text);
+    }
     if let Some(pieces) = &bound.summary {
         let mut text = String::new();
         for piece in pieces {
@@ -739,6 +749,43 @@ pub fn present<M: Machine>(
         presented.summary = text;
     }
     Ok(presented)
+}
+
+/// The text of `self`, when the view, or the last `extend` of it that
+/// formats `self`, writes it as UTF-8 and its bytes are text.
+fn self_text<M: Machine>(
+    bound: &BoundView<M::Step>,
+    machine: &mut ViewMachine<'_, M>,
+) -> Result<Option<TextSummary>, Failure> {
+    let owner = bound
+        .extensions
+        .iter()
+        .rev()
+        .map(AsRef::as_ref)
+        .chain(std::iter::once(bound))
+        .find(|view| {
+            view.formats
+                .iter()
+                .any(|(name, ..)| name.as_ref() == "self")
+        });
+    let Some((owner, source)) =
+        owner.and_then(|owner| owner.self_text.as_ref().map(|source| (owner, source)))
+    else {
+        return Ok(None);
+    };
+    let text = if std::ptr::eq(owner, bound) {
+        machine.set_variables(&[]);
+        read_text(source, None, machine)
+    } else {
+        let this = machine.this.clone();
+        let mut extension = ViewMachine::new(&mut *machine.base, owner, this);
+        read_text(source, None, &mut extension)
+    };
+    match text {
+        Ok(text) => Ok(super::format::utf8_text(&text)),
+        Err(Failure::Problem(_)) => Ok(None),
+        Err(failure) => Err(failure),
+    }
 }
 
 /// A sequence's or map's count and summary, previewing its first elements.
