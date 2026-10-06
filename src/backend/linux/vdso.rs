@@ -4,6 +4,18 @@
 //! included, into the mapping `/proc/<pid>/maps` names `[vdso]`, whose start
 //! the auxiliary vector records as `AT_SYSINFO_EHDR`. Its module is read from
 //! the process's memory, or a core dump's, as if that memory were its file.
+//!
+//! A process may move its vDSO with mremap(2), as a checkpoint restore does,
+//! and the breakpoint traps the debugger wrote into it move too. The kernel
+//! reports no change to a tracee's mappings short of stopping at every
+//! system call, so moves are found by comparing the memory map with the
+//! modules at each stop, and when a thread executes a trap at an address
+//! the debugger never wrote one (`reconcile_sites`, `rewind_carried_trap`).
+//! That works for the vDSO because its name follows it, and for a library
+//! because the map names its file. Code that nothing names, such as a
+//! JIT's anonymous memory, cannot be followed this way: a trap moved or
+//! copied with it is indistinguishable from the program's own `int3`, and
+//! is reported as a `SIGTRAP`.
 
 use std::ops::Range;
 use std::path::PathBuf;
