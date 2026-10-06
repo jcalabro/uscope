@@ -18,6 +18,7 @@ use crate::{
     Result, VirtualAddress,
 };
 
+use super::breakpoints::MovedCode;
 use super::native::{InspectionOps, LinuxTraceOps};
 use super::vdso::{VDSO_NAME, vdso_mapping};
 use super::{Controller, LinuxError, RuntimeModule, backend_error};
@@ -100,8 +101,11 @@ impl<P: LinuxTraceOps> Controller<P> {
     /// Synchronizes the module registry with the shared objects mapped at a
     /// coherent stop, the vDSO among them. A mapping whose file cannot be
     /// identified, such as a deleted library or JIT code, contributes no
-    /// module instead of failing the stop; its frames stay unnamed.
-    pub(super) fn refresh_modules(&mut self) -> Result<()> {
+    /// module instead of failing the stop; its frames stay unnamed. Sites
+    /// whose memory changed are forgotten first, as they must be before a
+    /// moved vDSO is read again; returns whether a breakpoint lost a
+    /// location to them.
+    pub(super) fn refresh_modules(&mut self) -> Result<bool> {
         let inferior = self.inferior.as_ref().ok_or(Error::NotRunning)?;
         // The leader may have exited before the rest of its process.
         let pid = inferior.memory_thread();
@@ -126,6 +130,8 @@ impl<P: LinuxTraceOps> Controller<P> {
             mapped_modules.insert(mapping, module);
         }
         self.mapped_modules = mapped_modules;
+        let moved = self.moved_code(&observed, mappings.vdso.as_ref());
+        let lost_locations = self.reconcile_sites(&moved)?;
         let (vdso, vdso_image) = self.observe_vdso(pid, mappings.vdso.as_ref()).unzip();
         observed.extend(vdso);
         let mut vdso_image = vdso_image.flatten();
@@ -203,11 +209,69 @@ impl<P: LinuxTraceOps> Controller<P> {
             .expect("main module is registered");
         main.loaded = main_loaded;
         main.link_map = link_maps.get(&main_loaded.load_bias).copied();
-        Ok(())
+        Ok(lost_locations)
     }
 }
 
 impl<P: LinuxTraceOps> Controller<P> {
+    /// The code that moved since the modules were refreshed, as the memory
+    /// map shows it now.
+    pub(super) fn moved_code_now(&self, pid: Pid) -> Result<Vec<MovedCode>> {
+        let mappings = self.ptrace.module_mappings(pid)?;
+        let files = mappings
+            .files
+            .iter()
+            .filter(|mapping| mapping.inode != self.executable_identity.inode)
+            .filter_map(|mapping| {
+                self.mapped_modules
+                    .get(mapping)
+                    .cloned()
+                    .or_else(|| self.ptrace.identify_module(mapping))
+            })
+            .filter(|(path, _)| *path != *self.executable)
+            .collect::<Vec<_>>();
+        Ok(self.moved_code(&files, mappings.vdso.as_ref()))
+    }
+
+    /// The code of each registered library that is now mapped elsewhere:
+    /// the vDSO wherever its name is, or a file mapped at one new place and
+    /// no longer at its old one. `files` are the files observed mapped.
+    fn moved_code(&self, files: &[(PathBuf, u64)], vdso: Option<&Range<u64>>) -> Vec<MovedCode> {
+        self.modules
+            .values()
+            .filter(|module| module.loaded.id != crate::ModuleId::new(0))
+            .filter_map(|module| {
+                let path = module.image.path();
+                let code = module.image.address_range();
+                let bias = module.loaded.load_bias;
+                let from = bias + code.start.get()..bias + code.end.get();
+                if path.as_os_str() == VDSO_NAME {
+                    let to = vdso?.start;
+                    return (to != from.start).then_some(MovedCode { from, to });
+                }
+                let biases = files
+                    .iter()
+                    .filter(|(file, _)| file == path)
+                    .map(|&(_, bias)| bias);
+                if biases.clone().any(|observed| observed == bias) {
+                    return None;
+                }
+                let mut new = biases.filter(|&observed| {
+                    !self.modules.values().any(|other| {
+                        other.image.path() == path && other.loaded.load_bias == observed
+                    })
+                });
+                match (new.next(), new.next()) {
+                    (Some(moved), None) => Some(MovedCode {
+                        from,
+                        to: moved + code.start.get(),
+                    }),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// Loads the metadata of an observed module: the vDSO's from the image
     /// read from memory, and any other's from its file.
     fn load_observed(

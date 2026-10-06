@@ -878,6 +878,13 @@ impl FakeTrace {
 
     /// Fails a request of a thread SIGKILL took out of its stop, which this
     /// request may be the one to do.
+    /// Writes a site's first byte, as installing or removing its trap does.
+    fn put_byte(&self, address: VirtualAddress, byte: u8) {
+        let mut memory = self.memory.borrow_mut();
+        let word = memory.entry(address.get()).or_default();
+        *word = (*word & !0xff) | u64::from(byte);
+    }
+
     fn reach(&self, pid: Pid, request: &'static str) -> Result<()> {
         let mut point = self.kill_point.borrow_mut();
         if let Some((target, name, remaining)) = point.as_mut()
@@ -1154,6 +1161,7 @@ impl LinuxTraceOps for FakeTrace {
             return Ok(());
         }
         self.record(format!("install_site {address}"));
+        self.put_byte(address, BREAKPOINT_OPCODE);
         sites.insert(
             address,
             BreakpointSite {
@@ -1172,6 +1180,7 @@ impl LinuxTraceOps for FakeTrace {
     ) -> Result<()> {
         self.reach(pid, "remove_breakpoint")?;
         self.record(format!("remove_site {address}"));
+        self.put_byte(address, 0x90);
         sites.get_mut(&address).expect("known site").installed = false;
         Ok(())
     }
@@ -1183,6 +1192,7 @@ impl LinuxTraceOps for FakeTrace {
     ) -> Result<()> {
         self.reach(pid, "reinstall_breakpoint")?;
         self.record(format!("reinstall_site {address}"));
+        self.put_byte(address, BREAKPOINT_OPCODE);
         sites.get_mut(&address).expect("known site").installed = true;
         Ok(())
     }
@@ -3164,6 +3174,7 @@ fn hit_harness(thread_count: i32, hit_condition: &str) -> WatchHarness {
             owners: BTreeSet::from([BreakpointOwner::User(BreakpointId::new(1))]),
         },
     );
+    harness.store(HIT_SITE, u64::from(BREAKPOINT_OPCODE));
     harness.start_continue();
     harness.trace().take_actions();
     harness

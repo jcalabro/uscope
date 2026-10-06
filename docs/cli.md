@@ -87,6 +87,14 @@ Addresses are always `0x`-prefixed, so `break add` names a function. Functions
 without debug information, such as libc's, break at their symbol, and
 breakpoints in a shared library wait until it loads.
 
+A breakpoint is a trap byte written into the program's code, so it moves
+wherever that code moves. When a library's code or the vDSO moves, as under a
+checkpoint restore, a function breakpoint follows it, even when the program
+runs the moved code at once. A location whose memory was unmapped or
+overwritten is dropped, so an address breakpoint there lists 0 locations.
+Nothing reports a move or copy of code no file backs, such as a JIT's, so a
+trap carried with that code stops the program as a `SIGTRAP`.
+
 A hit condition is an operator and a count: `==3` stops at the third hit only,
 `>=5` at the fifth and later, `%10` at every tenth, and `!=`, `<`, `<=`, and `>`
 work likewise. A bare count is refused, because debuggers disagree about what
