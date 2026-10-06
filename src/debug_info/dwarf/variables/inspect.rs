@@ -257,6 +257,30 @@ pub(in crate::debug_info) fn array_byte_offset(
         .ok_or_else(|| Error::InvalidValueExpression("array element offset overflows".to_owned()))
 }
 
+/// The source indices of the row-major element `index` of an array.
+fn array_source_indices(dimensions: &[ArrayDimension], index: u64) -> Result<Vec<i128>> {
+    let mut indices = vec![0_i128; dimensions.len()];
+    let mut remaining = index;
+    for (dimension_index, dimension) in dimensions.iter().enumerate().rev() {
+        if dimension.count == 0 {
+            return Err(Error::debug_info(DwarfError::MalformedVariable(
+                "a non-empty array page has a zero-sized dimension".into(),
+            )));
+        }
+        let relative = remaining % dimension.count;
+        remaining /= dimension.count;
+        indices[dimension_index] = dimension
+            .lower_bound
+            .checked_add(i128::from(relative))
+            .ok_or_else(|| {
+                Error::debug_info(DwarfError::MalformedVariable(
+                    "array source index overflows".into(),
+                ))
+            })?;
+    }
+    Ok(indices)
+}
+
 pub(super) fn static_member_layout_is_valid(
     record_size: Option<u64>,
     member_size: Option<u64>,
@@ -614,17 +638,7 @@ impl DwarfVariableInfo {
                         Error::AmbiguousBase { base, type_name }
                     });
                 };
-                let mut result = None;
-                for hop in path {
-                    self.validate_static_member_layout(hop.aggregate, &hop.member)?;
-                    result = Some(hop.member.type_ref.id);
-                    steps.push(PathStep::Member(Box::new(PlannedMemberStep {
-                        aggregate: hop.aggregate,
-                        child: hop.child,
-                        member: hop.member.clone(),
-                        required_variant: None,
-                    })));
-                }
+                let result = self.plan_hops(path, &mut steps)?;
                 Ok(planned(steps, 0, result))
             }
             Step::Index { available } => {
@@ -743,97 +757,65 @@ impl DwarfVariableInfo {
                         }
                     }
                 };
+                let lookup_failure = |found: usize| {
+                    let type_name = match self.type_info(aggregate) {
+                        Ok(info) => Arc::clone(&info.name),
+                        Err(description) => return malformed(description),
+                    };
+                    let member = member_name.to_owned();
+                    if found == 0 {
+                        Error::MemberNotFound { member, type_name }
+                    } else {
+                        Error::AmbiguousMember { member, type_name }
+                    }
+                };
+                let AggregateMembers::Variant {
+                    common_members,
+                    discriminant,
+                    variants,
+                } = aggregate_members
+                else {
+                    let paths = self.member_paths(aggregate, member_name, &mut 0, 0)?;
+                    let Some(path) = one_subobject(&paths) else {
+                        return Err(lookup_failure(paths.len()));
+                    };
+                    let result = self.plan_hops(path, &mut steps)?;
+                    return Ok(planned(steps, 0, result));
+                };
                 let named = |member: &&RecordMember| {
                     !member.artificial && member.name.as_deref() == Some(member_name)
                 };
-                let mut matching = Vec::new();
-                match aggregate_members {
-                    AggregateMembers::Direct => {
-                        let mut work = 0;
-                        let paths = self.member_paths(aggregate, member_name, &mut work, 0)?;
-                        let Some(path) = one_subobject(&paths) else {
-                            let type_name =
-                                Arc::clone(&self.type_info(aggregate).map_err(malformed)?.name);
-                            if paths.is_empty() {
-                                return Err(Error::MemberNotFound {
-                                    member: member_name.to_owned(),
-                                    type_name,
-                                });
-                            }
-                            return Err(Error::AmbiguousMember {
-                                member: member_name.to_owned(),
-                                type_name,
-                            });
-                        };
-                        let mut result = None;
-                        for hop in path {
-                            self.validate_static_member_layout(hop.aggregate, &hop.member)?;
-                            result = Some(hop.member.type_ref.id);
-                            steps.push(PathStep::Member(Box::new(PlannedMemberStep {
-                                aggregate: hop.aggregate,
-                                child: hop.child,
-                                member: hop.member.clone(),
-                                required_variant: None,
-                            })));
-                        }
-                        return Ok(planned(steps, 0, result));
-                    }
-                    AggregateMembers::Variant {
-                        common_members,
-                        discriminant,
-                        variants,
-                    } => {
-                        matching.extend(
-                            common_members
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, member)| named(member))
-                                .map(|(index, member)| {
-                                    (DynamicAggregateChild::Member(index), None, member)
-                                }),
-                        );
-                        for (variant_index, variant) in variants.iter().enumerate() {
-                            matching.extend(
-                                variant
-                                    .members
-                                    .iter()
-                                    .enumerate()
-                                    .filter(|(_, member)| named(member))
-                                    .map(|(member_index, member)| {
-                                        (
-                                            DynamicAggregateChild::VariantMember {
-                                                variant: variant_index,
-                                                member: member_index,
-                                            },
-                                            Some((
-                                                variant_index,
-                                                discriminant.clone(),
-                                                Arc::clone(variants),
-                                            )),
-                                            member,
-                                        )
-                                    }),
-                            );
-                        }
-                    }
+                let mut matching = common_members
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, member)| named(member))
+                    .map(|(index, member)| (DynamicAggregateChild::Member(index), None, member))
+                    .collect::<Vec<_>>();
+                for (variant_index, variant) in variants.iter().enumerate() {
+                    matching.extend(
+                        variant
+                            .members
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, member)| named(member))
+                            .map(|(member_index, member)| {
+                                (
+                                    DynamicAggregateChild::VariantMember {
+                                        variant: variant_index,
+                                        member: member_index,
+                                    },
+                                    Some((
+                                        variant_index,
+                                        discriminant.clone(),
+                                        Arc::clone(variants),
+                                    )),
+                                    member,
+                                )
+                            }),
+                    );
                 }
                 let [(child, required_variant, member)] = matching.as_slice() else {
-                    let type_name = Arc::clone(
-                        &self
-                            .type_info(aggregate)
-                            .expect("aggregate type resolved")
-                            .name,
-                    );
-                    if matching.is_empty() {
-                        return Err(Error::MemberNotFound {
-                            member: member_name.to_owned(),
-                            type_name,
-                        });
-                    }
-                    return Err(Error::AmbiguousMember {
-                        member: member_name.to_owned(),
-                        type_name,
-                    });
+                    return Err(lookup_failure(matching.len()));
                 };
                 self.validate_static_member_layout(aggregate, member)?;
                 steps.push(PathStep::Member(Box::new(PlannedMemberStep {
@@ -845,6 +827,21 @@ impl DwarfVariableInfo {
                 Ok(planned(steps, 0, Some(member.type_ref.id)))
             }
         }
+    }
+
+    /// Plans the member steps along one lookup path, returning the type it
+    /// reaches.
+    fn plan_hops(&self, path: &[MemberHop], steps: &mut Vec<PathStep>) -> Result<Option<TypeId>> {
+        for hop in path {
+            self.validate_static_member_layout(hop.aggregate, &hop.member)?;
+            steps.push(PathStep::Member(Box::new(PlannedMemberStep {
+                aggregate: hop.aggregate,
+                child: hop.child,
+                member: hop.member.clone(),
+                required_variant: None,
+            })));
+        }
+        Ok(path.last().map(|hop| hop.member.type_ref.id))
     }
 
     /// The index of the data object `name` names in the selected logical
@@ -1679,6 +1676,17 @@ impl DwarfVariableInfo {
             text: None,
             presentation: None,
         };
+        let with_children = |value, total, active| VariableState::Available {
+            source: Self::storage_source(storage),
+            raw: None,
+            value,
+            dereference: DereferenceState::NotApplicable,
+            children: ValueChildren::Available(Self::child_reference(
+                storage, context, type_id, total, active,
+            )),
+            text: None,
+            presentation: None,
+        };
         let read =
             |size: u64,
              runtime: &mut dyn VariableRuntime,
@@ -1831,19 +1839,13 @@ impl DwarfVariableInfo {
                         VariableUnavailableReason::EvaluationLimit,
                     ));
                 };
-                VariableState::Available {
-                    source: Self::storage_source(storage),
-                    raw: None,
-                    value: VariableValue::Array {
+                with_children(
+                    VariableValue::Array {
                         dimensions: Arc::clone(dimensions),
                     },
-                    dereference: DereferenceState::NotApplicable,
-                    children: ValueChildren::Available(Self::child_reference(
-                        storage, context, type_id, total, None,
-                    )),
-                    text: None,
-                    presentation: None,
-                }
+                    total,
+                    None,
+                )
             }
             ValueShape::Slice {
                 element: _,
@@ -1884,31 +1886,11 @@ impl DwarfVariableInfo {
             ValueShape::Record { members, bases, .. } => {
                 let total =
                     u64::try_from(bases.len().saturating_add(members.len())).unwrap_or(u64::MAX);
-                VariableState::Available {
-                    source: Self::storage_source(storage),
-                    raw: None,
-                    value: VariableValue::Record,
-                    dereference: DereferenceState::NotApplicable,
-                    children: ValueChildren::Available(Self::child_reference(
-                        storage, context, type_id, total, None,
-                    )),
-                    text: None,
-                    presentation: None,
-                }
+                with_children(VariableValue::Record, total, None)
             }
             ValueShape::Union { members, .. } => {
                 let total = u64::try_from(members.len()).unwrap_or(u64::MAX);
-                VariableState::Available {
-                    source: Self::storage_source(storage),
-                    raw: None,
-                    value: VariableValue::Union,
-                    dereference: DereferenceState::NotApplicable,
-                    children: ValueChildren::Available(Self::child_reference(
-                        storage, context, type_id, total, None,
-                    )),
-                    text: None,
-                    presentation: None,
-                }
+                with_children(VariableValue::Union, total, None)
             }
             ValueShape::Variant {
                 aggregate,
@@ -1942,27 +1924,17 @@ impl DwarfVariableInfo {
                             .and_then(|index| variants.get(index))
                             .map_or(0, |variant| variant.members.len()),
                     );
-                VariableState::Available {
-                    source: Self::storage_source(storage),
-                    raw: None,
-                    value: VariableValue::Variant {
+                with_children(
+                    VariableValue::Variant {
                         discriminant: discriminant_value,
                         active: active
                             .and_then(|index| variants.get(index))
                             .cloned()
                             .map(Arc::new),
                     },
-                    dereference: DereferenceState::NotApplicable,
-                    children: ValueChildren::Available(Self::child_reference(
-                        storage,
-                        context,
-                        type_id,
-                        u64::try_from(total).unwrap_or(u64::MAX),
-                        active,
-                    )),
-                    text: None,
-                    presentation: None,
-                }
+                    u64::try_from(total).unwrap_or(u64::MAX),
+                    active,
+                )
             }
         })
     }
@@ -2207,213 +2179,109 @@ impl DwarfVariableInfo {
                 _ => None,
             }
         };
+        // An aggregate's children are its bases, then its members, then the
+        // members of its active variant.
+        let aggregate = match &shape {
+            ValueShape::Record {
+                record,
+                members,
+                bases,
+                ..
+            } => Some((*record, &bases[..], &members[..], None)),
+            ValueShape::Union { union, members, .. } => Some((*union, &[][..], &members[..], None)),
+            ValueShape::Variant {
+                aggregate,
+                common_members,
+                bases,
+                variants,
+                ..
+            } => Some((
+                *aggregate,
+                &bases[..],
+                &common_members[..],
+                reference
+                    .active_variant
+                    .map(|active| (active, &variants[active].members[..])),
+            )),
+            _ => None,
+        };
         for index in offset..requested_end {
             if budget.consume_value_nodes(1).is_err() {
                 break;
             }
-            let (relationship, type_id, child_storage) = match &shape {
-                ValueShape::Array {
-                    element,
-                    dimensions,
-                    ..
-                } => {
-                    let element_shape = self.value_shape(*element).map_err(shape_error)?;
-                    let stride = element_shape.byte_size();
+            let (relationship, type_id, child_storage) =
+                if let Some((aggregate, bases, members, variant)) = aggregate {
+                    let index = usize::try_from(index).expect("bounded aggregate index fits usize");
+                    let (child, relationship, type_id, layout) =
+                        if let Some(base) = bases.get(index) {
+                            (
+                                DynamicAggregateChild::Base(index),
+                                ValueChildRelationship::Base(base.clone()),
+                                base.type_ref.id,
+                                base.layout,
+                            )
+                        } else {
+                            let index = index - bases.len();
+                            let (child, member) = if let Some(member) = members.get(index) {
+                                (DynamicAggregateChild::Member(index), member)
+                            } else {
+                                let Some((variant, variant_members)) = variant else {
+                                    return Err(Error::debug_info(DwarfError::MalformedVariable(
+                                        "variant child capability has no active arm".into(),
+                                    )));
+                                };
+                                let member = index - members.len();
+                                (
+                                    DynamicAggregateChild::VariantMember { variant, member },
+                                    &variant_members[member],
+                                )
+                            };
+                            (
+                                child,
+                                ValueChildRelationship::Member(member.clone()),
+                                member.type_ref.id,
+                                member.layout,
+                            )
+                        };
+                    let child_storage = self.aggregate_child_storage(
+                        &storage, aggregate, child, type_id, layout, runtime, budget,
+                    );
+                    (relationship, type_id, child_storage)
+                } else {
+                    let (ValueShape::Array { element, .. } | ValueShape::Slice { element, .. }) =
+                        &shape
+                    else {
+                        return Err(Error::debug_info(DwarfError::MalformedVariable(
+                            "a non-aggregate value produced a child capability".into(),
+                        )));
+                    };
+                    let stride = self.value_shape(*element).map_err(shape_error)?.byte_size();
                     let storage_index = if linear_storage.is_some() {
                         index - offset
                     } else {
                         index
                     };
-                    let byte_offset = storage_index
+                    let child_storage = storage_index
                         .checked_mul(stride)
                         .and_then(|offset| i64::try_from(offset).ok())
-                        .ok_or(VariableUnavailableReason::EvaluationLimit)
-                        .map_err(EvaluateError::from);
-                    let child_storage = byte_offset.and_then(|offset| {
-                        Self::storage_with_offset(
-                            linear_storage.clone().unwrap_or_else(|| storage.clone()),
-                            offset,
-                        )
-                    });
-                    let mut source_indices = vec![0_i128; dimensions.len()];
-                    let mut remaining = index;
-                    for (dimension_index, dimension) in dimensions.iter().enumerate().rev() {
-                        if dimension.count == 0 {
-                            return Err(Error::debug_info(DwarfError::MalformedVariable(
-                                "a non-empty array page has a zero-sized dimension".into(),
-                            )));
-                        }
-                        let relative = remaining % dimension.count;
-                        remaining /= dimension.count;
-                        source_indices[dimension_index] = dimension
-                            .lower_bound
-                            .checked_add(i128::from(relative))
-                            .ok_or_else(|| {
-                                Error::debug_info(DwarfError::MalformedVariable(
-                                    "array source index overflows".into(),
-                                ))
-                            })?;
-                    }
-                    (
-                        ValueChildRelationship::ArrayElement {
-                            index,
-                            indices: source_indices.into(),
-                        },
-                        *element,
-                        child_storage,
-                    )
-                }
-                ValueShape::Slice { element, .. } => {
-                    let element_shape = self.value_shape(*element).map_err(shape_error)?;
-                    let storage_index = if linear_storage.is_some() {
-                        index - offset
-                    } else {
-                        index
-                    };
-                    let byte_offset = storage_index
-                        .checked_mul(element_shape.byte_size())
-                        .and_then(|offset| i64::try_from(offset).ok())
-                        .ok_or(VariableUnavailableReason::EvaluationLimit)
-                        .map_err(EvaluateError::from);
-                    (
-                        ValueChildRelationship::SliceElement { index },
-                        *element,
-                        byte_offset.and_then(|offset| {
+                        .ok_or_else(|| VariableUnavailableReason::EvaluationLimit.into())
+                        .and_then(|offset| {
                             Self::storage_with_offset(
                                 linear_storage.clone().unwrap_or_else(|| storage.clone()),
                                 offset,
                             )
-                        }),
-                    )
-                }
-                ValueShape::Record {
-                    record,
-                    members,
-                    bases,
-                    ..
-                } => {
-                    let index = usize::try_from(index).expect("bounded record index fits usize");
-                    if let Some(base) = bases.get(index) {
-                        (
-                            ValueChildRelationship::Base(base.clone()),
-                            base.type_ref.id,
-                            self.aggregate_child_storage(
-                                &storage,
-                                *record,
-                                DynamicAggregateChild::Base(index),
-                                base.type_ref.id,
-                                base.layout,
-                                runtime,
-                                budget,
-                            ),
-                        )
-                    } else {
-                        let member_index = index - bases.len();
-                        let member = &members[member_index];
-                        (
-                            ValueChildRelationship::Member(member.clone()),
-                            member.type_ref.id,
-                            self.aggregate_child_storage(
-                                &storage,
-                                *record,
-                                DynamicAggregateChild::Member(member_index),
-                                member.type_ref.id,
-                                member.layout,
-                                runtime,
-                                budget,
-                            ),
-                        )
-                    }
-                }
-                ValueShape::Union { union, members, .. } => {
-                    let member_index =
-                        usize::try_from(index).expect("bounded union index fits usize");
-                    let member = &members[member_index];
-                    (
-                        ValueChildRelationship::Member(member.clone()),
-                        member.type_ref.id,
-                        self.aggregate_child_storage(
-                            &storage,
-                            *union,
-                            DynamicAggregateChild::Member(member_index),
-                            member.type_ref.id,
-                            member.layout,
-                            runtime,
-                            budget,
-                        ),
-                    )
-                }
-                ValueShape::Variant {
-                    aggregate,
-                    common_members,
-                    bases,
-                    variants,
-                    ..
-                } => {
-                    let index = usize::try_from(index).expect("bounded variant index fits usize");
-                    if let Some(base) = bases.get(index) {
-                        (
-                            ValueChildRelationship::Base(base.clone()),
-                            base.type_ref.id,
-                            self.aggregate_child_storage(
-                                &storage,
-                                *aggregate,
-                                DynamicAggregateChild::Base(index),
-                                base.type_ref.id,
-                                base.layout,
-                                runtime,
-                                budget,
-                            ),
-                        )
-                    } else {
-                        let relative = index - bases.len();
-                        if let Some(member) = common_members.get(relative) {
-                            (
-                                ValueChildRelationship::Member(member.clone()),
-                                member.type_ref.id,
-                                self.aggregate_child_storage(
-                                    &storage,
-                                    *aggregate,
-                                    DynamicAggregateChild::Member(relative),
-                                    member.type_ref.id,
-                                    member.layout,
-                                    runtime,
-                                    budget,
-                                ),
-                            )
-                        } else {
-                            let active = reference.active_variant.ok_or_else(|| {
-                                Error::debug_info(DwarfError::MalformedVariable(
-                                    "variant child capability has no active arm".into(),
-                                ))
-                            })?;
-                            let member_index = relative - common_members.len();
-                            let member = &variants[active].members[member_index];
-                            (
-                                ValueChildRelationship::Member(member.clone()),
-                                member.type_ref.id,
-                                self.aggregate_child_storage(
-                                    &storage,
-                                    *aggregate,
-                                    DynamicAggregateChild::VariantMember {
-                                        variant: active,
-                                        member: member_index,
-                                    },
-                                    member.type_ref.id,
-                                    member.layout,
-                                    runtime,
-                                    budget,
-                                ),
-                            )
+                        });
+                    let relationship = match &shape {
+                        ValueShape::Array { dimensions, .. } => {
+                            ValueChildRelationship::ArrayElement {
+                                index,
+                                indices: array_source_indices(dimensions, index)?.into(),
+                            }
                         }
-                    }
-                }
-                _ => {
-                    return Err(Error::debug_info(DwarfError::MalformedVariable(
-                        "a non-aggregate value produced a child capability".into(),
-                    )));
-                }
-            };
+                        _ => ValueChildRelationship::SliceElement { index },
+                    };
+                    (relationship, *element, child_storage)
+                };
             let child_storage = storage_failure
                 .clone()
                 .map_or(child_storage, std::result::Result::Err);
