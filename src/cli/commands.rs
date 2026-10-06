@@ -5,10 +5,13 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use std::sync::Arc;
+
 use uscope::{
-    BreakpointId, BreakpointSpec, ByteOrder, DebuggerEvent, Disassembly, DisassemblyQuery,
-    DisassemblyRange, HitComparison, HitCondition, LineNumber, MAX_WINDOW_AFTER, RegisterRole,
-    SignalPolicy, StackFrameId, StepKind, StopReason, ThreadId, VirtualAddress, WatchAccess,
+    Backtrace, BreakpointId, BreakpointSpec, ByteOrder, DebuggerEvent, Disassembly,
+    DisassemblyQuery, DisassemblyRange, ExecutionContext, HitComparison, HitCondition, LineNumber,
+    MAX_WINDOW_AFTER, ModuleId, ModuleImage, RegisterRole, SignalPolicy, StackFrame, StackFrameId,
+    StepKind, StopContext, StopReason, TaskSnapshot, ThreadId, VirtualAddress, WatchAccess,
     WatchpointId, WatchpointSpec,
 };
 
@@ -20,6 +23,8 @@ use super::{Cli, Control};
 const DEFAULT_HEX_DUMP_BYTES: u64 = 64;
 pub const MAX_HEX_DUMP_BYTES: u64 = 8 * 1024;
 const SOURCE_CONTEXT_RADIUS: u32 = 3;
+/// How many tasks one request lists.
+const TASK_PAGE: usize = 1024;
 /// Instructions shown before and from a stop that no function contains.
 const DISASSEMBLY_CONTEXT_BEFORE: u32 = 8;
 const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
@@ -64,6 +69,8 @@ pub enum Command {
     Registers,
     Threads,
     Thread,
+    Goroutines,
+    Goroutine,
     Clear,
     Help,
     Quit,
@@ -396,6 +403,20 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!(Threads, "threads", [], "threads", "List threads"),
     command!(Thread, "thread", [], "thread <id>", "Select a thread"),
     command!(
+        Goroutines,
+        "goroutines",
+        ["tasks"],
+        "goroutines [-a] [-g] [-t]",
+        "List goroutines: -a with the runtime's own, -g grouped, -t with stacks"
+    ),
+    command!(
+        Goroutine,
+        "goroutine",
+        ["task"],
+        "goroutine [id] [command...]",
+        "Show the selected goroutine, select one, or run a command in one"
+    ),
+    command!(
         Clear,
         "clear",
         ["cls"],
@@ -506,6 +527,8 @@ impl Cli {
             Command::Registers => format::registers(&debugger.registers().await?, renderer),
             Command::Threads => format::threads(&debugger.snapshot().await?, renderer),
             Command::Thread => self.select_thread(arguments[0]).await?,
+            Command::Goroutines => self.goroutines(line, &arguments, spec).await?,
+            Command::Goroutine => self.goroutine(line, &arguments).await?,
             Command::Clear => return Ok(Control::ClearScreen),
             Command::Help => match first {
                 Some(name) => format::command_help(
@@ -745,6 +768,221 @@ impl Cli {
             renderer.paint(Role::Success, "selected"),
             renderer.paint(Role::Metadata, id)
         ))
+    }
+
+    /// Every task at the current stop, each with its backtrace or why it
+    /// has none, and the images that name their frames' sources.
+    async fn task_traces(&self) -> Result<TaskTraces> {
+        let snapshot = self.debugger.snapshot().await?;
+        let stop = snapshot
+            .stop_id
+            .ok_or_else(|| anyhow!("the program is not stopped"))?;
+        let mut tasks = Vec::new();
+        let mut gaps = Vec::new();
+        let mut from = None;
+        loop {
+            let page = self.debugger.tasks(from, TASK_PAGE).await?;
+            tasks.extend(page.tasks.iter().cloned());
+            gaps.extend(page.gaps.iter().cloned());
+            match page.next {
+                Some(next) => from = Some(next),
+                None => break,
+            }
+        }
+        let mut traced = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let trace = self
+                .debugger
+                .at(StopContext {
+                    stop,
+                    execution: ExecutionContext::Task(task.id),
+                    frame: StackFrameId::INNERMOST,
+                })
+                .backtrace()
+                .await;
+            traced.push((task, trace));
+        }
+        let images = self
+            .source_images(
+                traced
+                    .iter()
+                    .filter_map(|(_, trace)| trace.as_ref().ok())
+                    .flat_map(|trace| trace.frames.iter()),
+            )
+            .await?;
+        Ok(TaskTraces {
+            selected: snapshot.selected,
+            tasks: traced,
+            gaps,
+            images,
+        })
+    }
+
+    /// Lists tasks: the program's, or with `-a` the runtime's own too; with
+    /// `-g` grouped by where they are; with `-t` each with its stack.
+    async fn goroutines(
+        &self,
+        line: &str,
+        arguments: &[&str],
+        spec: &CommandSpec,
+    ) -> Result<String> {
+        let (mut all, mut grouped, mut stacks) = (false, false, false);
+        for argument in arguments {
+            match *argument {
+                "-a" => all = true,
+                "-g" => grouped = true,
+                "-t" => stacks = true,
+                _ => return Err(spec.usage_error()),
+            }
+        }
+        let name = line_command(line).map_or(spec.name, |(_, name)| name);
+        let noun = name.trim_end_matches('s');
+        let traces = self.task_traces().await?;
+        let renderer = self.renderers.stdout;
+        let shown = traces
+            .tasks
+            .iter()
+            .filter(|(task, _)| all || !task.internal)
+            .collect::<Vec<_>>();
+        if traces.tasks.is_empty() && traces.gaps.is_empty() {
+            bail!("the program has no {name}");
+        }
+        let mut lines = Vec::new();
+        if grouped {
+            let mut groups: Vec<(String, Vec<u64>)> = Vec::new();
+            for (task, trace) in &shown {
+                let place = format::task_place(trace, &traces.images, renderer);
+                match groups.iter_mut().find(|(known, _)| *known == place) {
+                    Some((_, numbers)) => numbers.push(task.id.number),
+                    None => groups.push((place, vec![task.id.number])),
+                }
+            }
+            lines.extend(
+                groups
+                    .iter()
+                    .map(|(place, numbers)| format::task_group(noun, place, numbers, renderer)),
+            );
+        } else {
+            for (task, trace) in &shown {
+                let place = format::task_place(trace, &traces.images, renderer);
+                lines.push(format::task(
+                    task,
+                    &place,
+                    traces.is_selected(task),
+                    renderer,
+                ));
+                if stacks {
+                    let stack = match trace {
+                        Ok(trace) => {
+                            format::backtrace(trace, u32::MAX, None, &traces.images, renderer)
+                        }
+                        Err(error) => error.to_string(),
+                    };
+                    lines.extend(stack.lines().map(|line| format!("    {line}")));
+                }
+            }
+        }
+        for gap in &traces.gaps {
+            lines.push(format!("some {name} could not be read: {gap}"));
+        }
+        let hidden = traces.tasks.len() - shown.len();
+        if hidden > 0 {
+            lines.push(
+                renderer
+                    .paint(
+                        Role::Metadata,
+                        format_args!(
+                            "the runtime runs {} for itself; `{name} -a` lists them",
+                            plural(hidden as u64, &format!("more {noun}"))
+                        ),
+                    )
+                    .to_string(),
+            );
+        }
+        Ok(lines.join("\n"))
+    }
+
+    /// Shows the selected task, selects one, or runs an inspection command
+    /// with one selected and then selects again what was.
+    async fn goroutine(&self, line: &str, arguments: &[&str]) -> Result<String> {
+        let name = line_command(line).map_or("goroutine", |(_, name)| name);
+        let renderer = self.renderers.stdout;
+        let traces = self.task_traces().await?;
+        let Some(&argument) = arguments.first() else {
+            let (task, trace) = traces
+                .tasks
+                .iter()
+                .find(|(task, _)| traces.is_selected(task))
+                .ok_or_else(|| anyhow!("no {name} is selected"))?;
+            let place = format::task_place(trace, &traces.images, renderer);
+            return Ok(format::task(task, &place, true, renderer));
+        };
+        let number = argument
+            .parse::<u64>()
+            .map_err(|_| anyhow!("invalid {name} ID: {argument}"))?;
+        let mut found = traces
+            .tasks
+            .iter()
+            .map(|(task, _)| task.id)
+            .filter(|id| id.number == number);
+        let id = found.next().ok_or_else(|| anyhow!("no {name} {number}"))?;
+        if found.next().is_some() {
+            bail!("several runtimes have a {name} {number}");
+        }
+        let command = line
+            .trim_start()
+            .split_once(char::is_whitespace)
+            .and_then(|(_, rest)| rest.trim_start().split_once(char::is_whitespace))
+            .map(|(_, command)| command.trim());
+        let Some(command) = command else {
+            self.debugger.select_context(id).await?;
+            return Ok(format!(
+                "{} {name} {}",
+                renderer.paint(Role::Success, "selected"),
+                renderer.paint(Role::Metadata, number)
+            ));
+        };
+        let (spec, _) =
+            line_command(command).ok_or_else(|| anyhow!("unknown command in `{command}`"))?;
+        if !inspects(spec.command) {
+            bail!(
+                "{name} {number} runs only commands that inspect, not `{}`",
+                spec.name
+            );
+        }
+        let snapshot = self.debugger.snapshot().await?;
+        self.debugger.select_context(id).await?;
+        let output = Box::pin(self.execute(command)).await;
+        if let Some(previous) = snapshot.selected {
+            self.debugger.select_context(previous).await?;
+            if let Some(frame) = snapshot
+                .selected_frame
+                .filter(|frame| *frame != StackFrameId::INNERMOST)
+            {
+                self.debugger.select_frame(frame).await?;
+            }
+        }
+        match output? {
+            Control::Continue(output) => Ok(output),
+            _ => bail!("{name} {number} runs only commands that inspect"),
+        }
+    }
+
+    /// The images of the modules whose code the frames run, which name
+    /// their source files.
+    async fn source_images(
+        &self,
+        frames: impl Iterator<Item = &StackFrame>,
+    ) -> Result<BTreeMap<ModuleId, Arc<ModuleImage>>> {
+        let modules = frames
+            .filter(|frame| frame.source.is_some())
+            .filter_map(|frame| frame.module)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut images = BTreeMap::new();
+        for module in modules {
+            images.insert(module, self.debugger.loaded_module_image(module).await?);
+        }
+        Ok(images)
     }
 
     async fn step(&self, kind: StepKind) -> Result<String> {
@@ -1385,16 +1623,7 @@ impl Cli {
             None
         };
         // Source files are identified within their owning module's image.
-        let mut images = BTreeMap::new();
-        let modules_with_source = trace
-            .frames
-            .iter()
-            .filter(|frame| frame.source.is_some())
-            .filter_map(|frame| frame.module)
-            .collect::<std::collections::BTreeSet<_>>();
-        for module in modules_with_source {
-            images.insert(module, self.debugger.loaded_module_image(module).await?);
-        }
+        let images = self.source_images(trace.frames.iter()).await?;
         Ok(format::backtrace(
             &trace,
             selected,
@@ -1676,6 +1905,44 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
         return Err(spec.usage_error());
     }
     Ok((spec, format, rest, arguments))
+}
+
+/// Every task at a stop, with what names their places.
+struct TaskTraces {
+    selected: Option<ExecutionContext>,
+    tasks: Vec<(TaskSnapshot, uscope::Result<Backtrace>)>,
+    /// Why some tasks could not be read.
+    gaps: Vec<Arc<str>>,
+    images: BTreeMap<ModuleId, Arc<ModuleImage>>,
+}
+
+impl TaskTraces {
+    /// Whether the task is selected, itself or through the thread it is on.
+    fn is_selected(&self, task: &TaskSnapshot) -> bool {
+        match self.selected {
+            Some(ExecutionContext::Task(id)) => id == task.id,
+            Some(ExecutionContext::Thread(thread)) => task.thread == Some(thread),
+            None => false,
+        }
+    }
+}
+
+/// Whether a command only inspects the stop, so that it may run with
+/// another task selected for it.
+const fn inspects(command: Command) -> bool {
+    matches!(
+        command,
+        Command::Print
+            | Command::Whatis
+            | Command::Ptype
+            | Command::Examine
+            | Command::Disassemble
+            | Command::Where
+            | Command::List
+            | Command::Backtrace
+            | Command::Frame
+            | Command::Registers
+    )
 }
 
 /// An evaluation's failure, pointing into the expression when it is the

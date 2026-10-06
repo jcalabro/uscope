@@ -1604,6 +1604,142 @@ fn batch_mode_lists_threads_and_steps_one_instruction() {
     assert!(stdout.contains("stopped after instruction step"));
 }
 
+/// Runs `commands` at the workers fixture's checkpoint, where its workers
+/// are parked.
+fn at_go_checkpoint(commands: &[&str]) -> String {
+    let mut all = vec!["break main.reached", "run"];
+    all.extend_from_slice(commands);
+    batch(&["build/test-programs/workers-go-o0"], &all)
+}
+
+#[test]
+fn goroutines_are_listed_by_the_code_the_program_wrote() {
+    const WORKERS: &str = "tests/fixtures/go/workers/main.go";
+    let worker = support::source_line(WORKERS, "for job := range jobs");
+    let reached = support::source_line(WORKERS, "func reached(");
+    let stdout = at_go_checkpoint(&["goroutines"]);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    // Main runs on the stopped thread, and is selected through it.
+    let main = lines
+        .iter()
+        .find(|line| line.starts_with("* [1] main.reached at "))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert!(
+        main.contains(&format!("workers/main.go:{reached} — running (thread ")),
+        "{main}"
+    );
+    // A parked worker is where it waits, not in the runtime parking it.
+    let workers = lines
+        .iter()
+        .filter(|line| line.contains("main.worker at "))
+        .collect::<Vec<_>>();
+    assert_eq!(workers.len(), 4, "{stdout}");
+    for line in workers {
+        assert!(line.starts_with("  ["), "{line}");
+        assert!(
+            line.ends_with(&format!("workers/main.go:{worker} — chan receive")),
+            "{line}"
+        );
+    }
+    assert!(!stdout.contains("in runtime.gopark"), "{stdout}");
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.contains("`goroutines -a` lists them")),
+        "{stdout}"
+    );
+
+    let all = at_go_checkpoint(&["tasks -a"]);
+    let listed = |output: &str| {
+        output
+            .lines()
+            .filter(|line| line.starts_with("  [") || line.starts_with("* ["))
+            .count()
+    };
+    assert!(listed(&all) > listed(&stdout), "{all}");
+    assert!(!all.contains("lists them"), "{all}");
+
+    let grouped = at_go_checkpoint(&["goroutines -g"]);
+    assert!(
+        grouped
+            .lines()
+            .any(|line| line.starts_with("4 goroutines in main.worker at ")
+                && line.contains(&format!("workers/main.go:{worker}: "))),
+        "{grouped}"
+    );
+}
+
+#[test]
+fn a_goroutine_is_selected_or_inspected_by_its_id() {
+    let stdout = at_go_checkpoint(&[
+        "goroutines -t",
+        "goroutine 1 backtrace",
+        "threads",
+        "goroutine 1",
+        "goroutine",
+    ]);
+    // Each goroutine's frames follow it, the runtime's own among them.
+    assert_in_order(
+        &stdout,
+        &[
+            "main.worker at ",
+            "\n    #0 ",
+            "in runtime.gopark",
+            "unwind stopped",
+        ],
+    );
+    // A command runs in the goroutine without keeping it selected.
+    assert_in_order(
+        &stdout,
+        &[
+            "#0 ",
+            "in main.reached",
+            "in main.checkpoint",
+            "in runtime.main",
+        ],
+    );
+    let threads = stdout
+        .lines()
+        .filter(|line| line.contains(" stopped"))
+        .collect::<Vec<_>>();
+    assert!(
+        threads
+            .iter()
+            .any(|line| line.starts_with("* ") && line.ends_with(" — [1]")),
+        "{stdout}"
+    );
+    assert!(
+        threads.iter().any(|line| line.ends_with(" — idle")),
+        "{stdout}"
+    );
+    assert_in_order(&stdout, &["selected goroutine 1", "* [1] main.reached at "]);
+    let failure = batch_output(
+        &["build/test-programs/workers-go-o0"],
+        &["break main.reached", "run", "goroutine 1 next"],
+    );
+    assert_failure(&failure, "goroutine 1 runs only commands that inspect");
+}
+
+#[test]
+fn backtraces_say_whose_stack_each_run_of_frames_is_on() {
+    let stdout = batch(
+        &["build/test-programs/stacks-go-o0"],
+        &["break runtime.readmemstats_m", "run", "backtrace"],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            "\n    on the runtime's stack:\n#0 ",
+            "in runtime.readmemstats_m",
+            "in runtime.systemstack",
+            "\n    on the task's stack:\n#3 ",
+            "in runtime.ReadMemStats",
+            "in main.stats",
+            "unwind stopped: the outermost frame has no caller",
+        ],
+    );
+}
+
 #[test]
 fn stops_and_list_show_source_from_any_working_directory() {
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))

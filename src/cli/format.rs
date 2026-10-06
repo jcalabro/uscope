@@ -6,14 +6,15 @@ use std::sync::Arc;
 
 use uscope::{
     AddressDescription, Backtrace, BlockCompletion, BoundaryConflict, BoundaryEvidence, Breakpoint,
-    BreakpointLocation, ByteOrder, Condition, ConditionOwner, ContextShortfall, CoreDumpInfo,
-    CoreModuleState, DecodedInstruction, DisassembledInstruction, Disassembly, DisassemblyBlock,
-    DisassemblyView, ExitStatus, FunctionInfo, FunctionOrigin, GlobalVariablePage, HitCondition,
-    IndirectTarget, InstructionContent, InstructionReferenceKind, InstructionTokenKind,
-    InvalidatedWatchpoint, LoadedModuleSnapshot, MemoryRead, MemoryReadCompletion, ModuleId,
-    ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext, StackFrame, StateSnapshot,
-    StepKind, StopReason, SymbolExtentProvenance, SymbolLocation, TargetBoundary, ThreadState,
-    VirtualAddress, WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
+    BreakpointLocation, ByteOrder, CodeRole, Condition, ConditionOwner, ContextShortfall,
+    CoreDumpInfo, CoreModuleState, DecodedInstruction, DisassembledInstruction, Disassembly,
+    DisassemblyBlock, DisassemblyView, ExitStatus, FunctionInfo, FunctionOrigin,
+    GlobalVariablePage, HitCondition, IndirectTarget, InstructionContent, InstructionReferenceKind,
+    InstructionTokenKind, InvalidatedWatchpoint, LoadedModuleSnapshot, MemoryRead,
+    MemoryReadCompletion, ModuleId, ModuleIdentity, ModuleImage, RegisterSnapshot, SourceContext,
+    StackFrame, StackSegment, StateSnapshot, StepKind, StopReason, SymbolExtentProvenance,
+    SymbolLocation, TargetBoundary, TaskSnapshot, ThreadActivity, ThreadState, VirtualAddress,
+    WatchScope, Watchpoint, WatchpointHit, WatchpointInvalidation,
 };
 
 use super::commands::{COMMANDS, CommandSpec};
@@ -570,13 +571,91 @@ pub fn threads(snapshot: &StateSnapshot, renderer: Renderer) -> String {
                     )
                 })
                 .unwrap_or_default();
+            let activity = match &thread.activity {
+                Some(ThreadActivity::Task { task, stack }) => {
+                    let place = match stack {
+                        StackSegment::System => " on its runtime's stack",
+                        StackSegment::Signal => " on its signal stack",
+                        _ => "",
+                    };
+                    format!(
+                        " — {}{place}",
+                        renderer.paint(Role::Metadata, format_args!("[{}]", task.number))
+                    )
+                }
+                Some(ThreadActivity::Idle) => " — idle".to_owned(),
+                _ => String::new(),
+            };
             format!(
-                "{marker} {}{name} {state}",
+                "{marker} {}{name} {state}{activity}",
                 renderer.paint(Role::Metadata, thread.id)
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// One task: its id, where the code the program wrote has it, what it does
+/// in its runtime's words, and the thread it is on.
+pub fn task(task: &TaskSnapshot, place: &str, selected: bool, renderer: Renderer) -> String {
+    let marker = if selected {
+        renderer.paint(Role::Current, "*").to_string()
+    } else {
+        " ".to_owned()
+    };
+    let detail = task
+        .detail
+        .as_deref()
+        .map(|detail| format!(" — {detail}"))
+        .unwrap_or_default();
+    let thread = task
+        .thread
+        .map(|thread| format!(" (thread {})", renderer.paint(Role::Metadata, thread)))
+        .unwrap_or_default();
+    format!(
+        "{marker} {} {place}{detail}{thread}",
+        renderer.paint(Role::Metadata, format_args!("[{}]", task.id.number))
+    )
+}
+
+/// Where a task is: the code the program wrote that it runs, or why that
+/// is unknown.
+pub fn task_place(
+    trace: &uscope::Result<Backtrace>,
+    images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+    renderer: Renderer,
+) -> String {
+    match trace {
+        Ok(trace) => trace.user_frame().map_or_else(
+            || renderer.paint(Role::Metadata, "<runtime code>").to_string(),
+            |frame| {
+                let name = renderer.paint(
+                    Role::Name,
+                    code_name(frame.function.as_ref(), frame.symbol.as_ref()),
+                );
+                frame_source(frame, images).map_or_else(
+                    || name.to_string(),
+                    |source| format!("{name} at {}", renderer.paint(Role::Metadata, source)),
+                )
+            },
+        ),
+        Err(error) => renderer
+            .paint(Role::Metadata, format_args!("<{error}>"))
+            .to_string(),
+    }
+}
+
+/// Tasks that are in one place.
+pub fn task_group(noun: &str, place: &str, numbers: &[u64], renderer: Renderer) -> String {
+    let listed = numbers
+        .iter()
+        .map(|number| renderer.paint(Role::Metadata, number).to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{} in {place}: {listed}",
+        plural(numbers.len() as u64, noun)
+    )
 }
 
 pub fn registers(registers: &RegisterSnapshot, renderer: Renderer) -> String {
@@ -1307,7 +1386,28 @@ pub fn backtrace(
     renderer: Renderer,
 ) -> String {
     let mut lines = Vec::with_capacity(trace.frames.len() + 1);
+    // Where a stack continues on another, each run of frames says whose
+    // stack it is on.
+    let switches = trace
+        .frames
+        .windows(2)
+        .any(|pair| pair[0].segment != pair[1].segment);
+    let mut segment = None;
     for frame in trace.frames.iter() {
+        if switches && segment != Some(frame.segment) {
+            segment = Some(frame.segment);
+            let owner = match frame.segment {
+                StackSegment::Thread => "the thread's stack",
+                StackSegment::Task => "the task's stack",
+                StackSegment::System => "the runtime's stack",
+                StackSegment::Signal => "the signal stack",
+            };
+            lines.push(
+                renderer
+                    .paint(Role::Metadata, format_args!("    on {owner}:"))
+                    .to_string(),
+            );
+        }
         lines.push(stack_frame(
             frame,
             modules,
@@ -1333,13 +1433,7 @@ pub fn stack_frame(
     selected: bool,
     renderer: Renderer,
 ) -> String {
-    let source = frame.source.as_ref().and_then(|source| {
-        images
-            .get(&frame.module?)?
-            .source_file(source.file)
-            .map(|file| format!("{}:{}", file.path.display(), source.line))
-    });
-    let place = source.map_or_else(
+    let place = frame_source(frame, images).map_or_else(
         || {
             frame
                 .module
@@ -1362,10 +1456,31 @@ pub fn stack_frame(
         ),
         renderer.paint(Role::Metadata, format_args!("{:#018x}", frame.instruction)),
         renderer.paint(
-            Role::Name,
+            // A runtime's machinery and compiler wrappers recede.
+            if frame
+                .function
+                .as_ref()
+                .is_none_or(|function| function.role == CodeRole::Ordinary)
+            {
+                Role::Name
+            } else {
+                Role::Metadata
+            },
             code_name(frame.function.as_ref(), frame.symbol.as_ref())
         ),
     )
+}
+
+/// A frame's source file and line, from its module's image.
+fn frame_source(
+    frame: &StackFrame,
+    images: &BTreeMap<ModuleId, Arc<ModuleImage>>,
+) -> Option<String> {
+    let source = frame.source.as_ref()?;
+    images
+        .get(&frame.module?)?
+        .source_file(source.file)
+        .map(|file| format!("{}:{}", file.path.display(), source.line))
 }
 
 pub fn globals(page: &GlobalVariablePage, renderer: Renderer) -> String {

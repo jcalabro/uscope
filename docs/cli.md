@@ -177,7 +177,7 @@ process exits or execs, and cleared before detaching.
 
 | Command | |
 | --- | --- |
-| `backtrace`, `bt` | Show the selected thread's stack. |
+| `backtrace`, `bt` | Show the selected thread's or goroutine's stack. |
 | `frame`, `fr` [*level*] | Show the selected frame, or select one by level. |
 | `up` / `down` [*count*] | Select a caller / callee frame. |
 | `where` | Show the selected frame's location and module. |
@@ -192,6 +192,12 @@ is `<unknown>` rather than borrowing a neighbor's name. Rust and C++ symbols
 are demangled. The vDSO, the code the kernel maps into every process for
 calls such as `clock_gettime`, is the module `[vdso]`; no file backs it, so
 it is read from the process's memory.
+
+A Go thread runs the runtime's code on a stack of its own, and signal
+handlers on another, and a backtrace follows the runtime from them onto the
+goroutine's stack. When a backtrace crosses stacks, each run of frames is
+headed by whose stack it is on: the task's (the goroutine's), the runtime's,
+the signal stack, or the thread's. The runtime's own functions are dimmed.
 
 The selected frame applies to `print`, `watch`, `where`, `list`,
 `disassemble`, `registers`, and `finish`. Each stop selects the innermost
@@ -245,15 +251,30 @@ nearest preceding symbol.
 
 | Command | |
 | --- | --- |
-| `threads` | List threads. |
+| `threads` | List threads, with the goroutine each runs. |
 | `thread` *id* | Select a thread. |
+| `goroutines`, `tasks` [`-a`] [`-g`] [`-t`] | List goroutines: `-a` with the runtime's own, `-g` grouped by place, `-t` each with its stack. |
+| `goroutine`, `task` [*id* [*command*]] | Show the selected goroutine, select one, or run an inspecting command in one. |
 | `handle` *signal* [`stop`\|`nostop`] [`print`\|`noprint`] [`pass`\|`nopass`] | Change how a signal is handled. `stop` implies `print`, and `noprint` implies `nostop`. |
 | `info signals` | List every signal's policy. |
+
+A goroutine is listed where the code the program wrote has it, past the
+runtime's machinery, as the runtime's own goroutine dump shows it: a worker
+waiting on a channel is at its receive, not in `runtime.gopark`. Each line
+gives the goroutine's id, that place, what it does in the runtime's words,
+such as `chan receive`, and the thread it is on. Selecting a goroutine,
+parked or running, points `backtrace`, `frame`, `print`, `registers`, and
+the other inspecting commands at it, and `$task` in an expression is its id.
+`goroutine` *id* *command* runs one of those commands in the goroutine and
+then selects again what was selected.
 
 Signals follow gdb's defaults. `SIGALRM`, `SIGURG`, `SIGCHLD`, `SIGWINCH`,
 `SIGPROF`, `SIGVTALRM`, `SIGIO`, and `SIGPWR` are delivered without stopping;
 `SIGINT` stops and is discarded; every other signal stops and is delivered on
-resume.
+resume. Go preempts goroutines with `SIGURG`; one that arrives while a thread
+steps, steps over a breakpoint, or runs without the others waits until the
+thread continues with them, since its handler could wait for the stopped
+threads.
 
 ## Core dumps
 

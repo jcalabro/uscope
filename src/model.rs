@@ -3040,6 +3040,21 @@ pub struct Backtrace {
     pub termination: UnwindTermination,
 }
 
+impl Backtrace {
+    /// The innermost frame of code the program's author wrote or calls,
+    /// past a runtime's machinery and the wrappers a compiler writes, as a
+    /// runtime's own traceback shows a task: where it waits, not how.
+    #[must_use]
+    pub fn user_frame(&self) -> Option<&StackFrame> {
+        self.frames.iter().find(|frame| {
+            frame
+                .function
+                .as_ref()
+                .is_none_or(|function| function.role == CodeRole::Ordinary)
+        })
+    }
+}
+
 /// An internal image-address range associated with a source location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineEntry {
