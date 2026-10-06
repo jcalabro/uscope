@@ -93,13 +93,13 @@ pub(super) struct StopPlace {
 /// One frame of a stop, as expressions see it.
 pub(super) struct Frame<'a, P: InspectionOps> {
     pub(super) controller: &'a Controller<P>,
-    pub(super) inferior: &'a Inferior,
-    pub(super) pid: Pid,
+    inferior: &'a Inferior,
+    pid: Pid,
     pub(super) stop_id: StopId,
-    pub(super) resolved: &'a ResolvedFrame,
+    resolved: &'a ResolvedFrame,
     /// The frame's module, address, and inline instance, when it has debug
     /// information.
-    pub(super) code: Option<(&'a RuntimeModule, ImageAddress, Option<CodeInstanceId>)>,
+    code: Option<(&'a RuntimeModule, ImageAddress, Option<CodeInstanceId>)>,
     registers: OnceCell<Option<RegisterSnapshot>>,
     /// Units of work every machine running at the frame has done; the
     /// views presenting values one inside another each have a machine.

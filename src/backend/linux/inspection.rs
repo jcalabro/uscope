@@ -9,10 +9,10 @@ use crate::debug_info::{VariableContext, VariableRegister, VariableRuntime, Vari
 use crate::inspection::{InspectionBudget, MAX_INSPECTION_LIMITS};
 use crate::protocol::{GlobalVariableQuery, StopId, VariableQuery};
 use crate::{
-    CallFrameUnavailableReason, CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference,
-    ImageAddress, InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion,
-    RegisterSnapshot, Result, StackFrameId, TlsUnavailableReason, UnwindTermination,
-    VariableSnapshot, VariableState, VariableUnavailableReason, VirtualAddress,
+    CodeInstanceId, Error, GlobalVariablePage, GlobalVariableReference, ImageAddress,
+    InspectedValue, LoadedGlobalVariableInfo, LoadedModule, MemoryReadCompletion, RegisterSnapshot,
+    Result, StackFrameId, TlsUnavailableReason, VariableSnapshot, VariableState,
+    VariableUnavailableReason, VirtualAddress,
 };
 
 use super::evaluation::StopMachine;
@@ -520,22 +520,6 @@ pub(super) fn global_context_address(
         .code
         .filter(|(code_module, _)| *code_module == module.loaded.id)
         .map(|(_, address)| address)
-}
-
-pub(super) fn variable_cfa_error(termination: &UnwindTermination) -> VariableRuntimeError {
-    match termination {
-        // Defective unwind metadata makes a value malformed; anything else
-        // only leaves the call-frame address unavailable.
-        UnwindTermination::CorruptUnwindInfo { .. }
-        | UnwindTermination::InvalidCaller { .. }
-        | UnwindTermination::CycleDetected => {
-            VariableRuntimeError::Malformed(termination.to_string().into())
-        }
-        _ => VariableUnavailableReason::CallFrameUnavailable(
-            CallFrameUnavailableReason::UnwindTerminated(termination.to_string().into()),
-        )
-        .into(),
-    }
 }
 
 pub(super) struct LinuxVariableRuntime<'a, P> {
