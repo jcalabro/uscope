@@ -194,7 +194,11 @@ impl Builder<'_, '_> {
             None => None,
         };
         let go = function.is_go();
-        let role = crate::debug_info::roles::symbol_role(&name);
+        let role = if go {
+            crate::debug_info::roles::go_role(&name, Some(function.facts), false)
+        } else {
+            crate::debug_info::roles::symbol_role(&name)
+        };
         let language = if go {
             SourceLanguage::Go
         } else {
@@ -375,7 +379,11 @@ impl Builder<'_, '_> {
                 .and_then(|position| self.location(&position.file, call.start_line)),
             None => None,
         };
-        let role = crate::debug_info::roles::symbol_role(&name);
+        let facts = super::GoFunctionFacts {
+            special: call.special,
+            ..super::GoFunctionFacts::default()
+        };
+        let role = crate::debug_info::roles::go_role(&name, Some(facts), false);
         let id = self.new_function(Arc::clone(&name), declaration, SourceLanguage::Go, role)?;
         self.by_name.insert(name, id);
         Ok(id)

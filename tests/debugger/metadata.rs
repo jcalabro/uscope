@@ -565,3 +565,80 @@ fn assert_inline_metadata(image: &ModuleImage, fixture: &str) {
             .is_some_and(|entry| entry.provenance == expected_provenance)
     }));
 }
+
+/// Go code's roles follow the runtime's own traceback, from the function
+/// table's flags and IDs and from names, with DWARF and without it. An ABI
+/// wrapper shares its function's name everywhere but has a role of its own.
+#[tokio::test]
+async fn go_code_roles_follow_the_runtimes_traceback() {
+    use uscope::CodeRole::{
+        Ordinary, Outermost, RuntimeInternal, SignalTrampoline, StackSwitch, TrapEntry, Wrapper,
+    };
+    for fixture in ["callers-go", "callers-go-stripped"] {
+        let image = load_fixture_image(fixture).await;
+        let roles = |name: &str| {
+            let mut roles = image
+                .functions_named(name)
+                .flat_map(|function| image.instances_for_function(function.id))
+                .filter(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+                .map(|instance| {
+                    let role = image.code_role(instance.ranges[0].start);
+                    let function = image.function(instance.function).expect("a function");
+                    assert_eq!(function.role, role, "{fixture}: {name}");
+                    format!("{role:?}")
+                })
+                .collect::<Vec<_>>();
+            roles.sort();
+            roles
+        };
+        for (name, expected) in [
+            ("runtime.newproc", &[RuntimeInternal, Wrapper][..]),
+            ("runtime.asmcgocall", &[StackSwitch, Wrapper]),
+            ("runtime.goexit", &[Outermost]),
+            ("runtime.mstart", &[Outermost]),
+            ("runtime.rt0_go", &[Outermost]),
+            ("runtime.systemstack", &[StackSwitch]),
+            ("runtime.mcall", &[StackSwitch]),
+            ("runtime.morestack", &[StackSwitch]),
+            ("runtime.sigpanic", &[TrapEntry]),
+            ("runtime.asyncPreempt", &[TrapEntry]),
+            ("runtime.sigreturn__sigaction", &[SignalTrampoline]),
+            // The kernel enters the signal handler with the signal
+            // trampoline as its return address, so it is not outermost.
+            ("runtime.sigtramp", &[RuntimeInternal]),
+            ("runtime.deferreturn", &[Wrapper]),
+            ("runtime.mallocgc", &[RuntimeInternal]),
+            ("runtime.(*mheap).alloc", &[RuntimeInternal]),
+            (
+                "internal/runtime/syscall/linux.Syscall6",
+                &[RuntimeInternal],
+            ),
+            ("gogo", &[StackSwitch]),
+            ("runtime.SetFinalizer", &[Ordinary]),
+            // A closure of an exported function is not exported.
+            ("runtime.SetFinalizer.func2", &[RuntimeInternal]),
+            ("runtime.(*Frames).Next", &[Ordinary]),
+            ("main.main", &[Ordinary]),
+            ("main.(*walker).descend", &[Ordinary]),
+        ] {
+            let mut expected = expected
+                .iter()
+                .map(|role| format!("{role:?}"))
+                .collect::<Vec<_>>();
+            expected.sort();
+            assert_eq!(roles(name), expected, "{fixture}: {name}");
+        }
+        // Symbols carry the same roles, the ABI0 one by its suffixed name.
+        if fixture == "callers-go" {
+            for (name, role) in [
+                ("runtime.newproc", RuntimeInternal),
+                ("runtime.newproc.abi0", Wrapper),
+                ("runtime.systemstack.abi0", StackSwitch),
+                ("runtime.goexit.abi0", Outermost),
+            ] {
+                let symbol = image.symbol_named(name).expect("a symbol");
+                assert_eq!(symbol.role, role, "{name}");
+            }
+        }
+    }
+}
