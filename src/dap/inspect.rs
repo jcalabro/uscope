@@ -352,14 +352,16 @@ impl Session {
                 .unwrap_or(u64::MAX)
                 .min(MAX_CHILDREN),
             options,
+            filter: match arguments.filter.as_deref() {
+                Some("indexed") => Some(Filter::Indexed),
+                Some("named") => Some(Filter::Named),
+                _ => None,
+            },
         };
-        // A client pages by the count the list was given, so the other
-        // kind of row has none to show.
-        let wanted = match arguments.filter.as_deref() {
-            Some("indexed") => Some(true),
-            Some("named") => Some(false),
-            _ => None,
-        };
+        // A client pages by the count the list was given, so a list of one
+        // kind of row has none of the other to show. A view's list has both,
+        // and the window chooses between them.
+        let wanted = window.filter.map(|filter| filter == Filter::Indexed);
         if wanted.is_some_and(|wanted| variables.indexed() == Some(!wanted)) {
             return Ok(json!({"variables": []}));
         }
@@ -445,6 +447,7 @@ impl Session {
                 Item {
                     name: &variable.name,
                     path,
+                    raw: false,
                     type_info: variable.type_info.as_ref(),
                     state: &variable.state,
                     declaration: module.zip(variable.declaration.clone()),
@@ -566,6 +569,7 @@ impl Session {
                     Item {
                         name: &variable.name,
                         path: global_expression(&image, global),
+                        raw: false,
                         type_info: variable.type_info.as_ref(),
                         state: &variable.state,
                         declaration: global
@@ -595,13 +599,20 @@ impl Session {
         let pointee = handle.dereference(reference).await.map_err(error)?;
         let path = path.and_then(|path| path.dereferenced());
         if let VariableState::Available {
-            children: uscope::ValueChildren::Available(children),
+            children,
+            presentation,
             ..
         } = &pointee.state
         {
-            return self
-                .children(context, children.clone(), path.as_ref(), window)
-                .await;
+            let children = presentation
+                .as_deref()
+                .filter(|presentation| presentation.shape != uscope::PresentedShape::Raw)
+                .map_or(children, |presentation| &presentation.children);
+            if let uscope::ValueChildren::Available(children) = children {
+                return self
+                    .children(context, children.clone(), path.as_ref(), window)
+                    .await;
+            }
         }
         if window.start != 0 {
             return Ok(Vec::new());
@@ -610,6 +621,7 @@ impl Session {
             Item {
                 name: &format!("*{name}"),
                 path,
+                raw: false,
                 type_info: Some(&pointee.type_info),
                 state: &pointee.state,
                 declaration: None,
@@ -654,6 +666,7 @@ impl Session {
                 Item {
                     name: &name,
                     path: values::child_path(base.as_ref(), child),
+                    raw: false,
                     type_info: Some(&child.type_info),
                     state: &child.state,
                     declaration: None,
@@ -677,11 +690,18 @@ impl Session {
         window: Window,
     ) -> Result<Vec<Map<String, Value>>, ErrorBody> {
         let handle = self.target_handle()?;
-        let end = reference
-            .total()
-            .min(window.start.saturating_add(window.count));
+        // A view's elements come first and its named children after them;
+        // anything else's children are all of one kind.
+        let (start, end) = match (window.filter, reference.elements()) {
+            (Some(Filter::Indexed), Some(elements)) => (window.start, elements),
+            (Some(Filter::Named), Some(elements)) => {
+                (elements.saturating_add(window.start), reference.total())
+            }
+            _ => (window.start, reference.total()),
+        };
+        let end = end.min(start.saturating_add(window.count));
         let mut rows = Vec::new();
-        let mut offset = window.start;
+        let mut offset = start;
         while offset < end {
             let limit = (end - offset).min(PAGE);
             let page = handle
@@ -699,6 +719,7 @@ impl Session {
                     Item {
                         name: &values::child_name(child),
                         path: values::child_path(path, child),
+                        raw: matches!(child.relationship, uscope::ValueChildRelationship::Raw),
                         type_info: Some(&child.type_info),
                         state: &child.state,
                         declaration: None,
@@ -808,6 +829,7 @@ impl Session {
                 Item {
                     name: expression,
                     path: Some(parsed),
+                    raw: false,
                     type_info: value.type_info.as_ref(),
                     state: &value.state,
                     declaration: None,
@@ -970,6 +992,15 @@ struct Window {
     start: u64,
     count: u64,
     options: Options,
+    /// Which children the client asked for: a view's elements, which it
+    /// calls indexed, or its named children.
+    filter: Option<Filter>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Filter {
+    Indexed,
+    Named,
 }
 
 impl Window {
@@ -1064,6 +1095,7 @@ impl Session {
             Item {
                 name,
                 path: Some(path),
+                raw: false,
                 type_info: assigned.type_info.as_ref(),
                 state: &assigned.state,
                 declaration: None,
@@ -1141,7 +1173,14 @@ impl Session {
         let mut candidates = Vec::new();
         match completing {
             Completing::Name { first: false } if command == "info" => {
-                for subcommand in ["breakpoints", "watchpoints", "signals", "core", "symbol"] {
+                for subcommand in [
+                    "breakpoints",
+                    "watchpoints",
+                    "signals",
+                    "core",
+                    "symbol",
+                    "view",
+                ] {
                     candidates.push((subcommand.to_owned(), "value"));
                 }
             }

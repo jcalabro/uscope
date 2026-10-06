@@ -2,13 +2,13 @@
 
 use std::fmt::Write as _;
 
-use rustc_apfloat::Float as _;
-use rustc_apfloat::ieee::X87DoubleExtended;
+use std::sync::Arc;
+
 use uscope::{
-    BaseTypeEncoding, ByteOrder, DebuggerHandle, FloatValue, InspectionExhaustion, InspectionLimit,
-    InspectionLimits, IntegerValue, ModuleImage, ScalarValue, TypeInfo, TypeKind, ValueChildPage,
-    ValueChildQuery, ValueChildRelationship, ValueChildren, Variable, VariableSnapshot,
-    VariableState, VariableValue,
+    BaseTypeEncoding, ByteOrder, DebuggerHandle, InspectionExhaustion, InspectionLimit,
+    InspectionLimits, IntegerValue, ModuleImage, Presentation, PresentedCount, PresentedShape,
+    ScalarValue, TypeInfo, TypeKind, ValueChildPage, ValueChildQuery, ValueChildRelationship,
+    ValueChildren, Variable, VariableSnapshot, VariableState, VariableValue,
 };
 
 use super::format::register_bytes;
@@ -205,27 +205,68 @@ pub fn summary(type_info: Option<&TypeInfo>, state: &VariableState) -> String {
     )
 }
 
-/// Summarizes an available state's value, or describes why it has none.
+/// Summarizes an available state's value as its view presents it, or
+/// describes why it has none.
 fn state_summary(type_info: &TypeInfo, state: &VariableState) -> String {
+    rendered_summary(type_info, state, false)
+}
+
+/// The text a view gave a value, which the value as stored does not show.
+fn stored_text(state: &VariableState) -> Option<&Arc<uscope::TextSummary>> {
+    let VariableState::Available {
+        text, presentation, ..
+    } = state
+    else {
+        return None;
+    };
+    let from_view = presentation
+        .as_ref()
+        .is_some_and(|presentation| presentation.shape == PresentedShape::Text);
+    text.as_ref().filter(|_| !from_view)
+}
+
+/// A value's one-line summary: as its view presents it, unless `raw`.
+fn rendered_summary(type_info: &TypeInfo, state: &VariableState, raw: bool) -> String {
     match state {
         VariableState::Available {
             value,
             children,
-            text,
+            presentation,
             ..
         } => {
+            if let Some(presentation) = presentation.as_ref().filter(|_| !raw)
+                && presentation.shape != PresentedShape::Raw
+            {
+                return presentation.summary.to_string();
+            }
             let summary = value_summary(type_info, value, children);
-            match (text, value) {
+            let summary = match (stored_text(state), value) {
                 (None, _) => summary,
                 // A pointer keeps its address; the text follows it.
                 (Some(text), VariableValue::Address(_)) => format!("{summary} {}", quoted(text)),
                 (Some(text), _) => quoted(text),
+            };
+            match presentation.as_ref().filter(|_| !raw) {
+                Some(presentation) => format!("{summary} {}", view_failure(presentation)),
+                None => summary,
             }
         }
         _ => state_failure(state)
             .map(|(_, text)| text)
             .unwrap_or_default(),
     }
+}
+
+/// Why a view showed a value as stored.
+fn view_failure(presentation: &Presentation) -> String {
+    format!(
+        "<view {}: {}>",
+        presentation.view,
+        presentation
+            .problem
+            .as_ref()
+            .map_or_else(|| "failed".to_owned(), ToString::to_string)
+    )
 }
 
 pub fn range(expression: &str, page: &ValueChildPage, renderer: Renderer) -> String {
@@ -292,10 +333,17 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
             discriminant,
             active,
         } => {
-            let active = active
-                .as_ref()
-                .and_then(|variant| variant.name.as_deref())
-                .unwrap_or("<no matching variant>");
+            let active = active.as_ref().map_or("<no matching variant>", |variant| {
+                // Rust names a variant by its one member instead.
+                variant
+                    .name
+                    .as_deref()
+                    .or_else(|| match variant.members.as_ref() {
+                        [member] => member.name.as_deref(),
+                        _ => None,
+                    })
+                    .unwrap_or("<unnamed variant>")
+            });
             discriminant.map_or_else(
                 || format!("{{<{active}; {total} fields>}}"),
                 |value| format!("{{<{active} = {}; {total} fields>}}", integer(value)),
@@ -308,39 +356,7 @@ fn value_summary(type_info: &TypeInfo, value: &VariableValue, children: &ValueCh
 /// Renders text in double quotes, escaping what is not printable, and says
 /// when more text follows or could not be read.
 pub fn quoted(text: &uscope::TextSummary) -> String {
-    let mut output = String::from("\"");
-    for chunk in text.bytes.utf8_chunks() {
-        for character in chunk.valid().chars() {
-            match character {
-                '"' => output.push_str("\\\""),
-                '\\' => output.push_str("\\\\"),
-                '\n' => output.push_str("\\n"),
-                '\t' => output.push_str("\\t"),
-                '\r' => output.push_str("\\r"),
-                character if character.is_control() => {
-                    output.push_str(&character.escape_unicode().to_string());
-                }
-                character => output.push(character),
-            }
-        }
-        for byte in chunk.invalid() {
-            let _ = write!(output, "\\x{byte:02x}");
-        }
-    }
-    output.push('"');
-    match text.completion {
-        uscope::TextCompletion::Complete => {}
-        uscope::TextCompletion::Truncated { length: None } => output.push_str("..."),
-        uscope::TextCompletion::Truncated {
-            length: Some(length),
-        } => {
-            let _ = write!(output, "... ({length} bytes)");
-        }
-        uscope::TextCompletion::Unreadable { address } => {
-            let _ = write!(output, "... <unreadable at {address}>");
-        }
-    }
-    output
+    uscope::quoted_text(text)
 }
 
 /// Whether a value has no parts to expand.
@@ -362,12 +378,17 @@ enum Work {
 
 /// Renders a value with its aggregates expanded, fetching child pages until
 /// the remaining inspection limits or the output budget run out.
+#[expect(
+    clippy::too_many_lines,
+    reason = "values as stored and as presented are expanded in one bounded walk"
+)]
 pub async fn expanded(
     debugger: &DebuggerHandle,
     type_info: &TypeInfo,
     name: &str,
     state: &VariableState,
     mut remaining: InspectionLimits,
+    raw: bool,
     renderer: Renderer,
 ) -> uscope::Result<String> {
     let mut output = BoundedOutput::new(OUTPUT_LIMIT);
@@ -387,16 +408,74 @@ pub async fn expanded(
         let VariableState::Available {
             value,
             children,
-            text,
+            presentation,
             ..
         } = state
         else {
             output.push_str(&state_summary(type_info, state));
             continue;
         };
+        let presentation = presentation.as_deref().filter(|_| !raw);
+        // A view's elements show inside its summary's brackets; any other
+        // presentation is its summary.
+        if let Some(presentation) = presentation
+            && presentation.shape != PresentedShape::Raw
+        {
+            let (
+                shape @ (PresentedShape::Sequence | PresentedShape::Map),
+                ValueChildren::Available(reference),
+                Some(count),
+            ) = (
+                presentation.shape,
+                &presentation.children,
+                presentation.count,
+            )
+            else {
+                output.push_str(&presentation.summary);
+                continue;
+            };
+            let length = match count {
+                PresentedCount::Exact(count) => format!("len={count}"),
+                PresentedCount::AtLeast(count) => format!("len>={count}"),
+                _ => {
+                    output.push_str(&presentation.summary);
+                    continue;
+                }
+            };
+            let count = count.known();
+            let requested = count.min(MAX_EXPANDED_CHILDREN).min(remaining.value_nodes);
+            let page = if requested == 0 {
+                None
+            } else {
+                let page = debugger
+                    .value_children_with_limits(
+                        reference.clone(),
+                        ValueChildQuery {
+                            offset: 0,
+                            limit: u32::try_from(requested).expect("bounded page fits u32"),
+                        },
+                        remaining,
+                    )
+                    .await?;
+                remaining = remaining.remaining_after(page.usage);
+                Some(page)
+            };
+            let (opening, closing) = if shape == PresentedShape::Map {
+                ("{", "}")
+            } else {
+                ("[", "]")
+            };
+            output.push_str(&format!("{length} {opening}"));
+            work.push(Work::Text(closing.to_owned()));
+            schedule_children(&mut work, count, page.as_ref(), depth + 1, raw);
+            continue;
+        }
+        if let Some(presentation) = presentation {
+            work.push(Work::Text(format!(" {}", view_failure(presentation))));
+        }
         // Strings show as their text rather than their parts.
-        if text.is_some() || is_leaf(value) {
-            output.push_str(&state_summary(type_info, state));
+        if stored_text(state).is_some() || is_leaf(value) {
+            output.push_str(&rendered_summary(type_info, state, true));
             continue;
         }
         if depth >= remaining.aggregate_depth {
@@ -454,7 +533,7 @@ pub async fn expanded(
         };
         output.push_str(opening);
         work.push(Work::Text(closing));
-        schedule_children(&mut work, reference.total(), page.as_ref(), depth + 1);
+        schedule_children(&mut work, reference.total(), page.as_ref(), depth + 1, raw);
     }
     Ok(assignment(
         &type_info.name,
@@ -468,14 +547,20 @@ pub async fn expanded(
 
 /// Schedules one aggregate's children, then any truncation markers, as
 /// comma-separated items.
-fn schedule_children(work: &mut Vec<Work>, total: u64, page: Option<&ValueChildPage>, depth: u64) {
+fn schedule_children(
+    work: &mut Vec<Work>,
+    total: u64,
+    page: Option<&ValueChildPage>,
+    depth: u64,
+    raw: bool,
+) {
     let children = page.map_or(&[][..], |page| page.children.as_ref());
     let omitted = total.saturating_sub(children.len() as u64);
     let rendered = children.iter().filter(|child| {
         !matches!(
             &child.relationship,
             ValueChildRelationship::Member(member) if member.artificial
-        )
+        ) && (!raw || !matches!(child.relationship, ValueChildRelationship::Raw))
     });
     let mut items = rendered
         .map(|child| {
@@ -485,7 +570,13 @@ fn schedule_children(work: &mut Vec<Work>, total: u64, page: Option<&ValueChildP
                 }
                 ValueChildRelationship::Base(_) => format!("<base {}> = ", child.type_info.name),
                 ValueChildRelationship::ArrayElement { .. }
-                | ValueChildRelationship::SliceElement { .. } => String::new(),
+                | ValueChildRelationship::SliceElement { .. }
+                | ValueChildRelationship::Element { .. } => String::new(),
+                ValueChildRelationship::Field { name } => format!("{name} = "),
+                ValueChildRelationship::Entry { key, .. } => {
+                    format!("{}: ", state_summary(&key.type_info, &key.state))
+                }
+                ValueChildRelationship::Raw => "[raw] = ".to_owned(),
                 _ => "<child> = ".to_owned(),
             };
             vec![
@@ -520,45 +611,17 @@ const fn is_character(type_info: &TypeInfo) -> bool {
 }
 
 fn integer(value: IntegerValue) -> String {
-    match value {
-        IntegerValue::Signed(value) => value.to_string(),
-        IntegerValue::Unsigned(value) => value.to_string(),
-        _ => "<unsupported integer value>".to_owned(),
-    }
+    uscope::integer_text(value)
+}
+
+#[cfg(test)]
+fn float(value: uscope::FloatValue) -> String {
+    uscope::float_text(value)
 }
 
 /// Renders a scalar, adding the printable ASCII character for characters.
 fn scalar(value: &ScalarValue, character: bool) -> String {
-    let with_character = |number: String, code: Option<u8>| match code {
-        Some(code) if character && code.is_ascii_graphic() => {
-            format!("{number} '{}'", char::from(code).escape_default())
-        }
-        _ => number,
-    };
-    match value {
-        ScalarValue::Boolean(value) => value.to_string(),
-        ScalarValue::Signed(value) => with_character(value.to_string(), u8::try_from(*value).ok()),
-        ScalarValue::Unsigned(value) => {
-            with_character(value.to_string(), u8::try_from(*value).ok())
-        }
-        ScalarValue::Floating(value) => float(*value),
-        _ => "<unsupported scalar value>".to_owned(),
-    }
-}
-
-fn float(value: FloatValue) -> String {
-    match value {
-        FloatValue::Binary32(bits) => f32::from_bits(bits).to_string(),
-        FloatValue::Binary64(bits) => f64::from_bits(bits).to_string(),
-        FloatValue::X87Extended {
-            significand,
-            sign_exponent,
-        } => X87DoubleExtended::from_bits(
-            u128::from(significand) | (u128::from(sign_exponent) << 64),
-        )
-        .to_string(),
-        _ => "<unsupported floating-point format>".to_owned(),
-    }
+    uscope::scalar_text(value, character)
 }
 
 /// How watched bytes are decoded.
@@ -710,21 +773,52 @@ pub fn hexadecimal(
     )
 }
 
+/// A type's name with the path its producer's name leaves out, as in
+/// `std::vector<int, std::allocator<int> >`. Go and Zig names already
+/// carry their packages and modules.
+fn qualified_name(type_info: &TypeInfo) -> String {
+    let Some(identity) = type_info.identity.as_deref() else {
+        return type_info.name.to_string();
+    };
+    let spells_path = identity.path.first().is_none_or(|first| {
+        type_info
+            .name
+            .strip_prefix(first.as_ref())
+            .is_some_and(|rest| rest.starts_with("::"))
+    });
+    if spells_path
+        || !matches!(
+            identity.language,
+            uscope::SourceLanguage::C | uscope::SourceLanguage::Cpp | uscope::SourceLanguage::Rust
+        )
+    {
+        return type_info.name.to_string();
+    }
+    let mut name = String::new();
+    for segment in identity.path.iter() {
+        let _ = write!(name, "{segment}::");
+    }
+    name.push_str(&type_info.name);
+    name
+}
+
 /// Renders a type's definition, as `ptype` does: a record's or union's
-/// members, an enumeration's enumerators, or the name of any other type.
+/// members, an enumeration's enumerators, or the name of any other type,
+/// then the type's template or generic arguments.
 pub fn type_definition(
     type_info: &TypeInfo,
     images: &[std::sync::Arc<ModuleImage>],
     renderer: Renderer,
 ) -> String {
-    let name_of = |reference: uscope::TypeReference| {
-        images
-            .iter()
-            .find_map(|image| image.type_info(reference))
-            .map_or_else(|| "<unknown>".to_owned(), |info| info.name.to_string())
+    let info_of = |reference: uscope::TypeReference| {
+        images.iter().find_map(|image| image.type_info(reference))
     };
+    let name_of = |reference: uscope::TypeReference| {
+        info_of(reference).map_or_else(|| "<unknown>".to_owned(), |info| info.name.to_string())
+    };
+    let name = qualified_name(type_info);
     let members = |keyword: &str, members: &[uscope::RecordMember]| {
-        let mut output = format!("type = {keyword} {} {{\n", type_info.name);
+        let mut output = format!("type = {keyword} {name} {{\n");
         for member in members {
             let bits = match member.layout {
                 uscope::RecordMemberLayout::BitRange { bit_size, .. } => format!(" : {bit_size}"),
@@ -740,16 +834,24 @@ pub fn type_definition(
         output.push('}');
         output
     };
-    match &type_info.kind {
+    let mut output = match &type_info.kind {
         TypeKind::Record {
-            members: fields, ..
-        } => members("struct", fields),
+            kind,
+            members: fields,
+            ..
+        } => members(
+            if *kind == uscope::RecordKind::Class {
+                "class"
+            } else {
+                "struct"
+            },
+            fields,
+        ),
         TypeKind::Union {
             members: fields, ..
         } => members("union", fields),
         TypeKind::Enumeration { enumerators, .. } => format!(
-            "type = enum {} {{{}}}",
-            type_info.name,
+            "type = enum {name} {{{}}}",
             enumerators
                 .iter()
                 .map(|enumerator| {
@@ -764,7 +866,27 @@ pub fn type_definition(
                 .join(", ")
         ),
         _ => format!("type = {}", renderer.paint(Role::Type, &type_info.name)),
+    };
+    if let Some(identity) = type_info.identity.as_deref()
+        && !identity.arguments.is_empty()
+    {
+        let arguments = identity
+            .arguments
+            .iter()
+            .map(|argument| match argument {
+                uscope::TypeArgument::Type(reference) => {
+                    info_of(*reference).map_or_else(|| "<unknown>".to_owned(), qualified_name)
+                }
+                uscope::TypeArgument::Value(IntegerValue::Signed(value)) => value.to_string(),
+                uscope::TypeArgument::Value(IntegerValue::Unsigned(value)) => value.to_string(),
+                uscope::TypeArgument::Unknown(text) => text.to_string(),
+                _ => "?".to_owned(),
+            })
+            .map(|argument| renderer.paint(Role::Type, argument).to_string())
+            .collect::<Vec<_>>();
+        let _ = write!(output, "\narguments: {}", arguments.join(", "));
     }
+    output
 }
 
 #[cfg(test)]
@@ -838,10 +960,16 @@ mod tests {
 
     #[test]
     fn floating_values_preserve_special_signs_and_extended_precision() {
-        assert_eq!(float(FloatValue::Binary32(f32::INFINITY.to_bits())), "inf");
-        assert_eq!(float(FloatValue::Binary64((-0.0_f64).to_bits())), "-0");
         assert_eq!(
-            float(FloatValue::X87Extended {
+            float(uscope::FloatValue::Binary32(f32::INFINITY.to_bits())),
+            "inf"
+        );
+        assert_eq!(
+            float(uscope::FloatValue::Binary64((-0.0_f64).to_bits())),
+            "-0"
+        );
+        assert_eq!(
+            float(uscope::FloatValue::X87Extended {
                 significand: 0xc800_0000_0000_0000,
                 sign_exponent: 0x4000,
             }),

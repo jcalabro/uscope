@@ -1,0 +1,252 @@
+uscope-views 1
+
+# LLVM's libc++. Verified against clang 21.1.8 with libc++ 21, by
+# tests/fixtures/cpp/containers.cpp, with and without -fstandalone-debug.
+
+# std::string: a short string's characters are in the object, a long
+# string's in its buffer, and one bit tells them apart. A long string's
+# capacity is stored halved on little-endian targets.
+view c++ std::basic_string<C, _, _> {
+    check __rep_.__s.__is_long_ || __rep_.__s.__size_ < len(__rep_.__s.__data_)
+    check !__rep_.__s.__is_long_ || __rep_.__l.__size_ <= __rep_.__l.__cap_ * 2
+    show if __rep_.__s.__is_long_ {
+        text(__rep_.__l.__data_, __rep_.__l.__size_)
+    } else {
+        text(__rep_.__s.__data_, __rep_.__s.__size_)
+    }
+}
+
+view c++ std::basic_string_view<C, _> {
+    show text(__data_, __size_)
+}
+
+# libc++ 19 and later name the capacity `__cap_`; earlier versions keep it
+# in a compressed pair.
+view c++ std::vector<T, _> {
+    let capacity_end = __cap_ or __end_cap_.__value_
+    check __begin_ <= __end_ && __end_ <= capacity_end
+    show sequence(__end_ - __begin_) for i in range(__end_ - __begin_) => __begin_[i]
+    field capacity = capacity_end - __begin_
+}
+
+# An empty std::array is presented by libstdc++.views's view, which reads
+# nothing.
+view c++ std::array<T, N> {
+    show sequence(N) for i in range(N) => __elems_[i]
+}
+
+view c++ std::span<T, E> {
+    let size = __size_ or E
+    show sequence(size) for i in range(size) => __data_[i]
+}
+
+# The ordered containers are red-black trees whose end node's left child is
+# the root. The node type is the one their allocator allocates.
+view c++ std::map<K, V, _, _> {
+    type Node = arg(typeof(__tree_.__node_alloc_), 0)
+    show map(__tree_.__size_)
+        for x in inorder(__tree_.__end_node_.__left_, n => n->__left_, n => n->__right_)
+        => ((Node*)x)->__value_.first : ((Node*)x)->__value_.second
+}
+
+view c++ std::multimap<K, V, _, _> {
+    type Node = arg(typeof(__tree_.__node_alloc_), 0)
+    show map(__tree_.__size_)
+        for x in inorder(__tree_.__end_node_.__left_, n => n->__left_, n => n->__right_)
+        => ((Node*)x)->__value_.first : ((Node*)x)->__value_.second
+}
+
+view c++ std::set<K, _, _> {
+    type Node = arg(typeof(__tree_.__node_alloc_), 0)
+    show sequence(__tree_.__size_)
+        for x in inorder(__tree_.__end_node_.__left_, n => n->__left_, n => n->__right_)
+        => ((Node*)x)->__value_
+}
+
+view c++ std::multiset<K, _, _> {
+    type Node = arg(typeof(__tree_.__node_alloc_), 0)
+    show sequence(__tree_.__size_)
+        for x in inorder(__tree_.__end_node_.__left_, n => n->__left_, n => n->__right_)
+        => ((Node*)x)->__value_
+}
+
+# The unordered containers keep every node on one list from __first_node_.
+view c++ std::unordered_map<K, V, _, _, _> {
+    type Node = arg(typeof(__table_.__node_alloc_), 0)
+    show map(__table_.__size_) for x in list(__table_.__first_node_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_.first : ((Node*)x)->__value_.second
+}
+
+view c++ std::unordered_multimap<K, V, _, _, _> {
+    type Node = arg(typeof(__table_.__node_alloc_), 0)
+    show map(__table_.__size_) for x in list(__table_.__first_node_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_.first : ((Node*)x)->__value_.second
+}
+
+view c++ std::unordered_set<K, _, _, _> {
+    type Node = arg(typeof(__table_.__node_alloc_), 0)
+    show sequence(__table_.__size_) for x in list(__table_.__first_node_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_
+}
+
+view c++ std::unordered_multiset<K, _, _, _> {
+    type Node = arg(typeof(__table_.__node_alloc_), 0)
+    show sequence(__table_.__size_) for x in list(__table_.__first_node_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_
+}
+
+# A list is a ring through its own __end_, which holds no element.
+view c++ std::list<T, _> {
+    type Node = arg(typeof(__node_alloc_), 0)
+    let sentinel = &__end_
+    show sequence(__size_) for x in list(sentinel, n => n->__next_) if x != sentinel
+        => ((Node*)x)->__value_
+}
+
+# A forward list keeps no count; its last node links to nothing.
+view c++ std::forward_list<T, _> {
+    type Node = arg(typeof(__alloc_), 0)
+    show sequence(_) for x in list(__before_begin_.__next_, n => n->__next_)
+        => ((Node*)x)->__value_
+}
+
+# A deque's elements are in blocks, which __map_ points to, starting
+# __start_ elements into the first. Neither the object nor its debug
+# information holds a block's size: libc++ makes a block 4096 bytes of
+# elements, or 16 elements of 256 bytes or more.
+view c++ std::deque<T, _> {
+    let block = sizeof(T) < 256 ? 4096 / sizeof(T) : 16
+    let map = __map_.__begin_
+    let start = __start_
+    let size = __size_
+    let blocks = __map_.__end_ - map
+    check blocks >= 0 && start + size <= blocks * block
+    show sequence(size) for i in range(size) => map[(start + i) / block][(start + i) % block]
+}
+
+# A unique_ptr keeps its pointer beside its deleter: as __ptr_ of an
+# anonymous member, or, before libc++ 20, of a compressed pair. Arrays,
+# unique_ptr<T[]>, have no size to show.
+view c++ std::unique_ptr<T, _> {
+    check sizeof(T) > 0
+    let pointer = __ptr_.__value_ or __ptr_
+    show if pointer == 0 { empty("nullptr") } else { value(*pointer) }
+}
+
+# A shared_ptr's control block counts its owners less one, and its weak
+# references less one, of which its owners together hold one. Without
+# -fstandalone-debug, its debug information describes no control block,
+# and the next view shows no counts.
+view c++ std::shared_ptr<T> {
+    check sizeof(T) > 0
+    let strong = __cntrl_ == 0 ? 0 : __cntrl_->__shared_owners_ + 1
+    show if __ptr_ == 0 { empty("nullptr") } else { value(*__ptr_) }
+    field strong = strong
+    field weak = __cntrl_ == 0 ? 0 : __cntrl_->__shared_weak_owners_ + (strong > 0 ? 0 : 1)
+}
+
+view c++ std::shared_ptr<T> {
+    check sizeof(T) > 0
+    show if __ptr_ == 0 { empty("nullptr") } else { value(*__ptr_) }
+}
+
+# Whether a weak_ptr's object still exists is in the control block alone,
+# so without it a weak_ptr shows as stored.
+view c++ std::weak_ptr<T> {
+    check sizeof(T) > 0
+    let strong = __cntrl_ == 0 ? 0 : __cntrl_->__shared_owners_ + 1
+    show if __cntrl_ == 0 || __ptr_ == 0 {
+        empty("nullptr")
+    } else if strong == 0 {
+        empty("expired")
+    } else {
+        value(*__ptr_)
+    }
+    field strong = strong
+    field weak = __cntrl_ == 0 ? 0 : __cntrl_->__shared_weak_owners_ + (strong > 0 ? 0 : 1)
+}
+
+view c++ std::optional<T> {
+    show if __engaged_ { value(__val_) } else { empty("nullopt") }
+}
+
+# Every alternative is at the start of the union __data; __index says which
+# one it holds, or all ones when it holds none.
+view c++ std::variant {
+    type Index = typeof(__impl_.__index)
+    show if __impl_.__index == (Index)-1 {
+        empty("valueless")
+    } else {
+        dynamic(&__impl_.__data, arg(typeof(self), __impl_.__index))
+    }
+}
+
+# A tuple's element N is the __value_ of its __tuple_leaf<N, T> base. These
+# views name tuples of up to six elements; libstdc++.views names the empty
+# one for both libraries.
+view c++ std::tuple<A> {
+    type L0 = std::__tuple_leaf<0, A>
+    show record { 0 = ((L0)__base_).__value_ }
+}
+
+view c++ std::tuple<A, B> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    show record { 0 = ((L0)__base_).__value_, 1 = ((L1)__base_).__value_ }
+}
+
+view c++ std::tuple<A, B, C> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    type L2 = std::__tuple_leaf<2, C>
+    show record {
+        0 = ((L0)__base_).__value_,
+        1 = ((L1)__base_).__value_,
+        2 = ((L2)__base_).__value_,
+    }
+}
+
+view c++ std::tuple<A, B, C, D> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    type L2 = std::__tuple_leaf<2, C>
+    type L3 = std::__tuple_leaf<3, D>
+    show record {
+        0 = ((L0)__base_).__value_,
+        1 = ((L1)__base_).__value_,
+        2 = ((L2)__base_).__value_,
+        3 = ((L3)__base_).__value_,
+    }
+}
+
+view c++ std::tuple<A, B, C, D, E> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    type L2 = std::__tuple_leaf<2, C>
+    type L3 = std::__tuple_leaf<3, D>
+    type L4 = std::__tuple_leaf<4, E>
+    show record {
+        0 = ((L0)__base_).__value_,
+        1 = ((L1)__base_).__value_,
+        2 = ((L2)__base_).__value_,
+        3 = ((L3)__base_).__value_,
+        4 = ((L4)__base_).__value_,
+    }
+}
+
+view c++ std::tuple<A, B, C, D, E, F> {
+    type L0 = std::__tuple_leaf<0, A>
+    type L1 = std::__tuple_leaf<1, B>
+    type L2 = std::__tuple_leaf<2, C>
+    type L3 = std::__tuple_leaf<3, D>
+    type L4 = std::__tuple_leaf<4, E>
+    type L5 = std::__tuple_leaf<5, F>
+    show record {
+        0 = ((L0)__base_).__value_,
+        1 = ((L1)__base_).__value_,
+        2 = ((L2)__base_).__value_,
+        3 = ((L3)__base_).__value_,
+        4 = ((L4)__base_).__value_,
+        5 = ((L5)__base_).__value_,
+    }
+}

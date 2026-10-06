@@ -9,6 +9,7 @@ mod expressions;
 #[cfg(debug_assertions)]
 mod flight_recorder;
 mod globals;
+mod identities;
 mod libraries;
 mod metadata;
 mod signals;
@@ -16,6 +17,7 @@ mod stepping;
 mod unwind;
 mod values;
 mod variables;
+mod views;
 mod writes;
 
 use std::collections::{BTreeMap, BTreeSet};

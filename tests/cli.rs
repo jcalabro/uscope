@@ -418,6 +418,423 @@ fn strings_print_as_quoted_escaped_text() {
     );
 }
 
+/// `print` shows a value as its view presents it, with its elements up to
+/// the inspection's budget; `print/r` and `set views off` show it as
+/// stored; and `info view` says which view presents it, or why none does.
+#[test]
+fn views_present_values_raw_is_one_step_away_and_info_view_explains() {
+    let stdout = batch(
+        "containers-rust-o0",
+        &["--color", "never"],
+        &[
+            "break barrier",
+            "run",
+            "up",
+            "print ints",
+            "print many",
+            "print/r ints",
+            "print words",
+            "info view ints",
+            "info view past_capacity.value.0",
+            "set views off",
+            "print ints",
+            "info view ints",
+            "set views on",
+            "print ints[1] + len(ints)",
+            "print",
+        ],
+    );
+    let raw_ints = "(Vec<i32, alloc::alloc::Global>) ints = {buf = {inner = {ptr = ";
+    assert_in_order(
+        &stdout,
+        &[
+            "(Vec<i32, alloc::alloc::Global>) ints = len=3 [1, 2, 3]\n",
+            "(Vec<u32, alloc::alloc::Global>) many = len=300 [0, 1, 2, 3, ",
+            " 249, 250, <truncated: MemoryReads limit 256 after 256; requested 1>, <49 omitted>]\n",
+            raw_ints,
+            "}, len = 3}\n",
+            "(Vec<alloc::string::String, alloc::alloc::Global>) words = len=2 [\"one\", \"two\"]\n",
+            "`ints` has type Vec<i32, alloc::alloc::Global>\n",
+            "presented by rust-std.views:",
+            " `rust alloc::vec::Vec<T, _>`\nas len=3 [1, 2, 3]\nviews tried, in order:\n",
+            "`past_capacity.value.0` has type Vec<i32, alloc::alloc::Global>\n",
+            "binds, but shows the value as stored: check `len <= capacity` failed: \
+             `len` is 9, `capacity` is 8\n",
+            "values show as stored\n",
+            raw_ints,
+            "views are off, so it shows as stored; `set views on` turns them on\n",
+            "values show as their views present them\n",
+            "(integer) ints[1] + len(ints) = 5\n",
+            "(PathBuf) path = \"/tmp/uscope\"\n",
+            "(VecDeque<i32, alloc::alloc::Global>) ring = len=4 [1, 2, 3, 4]\n",
+        ],
+    );
+}
+
+/// Values are presented with the session's view files first, then the
+/// project's in `.uscope/views` where the program runs and the user's, then
+/// the program's own;
+/// `views clear` forgets the session's, and a file with an error is
+/// reported without ending the session.
+#[test]
+fn view_files_come_from_the_session_the_project_and_the_user() {
+    let directory = support::ScratchDir::new("cli-view-files");
+    let project = directory.path().join(".uscope/views");
+    let user = directory.path().join("config/uscope/views");
+    fs::create_dir_all(&project).expect("make the project's view directory");
+    fs::create_dir_all(&user).expect("make the user's view directory");
+    fs::write(
+        project.join("points.views"),
+        "uscope-views 1\nview c point {\n    format y as hex\n}\n",
+    )
+    .expect("write the project's views");
+    fs::write(
+        user.join("mine.views"),
+        "uscope-views 1\nview c point {\n    show empty(\"the user's\")\n}\nview c intvec {\n    show empty(\"the user's vector\")\n}\n",
+    )
+    .expect("write the user's views");
+    let session = directory.path().join("session.views");
+    fs::write(
+        &session,
+        "uscope-views 1\nview c point {\n    show empty(\"the session's\")\n}\n",
+    )
+    .expect("write the session's views");
+    let broken = directory.path().join("broken.views");
+    fs::write(
+        &broken,
+        "uscope-views 1\nview c point {\n    show nothing\n}\n",
+    )
+    .expect("write a broken view file");
+    let load_broken = format!("views load {}", broken.display());
+    // The project is where the program runs, wherever uscope does.
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("XDG_CONFIG_HOME", directory.path().join("config"))
+        .arg("--batch")
+        .arg("--cwd")
+        .arg(directory.path())
+        .arg("--views")
+        .arg(&session)
+        .args(["-e", "break barrier", "-e", "run", "-e", "up"])
+        .args(["-e", "print here", "-e", "views clear", "-e", "print here"])
+        .args([
+            "-e",
+            "print numbers",
+            "-e",
+            &load_broken,
+            "-e",
+            "print here",
+        ])
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/build/test-programs/embedded-views"
+        ))
+        .stdin(Stdio::null())
+        .output()
+        .expect("run uscope");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = assert_success(output);
+    assert_in_order(
+        &stdout,
+        &[
+            "here = the session's",
+            "forgot the loaded view files",
+            "here = {x: 1, y: 0x2}",
+            // The user's view comes before the program's own.
+            "numbers = the user's vector",
+            "loaded 1 view file",
+            "here = {x: 1, y: 0x2}",
+        ],
+    );
+    assert!(
+        stderr.contains("broken.views:3:10: expected a shape"),
+        "{stderr}"
+    );
+}
+
+/// `uscope views check` says which view presents each of a program's types
+/// that a pattern names, with no process, and fails when a view it was
+/// given presents nothing or binds nothing it names; `views explain` says
+/// why for one type.
+#[test]
+fn views_check_and_explain_a_programs_types_without_a_process() {
+    let directory = support::ScratchDir::new("cli-views-check");
+    let views = directory.path().join("app.views");
+    fs::write(
+        &views,
+        "uscope-views 1\nview c point {\n    show value(z)\n}\nview c widget {\n    show empty(\"w\")\n}\n",
+    )
+    .expect("write the views to check");
+    let program = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/build/test-programs/embedded-views"
+    );
+    let run = |arguments: &[&std::ffi::OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .current_dir(directory.path())
+            .env("XDG_CONFIG_HOME", directory.path().join("config"))
+            .arg("views")
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope views")
+    };
+    let clean = run(&["check".as_ref(), program.as_ref()]);
+    assert_in_order(
+        &assert_success(clean),
+        &[
+            "presented:",
+            "intvec by embedded-views.views[0]:4 `c intvec`",
+        ],
+    );
+    let failed = run(&[
+        "check".as_ref(),
+        program.as_ref(),
+        "--views".as_ref(),
+        views.as_os_str(),
+    ]);
+    assert!(!failed.status.success(), "{failed:?}");
+    let report = String::from_utf8_lossy(&failed.stdout).into_owned();
+    assert_in_order(
+        &report,
+        &[
+            "not presented, though views name them:",
+            "point",
+            "app.views:2 `c point`: line 3: `z`: `z` is neither a member",
+            "views that present no type:",
+            "app.views:5 `c widget`",
+        ],
+    );
+    // A view file that cannot be used fails an explanation too.
+    let broken = directory.path().join("broken.views");
+    fs::write(
+        &broken,
+        "uscope-views 1\nview c intvec {\n    show nothing\n}\n",
+    )
+    .expect("write a broken view file");
+    let refused = run(&[
+        "explain".as_ref(),
+        program.as_ref(),
+        "intvec".as_ref(),
+        "--views".as_ref(),
+        broken.as_os_str(),
+    ]);
+    assert!(!refused.status.success(), "{refused:?}");
+    let explained = run(&["explain".as_ref(), program.as_ref(), "intvec".as_ref()]);
+    assert_in_order(
+        &assert_success(explained),
+        &[
+            "intvec in ",
+            "presented by embedded-views.views[0]:4 `c intvec`",
+            "views tried, in order:",
+            "embedded-views.views[0]:4 `c intvec`: binds",
+        ],
+    );
+}
+
+/// A kernel beside a view file is loaded with it, as `NAME.wasm`; the runs
+/// a presentation takes are recorded, and replay with no program; and
+/// `views check` shows each kernel as the source it is built from.
+#[test]
+fn kernels_beside_view_files_present_values_and_their_runs_replay() {
+    let directory = support::ScratchDir::new("cli-kernels");
+    let root = env!("CARGO_MANIFEST_DIR");
+    let views = directory.path().join("forest.views");
+    fs::write(
+        &views,
+        "uscope-views 1\nview c tree {\n    show sequence(count) for at in kernel(\"preorder\", root, offsetof(node, child), offsetof(node, sibling))\n        => ((node *)at)->value * 10\n}\n",
+    )
+    .expect("write the views");
+    fs::copy(
+        format!("{root}/build/test-programs/tutorial-tree.wasm"),
+        directory.path().join("preorder.wasm"),
+    )
+    .expect("put the kernel beside the views");
+    let junk = directory.path().join("junk.views");
+    fs::write(
+        &junk,
+        "uscope-views 1\nview c intvec {\n    show sequence(n) for at in kernel(\"junk\") => at\n}\n",
+    )
+    .expect("write views that call a broken kernel");
+    fs::write(directory.path().join("junk.wasm"), b"\0asm junk").expect("write a broken kernel");
+    let runs = directory.path().join("family.runs");
+    let record = format!("views record {} family", runs.display());
+    let load_junk = format!("views load {}", junk.display());
+    let program = format!("{root}/build/test-programs/tutorial");
+    let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
+        .current_dir(root)
+        .env("XDG_CONFIG_HOME", directory.path().join("config"))
+        .arg("--batch")
+        .arg("--views")
+        .arg(&views)
+        .args(["-e", "break barrier", "-e", "run", "-e", "up"])
+        .args([
+            "-e",
+            "print family",
+            "-e",
+            &record,
+            "-e",
+            "info view family",
+        ])
+        .args(["-e", &load_junk])
+        .arg(&program)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run uscope");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = assert_success(output);
+    assert_in_order(
+        &stdout,
+        &[
+            "family = len=5 [10, 20, 30, 40, 50]",
+            "recorded 2 kernel runs to",
+            "presented by ",
+            "forest.views:2 `c tree`",
+        ],
+    );
+    assert!(
+        stderr.contains("junk.wasm:0:0: kernel `junk`: it is not a module a kernel may be"),
+        "{stderr}"
+    );
+    let replay = |arguments: &[&std::ffi::OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_uscope"))
+            .args(["views".as_ref(), "replay".as_ref(), runs.as_os_str()])
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run uscope views replay")
+    };
+    let kernel = directory.path().join("preorder.wasm");
+    assert_in_order(
+        &assert_success(replay(&["--kernel".as_ref(), kernel.as_os_str()])),
+        &[
+            "run 1: kernel `preorder` reproduced",
+            "run 2: kernel `preorder` reproduced",
+        ],
+    );
+    // A run replays only with the kernel it recorded.
+    let unknown = replay(&[]);
+    assert!(!unknown.status.success(), "{unknown:?}");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("no built-in kernel is named `preorder`"),
+        "{unknown:?}"
+    );
+    let other = replay(&[
+        "--kernel".as_ref(),
+        format!("{root}/views/kernels/rust-btree.wasm").as_ref(),
+    ]);
+    assert!(!other.status.success(), "{other:?}");
+    assert!(
+        String::from_utf8_lossy(&other.stdout).contains("differs"),
+        "{other:?}"
+    );
+    let check = uscope(&["views", "check", "build/test-programs/tutorial"]);
+    assert_in_order(
+        &assert_success(check),
+        &[
+            "kernels, and what they are built from:",
+            "  tree (tutorial.views[1]):",
+            "    // The values of a tree whose nodes keep their children in a list, each",
+        ],
+    );
+}
+
+/// A program built with line tables only describes no variables or types,
+/// so nothing is presented, and uscope says so rather than guessing.
+#[test]
+fn a_program_without_variable_information_presents_nothing() {
+    let output = batch_output(
+        "containers-rust-limited",
+        &["break barrier", "run", "up", "print text"],
+    );
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no variable is named `text` here"),
+        "{stderr}"
+    );
+    let check = uscope(&[
+        "views",
+        "check",
+        "build/test-programs/containers-rust-limited",
+    ]);
+    assert_in_order(
+        &assert_success(check),
+        &["no view's pattern names any type"],
+    );
+}
+
+/// `print` shows a map's entries as `key: value` and a linked structure's
+/// elements, and says why a broken one shows as stored.
+#[test]
+fn views_print_maps_and_linked_structures() {
+    let stdout = batch(
+        "containers-cpp-gcc-o0",
+        &["--color", "never"],
+        &[
+            "break barrier",
+            "run",
+            "up",
+            "print ordered",
+            "print named",
+            "print linked_words",
+            "print forward[1] * len(forward)",
+            "print looped",
+            "info view overcounted",
+        ],
+    );
+    assert_in_order(
+        &stdout,
+        &[
+            ") ordered = len=3 {1: 10, 2: 20, 3: 30}\n",
+            ") named = len=2 {\"one\": 1, \"two\": 2}\n",
+            ") linked_words = len=2 [\"a\", \"b\"]\n",
+            "(integer) forward[1] * len(forward) = 10\n",
+            ") looped = {",
+            " <view libstdc++.views:",
+            "`c++ std::list<T, _>`: cycle at element 3: it leads back to a node already visited>\n",
+            "binds, but shows the value as stored: the view declares 4 elements and generates 2\n",
+        ],
+    );
+}
+
+/// `ptype` names a type with its path and lists its arguments, whatever
+/// the producer called it.
+#[test]
+fn ptype_shows_qualified_names_and_template_arguments() {
+    for (fixture, commands, expected) in [
+        (
+            "templates-cpp-clang-o0",
+            &[
+                "break templates_target",
+                "run",
+                "ptype std::`vector<int>`",
+                "ptype `Fixed<3, short>`",
+            ][..],
+            &[
+                "type = class std::vector<int, std::allocator<int> > {",
+                "arguments: int, std::allocator<int>\n",
+                "type = struct Fixed<3, short> {\n    short[3] items;\n}\narguments: 3, short\n",
+            ][..],
+        ),
+        (
+            "generics-rust-o0",
+            &[
+                "break generics_target",
+                "run",
+                "ptype alloc::vec::`Vec<i32>`",
+            ][..],
+            &[
+                "type = struct alloc::vec::Vec<i32, alloc::alloc::Global> {",
+                "arguments: i32, alloc::alloc::Global\n",
+            ][..],
+        ),
+    ] {
+        let stdout = batch(fixture, &[], commands);
+        assert_in_order(&stdout, expected);
+    }
+}
+
 #[test]
 fn set_changes_values_the_program_then_uses() {
     let stdout = batch(
@@ -1112,20 +1529,31 @@ fn print_renders_symbolic_enums_variants_and_raw_unions() {
             "print *fieldless",
             "--eval",
             "print *wide",
+            "--eval",
+            "frame 1",
+            "--eval",
+            "print",
         ])
         .arg(rust)
         .output()
         .expect("render Rust enum values");
     let stdout = assert_success(output);
-    assert!(
-        stdout.contains("*value = {Integer = {__0 = 42}}"),
-        "{stdout}"
-    );
+    // A sum type shows as its active variant.
+    assert!(stdout.contains("*value = Integer(42)"), "{stdout}");
     assert!(stdout.contains("*fieldless = Negative (-3)"), "{stdout}");
     assert!(
         stdout.contains("*wide = Huge (1267650600228229401496703205385)"),
         "{stdout}"
     );
+    for summary in [
+        "value = Integer(42)",
+        "optional = Some(0x",
+        "empty = None",
+        "done = Ok(())",
+        "failed = Err(5)",
+    ] {
+        assert!(stdout.contains(summary), "{summary}: {stdout}");
+    }
 
     let c = fixture("build/test-programs/enums-c-gcc-o0");
     let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
@@ -1242,8 +1670,9 @@ fn command_argument_errors_use_the_registered_canonical_usage() {
         "{stderr}"
     );
 
-    // Only `info symbol` takes an address, and it requires one.
-    for command in ["info symbol", "info breakpoints 0x10"] {
+    // Only `info symbol` and `info view` take an argument, and they require
+    // one.
+    for command in ["info symbol", "info view", "info breakpoints 0x10"] {
         let output = Command::new(env!("CARGO_BIN_EXE_uscope"))
             .args(["--batch", "--eval", command])
             .arg(&executable)
@@ -1252,7 +1681,9 @@ fn command_argument_errors_use_the_registered_canonical_usage() {
         let stderr = String::from_utf8(output.stderr).expect("UTF-8 error output");
         assert!(!output.status.success(), "{command}");
         assert!(
-            stderr.contains("usage: info breakpoints|watchpoints|signals|core|symbol [0xaddress]"),
+            stderr.contains(
+                "usage: info breakpoints|watchpoints|signals|core|symbol|view [argument...]"
+            ),
             "{command}: {stderr}"
         );
     }

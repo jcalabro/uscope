@@ -27,6 +27,7 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
 - **Inspection.**
   - Threads with names, and stack traces through libraries and inlined calls, with the frames' parameters, lines, and modules when a client asks.
   - Arguments, locals, statics, and registers, with the text of strings. Each row's `evaluateName` reaches exactly that variable: a static that a local shadows is named from the outermost scope, such as `::count`, or with its file, such as `` ::`main.c::count` ``, and a variable an inner block hides has no name, since no expression reaches it. A register's row is named `$rax` and is read-only.
+  - Standard library and user containers presented by [views](views.md): a vector's elements as indexed variables, paged by the client's `filter`, `start`, and `count`, and its fields and `[raw]`, the value as stored, as named ones.
   - Hover, watch, clipboard, and debug console evaluation in the [expression language](expressions.md).
   - Integers in hexadecimal, as a request's `format` asks, or for the whole session with the `uscope/setValueFormat` request (`{"hex": true}`), which has the client read its values again.
   - Each variable's declaration (`declarationLocationReference`), and the function a function pointer points to (`valueLocationReference`), through the `locations` request.
@@ -66,6 +67,7 @@ A launch configuration:
   "stopOnEntry": false,          // stop at the first instruction, in the dynamic loader
   "console": "internalConsole",  // or "integratedTerminal" or "externalTerminal"
   "sourceMap": [["/build/src", "${workspaceFolder}/src"]],  // earlier rules first; {"from": "to"} also works
+  "viewFiles": ["${workspaceFolder}/app.views"],  // ahead of .uscope/views, the user's, the program's, the built-in
   "disassemblySyntax": "intel",  // or "att"
   "signals": { "SIGUSR1": "nostop", "SIGPIPE": ["stop", "print"] }
 }

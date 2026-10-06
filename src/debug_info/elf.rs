@@ -529,6 +529,7 @@ pub(super) fn fuzz(data: &[u8]) {
             statements: Vec::new(),
             lines: Vec::new(),
             sections: load_sections(&object),
+            vtables: Vec::new(),
         },
     );
     fuzz_lookups(&image, &symbols, data);

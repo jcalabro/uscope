@@ -14,7 +14,29 @@ struct Inner {
 };
 }  // namespace shapes
 
-struct Fixture {
+// A member of a base class or of an anonymous member is named as the
+// record's own, and a virtual base shared along two paths is one object.
+struct Base {
+    int base_value;
+};
+
+struct Top {
+    int top_value;
+};
+
+struct Left : virtual Top {
+    int left_value;
+};
+
+struct Right : virtual Top {
+    int right_value;
+};
+
+struct Diamond : Left, Right {
+    int own_value;
+};
+
+struct Fixture : Base {
     int count;
     unsigned char byte;
     shapes::Inner inner;
@@ -23,6 +45,10 @@ struct Fixture {
     const char *text;
     bool flag;
     double real;
+    union {
+        int as_int;
+        unsigned as_unsigned;
+    };
 };
 
 #define EXPECT_INT(expression, native) \
@@ -39,8 +65,15 @@ struct Fixture {
     } while (0)
 
 int main() {
-    Fixture f{-70000, 250, {-12, 123456789012LL}, {10, 20, 30, 40}, nullptr, "hello", true, 2.75};
+    Fixture f{{-5}, -70000, 250, {-12, 123456789012LL}, {10, 20, 30, 40}, nullptr, "hello", true, 2.75, {-9}};
     f.ptr = &f.arr[2];
+    Diamond diamond;
+    diamond.top_value = 1;
+    diamond.left_value = 2;
+    diamond.right_value = 3;
+    diamond.own_value = 4;
+    // Its address escapes, so its stores happen before barrier() is called.
+    __asm__ volatile("" : : "r"(&diamond) : "memory");
     int &ref = f.arr[1];
 
     EXPECT_INT("f.count", f.count);
@@ -57,6 +90,13 @@ int main() {
     EXPECT_F64("f.real * 2", f.real * 2);
     EXPECT_INT("sizeof(f.inner)", sizeof f.inner);
     EXPECT_INT("(short)f.count", static_cast<short>(f.count));
+    EXPECT_INT("f.base_value", f.base_value);
+    EXPECT_INT("f.base_value + f.count", f.base_value + f.count);
+    EXPECT_INT("f.as_int", f.as_int);
+    EXPECT_INT("f.as_unsigned", f.as_unsigned);
+    EXPECT_INT("diamond.top_value", diamond.top_value);
+    EXPECT_INT("diamond.left_value + diamond.right_value", diamond.left_value + diamond.right_value);
+    EXPECT_INT("diamond.own_value", diamond.own_value);
     std::fflush(stdout);
     barrier(&f);
     return ref == 0;

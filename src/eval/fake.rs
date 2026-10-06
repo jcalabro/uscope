@@ -74,6 +74,8 @@ pub enum Step {
         element_size: u64,
         ty: TypeReference,
     },
+    /// To a variable, from anywhere: a view's `global(NAME)`.
+    Global(usize),
 }
 
 /// A world the evaluator binds and runs in.
@@ -111,6 +113,7 @@ impl World {
             name: name.into(),
             byte_size,
             kind,
+            identity: None,
         });
         reference
     }
@@ -166,6 +169,72 @@ impl World {
                 incomplete: false,
             },
         )
+    }
+
+    /// Gives a record its base classes, each at a byte offset.
+    pub fn set_bases(&mut self, record: TypeReference, bases: &[(TypeReference, u64)]) {
+        let bases: Vec<crate::BaseClass> = bases
+            .iter()
+            .map(|(ty, offset)| crate::BaseClass {
+                type_ref: *ty,
+                layout: RecordMemberLayout::ByteOffset(*offset),
+                accessibility: crate::Accessibility::Public,
+                virtuality: crate::BaseClassVirtuality::None,
+            })
+            .collect();
+        let index = usize::try_from(record.id.get()).expect("small ids");
+        let TypeKind::Record {
+            bases: existing, ..
+        } = &mut self.types[index].kind
+        else {
+            panic!("only records have bases");
+        };
+        *existing = bases.into();
+    }
+
+    /// Every path from `from` through its bases to a base of type `target`,
+    /// as the offset it is at.
+    fn base_offsets(&self, from: TypeReference, target: TypeReference, at: u64) -> Vec<u64> {
+        let TypeKind::Record { bases, .. } = &self.info(from).kind else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for base in bases.iter() {
+            let RecordMemberLayout::ByteOffset(offset) = base.layout else {
+                panic!("the world lays bases out at byte offsets");
+            };
+            if base.type_ref == target {
+                found.push(at + offset);
+            } else {
+                found.extend(self.base_offsets(base.type_ref, target, at + offset));
+            }
+        }
+        found
+    }
+
+    /// Gives a record made without members its members, for a record that
+    /// points to its own type.
+    pub fn set_members(&mut self, record: TypeReference, members: &[(&str, TypeReference, u64)]) {
+        let members: Vec<RecordMember> = members
+            .iter()
+            .map(|(member, ty, offset)| RecordMember {
+                name: Some((*member).into()),
+                type_ref: *ty,
+                layout: RecordMemberLayout::ByteOffset(*offset),
+                accessibility: crate::Accessibility::Public,
+                artificial: false,
+                embedded: false,
+                declaration: None,
+            })
+            .collect();
+        let index = usize::try_from(record.id.get()).expect("small ids");
+        let TypeKind::Record {
+            members: existing, ..
+        } = &mut self.types[index].kind
+        else {
+            panic!("only records have members");
+        };
+        *existing = members.into();
     }
 
     pub fn pointer(&mut self, target: Option<TypeReference>) -> TypeReference {
@@ -233,6 +302,7 @@ impl World {
             TypeKind::Slice {
                 element,
                 has_capacity: false,
+                text: false,
             },
         )
     }
@@ -274,6 +344,55 @@ impl World {
         )
     }
 
+    /// Gives a type the identity a view's pattern matches.
+    pub fn identify(
+        &mut self,
+        ty: TypeReference,
+        language: crate::SourceLanguage,
+        path: &[&str],
+        base: &str,
+        arguments: Vec<crate::TypeArgument>,
+    ) {
+        let index = usize::try_from(ty.id.get()).expect("small ids");
+        self.types[index].identity = Some(Arc::new(crate::TypeIdentity {
+            language,
+            path: path.iter().map(|segment| Arc::from(*segment)).collect(),
+            inline_namespaces: Arc::default(),
+            base: base.into(),
+            origin: if arguments.is_empty() {
+                crate::ArgumentOrigin::None
+            } else {
+                crate::ArgumentOrigin::Dwarf
+            },
+            arguments: arguments.into(),
+            pack: None,
+            go: None,
+        }));
+    }
+
+    /// Gives a type Go's attributes, as Go's DWARF marks its kinds.
+    pub fn go_kind(&mut self, ty: TypeReference, kind: crate::GoKind) {
+        let index = usize::try_from(ty.id.get()).expect("small ids");
+        let identity = self.types[index]
+            .identity
+            .as_mut()
+            .expect("an identified type");
+        Arc::make_mut(identity).go = Some(crate::GoTypeAttributes {
+            kind,
+            runtime_type: None,
+        });
+    }
+
+    /// Marks where an identified type's template parameter pack begins.
+    pub fn pack(&mut self, ty: TypeReference, start: usize) {
+        let index = usize::try_from(ty.id.get()).expect("small ids");
+        let identity = self.types[index]
+            .identity
+            .as_mut()
+            .expect("an identified type");
+        Arc::make_mut(identity).pack = Some(start);
+    }
+
     pub fn typedef(&mut self, name: &str, target: TypeReference) -> TypeReference {
         let size = self.info(target).byte_size;
         self.add(
@@ -305,6 +424,11 @@ impl World {
         self.memory.insert(address, bytes.to_vec());
         self.next += (bytes.len() as u64).div_ceil(16) * 16 + 16;
         address
+    }
+
+    /// Maps `bytes` at `address`, which nothing else may use.
+    pub fn map(&mut self, address: u64, bytes: &[u8]) {
+        self.memory.insert(address, bytes.to_vec());
     }
 
     /// A variable in memory, returning its address.
@@ -389,6 +513,14 @@ impl World {
     /// Makes reading `[address, address + size)` fail the test.
     pub fn poison(&mut self, address: u64, size: u64) {
         self.poisoned.push((address, address + size));
+    }
+
+    /// The type of the variable `name`.
+    pub fn type_of(&self, name: &str) -> TypeReference {
+        self.objects
+            .iter()
+            .find(|object| object.name == name)
+            .map_or_else(|| panic!("no variable `{name}`"), |object| object.ty)
     }
 
     pub fn address_of(&self, name: &str) -> u64 {
@@ -534,6 +666,7 @@ impl World {
             dereference: DereferenceState::NotApplicable,
             children: ValueChildren::NotApplicable,
             text: None,
+            presentation: None,
         }
     }
 
@@ -597,6 +730,34 @@ impl TypeSource for World {
 
     fn byte_order(&self) -> ByteOrder {
         ByteOrder::Little
+    }
+
+    /// Types with identities are one type when their identities are, as
+    /// copies of one type in several units are.
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        if left == right {
+            return true;
+        }
+        let (Some(left), Some(right)) = (
+            self.info(left).identity.as_deref(),
+            self.info(right).identity.as_deref(),
+        ) else {
+            return false;
+        };
+        left.language == right.language
+            && left.path == right.path
+            && left.base == right.base
+            && left.arguments.len() == right.arguments.len()
+            && left
+                .arguments
+                .iter()
+                .zip(right.arguments.iter())
+                .all(|pair| match pair {
+                    (crate::TypeArgument::Type(left), crate::TypeArgument::Type(right)) => {
+                        self.same_type(*left, *right)
+                    }
+                    (left, right) => left == right,
+                })
     }
 }
 
@@ -746,6 +907,31 @@ impl Scope for World {
                 *element,
                 1,
             )),
+            (StepKind::Base(target), TypeKind::Record { .. }) => {
+                match self.base_offsets(from, target, 0).as_slice() {
+                    [offset] => Ok(planned(
+                        Step::Member {
+                            offset: *offset,
+                            ty: target,
+                        },
+                        target,
+                        0,
+                    )),
+                    [] => Err(type_error(format!(
+                        "`{}` is not a base class of `{}`",
+                        self.info(target).name,
+                        info.name
+                    ))),
+                    _ => Err(Refusal::new(
+                        ErrorKind::AmbiguousName,
+                        format!(
+                            "`{}` has several `{}` base class subobjects",
+                            info.name,
+                            self.info(target).name
+                        ),
+                    )),
+                }
+            }
             (step, _) => Err(type_error(format!(
                 "`{}` does not take {step:?}",
                 info.name
@@ -769,6 +955,30 @@ impl Scope for World {
             width: 64,
         })
     }
+
+    fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
+        self.types
+            .iter()
+            .filter(|info| {
+                info.identity
+                    .as_deref()
+                    .is_some_and(|identity| identity.base.as_ref() == base)
+            })
+            .map(|info| info.reference)
+            .collect()
+    }
+
+    fn global_step(&self, name: &str) -> Result<Option<(Step, TypeReference)>, Refusal> {
+        let mut objects = (0..self.objects.len()).filter(|&index| self.objects[index].name == name);
+        match (objects.next(), objects.next()) {
+            (Some(index), None) => Ok(Some((Step::Global(index), self.objects[index].ty))),
+            (None, _) => Ok(None),
+            (Some(_), Some(_)) => Err(Refusal::new(
+                ErrorKind::AmbiguousName,
+                format!("several variables are named `{name}`"),
+            )),
+        }
+    }
 }
 
 impl Machine for World {
@@ -776,10 +986,16 @@ impl Machine for World {
     type Step = Step;
     type Place = Place;
 
+    /// Runs out of work as an inspection's budget does.
     fn charge(&mut self) -> Result<(), Stop> {
         match &mut self.work {
             Some(0) => Err(Stop::missing(VariableState::Unavailable(
-                VariableUnavailableReason::EvaluationLimit,
+                VariableUnavailableReason::InspectionLimit(crate::InspectionExhaustion {
+                    resource: crate::InspectionLimit::ExpressionWork,
+                    limit: 0,
+                    used: 0,
+                    requested: 1,
+                }),
             ))),
             Some(work) => {
                 *work -= 1;
@@ -836,6 +1052,7 @@ impl Machine for World {
             },
         };
         match step {
+            Step::Global(object) => self.locate(object),
             Step::Deref(target) => {
                 let bytes = self.bytes(from)?;
                 let address = match self.decode(from.ty(), &bytes) {
@@ -1001,6 +1218,7 @@ impl Machine for World {
                 dereference: DereferenceState::NotApplicable,
                 children: ValueChildren::NotApplicable,
                 text: None,
+                presentation: None,
             },
         ))
     }
@@ -1059,9 +1277,9 @@ pub fn scalars() -> World {
     world
 }
 
-/// Records, pointers, arrays, a slice, text, enumerations, a typedef, a
-/// constant, a reference, values in a register or optimized out, and names
-/// that need qualifying.
+/// Records, one of them zero-sized, pointers, arrays, a slice, text,
+/// enumerations, a typedef, a constant, a reference, values in a register or
+/// optimized out, and names that need qualifying.
 pub fn memory() -> World {
     use BaseTypeEncoding as E;
     let mut world = World::new();
@@ -1082,6 +1300,8 @@ pub fn memory() -> World {
     world.enumeration("Small", uchar, &[("ONE", 1), ("TWO", 2), ("HIGH", 0x80)]);
     let void_pointer = world.pointer(None);
     let slice = world.slice(int);
+    let empty = world.record("Empty", 0, &[]);
+    let empty_pointer = world.pointer(Some(empty));
 
     let mut s = 5_i32.to_le_bytes().to_vec();
     s.extend_from_slice(&[0; 4]);
@@ -1103,6 +1323,7 @@ pub fn memory() -> World {
     world.variable("color", color, &2_u32.to_le_bytes());
     world.variable("sign", sign, &(-1_i32).to_le_bytes());
     world.variable("vp", void_pointer, &s_address.to_le_bytes());
+    world.variable("ep", empty_pointer, &s_address.to_le_bytes());
     let items: Vec<u8> = [10_i32, 20, 30]
         .iter()
         .flat_map(|value| value.to_le_bytes())
@@ -1131,5 +1352,21 @@ pub fn memory() -> World {
     world.variable("twice", int, &2_i32.to_le_bytes());
     let light = world.enumeration("Light", uint, &[("RED", 10), ("AMBER", 11)]);
     world.variable("light", light, &11_u32.to_le_bytes());
+    // C++ classes: a Tile is a Named and a Shape, and a Twice holds two
+    // Shapes, its own and its Tile's.
+    let shape = world.record("Shape", 4, &[("id", int, 0)]);
+    let named = world.record("Named", 8, &[("tag", long, 0)]);
+    let tile = world.record("Tile", 16, &[("row", int, 12)]);
+    world.set_bases(tile, &[(named, 0), (shape, 8)]);
+    let twice = world.record("Twice", 24, &[]);
+    world.set_bases(twice, &[(shape, 0), (tile, 8)]);
+    let mut bytes = 2_i64.to_le_bytes().to_vec();
+    bytes.extend(7_i32.to_le_bytes());
+    bytes.extend(9_i32.to_le_bytes());
+    world.variable("tile", tile, &bytes);
+    let mut twice_bytes = 1_i32.to_le_bytes().to_vec();
+    twice_bytes.resize(8, 0);
+    twice_bytes.extend(bytes);
+    world.variable("twice_shaped", twice, &twice_bytes);
     world
 }

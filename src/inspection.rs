@@ -79,6 +79,34 @@ impl InspectionBudget {
             .saturating_sub(self.usage.memory_bytes)
     }
 
+    /// A budget of a quarter of what remains, for work such as a view's
+    /// summary, whose exhaustion must not end the operation: the operation
+    /// then [`absorb`](Self::absorb)s what it used.
+    pub fn share(&self) -> Self {
+        let remaining = self.limits.remaining_after(self.usage);
+        let quarter = |value: u64| value / 4;
+        Self::new(InspectionLimits {
+            variables: quarter(remaining.variables),
+            value_nodes: quarter(remaining.value_nodes),
+            aggregate_depth: remaining.aggregate_depth,
+            memory_reads: quarter(remaining.memory_reads),
+            memory_bytes: quarter(remaining.memory_bytes),
+            expression_work: quarter(remaining.expression_work),
+        })
+    }
+
+    /// Charges what a [`share`](Self::share)d budget used, which never
+    /// exceeds what remained.
+    pub fn absorb(&mut self, used: InspectionUsage) {
+        let usage = &mut self.usage;
+        usage.variables = usage.variables.saturating_add(used.variables);
+        usage.value_nodes = usage.value_nodes.saturating_add(used.value_nodes);
+        usage.aggregate_depth = usage.aggregate_depth.max(used.aggregate_depth);
+        usage.memory_reads = usage.memory_reads.saturating_add(used.memory_reads);
+        usage.memory_bytes = usage.memory_bytes.saturating_add(used.memory_bytes);
+        usage.expression_work = usage.expression_work.saturating_add(used.expression_work);
+    }
+
     pub fn consume_variable_value(&mut self) -> Result<(), InspectionExhaustion> {
         self.reserve(&[
             (InspectionLimit::Variables, 1),
@@ -96,6 +124,46 @@ impl InspectionBudget {
             (InspectionLimit::MemoryReads, 1),
             (InspectionLimit::MemoryBytes, bytes),
         ])
+    }
+
+    /// The exhaustion one read of `bytes` would cause, if any, without
+    /// recording it.
+    pub fn memory_shortfall(&self, bytes: u64) -> Option<InspectionExhaustion> {
+        if let Some(exhaustion) = self.exhaustion {
+            return Some(exhaustion);
+        }
+        [
+            (InspectionLimit::MemoryReads, 1),
+            (InspectionLimit::MemoryBytes, bytes),
+        ]
+        .into_iter()
+        .find_map(|(resource, requested)| {
+            let (limit, used) = self.resource(resource);
+            used.checked_add(requested)
+                .is_none_or(|next| next > limit)
+                .then_some(InspectionExhaustion {
+                    resource,
+                    limit,
+                    used,
+                    requested,
+                })
+        })
+    }
+
+    /// Reserves one read of at most `bytes`, or of as many as remain. A read
+    /// the budget cannot afford is described without exhausting the budget,
+    /// so a caller can cut its own work short without failing the rest of
+    /// the inspection.
+    pub fn consume_memory_up_to(&mut self, bytes: usize) -> Result<usize, InspectionExhaustion> {
+        let wanted = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let granted = self.remaining_memory_bytes().min(wanted);
+        if let Some(exhaustion) = self.memory_shortfall(if granted == 0 { wanted } else { granted })
+        {
+            return Err(exhaustion);
+        }
+        self.usage.memory_reads += 1;
+        self.usage.memory_bytes += granted;
+        Ok(usize::try_from(granted).expect("granted bytes never exceed the request"))
     }
 
     pub fn consume_expression_work(&mut self, amount: u64) -> Result<(), InspectionExhaustion> {

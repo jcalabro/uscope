@@ -105,8 +105,29 @@ impl Printer<'_> {
                 form: CastForm::Prefix,
                 ..
             }
-            | NodeKind::SizeOf(_) => PREFIX,
+            | NodeKind::SizeOf(_)
+            | NodeKind::OffsetOf { .. } => PREFIX,
             _ => POSTFIX,
+        }
+    }
+
+    /// A member's or global's name, quoted in backticks unless it is a
+    /// plain word.
+    fn word(&mut self, name: &str) {
+        if super::parser::is_name_word(name)
+            && name
+                .bytes()
+                .next()
+                .is_some_and(|byte| !byte.is_ascii_digit())
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            self.out.push_str(name);
+        } else {
+            self.out.push('`');
+            self.out.push_str(name);
+            self.out.push('`');
         }
     }
 
@@ -131,6 +152,7 @@ impl Printer<'_> {
         printer.out
     }
 
+    #[expect(clippy::too_many_lines, reason = "one arm per kind of node")]
     fn node(&mut self, id: NodeId) {
         match self.tree.kind(id) {
             NodeKind::Unary { op, operand } => self.unary(*op, *operand),
@@ -198,8 +220,39 @@ impl Printer<'_> {
                 self.child(*operand, ASSIGN);
                 self.out.push(')');
             }
+            NodeKind::OffsetOf { ty, member } => {
+                self.out.push_str("offsetof(");
+                self.out.push_str(&type_text(ty));
+                self.out.push_str(", ");
+                self.word(member);
+                self.out.push(')');
+            }
+            NodeKind::ContainerOf {
+                pointer,
+                ty,
+                member,
+            } => {
+                self.out.push_str("container_of(");
+                self.child(*pointer, ASSIGN);
+                self.out.push_str(", ");
+                self.out.push_str(&type_text(ty));
+                self.out.push_str(", ");
+                self.word(member);
+                self.out.push(')');
+            }
+            NodeKind::Global(name) => {
+                self.out.push_str("global(");
+                self.word(name);
+                self.out.push(')');
+            }
             NodeKind::Len(operand) => {
                 self.out.push_str("len(");
+                self.child(*operand, ASSIGN);
+                self.out.push(')');
+            }
+            NodeKind::Call { function, operand } => {
+                self.out.push_str(function.name());
+                self.out.push('(');
                 self.child(*operand, ASSIGN);
                 self.out.push(')');
             }

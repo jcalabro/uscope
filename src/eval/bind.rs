@@ -9,13 +9,15 @@ use super::number::{
     BitOperator, Bits, Exact, Float, FloatFormat, FloatOperator, IntType, Integer,
 };
 use super::syntax::ast::{
-    BinaryOp, Field, NodeId, NodeKind, Path, Separator, SizeOf, Suffix, Tree, TypeBase, TypeName,
-    UnaryOp,
+    BinaryOp, Builtin, Field, NodeId, NodeKind, Path, Separator, SizeOf, Suffix, Tree, TypeBase,
+    TypeName, UnaryOp,
 };
 use super::syntax::{Expression, Span};
 use super::target::{Lookup, Refusal, Scope, StepKind, TypeLookup, TypeQuery};
-use super::types::{Category, Ty, builtin, c_type_key, category, is_character, size_of, type_name};
-use crate::TypeReference;
+use super::types::{
+    Category, Ty, builtin, c_type_key, category, is_character, representation, size_of, type_name,
+};
+use crate::{RecordMemberLayout, TypeKind, TypeReference};
 
 /// Whether an expression may assign.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +31,23 @@ pub enum Mode {
 /// The most nodes a bound program may hold.
 const MAX_BOUND_NODES: usize = 4096;
 
+/// The most wrappers `inner` steps through.
+const MAX_INNER_STEPS: usize = 64;
+
 type Bound<S> = Node<<S as Scope>::Object, <S as Scope>::Step>;
 type BindResult<S> = Result<Bound<S>, ExpressionError>;
+
+/// What a bound program's root is made into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Finish {
+    /// The value or place as written.
+    AsWritten,
+    /// Its truth.
+    Truth,
+    /// Its value: a place of a scalar type is read, and any other place
+    /// stays one.
+    Value,
+}
 
 /// Binds `expression` in `scope`, choosing for each ambiguity the reading
 /// its name has there.
@@ -39,7 +56,7 @@ pub fn bind<S: Scope>(
     scope: &S,
     mode: Mode,
 ) -> Result<Program<S::Object, S::Step>, ExpressionError> {
-    bind_as(expression, scope, mode, false)
+    bind_as(expression, scope, mode, Finish::AsWritten)
 }
 
 /// Binds a breakpoint's condition, whose value is its truth.
@@ -47,14 +64,24 @@ pub fn bind_condition<S: Scope>(
     expression: &Expression,
     scope: &S,
 ) -> Result<Program<S::Object, S::Step>, ExpressionError> {
-    bind_as(expression, scope, Mode::Read, true)
+    bind_as(expression, scope, Mode::Read, Finish::Truth)
+}
+
+/// Binds an expression whose value a scope computes once and keeps, as a
+/// view's `let` does: a place of a scalar type is read, and any other
+/// place stays one.
+pub fn bind_value<S: Scope>(
+    expression: &Expression,
+    scope: &S,
+) -> Result<Program<S::Object, S::Step>, ExpressionError> {
+    bind_as(expression, scope, Mode::Read, Finish::Value)
 }
 
 fn bind_as<S: Scope>(
     expression: &Expression,
     scope: &S,
     mode: Mode,
-    truth: bool,
+    finish: Finish,
 ) -> Result<Program<S::Object, S::Step>, ExpressionError> {
     let mut casts = 0;
     for (index, ambiguity) in expression.ambiguities().iter().enumerate() {
@@ -93,7 +120,11 @@ fn bind_as<S: Scope>(
     } else {
         binder.settle(root)?
     };
-    let root = if truth { binder.truth(root)? } else { root };
+    let root = match finish {
+        Finish::AsWritten => root,
+        Finish::Truth => binder.truth(root)?,
+        Finish::Value => binder.value(root)?,
+    };
     if matches!(root.ty, Ty::Text) {
         return Err(ExpressionError::new(
             ErrorKind::Type,
@@ -289,11 +320,103 @@ impl<'a, S: Scope> Binder<'a, S> {
                 let operand = self.settle(operand)?;
                 self.size_constant(&operand.ty, span)
             }
+            NodeKind::OffsetOf { ty, member } => {
+                let ty = self.resolve_type(&ty)?;
+                self.offset_constant(&ty, &member, span)
+            }
+            NodeKind::ContainerOf {
+                pointer,
+                ty,
+                member,
+            } => {
+                let pointer = self.bind(pointer)?;
+                let target = self.resolve_type(&ty)?;
+                self.container_of(pointer, target, &member, span)
+            }
+            NodeKind::Global(name) => match self.scope.global(&name) {
+                Ok(Lookup::Object { object, ty: Ok(ty) }) => {
+                    self.node(Op::Object(object), Ty::Program(ty), span)
+                }
+                Ok(Lookup::Object {
+                    ty: Err(reason), ..
+                }) => Err(Self::error(
+                    span,
+                    ErrorKind::Unsupported,
+                    format!("`{name}` has a malformed type: {reason}"),
+                )),
+                Ok(Lookup::Ambiguous(candidates)) => Err(Self::error(
+                    span,
+                    ErrorKind::AmbiguousName,
+                    format!(
+                        "`{name}` is ambiguous; select one of {}",
+                        candidates
+                            .iter()
+                            .map(|candidate| format!("`{candidate}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )),
+                Ok(_) => Err(Self::error(
+                    span,
+                    ErrorKind::UnknownName,
+                    format!("the module defines no global `{name}`"),
+                )),
+                Err(refusal) => Err(Self::refused(span, refusal)),
+            },
             NodeKind::Len(operand) => {
                 let operand = self.bind(operand)?;
                 self.length(operand, span)
             }
+            NodeKind::Call {
+                function: Builtin::Inner,
+                operand,
+            } => {
+                let operand = self.bind(operand)?;
+                self.inner(operand, span)
+            }
         }
+    }
+
+    /// `inner(x)`: while `x` is a record with exactly one member of
+    /// non-zero size, and no base, that member. Zero-sized markers, such as
+    /// Rust's `PhantomData`, are not counted.
+    fn inner(&mut self, mut node: Bound<S>, span: Span) -> BindResult<S> {
+        for _ in 0..MAX_INNER_STEPS {
+            node = self.settle(node)?;
+            let Ty::Program(reference) = node.ty else {
+                return Ok(node);
+            };
+            if !node.is_place() {
+                return Ok(node);
+            }
+            let Ok((_, info)) = representation(self.scope, reference) else {
+                return Ok(node);
+            };
+            let TypeKind::Record { members, bases, .. } = &info.kind else {
+                return Ok(node);
+            };
+            let sized = members
+                .iter()
+                .filter(|member| {
+                    representation(self.scope, member.type_ref)
+                        .ok()
+                        .and_then(|(_, info)| info.byte_size)
+                        != Some(0)
+                })
+                .collect::<Vec<_>>();
+            let ([member], true) = (sized.as_slice(), bases.is_empty()) else {
+                return Ok(node);
+            };
+            let Some(name) = member.name.as_deref() else {
+                return Ok(node);
+            };
+            node = self.member(node, &Field::Named(name.to_owned()), span, false, span)?;
+        }
+        Err(Self::error(
+            span,
+            ErrorKind::Limit,
+            format!("`inner` stepped through {MAX_INNER_STEPS} wrappers"),
+        ))
     }
 
     // ---- Names ----
@@ -395,6 +518,21 @@ impl<'a, S: Scope> Binder<'a, S> {
                     }
                     return self.enumerator(value, ty, span);
                 }
+                Lookup::Constant(value) => {
+                    if count < path.segments.len() {
+                        return Err(Self::error(
+                            span,
+                            ErrorKind::Type,
+                            format!("the constant `{name}` has no members"),
+                        ));
+                    }
+                    return self.node(
+                        Op::Constant(Constant::Integer(Integer::Exact(value))),
+                        Ty::Exact,
+                        span,
+                    );
+                }
+                Lookup::Bound { object, ty } => self.node(Op::Bound(object), ty, name_span)?,
                 Lookup::Object { object, ty } => {
                     let ty = match ty {
                         Ok(ty) => ty,
@@ -558,6 +696,118 @@ impl<'a, S: Scope> Binder<'a, S> {
             Ty::Exact,
             span,
         )
+    }
+
+    /// `offsetof(TYPE, member)`: the byte offset of one of a record's own
+    /// members, as its debug information places it.
+    fn offset_constant(&mut self, ty: &Ty, member: &str, span: Span) -> BindResult<S> {
+        let name = type_name(self.scope, ty);
+        let Ty::Program(reference) = ty else {
+            return Err(Self::error(
+                span,
+                ErrorKind::Type,
+                format!("`{name}` has no members"),
+            ));
+        };
+        let info = representation(self.scope, *reference)
+            .map_err(|reason| Self::error(span, ErrorKind::Type, reason.to_string()))?
+            .1;
+        let TypeKind::Record { members, .. } = &info.kind else {
+            return Err(Self::error(
+                span,
+                ErrorKind::Type,
+                format!("`{name}` has no members"),
+            ));
+        };
+        let found = members
+            .iter()
+            .find(|candidate| candidate.name.as_deref() == Some(member))
+            .ok_or_else(|| {
+                Self::error(
+                    span,
+                    ErrorKind::Type,
+                    format!("`{name}` has no member `{member}` of its own"),
+                )
+            })?;
+        let RecordMemberLayout::ByteOffset(offset) = found.layout else {
+            return Err(Self::error(
+                span,
+                ErrorKind::Type,
+                format!("`{member}` of `{name}` is not at a whole byte"),
+            ));
+        };
+        self.node(
+            Op::Constant(Constant::Integer(Integer::Exact(Exact::from(u128::from(
+                offset,
+            ))))),
+            Ty::Exact,
+            span,
+        )
+    }
+
+    /// `container_of(PTR, TYPE, member)`: the address of the `TYPE` whose
+    /// `member` is at `PTR`, the member's offset before it.
+    fn container_of(
+        &mut self,
+        pointer: Bound<S>,
+        target: Ty,
+        member: &str,
+        span: Span,
+    ) -> BindResult<S> {
+        let pointer = self.value(pointer)?;
+        let category = self.category(&pointer.ty);
+        let Category::Pointer(target_of) = &category else {
+            return Err(self.type_error(&pointer, &category, "is not a pointer"));
+        };
+        // The pointer points to the member's type, or to nothing in
+        // particular, so a mistyped view cannot locate the wrong object.
+        let offset = self.offset_constant(&target, member, span)?;
+        let member_type = match &target {
+            Ty::Program(reference) => {
+                representation(self.scope, *reference)
+                    .ok()
+                    .and_then(|(_, info)| match info.kind {
+                        TypeKind::Record { members, .. } => members
+                            .iter()
+                            .find(|candidate| candidate.name.as_deref() == Some(member))
+                            .map(|candidate| candidate.type_ref),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        };
+        let canonical = |ty: TypeReference| representation(self.scope, ty).ok().map(|(ty, _)| ty);
+        let points_to_member = match (target_of, member_type) {
+            (None | Some(Ty::Void), _) => true,
+            (Some(Ty::Program(points_to)), Some(member_type)) => canonical(*points_to)
+                .zip(canonical(member_type))
+                .is_some_and(|(left, right)| self.scope.same_type(left, right)),
+            _ => false,
+        };
+        if !points_to_member {
+            return Err(Self::error(
+                pointer.span,
+                ErrorKind::Type,
+                format!(
+                    "points to `{}`, not to the type of `{member}`",
+                    target_of
+                        .as_ref()
+                        .map_or_else(|| "void".to_owned(), |ty| type_name(self.scope, ty))
+                ),
+            ));
+        }
+        let ty = pointer.ty.clone();
+        let moved = self.node(
+            Op::Offset {
+                pointer: Box::new(pointer),
+                count: Box::new(offset),
+                scale: 1,
+                backward: true,
+            },
+            ty,
+            span,
+        )?;
+        self.convert(moved, Ty::Pointer(Arc::new(target)), span)
     }
 
     // ---- Places and values ----
@@ -1064,6 +1314,13 @@ impl<'a, S: Scope> Binder<'a, S> {
                         "the pointers point at types of different sizes",
                     ));
                 }
+                if scale == 0 {
+                    return Err(Self::error(
+                        span,
+                        ErrorKind::Type,
+                        "the pointers point at a zero-sized type, whose elements share one address",
+                    ));
+                }
                 self.node(
                     Op::Difference {
                         left: Box::new(left),
@@ -1119,7 +1376,8 @@ impl<'a, S: Scope> Binder<'a, S> {
         }
     }
 
-    /// The size of the elements a pointer steps over.
+    /// The size of the elements a pointer steps over, zero for a zero-sized
+    /// type, whose elements share one address.
     fn element_size(
         &self,
         pointer: &Bound<S>,
@@ -1136,18 +1394,16 @@ impl<'a, S: Scope> Binder<'a, S> {
             )
             .with_hint("cast it to `u8*` to count bytes"));
         };
-        size_of(self.scope, target)
-            .filter(|&size| size > 0)
-            .ok_or_else(|| {
-                Self::error(
-                    pointer.span,
-                    ErrorKind::Type,
-                    format!(
-                        "`{}` points at a type without a size",
-                        self.quote(pointer.span)
-                    ),
-                )
-            })
+        size_of(self.scope, target).ok_or_else(|| {
+            Self::error(
+                pointer.span,
+                ErrorKind::Type,
+                format!(
+                    "`{}` points at a type without a size",
+                    self.quote(pointer.span)
+                ),
+            )
+        })
     }
 
     fn float_operand(&mut self, node: Bound<S>, format: FloatFormat) -> BindResult<S> {
@@ -1429,6 +1685,58 @@ impl<'a, S: Scope> Binder<'a, S> {
 
     // ---- Conversions ----
 
+    /// A record in memory cast to one of its base classes: that base's part
+    /// of it, as C++'s `static_cast` selects it. `None` when the target is
+    /// not one of its bases.
+    fn upcast(
+        &mut self,
+        operand: &Bound<S>,
+        target: &Ty,
+        target_category: &Category,
+        span: Span,
+    ) -> Result<Option<Bound<S>>, ExpressionError> {
+        let (Ty::Program(from), Ty::Program(base), Category::Record) =
+            (&operand.ty, target, target_category)
+        else {
+            return Ok(None);
+        };
+        if !operand.is_place() || !matches!(self.category(&operand.ty), Category::Record) {
+            return Ok(None);
+        }
+        match self.scope.plan(*from, StepKind::Base(*base)) {
+            Ok(planned) => {
+                let ty = planned.result.map_or_else(
+                    || {
+                        Err(Self::error(
+                            span,
+                            ErrorKind::Unsupported,
+                            format!(
+                                "`{}` has a type the debugger cannot compute with",
+                                self.quote(span)
+                            ),
+                        ))
+                    },
+                    |ty| Ok(Ty::Program(ty)),
+                )?;
+                self.node(
+                    Op::Step {
+                        base: Box::new(operand.clone()),
+                        step: planned.step,
+                        indices: Vec::new(),
+                        follows: false,
+                    },
+                    ty,
+                    span,
+                )
+                .map(Some)
+            }
+            Err(refusal) if refusal.kind == ErrorKind::AmbiguousName => {
+                Err(Self::refused(span, refusal))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
     fn convert(&mut self, operand: Bound<S>, target: Ty, span: Span) -> BindResult<S> {
         let operand = self.settle(operand)?;
         if operand.ty == target {
@@ -1437,6 +1745,9 @@ impl<'a, S: Scope> Binder<'a, S> {
             return Ok(operand);
         }
         let target_category = self.category(&target);
+        if let Some(base) = self.upcast(&operand, &target, &target_category, span)? {
+            return Ok(base);
+        }
         let operand = match target_category {
             Category::Pointer(_) | Category::Integer { .. } | Category::Bool => {
                 self.operand(operand)?
@@ -1521,6 +1832,37 @@ impl<'a, S: Scope> Binder<'a, S> {
 
     // ---- Members, indices, lengths ----
 
+    /// Whether a pointer is only how its language represents a value of
+    /// its own kind, as Go represents a channel or a map, which nothing
+    /// indexes as a pointer.
+    fn represents(&self, ty: &Ty) -> bool {
+        let &Ty::Program(mut reference) = ty else {
+            return false;
+        };
+        for _ in 0..MAX_INNER_STEPS {
+            let Some(info) = self.scope.type_info(reference) else {
+                return false;
+            };
+            if info
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.go)
+                .is_some_and(|go| matches!(go.kind, crate::GoKind::Chan | crate::GoKind::Map))
+            {
+                return true;
+            }
+            match info.kind {
+                TypeKind::Named {
+                    target: Some(target),
+                    ..
+                }
+                | TypeKind::Modified { target, .. } => reference = target,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     fn member(
         &mut self,
         base: Bound<S>,
@@ -1551,6 +1893,16 @@ impl<'a, S: Scope> Binder<'a, S> {
         let Ty::Program(from) = base.ty else {
             unreachable!("records are program types")
         };
+        if !base.is_place() {
+            return Err(Self::error(
+                base.span,
+                ErrorKind::Type,
+                format!(
+                    "`{}` is a computed value, whose members cannot be selected",
+                    self.quote(base.span)
+                ),
+            ));
+        }
         let names = match field {
             Field::Named(name) => vec![name.clone()],
             Field::Index(index) => vec![format!("__{index}"), index.to_string()],
@@ -1589,7 +1941,11 @@ impl<'a, S: Scope> Binder<'a, S> {
     }
 
     /// `a[i][j]...`: an array takes as many consecutive indices as it has
-    /// dimensions.
+    /// dimensions, and a record any its view gives it.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "arrays, slices, pointers, and records each index differently"
+    )]
     fn index(&mut self, id: NodeId) -> BindResult<S> {
         let mut chain = Vec::new();
         let mut current = id;
@@ -1647,7 +2003,7 @@ impl<'a, S: Scope> Binder<'a, S> {
                     )?;
                     pending = rest;
                 }
-                Category::Pointer(target) => {
+                Category::Pointer(target) if !self.represents(&node.ty) => {
                     let pointer = self.value(node)?;
                     let scale = self.element_size(&pointer, target.as_ref())?;
                     let index = self.bind(*first)?;
@@ -1665,6 +2021,46 @@ impl<'a, S: Scope> Binder<'a, S> {
                     )?;
                     let target = target.expect("a sized pointee");
                     node = self.deref_value(moved, &target, *span)?;
+                    pending = &pending[1..];
+                }
+                ref category @ (Category::Record | Category::Pointer(_)) if node.is_place() => {
+                    // A record has no indexing of its own, nor has a value
+                    // its language represents as a pointer; a view that
+                    // presents it as a sequence may give it some.
+                    let Ty::Program(from) = node.ty else {
+                        unreachable!("records and pointers are program types")
+                    };
+                    let planned = self
+                        .scope
+                        .plan(
+                            from,
+                            StepKind::Index {
+                                available: pending.len(),
+                            },
+                        )
+                        .map_err(|_| self.type_error(&node, category, "cannot be indexed"))?;
+                    let index = self.bind(*first)?;
+                    let index = self.integer_value(index)?;
+                    let ty = planned.result.map_or_else(
+                        || {
+                            Err(Self::error(
+                                *span,
+                                ErrorKind::Unsupported,
+                                "the element has a type the debugger cannot compute with",
+                            ))
+                        },
+                        |ty| Ok(Ty::Program(ty)),
+                    )?;
+                    node = self.node(
+                        Op::Step {
+                            base: Box::new(node),
+                            step: planned.step,
+                            indices: vec![index],
+                            follows: true,
+                        },
+                        ty,
+                        *span,
+                    )?;
                     pending = &pending[1..];
                 }
                 category => return Err(self.type_error(&node, &category, "cannot be indexed")),
@@ -1693,6 +2089,21 @@ impl<'a, S: Scope> Binder<'a, S> {
             ),
             Category::Pointer(Some(ref pointee))
                 if operand.is_place() && is_character(self.scope, pointee) =>
+            {
+                self.node(
+                    Op::Length {
+                        operand: Box::new(operand),
+                        how: Length::Text,
+                    },
+                    Ty::Exact,
+                    span,
+                )
+            }
+            // A pointer a view presents, such as a Go map, has the view's
+            // length.
+            Category::Pointer(_)
+                if operand.is_place()
+                    && matches!(operand.ty, Ty::Program(ty) if self.scope.has_view(ty)) =>
             {
                 self.node(
                     Op::Length {

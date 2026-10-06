@@ -554,6 +554,9 @@ pub enum TypeKind {
         element: TypeReference,
         /// Whether the descriptor includes a capacity field.
         has_capacity: bool,
+        /// Whether the elements are the language's text, as in Rust's `str`
+        /// and Zig's `[]const u8`.
+        text: bool,
     },
     /// A structure or class with ordered instance members and base subobjects.
     Record {
@@ -631,6 +634,167 @@ pub struct TypeInfo {
     pub byte_size: Option<u64>,
     /// The node's normalized shape.
     pub kind: TypeKind,
+    /// What the type is, independent of how a producer spells its name:
+    /// present for every type the producer names.
+    pub identity: Option<Arc<TypeIdentity>>,
+}
+
+/// The source language of the unit that defines a type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum SourceLanguage {
+    /// Any version of C.
+    C,
+    /// Any version of C++.
+    Cpp,
+    /// Rust.
+    Rust,
+    /// Go.
+    Go,
+    /// Zig, whichever backend produced it.
+    Zig,
+    /// Another language, by its DWARF language code.
+    Other(u16),
+    /// The unit does not say.
+    Unknown,
+}
+
+/// What a named type is: its language, where it is declared, its base name,
+/// and its arguments.
+///
+/// Two instances of one template have the same path and base and differ in
+/// their arguments. Identities never depend on how a producer spells a name:
+/// inline namespaces are removed from paths, and arguments refer to types
+/// rather than to their spellings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeIdentity {
+    /// The language of the unit that defines the type.
+    pub language: SourceLanguage,
+    /// The enclosing namespaces, modules, packages, types, and functions,
+    /// outermost first, with inline namespaces removed.
+    pub path: Arc<[Arc<str>]>,
+    /// The inline namespaces among the enclosing scopes, such as libc++'s
+    /// `__1`, which a name may spell or omit.
+    pub inline_namespaces: Arc<[Arc<str>]>,
+    /// The name without its path or arguments: `vector`, `Vec`, `Aligned`.
+    pub base: Arc<str>,
+    /// Template or generic arguments by position, with packs flattened.
+    pub arguments: Arc<[TypeArgument]>,
+    /// Where a C++ template parameter pack's arguments begin among
+    /// `arguments`, when the type has a pack, even an empty one.
+    pub pack: Option<usize>,
+    /// Where the arguments came from.
+    pub origin: ArgumentOrigin,
+    /// What Go's runtime records about the type, for Go types.
+    pub go: Option<GoTypeAttributes>,
+}
+
+/// One template or generic argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TypeArgument {
+    /// A type.
+    Type(TypeReference),
+    /// An integral value, such as an array length.
+    Value(IntegerValue),
+    /// An argument the debugger cannot resolve, as the name spells it. It
+    /// matches only a wildcard.
+    Unknown(Arc<str>),
+}
+
+/// Where a type identity's arguments came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ArgumentOrigin {
+    /// Template parameter entries, or Go's key and element attributes.
+    /// Values the entries omit, such as Rust's const generic arguments,
+    /// come from the name.
+    Dwarf,
+    /// The producer described no parameters, so the name was parsed and its
+    /// arguments resolved through the image's types.
+    ParsedName,
+    /// The type has no arguments.
+    None,
+}
+
+/// What Go records about a type for its runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GoTypeAttributes {
+    /// The type's kind, which says what it is whatever it is named.
+    pub kind: GoKind,
+    /// The offset of the type's runtime descriptor from `runtime.types`.
+    pub runtime_type: Option<u64>,
+}
+
+/// A Go type's kind, as `internal/abi.Kind` numbers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum GoKind {
+    Bool,
+    Int,
+    Int8,
+    Int16,
+    Int32,
+    Int64,
+    Uint,
+    Uint8,
+    Uint16,
+    Uint32,
+    Uint64,
+    Uintptr,
+    Float32,
+    Float64,
+    Complex64,
+    Complex128,
+    Array,
+    Chan,
+    Func,
+    Interface,
+    Map,
+    Pointer,
+    Slice,
+    String,
+    Struct,
+    UnsafePointer,
+    /// A number this version does not know, or zero, which Go gives the
+    /// types it synthesizes for its own runtime.
+    Other(u8),
+}
+
+impl GoKind {
+    /// The kind `internal/abi.Kind` numbers `value`.
+    #[must_use]
+    pub const fn from_abi(value: u8) -> Self {
+        match value {
+            1 => Self::Bool,
+            2 => Self::Int,
+            3 => Self::Int8,
+            4 => Self::Int16,
+            5 => Self::Int32,
+            6 => Self::Int64,
+            7 => Self::Uint,
+            8 => Self::Uint8,
+            9 => Self::Uint16,
+            10 => Self::Uint32,
+            11 => Self::Uint64,
+            12 => Self::Uintptr,
+            13 => Self::Float32,
+            14 => Self::Float64,
+            15 => Self::Complex64,
+            16 => Self::Complex128,
+            17 => Self::Array,
+            18 => Self::Chan,
+            19 => Self::Func,
+            20 => Self::Interface,
+            21 => Self::Map,
+            22 => Self::Pointer,
+            23 => Self::Slice,
+            24 => Self::String,
+            25 => Self::Struct,
+            26 => Self::UnsafePointer,
+            other => Self::Other(other),
+        }
+    }
 }
 
 /// One finalized node in an image's immutable normalized type graph.
@@ -759,6 +923,35 @@ pub enum ValueChildRelationship {
     Member(RecordMember),
     /// One base-class subobject.
     Base(BaseClass),
+    /// One element of a value a view presents as a sequence.
+    Element {
+        /// The zero-based position in the sequence.
+        index: u64,
+    },
+    /// One entry of a value a view presents as a map. The child is the
+    /// entry's value.
+    Entry {
+        /// The zero-based position among the entries.
+        index: u64,
+        /// The entry's key.
+        key: Arc<MapKey>,
+    },
+    /// One named child a view computes, such as a vector's capacity.
+    Field {
+        /// The name the view gives it.
+        name: Arc<str>,
+    },
+    /// The value as it is stored, without its view.
+    Raw,
+}
+
+/// The key of one entry of a value a view presents as a map.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapKey {
+    /// Its source-facing normalized type.
+    pub type_info: TypeInfo,
+    /// Its current availability and decoded summary.
+    pub state: VariableState,
 }
 
 /// Which bounded resource prevented complete value materialization.
@@ -797,13 +990,15 @@ pub struct InspectionLimits {
 }
 
 impl Default for InspectionLimits {
+    /// Enough for a frame's values and the text they hold: text is charged
+    /// to the same budget, up to [`TextSummary::MAX_BYTES`] per value.
     fn default() -> Self {
         Self {
             variables: 256,
             value_nodes: 512,
             aggregate_depth: 64,
-            memory_reads: 64,
-            memory_bytes: 1_024,
+            memory_reads: 256,
+            memory_bytes: 64 * 1_024,
             expression_work: 5_120_000,
         }
     }
@@ -908,7 +1103,52 @@ pub struct ValueChildrenReference {
     pub(crate) storage: ValueStorage,
     pub(crate) total: u64,
     pub(crate) active_variant: Option<usize>,
+    /// The view whose children these are, rather than the stored value's.
+    pub(crate) view: Option<ViewChildren>,
 }
+
+/// The view a children capability presents through: its elements, then its
+/// fields, then a `[raw]` child.
+#[derive(Clone)]
+pub struct ViewChildren {
+    /// The bound view, which only the backend that bound it reads; `None`
+    /// for what the debugger presents without a view, such as a sum type's
+    /// active variant, which has no fields.
+    pub(crate) bound: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// How many elements precede the fields.
+    pub(crate) elements: u64,
+    /// How many fields precede the `[raw]` child.
+    pub(crate) fields: u64,
+    /// For a view presenting the value as another, that value's children,
+    /// which are the elements.
+    pub(crate) inner: Option<Arc<ValueChildrenReference>>,
+}
+
+impl fmt::Debug for ViewChildren {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ViewChildren")
+            .field("elements", &self.elements)
+            .field("fields", &self.fields)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ViewChildren {
+    fn eq(&self, other: &Self) -> bool {
+        let same_view = match (&self.bound, &other.bound) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        };
+        same_view
+            && self.elements == other.elements
+            && self.fields == other.fields
+            && self.inner == other.inner
+    }
+}
+
+impl Eq for ViewChildren {}
 
 impl ValueChildrenReference {
     /// Returns the stopped snapshot that owns this capability.
@@ -927,6 +1167,16 @@ impl ValueChildrenReference {
     #[must_use]
     pub const fn total(&self) -> u64 {
         self.total
+    }
+
+    /// For the children a view presents, how many of the first are its
+    /// elements; its named children, the fields and `[raw]`, follow them.
+    #[must_use]
+    pub const fn elements(&self) -> Option<u64> {
+        match &self.view {
+            Some(view) => Some(view.elements),
+            None => None,
+        }
     }
 }
 
@@ -1459,6 +1709,172 @@ pub enum TextCompletion {
     Truncated { length: Option<u64> },
     /// The text continues into memory that could not be read.
     Unreadable { address: VirtualAddress },
+    /// The inspection's budget could not afford reading more of the text:
+    /// `length` bytes in all, when the string records its length.
+    Limited {
+        length: Option<u64>,
+        exhaustion: InspectionExhaustion,
+    },
+}
+
+/// Which view presents a value: where it was written and what it matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewName {
+    /// The view file, or the built-in library it came from.
+    pub source: Arc<str>,
+    /// The line of its `view` keyword.
+    pub line: u32,
+    /// Its language and pattern, as written.
+    pub header: Arc<str>,
+    /// Whether it is an `extend`, which adds to a view.
+    pub extend: bool,
+}
+
+impl fmt::Display for ViewName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let keyword = if self.extend { "extend " } else { "" };
+        write!(
+            formatter,
+            "{}:{} `{keyword}{}`",
+            self.source, self.line, self.header
+        )
+    }
+}
+
+/// What a view presents a value as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PresentedShape {
+    /// Text, in the state's `text`.
+    Text,
+    /// Another value, standing for this one.
+    Value,
+    /// This value as the type it dynamically is, such as a C++ object of a
+    /// derived class, a Rust trait object, or a Go interface's value.
+    Dynamic,
+    /// Nothing, described by the summary, such as `None`.
+    Empty,
+    /// Elements, which are children.
+    Sequence,
+    /// Entries, each a key and a value, which are children.
+    Map,
+    /// Members a view names, which are children, as a C++ `std::tuple`'s
+    /// elements are.
+    Record,
+    /// The value as stored, written another way, such as in hexadecimal.
+    Formatted,
+    /// The view failed, for the reason in `problem`, so the value shows as
+    /// it is stored.
+    Raw,
+}
+
+/// How many elements or entries a presented sequence or map holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PresentedCount {
+    Exact(u64),
+    /// At least this many: the view leaves the count to its generators, and
+    /// the inspection's budget ended the count first.
+    AtLeast(u64),
+}
+
+impl PresentedCount {
+    /// How many elements are known to exist.
+    #[must_use]
+    pub const fn known(self) -> u64 {
+        match self {
+            Self::Exact(count) | Self::AtLeast(count) => count,
+        }
+    }
+}
+
+/// Why a view could not present a value, or presented only part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ViewProblem {
+    /// One of the view's invariants does not hold, so the value is not
+    /// what the view describes.
+    CheckFailed {
+        check: Arc<str>,
+        /// The values of the check's sides, when it compares.
+        detail: Option<Arc<str>>,
+    },
+    /// The program state could not provide a value the view needed.
+    Unavailable(VariableUnavailableReason),
+    /// The view asked for something the debugger refuses at this stop.
+    Refused(Arc<str>),
+    /// The view declares one count and generates another.
+    CountMismatch { declared: u64, generated: u64 },
+    /// A linked structure leads back to a node already visited, so the
+    /// element at this position would repeat an earlier one.
+    Cycle { at: u64 },
+    /// A tree is deeper than a view walks, so it is no tree a library
+    /// builds.
+    TooDeep { depth: u32 },
+    /// The generators passed the most elements a view generates without a
+    /// count.
+    TooMany { limit: u64 },
+    /// A kernel the view calls failed: it trapped, returned a failure, or
+    /// used the host wrongly.
+    Kernel { kernel: Arc<str>, reason: Arc<str> },
+    /// The debugger failed presenting the value; a defect in uscope.
+    Internal(Arc<str>),
+}
+
+impl fmt::Display for ViewProblem {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CheckFailed {
+                check,
+                detail: Some(detail),
+            } => write!(formatter, "check `{check}` failed: {detail}"),
+            Self::CheckFailed {
+                check,
+                detail: None,
+            } => write!(formatter, "check `{check}` failed"),
+            Self::Unavailable(reason) => reason.fmt(formatter),
+            Self::Refused(message) | Self::Internal(message) => formatter.write_str(message),
+            Self::CountMismatch {
+                declared,
+                generated,
+            } => write!(
+                formatter,
+                "the view declares {declared} elements and generates {generated}"
+            ),
+            Self::Cycle { at } => write!(
+                formatter,
+                "cycle at element {at}: it leads back to a node already visited"
+            ),
+            Self::TooDeep { depth } => {
+                write!(formatter, "the tree is deeper than {depth} levels")
+            }
+            Self::TooMany { limit } => write!(
+                formatter,
+                "the view generates more than {limit} elements without a count"
+            ),
+            Self::Kernel { kernel, reason } => {
+                write!(formatter, "kernel `{kernel}` failed: {reason}")
+            }
+        }
+    }
+}
+
+/// How a view presents a value as what it stands for (`docs/views.md`).
+/// The stored value beside it is untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Presentation {
+    pub view: Arc<ViewName>,
+    pub shape: PresentedShape,
+    /// The elements or entries a sequence or map holds; `None` for other
+    /// shapes.
+    pub count: Option<PresentedCount>,
+    /// A bounded one-line rendering, in one style for every language.
+    pub summary: Arc<str>,
+    /// The elements, the view's fields, and a `[raw]` child.
+    pub children: ValueChildren,
+    /// With [`PresentedShape::Raw`], why the view failed; otherwise why the
+    /// summary stopped short.
+    pub problem: Option<ViewProblem>,
 }
 
 /// The inspection state of one visible variable.
@@ -1480,6 +1896,8 @@ pub enum VariableState {
         /// The text the value holds, for values that are strings: a pointer
         /// to characters, a character array, or a language's string type.
         text: Option<Arc<TextSummary>>,
+        /// How a view presents the value, when one applies.
+        presentation: Option<Arc<Presentation>>,
     },
     /// Valid metadata does not provide a supported readable value here.
     Unavailable(VariableUnavailableReason),
@@ -2423,6 +2841,9 @@ pub struct ModuleMetadata {
     pub statements: Vec<StatementRow>,
     pub lines: Vec<LineEntry>,
     pub sections: Vec<SectionInfo>,
+    /// Rust trait objects' vtables, by address, with the concrete type each
+    /// is for.
+    pub vtables: Vec<(ImageAddress, TypeReference)>,
 }
 
 #[derive(Debug)]
@@ -2805,6 +3226,12 @@ pub struct ModuleImage {
     section_range_index: RangeIndex<SectionId>,
     /// Known instruction starts in address order, one per address.
     instruction_starts: Arc<[(ImageAddress, crate::BoundaryEvidence)]>,
+    type_index: crate::type_identity::TypeIndex,
+    /// Rust trait objects' vtables, with the concrete type each is for.
+    vtables: std::collections::BTreeMap<ImageAddress, TypeReference>,
+    /// The views the image carries for its own types, in its
+    /// `.debug_uscope_views` section.
+    views: Arc<crate::view::ViewSet>,
 }
 
 impl ModuleImage {
@@ -2862,6 +3289,19 @@ impl ModuleImage {
                 .map(|section| (section.range, section.id)),
         );
 
+        let type_index = crate::type_identity::TypeIndex::build(
+            metadata
+                .types
+                .first()
+                .map(TypeNode::reference)
+                .map(|reference| reference.image),
+            metadata.types.len(),
+            |index| match &metadata.types[index] {
+                TypeNode::Resolved(info) => Some(info),
+                TypeNode::Malformed { .. } => None,
+            },
+        );
+
         Self {
             id: ModuleImageId::new(0),
             path: Arc::new(path),
@@ -2892,6 +3332,9 @@ impl ModuleImage {
             unsized_data_index,
             section_range_index,
             instruction_starts,
+            type_index,
+            vtables: metadata.vtables.iter().copied().collect(),
+            views: crate::view::ViewSet::empty(),
         }
     }
 
@@ -2902,6 +3345,31 @@ impl ModuleImage {
         );
         self.id = id;
         self
+    }
+
+    /// Gives the image the views it carries for its own types.
+    pub(crate) fn with_views(mut self, views: Arc<crate::view::ViewSet>) -> Self {
+        self.views = views;
+        self
+    }
+
+    /// The views the image carries for its own types.
+    #[must_use]
+    pub(crate) const fn views(&self) -> &Arc<crate::view::ViewSet> {
+        &self.views
+    }
+
+    /// A type's identity as one string, which every type the same as it
+    /// shares.
+    #[must_use]
+    pub(crate) fn type_key(&self, reference: TypeReference) -> Option<&Arc<str>> {
+        self.type_index.key(reference)
+    }
+
+    /// What kept parts of the views the image carries out.
+    #[must_use]
+    pub fn view_errors(&self) -> &[crate::ViewFileError] {
+        self.views.errors()
     }
 
     /// Returns this image's session-scoped identifier.
@@ -3145,6 +3613,81 @@ impl ModuleImage {
             TypeNode::Resolved(info) => Some(info),
             TypeNode::Malformed { .. } => None,
         }
+    }
+
+    /// The types with exactly this language, path, and base, whatever their
+    /// arguments, in identifier order: every instance of a template.
+    #[must_use]
+    pub fn type_instances(
+        &self,
+        language: SourceLanguage,
+        path: &[&str],
+        base: &str,
+    ) -> Vec<TypeReference> {
+        self.type_index
+            .instances(language, path, base, &self.types.as_ref())
+    }
+
+    /// The concrete type a Rust trait object's vtable at `address` is for.
+    #[must_use]
+    pub fn trait_object_type(&self, address: ImageAddress) -> Option<TypeReference> {
+        self.vtables.get(&address).copied()
+    }
+
+    /// The C++ class whose vtable group, `vtable for X`, holds `address`:
+    /// the class's name, and where the group begins.
+    #[must_use]
+    pub fn vtable_class(&self, address: ImageAddress) -> Option<(String, ImageAddress)> {
+        let location = self.symbolize_data(address)?;
+        let symbol = self.symbol(location.symbol)?;
+        let name = crate::demangle::demangle(&symbol.name)?;
+        let class = name
+            .strip_prefix("vtable for ")
+            .or_else(|| name.strip_prefix("{vtable(")?.strip_suffix(")}"))?;
+        Some((class.to_owned(), symbol.address))
+    }
+
+    /// The type Go's runtime describes at `offset` from `runtime.types`, as
+    /// its `DW_AT_go_runtime_type` says: the first in identifier order when
+    /// several, such as a named type and its typedef, say so.
+    #[must_use]
+    pub fn go_runtime_type(&self, offset: u64) -> Option<TypeReference> {
+        self.types.iter().find_map(|node| match node {
+            TypeNode::Resolved(info)
+                if info
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.go)
+                    .and_then(|go| go.runtime_type)
+                    == Some(offset) =>
+            {
+                Some(info.reference)
+            }
+            _ => None,
+        })
+    }
+
+    /// The types whose identity has this base, whatever their language,
+    /// path, and arguments, in identifier order.
+    #[must_use]
+    pub fn types_with_base(&self, base: &str) -> Vec<TypeReference> {
+        self.type_index.with_base(base)
+    }
+
+    /// The types a name could mean, in identifier order: those named
+    /// exactly so, and those whose identity it spells. The name may omit
+    /// outer path segments and trailing arguments, as in `vector<int>` for
+    /// `std::vector<int, std::allocator<int> >`.
+    #[must_use]
+    pub fn types_named(&self, name: &str) -> Vec<TypeReference> {
+        self.type_index.named(name, false, &self.types.as_ref())
+    }
+
+    /// Whether two of this image's types have the same identity, as one
+    /// type defined in several units does.
+    #[must_use]
+    pub fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        self.type_index.same_type(left, right)
     }
 
     /// Resolves a basename, canonical qualification, source qualification, or
@@ -3682,6 +4225,7 @@ mod tests {
                 name: "int".into(),
                 byte_size: Some(4),
                 kind: TypeKind::Base(base),
+                identity: None,
             })
         };
         let globals = [
@@ -3737,6 +4281,7 @@ mod tests {
                 statements: Vec::new(),
                 lines: Vec::new(),
                 sections: Vec::new(),
+                vtables: Vec::new(),
             },
         )
     }
@@ -3824,6 +4369,7 @@ mod tests {
                         kind: TypeKind::Opaque {
                             description: "test type".into(),
                         },
+                        identity: None,
                     }),
                     TypeNode::Malformed {
                         reference: malformed_reference,
@@ -3834,6 +4380,7 @@ mod tests {
                 statements: Vec::new(),
                 lines: Vec::new(),
                 sections: Vec::new(),
+                vtables: Vec::new(),
             },
         )
         .with_id(image_id);
@@ -3953,6 +4500,7 @@ mod tests {
                 statements: Vec::new(),
                 lines: Vec::new(),
                 sections: Vec::new(),
+                vtables: Vec::new(),
             },
         )
     }
@@ -4039,6 +4587,7 @@ mod tests {
                     section(0, ".text", 0x10, 0x70, true),
                     section(1, ".data", 0x80, 0x90, false),
                 ],
+                vtables: Vec::new(),
             },
         );
         let starts = |start, end| {
@@ -4187,6 +4736,7 @@ mod tests {
                 statements: boundary_test_rows(),
                 lines: Vec::new(),
                 sections: Vec::new(),
+                vtables: Vec::new(),
             },
         )
     }
@@ -4454,6 +5004,7 @@ mod tests {
                 statements: Vec::new(),
                 lines: Vec::new(),
                 sections,
+                vtables: Vec::new(),
             },
         )
     }

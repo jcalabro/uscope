@@ -307,7 +307,7 @@ fn too_little_work_ends_in_an_unavailable_value_never_a_wrong_one() {
             world.work = Some(budget);
             let limited = outcome(&mut world, text);
             assert!(
-                limited.contains("EvaluationLimit"),
+                limited.contains("ExpressionWork"),
                 "`{text}` with {budget} of {used} units gave `{limited}`, not `{full}` or a limit"
             );
         }

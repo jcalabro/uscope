@@ -20,6 +20,7 @@
 //! - [`modules`]: the registry of mapped shared objects.
 //! - [`post_mortem`]: serving the same views from a core dump.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
@@ -74,6 +75,7 @@ mod native;
 #[cfg(test)]
 pub mod native_tracee;
 mod post_mortem;
+mod presentation;
 #[cfg(debug_assertions)]
 mod recorded;
 mod registers;
@@ -946,7 +948,11 @@ struct Controller<P: InspectionOps> {
     mapped_modules: BTreeMap<ModuleMapping, (PathBuf, u64)>,
     next_module_id: u32,
     next_image_id: u32,
-    messages: mpsc::Receiver<ControllerMessage>,
+    messages: RefCell<mpsc::Receiver<ControllerMessage>>,
+    /// Messages taken from the queue and not yet served, in arrival order.
+    pending: RefCell<VecDeque<ControllerMessage>>,
+    /// The views values are presented with.
+    views: presentation::Views,
     message_sender: mpsc::Sender<ControllerMessage>,
     events: EventSender,
     ptrace: P,
@@ -1051,7 +1057,9 @@ impl<P: InspectionOps> Controller<P> {
             mapped_modules: BTreeMap::new(),
             next_module_id: 1,
             next_image_id: 1,
-            messages: channels.receiver,
+            messages: RefCell::new(channels.receiver),
+            pending: RefCell::new(VecDeque::new()),
+            views: presentation::Views::default(),
             message_sender: channels.sender,
             events: channels.events,
             ptrace,
@@ -1073,9 +1081,66 @@ impl<P: InspectionOps> Controller<P> {
     }
 }
 
+impl<P: InspectionOps> Controller<P> {
+    /// Takes every message already queued, keeping them in arrival order.
+    fn drain_messages(&self) {
+        let mut messages = self.messages.borrow_mut();
+        let mut pending = self.pending.borrow_mut();
+        while let Ok(message) = messages.try_recv() {
+            pending.push_back(message);
+        }
+    }
+
+    /// The next message to serve: in arrival order, except that inspection
+    /// of a stop waits behind run control queued after it, which it would
+    /// only delay. Waits for one when `block` holds and none is queued.
+    fn next_message(&self, block: bool) -> Option<ControllerMessage> {
+        self.drain_messages();
+        let mut pending = self.pending.borrow_mut();
+        if let Some(preempting) = pending
+            .iter()
+            .position(ControllerMessage::preempts_inspection)
+        {
+            let index = pending
+                .iter()
+                .take(preempting + 1)
+                .position(|message| !message.reads_one_stop())
+                .expect("the preempting message does not wait");
+            return pending.remove(index);
+        }
+        if let Some(message) = pending.pop_front() {
+            return Some(message);
+        }
+        drop(pending);
+        if block {
+            self.messages.borrow_mut().blocking_recv()
+        } else {
+            None
+        }
+    }
+
+    /// Whether run control waits behind the inspection being served, which
+    /// then stops and is served again after it.
+    fn run_control_waiting(&self) -> bool {
+        self.drain_messages();
+        self.pending
+            .borrow()
+            .iter()
+            .any(ControllerMessage::preempts_inspection)
+    }
+
+    /// Serves a request again after the run control that interrupted it.
+    fn serve_later(&self, request: Request) {
+        record!("interrupted {}", request.describe());
+        self.pending
+            .borrow_mut()
+            .push_front(ControllerMessage::Request(request));
+    }
+}
+
 impl<P: LinuxTraceOps> Controller<P> {
     fn run(mut self) {
-        while let Some(message) = self.messages.blocking_recv() {
+        while let Some(message) = self.next_message(true) {
             if !self.handle_message(message) {
                 return;
             }
@@ -1333,10 +1398,20 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let _ = reply.send(
-                    debug_pid(thread_id)
-                        .and_then(|pid| self.variables(stop_id, pid, frame, &query, limits)),
-                );
+                let result = debug_pid(thread_id)
+                    .and_then(|pid| self.variables(stop_id, pid, frame, &query, limits));
+                if matches!(result, Err(Error::Interrupted)) {
+                    self.serve_later(Request::Variables {
+                        query,
+                        limits,
+                        stop_id,
+                        thread_id,
+                        frame,
+                        reply,
+                    });
+                } else {
+                    let _ = reply.send(result);
+                }
             }
             Request::Evaluate {
                 expression,
@@ -1347,10 +1422,21 @@ impl<P: InspectionOps> Controller<P> {
                 frame,
                 reply,
             } => {
-                let _ =
-                    reply.send(debug_pid(thread_id).and_then(|pid| {
-                        self.evaluate(stop_id, pid, frame, &expression, mode, limits)
-                    }));
+                let result = debug_pid(thread_id)
+                    .and_then(|pid| self.evaluate(stop_id, pid, frame, &expression, mode, limits));
+                if matches!(result, Err(Error::Interrupted)) {
+                    self.serve_later(Request::Evaluate {
+                        expression,
+                        mode,
+                        limits,
+                        stop_id,
+                        thread_id,
+                        frame,
+                        reply,
+                    });
+                } else {
+                    let _ = reply.send(result);
+                }
             }
             Request::ExpressionType {
                 expression,
@@ -1370,7 +1456,16 @@ impl<P: InspectionOps> Controller<P> {
                 limits,
                 reply,
             } => {
-                let _ = reply.send(self.dereference(&reference, limits));
+                let result = self.dereference(&reference, limits);
+                if matches!(result, Err(Error::Interrupted)) {
+                    self.serve_later(Request::Dereference {
+                        reference,
+                        limits,
+                        reply,
+                    });
+                } else {
+                    let _ = reply.send(result);
+                }
             }
             Request::ValueChildren {
                 reference,
@@ -1378,10 +1473,76 @@ impl<P: InspectionOps> Controller<P> {
                 limits,
                 reply,
             } => {
-                let _ = reply.send(self.value_children(&reference, &query, limits));
+                let result = self.value_children(&reference, &query, limits);
+                if matches!(result, Err(Error::Interrupted)) {
+                    self.serve_later(Request::ValueChildren {
+                        reference,
+                        query,
+                        limits,
+                        reply,
+                    });
+                } else {
+                    let _ = reply.send(result);
+                }
             }
             Request::Globals { query, reply } => {
                 let _ = reply.send(self.globals(&query));
+            }
+            Request::SetViews { views, reply } => {
+                self.views.replace(views);
+                let _ = reply.send(Ok(()));
+            }
+            Request::EnableViews { enabled, reply } => {
+                self.views.enabled = enabled;
+                let _ = reply.send(Ok(()));
+            }
+            Request::ExplainType { name, reply } => {
+                let _ = reply.send(Ok(self.explain_type(&name)));
+            }
+            Request::CheckViews { reply } => {
+                let _ = reply.send(Ok(self.check_views()));
+            }
+            Request::ExplainView {
+                expression,
+                stop_id,
+                thread_id,
+                frame,
+                reply,
+            } => {
+                let result = debug_pid(thread_id)
+                    .and_then(|pid| self.explain_view(stop_id, pid, frame, &expression));
+                if matches!(result, Err(Error::Interrupted)) {
+                    self.serve_later(Request::ExplainView {
+                        expression,
+                        stop_id,
+                        thread_id,
+                        frame,
+                        reply,
+                    });
+                } else {
+                    let _ = reply.send(result);
+                }
+            }
+            Request::RecordKernels {
+                expression,
+                stop_id,
+                thread_id,
+                frame,
+                reply,
+            } => {
+                let result = debug_pid(thread_id)
+                    .and_then(|pid| self.record_kernels(stop_id, pid, frame, &expression));
+                if matches!(result, Err(Error::Interrupted)) {
+                    self.serve_later(Request::RecordKernels {
+                        expression,
+                        stop_id,
+                        thread_id,
+                        frame,
+                        reply,
+                    });
+                } else {
+                    let _ = reply.send(result);
+                }
             }
             Request::SelectThread {
                 stop_id,

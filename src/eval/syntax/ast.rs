@@ -231,6 +231,29 @@ pub enum Field {
     Index(u32),
 }
 
+/// A function only a view's expressions may call (`docs/views.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    /// `inner(x)`: steps through wrapper records, while the value is a
+    /// record with exactly one member of non-zero size.
+    Inner,
+}
+
+impl Builtin {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "inner" => Some(Self::Inner),
+            _ => None,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Inner => "inner",
+        }
+    }
+}
+
 /// What `sizeof` measures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SizeOf {
@@ -344,7 +367,27 @@ pub enum NodeKind {
         end: NodeId,
     },
     SizeOf(SizeOf),
+    /// `offsetof(TYPE, member)`, a view's: where a member is in its record.
+    OffsetOf {
+        ty: TypeName,
+        member: String,
+    },
+    /// `container_of(PTR, TYPE, member)`, a view's: a pointer to the
+    /// record of `TYPE` whose `member` PTR points to.
+    ContainerOf {
+        pointer: NodeId,
+        ty: TypeName,
+        member: String,
+    },
+    /// `global(NAME)`, a view's: a global of the module whose value it
+    /// presents.
+    Global(String),
     Len(NodeId),
+    /// A call of a view's built-in function on one operand.
+    Call {
+        function: Builtin,
+        operand: NodeId,
+    },
 }
 
 impl NodeKind {
@@ -359,11 +402,17 @@ impl NodeKind {
             | Self::Text(_)
             | Self::Bool(_)
             | Self::Null
-            | Self::SizeOf(SizeOf::Type(_)) => Vec::new(),
+            | Self::SizeOf(SizeOf::Type(_))
+            | Self::OffsetOf { .. }
+            | Self::Global(_) => Vec::new(),
             Self::Unary { operand, .. }
             | Self::Cast { operand, .. }
             | Self::SizeOf(SizeOf::Operand(operand))
             | Self::Len(operand)
+            | Self::Call { operand, .. }
+            | Self::ContainerOf {
+                pointer: operand, ..
+            }
             | Self::Member { base: operand, .. } => vec![*operand],
             Self::Binary { left, right, .. } => vec![*left, *right],
             Self::Assign { target, value, .. } => vec![*target, *value],
@@ -381,7 +430,8 @@ impl NodeKind {
     fn same_leaf(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Name(left), Self::Name(right)) => left == right,
-            (Self::Register(left), Self::Register(right)) => left == right,
+            (Self::Register(left), Self::Register(right))
+            | (Self::Global(left), Self::Global(right)) => left == right,
             (
                 Self::Integer { value, suffix },
                 Self::Integer {
@@ -400,6 +450,12 @@ impl NodeKind {
             | (Self::Len(_), Self::Len(_))
             | (Self::SizeOf(SizeOf::Operand(_)), Self::SizeOf(SizeOf::Operand(_))) => true,
             (Self::Unary { op, .. }, Self::Unary { op: other, .. }) => op == other,
+            (
+                Self::Call { function, .. },
+                Self::Call {
+                    function: other, ..
+                },
+            ) => function == other,
             (Self::Binary { op, .. }, Self::Binary { op: other, .. }) => op == other,
             (Self::Assign { op, .. }, Self::Assign { op: other, .. }) => op == other,
             (
@@ -421,6 +477,21 @@ impl NodeKind {
             (Self::SizeOf(SizeOf::Type(left)), Self::SizeOf(SizeOf::Type(right))) => {
                 same_type(left, right)
             }
+            (
+                Self::OffsetOf { ty, member },
+                Self::OffsetOf {
+                    ty: other_ty,
+                    member: other_member,
+                },
+            )
+            | (
+                Self::ContainerOf { ty, member, .. },
+                Self::ContainerOf {
+                    ty: other_ty,
+                    member: other_member,
+                    ..
+                },
+            ) => same_type(ty, other_ty) && member == other_member,
             _ => false,
         }
     }

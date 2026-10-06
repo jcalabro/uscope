@@ -23,6 +23,14 @@
           hash = "sha256-SVvkvIcXasVnOS5bQRar2YRm0z17SdQedkzMaXay3EI=";
         };
       });
+      # Builds C++ against LLVM's libc++ instead of libstdc++, so fixtures
+      # cover both standard libraries' layouts.
+      libcxx = pkgs.llvmPackages.libcxx;
+      clangLibcxx = pkgs.writeShellScriptBin "clang++-libc++" ''
+        exec ${pkgs.clang}/bin/clang++ -stdlib=libc++ -nostdinc++ \
+          -isystem ${libcxx.dev}/include/c++/v1 \
+          -L${libcxx}/lib -Wl,-rpath,${libcxx}/lib "$@"
+      '';
     in {
       devShells.${system}.default = pkgs.mkShell {
         NIX_HARDENING_ENABLE = "";
@@ -35,6 +43,7 @@
           gcc
           mold
           clang
+          clangLibcxx
           gdb
           lldb
           goStable

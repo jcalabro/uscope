@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use uscope::{
     BreakpointId, BreakpointSpec, ByteOrder, Disassembly, DisassemblyQuery, DisassemblyRange,
     HitComparison, HitCondition, LineNumber, MAX_WINDOW_AFTER, RegisterRole, SignalPolicy,
@@ -26,6 +26,7 @@ const DISASSEMBLY_CONTEXT_AFTER: u32 = 16;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     Handle,
+    Views,
     Break,
     Breakpoints,
     Info,
@@ -143,8 +144,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         Info,
         "info",
         [],
-        "info breakpoints|watchpoints|signals|core|symbol [0xaddress]",
-        "Show debugger information, or the symbol and section containing an address"
+        "info breakpoints|watchpoints|signals|core|symbol|view [argument...]",
+        "Show debugger information, the symbol and section containing an address, or which view presents an expression's value and why"
     ),
     command!(
         Handle,
@@ -230,7 +231,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         "print",
         ["p"],
         "print [expression...]",
-        "Print an expression's value, or every variable; print/x shows integers in hexadecimal"
+        "Print an expression's value, or every variable; print/x shows integers in hexadecimal, and print/r values as stored, without views"
     ),
     command!(
         Whatis,
@@ -251,7 +252,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         "set",
         [],
         "set [var] <assignment...>",
-        "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1"
+        "Change a number, truth value, enumeration, or pointer, such as set var x = y + 1; set views on|off shows values as their views present them or as stored"
+    ),
+    command!(
+        Views,
+        "views",
+        [],
+        "views [load|clear|check|explain|record] [argument...]",
+        "List the view files values are presented with, load more, clear those loaded, check how the program's types are presented, explain which view presents a type, or record the kernel runs presenting a value to a file"
     ),
     command!(
         Globals,
@@ -433,6 +441,10 @@ impl Cli {
                     renderer,
                 ),
                 ("signals" | "handle", None) => self.list_signals().await?,
+                ("view", Some(_)) => {
+                    let text = rest.trim_start()["view".len()..].trim();
+                    self.explain_view(text).await?
+                }
                 _ => return Err(spec.usage_error()),
             },
             Command::Handle => self.handle_signal(&arguments).await?,
@@ -459,12 +471,13 @@ impl Cli {
                 join_lines(&signals, &self.stop_with_source(&reason).await)
             }
             Command::Print => match first {
-                Some(_) => self.print(rest, format == "x").await?,
+                Some(_) => self.print(rest, format == "x", format == "r").await?,
                 None => value::variables(&debugger.variables().await?, renderer),
             },
             Command::Whatis => self.whatis(rest).await?,
             Command::Ptype => self.ptype(rest).await?,
             Command::Globals => self.globals(first).await?,
+            Command::Views => self.views(&arguments).await?,
             Command::Set => self.set(rest, spec).await?,
             Command::Stepi => self.step(StepKind::Instruction).await?,
             Command::Nexti => self.step(StepKind::OverInstruction).await?,
@@ -756,7 +769,7 @@ impl Cli {
         Ok(format::watchpoint_set(&watchpoint, self.renderers.stdout))
     }
 
-    async fn print(&self, text: &str, hexadecimal: bool) -> Result<String> {
+    async fn print(&self, text: &str, hexadecimal: bool, raw: bool) -> Result<String> {
         let renderer = self.renderers.stdout;
         let expression = parse_expression(text)?;
         let evaluation = self
@@ -780,6 +793,7 @@ impl Cli {
                     text,
                     &inspected.state,
                     uscope::InspectionLimits::default().remaining_after(inspected.usage),
+                    raw,
                     renderer,
                 )
                 .await?
@@ -801,6 +815,22 @@ impl Cli {
             );
         }
         Ok(output)
+    }
+
+    /// Which view presents an expression's value, from where, and why each
+    /// view tried before it did not bind.
+    async fn explain_view(&self, text: &str) -> Result<String> {
+        let expression = parse_expression(text)?;
+        let explanation = self
+            .debugger
+            .explain_view(&expression)
+            .await
+            .map_err(|error| expression_error(text, error))?;
+        Ok(format::view_explanation(
+            text,
+            &explanation,
+            self.renderers.stdout,
+        ))
     }
 
     async fn whatis(&self, text: &str) -> Result<String> {
@@ -854,6 +884,17 @@ impl Cli {
 
     /// Assigns a value in the selected frame, as gdb's `set var` does.
     async fn set(&self, text: &str, spec: &CommandSpec) -> Result<String> {
+        if let Some(setting @ ("on" | "off")) = text.strip_prefix("views ").map(str::trim) {
+            self.debugger.enable_views(setting == "on").await?;
+            return Ok(format!(
+                "values show {}",
+                if setting == "on" {
+                    "as their views present them"
+                } else {
+                    "as stored"
+                }
+            ));
+        }
         let text = text.strip_prefix("var ").map_or(text, str::trim);
         let expression = parse_expression(text)?;
         let Some(target) = expression.assignment_target() else {
@@ -887,6 +928,96 @@ impl Cli {
             ),
             None => value::untyped(target, &assigned.state, renderer),
         })
+    }
+
+    /// `views` lists the view files values are presented with, `views load
+    /// FILE…` loads more ahead of them, and `views clear` forgets those
+    /// loaded.
+    async fn views(&self, arguments: &[&str]) -> Result<String> {
+        match arguments {
+            [] => {
+                let mut lines = vec!["values are presented with, in order:".to_owned()];
+                {
+                    let views = self.views.lock().expect("the view sources are whole");
+                    lines.extend(
+                        views
+                            .session
+                            .iter()
+                            .map(|file| format!("  {} (loaded)", file.name)),
+                    );
+                    lines.extend(
+                        views
+                            .discovered
+                            .iter()
+                            .map(|file| format!("  {}", file.name)),
+                    );
+                }
+                lines.push("  the views each module carries for its own types".to_owned());
+                lines.push("  the built-in views".to_owned());
+                Ok(lines.join("\n"))
+            }
+            ["load", paths @ ..] if !paths.is_empty() => {
+                let files = paths
+                    .iter()
+                    .map(|path| uscope::view_files::read(std::path::Path::new(path)))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|error| anyhow!(error))?;
+                {
+                    let mut views = self.views.lock().expect("the view sources are whole");
+                    views.session.splice(0..0, files);
+                }
+                for warning in self.reload_views().await {
+                    self.warn(&format!("views: {warning}"));
+                }
+                Ok(format!(
+                    "loaded {} view file{}",
+                    paths.len(),
+                    if paths.len() == 1 { "" } else { "s" }
+                ))
+            }
+            ["clear"] => {
+                self.views
+                    .lock()
+                    .expect("the view sources are whole")
+                    .session
+                    .clear();
+                for warning in self.reload_views().await {
+                    self.warn(&format!("views: {warning}"));
+                }
+                Ok("forgot the loaded view files".to_owned())
+            }
+            ["check"] => {
+                let check = self.debugger.check_views().await?;
+                Ok(format::view_check(&check, self.renderers.stdout).0)
+            }
+            ["explain", words @ ..] if !words.is_empty() => {
+                let name = words.join(" ");
+                let types = self.debugger.explain_type(&name).await?;
+                Ok(format::type_views(&name, &types, self.renderers.stdout))
+            }
+            ["record", path, words @ ..] if !words.is_empty() => {
+                let text = words.join(" ");
+                let expression = parse_expression(&text)?;
+                let recordings = self
+                    .debugger
+                    .record_kernels(&expression)
+                    .await
+                    .map_err(|error| expression_error(&text, error))?;
+                if recordings.is_empty() {
+                    return Ok(format!("no kernel ran presenting `{text}`"));
+                }
+                std::fs::write(path, recordings.concat())
+                    .with_context(|| format!("failed to write {path}"))?;
+                Ok(format!(
+                    "recorded {} kernel run{} to {path}",
+                    recordings.len(),
+                    if recordings.len() == 1 { "" } else { "s" }
+                ))
+            }
+            _ => bail!(
+                "usage: views [load <file...>|clear|check|explain <type...>|record <file> <expression>]"
+            ),
+        }
     }
 
     async fn globals(&self, filter: Option<&str>) -> Result<String> {
@@ -1416,8 +1547,8 @@ fn command_line(line: &str) -> Result<(&'static CommandSpec, &str, &str, Vec<&st
     let spec = command_named(entered)
         .ok_or_else(|| anyhow!("unknown command '{entered}'; type `help` for a list"))?;
     let arguments = words.collect::<Vec<_>>();
-    if !format.is_empty() && (spec.command != Command::Print || format != "x") {
-        bail!("unknown format '/{format}'; print takes /x");
+    if !format.is_empty() && (spec.command != Command::Print || !matches!(format, "x" | "r")) {
+        bail!("unknown format '/{format}'; print takes /x or /r");
     }
     let (minimum, maximum) = spec.arity();
     if !(minimum..=maximum).contains(&arguments.len()) {
@@ -1468,7 +1599,7 @@ mod tests {
         }
         assert_eq!(spec(Command::Run).arity(), (0, 0));
         assert_eq!(spec(Command::Break).arity(), (1, 2));
-        assert_eq!(spec(Command::Info).arity(), (1, 2));
+        assert_eq!(spec(Command::Info).arity(), (1, usize::MAX));
         assert_eq!(spec(Command::Print).arity(), (0, usize::MAX));
         assert_eq!(spec(Command::Whatis).arity(), (1, usize::MAX));
         assert_eq!(spec(Command::Examine).arity(), (1, 2));

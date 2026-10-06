@@ -128,6 +128,15 @@ pub struct Cli {
     renderers: Renderers,
     syntax: AssemblySyntax,
     launch: LaunchSettings,
+    views: std::sync::Mutex<ViewSources>,
+}
+
+/// The view files a session loads: those it was given or loaded, most
+/// recent first, then the project's and the user's.
+#[derive(Default)]
+struct ViewSources {
+    session: Vec<uscope::view_files::ViewFile>,
+    discovered: Vec<uscope::view_files::ViewFile>,
 }
 
 impl Cli {
@@ -142,6 +151,64 @@ impl Cli {
             renderers,
             syntax,
             launch,
+            views: std::sync::Mutex::new(ViewSources {
+                session: Vec::new(),
+                discovered: Vec::new(),
+            }),
+        }
+    }
+
+    /// Loads the project's and the user's view files, under
+    /// `working_directory`, and the session files at `paths`, and returns
+    /// a warning for each file or part of one it could not use.
+    pub async fn load_view_sources(
+        &self,
+        working_directory: &std::path::Path,
+        paths: &[PathBuf],
+    ) -> Vec<String> {
+        let (discovered, mut warnings) = uscope::view_files::discover(working_directory);
+        let mut session = Vec::new();
+        for path in paths {
+            match uscope::view_files::read(path) {
+                Ok(file) => session.insert(0, file),
+                Err(error) => warnings.push(error),
+            }
+        }
+        {
+            let mut views = self.views.lock().expect("the view sources are whole");
+            views.discovered = discovered;
+            views.session = session;
+        }
+        warnings.extend(self.reload_views().await);
+        warnings
+    }
+
+    /// Presents values with the session's view files and the kernels beside
+    /// them, and returns what kept parts of them out.
+    async fn reload_views(&self) -> Vec<String> {
+        let sources = {
+            let views = self.views.lock().expect("the view sources are whole");
+            views
+                .session
+                .iter()
+                .chain(&views.discovered)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let mut kernels = Vec::<uscope::view_files::KernelFile>::new();
+        // Files in one directory share the kernels beside them.
+        for kernel in sources.iter().flat_map(|file| &file.kernels) {
+            if !kernels.iter().any(|loaded| loaded.path == kernel.path) {
+                kernels.push(kernel.clone());
+            }
+        }
+        let files = sources
+            .iter()
+            .map(|file| (file.name.as_str(), file.text.as_str()))
+            .collect::<Vec<_>>();
+        match self.debugger.load_views(&files, &kernels).await {
+            Ok(errors) => errors.iter().map(ToString::to_string).collect(),
+            Err(error) => vec![error.to_string()],
         }
     }
 
@@ -172,6 +239,28 @@ impl Cli {
 
     async fn run_inputs(&self, args: &Args) -> Result<()> {
         self.announce(args)?;
+        // The project is where the program runs.
+        let working_directory = self
+            .launch
+            .working_directory
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        for warning in self
+            .load_view_sources(&working_directory, &args.views)
+            .await
+            .iter()
+            .chain(
+                self.debugger
+                    .module_image()
+                    .view_errors()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .iter(),
+            )
+        {
+            self.warn(&format!("views: {warning}"));
+        }
 
         for path in &args.command_files {
             let contents = fs::read_to_string(path)
@@ -314,8 +403,10 @@ impl Cli {
     ) -> Result<(String, StopReason)> {
         let mut events = self.debugger.subscribe();
         let mut lines = Vec::new();
+        let mut loaded = Vec::new();
         let renderer = self.renderers.stdout;
         let mut record = |event: Result<DebuggerEvent, _>| match event {
+            Ok(DebuggerEvent::ModuleLoaded { module, .. }) => loaded.push(module.module.id),
             Ok(DebuggerEvent::SignalReceived {
                 thread_id,
                 exception,
@@ -341,6 +432,17 @@ impl Cli {
         };
         while let Ok(event) = events.try_recv() {
             record(Ok(event));
+        }
+        // What kept a library's own views out, once, when it loads.
+        for module in loaded {
+            if let Ok(image) = self.debugger.loaded_module_image(module).await {
+                lines.extend(image.view_errors().iter().map(|error| {
+                    format!(
+                        "{}: views: {error}",
+                        renderer.paint(Role::Warning, "warning")
+                    )
+                }));
+            }
         }
         Ok((lines.join("\n"), reason))
     }

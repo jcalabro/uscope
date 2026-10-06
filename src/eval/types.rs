@@ -71,6 +71,12 @@ pub trait TypeSource {
 
     /// The target's byte order.
     fn byte_order(&self) -> crate::ByteOrder;
+
+    /// Whether two types have one identity, as one type defined in several
+    /// units does.
+    fn same_type(&self, left: TypeReference, right: TypeReference) -> bool {
+        left == right
+    }
 }
 
 /// How deep a chain of typedefs and qualifiers may go.
@@ -348,6 +354,7 @@ pub fn type_info(types: &dyn TypeSource, ty: &Ty) -> TypeInfo {
         name,
         byte_size: size_of(types, ty),
         kind,
+        identity: None,
     }
 }
 

@@ -67,6 +67,16 @@ impl Span {
     }
 }
 
+/// Which language an expression is read in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// The console's, for hovers, watches, conditions, and `print`.
+    Console,
+    /// A view's, which may also call the built-in functions views use, such
+    /// as `inner(x)` (`docs/views.md`).
+    View,
+}
+
 /// The most parenthesized names before `-`, `*`, or `&` one expression may
 /// hold; each doubles the readings.
 pub const MAX_AMBIGUITIES: usize = 4;
@@ -89,6 +99,7 @@ pub struct Expression {
 #[derive(Debug)]
 struct Parsed {
     text: String,
+    dialect: Dialect,
     ambiguities: Vec<Ambiguity>,
     /// One reading per combination: bit `i` of the index is set when
     /// ambiguity `i` reads as a cast.
@@ -99,14 +110,31 @@ impl Expression {
     /// Parses `text`. It fails only when no reading of the text is an
     /// expression.
     pub fn parse(text: &str) -> Result<Self, ExpressionError> {
-        let (ambiguities, readings) = parser::parse(text)?;
+        Self::parse_in(text, Dialect::Console)
+    }
+
+    /// Parses `text` as a view's expression, which may call the built-in
+    /// functions views use.
+    pub fn parse_view(text: &str) -> Result<Self, ExpressionError> {
+        Self::parse_in(text, Dialect::View)
+    }
+
+    fn parse_in(text: &str, dialect: Dialect) -> Result<Self, ExpressionError> {
+        let (ambiguities, readings) = parser::parse(text, dialect)?;
         Ok(Self {
             parsed: Arc::new(Parsed {
                 text: text.to_owned(),
+                dialect,
                 ambiguities,
                 readings,
             }),
         })
+    }
+
+    /// The language the expression was read in.
+    #[must_use]
+    pub fn dialect(&self) -> Dialect {
+        self.parsed.dialect
     }
 
     /// The text as written.
@@ -172,6 +200,14 @@ impl Expression {
     #[must_use]
     pub fn dereferenced(&self) -> Option<Self> {
         Self::parse(&format!("*({self})")).ok()
+    }
+
+    /// The value of type `ty` stored at `address`: `*(T*)0x…`.
+    #[must_use]
+    pub fn at(ty: &str, address: u64) -> Option<Self> {
+        Self::parse(&format!("*({ty}*){address:#x}"))
+            .ok()
+            .or_else(|| Self::parse(&format!("*({}*){address:#x}", print::name_text(ty))).ok())
     }
 
     /// The elements `start..end` of this expression's array or slice.
@@ -260,7 +296,13 @@ impl fmt::Display for Expression {
 /// nested in its parent's, and the normal form reads back the same.
 #[cfg(any(test, feature = "fuzzing"))]
 pub fn check_invariants(text: &str) -> Result<(), String> {
-    let expression = match Expression::parse(text) {
+    check_invariants_in(text, Dialect::Console)?;
+    check_invariants_in(text, Dialect::View)
+}
+
+#[cfg(any(test, feature = "fuzzing"))]
+fn check_invariants_in(text: &str, dialect: Dialect) -> Result<(), String> {
+    let expression = match Expression::parse_in(text, dialect) {
         Ok(expression) => expression,
         Err(error)
             if error.span.start <= error.span.end
@@ -276,7 +318,7 @@ pub fn check_invariants(text: &str) -> Result<(), String> {
         }
     }
     let printed = expression.to_string();
-    let reparsed = match Expression::parse(&printed) {
+    let reparsed = match Expression::parse_in(&printed, expression.dialect()) {
         Ok(reparsed) => reparsed,
         // Spaces and parentheses can take text near a limit past it.
         Err(error) if error.kind == super::error::ErrorKind::Limit => return Ok(()),

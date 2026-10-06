@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use uscope::{
-    ImageAddress, IntegerValue, ModuleImage, RegisterValue, ScalarValue, StopContext, SymbolKind,
-    TypeInfo, ValueChild, ValueChildRelationship, ValueChildren, VariableState, VariableValue,
-    VariableValueSource,
+    ImageAddress, IntegerValue, ModuleImage, PresentedShape, RegisterValue, ScalarValue,
+    StopContext, SymbolKind, TypeInfo, ValueChild, ValueChildRelationship, ValueChildren,
+    VariableState, VariableValue, VariableValueSource,
 };
 
 use super::handles::{Exhausted, Location, References, Variables};
@@ -42,6 +42,10 @@ pub struct Item<'a> {
     pub name: &'a str,
     /// How to evaluate the value again, when it can be.
     pub path: Option<uscope::Expression>,
+    /// Whether the value is `[raw]`, the value as stored, which its path
+    /// would evaluate as its view presents it: its own children are reached
+    /// through the path, but it is not named by it.
+    pub raw: bool,
     pub type_info: Option<&'a TypeInfo>,
     pub state: &'a VariableState,
     /// Where the value's variable is declared, in a module's sources.
@@ -117,7 +121,7 @@ pub fn variable(
     let path = item.path;
     let named = path.is_some();
     let whole = path.as_ref().is_some_and(uscope::Expression::is_name);
-    if let Some(path) = &path {
+    if let Some(path) = path.as_ref().filter(|_| !item.raw) {
         variable.insert("evaluateName".to_owned(), path.to_string().into());
     }
     let mut reference = 0;
@@ -126,21 +130,18 @@ pub fn variable(
         value,
         dereference,
         children,
+        presentation,
         ..
     } = item.state
     {
+        // A value a view presents expands to its elements, its fields, and
+        // `[raw]`, the value as stored.
+        let presented = presentation
+            .as_deref()
+            .filter(|presentation| presentation.shape != PresentedShape::Raw);
+        let children = presented.map_or(children, |presentation| &presentation.children);
         if let ValueChildren::Available(children) = children {
-            let total = children.total();
-            let indexed = matches!(
-                value,
-                VariableValue::Array { .. } | VariableValue::Slice { .. }
-            );
-            let count = if indexed {
-                "indexedVariables"
-            } else {
-                "namedVariables"
-            };
-            variable.insert(count.to_owned(), total.into());
+            let indexed = insert_counts(&mut variable, children, value);
             reference = references.variables(Variables::Children {
                 context,
                 reference: children.clone(),
@@ -180,7 +181,10 @@ pub fn variable(
                 );
             }
         }
-        let attributes = attributes(source, value, context, whole, named);
+        let mut attributes = attributes(source, value, context, whole, named);
+        if presented.is_some_and(|presentation| presentation.shape == PresentedShape::Text) {
+            attributes.push("rawString");
+        }
         let kind = match value {
             VariableValue::Record | VariableValue::Union | VariableValue::Variant { .. } => "class",
             _ => "data",
@@ -192,6 +196,41 @@ pub fn variable(
     }
     variable.insert("variablesReference".to_owned(), reference.into());
     Ok(variable)
+}
+
+/// How many children a value has, and whether they are all elements
+/// (`Some(true)`), all named (`Some(false)`), or a view's elements, which
+/// are indexed, followed by its fields and `[raw]`, which are named
+/// (`None`). An array's or slice's children are elements, and anything
+/// else's named.
+fn insert_counts(
+    variable: &mut Map<String, Value>,
+    children: &uscope::ValueChildrenReference,
+    value: &VariableValue,
+) -> Option<bool> {
+    let total = children.total();
+    match (children.elements(), value) {
+        (Some(elements), _) => {
+            if elements == 0 {
+                variable.insert("namedVariables".to_owned(), total.into());
+                return Some(false);
+            }
+            variable.insert("indexedVariables".to_owned(), elements.into());
+            variable.insert(
+                "namedVariables".to_owned(),
+                total.saturating_sub(elements).into(),
+            );
+            None
+        }
+        (None, VariableValue::Array { .. } | VariableValue::Slice { .. }) => {
+            variable.insert("indexedVariables".to_owned(), total.into());
+            Some(true)
+        }
+        (None, _) => {
+            variable.insert("namedVariables".to_owned(), total.into());
+            Some(false)
+        }
+    }
 }
 
 /// A value's presentation attributes: whether it can be changed, which
@@ -279,10 +318,17 @@ pub fn child_name(child: &ValueChild) -> String {
                 name
             })
         }
-        ValueChildRelationship::SliceElement { index } => format!("[{index}]"),
+        ValueChildRelationship::SliceElement { index }
+        | ValueChildRelationship::Element { index } => {
+            format!("[{index}]")
+        }
+        // A map's entry is named by its key.
+        ValueChildRelationship::Entry { key, .. } => summary(Some(&key.type_info), &key.state),
         ValueChildRelationship::Member(member) => {
             member.name.as_deref().unwrap_or("<anonymous>").to_owned()
         }
+        ValueChildRelationship::Field { name } => name.to_string(),
+        ValueChildRelationship::Raw => "[raw]".to_owned(),
         ValueChildRelationship::Base(_) => format!("<base {}>", child.type_info.name),
         _ => "<child>".to_owned(),
     }
@@ -303,15 +349,35 @@ pub fn child_path(
     let parent = parent?;
     match &child.relationship {
         ValueChildRelationship::ArrayElement { indices, .. } => parent.indexed(indices),
-        ValueChildRelationship::SliceElement { index } => parent.indexed(&[i128::from(*index)]),
+        ValueChildRelationship::SliceElement { index }
+        | ValueChildRelationship::Element { index } => parent.indexed(&[i128::from(*index)]),
         ValueChildRelationship::Member(member) => parent.member(member.name.as_deref()?),
+        // The value as stored is the parent's value.
+        ValueChildRelationship::Raw => Some(parent.clone()),
+        // Maps are not indexed by key yet, so an entry's value is named by
+        // where it is.
+        ValueChildRelationship::Entry { .. } => match &child.state {
+            VariableState::Available {
+                source: VariableValueSource::Memory(address),
+                ..
+            } => uscope::Expression::at(&child.type_info.name, address.get()),
+            _ => None,
+        },
         _ => None,
     }
 }
 
 /// A value's text: its summary, with integers in hexadecimal when asked.
+/// A value a view presents is shown as the view presents it.
 pub fn text(type_info: Option<&TypeInfo>, state: &VariableState, hexadecimal: bool) -> String {
-    hexadecimal
+    let presented = matches!(
+        state,
+        VariableState::Available {
+            presentation: Some(_),
+            ..
+        }
+    );
+    (hexadecimal && !presented)
         .then(|| hex(type_info.and_then(|type_info| type_info.byte_size), state))
         .flatten()
         .unwrap_or_else(|| summary(type_info, state))
@@ -359,6 +425,7 @@ mod tests {
             dereference: uscope::DereferenceState::NotApplicable,
             children: ValueChildren::NotApplicable,
             text: None,
+            presentation: None,
         };
         let signed = state(VariableValue::Scalar(ScalarValue::Signed(-1)));
         assert_eq!(hex(Some(4), &signed).as_deref(), Some("0xffffffff"));
@@ -367,5 +434,34 @@ mod tests {
         assert_eq!(hex(None, &unsigned).as_deref(), Some("0xff"));
         let boolean = state(VariableValue::Scalar(ScalarValue::Boolean(true)));
         assert_eq!(hex(Some(1), &boolean), None);
+    }
+
+    /// An integer a view presents shows as the view presents it, even in
+    /// hexadecimal: the stored number is one step away, as `[raw]`.
+    #[test]
+    fn hexadecimal_never_hides_what_a_view_presents() {
+        let presentation = uscope::Presentation {
+            view: Arc::new(uscope::ViewName {
+                source: Arc::from("app.views"),
+                line: 2,
+                header: Arc::from("c status"),
+                extend: false,
+            }),
+            shape: PresentedShape::Empty,
+            count: None,
+            summary: Arc::from("ok"),
+            children: ValueChildren::NotApplicable,
+            problem: None,
+        };
+        let state = VariableState::Available {
+            source: VariableValueSource::Computed,
+            raw: None,
+            value: VariableValue::Scalar(ScalarValue::Signed(0)),
+            dereference: uscope::DereferenceState::NotApplicable,
+            children: ValueChildren::NotApplicable,
+            text: None,
+            presentation: Some(Arc::new(presentation)),
+        };
+        assert_eq!(text(None, &state, true), text(None, &state, false));
     }
 }

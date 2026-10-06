@@ -1,6 +1,8 @@
 //! What the client inspects at a stop for the semantic oracles: backtraces,
 //! steps, and the selected frame's variables.
 
+use std::sync::Arc;
+
 use super::{Client, Evaluated, Observation, Purpose, protocol};
 use crate::sim::choices::Stream;
 use crate::sim::marks::Mark;
@@ -198,6 +200,11 @@ impl Client {
             backtrace,
             evaluations,
         });
+        // Half the inspections of a program with views also present its
+        // containers.
+        if self.script.views.is_some() && self.draw(2) == 0 {
+            self.present(stop).await?;
+        }
         // Every other stopped thread's stack, without changing which is
         // selected.
         for thread in snapshot.threads.iter() {
@@ -231,6 +238,95 @@ impl Client {
 }
 
 impl Client {
+    /// Evaluates each container the program defines, and reads the
+    /// elements of each a view presents as a sequence or map in one page
+    /// and in pages of a size it draws.
+    async fn present(&self, stop: StopId) -> Result<(), Failure> {
+        for name in crate::sim::views::CONTAINERS {
+            if !self
+                .script
+                .globals
+                .iter()
+                .any(|(global, ..)| global == name)
+            {
+                continue;
+            }
+            let expression = Expression::parse(name).expect("a container's name parses");
+            let value = match self.handle.evaluate(&expression).await {
+                Ok(crate::Evaluation::Value { value, .. }) => value,
+                Ok(other) => {
+                    return Err(protocol(format!("`{name}` evaluated to {other:?}")));
+                }
+                Err(error) => return Err(protocol(format!("evaluating `{name}` failed: {error}"))),
+            };
+            let children = match &value.state {
+                VariableState::Available {
+                    presentation: Some(presentation),
+                    ..
+                } if matches!(
+                    presentation.shape,
+                    crate::PresentedShape::Sequence | crate::PresentedShape::Map
+                ) =>
+                {
+                    match &presentation.children {
+                        crate::ValueChildren::Available(reference) => Some(Arc::clone(reference)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let (whole, paged) = match children {
+                Some(reference) => {
+                    let elements = reference.elements().unwrap_or(0);
+                    let whole = self.pages(&reference, elements, elements.max(1)).await;
+                    let size = 1 + self.draw(3);
+                    let paged = self.pages(&reference, elements, size).await;
+                    (whole, paged)
+                }
+                None => (Ok(Vec::new()), Ok(Vec::new())),
+            };
+            self.note(format!("presented `{name}`"));
+            self.observe(Observation::Presented {
+                stop,
+                name: name.to_owned(),
+                value: Box::new(value),
+                whole,
+                paged,
+            });
+        }
+        Ok(())
+    }
+
+    /// The first `elements` children of a presentation, in pages of `size`,
+    /// each resuming where the one before it ended, until one comes back
+    /// empty, as a page whose budget ran out at once does.
+    async fn pages(
+        &self,
+        reference: &Arc<crate::ValueChildrenReference>,
+        elements: u64,
+        size: u64,
+    ) -> Result<Vec<crate::ValueChildPage>, String> {
+        let mut pages = Vec::new();
+        let mut offset = 0;
+        while offset < elements {
+            let limit = u32::try_from(size.min(elements - offset)).expect("small pages");
+            let page = self
+                .handle
+                .value_children(
+                    Arc::clone(reference),
+                    crate::ValueChildQuery { offset, limit },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            if page.children.is_empty() {
+                break;
+            }
+            offset += page.children.len() as u64;
+            pages.push(page);
+        }
+        Ok(pages)
+    }
+
     /// Evaluates, in the selected frame, the condition of the marker on its
     /// line, the negation, and what it expects; a few of its variables by
     /// name, and those in memory by address; and a few sums, differences,

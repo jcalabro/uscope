@@ -27,13 +27,17 @@ fn inspect_enum(
     wide: &Wide,
     optional: &Option<&u32>,
     empty: &Option<&u32>,
+    done: &Result<(), u32>,
+    failed: &Result<(), u32>,
 ) -> bool {
-    core::hint::black_box((value, fieldless, wide, optional, empty));
+    core::hint::black_box((value, fieldless, wide, optional, empty, done, failed));
     matches!(value, Payload::Integer(42))
         && matches!(fieldless, Fieldless::Negative)
         && matches!(wide, Wide::Huge)
         && matches!(optional, Some(43))
         && empty.is_none()
+        && done.is_ok()
+        && matches!(failed, Err(5))
 }
 
 #[unsafe(no_mangle)]
@@ -44,10 +48,12 @@ pub extern "C" fn main() -> i32 {
     let optional_value = 43;
     let optional = Some(&optional_value);
     let empty = None;
+    let done: Result<(), u32> = Ok(());
+    let failed: Result<(), u32> = Err(5);
     core::hint::black_box(Payload::Unit);
     core::hint::black_box((Fieldless::Zero, Fieldless::Positive));
     i32::from(!inspect_enum(
-        &value, &fieldless, &wide, &optional, &empty,
+        &value, &fieldless, &wide, &optional, &empty, &done, &failed,
     ))
 }
 

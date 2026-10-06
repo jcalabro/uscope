@@ -110,6 +110,55 @@ pub enum ControllerMessage {
     Wait(linux::NativeWait),
 }
 
+impl ControllerMessage {
+    /// Whether the controller serves the message before inspection queued
+    /// ahead of it: run control, and the process events run control
+    /// classifies (§3.11 of `plans/views.md`). A burst of inspection never
+    /// delays a step.
+    pub(crate) const fn preempts_inspection(&self) -> bool {
+        matches!(
+            self,
+            Self::Wait(_)
+                | Self::Request(
+                    Request::Continue { .. }
+                        | Request::Step { .. }
+                        | Request::Pause { .. }
+                        | Request::Kill { .. }
+                        | Request::Terminate { .. }
+                        | Request::Shutdown { .. }
+                )
+        )
+    }
+
+    /// Whether the message only reads one stop, which it names, so it may
+    /// wait behind run control that arrives after it, and then fails as a
+    /// request for an old stop does.
+    pub(crate) const fn reads_one_stop(&self) -> bool {
+        matches!(
+            self,
+            Self::Request(
+                Request::Variables { .. }
+                    | Request::Evaluate {
+                        mode: crate::EvaluationMode::Read,
+                        ..
+                    }
+                    | Request::ExpressionType { .. }
+                    | Request::ExplainView { .. }
+                    | Request::RecordKernels { .. }
+                    | Request::Dereference { .. }
+                    | Request::ValueChildren { .. }
+                    | Request::Backtrace { .. }
+                    | Request::Registers { .. }
+                    | Request::ReadMemory { .. }
+                    | Request::ReadWord { .. }
+                    | Request::Disassemble { .. }
+                    | Request::DescribeAddress { .. }
+                    | Request::StoppedLocation { .. }
+            )
+        )
+    }
+}
+
 /// The channels a controller serves.
 pub struct ControllerChannels {
     /// Lets the controller's waiter thread queue native events.
