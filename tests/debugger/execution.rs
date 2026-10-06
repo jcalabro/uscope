@@ -1659,3 +1659,62 @@ async fn a_line_breakpoint_stops_where_the_line_begins_not_at_its_later_statemen
     assert_eq!(hits, [loop_start.id, body.id]);
     scenario.shutdown().await;
 }
+
+fn assert_basic_source_context(
+    context: &SourceContext,
+    source_file: &SourceFile,
+    source: &SourceLocation,
+) {
+    let current = context
+        .lines
+        .iter()
+        .find(|line| line.number == context.location.line)
+        .expect("current source line");
+
+    assert_eq!(&context.file, source_file);
+    assert_eq!(&context.location, source);
+    assert_eq!(context.location.line.get(), 6);
+    assert_eq!(current.text.as_ref(), "    return uscope_value;");
+    assert_eq!(
+        context
+            .lines
+            .first()
+            .expect("first source line")
+            .number
+            .get(),
+        3
+    );
+    assert_eq!(
+        context.lines.last().expect("last source line").number.get(),
+        9
+    );
+}
+
+fn assert_register_snapshot(
+    registers: &uscope::RegisterSnapshot,
+    state: &uscope::StateSnapshot,
+    instruction: VirtualAddress,
+) {
+    assert_eq!(registers.revision, state.revision);
+    assert_eq!(registers.target.architecture, Architecture::X86_64);
+    assert_eq!(registers.target.byte_order, ByteOrder::Little);
+    assert_eq!(registers.target.pointer_width, PointerWidth::Bits64);
+    assert_eq!(
+        registers.thread.get(),
+        match &state.inferior {
+            InferiorState::Stopped { process_id, .. } => process_id.get(),
+            _ => panic!("inferior was not stopped"),
+        }
+    );
+    assert_eq!(
+        register_u64(registers, RegisterRole::ProgramCounter),
+        instruction.get()
+    );
+    assert_ne!(register_u64(registers, RegisterRole::StackPointer), 0);
+    assert_ne!(register_u64(registers, RegisterRole::FramePointer), 0);
+    assert!(registers.registers.iter().any(|value| {
+        value.register.name.as_ref() == "rax"
+            && value.register.bits == 64
+            && value.bytes.as_ref().is_some_and(|bytes| bytes.len() == 8)
+    }));
+}
