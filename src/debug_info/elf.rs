@@ -55,8 +55,8 @@ pub fn load_symbols(
     unwind_functions: &[AddressRange<ImageAddress>],
 ) -> SymbolTable {
     let sections = ImageSections {
-        code: code_sections(object),
-        storage: storage_sections(object),
+        code: image_sections(object, is_code),
+        storage: image_sections(object, holds_storage),
     };
     let mut raw = BTreeMap::new();
 
@@ -173,7 +173,7 @@ pub(super) fn executable_ranges(object: &object::File<'_>) -> Vec<AddressRange<I
             end: ImageAddress::new(start.checked_add(size)?),
         })
     };
-    let sections = code_sections(object)
+    let sections = image_sections(object, is_code)
         .into_iter()
         .filter_map(|section| range(section.start, section.end - section.start))
         .collect::<Vec<_>>();
@@ -189,43 +189,36 @@ pub(super) fn executable_ranges(object: &object::File<'_>) -> Vec<AddressRange<I
         .collect()
 }
 
-fn code_sections<'data>(object: &object::File<'data>) -> Vec<ImageSection<'data>> {
+const fn is_code(flags: u64) -> bool {
+    let required = elf::SHF_ALLOC as u64 | elf::SHF_EXECINSTR as u64;
+    flags & required == required
+}
+
+/// Whether a section can hold the storage of data symbols: allocated and
+/// not thread-local.
+const fn holds_storage(flags: u64) -> bool {
+    flags & elf::SHF_ALLOC as u64 != 0 && flags & elf::SHF_TLS as u64 == 0
+}
+
+/// The image's sections whose ELF flags `accept` takes.
+fn image_sections<'data>(
+    object: &object::File<'data>,
+    accept: fn(u64) -> bool,
+) -> Vec<ImageSection<'data>> {
     object
         .sections()
-        .filter_map(|section| code_section(&section))
+        .filter_map(|section| image_section(&section, accept))
         .collect()
 }
 
-/// Returns the allocated, non-thread-local sections that can hold the storage
-/// of data symbols.
-fn storage_sections<'data>(object: &object::File<'data>) -> Vec<ImageSection<'data>> {
-    object
-        .sections()
-        .filter_map(|section| storage_section(&section))
-        .collect()
-}
-
-fn storage_section<'data>(section: &impl ObjectSection<'data>) -> Option<ImageSection<'data>> {
+fn image_section<'data>(
+    section: &impl ObjectSection<'data>,
+    accept: fn(u64) -> bool,
+) -> Option<ImageSection<'data>> {
     let SectionFlags::Elf { sh_flags } = section.flags() else {
         return None;
     };
-    if sh_flags & u64::from(elf::SHF_ALLOC) == 0 || sh_flags & u64::from(elf::SHF_TLS) != 0 {
-        return None;
-    }
-    let start = section.address();
-    Some(ImageSection {
-        name: section.name_bytes().ok()?,
-        start,
-        end: start.checked_add(section.size())?,
-    })
-}
-
-fn code_section<'data>(section: &impl ObjectSection<'data>) -> Option<ImageSection<'data>> {
-    let SectionFlags::Elf { sh_flags } = section.flags() else {
-        return None;
-    };
-    let required = u64::from(elf::SHF_ALLOC | elf::SHF_EXECINSTR);
-    if sh_flags & required != required {
+    if !accept(sh_flags) {
         return None;
     }
     let start = section.address();
@@ -314,13 +307,13 @@ fn collect<'data, S>(
         let code_section = matches!(kind, SymbolKind::Function | SymbolKind::IndirectFunction)
             .then_some(defining.as_ref())
             .flatten()
-            .and_then(code_section)
+            .and_then(|section| image_section(section, is_code))
             .filter(|section| image_sections.code.contains(section))
             .map(|section| (section.start, section.end));
         let storage_section = (kind == SymbolKind::Data)
             .then_some(defining.as_ref())
             .flatten()
-            .and_then(storage_section)
+            .and_then(|section| image_section(section, holds_storage))
             .filter(|section| image_sections.storage.contains(section))
             .map(|section| (section.start, section.end));
         // Symbols are keyed by their name bytes so that names which are not
@@ -468,8 +461,8 @@ pub(super) fn fuzz(data: &[u8]) {
         return;
     };
     let table = load_symbols(&object, &unwind);
-    let sections = code_sections(&object);
-    let storage_sections = storage_sections(&object);
+    let sections = image_sections(&object, is_code);
+    let storage_sections = image_sections(&object, holds_storage);
     for (index, symbol) in table.symbols.iter().enumerate() {
         assert_eq!(
             symbol.id,
