@@ -8,6 +8,7 @@ mod execution;
 mod expressions;
 #[cfg(debug_assertions)]
 mod flight_recorder;
+mod gallery;
 mod globals;
 mod identities;
 mod libraries;

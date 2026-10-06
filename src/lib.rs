@@ -76,13 +76,13 @@ pub use model::{
     PointerWidth, Presentation, PresentedCount, PresentedShape, RecordKind, RecordMember,
     RecordMemberLayout, ReferenceKind, RegisterDescriptor, RegisterId, RegisterRole,
     RegisterSnapshot, RegisterValue, RuntimeId, ScalarValue, SectionId, SectionInfo,
-    SectionLocation, SourceContext, SourceFile, SourceFileId, SourceLanguage, SourceLine,
-    SourceLocation, StackFrame, StackFrameId, StatementFlags, StatementRow, SymbolBinding,
-    SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo, SymbolKind, SymbolLocation,
-    SymbolTableSources, TargetDescription, TaskCursor, TaskId, TaskLocation, TaskPage,
-    TaskSnapshot, TaskStack, TaskState, TextCompletion, TextSummary, ThreadActivity, ThreadId,
-    TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo, TypeKind, TypeModifier,
-    TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
+    SectionLocation, ShapeUnresolvedReason, SourceContext, SourceFile, SourceFileId,
+    SourceLanguage, SourceLine, SourceLocation, StackFrame, StackFrameId, StatementFlags,
+    StatementRow, SymbolBinding, SymbolExtent, SymbolExtentProvenance, SymbolId, SymbolInfo,
+    SymbolKind, SymbolLocation, SymbolTableSources, TargetDescription, TaskCursor, TaskId,
+    TaskLocation, TaskPage, TaskSnapshot, TaskStack, TaskState, TextCompletion, TextSummary,
+    ThreadActivity, ThreadId, TlsUnavailableReason, TypeArgument, TypeId, TypeIdentity, TypeInfo,
+    TypeKind, TypeModifier, TypeNode, TypeReference, UnsupportedVariableFeature, UnwindTermination,
     ValueAccessUnavailableReason, ValueBitRange, ValueChild, ValueChildPage,
     ValueChildRelationship, ValueChildren, ValueChildrenReference, Variable, VariableInvalidReason,
     VariableKind, VariableMalformedKind, VariableMalformedReason, VariableSnapshot, VariableState,
@@ -103,8 +103,8 @@ pub use protocol::{
 };
 pub use source_map::SourcePathMap;
 pub use view::summary::{
-    float as float_text, integer as integer_text, quoted as quoted_text, scalar as scalar_text,
-    value as value_summary,
+    float as float_text, function as function_text, integer as integer_text, quoted as quoted_text,
+    scalar as scalar_text, symbol as symbol_text, value as value_summary,
 };
 pub use view::syntax::Error as ViewFileError;
 

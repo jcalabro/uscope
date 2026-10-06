@@ -667,6 +667,9 @@ impl World {
                 BaseTypeEncoding::Unsigned | BaseTypeEncoding::UnsignedCharacter => {
                     ScalarValue::Unsigned(raw)
                 }
+                BaseTypeEncoding::ComplexFloating => {
+                    unreachable!("the fake program has no complex numbers")
+                }
                 BaseTypeEncoding::Floating => ScalarValue::Floating(match bytes.len() {
                     4 => FloatValue::Binary32(u32::try_from(raw).expect("four bytes")),
                     8 => FloatValue::Binary64(u64::try_from(raw).expect("eight bytes")),

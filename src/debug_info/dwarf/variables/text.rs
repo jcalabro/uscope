@@ -19,6 +19,7 @@ use crate::{
 };
 
 use super::codec::{decode_address, unsigned_value};
+use super::pieces::unavailable_within;
 use super::shape::ValueShape;
 use super::{DwarfVariableInfo, VariableRuntime};
 use crate::debug_info::TextLocation;
@@ -136,11 +137,16 @@ impl TextReader<'_> {
                 Some(self.read_exact(address, size))
             }
             ValueStorage::Bytes {
-                raw, start, end, ..
+                raw,
+                start,
+                end,
+                unavailable,
+                ..
             } => {
                 let first = start.checked_add(usize::try_from(offset).ok()?)?;
                 let last = first.checked_add(size)?;
-                (last <= *end).then(|| Ok(raw[first..last].to_vec()))
+                (last <= *end && unavailable_within(unavailable, first, size).is_none())
+                    .then(|| Ok(raw[first..last].to_vec()))
             }
             ValueStorage::ImplicitPointer { .. } => None,
         }
@@ -479,6 +485,10 @@ mod tests {
 
         fn relocate(&self, address: ImageAddress) -> Result<VirtualAddress, Arc<str>> {
             Ok(VirtualAddress::new(address.get()))
+        }
+
+        fn image_address(&self, _: VirtualAddress) -> Option<ImageAddress> {
+            None
         }
 
         fn read_memory(

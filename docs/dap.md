@@ -27,7 +27,7 @@ Over TCP the adapter refuses a connection that sends an `Origin` header, which o
 - **Execution.** Continue, pause, step over, into, and out, by line or by instruction. The debugger is all-stop: every thread stops and resumes together, unless a request names a single thread (`singleThread`). A program that executes itself again is followed with its breakpoints.
 - **Inspection.**
   - Threads with names, and stack traces through libraries and inlined calls, with the frames' parameters, lines, and modules when a client asks.
-  - Arguments, locals, statics, and registers, with the text of strings. Each row's `evaluateName` reaches exactly that variable: a static that a local shadows is named from the outermost scope, such as `::count`, or with its file, such as `` ::`main.c::count` ``, and a variable an inner block hides has none. A register's row is named `$rax` and is read-only.
+  - Arguments, locals, statics, and registers, with the text of strings. Each row's `evaluateName` reaches exactly that variable: a static that a local shadows is named from the outermost scope, such as `::count`, or with its file, such as `` ::`main.c::count` ``, and a variable an inner block hides has none. A register's row is named `$rax` and is read-only. A Go function's results, such as `~r0`, are among its arguments.
   - Containers presented by [views](views.md): a vector's elements as indexed variables, paged by the client's `filter`, `start`, and `count`, and its fields and `[raw]`, the value as stored, as named ones.
   - Hover, watch, clipboard, and debug console evaluation in the [expression language](expressions.md).
   - Integers in hexadecimal, per request with `format` or for the session with the `uscope/setValueFormat` request (`{"hex": true}`).

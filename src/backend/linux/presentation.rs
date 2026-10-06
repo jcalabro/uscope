@@ -1800,6 +1800,7 @@ impl<'a, P: InspectionOps> StopMachine<'a, '_, P> {
                 start: 0,
                 end: raw.len(),
                 address: None,
+                unavailable: Arc::from([]),
             },
             _ => return None,
         };
