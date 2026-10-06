@@ -1611,9 +1611,8 @@ impl DwarfVariableInfo {
                 ));
             }
         };
-        let mut state =
+        let state =
             self.materialize_value_state(type_id, &shape, storage, context, runtime, budget)?;
-        self.constrain_dereference(&mut state, &shape);
         Ok(inspected_value(Some(type_info), state, budget))
     }
 
@@ -1634,7 +1633,8 @@ impl DwarfVariableInfo {
         }
     }
 
-    /// Materializes a value, with its text when it is a string.
+    /// Materializes a value, with its text when it is a string, and checks
+    /// that a pointer can be dereferenced.
     fn materialize_value_state(
         &self,
         type_id: TypeId,
@@ -1651,6 +1651,7 @@ impl DwarfVariableInfo {
                 .text_summary(type_id, shape, value, storage, runtime, budget)
                 .map(Arc::new);
         }
+        self.constrain_dereference(&mut state, shape);
         Ok(state)
     }
 
@@ -1992,13 +1993,8 @@ impl DwarfVariableInfo {
             Err(error) => evaluate_error_state(error, VariableMalformedKind::InvalidExpression)?,
             Ok(storage) => match self.value_shape(type_id) {
                 Err(error) => shape_error_state(error),
-                Ok(shape) => {
-                    let mut state = self.materialize_value_state(
-                        type_id, &shape, &storage, context, runtime, budget,
-                    )?;
-                    self.constrain_dereference(&mut state, &shape);
-                    state
-                }
+                Ok(shape) => self
+                    .materialize_value_state(type_id, &shape, &storage, context, runtime, budget)?,
             },
         };
         Ok(ValueChild {
@@ -2320,56 +2316,44 @@ impl DwarfVariableInfo {
         frame_base_cache: &mut FrameBaseCache,
         budget: &mut InspectionBudget,
     ) -> Result<Variable> {
-        if let Some(description) = &variable.malformed {
-            return Ok(malformed(variable, None, Arc::clone(description)));
-        }
-        let type_id = match &variable.type_info {
-            TypeResolution::Resolved(id) => *id,
-            TypeResolution::Malformed(description) => {
-                return Ok(malformed(variable, None, Arc::clone(description)));
+        let invalid = |description| {
+            VariableState::Malformed(malformed_reason(
+                VariableMalformedKind::InvalidAttribute,
+                description,
+            ))
+        };
+        let type_id = match (&variable.malformed, &variable.type_info) {
+            (Some(description), _) | (None, TypeResolution::Malformed(description)) => {
+                return Ok(data_object(
+                    variable,
+                    None,
+                    invalid(Arc::clone(description)),
+                ));
             }
+            (None, TypeResolution::Resolved(id)) => *id,
         };
         let type_info = match self.type_info(type_id) {
             Ok(info) => info.clone(),
-            Err(description) => return Ok(malformed(variable, None, description)),
+            Err(description) => return Ok(data_object(variable, None, invalid(description))),
         };
-        let shape = match self.value_shape(type_id) {
-            Ok(shape) => shape,
-            Err(ValueShapeError::Malformed(description)) => {
-                return Ok(malformed(variable, Some(type_info), description));
+        let state = match self.value_shape(type_id) {
+            Ok(shape) => {
+                match self.located_data_object(variable, address, runtime, frame_base_cache, budget)
+                {
+                    Ok(storage) => self.materialize_value_state(
+                        type_id, &shape, &storage, context, runtime, budget,
+                    )?,
+                    Err(error) => {
+                        evaluate_error_state(error, VariableMalformedKind::InvalidAttribute)?
+                    }
+                }
             }
-            Err(ValueShapeError::Unsupported(_)) => {
-                return Ok(unavailable(
-                    variable,
-                    Some(type_info),
-                    crate::UnsupportedVariableFeature::TypeRepresentation.into(),
-                ));
-            }
+            Err(ValueShapeError::Malformed(description)) => invalid(description),
+            Err(ValueShapeError::Unsupported(_)) => VariableState::Unavailable(
+                crate::UnsupportedVariableFeature::TypeRepresentation.into(),
+            ),
         };
-        let storage =
-            match self.located_data_object(variable, address, runtime, frame_base_cache, budget) {
-                Ok(storage) => storage,
-                Err(EvaluateError::Unavailable(reason)) => {
-                    return Ok(unavailable(variable, Some(type_info), reason));
-                }
-                Err(EvaluateError::Malformed(description)) => {
-                    return Ok(malformed(variable, Some(type_info), description));
-                }
-                Err(EvaluateError::Fatal(description)) => {
-                    return Err(Error::VariableRuntime(description));
-                }
-            };
-        let mut state =
-            self.materialize_value_state(type_id, &shape, &storage, context, runtime, budget)?;
-        self.constrain_dereference(&mut state, &shape);
-        Ok(Variable {
-            kind: variable.kind,
-            global: None,
-            name: Arc::clone(&variable.name),
-            declaration: variable.declaration.clone(),
-            type_info: Some(type_info),
-            state,
-        })
+        Ok(data_object(variable, Some(type_info), state))
     }
 
     fn constrain_dereference(&self, state: &mut VariableState, shape: &ValueShape) {
@@ -2432,31 +2416,51 @@ impl DwarfVariableInfo {
         runtime: &mut dyn VariableRuntime,
         budget: &mut InspectionBudget,
     ) -> Result<DereferencedValue> {
-        if let Err(exhaustion) = budget.consume_value_nodes(1) {
-            return Ok(DereferencedValue {
-                type_info: self
-                    .type_info(reference.target_type)
-                    .map_err(|reason| Error::debug_info(DwarfError::MalformedVariable(reason)))?
-                    .clone(),
-                state: VariableState::Unavailable(exhaustion.into()),
-                completion: budget.completion(),
-                usage: budget.usage(),
-            });
-        }
         let type_info = self
             .type_info(reference.target_type)
             .map_err(|reason| Error::debug_info(DwarfError::MalformedVariable(reason)))?
             .clone();
+        let state = match budget.consume_value_nodes(1) {
+            Ok(()) => self.dereferenced_state(reference, runtime, budget)?,
+            Err(exhaustion) => VariableState::Unavailable(exhaustion.into()),
+        };
+        Ok(DereferencedValue {
+            type_info,
+            state,
+            completion: budget.completion(),
+            usage: budget.usage(),
+        })
+    }
+
+    fn dereferenced_state(
+        &self,
+        reference: &DereferenceReference,
+        runtime: &mut dyn VariableRuntime,
+        budget: &mut InspectionBudget,
+    ) -> Result<VariableState> {
         let shape = match self.value_shape(reference.target_type) {
             Ok(shape) => shape,
-            Err(error) => {
-                return Ok(DereferencedValue {
-                    type_info,
-                    state: shape_error_state(error),
-                    completion: budget.completion(),
-                    usage: budget.usage(),
-                });
-            }
+            Err(error) => return Ok(shape_error_state(error)),
+        };
+        let storage = match reference.target {
+            crate::model::DereferenceTarget::Address(address) => ValueStorage::Memory(address),
+            crate::model::DereferenceTarget::ImplicitPointer {
+                debug_info_offset,
+                byte_offset,
+            } => match self.resolve_implicit_pointer(
+                debug_info_offset,
+                byte_offset,
+                reference.target_type,
+                reference.context_address,
+                runtime,
+                &mut FrameBaseCache::Empty,
+                budget,
+            ) {
+                Ok(storage) => storage,
+                Err(error) => {
+                    return evaluate_error_state(error, VariableMalformedKind::InvalidExpression);
+                }
+            },
         };
         let context = VariableContext {
             stop_id: reference.stop_id,
@@ -2466,52 +2470,14 @@ impl DwarfVariableInfo {
             image: reference.image,
             address: reference.context_address,
         };
-        let storage = match reference.target {
-            crate::model::DereferenceTarget::Address(address) => ValueStorage::Memory(address),
-            crate::model::DereferenceTarget::ImplicitPointer {
-                debug_info_offset,
-                byte_offset,
-            } => {
-                let mut frame_base = FrameBaseCache::Empty;
-                match self.resolve_implicit_pointer(
-                    debug_info_offset,
-                    byte_offset,
-                    reference.target_type,
-                    reference.context_address,
-                    runtime,
-                    &mut frame_base,
-                    budget,
-                ) {
-                    Ok(storage) => storage,
-                    Err(error) => {
-                        return Ok(DereferencedValue {
-                            type_info,
-                            state: evaluate_error_state(
-                                error,
-                                VariableMalformedKind::InvalidExpression,
-                            )?,
-                            completion: budget.completion(),
-                            usage: budget.usage(),
-                        });
-                    }
-                }
-            }
-        };
-        let mut state = self.materialize_value_state(
+        self.materialize_value_state(
             reference.target_type,
             &shape,
             &storage,
             context,
             runtime,
             budget,
-        )?;
-        self.constrain_dereference(&mut state, &shape);
-        Ok(DereferencedValue {
-            type_info,
-            state,
-            completion: budget.completion(),
-            usage: budget.usage(),
-        })
+        )
     }
 }
 
@@ -2552,10 +2518,10 @@ pub(super) const fn inspected_value(
     }
 }
 
-pub(super) fn unavailable(
+pub(super) fn data_object(
     variable: &CatalogDataObject,
     type_info: Option<TypeInfo>,
-    reason: VariableUnavailableReason,
+    state: VariableState,
 ) -> Variable {
     Variable {
         kind: variable.kind,
@@ -2563,24 +2529,6 @@ pub(super) fn unavailable(
         name: Arc::clone(&variable.name),
         declaration: variable.declaration.clone(),
         type_info,
-        state: VariableState::Unavailable(reason),
-    }
-}
-
-pub(super) fn malformed(
-    variable: &CatalogDataObject,
-    type_info: Option<TypeInfo>,
-    description: Arc<str>,
-) -> Variable {
-    Variable {
-        kind: variable.kind,
-        global: None,
-        name: Arc::clone(&variable.name),
-        declaration: variable.declaration.clone(),
-        type_info,
-        state: VariableState::Malformed(malformed_reason(
-            VariableMalformedKind::InvalidAttribute,
-            description,
-        )),
+        state,
     }
 }
