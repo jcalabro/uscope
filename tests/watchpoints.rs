@@ -11,8 +11,12 @@ use uscope::{
 };
 
 /// The single-threaded fixture across the compiler, optimization, and PIE
-/// matrix. Each phase function performs one kind of access.
+/// matrix, for what the compiler decides: where variables live and how
+/// steps cross its code. Each phase function performs one kind of access.
 const MATRIX: [&str; 3] = ["watch-gcc-o0", "watch-clang-o2", "watch-gcc-o2-nopie"];
+/// One build, for phases written in assembly or made of system calls, and
+/// for the debugger's own bookkeeping.
+const FIXTURE: &str = MATRIX[0];
 
 fn expression(text: &str) -> uscope::Expression {
     uscope::Expression::parse(text).expect("valid test expression")
@@ -23,22 +27,6 @@ async fn watch(scenario: &Scenario, text: &str, access: WatchAccess) -> Watchpoi
         .operation(
             &format!("watch {text}"),
             scenario.handle().watch(&expression(text), access),
-        )
-        .await
-}
-
-async fn watch_location(
-    scenario: &Scenario,
-    address: VirtualAddress,
-    byte_size: u64,
-) -> Watchpoint {
-    scenario
-        .operation(
-            "watch location",
-            scenario.handle().add_watchpoint(
-                WatchpointSpec::Location { address, byte_size },
-                WatchAccess::Write,
-            ),
         )
         .await
 }
@@ -101,21 +89,7 @@ async fn program_counter(scenario: &Scenario) -> u64 {
     let registers = scenario
         .operation("read registers", scenario.handle().registers())
         .await;
-    registers
-        .registers
-        .iter()
-        .find(|register| register.register.role == Some(RegisterRole::ProgramCounter))
-        .map(|register| {
-            let mut word = [0_u8; 8];
-            word.copy_from_slice(
-                &register
-                    .bytes
-                    .as_ref()
-                    .expect("innermost registers are saved")[..8],
-            );
-            u64::from_le_bytes(word)
-        })
-        .expect("program counter is readable")
+    support::register_u64(&registers, RegisterRole::ProgramCounter)
 }
 
 async fn stopped_function(scenario: &Scenario) -> Option<String> {
@@ -270,665 +244,606 @@ async fn write_watchpoints_report_every_store_after_its_instruction() {
 
 #[tokio::test]
 async fn watch_ranges_split_into_aligned_slots_until_capacity_runs_out() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "size_stores").await;
-        let capabilities = scenario.handle().watchpoint_capabilities();
-        assert_eq!(capabilities.slots, 4);
-        assert_eq!(capabilities.max_slot_bytes, 8);
-        let kinds = [
-            WatchAccess::Change,
-            WatchAccess::Write,
-            WatchAccess::ReadWrite,
-        ];
-        assert_eq!(capabilities.access.as_ref(), kinds);
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "size_stores").await;
+    let capabilities = scenario.handle().watchpoint_capabilities();
+    assert_eq!(capabilities.slots, 4);
+    assert_eq!(capabilities.max_slot_bytes, 8);
+    let kinds = [
+        WatchAccess::Change,
+        WatchAccess::Write,
+        WatchAccess::ReadWrite,
+    ];
+    assert_eq!(capabilities.access.as_ref(), kinds);
 
+    // A C array carries no size of its own: its size is its elements'.
+    for text in ["watch_oversized", "watch_oversized.bytes"] {
         let oversized = scenario
             .handle()
-            .watch(&expression("watch_oversized"), WatchAccess::Write)
+            .watch(&expression(text), WatchAccess::Write)
             .await;
         assert!(
             matches!(oversized, Err(Error::WatchpointCapacity { required, available: 4 }) if required > 4),
-            "{fixture}: {oversized:?}"
+            "{text}: {oversized:?}"
         );
-        let byte = watch(&scenario, "watch_u8", WatchAccess::Write).await;
-        let half = watch(&scenario, "watch_u16", WatchAccess::Write).await;
-        let word = watch(&scenario, "watch_u64", WatchAccess::Write).await;
-        assert_eq!(
-            [byte.byte_size, half.byte_size, word.byte_size],
-            [1, 2, 8],
-            "{fixture}"
-        );
-        let packed = scenario
-            .handle()
-            .watch(&expression("watch_packed.field"), WatchAccess::Write)
-            .await;
-        assert!(
-            matches!(
-                packed,
-                Err(Error::WatchpointCapacity {
-                    required: 3,
-                    available: 1
-                })
-            ),
-            "{fixture}: {packed:?}"
-        );
-        assert_eq!(scenario.snapshot().await.watchpoints.len(), 3);
-
-        for id in [byte.id, half.id] {
-            scenario
-                .operation("free slots", scenario.handle().remove_watchpoint(id))
-                .await;
-        }
-        let packed = watch(&scenario, "watch_packed.field", WatchAccess::Write).await;
-        assert_eq!(packed.byte_size, 4);
-        assert_eq!(
-            packed.address.get() % 8,
-            1,
-            "{fixture}: the field is misaligned"
-        );
-        assert_eq!(
-            packed
-                .coverage
-                .iter()
-                .map(|range| range.end.get() - range.start.get())
-                .collect::<Vec<_>>(),
-            [1, 2, 1],
-            "{fixture}: an exact cover of naturally aligned spans"
-        );
-        assert!(matches!(
-            scenario
-                .handle()
-                .watch(&expression("watch_array[3]"), WatchAccess::Write)
-                .await,
+    }
+    let words = watch(&scenario, "watch_wide.words", WatchAccess::Write).await;
+    assert_eq!((words.byte_size, words.coverage.len()), (32, 4));
+    scenario
+        .operation("free slots", scenario.handle().remove_watchpoint(words.id))
+        .await;
+    let byte = watch(&scenario, "watch_u8", WatchAccess::Write).await;
+    let half = watch(&scenario, "watch_u16", WatchAccess::Write).await;
+    let word = watch(&scenario, "watch_u64", WatchAccess::Write).await;
+    assert_eq!([byte.byte_size, half.byte_size, word.byte_size], [1, 2, 8]);
+    let packed = scenario
+        .handle()
+        .watch(&expression("watch_packed.field"), WatchAccess::Write)
+        .await;
+    assert!(
+        matches!(
+            packed,
             Err(Error::WatchpointCapacity {
-                required: 1,
-                available: 0
+                required: 3,
+                available: 1
             })
-        ));
+        ),
+        "{packed:?}"
+    );
+    assert_eq!(scenario.snapshot().await.watchpoints.len(), 3);
 
-        assert_single_hit(
-            &scenario.resume_to_stop().await,
-            word.id,
-            0x1111_1111_1111_1111,
-            0x4444_4444_4444_4444,
-        );
+    for id in [byte.id, half.id] {
         scenario
-            .operation("free a slot", scenario.handle().remove_watchpoint(word.id))
+            .operation("free slots", scenario.handle().remove_watchpoint(id))
             .await;
-        let element = watch(&scenario, "watch_array[3]", WatchAccess::Write).await;
-        assert_eq!(
-            element.address.get(),
-            symbol(&scenario, "watch_array").await.get() + 12
-        );
-        assert_single_hit(&scenario.resume_to_stop().await, packed.id, 0, 0x5555_5555);
-        assert_single_hit(&scenario.resume_to_stop().await, element.id, 0, 33);
-
-        let removed = scenario
-            .operation(
-                "remove all watchpoints",
-                scenario.handle().remove_all_watchpoints(),
-            )
-            .await;
-        assert_eq!(removed.len(), 2);
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
     }
-}
-
-/// C arrays carry no size of their own: theirs is their elements'.
-#[tokio::test]
-async fn whole_arrays_are_watched_by_their_elements_size() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "size_stores").await;
-        let bytes = scenario
+    let packed = watch(&scenario, "watch_packed.field", WatchAccess::Write).await;
+    assert_eq!(packed.byte_size, 4);
+    assert_eq!(packed.address.get() % 8, 1, "the field is misaligned");
+    assert_eq!(
+        packed
+            .coverage
+            .iter()
+            .map(|range| range.end.get() - range.start.get())
+            .collect::<Vec<_>>(),
+        [1, 2, 1],
+        "an exact cover of naturally aligned spans"
+    );
+    assert!(matches!(
+        scenario
             .handle()
-            .watch(&expression("watch_oversized.bytes"), WatchAccess::Write)
-            .await;
-        assert!(
-            matches!(bytes, Err(Error::WatchpointCapacity { required, available: 4 }) if required > 4),
-            "{fixture}: {bytes:?}"
-        );
-        let words = watch(&scenario, "watch_wide.words", WatchAccess::Write).await;
-        assert_eq!(
-            (words.byte_size, words.coverage.len()),
-            (32, 4),
-            "{fixture}"
-        );
-        scenario
-            .operation("free slots", scenario.handle().remove_watchpoint(words.id))
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+            .watch(&expression("watch_array[3]"), WatchAccess::Write)
+            .await,
+        Err(Error::WatchpointCapacity {
+            required: 1,
+            available: 0
+        })
+    ));
+
+    assert_single_hit(
+        &scenario.resume_to_stop().await,
+        word.id,
+        0x1111_1111_1111_1111,
+        0x4444_4444_4444_4444,
+    );
+    scenario
+        .operation("free a slot", scenario.handle().remove_watchpoint(word.id))
+        .await;
+    let element = watch(&scenario, "watch_array[3]", WatchAccess::Write).await;
+    assert_eq!(
+        element.address.get(),
+        symbol(&scenario, "watch_array").await.get() + 12
+    );
+    assert_single_hit(&scenario.resume_to_stop().await, packed.id, 0, 0x5555_5555);
+    assert_single_hit(&scenario.resume_to_stop().await, element.id, 0, 33);
+
+    let removed = scenario
+        .operation(
+            "remove all watchpoints",
+            scenario.handle().remove_all_watchpoints(),
+        )
+        .await;
+    assert_eq!(removed.len(), 2);
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn one_store_reports_every_watchpoint_it_touches() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "paired_store").await;
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "paired_store").await;
 
-        let first = watch(&scenario, "watch_pair.first", WatchAccess::Write).await;
-        let second = watch(&scenario, "watch_pair.second", WatchAccess::Write).await;
-        // The whole record shares both members' slots.
-        let pair = watch(&scenario, "watch_pair", WatchAccess::Write).await;
-        assert_eq!(pair.byte_size, 16);
-        // Two slots remain, so a further 16 bytes fit and then nothing does.
-        let wide = watch(&scenario, "watch_wide.words[2]", WatchAccess::Write).await;
-        let spare = watch(&scenario, "watch_wide.words[3]", WatchAccess::Write).await;
-        assert!(matches!(
-            scenario
-                .handle()
-                .watch(&expression("watch_u8"), WatchAccess::Write)
-                .await,
-            Err(Error::WatchpointCapacity {
-                required: 1,
-                available: 0
-            })
-        ));
-        for id in [wide.id, spare.id] {
-            scenario
-                .operation("remove spare", scenario.handle().remove_watchpoint(id))
-                .await;
-        }
-
-        let reason = scenario.resume_to_stop().await;
-        let reported = hits(&reason)
-            .iter()
-            .map(|hit| (hit.watchpoint, hit.changed()))
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(
-            reported,
-            BTreeMap::from([(first.id, true), (second.id, true), (pair.id, true)]),
-            "{fixture}: one 16-byte store must report all three watchpoints"
-        );
-        let pair_hit = hits(&reason)
-            .iter()
-            .find(|hit| hit.watchpoint == pair.id)
-            .expect("pair hit");
-        assert_eq!(pair_hit.current.as_deref(), Some(&[0xff_u8; 16][..]));
-        assert_eq!(pair_hit.previous.as_deref(), Some(&[0_u8; 16][..]));
-
+    let first = watch(&scenario, "watch_pair.first", WatchAccess::Write).await;
+    let second = watch(&scenario, "watch_pair.second", WatchAccess::Write).await;
+    // The whole record shares both members' slots.
+    let pair = watch(&scenario, "watch_pair", WatchAccess::Write).await;
+    assert_eq!(pair.byte_size, 16);
+    // Two slots remain, so a further 16 bytes fit and then nothing does.
+    let wide = watch(&scenario, "watch_wide.words[2]", WatchAccess::Write).await;
+    let spare = watch(&scenario, "watch_wide.words[3]", WatchAccess::Write).await;
+    assert!(matches!(
         scenario
-            .operation("remove all", scenario.handle().remove_all_watchpoints())
+            .handle()
+            .watch(&expression("watch_u8"), WatchAccess::Write)
+            .await,
+        Err(Error::WatchpointCapacity {
+            required: 1,
+            available: 0
+        })
+    ));
+    for id in [wide.id, spare.id] {
+        scenario
+            .operation("remove spare", scenario.handle().remove_watchpoint(id))
             .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
     }
+
+    let reason = scenario.resume_to_stop().await;
+    let reported = hits(&reason)
+        .iter()
+        .map(|hit| (hit.watchpoint, hit.changed()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        reported,
+        BTreeMap::from([(first.id, true), (second.id, true), (pair.id, true)]),
+        "one 16-byte store must report all three watchpoints"
+    );
+    let pair_hit = hits(&reason)
+        .iter()
+        .find(|hit| hit.watchpoint == pair.id)
+        .expect("pair hit");
+    assert_eq!(pair_hit.current.as_deref(), Some(&[0xff_u8; 16][..]));
+    assert_eq!(pair_hit.previous.as_deref(), Some(&[0_u8; 16][..]));
+
+    scenario
+        .operation("remove all", scenario.handle().remove_all_watchpoints())
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn accesses_that_do_not_change_the_value_are_still_reported() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "failed_exchange").await;
-        let watchpoint = watch(&scenario, "watch_u64", WatchAccess::Write).await;
-        let reason = scenario.resume_to_stop().await;
-        // A failing locked compare-exchange still writes its destination.
-        assert_single_hit(
-            &reason,
-            watchpoint.id,
-            0x4444_4444_4444_4444,
-            0x4444_4444_4444_4444,
-        );
-        assert_eq!(
-            stopped_function(&scenario).await.as_deref(),
-            Some("failed_exchange")
-        );
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "failed_exchange").await;
+    let watchpoint = watch(&scenario, "watch_u64", WatchAccess::Write).await;
+    let reason = scenario.resume_to_stop().await;
+    // A failing locked compare-exchange still writes its destination.
+    assert_single_hit(
+        &reason,
+        watchpoint.id,
+        0x4444_4444_4444_4444,
+        0x4444_4444_4444_4444,
+    );
+    assert_eq!(
+        stopped_function(&scenario).await.as_deref(),
+        Some("failed_exchange")
+    );
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn repeated_string_stores_report_each_iteration_at_the_string_instruction() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "repeated_store").await;
-        let watchpoint = watch(&scenario, "watch_wide.words[1]", WatchAccess::Write).await;
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "repeated_store").await;
+    let watchpoint = watch(&scenario, "watch_wide.words[1]", WatchAccess::Write).await;
 
-        let mut previous = 0_u64;
-        let mut program_counters = BTreeSet::new();
-        for written in 1..=8_u32 {
-            let reason = scenario.resume_to_stop().await;
-            let current = u64::from_le_bytes(std::array::from_fn(|index| {
-                if index < written as usize { 0x41 } else { 0 }
-            }));
-            assert_single_hit(&reason, watchpoint.id, previous, current);
-            previous = current;
-            program_counters.insert(program_counter(&scenario).await);
-        }
-        assert_eq!(
-            program_counters.len(),
-            1,
-            "{fixture}: every iteration stops at the unfinished string instruction"
-        );
-
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
+    let mut previous = 0_u64;
+    let mut program_counters = BTreeSet::new();
+    for written in 1..=8_u32 {
+        let reason = scenario.resume_to_stop().await;
+        let current = u64::from_le_bytes(std::array::from_fn(|index| {
+            if index < written as usize { 0x41 } else { 0 }
+        }));
+        assert_single_hit(&reason, watchpoint.id, previous, current);
+        previous = current;
+        program_counters.insert(program_counter(&scenario).await);
     }
+    assert_eq!(
+        program_counters.len(),
+        1,
+        "every iteration stops at the unfinished string instruction"
+    );
+
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn access_watchpoints_report_loads_and_read_only_watches_are_refused() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "read_access").await;
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "read_access").await;
 
-        let address = symbol(&scenario, "watch_i32").await;
-        for result in [
-            scenario
-                .handle()
-                .watch(&expression("watch_i32"), WatchAccess::Read)
-                .await,
-            scenario
-                .handle()
-                .add_watchpoint(
-                    WatchpointSpec::Location {
-                        address,
-                        byte_size: 4,
-                    },
-                    WatchAccess::Read,
-                )
-                .await,
-        ] {
-            assert!(
-                matches!(
-                    result,
-                    Err(Error::UnsupportedWatchAccess(WatchAccess::Read))
-                ),
-                "{fixture}: {result:?}"
-            );
-        }
-        assert!(scenario.snapshot().await.watchpoints.is_empty());
-
-        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::ReadWrite).await;
-        assert_eq!(watchpoint.access, WatchAccess::ReadWrite);
-        let reason = scenario.resume_to_stop().await;
-        assert_single_hit(&reason, watchpoint.id, 42, 42);
-        assert_eq!(
-            stopped_function(&scenario).await.as_deref(),
-            Some("read_access")
-        );
+    let address = symbol(&scenario, "watch_i32").await;
+    for result in [
         scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
+            .handle()
+            .watch(&expression("watch_i32"), WatchAccess::Read)
+            .await,
+        scenario
+            .handle()
+            .add_watchpoint(
+                WatchpointSpec::Location {
+                    address,
+                    byte_size: 4,
+                },
+                WatchAccess::Read,
             )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
+            .await,
+    ] {
+        assert!(
+            matches!(
+                result,
+                Err(Error::UnsupportedWatchAccess(WatchAccess::Read))
+            ),
+            "{result:?}"
+        );
     }
+    assert!(scenario.snapshot().await.watchpoints.is_empty());
+
+    let watchpoint = watch(&scenario, "watch_i32", WatchAccess::ReadWrite).await;
+    assert_eq!(watchpoint.access, WatchAccess::ReadWrite);
+    let reason = scenario.resume_to_stop().await;
+    assert_single_hit(&reason, watchpoint.id, 42, 42);
+    assert_eq!(
+        stopped_function(&scenario).await.as_deref(),
+        Some("read_access")
+    );
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn expression_watchpoints_keep_watching_the_location_they_resolved() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "retarget_pointer").await;
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "retarget_pointer").await;
 
-        let target = scenario
-            .operation(
-                "resolve pointee",
-                scenario
-                    .handle()
-                    .resolve_watch_target(&expression("*watch_pointer")),
-            )
-            .await;
-        assert_eq!(target.address(), symbol(&scenario, "pointee_first").await);
-        assert_eq!(target.byte_size(), 4);
-        assert_eq!(
-            target.scope(),
-            &WatchScope::Location,
-            "{fixture}: storage reached through a pointer has no known lifetime"
-        );
-        let watchpoint = scenario
-            .operation(
-                "watch pointee",
-                scenario
-                    .handle()
-                    .add_watchpoint(WatchpointSpec::Target(Box::new(target)), WatchAccess::Write),
-            )
-            .await;
+    let target = scenario
+        .operation(
+            "resolve pointee",
+            scenario
+                .handle()
+                .resolve_watch_target(&expression("*watch_pointer")),
+        )
+        .await;
+    assert_eq!(target.address(), symbol(&scenario, "pointee_first").await);
+    assert_eq!(target.byte_size(), 4);
+    assert_eq!(
+        target.scope(),
+        &WatchScope::Location,
+        "storage reached through a pointer has no known lifetime"
+    );
+    let watchpoint = scenario
+        .operation(
+            "watch pointee",
+            scenario
+                .handle()
+                .add_watchpoint(WatchpointSpec::Target(Box::new(target)), WatchAccess::Write),
+        )
+        .await;
 
-        // `*watch_pointer = 2` writes the second pointee and is not reported.
-        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 0, 1);
-        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 1, 3);
+    // `*watch_pointer = 2` writes the second pointee and is not reported.
+    assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 0, 1);
+    assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 1, 3);
 
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn kernel_writes_are_invisible_so_previous_is_the_last_observed_value() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "kernel_write").await;
-        let watchpoint = watch(&scenario, "watch_u64", WatchAccess::Write).await;
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "kernel_write").await;
+    let watchpoint = watch(&scenario, "watch_u64", WatchAccess::Write).await;
 
-        // read(2) stores 0x1234 inside the kernel without a hit; the next
-        // report is the user-mode increment, measured against the value the
-        // debugger last observed before resuming.
-        let reason = scenario.resume_to_stop().await;
-        assert_single_hit(&reason, watchpoint.id, 0x4444_4444_4444_4444, 0x1235);
-        assert_eq!(
-            stopped_function(&scenario).await.as_deref(),
-            Some("kernel_write")
-        );
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+    // read(2) stores 0x1234 inside the kernel without a hit; the next
+    // report is the user-mode increment, measured against the value the
+    // debugger last observed before resuming.
+    let reason = scenario.resume_to_stop().await;
+    assert_single_hit(&reason, watchpoint.id, 0x4444_4444_4444_4444, 0x1235);
+    assert_eq!(
+        stopped_function(&scenario).await.as_deref(),
+        Some("kernel_write")
+    );
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn debugger_writes_are_not_reported_but_refresh_the_previous_value() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "scalar_stores").await;
-        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "scalar_stores").await;
+    let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
-        let word = scenario
-            .operation("read word", scenario.handle().read_word(watchpoint.address))
-            .await;
-        scenario
-            .operation(
-                "write watched word",
-                scenario
-                    .handle()
-                    .write_word(watchpoint.address, (word & !0xffff_ffff) | 0x1f4),
-            )
-            .await;
-        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 0x1f4, 1);
+    let word = scenario
+        .operation("read word", scenario.handle().read_word(watchpoint.address))
+        .await;
+    scenario
+        .operation(
+            "write watched word",
+            scenario
+                .handle()
+                .write_word(watchpoint.address, (word & !0xffff_ffff) | 0x1f4),
+        )
+        .await;
+    assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 0x1f4, 1);
 
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn signal_handler_writes_are_reported_inside_the_handler() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "handler_write").await;
-        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "handler_write").await;
+    let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
-        assert!(matches!(
-            scenario.resume_to_stop().await,
-            StopReason::Exception(exception) if exception.code == 10
-        ));
-        let reason = scenario.resume_to_stop().await;
-        assert_single_hit(&reason, watchpoint.id, 42, 99);
-        assert_eq!(
-            stopped_function(&scenario).await.as_deref(),
-            Some("write_in_handler")
-        );
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Exception(exception) if exception.code == 10
+    ));
+    let reason = scenario.resume_to_stop().await;
+    assert_single_hit(&reason, watchpoint.id, 42, 99);
+    assert_eq!(
+        stopped_function(&scenario).await.as_deref(),
+        Some("write_in_handler")
+    );
 
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn a_handler_run_before_a_breakpoint_repair_reports_its_write() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "await_signal").await;
-        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
-        let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
-            panic!("inferior is stopped");
-        };
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "await_signal").await;
+    let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
+    let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
+        panic!("inferior is stopped");
+    };
 
-        // The signal arrives while the thread must still step over its
-        // breakpoint, so the handler runs before the breakpoint is repaired.
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(i32::try_from(process_id.get()).expect("pid fits i32")),
-            nix::sys::signal::Signal::SIGUSR1,
+    // The signal arrives while the thread must still step over its
+    // breakpoint, so the handler runs before the breakpoint is repaired.
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(process_id.get()).expect("pid fits i32")),
+        nix::sys::signal::Signal::SIGUSR1,
+    )
+    .expect("signal the inferior");
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Exception(exception) if exception.code == 10
+    ));
+    assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 99, 99);
+    assert_eq!(
+        stopped_function(&scenario).await.as_deref(),
+        Some("write_in_handler")
+    );
+
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
         )
-        .expect("signal the inferior");
-        assert!(matches!(
-            scenario.resume_to_stop().await,
-            StopReason::Exception(exception) if exception.code == 10
-        ));
-        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 99, 99);
-        assert_eq!(
-            stopped_function(&scenario).await.as_deref(),
-            Some("write_in_handler")
-        );
-
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        // The breakpoint the handler interrupted is repaired without being
-        // reported again.
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+        .await;
+    // The breakpoint the handler interrupted is repaired without being
+    // reported again.
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn a_handler_storing_the_same_value_before_a_breakpoint_repair_is_transparent() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "await_signal").await;
-        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Change).await;
-        let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
-            panic!("inferior is stopped");
-        };
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(i32::try_from(process_id.get()).expect("pid fits i32")),
-            nix::sys::signal::Signal::SIGUSR1,
-        )
-        .expect("signal the inferior");
-        assert!(matches!(
-            scenario.resume_to_stop().await,
-            StopReason::Exception(exception) if exception.code == 10
-        ));
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "await_signal").await;
+    let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Change).await;
+    let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
+        panic!("inferior is stopped");
+    };
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(i32::try_from(process_id.get()).expect("pid fits i32")),
+        nix::sys::signal::Signal::SIGUSR1,
+    )
+    .expect("signal the inferior");
+    assert!(matches!(
+        scenario.resume_to_stop().await,
+        StopReason::Exception(exception) if exception.code == 10
+    ));
 
-        // The handler stores the 99 already there. The thread then returns
-        // to its breakpoint and steps over it, and neither is reported: the
-        // next stop is the fork phase's change.
-        let mut reason = scenario.resume_to_stop().await;
-        while matches!(&reason, StopReason::Exception(exception) if exception.code == 17) {
-            reason = scenario.resume_to_stop().await;
-        }
-        assert_single_hit(&reason, watchpoint.id, 99, 4321);
-        assert_eq!(
-            stopped_function(&scenario).await.as_deref(),
-            Some("fork_write"),
-            "{fixture}"
-        );
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
+    // The handler stores the 99 already there. The thread then returns
+    // to its breakpoint and steps over it, and neither is reported: the
+    // next stop is the fork phase's change.
+    let mut reason = scenario.resume_to_stop().await;
+    while matches!(&reason, StopReason::Exception(exception) if exception.code == 17) {
+        reason = scenario.resume_to_stop().await;
     }
+    assert_single_hit(&reason, watchpoint.id, 99, 4321);
+    assert_eq!(
+        stopped_function(&scenario).await.as_deref(),
+        Some("fork_write")
+    );
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn forked_children_do_not_inherit_watchpoints() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "fork_write").await;
-        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "fork_write").await;
+    let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
-        // A child that inherited the watchpoint would die by SIGTRAP and the
-        // parent would exit 73 instead of storing 4321. Its SIGCHLD does not
-        // stop the parent.
-        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 99, 4321);
+    // A child that inherited the watchpoint would die by SIGTRAP and the
+    // parent would exit 73 instead of storing 4321. Its SIGCHLD does not
+    // stop the parent.
+    assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 99, 4321);
 
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn vdso_writes_are_reported_in_user_mode() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "vdso_write").await;
-        let watchpoint = watch(&scenario, "watch_time", WatchAccess::Write).await;
-        assert_eq!(watchpoint.byte_size, 16);
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "vdso_write").await;
+    let watchpoint = watch(&scenario, "watch_time", WatchAccess::Write).await;
+    assert_eq!(watchpoint.byte_size, 16);
 
-        let reason = scenario.resume_to_stop().await;
-        assert!(
-            hits(&reason)
-                .iter()
-                .all(|hit| hit.watchpoint == watchpoint.id)
-        );
-        let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
-            panic!("inferior is stopped");
-        };
-        let pc = program_counter(&scenario).await;
-        let maps = std::fs::read_to_string(format!("/proc/{process_id}/maps")).expect("maps");
-        let vdso = maps
-            .lines()
-            .find(|line| line.ends_with("[vdso]"))
-            .and_then(|line| line.split_whitespace().next())
-            .and_then(|range| range.split_once('-'))
-            .map(|(start, end)| {
-                (
-                    u64::from_str_radix(start, 16).expect("vdso start"),
-                    u64::from_str_radix(end, 16).expect("vdso end"),
-                )
-            })
-            .expect("the process maps a vDSO");
-        assert!(
-            (vdso.0..vdso.1).contains(&pc),
-            "{fixture}: the store happened in the vDSO, pc {pc:#x} outside {vdso:x?}"
-        );
-
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
+    let reason = scenario.resume_to_stop().await;
+    assert!(
+        hits(&reason)
+            .iter()
+            .all(|hit| hit.watchpoint == watchpoint.id)
+    );
+    let InferiorState::Stopped { process_id, .. } = scenario.snapshot().await.inferior else {
+        panic!("inferior is stopped");
+    };
+    let pc = program_counter(&scenario).await;
+    let maps = std::fs::read_to_string(format!("/proc/{process_id}/maps")).expect("maps");
+    let vdso = maps
+        .lines()
+        .find(|line| line.ends_with("[vdso]"))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|range| range.split_once('-'))
+        .map(|(start, end)| {
+            (
+                u64::from_str_radix(start, 16).expect("vdso start"),
+                u64::from_str_radix(end, 16).expect("vdso end"),
             )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+        })
+        .expect("the process maps a vDSO");
+    assert!(
+        (vdso.0..vdso.1).contains(&pc),
+        "the store happened in the vDSO, pc {pc:#x} outside {vdso:x?}"
+    );
+
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn a_breakpoint_right_after_a_watched_store_is_still_reported() {
-    for fixture in MATRIX {
-        for step_instead in [false, true] {
-            let mut scenario = Scenario::launch(fixture);
-            run_to(&mut scenario, "store_then_breakpoint").await;
-            let after = symbol(&scenario, "after_watched_store").await;
-            scenario
-                .add_breakpoint_spec(BreakpointSpec::Address(after))
-                .await;
-            let watchpoint = watch(&scenario, "watch_u16", WatchAccess::Write).await;
+    for step_instead in [false, true] {
+        let mut scenario = Scenario::launch(FIXTURE);
+        run_to(&mut scenario, "store_then_breakpoint").await;
+        let after = symbol(&scenario, "after_watched_store").await;
+        scenario
+            .add_breakpoint_spec(BreakpointSpec::Address(after))
+            .await;
+        let watchpoint = watch(&scenario, "watch_u16", WatchAccess::Write).await;
 
-            assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 0x2222, 7);
-            assert_eq!(program_counter(&scenario).await, after.get());
-            let next = if step_instead {
-                scenario.step_to_stop(StepKind::Instruction).await
-            } else {
-                scenario.resume_to_stop().await
-            };
-            assert_eq!(
-                support::breakpoint_address(&next),
-                after,
-                "{fixture}: the breakpoint at the next instruction is not skipped"
-            );
-            scenario.shutdown().await;
-        }
+        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 0x2222, 7);
+        assert_eq!(program_counter(&scenario).await, after.get());
+        let next = if step_instead {
+            scenario.step_to_stop(StepKind::Instruction).await
+        } else {
+            scenario.resume_to_stop().await
+        };
+        assert_eq!(
+            support::breakpoint_address(&next),
+            after,
+            "the breakpoint at the next instruction is not skipped"
+        );
+        scenario.shutdown().await;
     }
 }
 
 #[tokio::test]
 async fn stepping_over_a_breakpoint_on_a_watched_store_reports_the_store() {
-    for fixture in MATRIX {
-        for kind in [None, Some(StepKind::Instruction)] {
-            let mut scenario = Scenario::launch(fixture);
-            // The function entry is the store itself, so the address
-            // breakpoint is installed from the preceding phase.
-            run_to(&mut scenario, "store_then_breakpoint").await;
-            let site = symbol(&scenario, "watched_store_site").await;
-            scenario
-                .add_breakpoint_spec(BreakpointSpec::Address(site))
-                .await;
-            assert_eq!(
-                support::breakpoint_address(&scenario.resume_to_stop().await),
-                site
-            );
-            let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
+    for kind in [None, Some(StepKind::Instruction)] {
+        let mut scenario = Scenario::launch(FIXTURE);
+        // The function entry is the store itself, so the address
+        // breakpoint is installed from the preceding phase.
+        run_to(&mut scenario, "store_then_breakpoint").await;
+        let site = symbol(&scenario, "watched_store_site").await;
+        scenario
+            .add_breakpoint_spec(BreakpointSpec::Address(site))
+            .await;
+        assert_eq!(
+            support::breakpoint_address(&scenario.resume_to_stop().await),
+            site
+        );
+        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Write).await;
 
-            // The store executes during the step over the breakpoint, which
-            // must surface the hit instead of silently continuing.
-            let reason = match kind {
-                Some(kind) => scenario.step_to_stop(kind).await,
-                None => scenario.resume_to_stop().await,
-            };
-            assert_single_hit(&reason, watchpoint.id, 4321, 5);
-            assert!(program_counter(&scenario).await > site.get());
-            let site_bytes = scenario
-                .operation("read store site", scenario.handle().read_memory(site, 1))
-                .await;
-            assert_ne!(site_bytes.bytes.as_ref(), [0xcc], "breakpoints stay hidden");
+        // The store executes during the step over the breakpoint, which
+        // must surface the hit instead of silently continuing.
+        let reason = match kind {
+            Some(kind) => scenario.step_to_stop(kind).await,
+            None => scenario.resume_to_stop().await,
+        };
+        assert_single_hit(&reason, watchpoint.id, 4321, 5);
+        assert!(program_counter(&scenario).await > site.get());
+        let site_bytes = scenario
+            .operation("read store site", scenario.handle().read_memory(site, 1))
+            .await;
+        assert_ne!(site_bytes.bytes.as_ref(), [0xcc], "breakpoints stay hidden");
 
-            scenario
-                .operation(
-                    "remove watchpoint",
-                    scenario.handle().remove_watchpoint(watchpoint.id),
-                )
-                .await;
-            resume_to_exit(&mut scenario).await;
-            scenario.shutdown().await;
-        }
+        scenario
+            .operation(
+                "remove watchpoint",
+                scenario.handle().remove_watchpoint(watchpoint.id),
+            )
+            .await;
+        resume_to_exit(&mut scenario).await;
+        scenario.shutdown().await;
     }
 }
 
@@ -1012,7 +927,18 @@ async fn exec_discards_watchpoints_because_the_kernel_cleared_them() {
     let mut scenario = Scenario::new("watch exec", Scenario::fixture("thread-exec"));
     run_to(&mut scenario, "replace_image").await;
     let main = symbol(&scenario, "main").await;
-    let watchpoint = watch_location(&scenario, main, 1).await;
+    let watchpoint = scenario
+        .operation(
+            "watch location",
+            scenario.handle().add_watchpoint(
+                WatchpointSpec::Location {
+                    address: main,
+                    byte_size: 1,
+                },
+                WatchAccess::Write,
+            ),
+        )
+        .await;
     assert_eq!(watchpoint.scope, WatchScope::Location);
     let mut events = scenario.handle().subscribe();
 
@@ -1248,11 +1174,7 @@ fn locals_line(needle: &str) -> u64 {
 
 /// Watches a frame-scoped local and checks that its scope names the
 /// selected thread's current activation.
-async fn watch_local(scenario: &mut Scenario, name: &str) -> Watchpoint {
-    watch_local_for(scenario, name, WatchAccess::Write).await
-}
-
-async fn watch_local_for(scenario: &mut Scenario, name: &str, access: WatchAccess) -> Watchpoint {
+async fn watch_local(scenario: &mut Scenario, name: &str, access: WatchAccess) -> Watchpoint {
     let thread = selected_thread(scenario).await;
     let watchpoint = watch(scenario, name, access).await;
     assert!(
@@ -1319,7 +1241,7 @@ async fn frame_watchpoints_end_when_their_activation_returns() {
     }) {
         let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "leaf_local").await;
-        let watchpoint = watch_local_for(&mut scenario, "local", access).await;
+        let watchpoint = watch_local(&mut scenario, "local", access).await;
         scenario
             .add_source_breakpoint("watch-locals.c", locals_line("local += 2;"))
             .await;
@@ -1372,7 +1294,7 @@ async fn recursive_activations_keep_their_own_frame_watchpoint() {
             )
             .await;
         // The outermost activation's value survives its callees returning.
-        let watchpoint = watch_local(&mut scenario, "frame_value").await;
+        let watchpoint = watch_local(&mut scenario, "frame_value", WatchAccess::Write).await;
         scenario.add_breakpoint("after_return").await;
 
         let (values, reason, _) = hits_until_invalidated(&mut scenario, watchpoint.id).await;
@@ -1393,7 +1315,7 @@ async fn block_watchpoints_end_when_execution_leaves_the_block() {
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
         ));
-        let watchpoint = watch_local(&mut scenario, "inner").await;
+        let watchpoint = watch_local(&mut scenario, "inner", WatchAccess::Write).await;
         // The same activation is still live in the next block.
         scenario
             .add_source_breakpoint("watch-locals.c", locals_line("reused += 1;"))
@@ -1411,7 +1333,7 @@ async fn a_tail_call_replacing_the_activation_ends_its_watchpoints() {
     for fixture in LOCALS {
         let mut scenario = Scenario::launch(fixture);
         run_to(&mut scenario, "tail_caller").await;
-        let watchpoint = watch_local(&mut scenario, "mine").await;
+        let watchpoint = watch_local(&mut scenario, "mine", WatchAccess::Write).await;
         // The callee runs at the replaced activation's frame address.
         scenario.add_breakpoint("tail_callee").await;
 
@@ -1433,7 +1355,7 @@ async fn longjmp_past_an_activation_ends_its_watchpoints() {
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
         ));
-        let watchpoint = watch_local(&mut scenario, "doomed").await;
+        let watchpoint = watch_local(&mut scenario, "doomed", WatchAccess::Write).await;
         scenario.add_breakpoint("after_longjmp").await;
 
         let (values, reason, _) = hits_until_invalidated(&mut scenario, watchpoint.id).await;
@@ -1454,7 +1376,7 @@ async fn a_frame_watchpoint_ends_with_its_owner_thread() {
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
         ));
-        let watchpoint = watch_local(&mut scenario, "owned").await;
+        let watchpoint = watch_local(&mut scenario, "owned", WatchAccess::Write).await;
         scenario.add_breakpoint("after_owner_exit").await;
 
         let (values, reason, at_hit) = hits_until_invalidated(&mut scenario, watchpoint.id).await;
@@ -1548,9 +1470,8 @@ async fn arming_rolls_back_every_thread_when_a_later_thread_has_no_capacity() {
     scenario.shutdown().await;
 }
 
-/// A process launched outside the debugger that announces the address of the
-/// word it writes once released.
-/// The watch-attach fixture, which reports the address it watches.
+/// The watch-attach fixture, which reports the address of the word it writes
+/// once released.
 struct AttachTarget {
     process: support::ExternalProcess,
     watched: u64,
@@ -1721,77 +1642,69 @@ async fn watchpoints_work_across_the_rust_and_zig_matrix() {
 
 #[tokio::test]
 async fn go_watchpoints_follow_goroutines_onto_new_threads_and_refuse_stack_objects() {
-    for fixture in ["watch-go-o0", "watch-go-o2"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("main.watchReady").await;
-        let mut reason = scenario.run_to_stop().await;
-        while matches!(&reason, StopReason::Exception(exception) if exception.code == 23) {
-            reason = scenario.resume_to_stop().await;
-        }
-        assert!(
-            matches!(reason, StopReason::Breakpoint { .. }),
-            "{reason:?}"
-        );
-        let watchpoint = watch(&scenario, "main.watchedCounter", WatchAccess::Write).await;
-        scenario.add_breakpoint("main.stackLocal").await;
-
-        let mut hit_count = 0;
-        let mut writers = BTreeSet::new();
-        loop {
-            match scenario.resume_to_stop().await {
-                StopReason::Watchpoint { .. } => {
-                    for hit in thread_hits(&mut scenario).await {
-                        assert_eq!(hit.watchpoint, watchpoint.id);
-                        hit_count += 1;
-                        writers.insert(hit.thread);
-                    }
-                }
-                StopReason::Exception(exception) if exception.code == 23 => {}
-                StopReason::Breakpoint { .. } => break,
-                other => panic!("{fixture}: unexpected stop {other:?}"),
-            }
-        }
-        // watchReady's reset plus 4 goroutines x 5 increments.
-        assert_eq!(hit_count, 21, "{fixture}");
-        assert!(
-            writers.len() >= 2,
-            "{fixture}: goroutines ran on several threads"
-        );
-
-        if fixture == "watch-go-o0" {
-            let refused = scenario
-                .handle()
-                .watch(&expression("local"), WatchAccess::Write)
-                .await;
-            assert!(
-                matches!(refused, Err(Error::WatchTargetUnsupported(_))),
-                "{fixture}: Go may move goroutine stacks: {refused:?}"
-            );
-        }
-        scenario
-            .operation("remove all", scenario.handle().remove_all_watchpoints())
-            .await;
-        scenario
-            .operation(
-                "remove breakpoints",
-                scenario.handle().remove_all_breakpoints(),
-            )
-            .await;
-        loop {
-            match scenario.resume_to_stop().await {
-                StopReason::Exited(ExitStatus::Code(0)) => break,
-                StopReason::Exception(exception) if exception.code == 23 => {}
-                other => panic!("{fixture}: unexpected stop {other:?}"),
-            }
-        }
-        scenario.shutdown().await;
+    let mut scenario = Scenario::launch("watch-go-o0");
+    scenario.add_breakpoint("main.watchReady").await;
+    let mut reason = scenario.run_to_stop().await;
+    while matches!(&reason, StopReason::Exception(exception) if exception.code == 23) {
+        reason = scenario.resume_to_stop().await;
     }
+    assert!(
+        matches!(reason, StopReason::Breakpoint { .. }),
+        "{reason:?}"
+    );
+    let watchpoint = watch(&scenario, "main.watchedCounter", WatchAccess::Write).await;
+    scenario.add_breakpoint("main.stackLocal").await;
+
+    let mut hit_count = 0;
+    let mut writers = BTreeSet::new();
+    loop {
+        match scenario.resume_to_stop().await {
+            StopReason::Watchpoint { .. } => {
+                for hit in thread_hits(&mut scenario).await {
+                    assert_eq!(hit.watchpoint, watchpoint.id);
+                    hit_count += 1;
+                    writers.insert(hit.thread);
+                }
+            }
+            StopReason::Exception(exception) if exception.code == 23 => {}
+            StopReason::Breakpoint { .. } => break,
+            other => panic!("unexpected stop {other:?}"),
+        }
+    }
+    // watchReady's reset plus 4 goroutines x 5 increments.
+    assert_eq!(hit_count, 21);
+    assert!(writers.len() >= 2, "goroutines ran on several threads");
+
+    let refused = scenario
+        .handle()
+        .watch(&expression("local"), WatchAccess::Write)
+        .await;
+    assert!(
+        matches!(refused, Err(Error::WatchTargetUnsupported(_))),
+        "Go may move goroutine stacks: {refused:?}"
+    );
+    scenario
+        .operation("remove all", scenario.handle().remove_all_watchpoints())
+        .await;
+    scenario
+        .operation(
+            "remove breakpoints",
+            scenario.handle().remove_all_breakpoints(),
+        )
+        .await;
+    loop {
+        match scenario.resume_to_stop().await {
+            StopReason::Exited(ExitStatus::Code(0)) => break,
+            StopReason::Exception(exception) if exception.code == 23 => {}
+            other => panic!("unexpected stop {other:?}"),
+        }
+    }
+    scenario.shutdown().await;
 }
 
 #[tokio::test]
 async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
-    let fixture = "watch-gcc-o0";
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = Scenario::launch(FIXTURE);
     let location = |address, byte_size| WatchpointSpec::Location { address, byte_size };
 
     // No process exists yet.
@@ -1859,15 +1772,8 @@ async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
             .await,
         Err(Error::WatchpointNotFound(99))
     ));
-    assert!(
-        scenario
-            .operation(
-                "remove all of nothing",
-                scenario.handle().remove_all_watchpoints()
-            )
-            .await
-            .is_empty()
-    );
+    let removed = scenario.handle().remove_all_watchpoints().await;
+    assert!(removed.is_ok_and(|removed| removed.is_empty()));
     assert!(matches!(
         scenario
             .handle()
@@ -1881,15 +1787,6 @@ async fn invalid_requests_fail_with_typed_errors_and_leave_state_unchanged() {
         "failed requests publish nothing"
     );
 
-    scenario.shutdown().await;
-}
-
-#[tokio::test]
-async fn stale_targets_cannot_be_armed() {
-    let fixture = "watch-gcc-o0";
-    let mut scenario = Scenario::launch(fixture);
-    run_to(&mut scenario, "scalar_stores").await;
-
     // A target resolved at an earlier stop cannot be armed at a later one.
     let stale = scenario
         .operation(
@@ -1899,12 +1796,8 @@ async fn stale_targets_cannot_be_armed() {
                 .resolve_watch_target(&expression("watch_i32")),
         )
         .await;
-    assert_eq!(
-        scenario.step_to_stop(StepKind::Instruction).await,
-        StopReason::Step {
-            kind: StepKind::Instruction
-        }
-    );
+    let kind = StepKind::Instruction;
+    assert_eq!(scenario.step_to_stop(kind).await, StopReason::Step { kind });
     assert!(matches!(
         scenario
             .handle()
@@ -1918,13 +1811,14 @@ async fn stale_targets_cannot_be_armed() {
 #[tokio::test]
 async fn values_without_watchable_memory_are_refused_with_typed_errors() {
     // Registers, computed values, and entry values in optimized code.
-    for (fixture, name, expected) in [
-        ("variables-parameters-gcc-o2", "boolean", "register"),
-        ("variables-parameters-clang-o2", "boolean", "computed"),
+    for (fixture, refusals) in [
+        (
+            "variables-parameters-gcc-o2",
+            &[("boolean", "register")][..],
+        ),
         (
             "variables-parameters-clang-o2",
-            "signed_character",
-            "unavailable",
+            &[("boolean", "computed"), ("signed_character", "unavailable")][..],
         ),
     ] {
         let mut scenario = Scenario::launch(fixture);
@@ -1935,27 +1829,25 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
             scenario.run_to_stop().await,
             StopReason::Breakpoint { .. }
         ));
-        let result = scenario
-            .handle()
-            .resolve_watch_target(&expression(name))
-            .await;
-        match (expected, &result) {
-            ("register", Err(Error::WatchTargetNotInMemory(reason))) => {
-                assert!(reason.contains("register"), "{fixture}: {reason}");
+        for &(name, expected) in refusals {
+            let result = scenario
+                .handle()
+                .resolve_watch_target(&expression(name))
+                .await;
+            match (expected, &result) {
+                ("register" | "computed", Err(Error::WatchTargetNotInMemory(reason))) => {
+                    assert!(reason.contains(expected), "{fixture}: {reason}");
+                }
+                ("unavailable", Err(Error::WatchTargetUnavailable(_))) => {}
+                _ => panic!("{fixture} {name}: expected {expected}, got {result:?}"),
             }
-            ("computed", Err(Error::WatchTargetNotInMemory(reason))) => {
-                assert!(reason.contains("computed"), "{fixture}: {reason}");
-            }
-            ("unavailable", Err(Error::WatchTargetUnavailable(_))) => {}
-            _ => panic!("{fixture} {name}: expected {expected}, got {result:?}"),
         }
         assert!(scenario.snapshot().await.watchpoints.is_empty());
         scenario.shutdown().await;
     }
 
     // A bit-field member is extracted from its storage, not addressable.
-    let fixture = "records-c-gcc-o0";
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = Scenario::launch("records-c-gcc-o0");
     run_to(&mut scenario, "inspect_records").await;
     let result = scenario
         .handle()
@@ -1993,8 +1885,7 @@ async fn values_without_watchable_memory_are_refused_with_typed_errors() {
     scenario.shutdown().await;
 
     // A debug-information constant has no storage.
-    let fixture = "globals-cpp-gcc-o0";
-    let mut scenario = Scenario::launch(fixture);
+    let mut scenario = Scenario::launch("globals-cpp-gcc-o0");
     run_to(&mut scenario, "inspect_globals").await;
     let result = scenario
         .handle()
@@ -2366,35 +2257,33 @@ async fn steps_cross_stores_that_change_nothing_as_if_unwatched() {
 
 #[tokio::test]
 async fn a_debugger_write_is_what_the_next_store_is_judged_against() {
-    for fixture in MATRIX {
-        let mut scenario = Scenario::launch(fixture);
-        run_to(&mut scenario, "scalar_stores").await;
-        let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Change).await;
+    let mut scenario = Scenario::launch(FIXTURE);
+    run_to(&mut scenario, "scalar_stores").await;
+    let watchpoint = watch(&scenario, "watch_i32", WatchAccess::Change).await;
 
-        // Writing the value the program stores next hides that store.
-        let word = scenario
-            .operation("read word", scenario.handle().read_word(watchpoint.address))
-            .await;
-        scenario
-            .operation(
-                "write watched word",
-                scenario
-                    .handle()
-                    .write_word(watchpoint.address, (word & !0xffff_ffff) | 1),
-            )
-            .await;
-        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 1, 2);
-        assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 2, 42);
+    // Writing the value the program stores next hides that store.
+    let word = scenario
+        .operation("read word", scenario.handle().read_word(watchpoint.address))
+        .await;
+    scenario
+        .operation(
+            "write watched word",
+            scenario
+                .handle()
+                .write_word(watchpoint.address, (word & !0xffff_ffff) | 1),
+        )
+        .await;
+    assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 1, 2);
+    assert_single_hit(&scenario.resume_to_stop().await, watchpoint.id, 2, 42);
 
-        scenario
-            .operation(
-                "remove watchpoint",
-                scenario.handle().remove_watchpoint(watchpoint.id),
-            )
-            .await;
-        resume_to_exit(&mut scenario).await;
-        scenario.shutdown().await;
-    }
+    scenario
+        .operation(
+            "remove watchpoint",
+            scenario.handle().remove_watchpoint(watchpoint.id),
+        )
+        .await;
+    resume_to_exit(&mut scenario).await;
+    scenario.shutdown().await;
 }
 
 /// Reads a global's word.

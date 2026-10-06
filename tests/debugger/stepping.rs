@@ -63,8 +63,8 @@ async fn clang_o0_inline_steps_cover_entry_body_return_caller_and_exit() {
         "first inline statement",
     )
     .await;
-    assert_eq!(boundary_function(&inlined), Some("inline_adjust"));
-    assert_eq!(boundary_line(&inlined), Some(24));
+    assert_eq!(location_function(&inlined), Some("inline_adjust"));
+    assert_eq!(location_line(&inlined), Some(24));
     let physical = inlined.image.physical_instance;
     let sink = fixture_symbol_address(&scenario, &inlined, "boundary_sink");
     assert_eq!(boundary_sink_value(&scenario, sink).await, 0);
@@ -73,8 +73,8 @@ async fn clang_o0_inline_steps_cover_entry_body_return_caller_and_exit() {
         let location =
             boundary_source_step(&mut scenario, StepKind::OverSource, "next inline statement")
                 .await;
-        assert_eq!(boundary_line(&location), Some(expected_line));
-        assert_eq!(boundary_function(&location), Some("inline_adjust"));
+        assert_eq!(location_line(&location), Some(expected_line));
+        assert_eq!(location_function(&location), Some("inline_adjust"));
         assert_eq!(location.image.physical_instance, physical);
         assert_eq!(
             boundary_sink_value(&scenario, sink).await,
@@ -90,8 +90,8 @@ async fn clang_o0_inline_steps_cover_entry_body_return_caller_and_exit() {
     )
     .await;
     assert_eq!(caller.image.physical_instance, physical);
-    assert_eq!(boundary_function(&caller), Some("main"));
-    assert_eq!(boundary_line(&caller), Some(30));
+    assert_eq!(location_function(&caller), Some("main"));
+    assert_eq!(location_line(&caller), Some(30));
 
     let following_call = boundary_source_step(
         &mut scenario,
@@ -99,8 +99,8 @@ async fn clang_o0_inline_steps_cover_entry_body_return_caller_and_exit() {
         "statement following inline call",
     )
     .await;
-    assert_eq!(boundary_function(&following_call), Some("main"));
-    assert_eq!(boundary_line(&following_call), Some(31));
+    assert_eq!(location_function(&following_call), Some("main"));
+    assert_eq!(location_line(&following_call), Some(31));
 
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -132,11 +132,11 @@ async fn next_walks_the_entire_boundary_fixture_to_a_normal_exit() {
                 )
                 .await;
                 assert_eq!(
-                    boundary_function(&location),
+                    location_function(&location),
                     Some("main"),
                     "{fixture}: {location:?}"
                 );
-                let line = boundary_line(&location).expect("main next stop has source");
+                let line = location_line(&location).expect("main next stop has source");
                 assert!(
                     line <= expected_line,
                     "{fixture} skipped past expected line {expected_line} to {line}"
@@ -166,7 +166,7 @@ async fn next_walks_the_entire_boundary_fixture_to_a_normal_exit() {
                 )
                 .await;
             assert_eq!(
-                boundary_line(&closing_brace),
+                location_line(&closing_brace),
                 Some(36),
                 "{fixture} added an unexpected stop after main's return"
             );
@@ -197,12 +197,12 @@ async fn finish_distinguishes_inline_and_physical_frames_across_the_boundary_fix
         let inlined =
             boundary_source_step(&mut scenario, StepKind::IntoSource, "inline activation").await;
         assert_eq!(
-            boundary_function(&inlined),
+            location_function(&inlined),
             Some("inline_adjust"),
             "{fixture}: {inlined:?}"
         );
         assert_eq!(inlined.image.physical_instance, main_physical);
-        assert_eq!(boundary_line(&inlined), Some(24), "{fixture}: {inlined:?}");
+        assert_eq!(location_line(&inlined), Some(24), "{fixture}: {inlined:?}");
         let sink = fixture_symbol_address(&scenario, &inlined, "boundary_sink");
         assert_eq!(
             boundary_sink_value(&scenario, sink).await,
@@ -213,8 +213,8 @@ async fn finish_distinguishes_inline_and_physical_frames_across_the_boundary_fix
         let after_inline =
             boundary_source_step(&mut scenario, StepKind::Out, "caller after inline finish").await;
         assert_eq!(after_inline.image.physical_instance, main_physical);
-        assert_eq!(boundary_function(&after_inline), Some("main"));
-        let after_inline_line = boundary_line(&after_inline).expect("inline finish has source");
+        assert_eq!(location_function(&after_inline), Some("main"));
+        let after_inline_line = location_line(&after_inline).expect("inline finish has source");
         assert!(
             (30..=31).contains(&after_inline_line),
             "{fixture} finished inline_adjust at unexpected line {after_inline_line}"
@@ -252,8 +252,8 @@ async fn rust_o0_inline_steps_cross_source_holes_and_return_to_the_caller() {
         "first Rust inline statement",
     )
     .await;
-    assert_eq!(boundary_function(&inlined), Some("inline_adjust"));
-    assert_eq!(boundary_line(&inlined), Some(31));
+    assert_eq!(location_function(&inlined), Some("inline_adjust"));
+    assert_eq!(location_line(&inlined), Some(31));
     let physical = inlined.image.physical_instance;
     let sink = fixture_symbol_address(&scenario, &inlined, "RUST_BOUNDARY_SINK");
     assert_eq!(boundary_sink_value(&scenario, sink).await, 0);
@@ -265,8 +265,8 @@ async fn rust_o0_inline_steps_cross_source_holes_and_return_to_the_caller() {
             "next Rust inline statement",
         )
         .await;
-        assert_eq!(boundary_function(&location), Some("inline_adjust"));
-        assert_eq!(boundary_line(&location), Some(expected_line));
+        assert_eq!(location_function(&location), Some("inline_adjust"));
+        assert_eq!(location_line(&location), Some(expected_line));
         assert_eq!(location.image.physical_instance, physical);
         assert_eq!(boundary_sink_value(&scenario, sink).await, expected_sink);
     }
@@ -277,8 +277,8 @@ async fn rust_o0_inline_steps_cross_source_holes_and_return_to_the_caller() {
         "Rust caller after inline return",
     )
     .await;
-    assert_eq!(boundary_function(&caller), Some("main"));
-    assert_eq!(boundary_line(&caller), Some(39));
+    assert_eq!(location_function(&caller), Some("main"));
+    assert_eq!(location_line(&caller), Some(39));
     assert_eq!(caller.image.physical_instance, physical);
 
     let following_call = boundary_source_step(
@@ -287,8 +287,8 @@ async fn rust_o0_inline_steps_cross_source_holes_and_return_to_the_caller() {
         "Rust statement following inline call",
     )
     .await;
-    assert_eq!(boundary_function(&following_call), Some("main"));
-    assert_eq!(boundary_line(&following_call), Some(40));
+    assert_eq!(location_function(&following_call), Some("main"));
+    assert_eq!(location_line(&following_call), Some(40));
 
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -310,8 +310,8 @@ async fn rust_o2_inline_steps_follow_optimized_statements_and_return_to_the_call
         "first optimized Rust inline statement",
     )
     .await;
-    assert_eq!(boundary_function(&first), Some("inline_adjust"));
-    assert_eq!(boundary_line(&first), Some(31));
+    assert_eq!(location_function(&first), Some("inline_adjust"));
+    assert_eq!(location_line(&first), Some(31));
     let physical = first.image.physical_instance;
     let sink = fixture_symbol_address(&scenario, &first, "RUST_BOUNDARY_SINK");
     assert_eq!(boundary_sink_value(&scenario, sink).await, 0);
@@ -322,8 +322,8 @@ async fn rust_o2_inline_steps_follow_optimized_statements_and_return_to_the_call
         "second optimized Rust inline statement",
     )
     .await;
-    assert_eq!(boundary_function(&second), Some("inline_adjust"));
-    assert_eq!(boundary_line(&second), Some(32));
+    assert_eq!(location_function(&second), Some("inline_adjust"));
+    assert_eq!(location_line(&second), Some(32));
     assert_eq!(second.image.physical_instance, physical);
     assert_eq!(boundary_sink_value(&scenario, sink).await, 0);
 
@@ -333,8 +333,8 @@ async fn rust_o2_inline_steps_follow_optimized_statements_and_return_to_the_call
         "optimized Rust caller after inline return",
     )
     .await;
-    assert_eq!(boundary_function(&caller), Some("main"));
-    assert_eq!(boundary_line(&caller), Some(40));
+    assert_eq!(location_function(&caller), Some("main"));
+    assert_eq!(location_line(&caller), Some(40));
     assert_eq!(caller.image.physical_instance, physical);
     assert_eq!(boundary_sink_value(&scenario, sink).await, 6);
 
@@ -367,7 +367,7 @@ async fn next_walks_the_entire_rust_boundary_fixture_to_a_normal_exit() {
 
         for &(expected_line, expected_sink) in expected {
             let location = advance_boundary_to_line(&mut scenario, fixture, expected_line).await;
-            assert_eq!(boundary_function(&location), Some("main"));
+            assert_eq!(location_function(&location), Some("main"));
             assert_eq!(boundary_sink_value(&scenario, sink).await, expected_sink);
         }
 
@@ -379,7 +379,7 @@ async fn next_walks_the_entire_rust_boundary_fixture_to_a_normal_exit() {
                     scenario.handle().current_location(),
                 )
                 .await;
-            assert_eq!(boundary_line(&closing), Some(46), "{fixture}");
+            assert_eq!(location_line(&closing), Some(46), "{fixture}");
             exit = scenario.step_to_stop(StepKind::OverSource).await;
         }
         assert_eq!(exit, StopReason::Exited(ExitStatus::Code(0)), "{fixture}");
@@ -401,7 +401,7 @@ async fn finish_distinguishes_rust_inline_and_physical_frames() {
             "Rust inline activation",
         )
         .await;
-        assert_eq!(boundary_function(&inlined), Some("inline_adjust"));
+        assert_eq!(location_function(&inlined), Some("inline_adjust"));
         assert_eq!(inlined.image.physical_instance, main_physical);
         let returned = boundary_source_step(
             &mut scenario,
@@ -409,9 +409,9 @@ async fn finish_distinguishes_rust_inline_and_physical_frames() {
             "caller after Rust inline finish",
         )
         .await;
-        assert_eq!(boundary_function(&returned), Some("main"));
+        assert_eq!(location_function(&returned), Some("main"));
         assert_eq!(returned.image.physical_instance, main_physical);
-        assert!((39..=40).contains(&boundary_line(&returned).expect("Rust caller source")));
+        assert!((39..=40).contains(&location_line(&returned).expect("Rust caller source")));
 
         let sink = fixture_symbol_address(&scenario, &returned, "RUST_BOUNDARY_SINK");
         for case in [
@@ -432,147 +432,82 @@ async fn finish_distinguishes_rust_inline_and_physical_frames() {
     }
 }
 
+/// Steps from a return line whose epilogue the compiler marked complete in
+/// the caller, never at the marker; stepping out ends at the return
+/// address, which a step over runs past to the caller's next line.
 #[tokio::test]
-async fn next_crosses_each_marked_epilogue_and_completes_in_the_caller() {
-    let fixture = "stepping-boundaries-clang-o2";
-    let mut scenario = Scenario::new("multiple marked epilogues", Scenario::fixture(fixture));
-    let markers = epilogue_markers(&scenario, "marked_returns");
-    assert_eq!(
-        markers.len(),
-        2,
-        "fixture must retain two distinct marked return paths"
-    );
-    scenario
-        .add_source_breakpoint("stepping-boundaries.c", 11)
-        .await;
-    scenario
-        .add_source_breakpoint("stepping-boundaries.c", 15)
-        .await;
-
-    for return_line in [11, 15] {
-        let reason = if return_line == 11 {
-            scenario.run_to_stop().await
-        } else {
-            scenario.resume_to_stop().await
-        };
-        assert!(
-            matches!(reason, StopReason::Breakpoint { .. }),
-            "did not stop on return line {return_line}: {reason:?}"
+async fn steps_from_marked_epilogues_complete_in_the_caller() {
+    for kind in [StepKind::OverSource, StepKind::IntoSource, StepKind::Out] {
+        let mut scenario = Scenario::new(
+            format!("marked epilogues {kind:?}"),
+            Scenario::fixture("stepping-boundaries-clang-o2"),
         );
-        let before = scenario
-            .operation(
-                "return statement location",
-                scenario.handle().current_location(),
-            )
+        let markers = epilogue_markers(&scenario, "marked_returns");
+        assert_eq!(markers.len(), 2, "the fixture has two marked return paths");
+        scenario
+            .add_source_breakpoint("stepping-boundaries.c", 11)
             .await;
-        assert_eq!(
-            before.image.source.as_ref().map(|source| source.line.get()),
-            Some(return_line)
-        );
-
-        assert_eq!(
-            scenario.step_to_stop(StepKind::OverSource).await,
-            StopReason::Step {
-                kind: StepKind::OverSource
-            },
-            "next did not complete across return line {return_line}"
-        );
-        let after = scenario
-            .operation("caller after return", scenario.handle().current_location())
+        scenario
+            .add_source_breakpoint("stepping-boundaries.c", 15)
             .await;
-        assert_eq!(
-            after
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
-            Some("main"),
-            "next exposed an epilogue stop for return line {return_line}: {after:?}"
-        );
-        assert!(
-            !markers.contains(&after.image.address),
-            "next published compiler epilogue marker {}",
-            after.image.address
-        );
-    }
 
-    assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Exited(ExitStatus::Code(0))
-    );
-    scenario.shutdown().await;
-}
+        for return_line in [11, 15] {
+            let context = format!("{kind:?} from line {return_line}");
+            let reason = scenario.resume_or_run().await;
+            assert!(
+                matches!(reason, StopReason::Breakpoint { .. }),
+                "{context}: {reason:?}"
+            );
+            let before = scenario
+                .operation("return line", scenario.handle().current_location())
+                .await;
+            assert_eq!(location_line(&before), Some(return_line), "{context}");
+            let return_address = scenario
+                .operation("backtrace", scenario.handle().backtrace())
+                .await
+                .frames
+                .iter()
+                .filter(|frame| frame.kind != uscope::FrameKind::Inline)
+                .nth(1)
+                .expect("the return line's caller")
+                .instruction;
 
-#[tokio::test]
-async fn step_uses_each_marked_epilogue_to_complete_in_the_caller() {
-    let fixture = "stepping-boundaries-clang-o2";
-    let mut scenario = Scenario::new("step through marked epilogues", Scenario::fixture(fixture));
-    let markers = epilogue_markers(&scenario, "marked_returns");
-    assert_eq!(markers.len(), 2, "fixture boundary contract changed");
-    scenario
-        .add_source_breakpoint("stepping-boundaries.c", 11)
-        .await;
-    scenario
-        .add_source_breakpoint("stepping-boundaries.c", 15)
-        .await;
-
-    for return_line in [11, 15] {
-        let reason = if return_line == 11 {
-            scenario.run_to_stop().await
-        } else {
-            scenario.resume_to_stop().await
-        };
-        assert!(matches!(reason, StopReason::Breakpoint { .. }));
-
-        assert_eq!(
-            scenario.step_to_stop(StepKind::IntoSource).await,
-            StopReason::Step {
-                kind: StepKind::IntoSource
+            assert_eq!(
+                scenario.step_to_stop(kind).await,
+                StopReason::Step { kind },
+                "{context}"
+            );
+            let after = scenario
+                .operation("caller after return", scenario.handle().current_location())
+                .await;
+            assert_eq!(
+                location_function(&after),
+                Some("main"),
+                "{context}: {after:?}"
+            );
+            assert!(
+                !markers.contains(&after.image.address),
+                "{context}: {after:?}"
+            );
+            if kind == StepKind::Out {
+                assert_eq!(after.address, return_address, "{context}");
             }
-        );
-        let after = scenario
-            .operation(
-                "step caller after return",
-                scenario.handle().current_location(),
-            )
-            .await;
-        assert_eq!(
-            after
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
-            Some("main"),
-            "step exposed an epilogue stop for return line {return_line}: {after:?}"
-        );
-        assert!(!markers.contains(&after.image.address));
-    }
+        }
 
-    assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Exited(ExitStatus::Code(0))
-    );
-    scenario.shutdown().await;
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(0))
+        );
+        scenario.shutdown().await;
+    }
 }
 
-/// Stepping over a function's last line returns to its caller and stops
-/// there, even when the caller's line calls the function again at the same
-/// stack depth before it reaches a statement: the second call is a new
-/// frame, not the one the step began in. The simulator found such steps
-/// stopping inside the second call.
+/// Stepping over a function's last line stops in its caller, even when the
+/// caller's line calls the function again at the same stack depth before
+/// reaching a statement: the second call is a new frame.
 #[tokio::test]
 async fn stepping_over_a_return_stops_in_the_caller_before_a_second_call() {
-    let source = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/c/repeated-calls.c"
-    );
-    let text = fs::read_to_string(source).expect("read the fixture");
-    let line_of = |marker: &str| {
-        text.lines()
-            .position(|line| line.contains(marker))
-            .map(|index| u64::try_from(index + 1).expect("line fits u64"))
-            .expect("the fixture marks its lines")
-    };
+    let line_of = |marker| source_line("tests/fixtures/c/repeated-calls.c", marker);
     for fixture in ["repeated-calls-gcc-o0", "repeated-calls-clang-o0"] {
         let mut scenario = Scenario::new(
             format!("step over a return {fixture}"),
@@ -605,8 +540,7 @@ async fn stepping_over_a_return_stops_in_the_caller_before_a_second_call() {
             let here = scenario
                 .operation("location", scenario.handle().current_location())
                 .await;
-            let closing = here.image.source.as_ref().map(|source| source.line.get())
-                == Some(line_of("LOAD_RETURN") + 1);
+            let closing = location_line(&here) == Some(line_of("LOAD_RETURN") + 1);
             location = Some(here);
             if !closing {
                 break;
@@ -614,11 +548,7 @@ async fn stepping_over_a_return_stops_in_the_caller_before_a_second_call() {
         }
         let location = location.expect("a step was taken");
         assert_eq!(
-            location
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
+            location_function(&location),
             Some("main"),
             "{fixture} stepped over load's return to {location:?}"
         );
@@ -631,26 +561,13 @@ async fn stepping_over_a_return_stops_in_the_caller_before_a_second_call() {
     }
 }
 
-/// A source step from the last line of a function called by one that
-/// returns right after the call goes back through that caller, which has
-/// no statement left, and on into its caller: it does not run on to the
-/// program's exit. A step over never stops in the caller's next call of
-/// the same function, a new frame where the old one was. The simulator
-/// found steps running past the outer caller's line, and stopping in its
-/// next call.
+/// A source step from a function's last line returns through a caller with
+/// no statement left into that caller's caller, rather than running to the
+/// program's exit; a step over never stops in the next call of the same
+/// function, a new frame where the old one was.
 #[tokio::test]
 async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
-    let source = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/c/repeated-calls.c"
-    );
-    let text = fs::read_to_string(source).expect("read the fixture");
-    let line_of = |marker: &str| {
-        text.lines()
-            .position(|line| line.contains(marker))
-            .map(|index| u64::try_from(index + 1).expect("line fits u64"))
-            .expect("the fixture marks its lines")
-    };
+    let line_of = |marker| source_line("tests/fixtures/c/repeated-calls.c", marker);
     for fixture in ["repeated-calls-gcc-o0", "repeated-calls-clang-o0"] {
         for kind in [StepKind::IntoSource, StepKind::OverSource] {
             let mut scenario = Scenario::new(
@@ -716,11 +633,7 @@ async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
             // Returning into the middle of the call's line, a step may stop
             // there if the compiler marks it a statement, or at the next.
             let location = location.expect("a step was taken");
-            let line = location
-                .image
-                .source
-                .as_ref()
-                .map(|source| source.line.get());
+            let line = location_line(&location);
             assert!(
                 [line_of("RELAY_CALL"), line_of("AFTER_RELAY")]
                     .into_iter()
@@ -739,24 +652,17 @@ async fn source_steps_return_through_a_caller_with_nothing_left_to_run() {
 
 /// A step over that returns through the frame it returned to goes on from
 /// that frame's caller. The golden runtime's `rt_start` calls `rt_exit_group`
-/// with what `main` returns, at the depth `main` was, with no statement
-/// between: stepping over `main`'s last call, whose callee returns into
-/// `main`, which returns, must not stop in `rt_exit_group` as though it
-/// were `main`. The simulator found steps stopping there.
+/// at the depth `main` was, with no statement between, so stepping over
+/// `main`'s last call must not stop in `rt_exit_group` as though it were
+/// `main`.
 #[tokio::test]
 async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("build/golden/threads/threads-clang-O0");
-    let source = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/golden/threads/threads.c"
+    let line = source_line(
+        "tests/golden/threads/threads.c",
+        "return (int)(rt_load(&counter) % 100);",
     );
-    let line = fs::read_to_string(source)
-        .expect("read the golden program")
-        .lines()
-        .position(|line| line.contains("return (int)(rt_load(&counter) % 100);"))
-        .map(|index| u64::try_from(index + 1).expect("line fits u64"))
-        .expect("main's last line");
     let mut scenario = Scenario::new("step over through main's return", program);
     scenario.add_source_breakpoint("threads.c", line).await;
     assert!(matches!(
@@ -784,11 +690,7 @@ async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
         .operation("location in rt_load", scenario.handle().current_location())
         .await;
     assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
+        location_function(&location),
         Some("rt_load"),
         "the golden binary changed"
     );
@@ -800,11 +702,7 @@ async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
             .operation("location", scenario.handle().current_location())
             .await;
         assert_ne!(
-            location
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
+            location_function(&location),
             Some("rt_exit_group"),
             "stepping over stopped in a new frame: {reason:?} at {location:?}"
         );
@@ -812,10 +710,8 @@ async fn a_step_over_does_not_stop_in_a_new_frame_where_a_returned_one_was() {
     scenario.shutdown().await;
 }
 
-/// A step out of a function called from code without debug information
-/// runs on from the return, to be ended by a stop the user sees. A later
-/// hit its breakpoint's hit condition declines is no such stop: the
-/// simulator found such steps completing there.
+/// A step out to code without debug information runs on until a stop the
+/// user sees, which a hit its hit condition declines is not.
 #[tokio::test]
 async fn a_step_out_to_undescribed_code_does_not_end_at_a_declined_hit() {
     let mut scenario = Scenario::launch("undescribed-caller");
@@ -848,8 +744,7 @@ async fn a_step_out_to_undescribed_code_does_not_end_at_a_declined_hit() {
 /// Stepping out to a return address no line describes goes on, by single
 /// steps, to the caller's first instruction a line describes. Clang marks
 /// the code after `main`'s call of `orphan_spawn` in the golden `frames`
-/// program as line 0. The simulator found such steps running freely past
-/// the caller instead.
+/// program as line 0.
 #[tokio::test]
 async fn a_step_out_to_undescribed_code_in_the_caller_stops_in_the_caller() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -875,73 +770,8 @@ async fn a_step_out_to_undescribed_code_in_the_caller_stops_in_the_caller() {
     let location = scenario
         .operation("location", scenario.handle().current_location())
         .await;
-    assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
-        Some("main"),
-        "{location:?}"
-    );
+    assert_eq!(location_function(&location), Some("main"), "{location:?}");
     assert!(location.image.source.is_some(), "{location:?}");
-    scenario.shutdown().await;
-}
-
-/// Stepping out ends where the frame returns to its caller, at the return
-/// address, even from a line whose epilogue the compiler marked, which a
-/// step over crosses to the caller's next line. The simulator found steps
-/// out that ran past the return address.
-#[tokio::test]
-async fn step_out_across_a_marked_epilogue_stops_at_the_return_address() {
-    let fixture = "stepping-boundaries-clang-o2";
-    let mut scenario = Scenario::new("step out of marked epilogues", Scenario::fixture(fixture));
-    scenario
-        .add_source_breakpoint("stepping-boundaries.c", 11)
-        .await;
-    scenario
-        .add_source_breakpoint("stepping-boundaries.c", 15)
-        .await;
-
-    for return_line in [11, 15] {
-        let reason = if return_line == 11 {
-            scenario.run_to_stop().await
-        } else {
-            scenario.resume_to_stop().await
-        };
-        assert!(
-            matches!(reason, StopReason::Breakpoint { .. }),
-            "did not stop on return line {return_line}: {reason:?}"
-        );
-        let backtrace = scenario
-            .operation("backtrace", scenario.handle().backtrace())
-            .await;
-        let return_address = backtrace
-            .frames
-            .iter()
-            .filter(|frame| frame.kind != uscope::FrameKind::Inline)
-            .nth(1)
-            .expect("the return line's caller")
-            .instruction;
-        assert_eq!(
-            scenario.step_to_stop(StepKind::Out).await,
-            StopReason::Step {
-                kind: StepKind::Out
-            }
-        );
-        let after = scenario
-            .operation("caller after return", scenario.handle().current_location())
-            .await;
-        assert_eq!(
-            after.address, return_address,
-            "stepping out of return line {return_line} ended elsewhere: {after:?}"
-        );
-    }
-
-    assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Exited(ExitStatus::Code(0))
-    );
     scenario.shutdown().await;
 }
 
@@ -999,11 +829,11 @@ async fn next_from_an_inline_frame_crosses_a_tail_call_to_the_true_caller() {
                 boundary_source_step(&mut scenario, StepKind::OverSource, "next across tail call")
                     .await;
             assert_eq!(
-                boundary_function(&stop),
+                location_function(&stop),
                 Some("main"),
                 "{fixture} {function} next stopped inside the tail-called function: {stop:?}"
             );
-            let line = boundary_line(&stop).expect("tail-call next stop has caller source");
+            let line = location_line(&stop).expect("tail-call next stop has caller source");
             assert!(
                 (caller_line..=caller_line + 1).contains(&line),
                 "{fixture} {function} completed at unexpected main line {line}"
@@ -1042,11 +872,11 @@ async fn finish_from_an_inline_frame_crosses_its_parents_tail_call() {
         let stop =
             boundary_source_step(&mut scenario, StepKind::Out, "finish across tail call").await;
         assert_eq!(
-            boundary_function(&stop),
+            location_function(&stop),
             Some("main"),
             "{fixture} finish stopped inside the tail-called function: {stop:?}"
         );
-        let line = boundary_line(&stop).expect("tail-call finish stop has caller source");
+        let line = location_line(&stop).expect("tail-call finish stop has caller source");
         assert!(
             (81..=82).contains(&line),
             "{fixture} finish completed at unexpected main line {line}"
@@ -1093,11 +923,11 @@ async fn recursive_tail_call_completion_ignores_inner_frames_at_the_shared_retur
         )
         .await;
         assert_eq!(
-            boundary_function(&stop),
+            location_function(&stop),
             Some("mutual_tail"),
             "{fixture}: {stop:?}"
         );
-        let line = boundary_line(&stop).expect("recursive tail-call stop has caller source");
+        let line = location_line(&stop).expect("recursive tail-call stop has caller source");
         assert!(
             (55..=57).contains(&line),
             "{fixture} completed at unexpected mutual_tail line {line}"
@@ -1138,8 +968,8 @@ async fn next_from_an_inline_frame_runs_regular_callees_at_full_speed() {
             "next over long-running regular call",
         )
         .await;
-        assert_eq!(boundary_function(&stop), Some("inline_over_call"));
-        assert_eq!(boundary_line(&stop), Some(71));
+        assert_eq!(location_function(&stop), Some("inline_over_call"));
+        assert_eq!(location_line(&stop), Some(71));
         let counter = fixture_symbol_address(&scenario, &stop, "tail_counter");
         assert_eq!(
             boundary_sink_value(&scenario, counter).await,
@@ -1176,8 +1006,8 @@ async fn finish_from_an_inline_frame_runs_regular_callees_at_full_speed() {
             "finish through long-running regular call",
         )
         .await;
-        assert_eq!(boundary_function(&stop), Some("outer_over_call"));
-        let line = boundary_line(&stop).expect("regular-call finish stop has parent source");
+        assert_eq!(location_function(&stop), Some("outer_over_call"));
+        let line = location_line(&stop).expect("regular-call finish stop has parent source");
         assert!(
             (77..=78).contains(&line),
             "{fixture} finish completed at unexpected outer_over_call line {line}"
@@ -1224,8 +1054,8 @@ async fn zig_o0_steps_through_inline_code_and_unwinds_logical_and_physical_frame
     let inline = scenario
         .operation("Zig inline location", scenario.handle().current_location())
         .await;
-    assert_eq!(boundary_function(&inline), Some("inlineAdjust"));
-    assert_eq!(boundary_line(&inline), Some(30));
+    assert_eq!(location_function(&inline), Some("inlineAdjust"));
+    assert_eq!(location_line(&inline), Some(30));
 
     let trace = scenario
         .operation("Zig inline backtrace", scenario.handle().backtrace())
@@ -1247,7 +1077,7 @@ async fn zig_o0_steps_through_inline_code_and_unwinds_logical_and_physical_frame
     let caller = scenario
         .operation("Zig inline caller", scenario.handle().current_location())
         .await;
-    assert_eq!(boundary_function(&caller), Some("main"));
+    assert_eq!(location_function(&caller), Some("main"));
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -1281,7 +1111,7 @@ async fn optimized_zig_steps_into_and_finishes_a_physical_call() {
     let entered = scenario
         .operation("optimized Zig callee", scenario.handle().current_location())
         .await;
-    assert_eq!(boundary_function(&entered), Some("markedReturns"));
+    assert_eq!(location_function(&entered), Some("markedReturns"));
 
     let trace = scenario
         .operation("optimized Zig backtrace", scenario.handle().backtrace())
@@ -1303,7 +1133,7 @@ async fn optimized_zig_steps_into_and_finishes_a_physical_call() {
     let returned = scenario
         .operation("optimized Zig caller", scenario.handle().current_location())
         .await;
-    assert_eq!(boundary_function(&returned), Some("main"));
+    assert_eq!(location_function(&returned), Some("main"));
     assert_eq!(
         scenario.resume_to_stop().await,
         StopReason::Exited(ExitStatus::Code(0))
@@ -1358,6 +1188,23 @@ async fn virtual_steps_reveal_inline_frames_without_running_the_inferior() {
             .await;
         assert_inline_backtrace(fixture, &trace);
 
+        // Finishing the inline instances leaves the physical frame.
+        assert_eq!(
+            scenario.step_to_stop(StepKind::Out).await,
+            StopReason::Step {
+                kind: StepKind::Out
+            },
+            "{fixture}"
+        );
+        let location = scenario
+            .operation(
+                "location after finish",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(location_function(&location), Some("caller"), "{fixture}");
+        assert_eq!(location_line(&location), Some(29), "{fixture}");
+
         scenario.shutdown().await;
     }
 }
@@ -1382,24 +1229,8 @@ async fn next_skips_inline_descendants_of_the_selected_caller() {
                 scenario.handle().current_location(),
             )
             .await;
-        assert_eq!(
-            location
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
-            Some("caller"),
-            "{fixture}"
-        );
-        assert_eq!(
-            location
-                .image
-                .source
-                .as_ref()
-                .map(|source| source.line.get()),
-            Some(29),
-            "{fixture}"
-        );
+        assert_eq!(location_function(&location), Some("caller"), "{fixture}");
+        assert_eq!(location_line(&location), Some(29), "{fixture}");
 
         scenario.shutdown().await;
     }
@@ -1434,68 +1265,11 @@ async fn inline_next_is_owned_by_the_selected_thread() {
 
         assert_eq!(after.selected_thread, Some(selected), "{fixture}");
         assert_eq!(
-            location
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
+            location_function(&location),
             Some("thread_caller"),
             "{fixture}"
         );
-        assert_eq!(
-            location
-                .image
-                .source
-                .as_ref()
-                .map(|source| source.line.get()),
-            Some(19),
-            "{fixture}"
-        );
-        scenario.shutdown().await;
-    }
-}
-
-#[tokio::test]
-async fn finish_exits_inline_instances_without_unwinding_the_physical_frame() {
-    for fixture in ["inline-gcc-o2", "inline-clang-o2"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("caller").await;
-        scenario.run_to_stop().await;
-        scenario.step_to_stop(StepKind::IntoSource).await;
-        scenario.step_to_stop(StepKind::IntoSource).await;
-
-        assert_eq!(
-            scenario.step_to_stop(StepKind::Out).await,
-            StopReason::Step {
-                kind: StepKind::Out
-            },
-            "{fixture}"
-        );
-        let location = scenario
-            .operation(
-                "location after inline finish",
-                scenario.handle().current_location(),
-            )
-            .await;
-        assert_eq!(
-            location
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
-            Some("caller"),
-            "{fixture}"
-        );
-        assert_eq!(
-            location
-                .image
-                .source
-                .as_ref()
-                .map(|source| source.line.get()),
-            Some(29),
-            "{fixture}"
-        );
-
+        assert_eq!(location_line(&location), Some(19), "{fixture}");
         scenario.shutdown().await;
     }
 }
@@ -1618,40 +1392,6 @@ async fn instruction_step_executes_the_instruction_hidden_by_a_breakpoint() {
 }
 
 #[tokio::test]
-async fn finish_uses_unwind_information_across_the_compiler_matrix() {
-    for fixture in ["unwind-o0", "unwind-o2", "unwind-nopie", "unwind-clang-o2"] {
-        let mut scenario = Scenario::new(format!("finish {fixture}"), Scenario::fixture(fixture));
-        scenario.add_breakpoint("deepest").await;
-        scenario.run_to_stop().await;
-
-        assert_eq!(
-            scenario.step_to_stop(StepKind::Out).await,
-            StopReason::Step {
-                kind: StepKind::Out
-            },
-            "finish failed for {fixture}"
-        );
-        let location = scenario
-            .operation(
-                "location after finish",
-                scenario.handle().current_location(),
-            )
-            .await;
-        assert_eq!(
-            location
-                .image
-                .function
-                .as_ref()
-                .map(|function| function.name.as_ref()),
-            Some("middle"),
-            "unexpected caller for {fixture}: {location:?}"
-        );
-
-        scenario.shutdown().await;
-    }
-}
-
-#[tokio::test]
 async fn a_user_breakpoint_interrupts_finish_at_a_shared_site() {
     let mut scenario = Scenario::new("shared plan breakpoint", Scenario::fixture("unwind-o0"));
     scenario.add_breakpoint("deepest").await;
@@ -1702,20 +1442,9 @@ async fn source_next_steps_over_calls_but_preserves_user_breakpoints() {
     let location = step_over
         .operation("location after next", step_over.handle().current_location())
         .await;
+    assert_eq!(location_function(&location), Some("middle"));
     assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
-        Some("middle")
-    );
-    assert_eq!(
-        location
-            .image
-            .source
-            .as_ref()
-            .map(|source| source.line.get()),
+        location_line(&location),
         Some(12),
         "next ran the call on line 11 to its return"
     );
@@ -1736,14 +1465,7 @@ async fn source_next_steps_over_calls_but_preserves_user_breakpoints() {
             interrupted.handle().current_location(),
         )
         .await;
-    assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
-        Some("deepest")
-    );
+    assert_eq!(location_function(&location), Some("deepest"));
 
     interrupted.shutdown().await;
 }
@@ -1751,9 +1473,7 @@ async fn source_next_steps_over_calls_but_preserves_user_breakpoints() {
 #[tokio::test]
 async fn source_steps_skip_non_statement_line_rows() {
     // GCC at -O2 marks the trailing rows of middle (line 13) and deepest
-    // (line 8) as non-statement rows; source steps must not stop on them.
-    // Clang does not emit new-line non-statement rows for this fixture, so
-    // only the GCC binary exercises the defect.
+    // (line 8) as non-statement rows, where source steps must not stop.
     let mut next = Scenario::new("next unwind-o2", Scenario::fixture("unwind-o2"));
     next.add_breakpoint("middle").await;
     next.run_to_stop().await;
@@ -1770,14 +1490,7 @@ async fn source_steps_skip_non_statement_line_rows() {
             next.handle().current_location(),
         )
         .await;
-    assert_eq!(
-        location
-            .image
-            .source
-            .as_ref()
-            .map(|source| source.line.get()),
-        Some(12)
-    );
+    assert_eq!(location_line(&location), Some(12));
 
     assert_eq!(
         next.step_to_stop(StepKind::OverSource).await,
@@ -1792,11 +1505,7 @@ async fn source_steps_skip_non_statement_line_rows() {
         )
         .await;
     assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
+        location_function(&location),
         Some("outer"),
         "next stopped on a non-statement row instead of finishing middle"
     );
@@ -1818,14 +1527,7 @@ async fn source_steps_skip_non_statement_line_rows() {
             step.handle().current_location(),
         )
         .await;
-    assert_eq!(
-        location
-            .image
-            .source
-            .as_ref()
-            .map(|source| source.line.get()),
-        Some(7)
-    );
+    assert_eq!(location_line(&location), Some(7));
 
     assert_eq!(
         step.step_to_stop(StepKind::IntoSource).await,
@@ -1840,11 +1542,7 @@ async fn source_steps_skip_non_statement_line_rows() {
         )
         .await;
     assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
+        location_function(&location),
         Some("middle"),
         "step stopped on a non-statement row instead of returning to middle"
     );
@@ -1852,11 +1550,7 @@ async fn source_steps_skip_non_statement_line_rows() {
     // already-executed call line (11); the step must continue to the next
     // statement row even though the activation changed at the return.
     assert_eq!(
-        location
-            .image
-            .source
-            .as_ref()
-            .map(|source| source.line.get()),
+        location_line(&location),
         Some(12),
         "step completed on a non-statement row after the activation changed"
     );
@@ -1865,11 +1559,8 @@ async fn source_steps_skip_non_statement_line_rows() {
 
 #[tokio::test]
 async fn step_into_crosses_library_calls_without_line_info() {
-    // The function breakpoint lands post-prologue on line 6, which calls
-    // getpid() through the PLT. Its call-frame information uses a DWARF CFA
-    // expression and its code has no line rows. A source step must cross the
-    // library call and stop at line 7 instead of stopping inside the PLT or
-    // failing the unwind.
+    // Line 6 calls getpid() through the PLT, which has no line rows and whose
+    // call-frame information is a DWARF expression.
     let mut scenario = Scenario::new("step over libc", Scenario::fixture("step-over-libc"));
     scenario.add_breakpoint("call_libc").await;
     scenario.run_to_stop().await;
@@ -1886,22 +1577,8 @@ async fn step_into_crosses_library_calls_without_line_info() {
             scenario.handle().current_location(),
         )
         .await;
-    assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
-        Some("call_libc")
-    );
-    assert_eq!(
-        location
-            .image
-            .source
-            .as_ref()
-            .map(|source| source.line.get()),
-        Some(7)
-    );
+    assert_eq!(location_function(&location), Some("call_libc"));
+    assert_eq!(location_line(&location), Some(7));
 
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -2022,19 +1699,12 @@ async fn instruction_steps_and_breakpoint_repairs_cross_system_calls() {
 
 #[tokio::test]
 async fn next_instruction_runs_a_recursive_call_until_this_activation_returns() {
-    let source = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c/frames.c"),
-    )
-    .expect("read frames.c");
-    let call_line = source
-        .lines()
-        .position(|line| line.contains("int64_t below = frames_recurse(depth - 1, seed);"))
-        .expect("recursive call")
-        + 1;
+    let call_line = source_line(
+        "tests/fixtures/c/frames.c",
+        "int64_t below = frames_recurse(depth - 1, seed);",
+    );
     let mut scenario = Scenario::launch("frames-gcc-o0");
-    scenario
-        .add_source_breakpoint("frames.c", u64::try_from(call_line).expect("line"))
-        .await;
+    scenario.add_source_breakpoint("frames.c", call_line).await;
     assert!(matches!(
         scenario.run_to_stop().await,
         StopReason::Breakpoint { .. }
@@ -2119,17 +1789,7 @@ async fn next_instruction_runs_a_recursive_call_until_this_activation_returns() 
 
 /// The line of `orphan-frames.c` that `marker` labels.
 fn orphan_line(marker: &str) -> u64 {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/c/orphan-frames.c"
-    );
-    let text = fs::read_to_string(path).expect("read orphan-frames.c");
-    text.lines()
-        .position(|line| line.contains(marker))
-        .map_or_else(
-            || panic!("orphan-frames.c has no {marker} line"),
-            |index| u64::try_from(index + 1).expect("line fits u64"),
-        )
+    source_line("tests/fixtures/c/orphan-frames.c", marker)
 }
 
 async fn current_line(scenario: &Scenario) -> Option<u64> {
@@ -2214,73 +1874,50 @@ async fn frames_without_a_trustworthy_caller_step_and_leave_their_program_intact
     scenario.shutdown().await;
 }
 
-/// Stepping over a line from an instruction no debug information
-/// describes, such as a program's entry point, runs to the first source
-/// statement it reaches, as stepping in does, and the program carries on
-/// unharmed.
+/// Stepping over from an instruction no debug information describes, such
+/// as a program's entry point, runs to the first source statement it
+/// reaches, as stepping in does, with or without call-frame information.
 #[tokio::test]
 async fn stepping_over_from_undescribed_code_stops_at_the_first_source_statement() {
-    step_over_from_the_entry_point("freestanding-entry").await;
-}
-
-/// Stepping over from code without call-frame information, where the
-/// debugger cannot tell which frame it is in, steps as stepping in does.
-/// The simulator found such steps refused.
-#[tokio::test]
-async fn stepping_over_from_code_without_unwind_information_stops_at_the_first_source_statement() {
-    step_over_from_the_entry_point("freestanding-entry-bare").await;
-}
-
-async fn step_over_from_the_entry_point(fixture: &str) {
-    let mut scenario = Scenario::launch(fixture);
-    let entry = scenario
-        .run_with_to_stop(LaunchOptions {
-            stop_at_entry: true,
-            ..LaunchOptions::default()
-        })
-        .await;
-    assert_eq!(entry, StopReason::Entry);
-    assert_eq!(
-        scenario.step_to_stop(StepKind::OverSource).await,
-        StopReason::Step {
-            kind: StepKind::OverSource
-        }
-    );
-    let location = scenario
-        .operation("location", scenario.handle().current_location())
-        .await;
-    assert_eq!(
-        location
-            .image
-            .function
-            .as_ref()
-            .map(|function| function.name.as_ref()),
-        Some("main")
-    );
-    let source = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/c/freestanding-entry.c"
-    );
-    let first = fs::read_to_string(source)
-        .expect("read the fixture")
-        .lines()
-        .position(|line| line.contains("FIRST_STATEMENT"))
-        .map(|index| u64::try_from(index + 1).expect("line fits u64"));
-    assert_eq!(location.image.source.map(|source| source.line.get()), first);
-    assert_eq!(
-        scenario.resume_to_stop().await,
-        StopReason::Exited(ExitStatus::Code(3))
-    );
-    scenario.shutdown().await;
+    for fixture in ["freestanding-entry", "freestanding-entry-bare"] {
+        let mut scenario = Scenario::launch(fixture);
+        let entry = scenario
+            .run_with_to_stop(LaunchOptions {
+                stop_at_entry: true,
+                ..LaunchOptions::default()
+            })
+            .await;
+        assert_eq!(entry, StopReason::Entry);
+        assert_eq!(
+            scenario.step_to_stop(StepKind::OverSource).await,
+            StopReason::Step {
+                kind: StepKind::OverSource
+            }
+        );
+        let location = scenario
+            .operation("location", scenario.handle().current_location())
+            .await;
+        assert_eq!(location_function(&location), Some("main"));
+        assert_eq!(
+            location_line(&location),
+            Some(source_line(
+                "tests/fixtures/c/freestanding-entry.c",
+                "FIRST_STATEMENT"
+            ))
+        );
+        assert_eq!(
+            scenario.resume_to_stop().await,
+            StopReason::Exited(ExitStatus::Code(3))
+        );
+        scenario.shutdown().await;
+    }
 }
 
 /// Breakpoints on two nested inlined functions that begin at one
-/// instruction hit there together: `rt_exit_group` and the `rt_syscall3`
-/// inlined into it, at the loop clang builds for the inlined `exit_group`
-/// that follows `main` in the simulator's golden runtime. One chain of calls
-/// holds both, so the stop presents the innermost, as gdb does, and
-/// backtraces and source steps work there. The stop was presented as
-/// ambiguous, which refused them.
+/// instruction, `rt_exit_group` and the `rt_syscall3` inlined into it in the
+/// golden runtime, hit together. One chain of calls holds both, so the stop
+/// presents the innermost, as gdb does, and backtraces and source steps
+/// work there.
 #[tokio::test]
 async fn nested_inline_breakpoints_hit_together_present_the_innermost() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2332,4 +1969,242 @@ async fn nested_inline_breakpoints_hit_together_present_the_innermost() {
         }
     );
     scenario.shutdown().await;
+}
+
+async fn launch_boundary_scenario(
+    name: String,
+    fixture: &str,
+) -> (Scenario, uscope::ExecutionLocation) {
+    let mut scenario = Scenario::new(name, Scenario::fixture(fixture));
+    scenario.add_breakpoint("main").await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let main = scenario
+        .operation("main activation", scenario.handle().current_location())
+        .await;
+    (scenario, main)
+}
+
+async fn boundary_source_step(
+    scenario: &mut Scenario,
+    kind: StepKind,
+    operation: &str,
+) -> uscope::ExecutionLocation {
+    assert_eq!(
+        scenario.step_to_stop(kind).await,
+        StopReason::Step { kind },
+        "{operation}"
+    );
+    scenario
+        .operation(operation, scenario.handle().current_location())
+        .await
+}
+
+fn fixture_symbol_address(
+    scenario: &Scenario,
+    location: &uscope::ExecutionLocation,
+    symbol: &str,
+) -> VirtualAddress {
+    let address = scenario
+        .handle()
+        .module_image()
+        .symbol_named(symbol)
+        .unwrap_or_else(|error| panic!("missing fixture symbol {symbol}: {error}"))
+        .address;
+    relocate_image_address(address, location)
+}
+
+async fn boundary_sink_value(scenario: &Scenario, sink: VirtualAddress) -> u64 {
+    scenario
+        .operation("boundary sink", scenario.handle().read_word(sink))
+        .await
+        & u64::from(u32::MAX)
+}
+
+async fn advance_boundary_to_line(
+    scenario: &mut Scenario,
+    fixture: &str,
+    target: u64,
+) -> uscope::ExecutionLocation {
+    for _ in 0..4 {
+        let location = scenario
+            .operation(
+                "advance boundary call site",
+                scenario.handle().current_location(),
+            )
+            .await;
+        assert_eq!(location_function(&location), Some("main"));
+        let line = location_line(&location).expect("main call site has source");
+        if line == target {
+            return location;
+        }
+        assert!(
+            line < target,
+            "{fixture} skipped target line {target} and stopped at {line}"
+        );
+        boundary_source_step(scenario, StepKind::OverSource, "advance boundary call site").await;
+    }
+    panic!("{fixture} did not reach main line {target} within the step budget");
+}
+
+async fn finish_boundary_physical_call(
+    scenario: &mut Scenario,
+    fixture: &str,
+    main_physical: Option<uscope::CodeInstanceId>,
+    sink: VirtualAddress,
+    case: (u64, &str, u64, u64),
+) {
+    let (call_line, callee, expected_sink, last_caller_line) = case;
+    advance_boundary_to_line(scenario, fixture, call_line).await;
+    let entered =
+        boundary_source_step(scenario, StepKind::IntoSource, "entered physical callee").await;
+    assert_eq!(location_function(&entered), Some(callee));
+    assert_ne!(entered.image.physical_instance, main_physical);
+
+    let returned =
+        boundary_source_step(scenario, StepKind::Out, "caller after physical finish").await;
+    assert_eq!(location_function(&returned), Some("main"));
+    assert_eq!(returned.image.physical_instance, main_physical);
+    let line = location_line(&returned).expect("physical finish has caller source");
+    assert!(
+        (call_line..=last_caller_line).contains(&line),
+        "{fixture} finished {callee} at unexpected line {line}"
+    );
+    assert_eq!(
+        boundary_sink_value(scenario, sink).await,
+        expected_sink,
+        "{fixture} finished the wrong path through {callee}"
+    );
+}
+
+/// Steps into a fixture function until the selected frame is the named
+/// inline instance stopped at the requested source line.
+async fn enter_inline_frame(scenario: &mut Scenario, fixture: &str, function: &str, line: u64) {
+    for _ in 0..8 {
+        let location = scenario
+            .operation(
+                "inline frame location",
+                scenario.handle().current_location(),
+            )
+            .await;
+        if location_function(&location) == Some(function) && location_line(&location) == Some(line)
+        {
+            return;
+        }
+        boundary_source_step(scenario, StepKind::IntoSource, "enter inline frame").await;
+    }
+    panic!("{fixture} did not reach {function}:{line} within the step budget");
+}
+
+async fn advance_to_boundary_inline_call(
+    scenario: &mut Scenario,
+    fixture: &str,
+) -> uscope::ExecutionLocation {
+    for _ in 0..2 {
+        let location = scenario
+            .operation("boundary inline call", scenario.handle().current_location())
+            .await;
+        let is_main_call = location
+            .image
+            .function
+            .as_ref()
+            .is_some_and(|function| function.name.as_ref() == "main")
+            && location
+                .image
+                .source
+                .as_ref()
+                .is_some_and(|source| source.line.get() == 30);
+        if is_main_call {
+            return location;
+        }
+        assert_eq!(
+            scenario.step_to_stop(StepKind::OverSource).await,
+            StopReason::Step {
+                kind: StepKind::OverSource
+            },
+            "{fixture}"
+        );
+    }
+    panic!("{fixture} did not reach the inline_adjust call in main");
+}
+
+fn epilogue_markers(scenario: &Scenario, function: &str) -> BTreeSet<uscope::ImageAddress> {
+    let image = scenario.handle().module_image();
+    let function = image.function_named(function).expect("marked function");
+    let instance = image
+        .instances_for_function(function.id)
+        .find(|instance| matches!(instance.kind, CodeInstanceKind::OutOfLine))
+        .expect("physical marked function");
+    image
+        .statement_rows()
+        .iter()
+        .filter(|row| row.flags.epilogue_begin() && instance.contains(row.address))
+        .map(|row| row.address)
+        .collect()
+}
+
+fn assert_inline_location(
+    fixture: &str,
+    location: &uscope::ExecutionLocation,
+    function: &str,
+    line: u64,
+    address: VirtualAddress,
+) {
+    assert_eq!(location.address, address, "{fixture}");
+    assert_eq!(location_function(location), Some(function), "{fixture}");
+    assert_eq!(location_line(location), Some(line), "{fixture}");
+}
+
+fn assert_no_continued_event(
+    fixture: &str,
+    events: &mut tokio::sync::broadcast::Receiver<uscope::DebuggerEvent>,
+) {
+    assert!(
+        std::iter::from_fn(|| events.try_recv().ok())
+            .all(|event| !matches!(event, uscope::DebuggerEvent::InferiorContinued { .. })),
+        "{fixture} virtual step emitted InferiorContinued"
+    );
+}
+
+fn assert_inline_backtrace(fixture: &str, trace: &uscope::Backtrace) {
+    let frames: Vec<_> = trace
+        .frames
+        .iter()
+        .filter_map(|frame| {
+            frame
+                .function
+                .as_ref()
+                .map(|function| (frame, function.name.as_ref()))
+        })
+        .collect();
+
+    assert_eq!(
+        frames
+            .iter()
+            .take(4)
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>(),
+        ["leaf", "middle", "caller", "main"],
+        "unexpected {fixture} frames: {trace:?}"
+    );
+    assert!(frames[..2].iter().all(|(frame, _)| {
+        frame.kind == uscope::FrameKind::Inline && frame.code_instance.is_some()
+    }));
+    assert_eq!(frames[2].0.kind, uscope::FrameKind::Physical);
+    assert_eq!(
+        frames[..3]
+            .iter()
+            .map(|(frame, _)| frame.instruction)
+            .collect::<Vec<_>>(),
+        vec![frames[0].0.instruction; 3]
+    );
+    assert_eq!(
+        frames[..3]
+            .iter()
+            .map(|(frame, _)| frame.source.as_ref().map(|source| source.line.get()))
+            .collect::<Vec<_>>(),
+        [Some(7), Some(14), Some(28)]
+    );
 }

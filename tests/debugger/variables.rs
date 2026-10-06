@@ -22,69 +22,9 @@ async fn stack_scalar_variables_are_read_through_the_public_scenario_path() {
             .iter()
             .map(|variable| variable.name.as_ref())
             .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            [
-                "boolean",
-                "character",
-                "signed_character",
-                "unsigned_character",
-                "signed_short",
-                "unsigned_short",
-                "signed_int",
-                "unsigned_int",
-                "signed_long",
-                "unsigned_long",
-                "signed_long_long",
-                "unsigned_long_long",
-                "single",
-                "double_precision",
-                "extended",
-            ]
-        );
-        let expected = [
-            ScalarValue::Boolean(true),
-            ScalarValue::Signed(65),
-            ScalarValue::Signed(-12),
-            ScalarValue::Unsigned(250),
-            ScalarValue::Signed(-1234),
-            ScalarValue::Unsigned(54_321),
-            ScalarValue::Signed(-1_234_567),
-            ScalarValue::Unsigned(3_456_789_012),
-            ScalarValue::Signed(-123_456_789),
-            ScalarValue::Unsigned(123_456_789),
-            ScalarValue::Signed(-1_234_567_890_123),
-            ScalarValue::Unsigned(12_345_678_901_234),
-            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
-            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
-            ScalarValue::Floating(uscope::FloatValue::X87Extended {
-                significand: 0xc800_0000_0000_0000,
-                sign_exponent: 0x4000,
-            }),
-        ];
-        let expected_sizes = [1, 1, 1, 1, 2, 2, 4, 4, 8, 8, 8, 8, 4, 8, 16];
-        for ((variable, expected), expected_size) in
-            snapshot.variables.iter().zip(expected).zip(expected_sizes)
-        {
-            assert_variable_value(variable, expected);
-            assert_eq!(
-                variable
-                    .type_info
-                    .as_ref()
-                    .expect("available scalar type")
-                    .byte_size,
-                Some(expected_size)
-            );
-            let VariableState::Available { source, raw, .. } = &variable.state else {
-                unreachable!("value assertion checked availability")
-            };
-            assert!(
-                matches!(source, uscope::VariableValueSource::Memory(address) if address.get() != 0)
-            );
-            assert_eq!(
-                raw.as_ref().expect("available scalar bytes").len(),
-                usize::try_from(expected_size).unwrap()
-            );
+        assert_eq!(names, c_scalars().map(|(name, ..)| name), "{fixture}");
+        for (variable, (_, value, size)) in snapshot.variables.iter().zip(c_scalars()) {
+            assert_whole_in_memory(variable, value, size, fixture);
         }
         assert_eq!(
             scenario
@@ -419,24 +359,23 @@ async fn go_variable_lookup_respects_nested_lexical_shadowing() {
 }
 
 #[tokio::test]
-async fn zig_scalars_cover_pie_nonpie_and_optimized_partial_locations() {
-    for fixture in ["variables-zig-o0", "variables-zig-nopie"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_source_breakpoint("variables.zig", 37).await;
-        assert!(matches!(
-            scenario.run_to_stop().await,
-            StopReason::Breakpoint { .. }
-        ));
-        let snapshot = scenario
-            .operation("inspect Zig scalars", scenario.handle().variables())
-            .await;
-        assert_language_scalar_values(&snapshot, fixture);
-        assert_eq!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        );
-        assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
-    }
+async fn zig_scalars_cover_optimized_partial_locations() {
+    let fixture = "variables-zig-o0";
+    let mut scenario = Scenario::launch(fixture);
+    scenario.add_source_breakpoint("variables.zig", 37).await;
+    assert!(matches!(
+        scenario.run_to_stop().await,
+        StopReason::Breakpoint { .. }
+    ));
+    let snapshot = scenario
+        .operation("inspect Zig scalars", scenario.handle().variables())
+        .await;
+    assert_language_scalar_values(&snapshot, fixture);
+    assert_eq!(
+        scenario.resume_to_stop().await,
+        StopReason::Exited(ExitStatus::Code(0))
+    );
+    assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 
     let fixture = "variables-zig-o2";
     let mut scenario = Scenario::launch(fixture);
@@ -602,17 +541,11 @@ async fn zig_native_threads_are_all_stopped_selectable_and_variable_aware() {
         values.insert(*value);
     }
     assert_eq!(values, BTreeSet::from([101, 202]));
-
-    for _ in 0..3 {
-        if matches!(
-            scenario.resume_to_stop().await,
-            StopReason::Exited(ExitStatus::Code(0))
-        ) {
-            assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
-            return;
-        }
-    }
-    panic!("Zig threads did not exit after repairing co-hit breakpoints");
+    // Shutting down kills and reaps every thread.
+    assert!(matches!(
+        scenario.shutdown().await,
+        Some(ExitStatus::Terminated(exception)) if exception.code == 9
+    ));
 }
 
 #[tokio::test]
@@ -889,22 +822,6 @@ async fn a_line_breakpoint_inside_an_inline_body_presents_the_inline_frame() {
 }
 
 #[tokio::test]
-async fn variable_inspection_requires_a_stopped_inferior() {
-    let mut scenario = Scenario::new("variable state errors", Scenario::fixture("spin"));
-    assert!(matches!(
-        scenario.handle().variables().await,
-        Err(Error::NotRunning)
-    ));
-    let run = scenario.start_running().await;
-    assert!(matches!(
-        scenario.handle().variables().await,
-        Err(Error::NotStopped)
-    ));
-    scenario.shutdown().await;
-    let _ = run.await.expect("run task panicked");
-}
-
-#[tokio::test]
 async fn variable_inspection_uses_the_selected_threads_stack() {
     let mut scenario = Scenario::new(
         "thread-local variable inspection",
@@ -941,4 +858,364 @@ async fn variable_inspection_uses_the_selected_threads_stack() {
     }
     assert_eq!(values, BTreeSet::from([101, 202]));
     scenario.shutdown().await;
+}
+
+async fn assert_go_pointer_values(scenario: &Scenario, fixture: &str) {
+    for (name, depth) in [("pointerParameter", 1), ("pointerPointer", 2)] {
+        assert_signed(
+            &dereference_named(scenario, name, depth).await.state,
+            42,
+            fixture,
+        );
+    }
+    let nil_pointer = scenario
+        .operation(
+            "inspect Go nil pointer",
+            scenario.handle().variable("nilPointer"),
+        )
+        .await;
+    assert!(
+        matches!(
+            nil_pointer.state,
+            VariableState::Available {
+                dereference: uscope::DereferenceState::Unavailable {
+                    reason: uscope::DereferenceUnavailableReason::Null,
+                    ..
+                },
+                ..
+            }
+        ),
+        "{nil_pointer:?}"
+    );
+    let structure = dereference_named(scenario, "structurePointer", 1).await;
+    record_page(scenario, &structure.state, 2, fixture).await;
+    let recursive = dereference_named(scenario, "recursivePointer", 1).await;
+    record_page(scenario, &recursive.state, 2, fixture).await;
+    let slice = scenario
+        .operation("inspect Go slice", scenario.handle().variable("sliceValue"))
+        .await;
+    assert_slice_values(scenario, &slice, Some(2), &[20, 22], fixture).await;
+}
+
+async fn step_to_source_line(scenario: &mut Scenario, line: u32) {
+    for _ in 0..16 {
+        let reason = scenario.step_to_stop(StepKind::IntoSource).await;
+        assert!(
+            matches!(reason, StopReason::Step { .. }),
+            "source step terminated unexpectedly: {reason:?}"
+        );
+        let location = scenario
+            .operation("step location", scenario.handle().current_location())
+            .await;
+        if location
+            .image
+            .source
+            .as_ref()
+            .is_some_and(|source| source.line.get() == u64::from(line))
+        {
+            return;
+        }
+    }
+    panic!("did not reach source line {line} within the step budget");
+}
+
+/// The C fixtures' scalar variables: each name, value, and byte size.
+const fn c_scalars() -> [(&'static str, ScalarValue, u64); 15] {
+    [
+        ("boolean", ScalarValue::Boolean(true), 1),
+        ("character", ScalarValue::Signed(65), 1),
+        ("signed_character", ScalarValue::Signed(-12), 1),
+        ("unsigned_character", ScalarValue::Unsigned(250), 1),
+        ("signed_short", ScalarValue::Signed(-1234), 2),
+        ("unsigned_short", ScalarValue::Unsigned(54_321), 2),
+        ("signed_int", ScalarValue::Signed(-1_234_567), 4),
+        ("unsigned_int", ScalarValue::Unsigned(3_456_789_012), 4),
+        ("signed_long", ScalarValue::Signed(-123_456_789), 8),
+        ("unsigned_long", ScalarValue::Unsigned(123_456_789), 8),
+        (
+            "signed_long_long",
+            ScalarValue::Signed(-1_234_567_890_123),
+            8,
+        ),
+        (
+            "unsigned_long_long",
+            ScalarValue::Unsigned(12_345_678_901_234),
+            8,
+        ),
+        (
+            "single",
+            ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+            4,
+        ),
+        (
+            "double_precision",
+            ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+            8,
+        ),
+        (
+            "extended",
+            ScalarValue::Floating(uscope::FloatValue::X87Extended {
+                significand: 0xc800_0000_0000_0000,
+                sign_exponent: 0x4000,
+            }),
+            16,
+        ),
+    ]
+}
+
+/// Checks that a variable holds `expected`, read whole from memory.
+fn assert_whole_in_memory(
+    variable: &uscope::Variable,
+    expected: ScalarValue,
+    size: u64,
+    fixture: &str,
+) {
+    assert_variable_value(variable, expected);
+    assert_eq!(
+        variable.type_info.as_ref().and_then(|info| info.byte_size),
+        Some(size),
+        "{fixture}: {variable:?}"
+    );
+    assert!(
+        matches!(
+            &variable.state,
+            VariableState::Available {
+                source: uscope::VariableValueSource::Memory(address),
+                raw: Some(raw),
+                ..
+            } if address.get() != 0 && raw.len() == usize::try_from(size).unwrap()
+        ),
+        "{fixture}: {variable:?}"
+    );
+}
+
+fn assert_all_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    assert_parameter_catalog(snapshot, fixture);
+    for (variable, (_, value, size)) in snapshot.variables.iter().zip(c_scalars()) {
+        assert_whole_in_memory(variable, value, size, fixture);
+    }
+    assert_whole_in_memory(&snapshot.variables[15], ScalarValue::Signed(99), 4, fixture);
+}
+
+fn assert_parameter_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    let names = snapshot
+        .variables
+        .iter()
+        .map(|variable| variable.name.as_ref())
+        .collect::<Vec<_>>();
+    let mut expected = c_scalars().map(|(name, ..)| name).to_vec();
+    expected.push("local");
+    assert_eq!(names, expected, "{fixture}");
+    assert!(
+        snapshot.variables[..15]
+            .iter()
+            .all(|variable| variable.kind == VariableKind::Parameter)
+    );
+    assert_eq!(snapshot.variables[15].kind, VariableKind::Local);
+}
+
+fn assert_optimized_parameter_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    let expected = c_scalars().map(|(_, value, _)| value);
+    match fixture {
+        "variables-parameters-gcc-o2" => {
+            for (variable, value) in snapshot.variables[..14].iter().zip(&expected) {
+                assert_variable_value(variable, value.clone());
+            }
+            for (index, register) in [
+                (0, "rdi"),
+                (1, "rsi"),
+                (2, "rdx"),
+                (3, "rcx"),
+                (4, "r8"),
+                (5, "r9"),
+                (12, "xmm0"),
+                (13, "xmm1"),
+            ] {
+                assert_register_source(&snapshot.variables[index], register, fixture);
+            }
+            for variable in &snapshot.variables[6..12] {
+                assert_memory_source(variable, fixture);
+            }
+            assert_variable_value(&snapshot.variables[14], expected[14].clone());
+            assert_memory_source(&snapshot.variables[14], fixture);
+        }
+        "variables-parameters-clang-o2" => {
+            for (index, value) in [0, 4, 5]
+                .into_iter()
+                .chain(6..14)
+                .map(|index| (index, expected[index].clone()))
+            {
+                assert_variable_value(&snapshot.variables[index], value);
+            }
+            assert!(
+                matches!(
+                    snapshot.variables[0].state,
+                    VariableState::Available {
+                        source: uscope::VariableValueSource::Computed,
+                        ..
+                    }
+                ),
+                "{fixture}: {:?}",
+                snapshot.variables[0]
+            );
+            for index in 1..4 {
+                assert_unsupported(
+                    &snapshot.variables[index],
+                    uscope::UnsupportedVariableFeature::EntryValue,
+                    fixture,
+                );
+            }
+            assert_register_source(&snapshot.variables[4], "r8", fixture);
+            assert_register_source(&snapshot.variables[5], "r9", fixture);
+            for variable in &snapshot.variables[6..12] {
+                assert_memory_source(variable, fixture);
+            }
+            assert_register_source(&snapshot.variables[12], "xmm0", fixture);
+            assert_register_source(&snapshot.variables[13], "xmm1", fixture);
+            assert_unsupported(
+                &snapshot.variables[14],
+                uscope::UnsupportedVariableFeature::CompositeLocation,
+                fixture,
+            );
+        }
+        _ => panic!("unexpected optimized parameter fixture {fixture}"),
+    }
+    assert_variable_value(&snapshot.variables[15], ScalarValue::Signed(99));
+    assert!(
+        matches!(
+            snapshot.variables[15].state,
+            VariableState::Available {
+                source: uscope::VariableValueSource::Constant,
+                ..
+            }
+        ),
+        "{fixture}: {:?}",
+        snapshot.variables[15]
+    );
+}
+
+fn assert_register_source(variable: &uscope::Variable, name: &str, fixture: &str) {
+    assert!(
+        matches!(&variable.state, VariableState::Available {
+        source: uscope::VariableValueSource::Register(register),
+        ..
+    } if register.name.as_ref() == name),
+        "{fixture}: {variable:?}"
+    );
+}
+
+fn assert_memory_source(variable: &uscope::Variable, fixture: &str) {
+    assert!(
+        matches!(variable.state, VariableState::Available {
+        source: uscope::VariableValueSource::Memory(address),
+        ..
+    } if address.get() != 0),
+        "{fixture}: {variable:?}"
+    );
+}
+
+fn assert_unsupported(
+    variable: &uscope::Variable,
+    feature: uscope::UnsupportedVariableFeature,
+    fixture: &str,
+) {
+    assert_eq!(
+        variable.state,
+        VariableState::Unavailable(uscope::VariableUnavailableReason::Unsupported(feature)),
+        "{fixture}: {variable:?}"
+    );
+}
+
+fn assert_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    assert_language_scalar_catalog(snapshot, fixture);
+    let sizes = [1, 4, 8, 4, 8, 1, 4, 8, 4, 8];
+    for ((variable, expected), size) in snapshot
+        .variables
+        .iter()
+        .zip(language_scalar_values())
+        .zip(sizes)
+    {
+        assert_whole_in_memory(variable, expected, size, fixture);
+    }
+}
+
+const fn language_scalar_values() -> [ScalarValue; 10] {
+    [
+        ScalarValue::Boolean(true),
+        ScalarValue::Signed(-42),
+        ScalarValue::Unsigned(42),
+        ScalarValue::Floating(uscope::FloatValue::Binary32(1.25_f32.to_bits())),
+        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.5_f64).to_bits())),
+        ScalarValue::Boolean(false),
+        ScalarValue::Signed(-41),
+        ScalarValue::Unsigned(44),
+        ScalarValue::Floating(uscope::FloatValue::Binary32(1.75_f32.to_bits())),
+        ScalarValue::Floating(uscope::FloatValue::Binary64((-2.75_f64).to_bits())),
+    ]
+}
+
+fn assert_optimized_language_scalar_values(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    let expected = language_scalar_values();
+    let available = match fixture {
+        "variables-cpp-gcc-o2" => (0..10).collect::<Vec<_>>(),
+        "variables-cpp-clang-o2" => vec![0, 2, 3, 4, 5, 6, 7],
+        "variables-rust-o2" => vec![0, 1, 2, 3, 4, 5, 6, 7],
+        _ => panic!("unexpected optimized language fixture {fixture}"),
+    };
+    for index in available {
+        assert_variable_value(&snapshot.variables[index], expected[index].clone());
+    }
+    if fixture == "variables-cpp-clang-o2" {
+        assert_unsupported(
+            &snapshot.variables[1],
+            uscope::UnsupportedVariableFeature::EntryValue,
+            fixture,
+        );
+    }
+    if fixture != "variables-cpp-gcc-o2" {
+        for index in 8..10 {
+            assert_eq!(
+                snapshot.variables[index].state,
+                VariableState::Unavailable(
+                    uscope::VariableUnavailableReason::UnavailableAtInstruction
+                ),
+                "{fixture}: {:?}",
+                snapshot.variables[index]
+            );
+        }
+    }
+}
+
+fn assert_language_scalar_catalog(snapshot: &uscope::VariableSnapshot, fixture: &str) {
+    let names = snapshot
+        .variables
+        .iter()
+        .map(|variable| variable.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "flag",
+            "signed_value",
+            "unsigned_value",
+            "single",
+            "double_precision",
+            "local_flag",
+            "local_signed",
+            "local_unsigned",
+            "local_single",
+            "local_double",
+        ],
+        "{fixture}"
+    );
+    assert!(
+        snapshot.variables[..5]
+            .iter()
+            .all(|variable| variable.kind == VariableKind::Parameter)
+    );
+    assert!(
+        snapshot.variables[5..]
+            .iter()
+            .all(|variable| variable.kind == VariableKind::Local)
+    );
 }

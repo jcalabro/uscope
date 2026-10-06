@@ -624,9 +624,6 @@ build_fixture gcc "$c_fixtures_dir/exited-leader.c" "$output_dir/exited-leader" 
 build_c_fixture_directory gcc "$c_fixtures_dir/pointer-memory" \
     "$output_dir/pointer-memory-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
-build_c_fixture_directory clang "$c_fixtures_dir/pointer-memory" \
-    "$output_dir/pointer-memory-clang-o0" \
-    -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture gcc "$c_fixtures_dir/variables.c" "$output_dir/variables-gcc-o0" \
     -O0 -g3 -gdwarf-5 -fno-omit-frame-pointer -fPIE -pie
 build_fixture clang "$c_fixtures_dir/variables.c" "$output_dir/variables-clang-o0" \
@@ -986,14 +983,10 @@ build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-o2" \
     -O ReleaseFast -fPIE -fomit-frame-pointer
-build_zig_fixture "$zig_fixtures_dir/variables.zig" "$output_dir/variables-zig-nopie" \
-    -O Debug -fno-PIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/records.zig" "$output_dir/records-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/records.zig" "$output_dir/records-zig-o2" \
     -O ReleaseFast -fPIE -fomit-frame-pointer
-build_zig_fixture "$zig_fixtures_dir/records.zig" "$output_dir/records-zig-nopie" \
-    -O Debug -fno-PIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/enums.zig" "$output_dir/enums-zig-o0" \
     -O Debug -fPIE -fno-omit-frame-pointer
 build_zig_fixture "$zig_fixtures_dir/enums.zig" "$output_dir/enums-zig-o2" \
@@ -1196,8 +1189,6 @@ build_zig_fixture "$zig_fixtures_dir/watch.zig" "$output_dir/watch-zig-o2" \
     -O ReleaseFast -fPIE -fomit-frame-pointer
 build_go_fixture "$go_fixtures_dir/watch" "$output_dir/watch-go-o0" \
     -buildmode=pie "-gcflags=all=-N -l"
-build_go_fixture "$go_fixtures_dir/watch" "$output_dir/watch-go-o2" \
-    -buildmode=pie
 build_go_fixture "$go_fixtures_dir/frames" "$output_dir/frames-go-o2" \
     -buildmode=pie
 

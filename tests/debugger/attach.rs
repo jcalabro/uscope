@@ -5,14 +5,7 @@ use super::*;
 /// Waits for a released attach fixture to exit, and returns its exit code. A
 /// process left stopped by the debugger would never exit.
 fn exit_code(child: support::ExternalProcess) -> Option<i32> {
-    let stat = format!("/proc/{}/stat", child.process_id());
-    support::wait_until("the fixture exits", || {
-        let stat = fs::read_to_string(&stat).expect("read fixture stat");
-        // Fields resume after the command name's final parenthesis.
-        stat.rsplit_once(')')
-            .and_then(|(_, fields)| fields.split_whitespace().next())
-            == Some("Z")
-    });
+    wait_for_zombie(child.process_id());
     child.wait().code()
 }
 
@@ -110,14 +103,7 @@ async fn attach_stops_and_detaches_every_existing_native_thread() {
 async fn attach_traces_a_process_whose_main_thread_exited() {
     let mut child = support::ExternalProcess::spawn(&Scenario::fixture("attach-exited-leader"));
     // The zombie leader stays listed but can never be seized.
-    let stat = format!("/proc/{}/stat", child.process_id());
-    support::wait_until("the main thread exits", || {
-        fs::read_to_string(&stat).is_ok_and(|stat| {
-            stat.rsplit_once(')')
-                .and_then(|(_, fields)| fields.split_whitespace().next())
-                == Some("Z")
-        })
-    });
+    wait_for_zombie(child.process_id());
     let mut scenario = Scenario::attached("attach without a leader", child.attach().await);
     let snapshot = scenario.snapshot().await;
     assert!(matches!(
@@ -143,14 +129,7 @@ async fn detaching_waits_for_no_main_thread_that_exited_after_attaching() {
     let mut scenario = Scenario::attached("detach after the leader exits", child.attach().await);
     let _resumed = scenario.start_resuming().await;
     child.release();
-    let stat = format!("/proc/{}/stat", child.process_id());
-    support::wait_until("the main thread exits", || {
-        fs::read_to_string(&stat).is_ok_and(|stat| {
-            stat.rsplit_once(')')
-                .and_then(|(_, fields)| fields.split_whitespace().next())
-                == Some("Z")
-        })
-    });
+    wait_for_zombie(child.process_id());
     // Linux reports the main thread's exit only after the worker's, so
     // detaching cannot wait for it.
     scenario.shutdown().await;

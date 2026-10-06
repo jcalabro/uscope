@@ -504,17 +504,17 @@ async fn functions_cover_every_debug_information_range() {
                 split > 0,
                 "the optimized build splits a cold path from main"
             );
+            assert_split_main_names_each_range(&scenario, &modules, fixture).await;
         }
         scenario.shutdown().await;
     }
 }
 
-#[tokio::test]
-async fn split_functions_name_each_range_by_its_own_symbol() {
-    let (scenario, modules) = faulted_with_breakpoints("crash-gcc-o2-nopie").await;
-    let main = modules.symbol("crash-gcc-o2-nopie", "main");
+/// Each range of a split `main` is named by its own symbol.
+async fn assert_split_main_names_each_range(scenario: &Scenario, modules: &Modules, fixture: &str) {
+    let main = modules.symbol(fixture, "main");
     let disassembly = disassemble(
-        &scenario,
+        scenario,
         query(DisassemblyRange::Function(VirtualAddress::new(main))),
     )
     .await;
@@ -540,7 +540,6 @@ async fn split_functions_name_each_range_by_its_own_symbol() {
             Some(("main".to_owned(), 0))
         ]
     );
-    scenario.shutdown().await;
 }
 
 #[tokio::test]
@@ -802,44 +801,25 @@ async fn assert_hidden_data(scenario: &Scenario, hidden: u64, context: &str) {
     assert_eq!(texts, ["mov $1, %eax", "ret"], "{context}");
 }
 
-#[tokio::test]
-async fn data_inside_code_is_reported_instead_of_hidden() {
-    for fixture in ["disassembly-gcc-o0", "disassembly-clang-o2-nopie"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("main").await;
-        scenario.run_to_stop().await;
-        let modules = Modules::load(&scenario).await;
-        let hidden = modules.symbol(fixture, "disasm_hidden_data");
-        assert_marked_data(
-            &scenario,
-            modules.symbol(fixture, "disasm_marked_data"),
-            fixture,
-        )
+/// Stops at the hidden code, where the program counter proves it, and the
+/// trap installed there is never shown.
+async fn assert_hidden_data_at_its_stop(scenario: &mut Scenario, hidden: u64) {
+    scenario
+        .add_breakpoint_spec(BreakpointSpec::Address(VirtualAddress::new(hidden + 4)))
         .await;
-        assert_hidden_data(&scenario, hidden, fixture).await;
-
-        // Stopped at the hidden code, the program counter proves it, and the
-        // trap installed there is never shown.
-        scenario
-            .add_breakpoint_spec(BreakpointSpec::Address(VirtualAddress::new(hidden + 4)))
-            .await;
-        let stop = scenario.resume_to_stop().await;
-        assert!(
-            matches!(stop, StopReason::Breakpoint { address, .. } if address.get() == hidden + 4)
-        );
-        let (boundary, leading, block) =
-            into_window(disassemble(&scenario, window(hidden + 4, 4, 2)).await);
-        assert_eq!(
-            boundary,
-            TargetBoundary::Known(BoundaryEvidence::ProgramCounter)
-        );
-        assert!(matches!(
-            leading,
-            Some(ContextShortfall::Desynchronized { .. })
-        ));
-        assert_eq!(*block.instructions[0].bytes, [0xb8, 1, 0, 0, 0]);
-        scenario.shutdown().await;
-    }
+    let stop = scenario.resume_to_stop().await;
+    assert!(matches!(stop, StopReason::Breakpoint { address, .. } if address.get() == hidden + 4));
+    let (boundary, leading, block) =
+        into_window(disassemble(scenario, window(hidden + 4, 4, 2)).await);
+    assert_eq!(
+        boundary,
+        TargetBoundary::Known(BoundaryEvidence::ProgramCounter)
+    );
+    assert!(matches!(
+        leading,
+        Some(ContextShortfall::Desynchronized { .. })
+    ));
+    assert_eq!(*block.instructions[0].bytes, [0xb8, 1, 0, 0, 0]);
 }
 
 /// Disassembles a function in both syntaxes and checks that only the text
@@ -916,91 +896,84 @@ fn call_targets(
         .collect()
 }
 
-#[tokio::test]
-async fn instructions_name_their_targets_and_render_in_both_syntaxes() {
-    for fixture in ["disassembly-gcc-o0", "disassembly-clang-o2-nopie"] {
-        let mut scenario = Scenario::launch(fixture);
-        scenario.add_breakpoint("main").await;
-        scenario.run_to_stop().await;
-        let modules = Modules::load(&scenario).await;
-        let helper = modules.symbol(fixture, "disasm_helper");
-        let main = assert_syntaxes_agree(
-            &scenario,
-            VirtualAddress::new(modules.symbol(fixture, "main")),
-        )
-        .await;
+/// Calls and operands in `main` and its helper name their targets, and debug
+/// information places `main`'s instructions in its source.
+async fn assert_named_targets(scenario: &Scenario, modules: &Modules, fixture: &str) {
+    let helper = modules.symbol(fixture, "disasm_helper");
+    let main = assert_syntaxes_agree(
+        scenario,
+        VirtualAddress::new(modules.symbol(fixture, "main")),
+    )
+    .await;
 
-        // Calls name their targets: a function by its symbol, the C
-        // library's entry through the linkage table by its section alone.
-        let calls = call_targets(&main);
-        assert!(
-            calls.contains(&(
-                helper,
-                Some(".text".to_owned()),
-                Some("disasm_helper".to_owned())
-            )),
-            "{fixture}: {calls:?}"
-        );
-        assert!(
-            calls.iter().any(|(_, section, symbol)| {
-                section
-                    .as_deref()
-                    .is_some_and(|name| name.starts_with(".plt"))
-                    && symbol.is_none()
-            }),
-            "{fixture}: {calls:?}"
-        );
+    // A function is named by its symbol, the C library's entry through the
+    // linkage table by its section alone.
+    let calls = call_targets(&main);
+    assert!(
+        calls.contains(&(
+            helper,
+            Some(".text".to_owned()),
+            Some("disasm_helper".to_owned())
+        )),
+        "{fixture}: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|(_, section, symbol)| {
+            section
+                .as_deref()
+                .is_some_and(|name| name.starts_with(".plt"))
+                && symbol.is_none()
+        }),
+        "{fixture}: {calls:?}"
+    );
 
-        // The helper's operand names the global it reads.
-        let disassembly = disassemble(
-            &scenario,
-            query(DisassemblyRange::Function(VirtualAddress::new(helper))),
-        )
-        .await;
-        let DisassemblyView::Function { blocks, .. } = disassembly.view else {
-            panic!("not a function");
-        };
-        let operands = blocks[0]
-            .instructions
-            .iter()
-            .flat_map(|instruction| decoded(instruction).references.iter())
-            .filter(|reference| reference.kind == InstructionReferenceKind::MemoryOperand)
-            .collect::<Vec<_>>();
-        let [operand] = operands[..] else {
-            panic!("{fixture}: {operands:#?}");
-        };
-        assert_eq!(
-            operand.address.get(),
-            modules.symbol(fixture, "disasm_counter")
-        );
-        let symbol = operand
-            .description
-            .module
-            .as_ref()
-            .and_then(|module| module.image.symbol.as_ref())
-            .expect("named global");
-        assert_eq!(
-            (symbol.name.as_ref(), symbol.kind, symbol.offset),
-            ("disasm_counter", SymbolKind::Data, 0)
-        );
+    // The helper's operand names the global it reads.
+    let disassembly = disassemble(
+        scenario,
+        query(DisassemblyRange::Function(VirtualAddress::new(helper))),
+    )
+    .await;
+    let DisassemblyView::Function { blocks, .. } = disassembly.view else {
+        panic!("not a function");
+    };
+    let operands = blocks[0]
+        .instructions
+        .iter()
+        .flat_map(|instruction| decoded(instruction).references.iter())
+        .filter(|reference| reference.kind == InstructionReferenceKind::MemoryOperand)
+        .collect::<Vec<_>>();
+    let [operand] = operands[..] else {
+        panic!("{fixture}: {operands:#?}");
+    };
+    assert_eq!(
+        operand.address.get(),
+        modules.symbol(fixture, "disasm_counter")
+    );
+    let symbol = operand
+        .description
+        .module
+        .as_ref()
+        .and_then(|module| module.image.symbol.as_ref())
+        .expect("named global");
+    assert_eq!(
+        (symbol.name.as_ref(), symbol.kind, symbol.offset),
+        ("disasm_counter", SymbolKind::Data, 0)
+    );
 
-        // Debug information places the program's instructions in its source.
-        let module = modules.named(fixture).1;
-        let sources = main
-            .iter()
-            .filter_map(|instruction| instruction.source.as_ref())
-            .filter_map(|source| module.source_file(source.file))
-            .map(|file| {
-                file.path
-                    .file_name()
-                    .expect("file")
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(sources, BTreeSet::from(["main.c".to_owned()]), "{fixture}");
-        scenario.shutdown().await;
-    }
+    let module = modules.named(fixture).1;
+    let sources = main
+        .iter()
+        .filter_map(|instruction| instruction.source.as_ref())
+        .filter_map(|source| module.source_file(source.file))
+        .map(|file| {
+            file.path
+                .file_name()
+                .expect("file")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(sources, BTreeSet::from(["main.c".to_owned()]), "{fixture}");
 }
 
 #[tokio::test]
@@ -1393,13 +1366,25 @@ async fn assert_targets_at_each_stop(scenario: &mut Scenario, modules: &Modules,
     }
 }
 
+/// The fixture's code names its targets in both syntaxes, reports the data
+/// hidden inside it, and resolves each indirect branch's target at its stop.
+/// `main` calls the data functions before the indirect branches and printf.
 #[tokio::test]
-async fn indirect_branches_name_the_targets_they_read_at_the_stop() {
+async fn code_names_its_targets_and_reports_data_inside_it() {
     for fixture in ["disassembly-gcc-o0", "disassembly-clang-o2-nopie"] {
         let mut scenario = Scenario::launch(fixture);
         scenario.add_breakpoint("main").await;
         scenario.run_to_stop().await;
         let modules = Modules::load(&scenario).await;
+        assert_named_targets(&scenario, &modules, fixture).await;
+        let hidden = modules.symbol(fixture, "disasm_hidden_data");
+        assert_marked_data(
+            &scenario,
+            modules.symbol(fixture, "disasm_marked_data"),
+            fixture,
+        )
+        .await;
+        assert_hidden_data(&scenario, hidden, fixture).await;
         assert_targets_away_from_the_stop(&scenario, &modules, fixture).await;
 
         // Lazy binding leaves a linkage stub's slot pointing back into the
@@ -1412,6 +1397,7 @@ async fn indirect_branches_name_the_targets_they_read_at_the_stop() {
         assert_eq!(target.address, jump.end(), "{fixture}");
         assert_eq!(section(target), Some(".plt"), "{fixture}");
 
+        assert_hidden_data_at_its_stop(&mut scenario, hidden).await;
         assert_targets_at_each_stop(&mut scenario, &modules, fixture).await;
 
         // After the first call, the slot holds the C library's function.

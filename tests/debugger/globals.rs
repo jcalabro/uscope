@@ -30,32 +30,24 @@ async fn structural_inspection_preserves_dots_in_global_roots_before_selecting_m
             ])),
         )
         .await;
-    assert_inspected_signed(&member, -7, fixture);
+    assert_signed(&member.state, -7, fixture);
 
     resume_go_to_exit(&mut scenario, fixture).await;
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 }
 
+const CPP_GLOBALS: &[&str] = &[
+    "fixture::alpha::duplicate",
+    "fixture::Holder::member",
+    "fixture::Holder::constexpr_member",
+];
+
 #[tokio::test]
-async fn global_catalog_normalizes_compiler_qualification_and_optimized_storage() {
+async fn global_catalogs_normalize_qualification_and_optimized_storage_and_list_in_pages() {
     for (fixture, expected) in [
         ("globals-c-gcc-o0", &["external_value", "duplicate"][..]),
-        (
-            "globals-cpp-gcc-o0",
-            &[
-                "fixture::alpha::duplicate",
-                "fixture::Holder::member",
-                "fixture::Holder::constexpr_member",
-            ][..],
-        ),
-        (
-            "globals-cpp-clang-o0",
-            &[
-                "fixture::alpha::duplicate",
-                "fixture::Holder::member",
-                "fixture::Holder::constexpr_member",
-            ][..],
-        ),
+        ("globals-cpp-gcc-o0", CPP_GLOBALS),
+        ("globals-cpp-clang-o0", CPP_GLOBALS),
         (
             "globals-rust-o0",
             &[
@@ -93,6 +85,32 @@ async fn global_catalog_normalizes_compiler_qualification_and_optimized_storage(
                 );
             }
         }
+        // Listing is filtered, paged, and ordered by name.
+        if fixture == "globals-go-o0" {
+            let page = |offset, limit| {
+                handle.globals(uscope::GlobalVariableQuery {
+                    filter: Some("main.package".to_owned()),
+                    offset,
+                    limit,
+                })
+            };
+            let first = page(0, 1).await.expect("first global page");
+            let second = page(1, 1).await.expect("second global page");
+            assert_eq!(
+                (first.offset, first.total, first.variables.len()),
+                (0, 7, 1)
+            );
+            assert_eq!((second.total, second.variables.len()), (7, 1));
+            assert!(first.variables[0].module.is_none());
+            assert!(
+                first.variables[0].variable.qualified_name
+                    < second.variables[0].variable.qualified_name
+            );
+            assert!(matches!(
+                page(0, 0).await,
+                Err(Error::InvalidGlobalPageLimit(0))
+            ));
+        }
         debugger
             .shutdown()
             .await
@@ -117,52 +135,6 @@ async fn global_catalog_normalizes_compiler_qualification_and_optimized_storage(
             .await
             .expect("shut down catalog debugger");
     }
-}
-
-#[tokio::test]
-async fn global_catalog_listing_is_filtered_bounded_and_deterministic() {
-    let debugger = Debugger::new(Scenario::fixture("globals-go-o0")).expect("load Go catalog");
-    let handle = debugger.handle();
-    let first = handle
-        .globals(uscope::GlobalVariableQuery {
-            filter: Some("main.package".to_owned()),
-            offset: 0,
-            limit: 1,
-        })
-        .await
-        .expect("first global page");
-    assert_eq!(first.offset, 0);
-    assert_eq!(first.total, 7);
-    assert_eq!(first.variables.len(), 1);
-    assert!(first.variables[0].module.is_none());
-    let second = handle
-        .globals(uscope::GlobalVariableQuery {
-            filter: Some("main.package".to_owned()),
-            offset: 1,
-            limit: 1,
-        })
-        .await
-        .expect("second global page");
-    assert_eq!(second.total, first.total);
-    assert_eq!(second.variables.len(), 1);
-    assert!(
-        first.variables[0].variable.qualified_name < second.variables[0].variable.qualified_name
-    );
-    assert!(matches!(
-        handle
-            .globals(uscope::GlobalVariableQuery {
-                filter: None,
-                offset: 0,
-                limit: 0,
-            })
-            .await,
-        Err(Error::InvalidGlobalPageLimit(0))
-    ));
-    drop(handle);
-    debugger
-        .shutdown()
-        .await
-        .expect("shut down catalog debugger");
 }
 
 #[tokio::test]
@@ -220,7 +192,7 @@ async fn c_globals_cover_local_shadowing_collisions_relocation_and_optimization(
                 scenario.handle().dereference(reference),
             )
             .await;
-        assert_dereferenced_scalar(&dereferenced, 101, fixture);
+        assert_signed(&dereferenced.state, 101, fixture);
 
         let one = scenario
             .operation(
@@ -317,8 +289,10 @@ async fn rust_globals_preserve_module_qualification_and_honest_optimized_unavail
         scenario.handle().variable("DUPLICATE").await,
         Err(Error::AmbiguousGlobalVariable { .. })
     ));
-    assert_dereferenced_scalar(
-        &dereference_named(&scenario, "globals::ROOT_POINTER", 1).await,
+    assert_signed(
+        &dereference_named(&scenario, "globals::ROOT_POINTER", 1)
+            .await
+            .state,
         157,
         "globals-rust-o0",
     );
@@ -347,8 +321,10 @@ async fn rust_globals_preserve_module_qualification_and_honest_optimized_unavail
                 | uscope::VariableUnavailableReason::UnavailableAtInstruction,
         )
     ));
-    assert_dereferenced_scalar(
-        &dereference_named(&optimized, "globals::ROOT_POINTER", 1).await,
+    assert_signed(
+        &dereference_named(&optimized, "globals::ROOT_POINTER", 1)
+            .await
+            .state,
         157,
         "globals-rust-o2",
     );
@@ -377,13 +353,17 @@ async fn go_package_globals_are_printable_without_source_stepping() {
             .await;
         assert_variable_value(&variable, expected);
     }
-    assert_dereferenced_scalar(
-        &dereference_named(&scenario, "main.packagePointer", 1).await,
+    assert_signed(
+        &dereference_named(&scenario, "main.packagePointer", 1)
+            .await
+            .state,
         162,
         fixture,
     );
-    assert_dereferenced_scalar(
-        &dereference_named(&scenario, "main.packagePointerPointer", 2).await,
+    assert_signed(
+        &dereference_named(&scenario, "main.packagePointerPointer", 2)
+            .await
+            .state,
         162,
         fixture,
     );
@@ -404,7 +384,7 @@ async fn go_package_globals_are_printable_without_source_stepping() {
         }
     ));
     let pair = dereference_named(&scenario, "main.packagePairPointer", 1).await;
-    assert_dereferenced_record(&scenario, &pair, 2, fixture).await;
+    record_page(&scenario, &pair.state, 2, fixture).await;
     resume_go_to_exit(&mut scenario, fixture).await;
     assert_eq!(scenario.shutdown().await, Some(ExitStatus::Code(0)));
 
@@ -451,8 +431,10 @@ async fn zig_globals_cover_containers_constants_pie_and_optimized_storage() {
             scenario.handle().variable("duplicate").await,
             Err(Error::AmbiguousGlobalVariable { .. })
         ));
-        assert_dereferenced_scalar(
-            &dereference_named(&scenario, "globals.root_pointer", 1).await,
+        assert_signed(
+            &dereference_named(&scenario, "globals.root_pointer", 1)
+                .await
+                .state,
             184,
             fixture,
         );
@@ -579,7 +561,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
             scenario.handle().dereference(cross_module_reference),
         )
         .await;
-    assert_dereferenced_scalar(&cross_module_referent, 211, "globals-shared");
+    assert_signed(&cross_module_referent.state, 211, "globals-shared");
     let dso_pointer = loaded
         .variables
         .iter()
@@ -611,7 +593,7 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
             scenario.handle().dereference(reference),
         )
         .await;
-    assert_dereferenced_scalar(&dso_referent, 211, "globals-shared");
+    assert_signed(&dso_referent.state, 211, "globals-shared");
     let dso_tls = loaded
         .variables
         .iter()
@@ -631,6 +613,9 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         )
         .await;
     assert_variable_value(&tls_value, ScalarValue::Signed(213));
+    // glibc's descriptors find a loaded library's TLS block in the DTV or
+    // in static TLS space the loader set aside.
+    assert_eq!(tls_location_both_ways(&scenario, "dso_tls").await.1, 213);
     let mut saw_load = false;
     while let Ok(event) = events.try_recv() {
         saw_load |= matches!(
@@ -689,6 +674,8 @@ async fn shared_library_globals_track_load_unload_reload_and_stale_identity() {
         )
         .await;
     assert_variable_value(&reloaded_value, ScalarValue::Signed(211));
+    // Reloading reuses the module's TLS slot under a newer generation.
+    assert_eq!(tls_location_both_ways(&scenario, "dso_tls").await.1, 213);
 
     assert_eq!(
         scenario.resume_to_stop().await,
@@ -794,7 +781,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
                     scenario.handle().dereference(reference),
                 )
                 .await;
-            assert_dereferenced_scalar(&tls_referent, *value, fixture);
+            assert_signed(&tls_referent.state, *value, fixture);
         }
         let selected = snapshot.threads.last().expect("TLS thread").id;
         scenario
@@ -811,7 +798,7 @@ async fn tls_globals_resolve_per_selected_thread_for_gcc_and_clang() {
                     scenario.handle().dereference(reference),
                 )
                 .await;
-            assert_dereferenced_scalar(&tls_referent, value, fixture);
+            assert_signed(&tls_referent.state, value, fixture);
         }
         values.sort_unstable();
         assert_eq!(values, [300, 301, 302], "{fixture}");
@@ -868,23 +855,22 @@ pub async fn tls_location_both_ways(scenario: &Scenario, name: &str) -> (u64, i1
     thread_library
 }
 
-/// A library loaded at run time holds its TLS block in the DTV, or in static
-/// TLS space the loader set aside.
-#[tokio::test]
-async fn glibc_descriptor_tls_lookup_finds_libraries_loaded_at_run_time() {
-    let mut scenario = Scenario::new("dlopen TLS", Scenario::fixture("globals-shared"));
-    scenario.add_breakpoint("after_load").await;
-    scenario.add_breakpoint("after_reload").await;
-    assert!(matches!(
-        scenario.run_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    assert_eq!(tls_location_both_ways(&scenario, "dso_tls").await.1, 213);
-    // Reloading reuses the module's TLS slot under a newer generation.
-    assert!(matches!(
-        scenario.resume_to_stop().await,
-        StopReason::Breakpoint { .. }
-    ));
-    assert_eq!(tls_location_both_ways(&scenario, "dso_tls").await.1, 213);
-    scenario.shutdown().await;
+fn catalog_global<'a>(
+    image: &'a ModuleImage,
+    qualified_name: &str,
+) -> &'a uscope::GlobalVariableInfo {
+    image
+        .globals()
+        .iter()
+        .find(|global| global.qualified_name.as_ref() == qualified_name)
+        .unwrap_or_else(|| {
+            panic!(
+                "missing global {qualified_name}; catalog: {:?}",
+                image
+                    .globals()
+                    .iter()
+                    .map(|global| global.qualified_name.as_ref())
+                    .collect::<Vec<_>>()
+            )
+        })
 }

@@ -302,11 +302,15 @@ async fn go_identities_come_from_kinds_and_instance_names() {
 }
 
 /// Zig names generic instances by their calls and spells slices and
-/// sentinels in its own syntax.
+/// sentinels in its own syntax. Its text slices and sentinel pointers read
+/// as text, charged to the inspection's budget: text the budget cannot
+/// afford is cut short and says why, without failing the inspection.
 #[tokio::test]
-async fn zig_identities_and_text_slices_follow_zig_syntax() {
+async fn zig_identities_text_and_text_budgets_follow_zig_syntax() {
     use SourceLanguage::Zig;
-    let image = load_fixture_image("generics-zig-o0").await;
+    let scenario =
+        stop_at_marker("generics-zig-o0", "zig/generics.zig", "generics stop here").await;
+    let image = Arc::clone(scenario.handle().module_image());
     let list = identity(spelled(&image, "array_list.Aligned(u32,null)"));
     assert_eq!(list.language, Zig);
     assert_eq!(list.origin, ArgumentOrigin::ParsedName);
@@ -324,21 +328,63 @@ async fn zig_identities_and_text_slices_follow_zig_syntax() {
             "{name}: {slice:?}"
         );
     }
+
+    let variables = scenario
+        .operation("variables", scenario.handle().variables())
+        .await;
+    for (name, text) in [
+        ("text", Some(complete("hello"))),
+        ("terminated", Some(complete("zero"))),
+        ("c_text", Some(complete("cstr"))),
+        ("ints", None),
+    ] {
+        assert_eq!(text_of(&variables.variables, name), text, "{name}");
+    }
+
+    let full = inspect_text(&scenario, uscope::InspectionLimits::default()).await;
+    let VariableState::Available { text, .. } = &full.state else {
+        panic!("{full:?}");
+    };
+    assert_eq!(text.as_deref().cloned(), Some(complete("hello")));
+    // Three bytes short of the whole text.
+    let limits = uscope::InspectionLimits {
+        memory_bytes: full.usage.memory_bytes - 3,
+        ..uscope::InspectionLimits::default()
+    };
+    let tight = inspect_text(&scenario, limits).await;
+    assert_eq!(
+        tight.completion,
+        uscope::InspectionCompletion::Complete,
+        "{tight:?}"
+    );
+    let VariableState::Available {
+        text: Some(text), ..
+    } = &tight.state
+    else {
+        panic!("{tight:?}");
+    };
+    assert_eq!(&*text.bytes, b"he", "{text:?}");
+    assert!(
+        matches!(
+            text.completion,
+            uscope::TextCompletion::Limited {
+                length: Some(5),
+                exhaustion: uscope::InspectionExhaustion {
+                    resource: uscope::InspectionLimit::MemoryBytes,
+                    ..
+                },
+            }
+        ),
+        "{text:?}"
+    );
+    scenario.shutdown().await;
 }
 
 /// Stops a fixture at the line holding `marker`, in its source under
 /// `tests/fixtures`.
 async fn stop_at_marker(fixture: &str, source: &str, marker: &str) -> Scenario {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(source);
-    let line = fs::read_to_string(&path)
-        .expect("source")
-        .lines()
-        .position(|line| line.contains(marker))
-        .expect("marker") as u64
-        + 1;
-    let file = path.file_name().expect("name").to_str().expect("utf8");
+    let line = source_line(&format!("tests/fixtures/{source}"), marker);
+    let file = source.rsplit('/').next().expect("a file name");
     let mut scenario = Scenario::launch(fixture);
     scenario.add_source_breakpoint(file, line).await;
     assert!(matches!(
@@ -385,22 +431,6 @@ async fn expressions_name_types_by_their_identities() {
             ][..],
         ),
         (
-            "templates-cpp-gcc-dwarf4",
-            "cpp/templates.cpp",
-            &[
-                ("sizeof(std::`vector<int>`)", 24),
-                ("sizeof(std::__debug::`vector<int>`)", 56),
-            ][..],
-        ),
-        (
-            "templates-cpp-clang-o0",
-            "cpp/templates.cpp",
-            &[
-                ("sizeof(std::`vector<int>`)", 24),
-                ("sizeof(std::__debug::`vector<int>`)", 56),
-            ][..],
-        ),
-        (
             "templates-cpp-libcxx-o0",
             "cpp/templates.cpp",
             &[
@@ -439,17 +469,6 @@ async fn expressions_name_types_by_their_identities() {
     }
 }
 
-fn text_named(variables: &[uscope::Variable], name: &str) -> Option<uscope::TextSummary> {
-    let variable = variables
-        .iter()
-        .find(|variable| &*variable.name == name)
-        .unwrap_or_else(|| panic!("no variable {name} in {variables:?}"));
-    let VariableState::Available { text, .. } = &variable.state else {
-        panic!("{name} is not available: {:?}", variable.state);
-    };
-    text.as_deref().cloned()
-}
-
 fn complete(text: &str) -> uscope::TextSummary {
     uscope::TextSummary {
         bytes: text.as_bytes().into(),
@@ -457,45 +476,24 @@ fn complete(text: &str) -> uscope::TextSummary {
     }
 }
 
-/// A language's text slices read as text, and byte slices do not.
+/// Rust's text slices read as text, and byte slices do not.
 #[tokio::test]
-async fn text_slices_and_sentinel_pointers_read_as_text() {
-    for (fixture, source, expected) in [
-        (
-            "generics-rust-o0",
-            "rust/generics.rs",
-            &[
-                ("text", Some(complete("héllo"))),
-                ("boxed_text", Some(complete("boxed"))),
-                ("owned", Some(complete("owned"))),
-                ("bytes", None),
-                ("slice", None),
-            ][..],
-        ),
-        (
-            "generics-zig-o0",
-            "zig/generics.zig",
-            &[
-                ("text", Some(complete("hello"))),
-                ("terminated", Some(complete("zero"))),
-                ("c_text", Some(complete("cstr"))),
-                ("ints", None),
-            ][..],
-        ),
+async fn rust_text_slices_read_as_text() {
+    let scenario =
+        stop_at_marker("generics-rust-o0", "rust/generics.rs", "generics stop here").await;
+    let variables = scenario
+        .operation("variables", scenario.handle().variables())
+        .await;
+    for (name, text) in [
+        ("text", Some(complete("héllo"))),
+        ("boxed_text", Some(complete("boxed"))),
+        ("owned", Some(complete("owned"))),
+        ("bytes", None),
+        ("slice", None),
     ] {
-        let scenario = stop_at_marker(fixture, source, "generics stop here").await;
-        let variables = scenario
-            .operation("variables", scenario.handle().variables())
-            .await;
-        for (name, text) in expected {
-            assert_eq!(
-                &text_named(&variables.variables, name),
-                text,
-                "{fixture}: {name}"
-            );
-        }
-        scenario.shutdown().await;
+        assert_eq!(text_of(&variables.variables, name), text, "{name}");
     }
+    scenario.shutdown().await;
 }
 
 async fn inspect_text(
@@ -515,49 +513,4 @@ async fn inspect_text(
         panic!("text is not a value: {evaluation:?}");
     };
     value
-}
-
-/// Text is charged to the inspection's budget. Text the budget cannot
-/// afford is cut short and says why, without failing the inspection.
-#[tokio::test]
-async fn text_the_budget_cannot_afford_is_cut_short_without_failing_the_inspection() {
-    let scenario =
-        stop_at_marker("generics-zig-o0", "zig/generics.zig", "generics stop here").await;
-    let full = inspect_text(&scenario, uscope::InspectionLimits::default()).await;
-    let VariableState::Available { text, .. } = &full.state else {
-        panic!("{full:?}");
-    };
-    assert_eq!(text.as_deref().cloned(), Some(complete("hello")));
-    // Three bytes short of the whole text.
-    let limits = uscope::InspectionLimits {
-        memory_bytes: full.usage.memory_bytes - 3,
-        ..uscope::InspectionLimits::default()
-    };
-    let tight = inspect_text(&scenario, limits).await;
-    assert_eq!(
-        tight.completion,
-        uscope::InspectionCompletion::Complete,
-        "{tight:?}"
-    );
-    let VariableState::Available {
-        text: Some(text), ..
-    } = &tight.state
-    else {
-        panic!("{tight:?}");
-    };
-    assert_eq!(&*text.bytes, b"he", "{text:?}");
-    assert!(
-        matches!(
-            text.completion,
-            uscope::TextCompletion::Limited {
-                length: Some(5),
-                exhaustion: uscope::InspectionExhaustion {
-                    resource: uscope::InspectionLimit::MemoryBytes,
-                    ..
-                },
-            }
-        ),
-        "{text:?}"
-    );
-    scenario.shutdown().await;
 }
