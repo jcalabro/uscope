@@ -354,9 +354,7 @@ async fn line_zero_rows_do_not_extend_the_previous_source_line() {
 
 /// A line table's last row for a function runs on, to the next row,
 /// through code the compiler did not describe, such as hand-written
-/// assembly placed after it. That code has no source line: the simulator
-/// found a step stopping in such assembly, presented as the closing brace
-/// of the C function before it.
+/// assembly placed after it. That code has no source line.
 #[tokio::test]
 async fn hand_written_assembly_after_a_function_has_no_source_line() {
     let image = load_fixture_image("assembly-after-code").await;

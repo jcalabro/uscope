@@ -920,9 +920,8 @@ async fn nonleader_exec_rewrites_the_thread_registry_and_invalidates_the_image()
         Err(Error::Backend(_))
     ));
 
-    // The retained catalog describes the pre-exec program while the thread now
-    // runs the replaced image; every view through it must refuse rather than
-    // resolve stale metadata against the new address space.
+    // The catalog describes the program from before the exec, so every
+    // view through it refuses.
     assert!(matches!(
         scenario.handle().variables().await,
         Err(Error::Backend(_))
@@ -1198,9 +1197,8 @@ async fn pause_cancels_an_active_source_execution_plan() {
     let mut scenario = Scenario::new("pause source plan", Scenario::fixture("step"));
     scenario.add_breakpoint("step_forever").await;
     scenario.run_to_stop().await;
-    // The recommended post-prologue entry is the loop body itself, so leaving
-    // the function breakpoint installed would intentionally interrupt the
-    // finish plan on the next iteration instead of letting pause cancel it.
+    // The breakpoint is in the loop body, where it would end the finish
+    // before the pause could.
     scenario.remove_all_breakpoints().await;
 
     let snapshot = scenario.snapshot().await;
@@ -1241,9 +1239,8 @@ async fn pause_cancels_an_active_source_execution_plan() {
             .all(|thread| matches!(thread.state, ThreadState::Stopped { .. }))
     );
 
-    // Cancellation must also retract the plan's internal breakpoints: after
-    // releasing the loop, a stale plan-owned site at the caller's return
-    // address would surface as an unexpected breakpoint stop instead of exit.
+    // A finish breakpoint the pause left behind would stop the program
+    // before it exits.
     let release = scenario
         .operation(
             "resolve step release",

@@ -1,13 +1,10 @@
 //! Keeps the flight recordings of a failing test.
 //!
-//! A development build records what the debugger does: in this process for
-//! scenarios, and in each adapter process for DAP sessions. A test's
-//! recordings are kept under the recorder's `tests` directory when anything
-//! in the test panics, whenever that happens, so a comparison that fails
-//! after its sessions ended keeps them too. Otherwise they are discarded, and
-//! the directory holds only the recordings of tests that failed when last
-//! run. Nextest runs each test in its own process, so everything this
-//! process records belongs to one test. Release builds record nothing.
+//! A development build records scenarios in this process and DAP sessions
+//! in each adapter process. When anything in a test panics, even after its
+//! sessions ended, its recordings are kept under the recorder's `tests`
+//! directory; otherwise they are discarded. Nextest runs each test in its own
+//! process, so everything this process records belongs to one test.
 
 #![allow(
     unused_imports,

@@ -628,12 +628,10 @@ async fn a_named_threads_start_routine_finishes_when_the_thread_exits() {
 }
 
 /// A main thread continued alone that exits while other threads live ends
-/// its execution at its exit event, with the code it passed to `exit`, as
-/// any other thread's execution ends when its thread exits. Linux reports
-/// the main thread's exit status only once every other thread has exited,
-/// which threads held stopped never do, so the execution never ended. The
-/// process's own status comes when it exits, and however the session then
-/// ends, nothing is left behind.
+/// its execution at its exit event, with the code it passed to `exit`.
+/// Linux reports the main thread's exit status only once every other thread
+/// has exited, which threads held stopped never do. However the session
+/// then ends, nothing is left behind.
 #[tokio::test]
 async fn a_main_thread_continued_alone_ends_its_execution_when_it_exits() {
     let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

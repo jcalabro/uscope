@@ -24,11 +24,14 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uscope::{
     Breakpoint, BreakpointId, BreakpointSpec, CoreDumpOptions, Debugger, DebuggerEvent,
-    DebuggerHandle, ExceptionDisposition, ExitStatus, LaunchOptions, LineNumber, ProcessId, Result,
-    ResumeScope, StackFrameId, StateSnapshot, StepKind, StopReason, ThreadId, VirtualAddress,
+    DebuggerHandle, ExceptionDisposition, ExecutionId, ExitStatus, LaunchOptions, LineNumber,
+    ProcessId, Result, ResumeScope, StackFrameId, StateSnapshot, StepKind, StopReason, ThreadId,
+    VirtualAddress,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+// Event delivery depends on waiter and controller OS threads being scheduled.
+const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A uniquely named temporary directory, removed with its contents on drop,
 /// even when the test panics.
@@ -56,8 +59,6 @@ impl Drop for ScratchDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-// Event delivery depends on waiter and controller OS threads being scheduled.
-const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A fixture process for attach tests, killed and reaped when dropped, even
 /// when the test panics.
@@ -309,9 +310,9 @@ impl Scenario {
         let description = format!("{spec:?}");
         self.transcript
             .push(format!("request: break {description}"));
-        let result = within(self.handle.add_breakpoint(spec))
-            .await
-            .unwrap_or_else(|error| self.fail(&format!("add breakpoint failed: {error}")));
+        let result = self
+            .operation("add breakpoint", self.handle.add_breakpoint(spec))
+            .await;
         self.transcript.push(format!("reply: {result:?}"));
         self.drain_events();
         result
@@ -319,9 +320,9 @@ impl Scenario {
 
     pub async fn remove_breakpoint(&mut self, id: BreakpointId) -> Breakpoint {
         self.transcript.push(format!("request: delete {id}"));
-        let result = within(self.handle.remove_breakpoint(id))
-            .await
-            .unwrap_or_else(|error| self.fail(&format!("remove breakpoint failed: {error}")));
+        let result = self
+            .operation("remove breakpoint", self.handle.remove_breakpoint(id))
+            .await;
         self.transcript.push(format!("reply: {result:?}"));
         self.drain_events();
         result
@@ -329,9 +330,12 @@ impl Scenario {
 
     pub async fn remove_all_breakpoints(&mut self) -> Vec<Breakpoint> {
         self.transcript.push("request: delete all".to_owned());
-        let result = within(self.handle.remove_all_breakpoints())
-            .await
-            .unwrap_or_else(|error| self.fail(&format!("remove all breakpoints failed: {error}")));
+        let result = self
+            .operation(
+                "remove all breakpoints",
+                self.handle.remove_all_breakpoints(),
+            )
+            .await;
         self.transcript.push(format!("reply: {result:?}"));
         self.drain_events();
         result.to_vec()
@@ -343,10 +347,9 @@ impl Scenario {
 
     /// Launches with explicit options and waits for that launch's stop or exit.
     pub async fn run_with_to_stop(&mut self, options: LaunchOptions) -> StopReason {
-        self.drain_events();
-        self.transcript.push(format!("request: run {options:?}"));
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move { handle.run_with(options).await });
+        let task = self.spawn_request(&format!("run {options:?}"), |handle| async move {
+            handle.run_with(options).await
+        });
         self.wait_for_request(task, "run").await
     }
 
@@ -360,29 +363,23 @@ impl Scenario {
     }
 
     pub async fn resume_with_exception(&mut self, disposition: ExceptionDisposition) -> StopReason {
-        self.drain_events();
-        self.transcript
-            .push(format!("request: continue {disposition:?}"));
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move { handle.resume_with_exception(disposition).await });
+        let task = self.spawn_request(
+            &format!("continue {disposition:?}"),
+            move |handle| async move { handle.resume_with_exception(disposition).await },
+        );
         self.wait_for_request(task, "continue").await
     }
 
     pub async fn step_to_stop(&mut self, kind: StepKind) -> StopReason {
-        self.drain_events();
-        self.transcript.push(format!("request: step {kind:?}"));
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move { handle.step(kind).await });
+        let task = self.spawn_request(&format!("step {kind:?}"), move |handle| async move {
+            handle.step(kind).await
+        });
         self.wait_for_request(task, "step").await
     }
 
     /// Steps the selected thread while every other thread stays stopped.
     pub async fn step_alone_to_stop(&mut self, kind: StepKind) -> StopReason {
-        self.drain_events();
-        self.transcript
-            .push(format!("request: step {kind:?} alone"));
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move {
+        let task = self.spawn_request(&format!("step {kind:?} alone"), move |handle| async move {
             let snapshot = handle.snapshot().await?;
             let (Some(stop), Some(thread), Some(frame)) = (
                 snapshot.stop_id,
@@ -407,22 +404,7 @@ impl Scenario {
                     ExceptionDisposition::Pass,
                 )
                 .await?;
-            loop {
-                match events.recv().await {
-                    Ok(DebuggerEvent::InferiorStopped {
-                        execution_id: Some(id),
-                        reason,
-                        ..
-                    }) if id == execution => return Ok(reason),
-                    Ok(DebuggerEvent::InferiorExited {
-                        execution_id: Some(id),
-                        status,
-                        ..
-                    }) if id == execution => return Ok(StopReason::Exited(status)),
-                    Ok(_) => {}
-                    Err(error) => panic!("event stream failed: {error}"),
-                }
-            }
+            Ok(execution_end(&mut events, execution).await)
         });
         self.wait_for_request(task, "step").await
     }
@@ -430,57 +412,105 @@ impl Scenario {
     /// Continues `thread` while every other thread stays stopped, until its
     /// execution stops or ends.
     pub async fn continue_alone_to_stop(&mut self, thread: ThreadId) -> StopReason {
-        self.drain_events();
-        self.transcript
-            .push(format!("request: continue thread {thread} alone"));
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move {
-            let stop = handle
-                .snapshot()
-                .await?
-                .stop_id
-                .ok_or(uscope::Error::NotStopped)?;
-            let mut events = handle.subscribe();
-            let execution = handle
-                .continue_execution(
-                    stop,
-                    ResumeScope::Thread(thread),
-                    ExceptionDisposition::Pass,
-                )
-                .await?;
-            loop {
-                match events.recv().await {
-                    Ok(DebuggerEvent::InferiorStopped {
-                        execution_id: Some(id),
-                        reason,
-                        ..
-                    }) if id == execution => return Ok(reason),
-                    Ok(DebuggerEvent::InferiorExited {
-                        execution_id: Some(id),
-                        status,
-                        ..
-                    }) if id == execution => return Ok(StopReason::Exited(status)),
-                    Ok(_) => {}
-                    Err(error) => panic!("event stream failed: {error}"),
-                }
-            }
-        });
+        let task = self.spawn_request(
+            &format!("continue thread {thread} alone"),
+            move |handle| async move {
+                let stop = handle
+                    .snapshot()
+                    .await?
+                    .stop_id
+                    .ok_or(uscope::Error::NotStopped)?;
+                let mut events = handle.subscribe();
+                let execution = handle
+                    .continue_execution(
+                        stop,
+                        ResumeScope::Thread(thread),
+                        ExceptionDisposition::Pass,
+                    )
+                    .await?;
+                Ok(execution_end(&mut events, execution).await)
+            },
+        );
         self.wait_for_request(task, "continue").await
     }
 
+    /// Launches through `process`, which execs the scenario's program once
+    /// `release` runs, and waits for that launch's stop or exit.
+    pub async fn launch_by_exec_to_stop(
+        &mut self,
+        process: ProcessId,
+        stop_at_entry: bool,
+        release: impl FnOnce() + Send + 'static,
+    ) -> StopReason {
+        let task = self.spawn_request(
+            &format!("launch by exec of {process}, stop at entry {stop_at_entry}"),
+            move |handle| async move {
+                let mut events = handle.subscribe();
+                let execution = handle
+                    .launch_by_exec(process, stop_at_entry, release)
+                    .await?;
+                Ok(execution_end(&mut events, execution).await)
+            },
+        );
+        self.wait_for_request(task, "launch by exec").await
+    }
+
+    /// Launches and returns once the program runs past its launch, so that
+    /// an immediate shutdown meets an active execution rather than the
+    /// launch itself.
+    pub async fn start_running(&mut self) -> JoinHandle<Result<StopReason>> {
+        let task = self.run_task(true);
+        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
+            .await;
+        task
+    }
+
+    /// Launches and returns as soon as the inferior exists, which may be
+    /// before its initial exec stop has been processed.
+    pub async fn start_launching(&mut self) -> JoinHandle<Result<StopReason>> {
+        let task = self.run_task(true);
+        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorLaunched { .. }))
+            .await;
+        task
+    }
+
+    pub async fn start_resuming(&mut self) -> JoinHandle<Result<StopReason>> {
+        let task = self.run_task(false);
+        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
+            .await;
+        task
+    }
+
     async fn run_request(&mut self, launch: bool) -> StopReason {
-        let operation = if launch { "run" } else { "continue" };
-        self.drain_events();
-        self.transcript.push(format!("request: {operation}"));
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move {
+        let task = self.run_task(launch);
+        self.wait_for_request(task, if launch { "run" } else { "continue" })
+            .await
+    }
+
+    /// Spawns a launch, or a resume.
+    fn run_task(&mut self, launch: bool) -> JoinHandle<Result<StopReason>> {
+        let description = if launch { "run" } else { "continue" };
+        self.spawn_request(description, move |handle| async move {
             if launch {
                 handle.run().await
             } else {
                 handle.resume().await
             }
-        });
-        self.wait_for_request(task, operation).await
+        })
+    }
+
+    /// Records and spawns a run-control request after the events before it.
+    fn spawn_request<F>(
+        &mut self,
+        description: &str,
+        request: impl FnOnce(DebuggerHandle) -> F,
+    ) -> JoinHandle<Result<StopReason>>
+    where
+        F: Future<Output = Result<StopReason>> + Send + 'static,
+    {
+        self.drain_events();
+        self.transcript.push(format!("request: {description}"));
+        tokio::spawn(request(self.handle.clone()))
     }
 
     /// Waits for a run-control request's stop or exit. A request that fails
@@ -513,84 +543,8 @@ impl Scenario {
         reply
     }
 
-    /// Launches through `process`, which execs the scenario's program once
-    /// `release` runs, and waits for that launch's stop or exit.
-    pub async fn launch_by_exec_to_stop(
-        &mut self,
-        process: ProcessId,
-        stop_at_entry: bool,
-        release: impl FnOnce() + Send + 'static,
-    ) -> StopReason {
-        self.drain_events();
-        self.transcript.push(format!(
-            "request: launch by exec of {process}, stop at entry {stop_at_entry}"
-        ));
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move {
-            let mut events = handle.subscribe();
-            let execution = handle
-                .launch_by_exec(process, stop_at_entry, release)
-                .await?;
-            loop {
-                match events.recv().await {
-                    Ok(DebuggerEvent::InferiorStopped {
-                        execution_id: Some(id),
-                        reason,
-                        ..
-                    }) if id == execution => return Ok(reason),
-                    Ok(DebuggerEvent::InferiorExited {
-                        execution_id: Some(id),
-                        status,
-                        ..
-                    }) if id == execution => return Ok(StopReason::Exited(status)),
-                    Ok(_) => {}
-                    Err(error) => panic!("event stream failed: {error}"),
-                }
-            }
-        });
-        self.wait_for_request(task, "launch by exec").await
-    }
-
-    pub async fn start_running(&mut self) -> JoinHandle<Result<StopReason>> {
-        self.drain_events();
-        self.transcript.push("request: run".to_owned());
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move { handle.run().await });
-        // InferiorLaunched precedes the initial exec stop and launch
-        // acknowledgement. Waiting through InferiorContinued guarantees the
-        // returned run task is past launch, so an immediate shutdown tests an
-        // active execution rather than racing cancellation of launch itself.
-        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
-            .await;
-        task
-    }
-
-    /// Starts running and returns as soon as the inferior exists, which may be
-    /// before its initial exec stop has been processed.
-    pub async fn start_launching(&mut self) -> JoinHandle<Result<StopReason>> {
-        self.drain_events();
-        self.transcript.push("request: run".to_owned());
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move { handle.run().await });
-        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorLaunched { .. }))
-            .await;
-        task
-    }
-
-    pub async fn start_resuming(&mut self) -> JoinHandle<Result<StopReason>> {
-        self.drain_events();
-        self.transcript.push("request: continue".to_owned());
-        let handle = self.handle.clone();
-        let task = tokio::spawn(async move { handle.resume().await });
-        self.wait_for(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
-            .await;
-        task
-    }
-
     pub async fn snapshot(&mut self) -> StateSnapshot {
-        let snapshot = within(self.handle.snapshot())
-            .await
-            .unwrap_or_else(|error| self.fail(&format!("snapshot failed: {error}")));
+        let snapshot = self.operation("snapshot", self.handle.snapshot()).await;
         self.transcript.push(format!("snapshot: {snapshot:?}"));
         snapshot
     }
@@ -619,9 +573,7 @@ impl Scenario {
 
     pub async fn shutdown(mut self) -> Option<ExitStatus> {
         let debugger = self.debugger.take().expect("scenario owns debugger");
-        within(debugger.shutdown())
-            .await
-            .unwrap_or_else(|error| self.fail(&format!("shutdown failed: {error}")));
+        self.operation("shutdown", debugger.shutdown()).await;
         self.drain_events();
         self.assert_reaped();
         self.last_exit
@@ -705,8 +657,8 @@ impl Scenario {
     }
 }
 
-/// Waits until `condition` holds, failing with `what` at the event deadline.
-/// For facts outside the debugger, such as `/proc`, that nothing announces.
+/// Waits until `condition`, a fact outside the debugger such as `/proc`,
+/// holds, failing with `what` at the event deadline.
 pub fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + EVENT_TIMEOUT;
     while !condition() {
@@ -740,15 +692,32 @@ pub fn randomize_addresses() {
     personality::set(persona - Persona::ADDR_NO_RANDOMIZE).expect("randomize addresses");
 }
 
-async fn within<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
-    timeout(REQUEST_TIMEOUT, future)
-        .await
-        .expect("debugger operation timed out")
-}
-
 async fn join_request(task: JoinHandle<Result<StopReason>>) -> Result<StopReason> {
     timeout(REQUEST_TIMEOUT, task)
         .await
         .expect("debugger task timed out")
         .expect("debugger task panicked")
+}
+
+/// Waits for the stop or exit that ends `execution`.
+async fn execution_end(
+    events: &mut broadcast::Receiver<DebuggerEvent>,
+    execution: ExecutionId,
+) -> StopReason {
+    loop {
+        match events.recv().await {
+            Ok(DebuggerEvent::InferiorStopped {
+                execution_id: Some(id),
+                reason,
+                ..
+            }) if id == execution => return reason,
+            Ok(DebuggerEvent::InferiorExited {
+                execution_id: Some(id),
+                status,
+                ..
+            }) if id == execution => return StopReason::Exited(status),
+            Ok(_) => {}
+            Err(error) => panic!("event stream failed: {error}"),
+        }
+    }
 }
