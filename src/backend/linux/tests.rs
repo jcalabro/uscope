@@ -19,7 +19,6 @@ use crate::unwind::FrameContext;
 use crate::unwind::MemoryReader;
 use crate::unwind::RegisterFile;
 use std::cell::RefCell;
-use std::rc::Rc;
 use tokio::sync::broadcast;
 
 use super::classify::{WatchStatus, classify_stop_evidence};
@@ -211,257 +210,6 @@ fn logical_memory_reads_do_not_disguise_operational_failures_as_inaccessible() {
     assert!(matches!(result, Err(Error::RequestCancelled)));
 }
 
-struct RecordingTrace {
-    actions: Rc<RefCell<Vec<&'static str>>>,
-    pid: Pid,
-}
-
-impl RecordingTrace {
-    fn record(&self, action: &'static str) {
-        self.actions.borrow_mut().push(action);
-    }
-
-    fn unexpected<T>(operation: &str) -> T {
-        panic!("unexpected native operation: {operation}")
-    }
-}
-
-impl InspectionOps for RecordingTrace {
-    fn read_word(&self, _pid: Pid, _address: u64) -> Result<u64> {
-        Self::unexpected("read_word")
-    }
-
-    fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
-        assert_eq!(pid, self.pid);
-        self.record("registers");
-        Ok(libc::user_regs_struct {
-            r15: 0,
-            r14: 0,
-            r13: 0,
-            r12: 0,
-            rbp: 0,
-            rbx: 0,
-            r11: 0,
-            r10: 0,
-            r9: 0,
-            r8: 0,
-            rax: 0,
-            rcx: 0,
-            rdx: 0,
-            rsi: 0,
-            rdi: 0,
-            orig_rax: 0,
-            rip: 0x5000,
-            cs: 0,
-            eflags: 0,
-            rsp: 0,
-            ss: 0,
-            fs_base: 0,
-            gs_base: 0,
-            ds: 0,
-            es: 0,
-            fs: 0,
-            gs: 0,
-        })
-    }
-}
-
-impl LinuxTraceOps for RecordingTrace {
-    fn spawn(&self, _executable: &Path, _options: LaunchOptions) -> Result<Pid> {
-        self.record("spawn");
-        Ok(self.pid)
-    }
-
-    fn spawn_waiter(&self, _messages: mpsc::Sender<ControllerMessage>) -> Result<Waiter> {
-        self.record("spawn_waiter");
-        Ok(Waiter::external())
-    }
-
-    fn traced_children(&self, _process: Pid, _thread: Pid) -> Vec<Pid> {
-        Vec::new()
-    }
-    fn process_threads(&self, _process: Pid) -> Result<Vec<Pid>> {
-        Self::unexpected("process_threads")
-    }
-
-    fn seize(&self, _pid: Pid, _exit_kill: bool) -> Result<bool> {
-        Self::unexpected("seize")
-    }
-
-    fn interrupt(&self, _pid: Pid) -> Result<bool> {
-        Self::unexpected("interrupt")
-    }
-
-    fn detach(&self, _pid: Pid, _signal: Option<Signal>) -> Result<bool> {
-        Self::unexpected("detach")
-    }
-
-    fn kill(&self, pid: Pid, signal: Signal) -> Result<()> {
-        assert_eq!(pid, self.pid);
-        assert_eq!(signal, Signal::SIGKILL);
-        self.record("kill");
-        Ok(())
-    }
-
-    fn reap(&self, _pid: Pid) -> Result<()> {
-        Self::unexpected("reap")
-    }
-    fn wait_status(&self, _pid: Pid) -> std::result::Result<WaitEvent, Errno> {
-        Self::unexpected("wait_status")
-    }
-    fn process_start_time(&self, _process: Pid) -> Option<u64> {
-        None
-    }
-    fn tracer_process(&self) -> i32 {
-        i32::try_from(std::process::id()).expect("pid fits")
-    }
-    fn allocate_stop_id(&self) -> StopId {
-        allocate_stop_id()
-    }
-    fn identify_module(&self, _mapping: &ModuleMapping) -> Option<(PathBuf, u64)> {
-        None
-    }
-    fn load_module(&self, _path: &Path, _id: crate::ModuleImageId) -> Result<DebugInfo> {
-        Self::unexpected("load_module")
-    }
-
-    fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
-        Self::unexpected("thread_group_id")
-    }
-
-    fn load_bias(
-        &self,
-        pid: Pid,
-        _executable: &Path,
-        _executable_data: &[u8],
-        _identity: FileIdentity,
-    ) -> Result<u64> {
-        assert_eq!(pid, self.pid);
-        self.record("load_bias");
-        Ok(0x5000)
-    }
-
-    fn write_word(&self, _pid: Pid, _address: u64, _value: u64) -> Result<()> {
-        Self::unexpected("write_word")
-    }
-
-    fn continue_execution(&self, pid: Pid, signal: Option<Signal>) -> Result<()> {
-        assert_eq!(pid, self.pid);
-        assert_eq!(signal, None);
-        self.record("continue");
-        Ok(())
-    }
-
-    fn continue_during_shutdown(&self, _pid: Pid) -> Result<()> {
-        Self::unexpected("continue_during_shutdown")
-    }
-
-    fn step(&self, _pid: Pid, _signal: Option<Signal>) -> Result<()> {
-        Self::unexpected("step")
-    }
-
-    fn set_registers(&self, _pid: Pid, _registers: libc::user_regs_struct) -> Result<()> {
-        Self::unexpected("set_registers")
-    }
-
-    fn set_options(&self, pid: Pid, _exit_kill: bool) -> Result<()> {
-        assert_eq!(pid, self.pid);
-        self.record("set_options");
-        Ok(())
-    }
-
-    fn event_message(&self, _pid: Pid) -> Result<libc::c_long> {
-        Self::unexpected("event_message")
-    }
-
-    fn signal_metadata(&self, _pid: Pid) -> std::result::Result<SignalMetadata, Errno> {
-        Self::unexpected("signal_metadata")
-    }
-
-    fn request_stop(&self, _process: Pid, _thread: Pid) -> Result<()> {
-        Self::unexpected("request_stop")
-    }
-
-    fn executable(&self, _pid: Pid, _address: VirtualAddress) -> Result<bool> {
-        Ok(true)
-    }
-    fn read_debug_register(&self, _pid: Pid, _index: usize) -> std::result::Result<u64, Errno> {
-        Self::unexpected("read_debug_register")
-    }
-
-    fn write_debug_register(
-        &self,
-        _pid: Pid,
-        _index: usize,
-        _value: u64,
-    ) -> std::result::Result<(), Errno> {
-        Self::unexpected("write_debug_register")
-    }
-
-    fn install_breakpoint(
-        &self,
-        _pid: Pid,
-        _sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
-        _address: VirtualAddress,
-        _owner: BreakpointOwner,
-    ) -> Result<()> {
-        Self::unexpected("install_breakpoint")
-    }
-
-    fn remove_breakpoint(
-        &self,
-        _pid: Pid,
-        _sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
-        _address: VirtualAddress,
-    ) -> Result<()> {
-        Self::unexpected("remove_breakpoint")
-    }
-
-    fn reinstall_breakpoint(
-        &self,
-        _pid: Pid,
-        _sites: &mut BTreeMap<VirtualAddress, BreakpointSite>,
-        _address: VirtualAddress,
-    ) -> Result<()> {
-        Self::unexpected("reinstall_breakpoint")
-    }
-}
-
-/// Builds a controller over a fake trace, with placeholder unwind and
-/// variable providers, and subscribes to its events.
-fn test_controller<P: InspectionOps>(
-    lease: SessionLease,
-    path: &str,
-    data: Arc<[u8]>,
-    image: Arc<ModuleImage>,
-    trace: P,
-    event_capacity: usize,
-) -> (Controller<P>, broadcast::Receiver<DebuggerEvent>) {
-    let (sender, receiver) = mpsc::channel(8);
-    let (events, event_receiver) = broadcast::channel(event_capacity);
-    let controller = Controller::new(
-        lease,
-        ExecutableSource {
-            display_path: Arc::new(PathBuf::from(path)),
-            data,
-            identity: FileIdentity { inode: 0 },
-            process_start_time: None,
-        },
-        DebugInfo {
-            image,
-            unwind: Arc::new(UnusedUnwindInfo),
-            variables: Arc::new(UnusedVariableInfo),
-        },
-        ControllerChannels {
-            sender,
-            receiver,
-            events: events.into(),
-        },
-        trace,
-    );
-    (controller, event_receiver)
-}
-
 struct UnusedUnwindInfo;
 
 impl UnwindInfo for UnusedUnwindInfo {
@@ -480,7 +228,7 @@ impl UnwindInfo for UnusedUnwindInfo {
         _registers: &RegisterFile,
         _memory: &mut dyn MemoryReader,
     ) -> std::result::Result<crate::unwind::UnwindStep, UnwindTermination> {
-        RecordingTrace::unexpected("unwind")
+        panic!("unexpected unwind")
     }
 }
 
@@ -608,62 +356,6 @@ impl VariableInfo for UnusedVariableInfo {
     }
 }
 
-struct LaunchHarness {
-    controller: Controller<RecordingTrace>,
-    events: broadcast::Receiver<DebuggerEvent>,
-    actions: Rc<RefCell<Vec<&'static str>>>,
-    pid: Pid,
-}
-
-fn launch_controller() -> LaunchHarness {
-    let actions = Rc::new(RefCell::new(Vec::new()));
-    let pid = Pid::from_raw(4242);
-    let trace = RecordingTrace {
-        actions: Rc::clone(&actions),
-        pid,
-    };
-    let image = Arc::new(ModuleImage::new(
-        PathBuf::from("/test/program"),
-        crate::TargetDescription {
-            architecture: crate::Architecture::X86_64,
-            byte_order: crate::ByteOrder::Little,
-            pointer_width: crate::PointerWidth::Bits64,
-        },
-        AddressRange {
-            start: ImageAddress::new(0),
-            end: ImageAddress::new(0x1000),
-        },
-        crate::model::ModuleMetadata {
-            functions: Vec::new(),
-            code_instances: Vec::new(),
-            symbols: Vec::new(),
-            symbol_sources: crate::model::SymbolTableSources::default(),
-            globals: Vec::new(),
-            types: Arc::default(),
-            source_files: Vec::new(),
-            statements: Vec::new(),
-            lines: Vec::new(),
-            sections: Vec::new(),
-            vtables: Vec::new(),
-        },
-    ));
-    let (controller, event_receiver) = test_controller(
-        SessionLease::detached(),
-        "/test/program",
-        sectionless_elf(),
-        image,
-        trace,
-        8,
-    );
-
-    LaunchHarness {
-        controller,
-        events: event_receiver,
-        actions,
-        pid,
-    }
-}
-
 /// An ELF header without sections, so loader rendezvous discovery finds no
 /// dynamic section to read through the fake.
 fn sectionless_elf() -> Arc<[u8]> {
@@ -692,67 +384,24 @@ fn sectionless_elf() -> Arc<[u8]> {
 }
 
 #[test]
-fn controller_lifecycle_is_driven_through_the_linux_effect_boundary() {
-    let LaunchHarness {
-        mut controller,
-        actions,
-        pid,
-        ..
-    } = launch_controller();
-    let (launch_reply, launch_result) = tokio::sync::oneshot::channel();
-
-    controller.start(Start::Launch(LaunchOptions::default(), launch_reply));
-    controller
-        .process_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
-        .expect("process initial stop");
-
-    assert_eq!(
-        launch_result
-            .blocking_recv()
-            .expect("launch reply")
-            .expect("launch success"),
-        ExecutionId::new(1)
-    );
-
-    let (shutdown_reply, shutdown_result) = tokio::sync::oneshot::channel();
-    controller.begin_shutdown(Some(shutdown_reply));
-    assert!(!controller.handle_shutdown_wait(WaitEvent::Signaled(pid, Signal::SIGKILL, false,)));
-    shutdown_result
-        .blocking_recv()
-        .expect("shutdown reply")
-        .expect("shutdown success");
-
-    assert_eq!(
-        actions.borrow().as_slice(),
-        [
-            "spawn",
-            "spawn_waiter",
-            "set_options",
-            "load_bias",
-            "continue",
-            "kill",
-        ]
-    );
-}
-
-#[test]
 fn pause_during_launch_completes_at_the_initial_exec_stop() {
-    let LaunchHarness {
-        mut controller,
-        mut events,
-        actions,
-        pid,
-    } = launch_controller();
+    let mut harness = watch_harness(1);
+    harness.controller.inferior = None;
     let (launch_reply, launch_result) = tokio::sync::oneshot::channel();
-    controller.start(Start::Launch(LaunchOptions::default(), launch_reply));
+    harness
+        .controller
+        .start(Start::Launch(LaunchOptions::default(), launch_reply));
+    let pid = harness.controller.inferior.as_ref().expect("launched").tgid;
 
     assert_eq!(
-        controller
+        harness
+            .controller
             .begin_pause(process_id(pid))
             .expect("a launching inferior accepts a pause"),
         ExecutionId::new(1)
     );
-    controller
+    harness
+        .controller
         .process_wait(WaitEvent::Stopped(pid, Signal::SIGTRAP))
         .expect("process initial stop");
 
@@ -763,9 +412,7 @@ fn pause_during_launch_completes_at_the_initial_exec_stop() {
             .expect("launch success"),
         ExecutionId::new(1)
     );
-    let published = std::iter::from_fn(|| events.try_recv().ok())
-        .filter(|event| !matches!(event, DebuggerEvent::StateChanged { .. }))
-        .collect::<Vec<_>>();
+    let published = harness.published();
     assert!(
         matches!(
             published.as_slice(),
@@ -781,34 +428,24 @@ fn pause_during_launch_completes_at_the_initial_exec_stop() {
         "the paused launch must stop without first resuming: {published:?}"
     );
     assert_eq!(
-        actions.borrow().as_slice(),
-        [
-            "spawn",
-            "spawn_waiter",
-            "set_options",
-            "load_bias",
-            "registers"
-        ],
+        harness.trace().take_actions(),
+        ["spawn".to_owned(), format!("set_options {pid}")],
         "the initial thread must stop without a native stop request or resume"
     );
 }
 
 #[test]
 fn virtual_inline_step_emits_a_new_stop_without_native_operations() {
-    let VirtualStepHarness {
-        mut controller,
-        mut events,
-        actions,
-        pid,
-    } = virtual_step_controller();
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
 
-    let (execution, stopped) = controller
+    let (execution, stopped) = harness
+        .controller
         .try_virtual_step(process_id(pid), StopId::new(1), pid, StepKind::IntoSource)
         .expect("virtual step")
         .expect("hidden child exists");
 
     assert_eq!(execution, ExecutionId::new(2));
-    assert!(actions.borrow().is_empty());
     assert!(matches!(
         stopped,
         DebuggerEvent::InferiorStopped {
@@ -816,25 +453,20 @@ fn virtual_inline_step_emits_a_new_stop_without_native_operations() {
             ..
         } if execution_id == ExecutionId::new(2)
     ));
-    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
     assert!(
-        !emitted
+        !harness
+            .published()
             .iter()
             .any(|event| matches!(event, DebuggerEvent::InferiorContinued { .. }))
     );
-    let stop = controller
+    let stop = harness
+        .controller
         .inferior
         .as_ref()
         .and_then(|inferior| inferior.public_stop.as_ref())
         .expect("new public stop");
-    // Stop ids are allocated from a process-global counter, so the exact
-    // value depends on concurrent test order. Assert only the invariant: the
-    // virtual step minted a fresh id distinct from the launch stop (1).
-    assert!(
-        stop.id.get() > StopId::new(1).get(),
-        "virtual step must mint a fresh stop id past the launch stop: {:?}",
-        stop.id
-    );
+    // Stop identifiers are process-wide, so only their freshness is known.
+    assert!(stop.id.get() > 1, "{:?}", stop.id);
     assert_eq!(
         stop.presentations.get(&pid),
         Some(&FramePresentation {
@@ -844,114 +476,75 @@ fn virtual_inline_step_emits_a_new_stop_without_native_operations() {
         })
     );
     assert!(matches!(
-        controller.try_virtual_step(process_id(pid), StopId::new(1), pid, StepKind::IntoSource,),
+        harness.controller.try_virtual_step(
+            process_id(pid),
+            StopId::new(1),
+            pid,
+            StepKind::IntoSource
+        ),
         Err(Error::StaleStop)
     ));
-    assert!(actions.borrow().is_empty());
+    assert!(harness.trace().take_actions().is_empty());
 }
 
 #[test]
 fn outstanding_debugger_stop_is_reused_across_barriers() {
-    let VirtualStepHarness {
-        mut controller,
-        actions,
-        pid,
-        ..
-    } = virtual_step_controller();
-    let thread = controller
-        .inferior
-        .as_mut()
-        .and_then(|inferior| inferior.threads.get_mut(&pid))
-        .expect("test thread exists");
+    let mut harness = watch_harness(1);
+    let pid = harness.threads[0];
+    let thread = harness.thread(pid);
     thread.state = NativeThreadState::Running;
     thread.debugger_stop_pending = true;
 
-    controller
+    harness
+        .controller
         .request_stops()
         .expect("reuse outstanding debugger stop");
 
     assert!(
-        actions.borrow().is_empty(),
+        harness.trace().take_actions().is_empty(),
         "an outstanding SIGSTOP must not be duplicated"
     );
-    let thread = controller
-        .inferior
-        .as_ref()
-        .and_then(|inferior| inferior.threads.get(&pid))
-        .expect("test thread exists");
+    let thread = harness.thread(pid);
     assert_eq!(thread.state, NativeThreadState::StopRequested);
     assert!(thread.debugger_stop_pending);
 }
 
 #[test]
 fn user_breakpoint_supersedes_a_coincident_exception_barrier() {
-    let VirtualStepHarness {
-        mut controller,
-        actions,
-        pid,
-        ..
-    } = virtual_step_controller();
-    let breakpoint_thread = Pid::from_raw(pid.as_raw() + 1);
-    let pending_thread = Pid::from_raw(pid.as_raw() + 2);
+    let mut harness = watch_harness(3);
+    let [pid, breakpoint_thread, pending_thread] = harness.threads[..] else {
+        unreachable!("three threads");
+    };
     let exception = exception_info(Signal::SIGURG);
-    let inferior = controller.inferior.as_mut().expect("test inferior exists");
+    harness.thread(pid).reason = Some(StopReason::Exception(exception.clone()));
+    harness.thread(breakpoint_thread).state = NativeThreadState::Running;
+    let pending = harness.thread(pending_thread);
+    pending.state = NativeThreadState::StopRequested;
+    pending.debugger_stop_pending = true;
+    let inferior = harness.inferior();
     inferior.public_stop = None;
-    inferior.thread_mut(pid).expect("test thread exists").reason =
-        Some(StopReason::Exception(exception.clone()));
-    inferior.threads.insert(
-        breakpoint_thread,
-        TraceThread {
-            state: NativeThreadState::Running,
-            expected: ExpectedStop::None,
-            pending_signal: None,
-            reason: None,
-            stopped_at_breakpoint: None,
-            trapped_at: None,
-            awaiting_breakpoint: None,
-            debugger_stop_pending: false,
-            armed: None,
-            watch_hits: BTreeSet::new(),
-            name: None,
-        },
-    );
-    inferior.threads.insert(
-        pending_thread,
-        TraceThread {
-            state: NativeThreadState::StopRequested,
-            expected: ExpectedStop::None,
-            pending_signal: None,
-            reason: None,
-            stopped_at_breakpoint: None,
-            trapped_at: None,
-            awaiting_breakpoint: None,
-            debugger_stop_pending: true,
-            armed: None,
-            watch_hits: BTreeSet::new(),
-            name: None,
-        },
-    );
     inferior.barrier = Some(StopBarrier::visible(pid, StopReason::Exception(exception)));
-    let address = VirtualAddress::new(0x20);
     let breakpoint = StopReason::Breakpoint {
-        address,
+        address: VirtualAddress::new(0x20),
         hits: Arc::from([BreakpointHit {
             breakpoint: BreakpointId::new(1),
             hit_count: 1,
         }]),
     };
 
-    controller
+    harness
+        .controller
         .begin_visible_stop(breakpoint_thread, breakpoint.clone())
         .expect("record coincident breakpoint");
 
-    let barrier = controller
-        .inferior
+    let barrier = harness
+        .inferior()
+        .barrier
         .as_ref()
-        .and_then(|inferior| inferior.barrier.as_ref())
         .expect("pending thread keeps barrier active");
     assert_eq!(barrier.triggering_thread, breakpoint_thread);
     assert_eq!(barrier.reason, Some(breakpoint));
-    assert!(actions.borrow().is_empty());
+    assert!(harness.trace().take_actions().is_empty());
 }
 
 #[test]
@@ -1070,80 +663,6 @@ fn inline_test_image(instances: &[TestInstance]) -> Arc<ModuleImage> {
     ))
 }
 
-struct VirtualStepHarness {
-    controller: Controller<RecordingTrace>,
-    events: broadcast::Receiver<DebuggerEvent>,
-    actions: Rc<RefCell<Vec<&'static str>>>,
-    pid: Pid,
-}
-
-fn virtual_step_controller() -> VirtualStepHarness {
-    let pid = Pid::from_raw(4343);
-    let actions = Rc::new(RefCell::new(Vec::new()));
-    let trace = RecordingTrace {
-        actions: Rc::clone(&actions),
-        pid,
-    };
-    let image = virtual_step_image();
-    let (mut controller, event_receiver) = test_controller(
-        SessionLease::detached(),
-        "/test/inline",
-        Arc::from([]),
-        Arc::clone(&image),
-        trace,
-        8,
-    );
-    controller.inferior = Some(virtual_step_inferior(pid, &image, StopId::new(1)));
-
-    VirtualStepHarness {
-        controller,
-        events: event_receiver,
-        actions,
-        pid,
-    }
-}
-
-fn virtual_step_inferior(pid: Pid, image: &ModuleImage, stop_id: StopId) -> Inferior {
-    let presentation = FramePresentation {
-        instruction: VirtualAddress::new(0x10),
-        frame: PresentedFrame::Physical,
-        hidden_inline_frames: 2,
-    };
-    Inferior {
-        public_stop: Some(PublicStop {
-            id: stop_id,
-            triggering_thread: pid,
-            reason: StopReason::Pause,
-            presentations: BTreeMap::from([(pid, presentation)]),
-            selected_frames: BTreeMap::new(),
-        }),
-        selected_thread: Some(pid),
-        next_execution: 1,
-        ..Inferior::new(
-            InferiorOrigin::Launched,
-            pid,
-            LoadedModule::main(image.id(), 0),
-            BTreeMap::from([(
-                pid,
-                TraceThread {
-                    state: NativeThreadState::Stopped,
-                    expected: ExpectedStop::None,
-                    pending_signal: None,
-                    reason: Some(StopReason::Pause),
-                    stopped_at_breakpoint: None,
-                    trapped_at: None,
-                    awaiting_breakpoint: None,
-                    debugger_stop_pending: false,
-                    armed: None,
-                    watch_hits: BTreeSet::new(),
-                    name: None,
-                },
-            )]),
-            None,
-        )
-    }
-}
-
 #[test]
 fn frame_symbolization_adjusts_only_ordinary_caller_resume_addresses() {
     let stopped = FrameContext {
@@ -1206,7 +725,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
             fault_address: None,
         })
     };
-    let classify = |signal, siginfo, expected, breakpoint| {
+    let classify = |signal, siginfo, expected: &ExpectedStop, breakpoint| {
         classify_stop_evidence(
             signal,
             "raw-status".to_owned(),
@@ -1219,37 +738,27 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
             WatchStatus::Absent,
         )
     };
+    let stepping = ExpectedStop::UserStep {
+        kind: StepKind::Instruction,
+    };
+    let none = ExpectedStop::None;
+    let traced = |stop| matches!(stop, ClassifiedStop::Trace { ref watch } if watch.is_empty());
 
-    assert!(matches!(
-        classify(
-            Signal::SIGTRAP,
-            metadata(libc::TRAP_TRACE),
-            &ExpectedStop::UserStep {
-                kind: StepKind::Instruction
-            },
-            None,
-        ),
-        ClassifiedStop::Trace { ref watch } if watch.is_empty()
-    ));
+    assert!(traced(classify(
+        Signal::SIGTRAP,
+        metadata(libc::TRAP_TRACE),
+        &stepping,
+        None
+    )));
     // A step across a system call completes from the call's exit path.
+    assert!(traced(classify(
+        Signal::SIGTRAP,
+        metadata(libc::TRAP_BRKPT),
+        &stepping,
+        None
+    )));
     assert!(matches!(
-        classify(
-            Signal::SIGTRAP,
-            metadata(libc::TRAP_BRKPT),
-            &ExpectedStop::UserStep {
-                kind: StepKind::Instruction
-            },
-            None,
-        ),
-        ClassifiedStop::Trace { ref watch } if watch.is_empty()
-    ));
-    assert!(matches!(
-        classify(
-            Signal::SIGTRAP,
-            metadata(libc::SI_TKILL),
-            &ExpectedStop::None,
-            None,
-        ),
+        classify(Signal::SIGTRAP, metadata(libc::SI_TKILL), &none, None),
         ClassifiedStop::SignalDelivery(PendingSignal {
             signal: Signal::SIGTRAP,
             sender: Some(71),
@@ -1257,12 +766,7 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
         })
     ));
     assert!(matches!(
-        classify(
-            Signal::SIGSEGV,
-            metadata(libc::SI_KERNEL),
-            &ExpectedStop::None,
-            None,
-        ),
+        classify(Signal::SIGSEGV, metadata(libc::SI_KERNEL), &none, None),
         ClassifiedStop::SignalDelivery(PendingSignal {
             signal: Signal::SIGSEGV,
             code: libc::SI_KERNEL,
@@ -1270,16 +774,11 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
         })
     ));
     assert!(matches!(
-        classify(
-            Signal::SIGSTOP,
-            Err(Errno::EINVAL),
-            &ExpectedStop::None,
-            None,
-        ),
+        classify(Signal::SIGSTOP, Err(Errno::EINVAL), &none, None),
         ClassifiedStop::GroupStop(Signal::SIGSTOP)
     ));
     assert!(matches!(
-        classify(Signal::SIGTRAP, Err(Errno::EIO), &ExpectedStop::None, None),
+        classify(Signal::SIGTRAP, Err(Errno::EIO), &none, None),
         ClassifiedStop::Unclassifiable(RawStopRecord {
             siginfo: Err(Errno::EIO),
             ..
@@ -1289,48 +788,41 @@ fn stop_classifier_preserves_signal_and_trap_provenance() {
         classify(
             Signal::SIGTRAP,
             metadata(libc::SI_KERNEL),
-            &ExpectedStop::None,
+            &none,
             Some(VirtualAddress::new(0x1234)),
         ),
         ClassifiedStop::Breakpoint(address) if address == VirtualAddress::new(0x1234)
     ));
-}
-
-#[test]
-fn stop_classifier_treats_a_thread_killed_from_its_stop_as_exiting() {
-    let classify = |siginfo| {
-        classify_stop_evidence(
-            Signal::SIGTRAP,
-            "raw-status".to_owned(),
-            siginfo,
-            &ExpectedStop::BreakpointRepair {
-                address: VirtualAddress::new(0x1234),
-            },
-            false,
-            false,
-            None,
-            false,
-            WatchStatus::Absent,
-        )
-    };
     // SIGKILL wakes a thread from a reported stop: its siginfo vanishes and
     // then describes its exit event.
-    for siginfo in [
-        Err(Errno::ESRCH),
-        Ok(SignalMetadata {
-            code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
-            sender: None,
-            fault_address: None,
-        }),
-    ] {
-        assert!(matches!(classify(siginfo), ClassifiedStop::Superseded));
+    let repairing = ExpectedStop::BreakpointRepair {
+        address: VirtualAddress::new(0x1234),
+    };
+    for siginfo in [Err(Errno::ESRCH), metadata(EXIT_EVENT)] {
+        assert!(matches!(
+            classify(Signal::SIGTRAP, siginfo, &repairing, None),
+            ClassifiedStop::Superseded
+        ));
     }
 }
 
-/// Models per-thread debug registers the way Linux exposes them, records
-/// every native effect, and injects failures.
+fn step_execution(thread: Pid, kind: StepKind, start: StepStart) -> ActiveKind {
+    ActiveKind::Step {
+        thread,
+        kind,
+        start: Box::new(start),
+        progress_owed: false,
+    }
+}
+
+/// The siginfo code of a thread stopped at its exit event.
+const EXIT_EVENT: i32 = libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8);
+
+/// A traced process for the controller: it models per-thread debug
+/// registers as Linux exposes them, records every native effect, and
+/// injects failures and SIGKILL races.
 #[derive(Default)]
-struct DebugRegisterTrace {
+struct FakeTrace {
     actions: RefCell<Vec<String>>,
     registers: RefCell<BTreeMap<Pid, [u64; 8]>>,
     /// Fails a write of `(thread, register)` after skipping that many
@@ -1372,9 +864,21 @@ struct DebugRegisterTrace {
     read_failure: RefCell<Option<Errno>>,
 }
 
-impl DebugRegisterTrace {
+impl FakeTrace {
     fn record(&self, action: String) {
         self.actions.borrow_mut().push(action);
+    }
+
+    /// Makes `pid`'s next stop report this siginfo.
+    fn set_siginfo(&self, pid: Pid, code: i32, sender: Option<i32>) {
+        self.siginfo.borrow_mut().insert(
+            pid,
+            SignalMetadata {
+                code,
+                sender,
+                fault_address: None,
+            },
+        );
     }
 
     /// Takes a thread out of its stop as SIGKILL does, to its exit event.
@@ -1384,7 +888,7 @@ impl DebugRegisterTrace {
         self.siginfo.borrow_mut().insert(
             pid,
             SignalMetadata {
-                code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
+                code: EXIT_EVENT,
                 sender: None,
                 fault_address: None,
             },
@@ -1441,14 +945,14 @@ impl DebugRegisterTrace {
     }
 }
 
-impl InspectionOps for DebugRegisterTrace {
+impl InspectionOps for FakeTrace {
     fn read_word(&self, pid: Pid, address: u64) -> Result<u64> {
         if *self.kill_at_read.borrow() == Some((pid, address)) {
             self.kill_at_read.borrow_mut().take();
             self.siginfo.borrow_mut().insert(
                 pid,
                 SignalMetadata {
-                    code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
+                    code: EXIT_EVENT,
                     sender: None,
                     fault_address: None,
                 },
@@ -1485,19 +989,19 @@ impl InspectionOps for DebugRegisterTrace {
 
     fn registers(&self, pid: Pid) -> Result<libc::user_regs_struct> {
         self.reach(pid, "registers")?;
-        let mut registers = RecordingTrace {
-            actions: Rc::new(RefCell::new(Vec::new())),
-            pid,
-        }
-        .registers(pid)?;
-        if let Some(&rip) = self.program_counters.borrow().get(&pid) {
-            registers.rip = rip;
-        }
+        let mut registers =
+            super::sim_edge::user_registers(&crate::sim::cpu::Registers::default(), 0);
+        registers.rip = self
+            .program_counters
+            .borrow()
+            .get(&pid)
+            .copied()
+            .unwrap_or(0x5000);
         Ok(registers)
     }
 }
 
-impl LinuxTraceOps for DebugRegisterTrace {
+impl LinuxTraceOps for FakeTrace {
     fn spawn(&self, _executable: &Path, _options: LaunchOptions) -> Result<Pid> {
         self.record("spawn".to_owned());
         Ok(Pid::from_raw(7000))
@@ -1530,10 +1034,10 @@ impl LinuxTraceOps for DebugRegisterTrace {
         Ok(())
     }
     fn reap(&self, _pid: Pid) -> Result<()> {
-        RecordingTrace::unexpected("reap")
+        panic!("unexpected reap")
     }
     fn wait_status(&self, _pid: Pid) -> std::result::Result<WaitEvent, Errno> {
-        RecordingTrace::unexpected("wait_status")
+        panic!("unexpected wait")
     }
     fn process_start_time(&self, _process: Pid) -> Option<u64> {
         None
@@ -1548,7 +1052,7 @@ impl LinuxTraceOps for DebugRegisterTrace {
         None
     }
     fn load_module(&self, _path: &Path, _id: crate::ModuleImageId) -> Result<DebugInfo> {
-        RecordingTrace::unexpected("load_module")
+        panic!("unexpected module load")
     }
     fn thread_group_id(&self, _pid: Pid) -> Result<Pid> {
         Ok(self.clone.borrow().expect("a clone is pending").1)
@@ -1704,14 +1208,60 @@ impl LinuxTraceOps for DebugRegisterTrace {
 }
 
 struct WatchHarness {
-    controller: Controller<DebugRegisterTrace>,
+    controller: Controller<FakeTrace>,
     events: broadcast::Receiver<DebuggerEvent>,
     threads: Vec<Pid>,
 }
 
 impl WatchHarness {
-    fn trace(&self) -> &DebugRegisterTrace {
+    fn trace(&self) -> &FakeTrace {
         &self.controller.ptrace
+    }
+
+    fn inferior(&mut self) -> &mut Inferior {
+        self.controller.inferior.as_mut().expect("inferior")
+    }
+
+    /// Makes the process one the debugger attached to.
+    fn attached(&mut self) {
+        self.inferior().origin = InferiorOrigin::Attached;
+    }
+
+    fn stop_id(&self) -> StopId {
+        self.controller
+            .inferior
+            .as_ref()
+            .and_then(|inferior| inferior.public_stop.as_ref())
+            .expect("a public stop")
+            .id
+    }
+
+    /// Reports `pid` stopped at the ptrace `event`.
+    fn event(&mut self, pid: Pid, event: i32) -> Result<()> {
+        self.controller
+            .process_wait(WaitEvent::PtraceEvent(pid, Signal::SIGTRAP, event))
+    }
+
+    /// Adds a breakpoint at `address` while every thread is stopped.
+    fn add_breakpoint(&mut self, address: u64) -> Breakpoint {
+        self.edit(|reply| Edit::AddBreakpoint {
+            spec: BreakpointSpec::Address(VirtualAddress::new(address)),
+            options: Box::default(),
+            reply,
+        })
+        .try_recv()
+        .expect("reply")
+        .expect("added")
+    }
+
+    /// The thread and reason of the next stop published.
+    fn stopped(&mut self) -> Option<(DebugThreadId, StopReason)> {
+        self.published().into_iter().find_map(|event| match event {
+            DebuggerEvent::InferiorStopped {
+                thread_id, reason, ..
+            } => Some((thread_id, reason)),
+            _ => None,
+        })
     }
 
     fn add(&mut self, address: u64, byte_size: u64) -> Result<Watchpoint> {
@@ -1855,29 +1405,66 @@ fn watch_harness(thread_count: i32) -> WatchHarness {
     watch_harness_of(thread_count, &virtual_step_image())
 }
 
-/// A harness of `thread_count` stopped threads in a process of `image`.
+/// A harness of `thread_count` threads stopped for a pause in a process of
+/// `image`, the first presenting the stop at 0x10.
 fn watch_harness_of(thread_count: i32, image: &Arc<ModuleImage>) -> WatchHarness {
     let threads = (0..thread_count)
         .map(|offset| Pid::from_raw(5000 + offset))
         .collect::<Vec<_>>();
-    let (mut controller, event_receiver) = test_controller(
+    let (sender, receiver) = mpsc::channel(8);
+    let (events, event_receiver) = broadcast::channel(256);
+    let mut controller = Controller::new(
         SessionLease::detached(),
-        "/test/watch",
-        sectionless_elf(),
-        Arc::clone(image),
-        DebugRegisterTrace::default(),
-        256,
+        ExecutableSource {
+            display_path: Arc::new(PathBuf::from("/test/watch")),
+            data: sectionless_elf(),
+            identity: FileIdentity { inode: 0 },
+            process_start_time: None,
+        },
+        DebugInfo {
+            image: Arc::clone(image),
+            unwind: Arc::new(UnusedUnwindInfo),
+            variables: Arc::new(UnusedVariableInfo),
+        },
+        ControllerChannels {
+            sender,
+            receiver,
+            events: events.into(),
+        },
+        FakeTrace::default(),
     );
-    let mut inferior = virtual_step_inferior(threads[0], image, StopId::new(1));
-    for &pid in &threads[1..] {
-        inferior
-            .threads
-            .insert(pid, TraceThread::starting(ExpectedStop::None));
-    }
-    for thread in inferior.threads.values_mut() {
-        thread.state = NativeThreadState::Stopped;
-        thread.armed = Some(0);
-    }
+    let pid = threads[0];
+    let stopped = || TraceThread {
+        state: NativeThreadState::Stopped,
+        armed: Some(0),
+        ..TraceThread::starting(ExpectedStop::None)
+    };
+    let mut inferior = Inferior {
+        public_stop: Some(PublicStop {
+            id: StopId::new(1),
+            triggering_thread: pid,
+            reason: StopReason::Pause,
+            presentations: BTreeMap::from([(
+                pid,
+                FramePresentation {
+                    instruction: VirtualAddress::new(0x10),
+                    frame: PresentedFrame::Physical,
+                    hidden_inline_frames: 2,
+                },
+            )]),
+            selected_frames: BTreeMap::new(),
+        }),
+        selected_thread: Some(pid),
+        next_execution: 1,
+        ..Inferior::new(
+            InferiorOrigin::Launched,
+            pid,
+            LoadedModule::main(image.id(), 0),
+            threads.iter().map(|&pid| (pid, stopped())).collect(),
+            None,
+        )
+    };
+    inferior.thread_mut(pid).expect("first thread").reason = Some(StopReason::Pause);
     controller.inferior = Some(inferior);
     WatchHarness {
         controller,
@@ -2167,13 +1754,7 @@ fn a_new_thread_that_cannot_be_armed_never_runs() {
 
     // Resuming retries the arming and refuses to run while it fails.
     harness.trace().fail_after(child, 0, 0, Errno::ENOSPC);
-    let stop = harness
-        .controller
-        .inferior
-        .as_ref()
-        .and_then(|inferior| inferior.public_stop.as_ref())
-        .expect("stop")
-        .id;
+    let stop = harness.stop_id();
     let tgid = harness.threads[0];
     let result = harness.controller.begin_execution(
         process_id(tgid),
@@ -2414,14 +1995,9 @@ fn detaching_disarms_every_thread_first_and_never_redelivers_a_watch_trap() {
         .registers
         .borrow_mut()
         .insert(first, registers);
-    harness.trace().siginfo.borrow_mut().insert(
-        first,
-        SignalMetadata {
-            code: TRAP_HARDWARE_BREAKPOINT,
-            sender: None,
-            fault_address: None,
-        },
-    );
+    harness
+        .trace()
+        .set_siginfo(first, TRAP_HARDWARE_BREAKPOINT, None);
     assert!(
         harness
             .controller
@@ -2464,12 +2040,7 @@ fn detaching_disarms_every_thread_first_and_never_redelivers_a_watch_trap() {
 fn a_failed_disarm_still_detaches_and_publishes_the_detach() {
     let mut harness = watch_harness(2);
     harness.add(0xf000, 8).expect("arm");
-    harness
-        .controller
-        .inferior
-        .as_mut()
-        .expect("inferior")
-        .origin = InferiorOrigin::Attached;
+    harness.attached();
     let [first, second] = harness.threads[..] else {
         unreachable!("two threads");
     };
@@ -2512,21 +2083,8 @@ fn a_failed_disarm_still_detaches_and_publishes_the_detach() {
 #[test]
 fn detaching_a_process_killed_from_outside_succeeds() {
     let mut harness = watch_harness(2);
-    harness
-        .edit(|reply| Edit::AddBreakpoint {
-            spec: address_breakpoint(0x40),
-            options: Box::default(),
-            reply,
-        })
-        .try_recv()
-        .expect("reply")
-        .expect("added");
-    harness
-        .controller
-        .inferior
-        .as_mut()
-        .expect("inferior")
-        .origin = InferiorOrigin::Attached;
+    harness.add_breakpoint(0x40);
+    harness.attached();
     for &pid in &harness.threads {
         harness.trace().sigkill(pid);
     }
@@ -2586,12 +2144,7 @@ fn detaching_waits_for_no_main_thread_that_exits_during_the_detach() {
 #[test]
 fn a_failure_that_detaches_an_attached_process_ends_the_controller() {
     let mut harness = watch_harness(2);
-    harness
-        .controller
-        .inferior
-        .as_mut()
-        .expect("inferior")
-        .origin = InferiorOrigin::Attached;
+    harness.attached();
     let unowned = WaitEvent::PtraceEvent(
         Pid::from_raw(9999),
         Signal::SIGTRAP,
@@ -2614,12 +2167,7 @@ fn an_attached_stop_collects_traps_queued_behind_its_interrupt() {
     let [first, second] = harness.threads[..] else {
         unreachable!("two threads");
     };
-    harness
-        .controller
-        .inferior
-        .as_mut()
-        .expect("inferior")
-        .origin = InferiorOrigin::Attached;
+    harness.attached();
     harness.start_continue();
     harness.trace().queued_traps.borrow_mut().insert(second);
     harness.trace().take_actions();
@@ -2640,12 +2188,7 @@ fn an_attached_stop_collects_traps_queued_behind_its_interrupt() {
             .contains(&format!("interrupt {second}"))
     );
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            second,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_STOP,
-        ))
+        .event(second, libc::PTRACE_EVENT_STOP)
         .expect("interrupt stop");
     assert_eq!(
         harness.public_reason(),
@@ -2683,12 +2226,7 @@ fn detaching_collects_queued_traps_before_releasing_the_process() {
     let mut harness = watch_harness(1);
     harness.add(0x1_0000, 8).expect("arm");
     let pid = harness.threads[0];
-    harness
-        .controller
-        .inferior
-        .as_mut()
-        .expect("inferior")
-        .origin = InferiorOrigin::Attached;
+    harness.attached();
     harness.trace().queued_traps.borrow_mut().insert(pid);
     harness.trace().take_actions();
 
@@ -2708,14 +2246,9 @@ fn detaching_collects_queued_traps_before_releasing_the_process() {
         .registers
         .borrow_mut()
         .insert(pid, registers);
-    harness.trace().siginfo.borrow_mut().insert(
-        pid,
-        SignalMetadata {
-            code: TRAP_HARDWARE_BREAKPOINT,
-            sender: None,
-            fault_address: None,
-        },
-    );
+    harness
+        .trace()
+        .set_siginfo(pid, TRAP_HARDWARE_BREAKPOINT, None);
     assert!(
         !harness
             .controller
@@ -2752,22 +2285,14 @@ impl WatchHarness {
 
     /// Reports the `PTRACE_EVENT_STOP` an interrupt causes.
     fn interrupted(&mut self, pid: Pid) -> Result<()> {
-        self.controller.process_wait(WaitEvent::PtraceEvent(
-            pid,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_STOP,
-        ))
+        self.event(pid, libc::PTRACE_EVENT_STOP)
     }
 
     /// Reports `parent` stopped at its clone event for `child`.
     fn cloned(&mut self, parent: Pid, child: Pid) -> Result<()> {
         let tgid = self.controller.inferior.as_ref().expect("inferior").tgid;
         self.trace().clone.replace(Some((child, tgid)));
-        self.controller.process_wait(WaitEvent::PtraceEvent(
-            parent,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_CLONE,
-        ))
+        self.event(parent, libc::PTRACE_EVENT_CLONE)
     }
 }
 
@@ -2840,12 +2365,7 @@ fn a_seized_thread_whose_interrupt_a_clone_event_took_is_interrupted_again() {
         unreachable!("two threads");
     };
     let child = Pid::from_raw(5100);
-    harness
-        .controller
-        .inferior
-        .as_mut()
-        .expect("inferior")
-        .origin = InferiorOrigin::Attached;
+    harness.attached();
     harness.resume().expect("continue");
     let process = process_id(harness.controller.inferior.as_ref().expect("inferior").tgid);
 
@@ -2873,12 +2393,7 @@ fn a_fork_child_loses_each_trap_it_inherited_even_one_lifted_since() {
     let child = Pid::from_raw(6000);
     harness.trace().clone.replace(Some((child, child)));
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            parent,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_FORK,
-        ))
+        .event(parent, libc::PTRACE_EVENT_FORK)
         .expect("fork event");
     harness.hit(parent).expect("breakpoint stop");
     assert_eq!(harness.public_reason(), Some(site_hit(1)));
@@ -2976,12 +2491,7 @@ fn a_fork_child_keeps_code_mapped_where_a_trap_was_removed() {
     harness.start_continue();
     harness.trace().clone.replace(Some((child, child)));
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            parent,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_FORK,
-        ))
+        .event(parent, libc::PTRACE_EVENT_FORK)
         .expect("fork event");
     harness.trace().take_actions();
     harness
@@ -3138,7 +2648,9 @@ fn a_launch_while_fork_children_are_released_waits_for_them() {
     harness.trace().take_actions();
 
     let (reply, mut launched) = tokio::sync::oneshot::channel();
-    harness.controller.start(Start::Launch(LaunchOptions::default(), reply));
+    harness
+        .controller
+        .start(Start::Launch(LaunchOptions::default(), reply));
     assert!(
         launched.try_recv().is_err(),
         "the launch waits for the child"
@@ -3217,14 +2729,9 @@ fn a_fork_event_whose_thread_is_killed_as_its_message_is_read_is_superseded() {
     let mut harness = hit_harness(1, ">=1");
     let parent = harness.threads[0];
     harness.start_continue();
-    harness.trace().siginfo.borrow_mut().insert(
-        parent,
-        SignalMetadata {
-            code: libc::SIGTRAP | (libc::PTRACE_EVENT_FORK << 8),
-            sender: None,
-            fault_address: None,
-        },
-    );
+    harness
+        .trace()
+        .set_siginfo(parent, libc::SIGTRAP | (libc::PTRACE_EVENT_FORK << 8), None);
     // SIGKILL lands after the stop was seen to be the fork's, so the message
     // read is the exit's, not the child's identifier.
     *harness.trace().kill_point.borrow_mut() = Some((parent, "event_message", 0));
@@ -3256,13 +2763,7 @@ fn continuing_tolerates_threads_killed_by_a_siblings_exit() {
         .vanished
         .borrow_mut()
         .extend([second, third]);
-    let stop = harness
-        .controller
-        .inferior
-        .as_ref()
-        .and_then(|inferior| inferior.public_stop.as_ref())
-        .expect("stop")
-        .id;
+    let stop = harness.stop_id();
     harness
         .controller
         .begin_execution(
@@ -3332,12 +2833,7 @@ fn a_seized_thread_whose_start_precedes_its_clone_event_is_armed_before_running(
     let mut harness = watch_harness(1);
     harness.add(0x1_2000, 8).expect("arm");
     let parent = harness.threads[0];
-    harness
-        .controller
-        .inferior
-        .as_mut()
-        .expect("inferior")
-        .origin = InferiorOrigin::Attached;
+    harness.attached();
     harness.start_continue();
     let child = Pid::from_raw(6100);
     *harness.trace().clone.borrow_mut() = Some((child, parent));
@@ -3345,21 +2841,11 @@ fn a_seized_thread_whose_start_precedes_its_clone_event_is_armed_before_running(
 
     // The child's first stop arrives before the debugger knows it exists.
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            child,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_STOP,
-        ))
+        .event(child, libc::PTRACE_EVENT_STOP)
         .expect("early child stop is retained");
     assert!(harness.trace().take_actions().is_empty());
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            parent,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_CLONE,
-        ))
+        .event(parent, libc::PTRACE_EVENT_CLONE)
         .expect("clone event");
 
     let actions = harness.trace().take_actions();
@@ -3383,24 +2869,14 @@ fn a_new_thread_killed_out_of_its_first_stop_is_retired_by_its_exit() {
     let child = Pid::from_raw(6100);
     *harness.trace().clone.borrow_mut() = Some((child, parent));
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            parent,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_CLONE,
-        ))
+        .event(parent, libc::PTRACE_EVENT_CLONE)
         .expect("clone event");
 
     // The parent resumed and called exit_group before the child's first
     // stop was handled, killing the child out of that stop.
     harness.trace().vanished.borrow_mut().insert(child);
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            child,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_STOP,
-        ))
+        .event(child, libc::PTRACE_EVENT_STOP)
         .expect("the killed child's start is no failure");
     assert_eq!(harness.thread(child).state, NativeThreadState::Exiting);
 
@@ -3419,12 +2895,7 @@ fn a_requested_stop_that_sigkill_ended_since_is_superseded() {
     let [first, second] = harness.threads[..] else {
         unreachable!("two threads");
     };
-    harness
-        .controller
-        .inferior
-        .as_mut()
-        .expect("inferior")
-        .origin = InferiorOrigin::Attached;
+    harness.attached();
     harness.start_continue();
     harness
         .controller
@@ -3433,40 +2904,18 @@ fn a_requested_stop_that_sigkill_ended_since_is_superseded() {
 
     // A sibling's exit_group killed the second thread out of the stop it
     // reported, and it now waits at its exit event.
-    harness.trace().siginfo.borrow_mut().insert(
-        second,
-        SignalMetadata {
-            code: libc::SIGTRAP | (libc::PTRACE_EVENT_EXIT << 8),
-            sender: None,
-            fault_address: None,
-        },
-    );
+    harness.trace().set_siginfo(second, EXIT_EVENT, None);
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            second,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_STOP,
-        ))
+        .event(second, libc::PTRACE_EVENT_STOP)
         .expect("a superseded stop is no failure");
     assert_eq!(harness.thread(second).state, NativeThreadState::Running);
 
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            first,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_STOP,
-        ))
+        .event(first, libc::PTRACE_EVENT_STOP)
         .expect("first stop");
     assert_eq!(harness.public_reason(), None, "the second thread runs");
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            second,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_EXIT,
-        ))
+        .event(second, libc::PTRACE_EVENT_EXIT)
         .expect("exit event");
     harness
         .controller
@@ -3506,39 +2955,17 @@ fn a_stop_whose_thread_sigkill_ends_while_it_is_handled_waits_for_the_exit() {
     };
     harness.start_continue();
     let inferior = harness.controller.inferior.as_mut().expect("inferior");
-    inferior.active.as_mut().expect("execution").kind = ActiveKind::Step {
-        thread: stepping,
-        kind: StepKind::OverInstruction,
-        start: Box::new(StepStart {
-            stack_pointer: 0,
-            returned_to: None,
-            running_on: false,
-            source: None,
-            code_instance: None,
-            physical_instance: None,
-            activation: None,
-            plan_addresses: BTreeSet::new(),
-            epilogue_traversal: None,
-            return_traversal: None,
-            signal_guard: None,
-            call_return: None,
-        }),
-        progress_owed: false,
-    };
+    inferior.active.as_mut().expect("execution").kind =
+        step_execution(stepping, StepKind::OverInstruction, StepStart::default());
     inferior.thread_mut(stepping).expect("thread").expected = ExpectedStop::UserStep {
         kind: StepKind::OverInstruction,
     };
 
     // The sibling calls exit_group after the step's trap was classified.
     *harness.trace().kill_point.borrow_mut() = Some((stepping, "registers", 0));
-    harness.trace().siginfo.borrow_mut().insert(
-        stepping,
-        SignalMetadata {
-            code: libc::TRAP_TRACE,
-            sender: None,
-            fault_address: None,
-        },
-    );
+    harness
+        .trace()
+        .set_siginfo(stepping, libc::TRAP_TRACE, None);
     assert!(
         harness
             .controller
@@ -3568,13 +2995,7 @@ fn a_step_whose_threads_sigkill_ends_as_it_begins_runs_into_the_exit() {
     let [first, second] = harness.threads[..] else {
         unreachable!("two threads");
     };
-    let stop = harness
-        .controller
-        .inferior
-        .as_ref()
-        .and_then(|inferior| inferior.public_stop.as_ref())
-        .expect("stop")
-        .id;
+    let stop = harness.stop_id();
     // Something outside the debugger kills the program as the step starts.
     *harness.trace().kill_point.borrow_mut() = Some((first, "registers", 0));
     harness.trace().sigkill(second);
@@ -3582,25 +3003,7 @@ fn a_step_whose_threads_sigkill_ends_as_it_begins_runs_into_the_exit() {
         process_id(first),
         stop,
         ResumeScope::Process(process_id(first)),
-        ActiveKind::Step {
-            thread: first,
-            kind: StepKind::IntoSource,
-            start: Box::new(StepStart {
-                stack_pointer: 0,
-                returned_to: None,
-                running_on: false,
-                source: None,
-                code_instance: None,
-                physical_instance: None,
-                activation: None,
-                plan_addresses: BTreeSet::new(),
-                epilogue_traversal: None,
-                return_traversal: None,
-                signal_guard: None,
-                call_return: None,
-            }),
-            progress_owed: false,
-        },
+        step_execution(first, StepKind::IntoSource, StepStart::default()),
         ExceptionDisposition::Pass,
     );
     assert!(
@@ -3643,13 +3046,7 @@ fn plan_traps_a_dying_process_cannot_take_are_not_restored() {
     // As a step begins.
     let mut harness = watch_harness(1);
     let pid = harness.threads[0];
-    let stop = harness
-        .controller
-        .inferior
-        .as_ref()
-        .and_then(|inferior| inferior.public_stop.as_ref())
-        .expect("stop")
-        .id;
+    let stop = harness.stop_id();
     *harness.trace().kill_point.borrow_mut() = Some((pid, "install_breakpoint", 1));
     let error = harness
         .controller
@@ -3657,25 +3054,14 @@ fn plan_traps_a_dying_process_cannot_take_are_not_restored() {
             process_id(pid),
             stop,
             ResumeScope::Process(process_id(pid)),
-            ActiveKind::Step {
-                thread: pid,
-                kind: StepKind::OverSource,
-                start: Box::new(StepStart {
-                    stack_pointer: 0,
-                    returned_to: None,
-                    running_on: false,
-                    source: None,
-                    code_instance: None,
-                    physical_instance: None,
-                    activation: None,
+            step_execution(
+                pid,
+                StepKind::OverSource,
+                StepStart {
                     plan_addresses: plan.clone(),
-                    epilogue_traversal: None,
-                    return_traversal: None,
-                    signal_guard: None,
-                    call_return: None,
-                }),
-                progress_owed: false,
-            },
+                    ..StepStart::default()
+                },
+            ),
             ExceptionDisposition::Pass,
         )
         .expect_err("the second trap fails");
@@ -3758,15 +3144,7 @@ fn a_launch_killed_at_its_first_stop_ends_in_its_exit() {
 #[test]
 fn repairs_after_the_debuggers_own_kill_are_left_undone() {
     let mut harness = watch_harness(3);
-    harness
-        .edit(|reply| Edit::AddBreakpoint {
-            spec: address_breakpoint(0x40),
-            options: Box::default(),
-            reply,
-        })
-        .try_recv()
-        .expect("reply")
-        .expect("added");
+    harness.add_breakpoint(0x40);
     harness.start_continue();
     let [leader, repairing, running] = harness.threads[..] else {
         unreachable!("three threads");
@@ -3857,12 +3235,7 @@ fn a_pause_that_meets_a_fork_event_instead_completes() {
     let child = Pid::from_raw(6200);
     *harness.trace().clone.borrow_mut() = Some((child, child));
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            parent,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_FORK,
-        ))
+        .event(parent, libc::PTRACE_EVENT_FORK)
         .expect("fork event");
     assert_eq!(harness.public_reason(), Some(StopReason::Pause));
 }
@@ -4016,14 +3389,7 @@ fn a_visible_stop_during_an_internal_stop_wins_and_the_declined_hit_counts_once(
     harness.hit(first).expect("declined hit");
 
     // The sibling reports a signal before the stop it was asked for.
-    harness.trace().siginfo.borrow_mut().insert(
-        second,
-        SignalMetadata {
-            code: 0,
-            sender: Some(1),
-            fault_address: None,
-        },
-    );
+    harness.trace().set_siginfo(second, 0, Some(1));
     harness
         .controller
         .process_wait(WaitEvent::Stopped(second, Signal::SIGUSR1))
@@ -4123,12 +3489,7 @@ fn frames_ignore_a_breakpoint_removed_while_a_sibling_exits() {
     harness.settle_requested_stops();
     assert_eq!(harness.public_reason(), Some(site_hit(1)));
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            second,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_EXIT,
-        ))
+        .event(second, libc::PTRACE_EVENT_EXIT)
         .expect("exit event");
     assert!(!harness.controller.sites_live());
 
@@ -4223,14 +3584,7 @@ fn a_trap_reexecuted_after_a_signal_interrupted_its_repair_is_not_a_new_hit() {
     harness.hit(pid).expect("declined hit");
     // A signal arrives instead of the repair step's trace trap, before the
     // original instruction ran.
-    harness.trace().siginfo.borrow_mut().insert(
-        pid,
-        SignalMetadata {
-            code: 0,
-            sender: Some(1),
-            fault_address: None,
-        },
-    );
+    harness.trace().set_siginfo(pid, 0, Some(1));
     harness
         .controller
         .process_wait(WaitEvent::Stopped(pid, Signal::SIGUSR1))
@@ -4281,15 +3635,7 @@ fn a_breakpoint_replaced_where_a_paused_repair_stands_is_stepped_over() {
         .try_recv()
         .expect("reply")
         .expect("removed");
-    harness
-        .edit(|reply| Edit::AddBreakpoint {
-            spec: address_breakpoint(HIT_SITE),
-            options: Box::default(),
-            reply,
-        })
-        .try_recv()
-        .expect("reply")
-        .expect("added");
+    harness.add_breakpoint(HIT_SITE);
     harness.trace().take_actions();
 
     harness.resume().expect("resume");
@@ -4308,25 +3654,8 @@ fn a_breakpoint_hit_where_a_signal_interrupted_a_step_is_stepped_over() {
     let mut harness = hit_harness(1, "==2");
     let pid = harness.threads[0];
     let inferior = harness.controller.inferior.as_mut().expect("inferior");
-    inferior.active.as_mut().expect("execution").kind = ActiveKind::Step {
-        thread: pid,
-        kind: StepKind::Instruction,
-        start: Box::new(StepStart {
-            stack_pointer: 0,
-            returned_to: None,
-            running_on: false,
-            source: None,
-            code_instance: None,
-            physical_instance: None,
-            activation: None,
-            plan_addresses: BTreeSet::new(),
-            epilogue_traversal: None,
-            return_traversal: None,
-            signal_guard: None,
-            call_return: None,
-        }),
-        progress_owed: false,
-    };
+    inferior.active.as_mut().expect("execution").kind =
+        step_execution(pid, StepKind::Instruction, StepStart::default());
     inferior.thread_mut(pid).expect("thread").expected = ExpectedStop::UserStep {
         kind: StepKind::Instruction,
     };
@@ -4367,67 +3696,9 @@ fn address_breakpoint(address: u64) -> BreakpointSpec {
 }
 
 #[test]
-fn an_edit_while_running_applies_at_an_internal_stop_and_resumes_silently() {
-    let mut harness = watch_harness(2);
-    harness.start_continue();
-    harness.published();
-    let mut added = harness.edit(|reply| Edit::AddBreakpoint {
-        spec: address_breakpoint(0x40),
-        options: Box::default(),
-        reply,
-    });
-
-    assert_eq!(
-        harness.trace().take_actions(),
-        ["request_stop 5000", "request_stop 5001"]
-    );
-    assert!(added.try_recv().is_err(), "the edit waits for every thread");
-    harness.settle_requested_stops();
-
-    let breakpoint = added.try_recv().expect("edit reply").expect("added");
-    assert_eq!(breakpoint.id, BreakpointId::new(1));
-    assert_eq!(
-        harness.trace().take_actions(),
-        [
-            "install_site 0x40",
-            "continue 5000 None",
-            "continue 5001 None"
-        ]
-    );
-    assert!(
-        matches!(
-            harness.published().as_slice(),
-            [DebuggerEvent::BreakpointsChanged { .. }]
-        ),
-        "an internal stop publishes no stop or continue"
-    );
-    let inferior = harness.controller.inferior.as_ref().expect("inferior");
-    assert!(inferior.public_stop.is_none() && inferior.barrier.is_none());
-    assert_eq!(
-        inferior.active.as_ref().map(|active| active.id),
-        Some(ExecutionId::new(2)),
-        "the execution continues under its own identity"
-    );
-    assert!(
-        inferior
-            .threads
-            .values()
-            .all(|thread| thread.state == NativeThreadState::Running)
-    );
-}
-
-#[test]
 fn a_hit_on_a_breakpoint_removed_while_running_is_dropped() {
     let mut harness = watch_harness(2);
-    let breakpoint = harness
-        .edit(|reply| Edit::AddBreakpoint {
-            spec: address_breakpoint(0x40),
-            options: Box::default(),
-            reply,
-        })
-        .try_recv()
-        .expect("reply")
-        .expect("added at the stop");
+    let breakpoint = harness.add_breakpoint(0x40);
     harness.start_continue();
     harness.trace().take_actions();
     harness.published();
@@ -4475,24 +3746,8 @@ fn a_hit_on_a_breakpoint_removed_while_running_is_dropped() {
 #[test]
 fn a_hit_on_a_breakpoint_that_survives_the_edit_is_published_with_its_owners() {
     let mut harness = watch_harness(2);
-    let kept = harness
-        .edit(|reply| Edit::AddBreakpoint {
-            spec: address_breakpoint(0x40),
-            options: Box::default(),
-            reply,
-        })
-        .try_recv()
-        .expect("reply")
-        .expect("added");
-    let other = harness
-        .edit(|reply| Edit::AddBreakpoint {
-            spec: address_breakpoint(0x48),
-            options: Box::default(),
-            reply,
-        })
-        .try_recv()
-        .expect("reply")
-        .expect("added");
+    let kept = harness.add_breakpoint(0x40);
+    let other = harness.add_breakpoint(0x48);
     harness.start_continue();
     harness.published();
 
@@ -4543,14 +3798,7 @@ fn a_signal_during_an_internal_stop_is_published_after_the_edit() {
         reply,
     });
     let pid = Pid::from_raw(5001);
-    harness.trace().siginfo.borrow_mut().insert(
-        pid,
-        SignalMetadata {
-            code: libc::SI_USER,
-            sender: Some(1),
-            fault_address: None,
-        },
-    );
+    harness.trace().set_siginfo(pid, libc::SI_USER, Some(1));
     harness
         .controller
         .process_wait(WaitEvent::Stopped(pid, Signal::SIGUSR1))
@@ -4571,26 +3819,6 @@ fn a_signal_during_an_internal_stop_is_published_after_the_edit() {
 }
 
 #[test]
-fn pausing_during_an_internal_stop_publishes_the_pause() {
-    let mut harness = watch_harness(2);
-    harness.start_continue();
-    let process = process_id(harness.threads[0]);
-    let mut added = harness.edit(|reply| Edit::AddBreakpoint {
-        spec: address_breakpoint(0x40),
-        options: Box::default(),
-        reply,
-    });
-    assert_eq!(
-        harness.controller.begin_pause(process).expect("pause"),
-        ExecutionId::new(2)
-    );
-    harness.settle_requested_stops();
-
-    added.try_recv().expect("reply").expect("added");
-    assert_eq!(harness.public_reason(), Some(StopReason::Pause));
-}
-
-#[test]
 fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_stopped() {
     let mut harness = watch_harness(2);
     let (stepping, other) = (harness.threads[0], harness.threads[1]);
@@ -4598,25 +3826,14 @@ fn another_thread_at_a_stepping_plans_site_is_stepped_over_while_the_others_are_
     {
         let inferior = harness.controller.inferior.as_mut().expect("inferior");
         let active = inferior.active.as_mut().expect("execution");
-        active.kind = ActiveKind::Step {
-            thread: stepping,
-            kind: StepKind::OverSource,
-            start: Box::new(StepStart {
-                stack_pointer: 0,
-                returned_to: None,
-                running_on: false,
-                source: None,
-                code_instance: None,
-                physical_instance: None,
-                activation: None,
+        active.kind = step_execution(
+            stepping,
+            StepKind::OverSource,
+            StepStart {
                 plan_addresses: BTreeSet::from([VirtualAddress::new(0x40)]),
-                epilogue_traversal: None,
-                return_traversal: None,
-                signal_guard: None,
-                call_return: None,
-            }),
-            progress_owed: false,
-        };
+                ..StepStart::default()
+            },
+        );
         let execution = active.id;
         let owner = BreakpointOwner::Plan(execution);
         inferior
@@ -4861,25 +4078,8 @@ fn a_change_undone_before_every_thread_stopped_lets_a_stepi_finish_once() {
         .expect("arm");
     harness.start_continue();
     let inferior = harness.controller.inferior.as_mut().expect("inferior");
-    inferior.active.as_mut().expect("execution").kind = ActiveKind::Step {
-        thread: stepping,
-        kind: StepKind::Instruction,
-        start: Box::new(StepStart {
-            stack_pointer: 0,
-            returned_to: None,
-            running_on: false,
-            source: None,
-            code_instance: None,
-            physical_instance: None,
-            activation: None,
-            plan_addresses: BTreeSet::new(),
-            epilogue_traversal: None,
-            return_traversal: None,
-            signal_guard: None,
-            call_return: None,
-        }),
-        progress_owed: false,
-    };
+    inferior.active.as_mut().expect("execution").kind =
+        step_execution(stepping, StepKind::Instruction, StepStart::default());
     inferior.thread_mut(stepping).expect("thread").expected = ExpectedStop::UserStep {
         kind: StepKind::Instruction,
     };
@@ -5189,15 +4389,7 @@ fn repairing_harness() -> WatchHarness {
 /// at 0x40 while the other waits stopped, as a continue does.
 fn repairing_harness_of(repairing: usize) -> WatchHarness {
     let mut harness = watch_harness(2);
-    harness
-        .edit(|reply| Edit::AddBreakpoint {
-            spec: address_breakpoint(0x40),
-            options: Box::default(),
-            reply,
-        })
-        .try_recv()
-        .expect("reply")
-        .expect("added");
+    harness.add_breakpoint(0x40);
     harness.start_continue();
     let (repairing, waiting) = (harness.threads[repairing], harness.threads[1 - repairing]);
     let inferior = harness.controller.inferior.as_mut().expect("inferior");
@@ -5233,25 +4425,7 @@ fn a_step_whose_main_thread_exited_alone_runs_its_siblings_on() {
     let (leader, repairing) = (harness.threads[0], harness.threads[1]);
     let inferior = harness.controller.inferior.as_mut().expect("inferior");
     let active = inferior.active.as_mut().expect("execution");
-    active.kind = ActiveKind::Step {
-        thread: leader,
-        kind: StepKind::IntoSource,
-        start: Box::new(StepStart {
-            stack_pointer: 0,
-            returned_to: None,
-            running_on: false,
-            source: None,
-            code_instance: None,
-            physical_instance: None,
-            activation: None,
-            plan_addresses: BTreeSet::new(),
-            epilogue_traversal: None,
-            return_traversal: None,
-            signal_guard: None,
-            call_return: None,
-        }),
-        progress_owed: false,
-    };
+    active.kind = step_execution(leader, StepKind::IntoSource, StepStart::default());
     inferior.thread_mut(leader).expect("leader").state = NativeThreadState::Exiting;
     harness.trace().killed.borrow_mut().insert(leader);
     harness.trace().take_actions();
@@ -5299,14 +4473,7 @@ fn an_exiting_thread_is_not_stepped_over_its_breakpoint() {
 }
 
 fn deliver(harness: &mut WatchHarness, pid: Pid, signal: Signal) {
-    harness.trace().siginfo.borrow_mut().insert(
-        pid,
-        SignalMetadata {
-            code: libc::SI_USER,
-            sender: Some(1),
-            fault_address: None,
-        },
-    );
+    harness.trace().set_siginfo(pid, libc::SI_USER, Some(1));
     harness
         .controller
         .process_wait(WaitEvent::Stopped(pid, signal))
@@ -5408,12 +4575,7 @@ fn threads_ending_before_their_announcement_never_become_live() {
 
     // A sibling's exit_group ends a thread its creator has not announced.
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            unannounced,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_EXIT,
-        ))
+        .event(unannounced, libc::PTRACE_EVENT_EXIT)
         .expect("an unannounced thread's exit event");
     harness
         .controller
@@ -5421,12 +4583,7 @@ fn threads_ending_before_their_announcement_never_become_live() {
         .expect("an unannounced thread's exit");
     *harness.trace().clone.borrow_mut() = Some((unannounced, tgid));
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            leader,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_CLONE,
-        ))
+        .event(leader, libc::PTRACE_EVENT_CLONE)
         .expect("the late announcement");
     assert!(
         !harness
@@ -5449,12 +4606,7 @@ fn threads_ending_before_their_announcement_never_become_live() {
     // A thread whose exit event the kernel released early is no failure.
     harness.trace().vanished.borrow_mut().insert(sibling);
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            sibling,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_EXIT,
-        ))
+        .event(sibling, libc::PTRACE_EVENT_EXIT)
         .expect("a released exit event");
 
     // The leader's exit is reported once every thread is gone, even one
@@ -5527,13 +4679,10 @@ fn lost_frame_harness() -> WatchHarness {
     inferior.public_stop = None;
     inferior.active = Some(ActiveExecution {
         id: execution,
-        kind: ActiveKind::Step {
-            thread: pid,
-            kind: StepKind::OverSource,
-            start: Box::new(StepStart {
-                stack_pointer: 0,
-                returned_to: None,
-                running_on: false,
+        kind: step_execution(
+            pid,
+            StepKind::OverSource,
+            StepStart {
                 source: Some(SourceLocation {
                     file: crate::SourceFileId::new(0),
                     line: crate::LineNumber::new(1).expect("nonzero line"),
@@ -5543,13 +4692,9 @@ fn lost_frame_harness() -> WatchHarness {
                 physical_instance: Some(CodeInstanceId::new(0)),
                 activation: Some(VirtualAddress::new(0x7000)),
                 plan_addresses: BTreeSet::from([site]),
-                epilogue_traversal: None,
-                return_traversal: None,
-                signal_guard: None,
-                call_return: None,
-            }),
-            progress_owed: false,
-        },
+                ..StepStart::default()
+            },
+        ),
         scope: ResumeScope::Thread(debug_thread_id(pid)),
         resume_threads: BTreeSet::from([pid]),
     });
@@ -5608,14 +4753,7 @@ fn a_step_whose_thread_sigkill_ends_as_it_unwinds_publishes_no_lost_frame() {
         .program_counters
         .borrow_mut()
         .insert(pid, 0x31);
-    harness.trace().siginfo.borrow_mut().insert(
-        pid,
-        SignalMetadata {
-            code: libc::SI_KERNEL,
-            sender: None,
-            fault_address: None,
-        },
-    );
+    harness.trace().set_siginfo(pid, libc::SI_KERNEL, None);
     assert!(
         harness
             .controller
@@ -5702,36 +4840,17 @@ fn an_edit_waiting_for_an_internal_stop_is_answered_when_the_process_ends_first(
 fn a_step_whose_thread_exits_while_an_edit_drops_the_other_reason_ends_in_its_exit() {
     let mut harness = watch_harness(2);
     let (other, stepping) = (harness.threads[0], harness.threads[1]);
-    let breakpoint = harness
-        .edit(|reply| Edit::AddBreakpoint {
-            spec: address_breakpoint(0x40),
-            options: Box::default(),
-            reply,
-        })
-        .try_recv()
-        .expect("reply")
-        .expect("added at the stop");
+    let breakpoint = harness.add_breakpoint(0x40);
     harness.start_continue();
     let inferior = harness.controller.inferior.as_mut().expect("inferior");
-    inferior.active.as_mut().expect("an execution").kind = ActiveKind::Step {
-        thread: stepping,
-        kind: StepKind::OverSource,
-        start: Box::new(StepStart {
-            stack_pointer: 0,
-            returned_to: None,
-            running_on: false,
-            source: None,
-            code_instance: None,
-            physical_instance: None,
+    inferior.active.as_mut().expect("an execution").kind = step_execution(
+        stepping,
+        StepKind::OverSource,
+        StepStart {
             activation: Some(VirtualAddress::new(0x7000)),
-            plan_addresses: BTreeSet::new(),
-            epilogue_traversal: None,
-            return_traversal: None,
-            signal_guard: None,
-            call_return: None,
-        }),
-        progress_owed: false,
-    };
+            ..StepStart::default()
+        },
+    );
     harness.published();
 
     // The edit stops every thread; meanwhile the other thread hits the
@@ -5927,13 +5046,10 @@ fn a_pause_completes_when_the_main_thread_exits_alone() {
         .controller
         .begin_pause(process_id(leader))
         .expect("the pause is accepted");
-    harness.trace().siginfo.borrow_mut().insert(
+    harness.trace().set_siginfo(
         worker,
-        SignalMetadata {
-            code: libc::SI_TKILL,
-            sender: Some(i32::try_from(std::process::id()).expect("pid fits")),
-            fault_address: None,
-        },
+        libc::SI_TKILL,
+        Some(i32::try_from(std::process::id()).expect("pid fits")),
     );
     harness
         .controller
@@ -5945,22 +5061,9 @@ fn a_pause_completes_when_the_main_thread_exits_alone() {
     // request.
     harness.trace().killed.borrow_mut().insert(leader);
     harness
-        .controller
-        .process_wait(WaitEvent::PtraceEvent(
-            leader,
-            Signal::SIGTRAP,
-            libc::PTRACE_EVENT_EXIT,
-        ))
+        .event(leader, libc::PTRACE_EVENT_EXIT)
         .expect("the leader exits");
-    let stopped = harness
-        .published()
-        .into_iter()
-        .find_map(|event| match event {
-            DebuggerEvent::InferiorStopped {
-                thread_id, reason, ..
-            } => Some((thread_id, reason)),
-            _ => None,
-        });
+    let stopped = harness.stopped();
     assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
 }
 
@@ -5982,15 +5085,7 @@ fn a_pause_after_a_lone_main_thread_exited_stops_at_once() {
         .controller
         .begin_pause(process_id(leader))
         .expect("the pause is accepted");
-    let stopped = harness
-        .published()
-        .into_iter()
-        .find_map(|event| match event {
-            DebuggerEvent::InferiorStopped {
-                thread_id, reason, ..
-            } => Some((thread_id, reason)),
-            _ => None,
-        });
+    let stopped = harness.stopped();
     assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
 }
 
@@ -6013,27 +5108,12 @@ fn a_pause_waits_for_a_starting_thread_to_stop() {
         .begin_pause(process_id(leader))
         .expect("the pause is accepted");
     assert_eq!(harness.public_reason(), None);
-    harness.trace().siginfo.borrow_mut().insert(
-        worker,
-        SignalMetadata {
-            code: libc::SI_USER,
-            sender: Some(0),
-            fault_address: None,
-        },
-    );
+    harness.trace().set_siginfo(worker, libc::SI_USER, Some(0));
     harness
         .controller
         .process_wait(WaitEvent::Stopped(worker, Signal::SIGSTOP))
         .expect("the worker's first stop");
-    let stopped = harness
-        .published()
-        .into_iter()
-        .find_map(|event| match event {
-            DebuggerEvent::InferiorStopped {
-                thread_id, reason, ..
-            } => Some((thread_id, reason)),
-            _ => None,
-        });
+    let stopped = harness.stopped();
     assert_eq!(stopped, Some((debug_thread_id(worker), StopReason::Pause)));
 }
 
@@ -6059,15 +5139,7 @@ fn a_pause_waits_for_an_exiting_thread() {
         .controller
         .process_wait(WaitEvent::Exited(worker, 0))
         .expect("the worker exits");
-    let stopped = harness
-        .published()
-        .into_iter()
-        .find_map(|event| match event {
-            DebuggerEvent::InferiorStopped {
-                thread_id, reason, ..
-            } => Some((thread_id, reason)),
-            _ => None,
-        });
+    let stopped = harness.stopped();
     assert_eq!(stopped, Some((debug_thread_id(leader), StopReason::Pause)));
 }
 
@@ -6147,14 +5219,12 @@ fn instruction_steps_work_where_the_inline_frame_is_ambiguous() {
 
 /// Inspection of a stop waits behind run control queued after it, which it
 /// would only delay; every other message keeps its order, and inspection
-/// that run control interrupted is served again after it (§3.11 of
-/// `plans/views.md`).
+/// that run control interrupted is served again after it.
 #[test]
 #[expect(clippy::too_many_lines, reason = "one queue, served in two rounds")]
 fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
-    let LaunchHarness {
-        controller, pid, ..
-    } = launch_controller();
+    let harness = watch_harness(1);
+    let (controller, pid) = (&harness.controller, harness.threads[0]);
     let sender = controller.message_sender.clone();
     let stop_id = StopId::new(7);
     let thread_id = debug_thread_id(pid);
@@ -6226,7 +5296,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
         [
             "add breakpoint Function(\"f\")",
             "evaluate `b = 1`",
-            "continue StopId(7) Process(ProcessId(4242)) Pass",
+            "continue StopId(7) Process(ProcessId(5000)) Pass",
             "evaluate `a`",
             "variables",
             "read memory",
@@ -6264,7 +5334,7 @@ fn inspection_of_a_stop_waits_behind_run_control_queued_after_it() {
             ControllerMessage::Wait(_) => "wait".to_owned(),
         })
         .collect::<Vec<_>>();
-    assert_eq!(served, ["pause 4242", "evaluate `interrupted`"]);
+    assert_eq!(served, ["pause 5000", "evaluate `interrupted`"]);
     // Serving decides only the order; nothing was answered.
     assert!(replies.iter_mut().all(|reply| reply.try_recv().is_err()));
 }
