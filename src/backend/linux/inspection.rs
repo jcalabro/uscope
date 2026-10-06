@@ -5,7 +5,11 @@ use std::sync::Arc;
 
 use nix::unistd::Pid;
 
-use crate::debug_info::{VariableContext, VariableRegister, VariableRuntime, VariableRuntimeError};
+use std::rc::Rc;
+
+use crate::debug_info::{
+    EntryParameter, VariableContext, VariableRegister, VariableRuntime, VariableRuntimeError,
+};
 use crate::inspection::{InspectionBudget, MAX_INSPECTION_LIMITS};
 use crate::protocol::{GlobalVariableQuery, StopId, VariableQuery};
 use crate::{
@@ -15,6 +19,7 @@ use crate::{
     VariableUnavailableReason, VirtualAddress,
 };
 
+use super::callers::{Callers, FrameAt};
 use super::evaluation::StopMachine;
 use super::frames::{FrameRegisters, FrameScope, ResolvedFrame};
 use super::memory::read_logical_memory;
@@ -101,6 +106,12 @@ impl<P: InspectionOps> Controller<P> {
             floating: None,
             cfa: frame.cfa.clone(),
             link_map: module.link_map,
+            frame: FrameAt {
+                activation: frame.activation,
+                code: frame.code,
+                depth: 0,
+            },
+            callers: Some(Callers::new(self, inferior, pid)),
         }
     }
 
@@ -522,7 +533,7 @@ pub(super) fn global_context_address(
         .map(|(_, address)| address)
 }
 
-pub(super) struct LinuxVariableRuntime<'a, P> {
+pub(super) struct LinuxVariableRuntime<'a, P: InspectionOps> {
     pub(super) ptrace: &'a P,
     pub(super) pid: Pid,
     pub(super) loaded_module: LoadedModule,
@@ -531,6 +542,9 @@ pub(super) struct LinuxVariableRuntime<'a, P> {
     pub(super) floating: Option<std::result::Result<Fxsave, Arc<str>>>,
     pub(super) cfa: std::result::Result<VirtualAddress, VariableRuntimeError>,
     pub(super) link_map: Option<VirtualAddress>,
+    pub(super) frame: FrameAt,
+    /// The thread's activations, which entry values find callers among.
+    pub(super) callers: Option<Rc<Callers<'a, P>>>,
 }
 
 impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
@@ -625,6 +639,19 @@ impl<P: InspectionOps> VariableRuntime for LinuxVariableRuntime<'_, P> {
                 }),
             ),
         }
+    }
+    fn entry_value(
+        &mut self,
+        parameter: EntryParameter,
+        budget: &mut InspectionBudget,
+    ) -> std::result::Result<u64, VariableRuntimeError> {
+        let callers = self
+            .callers
+            .as_ref()
+            .ok_or(VariableRuntimeError::Unavailable(
+                VariableUnavailableReason::EntryValue(crate::EntryValueUnavailableReason::NoCaller),
+            ))?;
+        callers.entry_value(self.frame, self.loaded_module.id, parameter, budget)
     }
 }
 

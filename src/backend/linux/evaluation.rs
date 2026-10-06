@@ -775,6 +775,7 @@ impl<P: InspectionOps> Machine for StopMachine<'_, '_, P> {
             ValueStorage::ImplicitPointer { .. } => {
                 Err(not_in_memory("optimized into its referent"))
             }
+            ValueStorage::Composite(_) => Err(not_in_memory("split across several places")),
         }
     }
 
@@ -1019,6 +1020,9 @@ impl<P: LinuxTraceOps> Controller<P> {
                 self.write_register(pid, register.id, &bytes).map_err(|_| {
                     refused(format!("register {} cannot be changed", register.name))
                 })?;
+            }
+            ValueStorage::Composite(_) => {
+                return Err(refused("it is split across several places".into()));
             }
             _ => {
                 return Err(refused(

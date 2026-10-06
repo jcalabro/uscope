@@ -324,6 +324,39 @@ impl VariableInfo for UnusedVariableInfo {
     ) -> Result<crate::ValueChildPage> {
         panic!("unexpected value child lookup")
     }
+
+    fn call_site(
+        &self,
+        _return_address: ImageAddress,
+        _runtime: &mut dyn VariableRuntime,
+        _budget: &mut InspectionBudget,
+    ) -> std::result::Result<
+        Option<crate::debug_info::CallSite>,
+        crate::debug_info::VariableRuntimeError,
+    > {
+        panic!("unexpected call site lookup")
+    }
+
+    fn tail_calls(
+        &self,
+        _from: ImageAddress,
+        _to: ImageAddress,
+    ) -> std::result::Result<
+        Arc<[crate::debug_info::CallSiteId]>,
+        crate::debug_info::VariableRuntimeError,
+    > {
+        panic!("unexpected tail call lookup")
+    }
+
+    fn call_site_value(
+        &self,
+        _site: crate::debug_info::CallSiteId,
+        _parameter: crate::debug_info::EntryParameter,
+        _runtime: &mut dyn VariableRuntime,
+        _budget: &mut InspectionBudget,
+    ) -> std::result::Result<u64, crate::debug_info::VariableRuntimeError> {
+        panic!("unexpected call site value")
+    }
 }
 
 /// An ELF header without sections, so loader rendezvous discovery finds no
