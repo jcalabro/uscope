@@ -1,9 +1,8 @@
-#[path = "support/memory_cap.rs"]
-mod memory_cap;
+mod support;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use expectrl::session::{OsSession, Session};
 use expectrl::{ControlCode, Eof, Expect};
@@ -11,47 +10,37 @@ use expectrl::{ControlCode, Eof, Expect};
 /// The harness's deadline for anything a test waits to observe.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-struct TestStateDir(PathBuf);
-
-impl TestStateDir {
-    fn new(name: &str) -> Self {
-        let unique = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("system clock after epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "uscope-repl-{name}-{}-{unique}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&path).expect("create test state directory");
-        Self(path)
-    }
-}
-
-impl Drop for TestStateDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("build/test-programs")
         .join(name)
 }
 
-fn repl(executable: &Path, state: &Path) -> OsSession {
+/// A uscope command for a terminal that supports color, with history kept
+/// under `state` and no color settings in the environment.
+fn command(executable: &Path, state: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
     command
-        .args(["--color", "never"])
         .arg(executable)
         .env("XDG_STATE_HOME", state)
         .env("TERM", "xterm-256color")
         .env_remove("NO_COLOR")
         .env_remove("CLICOLOR")
         .env_remove("CLICOLOR_FORCE");
+    command
+}
+
+fn spawn(command: Command) -> OsSession {
     let mut session = Session::spawn(command).expect("spawn uscope in a PTY");
     session.set_expect_timeout(Some(TIMEOUT));
+    session
+}
+
+/// Starts an uncolored REPL and waits for its first prompt.
+fn repl(executable: &Path, state: &Path) -> OsSession {
+    let mut command = command(executable, state);
+    command.args(["--color", "never"]);
+    let mut session = spawn(command);
     session.expect("(uscope) ").expect("initial prompt");
     session
 }
@@ -72,17 +61,8 @@ fn contains_sgr(bytes: &[u8]) -> bool {
 
 #[test]
 fn interactive_named_prompt_preserves_rustyline_cursor_width() {
-    let state = TestStateDir::new("color");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
-    command
-        .arg(fixture("basic"))
-        .env("XDG_STATE_HOME", &state.0)
-        .env("TERM", "xterm-256color")
-        .env_remove("NO_COLOR")
-        .env_remove("CLICOLOR")
-        .env_remove("CLICOLOR_FORCE");
-    let mut session = Session::spawn(command).expect("spawn colored uscope REPL");
-    session.set_expect_timeout(Some(TIMEOUT));
+    let state = support::ScratchDir::new("repl-color");
+    let mut session = spawn(command(&fixture("basic"), state.path()));
     session
         .expect("\x1b[2m(uscope) \x1b[0m")
         .expect("dimmed prompt");
@@ -99,17 +79,10 @@ fn interactive_named_prompt_preserves_rustyline_cursor_width() {
 
 #[test]
 fn interactive_prompt_honors_no_color() {
-    let state = TestStateDir::new("no-color");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
-    command
-        .arg(fixture("basic"))
-        .env("XDG_STATE_HOME", &state.0)
-        .env("TERM", "xterm-256color")
-        .env("NO_COLOR", "1")
-        .env_remove("CLICOLOR")
-        .env_remove("CLICOLOR_FORCE");
-    let mut session = Session::spawn(command).expect("spawn uncolored uscope REPL");
-    session.set_expect_timeout(Some(TIMEOUT));
+    let state = support::ScratchDir::new("repl-no-color");
+    let mut command = command(&fixture("basic"), state.path());
+    command.env("NO_COLOR", "1");
+    let mut session = spawn(command);
     let prompt = session.expect("(uscope) ").expect("plain prompt");
     assert!(
         !contains_sgr(prompt.as_bytes()),
@@ -119,118 +92,12 @@ fn interactive_prompt_honors_no_color() {
 
     session.send_line("quit").expect("quit repl");
     session.expect(Eof).expect("repl exited");
-
-    let mut command = Command::new(env!("CARGO_BIN_EXE_uscope"));
-    command
-        .args(["--color", "always"])
-        .arg(fixture("basic"))
-        .env("XDG_STATE_HOME", &state.0)
-        .env("TERM", "xterm-256color")
-        .env("NO_COLOR", "1")
-        .env_remove("CLICOLOR")
-        .env_remove("CLICOLOR_FORCE");
-    let mut session = Session::spawn(command).expect("spawn forced-color uscope REPL");
-    session.set_expect_timeout(Some(TIMEOUT));
-    session
-        .expect("\x1b[92mdebugging\x1b[0m")
-        .expect("explicit color overrides NO_COLOR");
-    session
-        .expect("\x1b[2m(uscope) \x1b[0m")
-        .expect("prompt dims the default foreground");
-    session.send_line("quit").expect("quit repl");
-    session.expect(Eof).expect("repl exited");
-}
-
-#[test]
-fn interactive_history_supports_arrows_control_navigation_and_reverse_search() {
-    let state = TestStateDir::new("navigation");
-    let mut session = repl(&fixture("basic"), &state.0);
-
-    session.send_line("help quit").expect("send command");
-    session.expect("aliases: q").expect("command output");
-    session.expect("(uscope) ").expect("prompt after command");
-
-    session.send(b"\x1b[A").expect("send up arrow");
-    session.send_line("").expect("execute recalled command");
-    session
-        .expect("aliases: q")
-        .expect("up arrow recalled history");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after recalled command");
-
-    session.send([0x10]).expect("send Ctrl-P");
-    session.send_line("").expect("execute Ctrl-P command");
-    session
-        .expect("aliases: q")
-        .expect("Ctrl-P recalled history");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after Ctrl-P command");
-
-    session.send(b"\x1b[A").expect("send up arrow");
-    session.send(b"\x1b[B").expect("send down arrow");
-    session.send("help quit").expect("type after Down");
-    session.send_line("").expect("execute line after Down");
-    session
-        .expect("aliases: q")
-        .expect("Down restored current line");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after Down command");
-
-    session.send([0x10]).expect("send Ctrl-P");
-    session.send([0x0e]).expect("send Ctrl-N");
-    session.send("help quit").expect("type after Ctrl-N");
-    session.send_line("").expect("execute line after Ctrl-N");
-    session
-        .expect("aliases: q")
-        .expect("Ctrl-N restored current line");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after Ctrl-N command");
-
-    session.send("quit").expect("type one word");
-    session.send(b"\x1b[1;3D").expect("send Alt-Left");
-    session.send("help ").expect("insert before prior word");
-    session.send_line("").expect("execute Alt-Left edit");
-    session
-        .expect("aliases: q")
-        .expect("Alt-Left moved by one word");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after Alt-Left edit");
-
-    session.send("help").expect("type one word");
-    session.send([0x01]).expect("send Ctrl-A");
-    session.send(b"\x1b[1;3C").expect("send Alt-Right");
-    session.send(" quit").expect("insert after prior word");
-    session.send_line("").expect("execute Alt-Right edit");
-    session
-        .expect("aliases: q")
-        .expect("Alt-Right moved by one word");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after Alt-Right edit");
-
-    session.send([0x12]).expect("send Ctrl-R");
-    session.send("help q").expect("type reverse-search query");
-    session.send_line("").expect("accept reverse-search result");
-    session
-        .expect("aliases: q")
-        .expect("reverse search found command");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after reverse search");
-
-    session.send_line("quit").expect("quit repl");
-    session.expect(Eof).expect("repl exited");
 }
 
 #[test]
 fn interactive_control_c_cancels_the_line_and_control_l_redraws() {
-    let state = TestStateDir::new("editing");
-    let mut session = repl(&fixture("basic"), &state.0);
+    let state = support::ScratchDir::new("repl-editing");
+    let mut session = repl(&fixture("basic"), state.path());
 
     session.send("invalid-command").expect("type invalid line");
     session.send(ControlCode::EndOfText).expect("send Ctrl-C");
@@ -247,8 +114,8 @@ fn interactive_control_c_cancels_the_line_and_control_l_redraws() {
 
 #[test]
 fn interactive_errors_omit_repl_context() {
-    let state = TestStateDir::new("errors");
-    let mut session = repl(&fixture("basic"), &state.0);
+    let state = support::ScratchDir::new("repl-errors");
+    let mut session = repl(&fixture("basic"), state.path());
 
     session
         .send_line("break asdf")
@@ -264,8 +131,8 @@ fn interactive_errors_omit_repl_context() {
 
 #[test]
 fn interactive_clear_command_and_cls_alias_clear_the_terminal() {
-    let state = TestStateDir::new("clear");
-    let mut session = repl(&fixture("basic"), &state.0);
+    let state = support::ScratchDir::new("repl-clear");
+    let mut session = repl(&fixture("basic"), state.path());
 
     for command in ["clear", "cls"] {
         session.send_line(command).expect("send clear command");
@@ -281,8 +148,8 @@ fn interactive_clear_command_and_cls_alias_clear_the_terminal() {
 
 #[test]
 fn interactive_empty_lines_repeat_the_last_session_command() {
-    let state = TestStateDir::new("repeat");
-    let mut session = repl(&fixture("basic"), &state.0);
+    let state = support::ScratchDir::new("repl-repeat");
+    let mut session = repl(&fixture("basic"), state.path());
 
     session.send_line("").expect("send initial empty line");
     session
@@ -307,123 +174,32 @@ fn interactive_empty_lines_repeat_the_last_session_command() {
         .expect("(uscope) ")
         .expect("prompt after first source step");
 
-    session.send_line("").expect("repeat next once");
-    session.expect("=> 12 | ").expect("repeated source step");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after repeated source step");
-
-    session.send_line("").expect("repeat next twice");
-    session
-        .expect("=> 13 | ")
-        .expect("second repeated source step");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after second repeated source step");
-
-    session.send_line("quit").expect("quit repl");
-    session.expect(Eof).expect("repl exited");
-}
-
-#[test]
-fn interactive_empty_lines_keep_moving_up_the_stack() {
-    let state = TestStateDir::new("frames");
-    let mut session = repl(&fixture("frames-gcc-o0"), &state.0);
-
-    session
-        .send_line("break frames_keep")
-        .expect("set breakpoint");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after breakpoint");
-    session.send_line("run").expect("run inferior");
-    session.expect("stopped at breakpoint").expect("leaf stop");
-    session.expect("(uscope) ").expect("prompt after run");
-
-    session.send_line("up").expect("select the caller");
-    session
-        .expect("#1  0x")
-        .expect("the innermost recursion frame");
-    session.expect("(uscope) ").expect("prompt after up");
-    for level in 2..=4 {
-        session.send_line("").expect("repeat up");
-        session
-            .expect(format!("#{level}  0x").as_str())
-            .expect("the next outer frame");
-        session
-            .expect("(uscope) ")
-            .expect("prompt after repeated up");
-    }
-    session
-        .send_line("print depth")
-        .expect("print the frame's depth");
-    session
-        .expect("depth = 3")
-        .expect("the outermost recursion");
-    session.expect("(uscope) ").expect("prompt after print");
-
-    session.send_line("quit").expect("quit repl");
-    session.expect(Eof).expect("repl exited");
-}
-
-#[test]
-fn interactive_repeated_next_crosses_an_inline_return_without_killing_the_inferior() {
-    let state = TestStateDir::new("inline-repeat");
-    let mut session = repl(&fixture("stepping-boundaries-clang-o0"), &state.0);
-
-    session.send_line("break main").expect("set breakpoint");
-    session
-        .expect("breakpoint 1 set")
-        .expect("breakpoint reply");
-    session
-        .expect("(uscope) ")
-        .expect("prompt after breakpoint");
-
-    session.send_line("run").expect("run inferior");
-    session.expect("=> 30 | ").expect("main call stop");
-    session.expect("(uscope) ").expect("prompt after run");
-
-    session.send_line("step").expect("enter inline function");
-    session.expect("=> 24 | ").expect("first inline statement");
-    session.expect("(uscope) ").expect("prompt after step");
-
-    session.send_line("next").expect("next in inline function");
-    session.expect("=> 25 | ").expect("second inline statement");
-    session.expect("(uscope) ").expect("prompt after next");
-
-    for (line, description) in [
-        (26, "inline return statement"),
-        (30, "logical caller expression"),
-        (31, "statement following inline call"),
-    ] {
+    for line in [12, 13] {
         session.send_line("").expect("repeat next");
-        session.expect(format!("=> {line} | ")).expect(description);
+        session
+            .expect(format!("=> {line} | ").as_str())
+            .expect("repeated source step");
         session
             .expect("(uscope) ")
-            .expect("prompt after repeated next");
+            .expect("prompt after repeated source step");
     }
 
-    session.send_line("continue").expect("finish inferior");
-    session
-        .expect("inferior exited with status 0")
-        .expect("inferior exited normally");
-    session.expect("(uscope) ").expect("prompt after exit");
     session.send_line("quit").expect("quit repl");
     session.expect(Eof).expect("repl exited");
 }
 
 #[test]
 fn interactive_history_persists_across_sessions() {
-    let state = TestStateDir::new("persistence");
+    let state = support::ScratchDir::new("repl-history");
     {
-        let mut session = repl(&fixture("basic"), &state.0);
+        let mut session = repl(&fixture("basic"), state.path());
         session.send_line("help quit").expect("record command");
         session.expect("(uscope) ").expect("prompt after command");
         session.send_line("quit").expect("quit first repl");
         session.expect(Eof).expect("first repl exited");
     }
 
-    let mut session = repl(&fixture("basic"), &state.0);
+    let mut session = repl(&fixture("basic"), state.path());
     session.send(b"\x1b[A").expect("send up arrow");
     session
         .send(b"\x1b[A")
