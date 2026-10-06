@@ -222,6 +222,10 @@ impl<P: InspectionOps> Scope for ModuleScope<'_, P> {
         self.module.image.types_with_base(base)
     }
 
+    fn stands_for_container(&self, ty: TypeReference) -> bool {
+        crate::view::stands_for_container(self, ty)
+    }
+
     fn global_step(
         &self,
         name: &str,

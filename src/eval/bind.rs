@@ -1799,35 +1799,10 @@ impl<'a, S: Scope> Binder<'a, S> {
 
     // ---- Members, indices, lengths ----
 
-    /// Whether a pointer is only how its language represents a value of
-    /// its own kind, as Go represents a channel or a map, which nothing
-    /// indexes as a pointer.
+    /// Whether a pointer only stands for a container a view presents,
+    /// which nothing indexes as a pointer.
     fn represents(&self, ty: &Ty) -> bool {
-        let &Ty::Program(mut reference) = ty else {
-            return false;
-        };
-        for _ in 0..MAX_INNER_STEPS {
-            let Some(info) = self.scope.type_info(reference) else {
-                return false;
-            };
-            if info
-                .identity
-                .as_ref()
-                .and_then(|identity| identity.go)
-                .is_some_and(|go| matches!(go.kind, crate::GoKind::Chan | crate::GoKind::Map))
-            {
-                return true;
-            }
-            match info.kind {
-                TypeKind::Named {
-                    target: Some(target),
-                    ..
-                }
-                | TypeKind::Modified { target, .. } => reference = target,
-                _ => return false,
-            }
-        }
-        false
+        matches!(ty, Ty::Program(reference) if self.scope.stands_for_container(*reference))
     }
 
     fn member(
